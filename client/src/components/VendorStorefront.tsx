@@ -1,0 +1,242 @@
+import { useState } from "react";
+import { MapPin, Star, MessageCircle, Share2, Heart, Clock } from "lucide-react";
+import { Button } from "@/components/ui/button";
+import { Badge } from "@/components/ui/badge";
+import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import ProductCard from "./ProductCard";
+import ServiceCard from "./ServiceCard";
+import BookingCalendar from "./BookingCalendar";
+
+interface Product {
+  id: string;
+  name: string;
+  image: string;
+  price: number;
+  originalPrice?: number;
+  category?: string;
+}
+
+interface Service {
+  id: string;
+  name: string;
+  image: string;
+  price: number;
+  duration: number;
+  category?: string;
+  description?: string;
+}
+
+interface VendorStorefrontProps {
+  id: string;
+  name: string;
+  avatar?: string;
+  banner: string;
+  category: string;
+  location: string;
+  rating: number;
+  reviewCount: number;
+  description: string;
+  businessHours?: string;
+  products: Product[];
+  services: Service[];
+  availableSlots?: Record<string, { time: string; available: boolean }[]>;
+  isFollowing?: boolean;
+  onFollow?: () => void;
+  onMessage?: () => void;
+  onShare?: () => void;
+  onBookService?: (serviceId: string, date: string, time: string) => void;
+}
+
+export default function VendorStorefront({
+  id,
+  name,
+  avatar,
+  banner,
+  category,
+  location,
+  rating,
+  reviewCount,
+  description,
+  businessHours,
+  products,
+  services,
+  availableSlots = {},
+  isFollowing = false,
+  onFollow,
+  onMessage,
+  onShare,
+  onBookService,
+}: VendorStorefrontProps) {
+  const [activeTab, setActiveTab] = useState("about");
+  const [selectedService, setSelectedService] = useState<Service | null>(null);
+
+  return (
+    <div className="min-h-screen" data-testid={`vendor-storefront-${id}`}>
+      <div className="relative">
+        <div className="aspect-[16/9] max-h-[300px] overflow-hidden">
+          <img
+            src={banner}
+            alt={name}
+            className="w-full h-full object-cover"
+          />
+        </div>
+        <div className="absolute inset-0 bg-gradient-to-t from-black/60 to-transparent" />
+        <div className="absolute bottom-0 left-0 right-0 p-4 md:p-6">
+          <div className="flex items-end gap-4">
+            <Avatar className="h-20 w-20 md:h-24 md:w-24 border-4 border-background">
+              <AvatarImage src={avatar} alt={name} />
+              <AvatarFallback className="text-2xl">{name.charAt(0)}</AvatarFallback>
+            </Avatar>
+            <div className="flex-1 text-white">
+              <h1 className="text-2xl md:text-3xl font-bold" data-testid="text-vendor-name">{name}</h1>
+              <div className="flex flex-wrap items-center gap-2 mt-1">
+                <Badge variant="secondary">{category}</Badge>
+                <div className="flex items-center gap-1 text-sm">
+                  <MapPin className="h-4 w-4" />
+                  <span>{location}</span>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div className="max-w-7xl mx-auto px-4 py-4">
+        <div className="flex flex-wrap items-center justify-between gap-4 mb-6">
+          <div className="flex items-center gap-4">
+            <div className="flex items-center gap-1">
+              <Star className="h-5 w-5 fill-yellow-400 text-yellow-400" />
+              <span className="font-semibold">{rating.toFixed(1)}</span>
+              <span className="text-muted-foreground">({reviewCount} reviews)</span>
+            </div>
+            {businessHours && (
+              <div className="flex items-center gap-1 text-sm text-muted-foreground">
+                <Clock className="h-4 w-4" />
+                <span>{businessHours}</span>
+              </div>
+            )}
+          </div>
+          <div className="flex items-center gap-2">
+            <Button
+              variant={isFollowing ? "secondary" : "default"}
+              onClick={onFollow}
+              data-testid="button-follow"
+            >
+              <Heart className={`h-4 w-4 mr-2 ${isFollowing ? "fill-current" : ""}`} />
+              {isFollowing ? "Following" : "Follow"}
+            </Button>
+            <Button variant="outline" onClick={onMessage} data-testid="button-message-vendor">
+              <MessageCircle className="h-4 w-4 mr-2" />
+              Message
+            </Button>
+            <Button size="icon" variant="outline" onClick={onShare} data-testid="button-share-vendor">
+              <Share2 className="h-4 w-4" />
+            </Button>
+          </div>
+        </div>
+
+        <Tabs value={activeTab} onValueChange={setActiveTab} className="w-full">
+          <TabsList className="w-full justify-start border-b rounded-none h-auto p-0 bg-transparent">
+            <TabsTrigger
+              value="about"
+              className="rounded-none border-b-2 border-transparent data-[state=active]:border-primary data-[state=active]:bg-transparent px-6 py-3"
+              data-testid="tab-about"
+            >
+              About
+            </TabsTrigger>
+            {products.length > 0 && (
+              <TabsTrigger
+                value="products"
+                className="rounded-none border-b-2 border-transparent data-[state=active]:border-primary data-[state=active]:bg-transparent px-6 py-3"
+                data-testid="tab-products"
+              >
+                Products
+              </TabsTrigger>
+            )}
+            {services.length > 0 && (
+              <TabsTrigger
+                value="services"
+                className="rounded-none border-b-2 border-transparent data-[state=active]:border-primary data-[state=active]:bg-transparent px-6 py-3"
+                data-testid="tab-services"
+              >
+                Services
+              </TabsTrigger>
+            )}
+            {services.length > 0 && (
+              <TabsTrigger
+                value="book"
+                className="rounded-none border-b-2 border-transparent data-[state=active]:border-primary data-[state=active]:bg-transparent px-6 py-3"
+                data-testid="tab-book"
+              >
+                Book
+              </TabsTrigger>
+            )}
+          </TabsList>
+
+          <TabsContent value="about" className="pt-6">
+            <div className="max-w-2xl">
+              <h2 className="text-xl font-semibold mb-4">About Us</h2>
+              <p className="text-muted-foreground">{description}</p>
+            </div>
+          </TabsContent>
+
+          <TabsContent value="products" className="pt-6">
+            <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
+              {products.map((product) => (
+                <ProductCard
+                  key={product.id}
+                  {...product}
+                  onAddToCart={(id) => console.log("Add to cart:", id)}
+                />
+              ))}
+            </div>
+          </TabsContent>
+
+          <TabsContent value="services" className="pt-6">
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+              {services.map((service) => (
+                <ServiceCard
+                  key={service.id}
+                  {...service}
+                  onBook={(id) => {
+                    const svc = services.find((s) => s.id === id);
+                    if (svc) {
+                      setSelectedService(svc);
+                      setActiveTab("book");
+                    }
+                  }}
+                />
+              ))}
+            </div>
+          </TabsContent>
+
+          <TabsContent value="book" className="pt-6">
+            {selectedService ? (
+              <div className="max-w-md">
+                <BookingCalendar
+                  serviceName={selectedService.name}
+                  servicePrice={selectedService.price}
+                  serviceDuration={selectedService.duration}
+                  availableSlots={availableSlots}
+                  onBook={(date, time) =>
+                    onBookService?.(selectedService.id, date, time)
+                  }
+                />
+              </div>
+            ) : (
+              <div className="text-center py-12">
+                <p className="text-muted-foreground mb-4">
+                  Select a service to book an appointment
+                </p>
+                <Button variant="outline" onClick={() => setActiveTab("services")}>
+                  View Services
+                </Button>
+              </div>
+            )}
+          </TabsContent>
+        </Tabs>
+      </div>
+    </div>
+  );
+}
