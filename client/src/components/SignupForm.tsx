@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { ChevronLeft, ChevronRight, Check, Eye, EyeOff, CreditCard, Building2, Globe, Rocket, Store } from "lucide-react";
+import { ChevronLeft, ChevronRight, Check, Eye, EyeOff, CreditCard, Building2, Globe, Rocket, Store, Shirt, Scissors, Utensils, SprayCan, Dumbbell, ShoppingBag, Palette, Wrench } from "lucide-react";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -10,6 +10,7 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { Textarea } from "@/components/ui/textarea";
 import { Separator } from "@/components/ui/separator";
+import { Badge } from "@/components/ui/badge";
 
 interface SignupFormProps {
   onComplete?: (data: SignupData) => void;
@@ -36,6 +37,8 @@ interface SignupData {
   shoppingFrequency?: string;
   preferredCategories: string[];
   interests: string[];
+  selectedIndustries: string[];
+  industryNiches: Record<string, string[]>;
   businessName?: string;
   businessCategory?: string;
   businessDescription?: string;
@@ -54,7 +57,9 @@ const customerSteps = [
   { id: 2, name: "Location" },
   { id: 3, name: "About You" },
   { id: 4, name: "Lifestyle" },
-  { id: 5, name: "Preferences" },
+  { id: 5, name: "Industries" },
+  { id: 6, name: "Your Tastes" },
+  { id: 7, name: "Finish" },
 ];
 
 const vendorSteps = [
@@ -76,6 +81,52 @@ const categories = [
   "Entertainment",
   "Arts & Crafts",
 ];
+
+const industries = [
+  { id: "clothing", name: "Clothing & Fashion", icon: Shirt },
+  { id: "beauty-products", name: "Beauty Products", icon: SprayCan },
+  { id: "beauty-services", name: "Beauty Services", icon: Scissors },
+  { id: "food", name: "Food & Dining", icon: Utensils },
+  { id: "fitness", name: "Fitness & Wellness", icon: Dumbbell },
+  { id: "home-goods", name: "Home & Decor", icon: ShoppingBag },
+  { id: "arts", name: "Arts & Crafts", icon: Palette },
+  { id: "services", name: "Professional Services", icon: Wrench },
+];
+
+const industryNicheOptions: Record<string, { label: string; options: string[] }> = {
+  "clothing": {
+    label: "What types of clothing interest you?",
+    options: ["Streetwear", "Vintage", "Designer", "Casual", "Athletic Wear", "Formal Wear", "Children's Clothing", "Plus Size", "Sustainable Fashion", "Accessories & Jewelry", "Shoes & Footwear", "Custom/Tailored"]
+  },
+  "beauty-products": {
+    label: "What beauty products are you interested in?",
+    options: ["Skincare", "Makeup", "Haircare", "Natural/Organic", "Fragrances", "Nail Products", "Men's Grooming", "K-Beauty", "Anti-aging", "Acne Care", "Body Care", "Indie Brands"]
+  },
+  "beauty-services": {
+    label: "What beauty services do you look for?",
+    options: ["Hair Styling", "Hair Coloring", "Barbershop", "Nail Salon", "Spa & Massage", "Facials", "Waxing", "Lash Extensions", "Brow Services", "Makeup Artist", "Braiding & Locs", "Med Spa"]
+  },
+  "food": {
+    label: "What types of food do you enjoy?",
+    options: ["Italian", "Soul Food", "Mexican", "Asian Fusion", "Caribbean", "BBQ", "Vegan/Vegetarian", "Bakery & Sweets", "Coffee & Cafe", "Seafood", "Food Trucks", "Fine Dining", "Fast Casual", "Desserts", "Healthy/Organic"]
+  },
+  "fitness": {
+    label: "What fitness activities interest you?",
+    options: ["Yoga", "CrossFit", "Personal Training", "Pilates", "Boxing/MMA", "Dance Fitness", "Swimming", "Cycling/Spin", "Meditation", "Nutrition Coaching", "Physical Therapy", "Group Classes"]
+  },
+  "home-goods": {
+    label: "What home items are you looking for?",
+    options: ["Furniture", "Home Decor", "Plants & Garden", "Kitchenware", "Bedding & Linens", "Candles & Scents", "Wall Art", "Handmade Items", "Antiques", "Organization", "Outdoor Living", "Pet Supplies"]
+  },
+  "arts": {
+    label: "What arts & crafts interest you?",
+    options: ["Paintings", "Photography", "Pottery & Ceramics", "Jewelry Making", "Handmade Crafts", "Digital Art", "Sculpture", "Textiles", "Woodworking", "Custom Commissions", "Art Classes", "Supplies"]
+  },
+  "services": {
+    label: "What services might you need?",
+    options: ["Cleaning", "Landscaping", "Handyman", "Auto Repair", "Pet Services", "Photography", "Event Planning", "Tutoring", "Legal Services", "Accounting", "Real Estate", "Tech Support"]
+  }
+};
 
 export default function SignupForm({ onComplete, isVendor = false }: SignupFormProps) {
   const steps = isVendor ? vendorSteps : customerSteps;
@@ -101,6 +152,8 @@ export default function SignupForm({ onComplete, isVendor = false }: SignupFormP
     shoppingFrequency: "",
     preferredCategories: [],
     interests: [],
+    selectedIndustries: [],
+    industryNiches: {},
     businessName: "",
     businessCategory: "",
     businessDescription: "",
@@ -116,16 +169,27 @@ export default function SignupForm({ onComplete, isVendor = false }: SignupFormP
 
   const progress = (currentStep / steps.length) * 100;
 
-  const updateField = (field: keyof SignupData, value: string | string[] | boolean | undefined) => {
+  const updateField = (field: keyof SignupData, value: string | string[] | boolean | undefined | Record<string, string[]>) => {
     setFormData({ ...formData, [field]: value });
   };
 
-  const toggleArrayItem = (field: "interests" | "preferredCategories", item: string) => {
+  const toggleArrayItem = (field: "interests" | "preferredCategories" | "selectedIndustries", item: string) => {
     const current = formData[field];
     const updated = current.includes(item)
       ? current.filter((i) => i !== item)
       : [...current, item];
     updateField(field, updated);
+  };
+
+  const toggleNicheItem = (industryId: string, niche: string) => {
+    const currentNiches = formData.industryNiches[industryId] || [];
+    const updated = currentNiches.includes(niche)
+      ? currentNiches.filter((n) => n !== niche)
+      : [...currentNiches, niche];
+    updateField("industryNiches", {
+      ...formData.industryNiches,
+      [industryId]: updated
+    });
   };
 
   const nextStep = () => {
@@ -147,6 +211,12 @@ export default function SignupForm({ onComplete, isVendor = false }: SignupFormP
       return formData.acceptedSubscription;
     }
     return true;
+  };
+
+  const skipOptionalSteps = () => {
+    if (!isVendor && (currentStep === 5 || currentStep === 6)) {
+      setCurrentStep(7);
+    }
   };
 
   return (
@@ -176,7 +246,7 @@ export default function SignupForm({ onComplete, isVendor = false }: SignupFormP
               </div>
               {index < steps.length - 1 && (
                 <div
-                  className={`h-0.5 w-4 sm:w-6 ${
+                  className={`h-0.5 w-3 sm:w-4 ${
                     currentStep > step.id ? "bg-primary" : "bg-muted"
                   }`}
                 />
@@ -285,6 +355,7 @@ export default function SignupForm({ onComplete, isVendor = false }: SignupFormP
                   <SelectItem value="CA">California</SelectItem>
                   <SelectItem value="TX">Texas</SelectItem>
                   <SelectItem value="FL">Florida</SelectItem>
+                  <SelectItem value="GA">Georgia</SelectItem>
                   <SelectItem value="IL">Illinois</SelectItem>
                   <SelectItem value="other">Other</SelectItem>
                 </SelectContent>
@@ -494,30 +565,164 @@ export default function SignupForm({ onComplete, isVendor = false }: SignupFormP
         </div>
       )}
 
-      {/* CUSTOMER STEP 5: Preferences */}
+      {/* CUSTOMER STEP 5: Industry Selection (Optional) */}
       {!isVendor && currentStep === 5 && (
         <div className="space-y-4">
-          <p className="text-sm text-muted-foreground">
-            Select business categories you're interested in
-          </p>
-          <div className="grid grid-cols-2 gap-3">
-            {categories.map((category) => (
-              <div
-                key={category}
-                className={`flex items-center gap-2 p-3 border rounded-md cursor-pointer hover-elevate ${
-                  formData.preferredCategories.includes(category) ? "border-primary bg-primary/5" : ""
-                }`}
-                onClick={() => toggleArrayItem("preferredCategories", category)}
-                data-testid={`checkbox-category-${category}`}
-              >
-                <Checkbox
-                  checked={formData.preferredCategories.includes(category)}
-                  onCheckedChange={() => toggleArrayItem("preferredCategories", category)}
-                />
-                <span className="text-sm">{category}</span>
-              </div>
-            ))}
+          <div className="flex items-center justify-between">
+            <div>
+              <h3 className="font-medium">What industries interest you?</h3>
+              <p className="text-sm text-muted-foreground">
+                Select all that apply for personalized recommendations
+              </p>
+            </div>
+            <Badge variant="secondary">Optional</Badge>
           </div>
+          <div className="grid grid-cols-2 gap-3">
+            {industries.map((industry) => {
+              const Icon = industry.icon;
+              const isSelected = formData.selectedIndustries.includes(industry.id);
+              return (
+                <div
+                  key={industry.id}
+                  className={`flex items-center gap-3 p-3 border rounded-md cursor-pointer hover-elevate ${
+                    isSelected ? "border-primary bg-primary/5" : ""
+                  }`}
+                  onClick={() => toggleArrayItem("selectedIndustries", industry.id)}
+                  data-testid={`checkbox-industry-${industry.id}`}
+                >
+                  <Checkbox checked={isSelected} />
+                  <Icon className={`h-5 w-5 ${isSelected ? "text-primary" : "text-muted-foreground"}`} />
+                  <span className="text-sm">{industry.name}</span>
+                </div>
+              );
+            })}
+          </div>
+          <Button 
+            variant="ghost" 
+            className="w-full mt-4"
+            onClick={skipOptionalSteps}
+            data-testid="button-skip-industries"
+          >
+            Skip this step
+          </Button>
+        </div>
+      )}
+
+      {/* CUSTOMER STEP 6: Industry Niches (Optional) */}
+      {!isVendor && currentStep === 6 && (
+        <div className="space-y-5">
+          <div className="flex items-center justify-between">
+            <div>
+              <h3 className="font-medium">Tell us your preferences</h3>
+              <p className="text-sm text-muted-foreground">
+                Get tailored recommendations based on your tastes
+              </p>
+            </div>
+            <Badge variant="secondary">Optional</Badge>
+          </div>
+
+          {formData.selectedIndustries.length === 0 ? (
+            <div className="text-center py-6">
+              <p className="text-muted-foreground mb-4">
+                You haven't selected any industries yet. Go back to select some, or skip to complete signup.
+              </p>
+              <Button variant="outline" onClick={prevStep}>
+                Go Back
+              </Button>
+            </div>
+          ) : (
+            <div className="space-y-6 max-h-[350px] overflow-y-auto pr-2">
+              {formData.selectedIndustries.map((industryId) => {
+                const nicheData = industryNicheOptions[industryId];
+                const industry = industries.find(i => i.id === industryId);
+                if (!nicheData || !industry) return null;
+                
+                const selectedNiches = formData.industryNiches[industryId] || [];
+                const Icon = industry.icon;
+
+                return (
+                  <div key={industryId} className="space-y-3">
+                    <div className="flex items-center gap-2">
+                      <Icon className="h-5 w-5 text-primary" />
+                      <Label className="text-base font-medium">{nicheData.label}</Label>
+                    </div>
+                    <div className="flex flex-wrap gap-2">
+                      {nicheData.options.map((niche) => {
+                        const isSelected = selectedNiches.includes(niche);
+                        return (
+                          <Badge
+                            key={niche}
+                            variant={isSelected ? "default" : "outline"}
+                            className="cursor-pointer"
+                            onClick={() => toggleNicheItem(industryId, niche)}
+                            data-testid={`badge-niche-${industryId}-${niche}`}
+                          >
+                            {niche}
+                          </Badge>
+                        );
+                      })}
+                    </div>
+                    <Separator />
+                  </div>
+                );
+              })}
+            </div>
+          )}
+
+          {formData.selectedIndustries.length > 0 && (
+            <Button 
+              variant="ghost" 
+              className="w-full"
+              onClick={() => setCurrentStep(7)}
+              data-testid="button-skip-niches"
+            >
+              Skip this step
+            </Button>
+          )}
+        </div>
+      )}
+
+      {/* CUSTOMER STEP 7: Finish */}
+      {!isVendor && currentStep === 7 && (
+        <div className="space-y-4 text-center py-4">
+          <div className="h-16 w-16 rounded-full bg-primary/10 flex items-center justify-center mx-auto">
+            <Check className="h-8 w-8 text-primary" />
+          </div>
+          <h3 className="text-xl font-semibold">You're all set!</h3>
+          <p className="text-muted-foreground">
+            Your personalized Outsyde experience is ready. Start discovering amazing local businesses tailored just for you.
+          </p>
+          
+          {formData.selectedIndustries.length > 0 && (
+            <div className="text-left p-4 bg-muted/50 rounded-md mt-4">
+              <p className="text-sm font-medium mb-2">Your interests:</p>
+              <div className="flex flex-wrap gap-2">
+                {formData.selectedIndustries.map((id) => {
+                  const industry = industries.find(i => i.id === id);
+                  return industry ? (
+                    <Badge key={id} variant="secondary">{industry.name}</Badge>
+                  ) : null;
+                })}
+              </div>
+              {Object.keys(formData.industryNiches).some(k => formData.industryNiches[k]?.length > 0) && (
+                <div className="mt-3">
+                  <p className="text-sm font-medium mb-2">Your tastes:</p>
+                  <div className="flex flex-wrap gap-1">
+                    {Object.entries(formData.industryNiches).flatMap(([_, niches]) => 
+                      niches.slice(0, 5).map(niche => (
+                        <Badge key={niche} variant="outline" className="text-xs">{niche}</Badge>
+                      ))
+                    )}
+                    {Object.values(formData.industryNiches).flat().length > 5 && (
+                      <Badge variant="outline" className="text-xs">
+                        +{Object.values(formData.industryNiches).flat().length - 5} more
+                      </Badge>
+                    )}
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
         </div>
       )}
 
@@ -786,6 +991,7 @@ export default function SignupForm({ onComplete, isVendor = false }: SignupFormP
                       <SelectItem value="CA">California</SelectItem>
                       <SelectItem value="TX">Texas</SelectItem>
                       <SelectItem value="FL">Florida</SelectItem>
+                      <SelectItem value="GA">Georgia</SelectItem>
                       <SelectItem value="IL">Illinois</SelectItem>
                       <SelectItem value="other">Other</SelectItem>
                     </SelectContent>
@@ -943,7 +1149,7 @@ export default function SignupForm({ onComplete, isVendor = false }: SignupFormP
           disabled={!canProceed()}
           data-testid="button-next-step"
         >
-          {currentStep === steps.length ? (isVendor ? "Start Subscription" : "Complete") : "Continue"}
+          {currentStep === steps.length ? (isVendor ? "Start Subscription" : "Get Started") : "Continue"}
           {currentStep !== steps.length && <ChevronRight className="h-4 w-4 ml-1" />}
         </Button>
       </div>
