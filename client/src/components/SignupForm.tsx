@@ -1,5 +1,6 @@
 import { useState } from "react";
-import { ChevronLeft, ChevronRight, Check, Eye, EyeOff, CreditCard, Building2, Globe, Rocket, Store, Shirt, Scissors, Utensils, SprayCan, Dumbbell, ShoppingBag, Palette, Wrench } from "lucide-react";
+import { useMutation } from "@tanstack/react-query";
+import { ChevronLeft, ChevronRight, Check, Eye, EyeOff, CreditCard, Building2, Globe, Rocket, Store, Shirt, Scissors, Utensils, SprayCan, Dumbbell, ShoppingBag, Palette, Wrench, Loader2 } from "lucide-react";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -11,6 +12,8 @@ import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { Textarea } from "@/components/ui/textarea";
 import { Separator } from "@/components/ui/separator";
 import { Badge } from "@/components/ui/badge";
+import { useToast } from "@/hooks/use-toast";
+import { apiRequest } from "@/lib/queryClient";
 
 interface SignupFormProps {
   onComplete?: (data: SignupData) => void;
@@ -132,6 +135,93 @@ export default function SignupForm({ onComplete, isVendor = false }: SignupFormP
   const steps = isVendor ? vendorSteps : customerSteps;
   const [currentStep, setCurrentStep] = useState(1);
   const [showPassword, setShowPassword] = useState(false);
+  const { toast } = useToast();
+
+  // Signup mutation for customer
+  const customerSignupMutation = useMutation({
+    mutationFn: async (data: SignupData) => {
+      const response = await apiRequest("POST", "/api/auth/customer/signup", {
+        email: data.email,
+        password: data.password,
+        name: data.name,
+        phone: data.phone || undefined,
+        address: data.location || undefined,
+        city: data.city || undefined,
+        state: data.state || undefined,
+        zipCode: data.zipCode || undefined,
+        ageRange: data.ageRange || undefined,
+        gender: data.gender || undefined,
+        ethnicity: data.ethnicity || undefined,
+        nationality: data.nationality || undefined,
+        householdSize: data.householdSize || undefined,
+        incomeRange: data.incomeRange || undefined,
+        education: data.education || undefined,
+        occupation: data.occupation || undefined,
+        shoppingFrequency: data.shoppingFrequency || undefined,
+        selectedIndustries: data.selectedIndustries,
+        industryNiches: data.industryNiches,
+      });
+      return response.json();
+    },
+    onSuccess: (result) => {
+      toast({
+        title: "Welcome to Outsyde!",
+        description: "Your account has been created successfully.",
+      });
+      onComplete?.(formData);
+    },
+    onError: (error: Error) => {
+      toast({
+        title: "Signup failed",
+        description: error.message || "Please try again",
+        variant: "destructive",
+      });
+    },
+  });
+
+  // Signup mutation for vendor
+  const vendorSignupMutation = useMutation({
+    mutationFn: async (data: SignupData) => {
+      const response = await apiRequest("POST", "/api/auth/vendor/signup", {
+        email: data.email,
+        password: data.password,
+        name: data.name,
+        phone: data.phone || undefined,
+        businessName: data.businessName,
+        businessCategory: data.businessCategory,
+        businessDescription: data.businessDescription || undefined,
+        isStartup: data.isStartup,
+        yearsInBusiness: data.yearsInBusiness || undefined,
+        employeeCount: data.employeeCount || undefined,
+        businessType: data.businessType || undefined,
+        hasPhysicalLocation: data.hasPhysicalLocation,
+        address: data.location || undefined,
+        city: data.city || undefined,
+        state: data.state || undefined,
+        zipCode: data.zipCode || undefined,
+        websiteUrl: data.websiteUrl || undefined,
+        socialMedia: data.socialMedia || undefined,
+      });
+      return response.json();
+    },
+    onSuccess: (result) => {
+      toast({
+        title: "Welcome to Outsyde!",
+        description: "Your business account is ready. Start setting up your storefront!",
+      });
+      onComplete?.(formData);
+    },
+    onError: (error: Error) => {
+      toast({
+        title: "Signup failed",
+        description: error.message || "Please try again",
+        variant: "destructive",
+      });
+    },
+  });
+
+  const isSubmitting = customerSignupMutation.isPending || vendorSignupMutation.isPending;
+
   const [formData, setFormData] = useState<SignupData>({
     email: "",
     password: "",
@@ -196,7 +286,12 @@ export default function SignupForm({ onComplete, isVendor = false }: SignupFormP
     if (currentStep < steps.length) {
       setCurrentStep(currentStep + 1);
     } else {
-      onComplete?.(formData);
+      // Submit form via API
+      if (isVendor) {
+        vendorSignupMutation.mutate(formData);
+      } else {
+        customerSignupMutation.mutate(formData);
+      }
     }
   };
 
@@ -1138,7 +1233,7 @@ export default function SignupForm({ onComplete, isVendor = false }: SignupFormP
         <Button
           variant="outline"
           onClick={prevStep}
-          disabled={currentStep === 1}
+          disabled={currentStep === 1 || isSubmitting}
           data-testid="button-prev-step"
         >
           <ChevronLeft className="h-4 w-4 mr-1" />
@@ -1146,11 +1241,20 @@ export default function SignupForm({ onComplete, isVendor = false }: SignupFormP
         </Button>
         <Button 
           onClick={nextStep} 
-          disabled={!canProceed()}
+          disabled={!canProceed() || isSubmitting}
           data-testid="button-next-step"
         >
-          {currentStep === steps.length ? (isVendor ? "Start Subscription" : "Get Started") : "Continue"}
-          {currentStep !== steps.length && <ChevronRight className="h-4 w-4 ml-1" />}
+          {isSubmitting ? (
+            <>
+              <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+              Creating account...
+            </>
+          ) : (
+            <>
+              {currentStep === steps.length ? (isVendor ? "Start Subscription" : "Get Started") : "Continue"}
+              {currentStep !== steps.length && <ChevronRight className="h-4 w-4 ml-1" />}
+            </>
+          )}
         </Button>
       </div>
     </Card>
