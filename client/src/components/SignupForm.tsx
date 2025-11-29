@@ -201,6 +201,7 @@ export default function SignupForm({ onComplete, isVendor = false }: SignupFormP
         zipCode: data.zipCode || undefined,
         websiteUrl: data.websiteUrl || undefined,
         socialMedia: data.socialMedia || undefined,
+        acceptedSubscription: data.acceptedSubscription,
       });
       return response.json();
     },

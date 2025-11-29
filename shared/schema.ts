@@ -138,6 +138,9 @@ export const vendorSignupSchema = z.object({
   zipCode: z.string().optional(),
   websiteUrl: z.string().optional(),
   socialMedia: z.string().optional(),
+  acceptedSubscription: z.boolean().refine((val) => val === true, {
+    message: "You must accept the subscription terms",
+  }),
 });
 
 // Login schema
