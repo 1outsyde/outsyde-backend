@@ -4,49 +4,220 @@ import {
   type Business, 
   type InsertBusiness,
   type City,
-  type InsertCity 
+  type InsertCity,
+  users,
+  businesses,
+  cities
 } from "@shared/schema";
+import { db } from "./db";
+import { eq, ilike, or, and, sql } from "drizzle-orm";
 import { randomUUID } from "crypto";
 
 export interface IStorage {
-  // Users
   getUser(id: string): Promise<User | undefined>;
   getUserByEmail(email: string): Promise<User | undefined>;
   createUser(user: InsertUser): Promise<User>;
   updateUser(id: string, updates: Partial<User>): Promise<User | undefined>;
   
-  // Businesses
   getBusiness(id: string): Promise<Business | undefined>;
   getBusinessByOwnerId(ownerId: string): Promise<Business | undefined>;
   getBusinesses(filters?: { city?: string; category?: string; search?: string }): Promise<Business[]>;
   createBusiness(business: InsertBusiness): Promise<Business>;
   updateBusiness(id: string, updates: Partial<Business>): Promise<Business | undefined>;
   
-  // Cities
   getCities(): Promise<City[]>;
   getCity(id: string): Promise<City | undefined>;
   createCity(city: InsertCity): Promise<City>;
   updateCityBusinessCount(cityId: string, count: number): Promise<void>;
+  
+  seedInitialData(): Promise<void>;
 }
 
-export class MemStorage implements IStorage {
-  private users: Map<string, User>;
-  private businesses: Map<string, Business>;
-  private cities: Map<string, City>;
-
-  constructor() {
-    this.users = new Map();
-    this.businesses = new Map();
-    this.cities = new Map();
-    
-    // Seed major cities
-    this.seedCities();
-    // Seed sample businesses for demo
-    this.seedBusinesses();
+export class DatabaseStorage implements IStorage {
+  
+  async getUser(id: string): Promise<User | undefined> {
+    const result = await db.select().from(users).where(eq(users.id, id));
+    return result[0];
   }
 
-  private seedCities() {
-    const majorCities: City[] = [
+  async getUserByEmail(email: string): Promise<User | undefined> {
+    const result = await db.select().from(users).where(
+      sql`LOWER(${users.email}) = LOWER(${email})`
+    );
+    return result[0];
+  }
+
+  async createUser(insertUser: InsertUser): Promise<User> {
+    const id = randomUUID();
+    const result = await db.insert(users).values({
+      id,
+      email: insertUser.email,
+      password: insertUser.password,
+      name: insertUser.name,
+      phone: insertUser.phone || null,
+      isVendor: insertUser.isVendor ?? false,
+      address: insertUser.address || null,
+      city: insertUser.city || null,
+      state: insertUser.state || null,
+      zipCode: insertUser.zipCode || null,
+      ageRange: insertUser.ageRange || null,
+      gender: insertUser.gender || null,
+      ethnicity: insertUser.ethnicity || null,
+      nationality: insertUser.nationality || null,
+      householdSize: insertUser.householdSize || null,
+      incomeRange: insertUser.incomeRange || null,
+      education: insertUser.education || null,
+      occupation: insertUser.occupation || null,
+      shoppingFrequency: insertUser.shoppingFrequency || null,
+      selectedIndustries: (insertUser.selectedIndustries as string[]) || [],
+      industryNiches: (insertUser.industryNiches as Record<string, string[]>) || {},
+    }).returning();
+    return result[0];
+  }
+
+  async updateUser(id: string, updates: Partial<User>): Promise<User | undefined> {
+    const result = await db.update(users)
+      .set(updates)
+      .where(eq(users.id, id))
+      .returning();
+    return result[0];
+  }
+
+  async getBusiness(id: string): Promise<Business | undefined> {
+    const result = await db.select().from(businesses).where(eq(businesses.id, id));
+    return result[0];
+  }
+
+  async getBusinessByOwnerId(ownerId: string): Promise<Business | undefined> {
+    const result = await db.select().from(businesses).where(eq(businesses.ownerId, ownerId));
+    return result[0];
+  }
+
+  async getBusinesses(filters?: { city?: string; category?: string; search?: string }): Promise<Business[]> {
+    let conditions = [];
+    
+    if (filters?.city) {
+      conditions.push(sql`LOWER(${businesses.city}) = LOWER(${filters.city})`);
+    }
+    
+    if (filters?.category && filters.category !== "All") {
+      conditions.push(eq(businesses.category, filters.category));
+    }
+    
+    if (filters?.search) {
+      const searchTerm = `%${filters.search}%`;
+      conditions.push(
+        or(
+          ilike(businesses.name, searchTerm),
+          ilike(businesses.description, searchTerm)
+        )
+      );
+    }
+    
+    if (conditions.length > 0) {
+      return db.select().from(businesses).where(and(...conditions));
+    }
+    
+    return db.select().from(businesses);
+  }
+
+  async createBusiness(insertBusiness: InsertBusiness): Promise<Business> {
+    const id = randomUUID();
+    const result = await db.insert(businesses).values({
+      id,
+      ownerId: insertBusiness.ownerId,
+      name: insertBusiness.name,
+      category: insertBusiness.category,
+      description: insertBusiness.description || null,
+      isStartup: insertBusiness.isStartup ?? false,
+      yearsInBusiness: insertBusiness.yearsInBusiness || null,
+      employeeCount: insertBusiness.employeeCount || null,
+      businessType: insertBusiness.businessType || null,
+      hasPhysicalLocation: insertBusiness.hasPhysicalLocation ?? true,
+      address: insertBusiness.address || null,
+      city: insertBusiness.city || null,
+      state: insertBusiness.state || null,
+      zipCode: insertBusiness.zipCode || null,
+      websiteUrl: insertBusiness.websiteUrl || null,
+      socialMedia: insertBusiness.socialMedia || null,
+      coverImage: insertBusiness.coverImage || null,
+      logoImage: insertBusiness.logoImage || null,
+      rating: 0,
+      reviewCount: 0,
+      subscriptionActive: insertBusiness.subscriptionActive ?? false,
+    }).returning();
+    
+    return result[0];
+  }
+
+  async updateBusiness(id: string, updates: Partial<Business>): Promise<Business | undefined> {
+    const result = await db.update(businesses)
+      .set(updates)
+      .where(eq(businesses.id, id))
+      .returning();
+    return result[0];
+  }
+
+  async getCities(): Promise<City[]> {
+    return db.select().from(cities);
+  }
+
+  async getCity(id: string): Promise<City | undefined> {
+    const result = await db.select().from(cities).where(eq(cities.id, id));
+    return result[0];
+  }
+
+  async createCity(city: InsertCity): Promise<City> {
+    const result = await db.insert(cities).values({
+      id: city.id,
+      name: city.name,
+      state: city.state,
+      businessCount: city.businessCount ?? 0,
+      imageUrl: city.imageUrl || null,
+      trending: city.trending ?? false,
+    }).returning();
+    return result[0];
+  }
+
+  async updateCityBusinessCount(cityId: string, count: number): Promise<void> {
+    await db.update(cities)
+      .set({ businessCount: count })
+      .where(eq(cities.id, cityId));
+  }
+
+  async seedInitialData(): Promise<void> {
+    const existingCities = await db.select().from(cities);
+    if (existingCities.length > 0) {
+      console.log("Database already seeded, skipping...");
+      return;
+    }
+
+    console.log("Seeding database with initial data...");
+    
+    const demoUsers = [
+      { id: "demo-owner-1", email: "demo1@outsyde.com", password: "demo", name: "Demo Owner 1", isVendor: true },
+      { id: "demo-owner-2", email: "demo2@outsyde.com", password: "demo", name: "Demo Owner 2", isVendor: true },
+      { id: "demo-owner-3", email: "demo3@outsyde.com", password: "demo", name: "Demo Owner 3", isVendor: true },
+      { id: "demo-owner-4", email: "demo4@outsyde.com", password: "demo", name: "Demo Owner 4", isVendor: true },
+      { id: "demo-owner-5", email: "demo5@outsyde.com", password: "demo", name: "Demo Owner 5", isVendor: true },
+      { id: "demo-owner-6", email: "demo6@outsyde.com", password: "demo", name: "Demo Owner 6", isVendor: true },
+      { id: "demo-owner-7", email: "demo7@outsyde.com", password: "demo", name: "Demo Owner 7", isVendor: true },
+      { id: "demo-owner-8", email: "demo8@outsyde.com", password: "demo", name: "Demo Owner 8", isVendor: true },
+    ];
+    
+    for (const demoUser of demoUsers) {
+      await db.insert(users).values({
+        id: demoUser.id,
+        email: demoUser.email,
+        password: demoUser.password,
+        name: demoUser.name,
+        isVendor: demoUser.isVendor,
+        selectedIndustries: [],
+        industryNiches: {},
+      });
+    }
+
+    const majorCities: InsertCity[] = [
       {
         id: "nyc",
         name: "New York",
@@ -112,14 +283,13 @@ export class MemStorage implements IStorage {
         trending: false,
       },
     ];
-    
-    majorCities.forEach(city => this.cities.set(city.id, city));
-  }
 
-  private seedBusinesses() {
-    const sampleBusinesses: Business[] = [
+    for (const city of majorCities) {
+      await this.createCity(city);
+    }
+
+    const sampleBusinesses: InsertBusiness[] = [
       {
-        id: "b1",
         ownerId: "demo-owner-1",
         name: "Sunrise Coffee Co.",
         category: "Food & Drinks",
@@ -135,14 +305,9 @@ export class MemStorage implements IStorage {
         zipCode: "10001",
         websiteUrl: "https://sunrisecoffee.com",
         socialMedia: "@sunrisecoffee",
-        coverImage: null,
-        logoImage: null,
-        rating: 48,
-        reviewCount: 124,
         subscriptionActive: true,
       },
       {
-        id: "b2",
         ownerId: "demo-owner-2",
         name: "Bella's Hair Studio",
         category: "Beauty",
@@ -156,16 +321,10 @@ export class MemStorage implements IStorage {
         city: "nyc",
         state: "NY",
         zipCode: "10002",
-        websiteUrl: null,
         socialMedia: "@bellashair",
-        coverImage: null,
-        logoImage: null,
-        rating: 49,
-        reviewCount: 89,
         subscriptionActive: true,
       },
       {
-        id: "b3",
         ownerId: "demo-owner-3",
         name: "Artisan Jewelry Co.",
         category: "Shopping",
@@ -181,14 +340,9 @@ export class MemStorage implements IStorage {
         zipCode: "30301",
         websiteUrl: "https://artisanjewelry.co",
         socialMedia: "@artisanjewelry",
-        coverImage: null,
-        logoImage: null,
-        rating: 47,
-        reviewCount: 56,
         subscriptionActive: true,
       },
       {
-        id: "b4",
         ownerId: "demo-owner-4",
         name: "Zen Yoga Studio",
         category: "Health",
@@ -204,14 +358,9 @@ export class MemStorage implements IStorage {
         zipCode: "90001",
         websiteUrl: "https://zenyoga.com",
         socialMedia: "@zenyogala",
-        coverImage: null,
-        logoImage: null,
-        rating: 49,
-        reviewCount: 203,
         subscriptionActive: true,
       },
       {
-        id: "b5",
         ownerId: "demo-owner-5",
         name: "Green Valley Organics",
         category: "Food & Drinks",
@@ -225,16 +374,10 @@ export class MemStorage implements IStorage {
         city: "mia",
         state: "FL",
         zipCode: "33101",
-        websiteUrl: null,
         socialMedia: "@greenvalleyorganics",
-        coverImage: null,
-        logoImage: null,
-        rating: 48,
-        reviewCount: 167,
         subscriptionActive: true,
       },
       {
-        id: "b6",
         ownerId: "demo-owner-6",
         name: "Urban Cuts Barbershop",
         category: "Beauty",
@@ -248,16 +391,10 @@ export class MemStorage implements IStorage {
         city: "atl",
         state: "GA",
         zipCode: "30302",
-        websiteUrl: null,
         socialMedia: "@urbancuts",
-        coverImage: null,
-        logoImage: null,
-        rating: 46,
-        reviewCount: 78,
         subscriptionActive: true,
       },
       {
-        id: "b7",
         ownerId: "demo-owner-7",
         name: "Soul Food Kitchen",
         category: "Food & Drinks",
@@ -273,14 +410,9 @@ export class MemStorage implements IStorage {
         zipCode: "30303",
         websiteUrl: "https://soulfoodkitchen.com",
         socialMedia: "@soulfoodkitchen",
-        coverImage: null,
-        logoImage: null,
-        rating: 49,
-        reviewCount: 312,
         subscriptionActive: true,
       },
       {
-        id: "b8",
         ownerId: "demo-owner-8",
         name: "Beach Vibes Boutique",
         category: "Shopping",
@@ -296,174 +428,23 @@ export class MemStorage implements IStorage {
         zipCode: "33102",
         websiteUrl: "https://beachvibes.com",
         socialMedia: "@beachvibesboutique",
-        coverImage: null,
-        logoImage: null,
-        rating: 47,
-        reviewCount: 145,
         subscriptionActive: true,
       },
     ];
-    
-    sampleBusinesses.forEach(business => this.businesses.set(business.id, business));
-  }
 
-  // User methods
-  async getUser(id: string): Promise<User | undefined> {
-    return this.users.get(id);
-  }
-
-  async getUserByEmail(email: string): Promise<User | undefined> {
-    return Array.from(this.users.values()).find(
-      (user) => user.email.toLowerCase() === email.toLowerCase(),
-    );
-  }
-
-  async createUser(insertUser: InsertUser): Promise<User> {
-    const id = randomUUID();
-    const user: User = { 
-      id,
-      email: insertUser.email,
-      password: insertUser.password,
-      name: insertUser.name,
-      phone: insertUser.phone || null,
-      isVendor: insertUser.isVendor ?? false,
-      address: insertUser.address || null,
-      city: insertUser.city || null,
-      state: insertUser.state || null,
-      zipCode: insertUser.zipCode || null,
-      ageRange: insertUser.ageRange || null,
-      gender: insertUser.gender || null,
-      ethnicity: insertUser.ethnicity || null,
-      nationality: insertUser.nationality || null,
-      householdSize: insertUser.householdSize || null,
-      incomeRange: insertUser.incomeRange || null,
-      education: insertUser.education || null,
-      occupation: insertUser.occupation || null,
-      shoppingFrequency: insertUser.shoppingFrequency || null,
-      selectedIndustries: (insertUser.selectedIndustries as string[]) || [],
-      industryNiches: (insertUser.industryNiches as Record<string, string[]>) || {},
-    };
-    this.users.set(id, user);
-    return user;
-  }
-
-  async updateUser(id: string, updates: Partial<User>): Promise<User | undefined> {
-    const user = this.users.get(id);
-    if (!user) return undefined;
-    const updated = { ...user, ...updates };
-    this.users.set(id, updated);
-    return updated;
-  }
-
-  // Business methods
-  async getBusiness(id: string): Promise<Business | undefined> {
-    return this.businesses.get(id);
-  }
-
-  async getBusinessByOwnerId(ownerId: string): Promise<Business | undefined> {
-    return Array.from(this.businesses.values()).find(
-      (business) => business.ownerId === ownerId,
-    );
-  }
-
-  async getBusinesses(filters?: { city?: string; category?: string; search?: string }): Promise<Business[]> {
-    let businesses = Array.from(this.businesses.values());
-    
-    if (filters?.city) {
-      businesses = businesses.filter(b => b.city?.toLowerCase() === filters.city?.toLowerCase());
+    for (const business of sampleBusinesses) {
+      const result = await db.insert(businesses).values({
+        id: randomUUID(),
+        ...business,
+        coverImage: null,
+        logoImage: null,
+        rating: Math.floor(Math.random() * 5 + 45),
+        reviewCount: Math.floor(Math.random() * 200 + 50),
+      }).returning();
     }
-    
-    if (filters?.category && filters.category !== "All") {
-      businesses = businesses.filter(b => b.category === filters.category);
-    }
-    
-    if (filters?.search) {
-      const search = filters.search.toLowerCase();
-      businesses = businesses.filter(b => 
-        b.name.toLowerCase().includes(search) || 
-        b.description?.toLowerCase().includes(search)
-      );
-    }
-    
-    return businesses;
-  }
 
-  async createBusiness(insertBusiness: InsertBusiness): Promise<Business> {
-    const id = randomUUID();
-    const business: Business = {
-      id,
-      ownerId: insertBusiness.ownerId,
-      name: insertBusiness.name,
-      category: insertBusiness.category,
-      description: insertBusiness.description || null,
-      isStartup: insertBusiness.isStartup ?? false,
-      yearsInBusiness: insertBusiness.yearsInBusiness || null,
-      employeeCount: insertBusiness.employeeCount || null,
-      businessType: insertBusiness.businessType || null,
-      hasPhysicalLocation: insertBusiness.hasPhysicalLocation ?? true,
-      address: insertBusiness.address || null,
-      city: insertBusiness.city || null,
-      state: insertBusiness.state || null,
-      zipCode: insertBusiness.zipCode || null,
-      websiteUrl: insertBusiness.websiteUrl || null,
-      socialMedia: insertBusiness.socialMedia || null,
-      coverImage: insertBusiness.coverImage || null,
-      logoImage: insertBusiness.logoImage || null,
-      rating: 0,
-      reviewCount: 0,
-      subscriptionActive: insertBusiness.subscriptionActive ?? false,
-    };
-    this.businesses.set(id, business);
-    
-    // Update city business count
-    if (business.city) {
-      const city = this.cities.get(business.city);
-      if (city) {
-        city.businessCount = (city.businessCount || 0) + 1;
-        this.cities.set(city.id, city);
-      }
-    }
-    
-    return business;
-  }
-
-  async updateBusiness(id: string, updates: Partial<Business>): Promise<Business | undefined> {
-    const business = this.businesses.get(id);
-    if (!business) return undefined;
-    const updated = { ...business, ...updates };
-    this.businesses.set(id, updated);
-    return updated;
-  }
-
-  // City methods
-  async getCities(): Promise<City[]> {
-    return Array.from(this.cities.values());
-  }
-
-  async getCity(id: string): Promise<City | undefined> {
-    return this.cities.get(id);
-  }
-
-  async createCity(city: InsertCity): Promise<City> {
-    const newCity: City = {
-      id: city.id,
-      name: city.name,
-      state: city.state,
-      businessCount: city.businessCount ?? 0,
-      imageUrl: city.imageUrl || null,
-      trending: city.trending ?? false,
-    };
-    this.cities.set(newCity.id, newCity);
-    return newCity;
-  }
-
-  async updateCityBusinessCount(cityId: string, count: number): Promise<void> {
-    const city = this.cities.get(cityId);
-    if (city) {
-      city.businessCount = count;
-      this.cities.set(cityId, city);
-    }
+    console.log("Database seeded successfully!");
   }
 }
 
-export const storage = new MemStorage();
+export const storage = new DatabaseStorage();
