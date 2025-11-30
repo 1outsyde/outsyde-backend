@@ -5,18 +5,22 @@ Outsyde is a social marketplace platform connecting customers with local small b
 
 ## Current State
 The MVP includes:
-- Customer and vendor authentication with comprehensive signup flows
-- Customer signup with demographics and optional industry/niche preferences for personalized recommendations
+- Dual authentication system (session-based for web, JWT for mobile apps)
+- Customer signup with demographics and optional industry/niche preferences
 - Vendor signup with business details, startup status, and $40/month subscription acknowledgment
 - Search page with major city discovery boxes for travelers
-- Backend APIs for users, businesses, and cities
+- PostgreSQL database with Drizzle ORM for data persistence
+- Secure password hashing with bcrypt
+- Mobile API documentation for native app developers
 
 ## Project Architecture
 
 ### Backend (Express + TypeScript)
-- `server/index.ts` - Express server with session middleware
-- `server/routes.ts` - API routes for auth, businesses, cities, and user preferences
-- `server/storage.ts` - In-memory storage with seeded cities and sample businesses
+- `server/index.ts` - Express server with session middleware and database seeding
+- `server/routes.ts` - API routes for auth, businesses, cities, user preferences
+- `server/auth.ts` - JWT token generation/verification for mobile apps
+- `server/storage.ts` - DatabaseStorage class with PostgreSQL via Drizzle ORM
+- `server/db.ts` - Drizzle database client configuration
 
 ### Frontend (React + Vite)
 - `client/src/pages/` - Page components (home, search, auth, profile, messages)
@@ -26,14 +30,24 @@ The MVP includes:
 ### Shared
 - `shared/schema.ts` - Drizzle schemas and Zod validation for users, businesses, cities
 
+### Documentation
+- `docs/MOBILE_API.md` - Complete mobile API reference with examples for iOS, Android, React Native
+
 ## API Endpoints
 
-### Authentication
-- `POST /api/auth/customer/signup` - Customer registration with demographics and preferences
-- `POST /api/auth/vendor/signup` - Vendor registration with business info and subscription
+### Web Authentication (Session-based)
+- `POST /api/auth/customer/signup` - Customer registration
+- `POST /api/auth/vendor/signup` - Vendor registration
 - `POST /api/auth/login` - User login
 - `POST /api/auth/logout` - User logout
 - `GET /api/auth/me` - Get current user
+
+### Mobile Authentication (JWT-based) - /api/v1/
+- `POST /api/v1/auth/customer/signup` - Customer registration (returns tokens)
+- `POST /api/v1/auth/vendor/signup` - Vendor registration (returns tokens)
+- `POST /api/v1/auth/login` - Login (returns accessToken + refreshToken)
+- `POST /api/v1/auth/refresh` - Refresh expired access token
+- `GET /api/v1/auth/me` - Get current user (requires Bearer token)
 
 ### Businesses
 - `GET /api/businesses` - List businesses with optional city/category/search filters
@@ -48,6 +62,11 @@ The MVP includes:
 - `PATCH /api/users/preferences` - Update industry/niche preferences
 
 ## Key Features
+
+### Dual Authentication System
+- **Web (Session-based)**: Uses express-session with httpOnly cookies
+- **Mobile (JWT-based)**: Uses accessToken (1hr) + refreshToken (7 days)
+- Passwords securely hashed with bcrypt (10 rounds)
 
 ### Customer Signup (7 steps)
 1. Account info (name, email, password)
@@ -64,7 +83,7 @@ The MVP includes:
 3. Business details (startup status, years in business, employees, structure)
 4. Location (physical store vs online-only)
 5. Online presence (website, social media)
-6. Subscription confirmation ($40/month)
+6. Subscription confirmation ($40/month) - stored as subscriptionAcknowledged
 
 ### Search Page
 - Major city discovery boxes (NYC, Atlanta, Miami, LA, Chicago, Houston, Dallas, DC)
@@ -75,30 +94,37 @@ The MVP includes:
 ## Database Schema
 
 ### Users
-- id, email, password, name, phone
+- id (UUID), email, password (bcrypt hash), name, phone
 - isVendor flag
 - Location fields (address, city, state, zipCode)
 - Demographics (ageRange, gender, ethnicity, etc.)
-- Preferences (selectedIndustries, industryNiches)
+- Preferences (selectedIndustries[], industryNiches{})
 
 ### Businesses
-- id, ownerId, name, category, description
-- Business details (isStartup, yearsInBusiness, etc.)
-- Location fields
-- Online presence (websiteUrl, socialMedia)
+- id (UUID), ownerId (FK to users), name, category, description
+- Business details (isStartup, yearsInBusiness, numberOfEmployees, businessStructure)
+- Location fields (hasPhysicalLocation, address, city, state, zipCode)
+- Online presence (websiteUrl, socialMedia{})
 - Stats (rating, reviewCount)
-- subscriptionActive flag
+- subscriptionActive, subscriptionAcknowledged flags
 
 ### Cities
 - id, name, state
 - businessCount, imageUrl, trending
 
+## Environment Variables
+- `DATABASE_URL` - PostgreSQL connection string
+- `SESSION_SECRET` - Session encryption key
+- `JWT_SECRET` - JWT signing key (defaults to SESSION_SECRET)
+
 ## Recent Changes
-- Added comprehensive customer signup with industry preferences
-- Added vendor signup with startup status and subscription flow
-- Added major city discovery on search page
-- Connected frontend forms to backend APIs
-- Added session-based authentication
+- Implemented JWT authentication for mobile apps (/api/v1/ endpoints)
+- Connected to PostgreSQL database with Drizzle ORM
+- Added bcrypt password hashing (replaced insecure base64)
+- Fixed vendor signup to persist subscriptionAcknowledged
+- Added token refresh endpoint for mobile sessions
+- Created comprehensive mobile API documentation
+- Database auto-seeds with demo data on startup
 
 ## User Preferences
 - Purple/violet color scheme for branding

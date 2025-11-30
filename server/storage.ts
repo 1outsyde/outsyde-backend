@@ -5,13 +5,15 @@ import {
   type InsertBusiness,
   type City,
   type InsertCity,
+  type RefreshToken,
   users,
   businesses,
-  cities
+  cities,
+  refreshTokens
 } from "@shared/schema";
 import { db } from "./db";
-import { eq, ilike, or, and, sql } from "drizzle-orm";
-import { randomUUID } from "crypto";
+import { eq, ilike, or, and, sql, lt, isNull } from "drizzle-orm";
+import { randomUUID, createHash } from "crypto";
 
 export interface IStorage {
   getUser(id: string): Promise<User | undefined>;
@@ -29,6 +31,12 @@ export interface IStorage {
   getCity(id: string): Promise<City | undefined>;
   createCity(city: InsertCity): Promise<City>;
   updateCityBusinessCount(cityId: string, count: number): Promise<void>;
+  
+  storeRefreshToken(userId: string, token: string, expiresAt: Date): Promise<string>;
+  validateRefreshToken(token: string): Promise<{ userId: string; tokenId: string } | null>;
+  revokeRefreshToken(tokenId: string): Promise<void>;
+  revokeAllUserRefreshTokens(userId: string): Promise<void>;
+  cleanupExpiredTokens(): Promise<void>;
   
   seedInitialData(): Promise<void>;
 }
@@ -183,6 +191,63 @@ export class DatabaseStorage implements IStorage {
     await db.update(cities)
       .set({ businessCount: count })
       .where(eq(cities.id, cityId));
+  }
+
+  private hashToken(token: string): string {
+    return createHash('sha256').update(token).digest('hex');
+  }
+
+  async storeRefreshToken(userId: string, token: string, expiresAt: Date): Promise<string> {
+    const tokenHash = this.hashToken(token);
+    const result = await db.insert(refreshTokens).values({
+      userId,
+      tokenHash,
+      expiresAt,
+    }).returning();
+    return result[0].id;
+  }
+
+  async validateRefreshToken(token: string): Promise<{ userId: string; tokenId: string } | null> {
+    const tokenHash = this.hashToken(token);
+    const result = await db.select().from(refreshTokens).where(
+      and(
+        eq(refreshTokens.tokenHash, tokenHash),
+        isNull(refreshTokens.revokedAt),
+        sql`${refreshTokens.expiresAt} > NOW()`
+      )
+    );
+    
+    if (result.length === 0) {
+      return null;
+    }
+    
+    return {
+      userId: result[0].userId,
+      tokenId: result[0].id,
+    };
+  }
+
+  async revokeRefreshToken(tokenId: string): Promise<void> {
+    await db.update(refreshTokens)
+      .set({ revokedAt: new Date() })
+      .where(eq(refreshTokens.id, tokenId));
+  }
+
+  async revokeAllUserRefreshTokens(userId: string): Promise<void> {
+    await db.update(refreshTokens)
+      .set({ revokedAt: new Date() })
+      .where(
+        and(
+          eq(refreshTokens.userId, userId),
+          isNull(refreshTokens.revokedAt)
+        )
+      );
+  }
+
+  async cleanupExpiredTokens(): Promise<void> {
+    await db.delete(refreshTokens).where(
+      sql`${refreshTokens.expiresAt} < NOW()`
+    );
   }
 
   async seedInitialData(): Promise<void> {

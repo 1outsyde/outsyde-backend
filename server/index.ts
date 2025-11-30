@@ -85,6 +85,17 @@ app.use((req, res, next) => {
 
 (async () => {
   await storage.seedInitialData();
+  await storage.cleanupExpiredTokens();
+  
+  setInterval(async () => {
+    try {
+      await storage.cleanupExpiredTokens();
+      log("Expired tokens cleaned up", "auth");
+    } catch (error) {
+      console.error("Token cleanup error:", error);
+    }
+  }, 60 * 60 * 1000);
+  
   await registerRoutes(httpServer, app);
 
   app.use((err: any, _req: Request, res: Response, _next: NextFunction) => {

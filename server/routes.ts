@@ -410,6 +410,11 @@ export async function registerRoutes(
       const accessToken = generateAccessToken(tokenPayload);
       const refreshToken = generateRefreshToken(tokenPayload);
       
+      await storage.revokeAllUserRefreshTokens(user.id);
+      const refreshExpiry = new Date();
+      refreshExpiry.setDate(refreshExpiry.getDate() + 7);
+      await storage.storeRefreshToken(user.id, refreshToken, refreshExpiry);
+      
       const { password: _, ...safeUser } = user;
       res.json({ 
         success: true, 
@@ -483,6 +488,11 @@ export async function registerRoutes(
       const accessToken = generateAccessToken(tokenPayload);
       const refreshToken = generateRefreshToken(tokenPayload);
       
+      await storage.revokeAllUserRefreshTokens(user.id);
+      const refreshExpiry = new Date();
+      refreshExpiry.setDate(refreshExpiry.getDate() + 7);
+      await storage.storeRefreshToken(user.id, refreshToken, refreshExpiry);
+      
       const { password: _, ...safeUser } = user;
       res.json({ 
         success: true, 
@@ -548,6 +558,11 @@ export async function registerRoutes(
       const accessToken = generateAccessToken(tokenPayload);
       const refreshToken = generateRefreshToken(tokenPayload);
       
+      await storage.revokeAllUserRefreshTokens(user.id);
+      const refreshExpiry = new Date();
+      refreshExpiry.setDate(refreshExpiry.getDate() + 7);
+      await storage.storeRefreshToken(user.id, refreshToken, refreshExpiry);
+      
       const { password: _, ...safeUser } = user;
       res.json({ 
         success: true, 
@@ -593,6 +608,14 @@ export async function registerRoutes(
         });
       }
       
+      const storedToken = await storage.validateRefreshToken(refreshToken);
+      if (!storedToken) {
+        return res.status(401).json({ 
+          success: false, 
+          error: { code: "TOKEN_REVOKED", message: "Refresh token has been revoked or expired" }
+        });
+      }
+      
       const user = await storage.getUser(payload.userId);
       if (!user) {
         return res.status(401).json({ 
@@ -600,6 +623,8 @@ export async function registerRoutes(
           error: { code: "USER_NOT_FOUND", message: "User not found" }
         });
       }
+      
+      await storage.revokeRefreshToken(storedToken.tokenId);
       
       let business = null;
       if (user.isVendor) {
@@ -613,6 +638,10 @@ export async function registerRoutes(
       };
       const newAccessToken = generateAccessToken(newTokenPayload);
       const newRefreshToken = generateRefreshToken(newTokenPayload);
+      
+      const refreshExpiry = new Date();
+      refreshExpiry.setDate(refreshExpiry.getDate() + 7);
+      await storage.storeRefreshToken(user.id, newRefreshToken, refreshExpiry);
       
       res.json({ 
         success: true, 

@@ -82,6 +82,16 @@ export const cities = pgTable("cities", {
   trending: boolean("trending").default(false),
 });
 
+// Refresh tokens table for mobile JWT auth
+export const refreshTokens = pgTable("refresh_tokens", {
+  id: varchar("id", { length: 36 }).primaryKey().default(sql`gen_random_uuid()`),
+  userId: varchar("user_id", { length: 36 }).notNull().references(() => users.id),
+  tokenHash: text("token_hash").notNull(),
+  expiresAt: timestamp("expires_at").notNull(),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  revokedAt: timestamp("revoked_at"),
+});
+
 // Insert schemas
 export const insertUserSchema = createInsertSchema(users).omit({
   id: true,
@@ -94,6 +104,11 @@ export const insertBusinessSchema = createInsertSchema(businesses).omit({
 });
 
 export const insertCitySchema = createInsertSchema(cities);
+
+export const insertRefreshTokenSchema = createInsertSchema(refreshTokens).omit({
+  id: true,
+  createdAt: true,
+});
 
 // Customer signup schema (without password confirmation logic, just data)
 export const customerSignupSchema = z.object({
@@ -156,6 +171,8 @@ export type InsertBusiness = z.infer<typeof insertBusinessSchema>;
 export type Business = typeof businesses.$inferSelect;
 export type InsertCity = z.infer<typeof insertCitySchema>;
 export type City = typeof cities.$inferSelect;
+export type InsertRefreshToken = z.infer<typeof insertRefreshTokenSchema>;
+export type RefreshToken = typeof refreshTokens.$inferSelect;
 export type CustomerSignup = z.infer<typeof customerSignupSchema>;
 export type VendorSignup = z.infer<typeof vendorSignupSchema>;
 export type LoginData = z.infer<typeof loginSchema>;
