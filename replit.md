@@ -122,7 +122,10 @@ The MVP includes:
 - Connected to PostgreSQL database with Drizzle ORM
 - Added bcrypt password hashing (replaced insecure base64)
 - Fixed vendor signup to persist subscriptionAcknowledged
-- Added token refresh endpoint for mobile sessions
+- Added token refresh endpoint for mobile sessions with secure token rotation
+- Refresh tokens stored in database with hashing, single-use rotation
+- All login/signup endpoints revoke existing tokens before issuing new ones
+- Periodic cleanup of expired refresh tokens (hourly)
 - Created comprehensive mobile API documentation
 - Database auto-seeds with demo data on startup
 
