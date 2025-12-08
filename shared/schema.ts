@@ -1,9 +1,14 @@
-import { pgTable, text, varchar, boolean, integer, jsonb, timestamp } from "drizzle-orm/pg-core";
+import { 
+  pgTable, text, varchar, boolean, integer, jsonb, timestamp 
+} from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
 import { sql } from "drizzle-orm";
 
-// Users table - both customers and vendors
+
+// =========================================
+// USERS TABLE (Clients + Photographers + Businesses)
+// =========================================
 export const users = pgTable("users", {
   id: varchar("id", { length: 36 }).primaryKey().default(sql`gen_random_uuid()`),
   email: text("email").notNull().unique(),
@@ -11,14 +16,14 @@ export const users = pgTable("users", {
   name: text("name").notNull(),
   phone: text("phone"),
   isVendor: boolean("is_vendor").default(false).notNull(),
-  
+
   // Location fields
   address: text("address"),
   city: text("city"),
   state: text("state"),
   zipCode: text("zip_code"),
-  
-  // Demographics (customers only)
+
+  // Demographics
   ageRange: text("age_range"),
   gender: text("gender"),
   ethnicity: text("ethnicity"),
@@ -28,51 +33,57 @@ export const users = pgTable("users", {
   education: text("education"),
   occupation: text("occupation"),
   shoppingFrequency: text("shopping_frequency"),
-  
-  // Industry preferences (stored as JSON array)
+
+  // Preferences
   selectedIndustries: jsonb("selected_industries").$type<string[]>().default([]),
   industryNiches: jsonb("industry_niches").$type<Record<string, string[]>>().default({}),
 });
 
-// Businesses table (for vendors)
+
+// =========================================
+// EXISTING BUSINESSES TABLE (Marketplace Vendors)
+// =========================================
 export const businesses = pgTable("businesses", {
   id: varchar("id", { length: 36 }).primaryKey().default(sql`gen_random_uuid()`),
   ownerId: varchar("owner_id", { length: 36 }).notNull().references(() => users.id),
-  
+
   name: text("name").notNull(),
   category: text("category").notNull(),
   description: text("description"),
-  
+
   // Business details
   isStartup: boolean("is_startup").default(false),
   yearsInBusiness: text("years_in_business"),
   employeeCount: text("employee_count"),
   businessType: text("business_type"),
-  
+
   // Location
   hasPhysicalLocation: boolean("has_physical_location").default(true),
   address: text("address"),
   city: text("city"),
   state: text("state"),
   zipCode: text("zip_code"),
-  
+
   // Online presence
   websiteUrl: text("website_url"),
   socialMedia: text("social_media"),
-  
-  // Business images
+
+  // Media
   coverImage: text("cover_image"),
   logoImage: text("logo_image"),
-  
-  // Stats
+
+  // Ratings
   rating: integer("rating").default(0),
   reviewCount: integer("review_count").default(0),
-  
-  // Subscription status
+
+  // Subscription
   subscriptionActive: boolean("subscription_active").default(false),
 });
 
-// Cities table for discovery feature
+
+// =========================================
+// CITIES TABLE
+// =========================================
 export const cities = pgTable("cities", {
   id: varchar("id", { length: 36 }).primaryKey(),
   name: text("name").notNull(),
@@ -82,7 +93,10 @@ export const cities = pgTable("cities", {
   trending: boolean("trending").default(false),
 });
 
-// Refresh tokens table for mobile JWT auth
+
+// =========================================
+// REFRESH TOKENS TABLE
+// =========================================
 export const refreshTokens = pgTable("refresh_tokens", {
   id: varchar("id", { length: 36 }).primaryKey().default(sql`gen_random_uuid()`),
   userId: varchar("user_id", { length: 36 }).notNull().references(() => users.id),
@@ -92,7 +106,143 @@ export const refreshTokens = pgTable("refresh_tokens", {
   revokedAt: timestamp("revoked_at"),
 });
 
-// Insert schemas
+
+// =====================================================
+// NEW: PHOTOGRAPHERS TABLE (Shoot-based service providers)
+// =====================================================
+export const photographers = pgTable("photographers", {
+  id: varchar("id", { length: 36 }).primaryKey().default(sql`gen_random_uuid()`),
+
+  userId: varchar("user_id", { length: 36 })
+    .notNull()
+    .references(() => users.id),
+
+  displayName: text("display_name").notNull(),
+  bio: text("bio"),
+  city: text("city"),
+  state: text("state"),
+  portfolioUrl: text("portfolio_url"),
+
+  hourlyRate: integer("hourly_rate").notNull(),
+
+  rating: integer("rating").default(0),
+  reviewCount: integer("review_count").default(0),
+
+  stripeAccountId: text("stripe_account_id").notNull(),
+
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+});
+
+
+// =====================================================
+// NEW: SERVICE BUSINESSES (Barbers, Nail Techs, MUAs, etc.)
+// =====================================================
+export const serviceBusinesses = pgTable("service_businesses", {
+  id: varchar("id", { length: 36 }).primaryKey().default(sql`gen_random_uuid()`),
+
+  ownerId: varchar("owner_id", { length: 36 })
+    .notNull()
+    .references(() => users.id),
+
+  businessName: text("business_name").notNull(),
+  category: text("category").notNull(), // nails, lashes, barber, etc.
+  description: text("description"),
+
+  address: text("address"),
+  city: text("city"),
+  state: text("state"),
+
+  stripeAccountId: text("stripe_account_id").notNull(),
+
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+});
+
+
+// =====================================================
+// NEW: SERVICES TABLE (What service businesses offer)
+// =====================================================
+export const services = pgTable("services", {
+  id: varchar("id", { length: 36 }).primaryKey().default(sql`gen_random_uuid()`),
+
+  businessId: varchar("business_id", { length: 36 })
+    .notNull()
+    .references(() => serviceBusinesses.id),
+
+  title: text("title").notNull(),
+  description: text("description"),
+  price: integer("price").notNull(),
+  durationMinutes: integer("duration_minutes").notNull(),
+
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+});
+
+
+// =====================================================
+// NEW: SHOOT BOOKINGS (PHOTOGRAPHERS ONLY)
+// =====================================================
+export const shootBookings = pgTable("shoot_bookings", {
+  id: varchar("id", { length: 36 }).primaryKey().default(sql`gen_random_uuid()`),
+
+  photographerId: varchar("photographer_id", { length: 36 })
+    .notNull()
+    .references(() => photographers.id),
+
+  clientId: varchar("client_id", { length: 36 })
+    .notNull()
+    .references(() => users.id),
+
+  shootType: text("shoot_type").notNull(),
+
+  date: text("date").notNull(),
+  startTime: text("start_time").notNull(),
+  endTime: text("end_time").notNull(),
+  durationHours: integer("duration_hours").notNull(),
+
+  locationType: text("location_type"),  // studio / lifestyle
+  locationDetails: text("location_details"),
+
+  totalPrice: integer("total_price").notNull(),
+
+  stripePaymentIntentId: text("stripe_payment_intent_id"),
+  status: text("status").default("pending"),
+
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+});
+
+
+// =====================================================
+// NEW: APPOINTMENT BOOKINGS (BUSINESSES ONLY)
+// =====================================================
+export const appointments = pgTable("appointments", {
+  id: varchar("id", { length: 36 }).primaryKey().default(sql`gen_random_uuid()`),
+
+  businessId: varchar("business_id", { length: 36 })
+    .notNull()
+    .references(() => serviceBusinesses.id),
+
+  clientId: varchar("client_id", { length: 36 })
+    .notNull()
+    .references(() => users.id),
+
+  serviceId: varchar("service_id", { length: 36 })
+    .notNull()
+    .references(() => services.id),
+
+  appointmentDate: text("appointment_date").notNull(),
+  appointmentTime: text("appointment_time").notNull(),
+
+  totalPrice: integer("total_price").notNull(),
+
+  stripePaymentIntentId: text("stripe_payment_intent_id"),
+  status: text("status").default("pending"),
+
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+});
+
+
+// =========================================
+// SCHEMAS FOR INSERTION (Zod)
+// =========================================
 export const insertUserSchema = createInsertSchema(users).omit({
   id: true,
 });
@@ -110,7 +260,7 @@ export const insertRefreshTokenSchema = createInsertSchema(refreshTokens).omit({
   createdAt: true,
 });
 
-// Customer signup schema (without password confirmation logic, just data)
+// Signup schemas
 export const customerSignupSchema = z.object({
   email: z.string().email(),
   password: z.string().min(6),
@@ -133,7 +283,6 @@ export const customerSignupSchema = z.object({
   industryNiches: z.record(z.string(), z.array(z.string())).default({}),
 });
 
-// Vendor signup schema
 export const vendorSignupSchema = z.object({
   email: z.string().email(),
   password: z.string().min(6),
@@ -158,21 +307,30 @@ export const vendorSignupSchema = z.object({
   }),
 });
 
-// Login schema
 export const loginSchema = z.object({
   email: z.string().email(),
   password: z.string().min(1),
 });
 
-// Types
+
+// =========================================
+// TYPES
+// =========================================
 export type InsertUser = z.infer<typeof insertUserSchema>;
 export type User = typeof users.$inferSelect;
+
 export type InsertBusiness = z.infer<typeof insertBusinessSchema>;
 export type Business = typeof businesses.$inferSelect;
+
 export type InsertCity = z.infer<typeof insertCitySchema>;
 export type City = typeof cities.$inferSelect;
+
 export type InsertRefreshToken = z.infer<typeof insertRefreshTokenSchema>;
 export type RefreshToken = typeof refreshTokens.$inferSelect;
-export type CustomerSignup = z.infer<typeof customerSignupSchema>;
-export type VendorSignup = z.infer<typeof vendorSignupSchema>;
-export type LoginData = z.infer<typeof loginSchema>;
+
+// New types
+export type Photographer = typeof photographers.$inferSelect;
+export type ServiceBusiness = typeof serviceBusinesses.$inferSelect;
+export type Service = typeof services.$inferSelect;
+export type ShootBooking = typeof shootBookings.$inferSelect;
+export type Appointment = typeof appointments.$inferSelect;
