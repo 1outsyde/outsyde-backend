@@ -6,43 +6,68 @@ import {
   type City,
   type InsertCity,
   type RefreshToken,
+  type Photographer,
   users,
   businesses,
   cities,
-  refreshTokens
+  refreshTokens,
+  photographers
 } from "@shared/schema";
 import { db } from "./db";
-import { eq, ilike, or, and, sql, lt, isNull } from "drizzle-orm";
+import { eq, ilike, or, and, sql, isNull } from "drizzle-orm";
 import { randomUUID, createHash } from "crypto";
+
+// Input type for creating a photographer (no need for InsertPhotographer in schema)
+export type NewPhotographerInput = {
+  userId: string;
+  displayName: string;
+  bio?: string | null;
+  city?: string | null;
+  state?: string | null;
+  portfolioUrl?: string | null;
+  hourlyRate: number;
+  stripeAccountId: string;
+};
 
 export interface IStorage {
   getUser(id: string): Promise<User | undefined>;
   getUserByEmail(email: string): Promise<User | undefined>;
   createUser(user: InsertUser): Promise<User>;
   updateUser(id: string, updates: Partial<User>): Promise<User | undefined>;
-  
+
   getBusiness(id: string): Promise<Business | undefined>;
   getBusinessByOwnerId(ownerId: string): Promise<Business | undefined>;
   getBusinesses(filters?: { city?: string; category?: string; search?: string }): Promise<Business[]>;
   createBusiness(business: InsertBusiness): Promise<Business>;
   updateBusiness(id: string, updates: Partial<Business>): Promise<Business | undefined>;
-  
+
   getCities(): Promise<City[]>;
   getCity(id: string): Promise<City | undefined>;
   createCity(city: InsertCity): Promise<City>;
   updateCityBusinessCount(cityId: string, count: number): Promise<void>;
-  
+
   storeRefreshToken(userId: string, token: string, expiresAt: Date): Promise<string>;
   validateRefreshToken(token: string): Promise<{ userId: string; tokenId: string } | null>;
   revokeRefreshToken(tokenId: string): Promise<void>;
   revokeAllUserRefreshTokens(userId: string): Promise<void>;
   cleanupExpiredTokens(): Promise<void>;
-  
+
+  // Photographer CRUD
+  createPhotographer(data: NewPhotographerInput): Promise<Photographer>;
+  getPhotographer(id: string): Promise<Photographer | undefined>;
+  listPhotographers(): Promise<Photographer[]>;
+  updatePhotographer(id: string, updates: Partial<Photographer>): Promise<Photographer | undefined>;
+  deletePhotographer(id: string): Promise<void>;
+
   seedInitialData(): Promise<void>;
 }
 
 export class DatabaseStorage implements IStorage {
-  
+
+  // =========================
+  // USERS
+  // =========================
+
   async getUser(id: string): Promise<User | undefined> {
     const result = await db.select().from(users).where(eq(users.id, id));
     return result[0];
@@ -64,10 +89,12 @@ export class DatabaseStorage implements IStorage {
       name: insertUser.name,
       phone: insertUser.phone || null,
       isVendor: insertUser.isVendor ?? false,
+
       address: insertUser.address || null,
       city: insertUser.city || null,
       state: insertUser.state || null,
       zipCode: insertUser.zipCode || null,
+
       ageRange: insertUser.ageRange || null,
       gender: insertUser.gender || null,
       ethnicity: insertUser.ethnicity || null,
@@ -77,6 +104,7 @@ export class DatabaseStorage implements IStorage {
       education: insertUser.education || null,
       occupation: insertUser.occupation || null,
       shoppingFrequency: insertUser.shoppingFrequency || null,
+
       selectedIndustries: (insertUser.selectedIndustries as string[]) || [],
       industryNiches: (insertUser.industryNiches as Record<string, string[]>) || {},
     }).returning();
@@ -91,6 +119,10 @@ export class DatabaseStorage implements IStorage {
     return result[0];
   }
 
+  // =========================
+  // BUSINESSES
+  // =========================
+
   async getBusiness(id: string): Promise<Business | undefined> {
     const result = await db.select().from(businesses).where(eq(businesses.id, id));
     return result[0];
@@ -102,16 +134,16 @@ export class DatabaseStorage implements IStorage {
   }
 
   async getBusinesses(filters?: { city?: string; category?: string; search?: string }): Promise<Business[]> {
-    let conditions = [];
-    
+    const conditions: any[] = [];
+
     if (filters?.city) {
       conditions.push(sql`LOWER(${businesses.city}) = LOWER(${filters.city})`);
     }
-    
+
     if (filters?.category && filters.category !== "All") {
       conditions.push(eq(businesses.category, filters.category));
     }
-    
+
     if (filters?.search) {
       const searchTerm = `%${filters.search}%`;
       conditions.push(
@@ -121,11 +153,11 @@ export class DatabaseStorage implements IStorage {
         )
       );
     }
-    
+
     if (conditions.length > 0) {
       return db.select().from(businesses).where(and(...conditions));
     }
-    
+
     return db.select().from(businesses);
   }
 
@@ -154,7 +186,7 @@ export class DatabaseStorage implements IStorage {
       reviewCount: 0,
       subscriptionActive: insertBusiness.subscriptionActive ?? false,
     }).returning();
-    
+
     return result[0];
   }
 
@@ -165,6 +197,10 @@ export class DatabaseStorage implements IStorage {
       .returning();
     return result[0];
   }
+
+  // =========================
+  // CITIES
+  // =========================
 
   async getCities(): Promise<City[]> {
     return db.select().from(cities);
@@ -193,8 +229,12 @@ export class DatabaseStorage implements IStorage {
       .where(eq(cities.id, cityId));
   }
 
+  // =========================
+  // REFRESH TOKENS
+  // =========================
+
   private hashToken(token: string): string {
-    return createHash('sha256').update(token).digest('hex');
+    return createHash("sha256").update(token).digest("hex");
   }
 
   async storeRefreshToken(userId: string, token: string, expiresAt: Date): Promise<string> {
@@ -216,11 +256,11 @@ export class DatabaseStorage implements IStorage {
         sql`${refreshTokens.expiresAt} > NOW()`
       )
     );
-    
+
     if (result.length === 0) {
       return null;
     }
-    
+
     return {
       userId: result[0].userId,
       tokenId: result[0].id,
@@ -250,6 +290,51 @@ export class DatabaseStorage implements IStorage {
     );
   }
 
+  // =========================
+  // PHOTOGRAPHERS
+  // =========================
+
+  async createPhotographer(data: NewPhotographerInput): Promise<Photographer> {
+    const id = randomUUID();
+    const result = await db.insert(photographers).values({
+      id,
+      userId: data.userId,
+      displayName: data.displayName,
+      bio: data.bio ?? null,
+      city: data.city ?? null,
+      state: data.state ?? null,
+      portfolioUrl: data.portfolioUrl ?? null,
+      hourlyRate: data.hourlyRate,
+      stripeAccountId: data.stripeAccountId,
+    }).returning();
+    return result[0];
+  }
+
+  async getPhotographer(id: string): Promise<Photographer | undefined> {
+    const result = await db.select().from(photographers).where(eq(photographers.id, id));
+    return result[0];
+  }
+
+  async listPhotographers(): Promise<Photographer[]> {
+    return db.select().from(photographers);
+  }
+
+  async updatePhotographer(id: string, updates: Partial<Photographer>): Promise<Photographer | undefined> {
+    const result = await db.update(photographers)
+      .set(updates)
+      .where(eq(photographers.id, id))
+      .returning();
+    return result[0];
+  }
+
+  async deletePhotographer(id: string): Promise<void> {
+    await db.delete(photographers).where(eq(photographers.id, id));
+  }
+
+  // =========================
+  // SEED INITIAL DATA
+  // =========================
+
   async seedInitialData(): Promise<void> {
     const existingCities = await db.select().from(cities);
     if (existingCities.length > 0) {
@@ -258,7 +343,7 @@ export class DatabaseStorage implements IStorage {
     }
 
     console.log("Seeding database with initial data...");
-    
+
     const demoUsers = [
       { id: "demo-owner-1", email: "demo1@outsyde.com", password: "demo", name: "Demo Owner 1", isVendor: true },
       { id: "demo-owner-2", email: "demo2@outsyde.com", password: "demo", name: "Demo Owner 2", isVendor: true },
@@ -269,7 +354,7 @@ export class DatabaseStorage implements IStorage {
       { id: "demo-owner-7", email: "demo7@outsyde.com", password: "demo", name: "Demo Owner 7", isVendor: true },
       { id: "demo-owner-8", email: "demo8@outsyde.com", password: "demo", name: "Demo Owner 8", isVendor: true },
     ];
-    
+
     for (const demoUser of demoUsers) {
       await db.insert(users).values({
         id: demoUser.id,
@@ -498,7 +583,7 @@ export class DatabaseStorage implements IStorage {
     ];
 
     for (const business of sampleBusinesses) {
-      const result = await db.insert(businesses).values({
+      await db.insert(businesses).values({
         id: randomUUID(),
         ...business,
         coverImage: null,
