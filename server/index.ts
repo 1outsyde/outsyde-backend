@@ -2,7 +2,7 @@
 import express from "express";
 import cors from "cors";
 import { storage } from "./storage";
-import photographersRouter from "./Photographers/photographers.routes";
+import { photographersRouter } from "./Photographers/photographers.routes";
 
 // -------------------------------
 // CREATE EXPRESS APP
