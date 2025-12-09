@@ -3,6 +3,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import ThemeToggle from "./ThemeToggle";
+import logoImage from "@assets/IMG_6664_1765313819403.jpg";
 
 interface TopNavProps {
   onMenuClick?: () => void;
@@ -36,9 +37,10 @@ export default function TopNav({
           >
             <Menu className="h-5 w-5" />
           </Button>
-          <h1 className="font-serif text-2xl font-bold text-primary" data-testid="text-logo">
-            Outsyde
-          </h1>
+          <div className="flex items-center gap-2" data-testid="text-logo">
+            <img src={logoImage} alt="Outsyde" className="h-8 w-auto" />
+            <span className="font-serif text-2xl font-bold text-primary">Outsyde</span>
+          </div>
         </div>
 
         <div className="hidden md:flex flex-1 max-w-md mx-4">
