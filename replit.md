@@ -12,15 +12,19 @@ The MVP includes:
 - PostgreSQL database with Drizzle ORM for data persistence
 - Secure password hashing with bcrypt
 - Mobile API documentation for native app developers
+- **Stripe Connect** integration for marketplace payments (stripe-replit-sync)
+- **Verified Reviews** - only customers with completed bookings/orders can leave reviews
 
 ## Project Architecture
 
 ### Backend (Express + TypeScript)
 - `server/index.ts` - Express server with session middleware and database seeding
-- `server/routes.ts` - API routes for auth, businesses, cities, user preferences
+- `server/routes.ts` - API routes for auth, businesses, cities, user preferences, reviews, Stripe
 - `server/auth.ts` - JWT token generation/verification for mobile apps
 - `server/storage.ts` - DatabaseStorage class with PostgreSQL via Drizzle ORM
 - `server/db.ts` - Drizzle database client configuration
+- `server/stripe/` - Stripe Connect integration (stripeClient.ts, stripeService.ts, webhookHandlers.ts)
+- `server/Photographers/` - Photographer business routes and types
 
 ### Frontend (React + Vite)
 - `client/src/pages/` - Page components (home, search, auth, profile, messages)
@@ -60,6 +64,17 @@ The MVP includes:
 
 ### User Preferences
 - `PATCH /api/users/preferences` - Update industry/niche preferences
+
+### Stripe Payments
+- `GET /api/stripe/config` - Get Stripe publishable key
+- `GET /api/stripe/products` - Get products with prices
+- `POST /api/stripe/checkout/subscription` - Create vendor subscription checkout
+
+### Verified Reviews
+- `GET /api/reviews/:targetType/:targetId` - Get reviews for a business/photographer
+- `GET /api/reviews/reviewable` - Get bookings the current user can review
+- `POST /api/reviews` - Create a verified review (requires completed booking/order)
+- `GET /api/reviews/can-review/:bookingType/:bookingId` - Check if booking can be reviewed
 
 ## Key Features
 
@@ -112,6 +127,12 @@ The MVP includes:
 - id, name, state
 - businessCount, imageUrl, trending
 
+### Reviews (verified)
+- id (UUID), reviewerId (FK to users), targetType (photographer/business/service_business)
+- targetId (FK to target), bookingType (shoot_booking/appointment/order)
+- bookingId (FK to specific booking/order), rating (1-5), comment
+- createdAt timestamp for ordering
+
 ## Environment Variables
 - `DATABASE_URL` - PostgreSQL connection string
 - `SESSION_SECRET` - Session encryption key
@@ -128,8 +149,12 @@ The MVP includes:
 - Periodic cleanup of expired refresh tokens (hourly)
 - Created comprehensive mobile API documentation
 - Database auto-seeds with demo data on startup
+- **Stripe Connect** integrated with stripe-replit-sync managing schema automatically
+- **Verified Reviews** implemented - only customers with completed bookings can review
+- Reviews table added with booking verification fields
+- Stripe routes for checkout and subscription management
 
 ## User Preferences
-- Purple/violet color scheme for branding
+- Golden yellow color scheme for branding
 - Modern, social media-inspired UI
 - Inter/DM Sans/Poppins font family
