@@ -5,11 +5,47 @@ import cors from "cors";
 import { storage } from "./storage";
 import { registerRoutes } from "./routes";
 import { setupVite } from "./vite";
+import { runMigrations } from "stripe-replit-sync";
+import { getStripeSync } from "./stripe/stripeClient";
+import { WebhookHandlers } from "./stripe/webhookHandlers";
 
 const app = express();
 const httpServer = createServer(app);
 
 app.use(cors());
+
+// CRITICAL: Stripe webhook route MUST be registered BEFORE express.json()
+// The webhook needs the raw Buffer body, not parsed JSON
+app.post(
+  '/api/stripe/webhook/:uuid',
+  express.raw({ type: 'application/json' }),
+  async (req, res) => {
+    const signature = req.headers['stripe-signature'];
+
+    if (!signature) {
+      return res.status(400).json({ error: 'Missing stripe-signature' });
+    }
+
+    try {
+      const sig = Array.isArray(signature) ? signature[0] : signature;
+
+      if (!Buffer.isBuffer(req.body)) {
+        console.error('STRIPE WEBHOOK ERROR: req.body is not a Buffer');
+        return res.status(500).json({ error: 'Webhook processing error' });
+      }
+
+      const { uuid } = req.params;
+      await WebhookHandlers.processWebhook(req.body as Buffer, sig, uuid);
+
+      res.status(200).json({ received: true });
+    } catch (error: any) {
+      console.error('Webhook error:', error.message);
+      res.status(400).json({ error: 'Webhook processing error' });
+    }
+  }
+);
+
+// Now apply JSON middleware for all other routes
 app.use(express.json());
 app.use(express.urlencoded({ extended: false }));
 
@@ -67,9 +103,46 @@ function log(message: string, source = "express") {
   console.log(`${formattedTime} [${source}] ${message}`);
 }
 
+// Initialize Stripe schema and sync data on startup
+async function initStripe() {
+  const databaseUrl = process.env.DATABASE_URL;
+
+  if (!databaseUrl) {
+    log('DATABASE_URL not set - skipping Stripe initialization', 'stripe');
+    return;
+  }
+
+  try {
+    log('Initializing Stripe schema...', 'stripe');
+    await runMigrations({ databaseUrl });
+    log('Stripe schema ready', 'stripe');
+
+    const stripeSync = await getStripeSync();
+
+    log('Setting up managed webhook...', 'stripe');
+    const webhookBaseUrl = `https://${process.env.REPLIT_DOMAINS?.split(',')[0]}`;
+    const { webhook, uuid } = await stripeSync.findOrCreateManagedWebhook(
+      `${webhookBaseUrl}/api/stripe/webhook`,
+      {
+        enabled_events: ['*'],
+        description: 'Managed webhook for Outsyde marketplace',
+      }
+    );
+    log(`Webhook configured: ${webhook.url}`, 'stripe');
+
+    // Sync all existing Stripe data in background
+    stripeSync.syncBackfill()
+      .then(() => log('Stripe data synced', 'stripe'))
+      .catch((err: any) => console.error('Error syncing Stripe data:', err));
+  } catch (error) {
+    console.error('Failed to initialize Stripe:', error);
+  }
+}
+
 (async () => {
   await storage.seedInitialData();
   await storage.cleanupExpiredTokens();
+  await initStripe();
 
   setInterval(async () => {
     try {

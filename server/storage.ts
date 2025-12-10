@@ -7,11 +7,20 @@ import {
   type InsertCity,
   type RefreshToken,
   type Photographer,
+  type Review,
+  type InsertReview,
+  type ShootBooking,
+  type Appointment,
+  type Order,
   users,
   businesses,
   cities,
   refreshTokens,
-  photographers
+  photographers,
+  reviews,
+  shootBookings,
+  appointments,
+  orders
 } from "@shared/schema";
 import { db } from "./db";
 import { eq, ilike, or, and, sql, isNull } from "drizzle-orm";
@@ -58,6 +67,15 @@ export interface IStorage {
   listPhotographers(): Promise<Photographer[]>;
   updatePhotographer(id: string, updates: Partial<Photographer>): Promise<Photographer | undefined>;
   deletePhotographer(id: string): Promise<void>;
+
+  // Reviews (verified purchases only)
+  createReview(data: InsertReview): Promise<Review>;
+  getReviewsByTarget(targetType: string, targetId: string): Promise<Review[]>;
+  getReviewByBooking(bookingType: string, bookingId: string): Promise<Review | undefined>;
+  hasReviewedBooking(bookingType: string, bookingId: string): Promise<boolean>;
+  verifyCustomerCanReview(customerId: string, targetType: string, targetId: string, bookingType: string, bookingId: string): Promise<{ canReview: boolean; reason?: string }>;
+  getReviewableBookings(customerId: string): Promise<{ shootBookings: ShootBooking[]; appointments: Appointment[]; orders: Order[] }>;
+  updateTargetRating(targetType: string, targetId: string): Promise<void>;
 
   seedInitialData(): Promise<void>;
 }
@@ -329,6 +347,177 @@ export class DatabaseStorage implements IStorage {
 
   async deletePhotographer(id: string): Promise<void> {
     await db.delete(photographers).where(eq(photographers.id, id));
+  }
+
+  // =========================
+  // REVIEWS (Verified purchases only)
+  // =========================
+
+  async createReview(data: InsertReview): Promise<Review> {
+    const id = randomUUID();
+    const result = await db.insert(reviews).values({
+      id,
+      targetType: data.targetType,
+      targetId: data.targetId,
+      reviewerId: data.reviewerId,
+      bookingType: data.bookingType,
+      bookingId: data.bookingId,
+      rating: data.rating,
+      title: data.title ?? null,
+      comment: data.comment ?? null,
+      isVerified: true,
+    }).returning();
+    return result[0];
+  }
+
+  async getReviewsByTarget(targetType: string, targetId: string): Promise<Review[]> {
+    return db.select().from(reviews).where(
+      and(
+        eq(reviews.targetType, targetType),
+        eq(reviews.targetId, targetId)
+      )
+    );
+  }
+
+  async getReviewByBooking(bookingType: string, bookingId: string): Promise<Review | undefined> {
+    const result = await db.select().from(reviews).where(
+      and(
+        eq(reviews.bookingType, bookingType),
+        eq(reviews.bookingId, bookingId)
+      )
+    );
+    return result[0];
+  }
+
+  async hasReviewedBooking(bookingType: string, bookingId: string): Promise<boolean> {
+    const existing = await this.getReviewByBooking(bookingType, bookingId);
+    return !!existing;
+  }
+
+  // Verify customer has a completed booking/order with the target
+  async verifyCustomerCanReview(
+    customerId: string, 
+    targetType: string, 
+    targetId: string, 
+    bookingType: string, 
+    bookingId: string
+  ): Promise<{ canReview: boolean; reason?: string }> {
+    
+    // Check if already reviewed this booking
+    const alreadyReviewed = await this.hasReviewedBooking(bookingType, bookingId);
+    if (alreadyReviewed) {
+      return { canReview: false, reason: 'You have already reviewed this booking' };
+    }
+
+    // Verify the booking exists and belongs to this customer
+    if (bookingType === 'shoot_booking') {
+      const booking = await db.select().from(shootBookings).where(
+        and(
+          eq(shootBookings.id, bookingId),
+          eq(shootBookings.clientId, customerId),
+          eq(shootBookings.photographerId, targetId),
+          eq(shootBookings.status, 'completed')
+        )
+      );
+      if (booking.length === 0) {
+        return { canReview: false, reason: 'No completed shoot booking found' };
+      }
+    } else if (bookingType === 'appointment') {
+      const booking = await db.select().from(appointments).where(
+        and(
+          eq(appointments.id, bookingId),
+          eq(appointments.clientId, customerId),
+          eq(appointments.businessId, targetId),
+          eq(appointments.status, 'completed')
+        )
+      );
+      if (booking.length === 0) {
+        return { canReview: false, reason: 'No completed appointment found' };
+      }
+    } else if (bookingType === 'order') {
+      const order = await db.select().from(orders).where(
+        and(
+          eq(orders.id, bookingId),
+          eq(orders.customerId, customerId),
+          eq(orders.businessId, targetId),
+          sql`${orders.status} IN ('delivered', 'completed')`
+        )
+      );
+      if (order.length === 0) {
+        return { canReview: false, reason: 'No completed order found' };
+      }
+    } else {
+      return { canReview: false, reason: 'Invalid booking type' };
+    }
+
+    return { canReview: true };
+  }
+
+  // Get all completed bookings/orders for a customer that can be reviewed
+  async getReviewableBookings(customerId: string): Promise<{
+    shootBookings: ShootBooking[];
+    appointments: Appointment[];
+    orders: Order[];
+  }> {
+    // Get completed shoot bookings without reviews
+    const completedShoots = await db.select().from(shootBookings).where(
+      and(
+        eq(shootBookings.clientId, customerId),
+        eq(shootBookings.status, 'completed')
+      )
+    );
+
+    // Get completed appointments without reviews
+    const completedAppointments = await db.select().from(appointments).where(
+      and(
+        eq(appointments.clientId, customerId),
+        eq(appointments.status, 'completed')
+      )
+    );
+
+    // Get completed orders without reviews
+    const completedOrders = await db.select().from(orders).where(
+      and(
+        eq(orders.customerId, customerId),
+        sql`${orders.status} IN ('delivered', 'completed')`
+      )
+    );
+
+    // Filter out already reviewed items
+    const reviewedBookingIds = await db.select({ bookingId: reviews.bookingId }).from(reviews).where(
+      eq(reviews.reviewerId, customerId)
+    );
+    const reviewedIds = new Set(reviewedBookingIds.map(r => r.bookingId));
+
+    return {
+      shootBookings: completedShoots.filter(b => !reviewedIds.has(b.id)),
+      appointments: completedAppointments.filter(a => !reviewedIds.has(a.id)),
+      orders: completedOrders.filter(o => !reviewedIds.has(o.id)),
+    };
+  }
+
+  // Update rating on target after a review
+  async updateTargetRating(targetType: string, targetId: string): Promise<void> {
+    const targetReviews = await this.getReviewsByTarget(targetType, targetId);
+    
+    if (targetReviews.length === 0) return;
+
+    const avgRating = Math.round(
+      targetReviews.reduce((sum, r) => sum + r.rating, 0) / targetReviews.length * 10
+    ); // Store as 0-50 (multiplied by 10 for precision)
+    
+    const reviewCount = targetReviews.length;
+
+    if (targetType === 'photographer') {
+      await db.update(photographers)
+        .set({ rating: avgRating, reviewCount })
+        .where(eq(photographers.id, targetId));
+    } else if (targetType === 'business') {
+      await db.update(businesses)
+        .set({ rating: avgRating, reviewCount })
+        .where(eq(businesses.id, targetId));
+    }
+    // service_businesses would need a rating column added if needed
   }
 
   // =========================
