@@ -15,6 +15,7 @@ The MVP includes:
 - **Stripe Connect** integration for marketplace payments (stripe-replit-sync)
 - **Verified Reviews** - only customers with completed bookings/orders can leave reviews
 - **Real-time Chat** - WebSocket-based messaging between customers and businesses
+- **Outsyde Points** - Loyalty rewards system ($1 = 100 points, redeemable at any business)
 
 ## Project Architecture
 
@@ -86,6 +87,13 @@ The MVP includes:
 - `GET /api/messages/unread-count` - Get unread message count
 - WebSocket endpoint: `/ws` - Real-time messaging with JWT auth
 
+### Outsyde Points (Loyalty System)
+- `GET /api/points/balance` - Get user's points balance and dollar value
+- `GET /api/points/history` - Get user's points transaction history
+- `POST /api/points/calculate` - Preview points redemption value
+- `POST /api/points/redeem` - Redeem points for discount
+- `POST /api/points/earn` - Earn points (called after completed payment)
+
 ## Key Features
 
 ### Dual Authentication System
@@ -150,6 +158,18 @@ The MVP includes:
 - targetId (FK to target), bookingType (shoot_booking/appointment/order)
 - bookingId (FK to specific booking/order), rating (1-5), comment
 - createdAt timestamp for ordering
+
+### Point Transactions (loyalty system)
+- id (UUID), userId (FK to users), type (earn/redeem)
+- points (amount earned or redeemed)
+- dollarAmountCents (transaction amount or discount applied)
+- businessId, businessName (optional business reference)
+- referenceType, referenceId (optional order/booking reference)
+- balanceAfter (user's balance after transaction)
+- description, createdAt
+
+### Users (loyalty fields)
+- loyaltyPoints (integer, default 0) - current points balance
 
 ## Environment Variables
 - `DATABASE_URL` - PostgreSQL connection string
