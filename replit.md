@@ -200,6 +200,14 @@ The MVP includes:
   - BusinessCard shows Book/Shop CTAs based on hasServices/hasProducts (no Chat button)
   - VendorStorefront has embedded Chat tab with full messaging interface
   - VendorChat component handles auth checking and conversation creation
+- **Outsyde Points** loyalty rewards system implemented
+  - Database: pointTransactions table, users.loyaltyPoints field
+  - Conversion: $1 spent = 100 points earned, 100 points = $1 discount
+  - Storage methods: earnPoints, redeemPoints, getUserPointsBalance, getPointTransactions
+  - API endpoints for balance, history, calculate, redeem, and earn
+  - Frontend: LoyaltyPointsCard component, PointsHistory component
+  - Profile page updated with "My Points" section showing balance and transaction history
+  - Integration note: Call POST /api/points/earn after successful payment completion
 
 ## User Preferences
 - Golden yellow color scheme for branding

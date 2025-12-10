@@ -27,7 +27,7 @@ interface PointsHistoryProps {
 
 export default function PointsHistory({ limit = 20, showTitle = true }: PointsHistoryProps) {
   const { data, isLoading } = useQuery<{ transactions: PointTransaction[] }>({
-    queryKey: ["/api/points/history", limit],
+    queryKey: ["/api/points/history"],
   });
 
   const transactions = data?.transactions || [];

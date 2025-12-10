@@ -768,7 +768,7 @@ export async function registerRoutes(
       });
 
       if ('error' in result) {
-        return res.status(400).json({ error: result.error });
+        return res.status(400).json({ success: false, error: result.error });
       }
 
       const newBalance = await storage.getUserPointsBalance(userId);
