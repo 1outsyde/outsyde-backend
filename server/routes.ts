@@ -284,26 +284,35 @@ export async function registerRoutes(
   });
 
   // Create checkout session for vendor subscription
+  // SECURITY: Uses authenticated session to derive user/business - no client-supplied IDs
   app.post("/api/stripe/checkout/subscription", async (req, res) => {
     const userId = req.session?.userId;
     if (!userId) {
       return res.status(401).json({ error: "Not authenticated" });
     }
 
-    try {
-      const { priceId } = req.body;
-      if (!priceId) {
-        return res.status(400).json({ error: "Price ID is required" });
-      }
+    // Must be a vendor to subscribe
+    if (!req.session?.isVendor) {
+      return res.status(403).json({ error: "Only vendors can subscribe" });
+    }
 
+    try {
+      // Validate request body with Zod
+      const checkoutSchema = z.object({
+        priceId: z.string().min(1, "Price ID is required"),
+      });
+      const { priceId } = checkoutSchema.parse(req.body);
+
+      // Derive user from authenticated session - never from client input
       const user = await storage.getUser(userId);
       if (!user) {
         return res.status(404).json({ error: "User not found" });
       }
 
-      // Create Stripe customer if not exists
+      // Create Stripe customer using authenticated user's info
       const customer = await stripeService.createCustomer(user.email, userId, user.name);
 
+      // Derive business from authenticated user - never from client input
       const business = await storage.getBusinessByOwnerId(userId);
       if (!business) {
         return res.status(404).json({ error: "Business not found" });
@@ -320,6 +329,9 @@ export async function registerRoutes(
 
       res.json({ url: session.url });
     } catch (error) {
+      if (error instanceof z.ZodError) {
+        return res.status(400).json({ error: "Invalid data", details: error.errors });
+      }
       console.error("Create subscription checkout error:", error);
       res.status(500).json({ error: "Failed to create checkout session" });
     }
