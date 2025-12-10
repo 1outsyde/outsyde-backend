@@ -37,6 +37,7 @@ export const users = pgTable("users", {
   // Preferences
   selectedIndustries: jsonb("selected_industries").$type<string[]>().default([]),
   industryNiches: jsonb("industry_niches").$type<Record<string, string[]>>().default({}),
+  industryValues: jsonb("industry_values").$type<Record<string, string[]>>().default({}),
 
   // Outsyde Points (loyalty program)
   // $1 = 100 points, redeemable at any Outsyde business
@@ -346,6 +347,7 @@ export const customerSignupSchema = z.object({
   shoppingFrequency: z.string().optional(),
   selectedIndustries: z.array(z.string()).default([]),
   industryNiches: z.record(z.string(), z.array(z.string())).default({}),
+  industryValues: z.record(z.string(), z.array(z.string())).default({}),
 });
 
 export const vendorSignupSchema = z.object({

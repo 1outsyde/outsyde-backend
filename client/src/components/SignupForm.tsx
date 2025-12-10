@@ -37,6 +37,7 @@ interface SignupData {
   interests: string[];
   selectedIndustries: string[];
   industryNiches: Record<string, string[]>;
+  industryValues: Record<string, string[]>;
   businessName?: string;
   businessCategory?: string;
   businessDescription?: string;
@@ -122,6 +123,99 @@ const industryNicheOptions: Record<string, { label: string; options: string[] }>
   "services": {
     label: "What services might you need?",
     options: ["Cleaning", "Landscaping", "Handyman", "Auto Repair", "Pet Services", "Photography", "Event Planning", "Tutoring", "Legal Services", "Accounting", "Real Estate", "Tech Support"]
+  }
+};
+
+const industryValueOptions: Record<string, { label: string; options: { id: string; name: string; description: string }[] }> = {
+  "clothing": {
+    label: "What matters most to you when shopping for clothing?",
+    options: [
+      { id: "quality", name: "Quality", description: "Well-made, durable items" },
+      { id: "style", name: "Style & Trends", description: "On-trend, fashionable pieces" },
+      { id: "price", name: "Value for Money", description: "Good quality at fair prices" },
+      { id: "service", name: "Customer Service", description: "Helpful, attentive staff" },
+      { id: "unique", name: "Uniqueness", description: "One-of-a-kind, unique items" },
+      { id: "sustainable", name: "Sustainability", description: "Eco-friendly, ethical practices" },
+    ]
+  },
+  "beauty-products": {
+    label: "What's most important when choosing beauty products?",
+    options: [
+      { id: "quality", name: "Product Quality", description: "High-performance formulas" },
+      { id: "ingredients", name: "Ingredients", description: "Clean, safe ingredients" },
+      { id: "price", name: "Affordability", description: "Good value for the price" },
+      { id: "brand", name: "Brand Reputation", description: "Trusted, well-known brands" },
+      { id: "results", name: "Visible Results", description: "Products that deliver" },
+      { id: "cruelty-free", name: "Cruelty-Free", description: "Not tested on animals" },
+    ]
+  },
+  "beauty-services": {
+    label: "What matters most in beauty service experiences?",
+    options: [
+      { id: "skill", name: "Technical Skill", description: "Expert technique and results" },
+      { id: "hospitality", name: "Hospitality", description: "Warm, welcoming atmosphere" },
+      { id: "cleanliness", name: "Cleanliness", description: "Sanitary, clean environment" },
+      { id: "price", name: "Pricing", description: "Fair and transparent pricing" },
+      { id: "convenience", name: "Convenience", description: "Easy booking, good hours" },
+      { id: "trendy", name: "Trendy Styles", description: "Up-to-date with latest trends" },
+    ]
+  },
+  "food": {
+    label: "What matters most when dining out?",
+    options: [
+      { id: "taste", name: "Taste & Flavor", description: "Delicious, flavorful food" },
+      { id: "presentation", name: "Presentation", description: "Beautiful plating and setup" },
+      { id: "service", name: "Service Quality", description: "Attentive, friendly staff" },
+      { id: "hospitality", name: "Hospitality", description: "Warm, welcoming atmosphere" },
+      { id: "ambiance", name: "Ambiance", description: "Nice decor and vibe" },
+      { id: "value", name: "Value for Money", description: "Good portions at fair prices" },
+      { id: "speed", name: "Speed", description: "Quick service when needed" },
+      { id: "authenticity", name: "Authenticity", description: "True to cuisine origins" },
+    ]
+  },
+  "fitness": {
+    label: "What's most important in your fitness experience?",
+    options: [
+      { id: "expertise", name: "Trainer Expertise", description: "Knowledgeable instructors" },
+      { id: "equipment", name: "Equipment Quality", description: "Modern, well-maintained gear" },
+      { id: "atmosphere", name: "Atmosphere", description: "Motivating, energetic vibe" },
+      { id: "community", name: "Community", description: "Supportive, friendly members" },
+      { id: "cleanliness", name: "Cleanliness", description: "Clean, hygienic facilities" },
+      { id: "results", name: "Results-Focused", description: "Programs that deliver" },
+    ]
+  },
+  "home-goods": {
+    label: "What matters most when shopping for home items?",
+    options: [
+      { id: "quality", name: "Quality", description: "Well-crafted, durable items" },
+      { id: "design", name: "Design & Aesthetics", description: "Beautiful, stylish pieces" },
+      { id: "price", name: "Value", description: "Good quality at fair prices" },
+      { id: "unique", name: "Uniqueness", description: "One-of-a-kind finds" },
+      { id: "handmade", name: "Handmade/Artisan", description: "Crafted with care" },
+      { id: "function", name: "Functionality", description: "Practical and useful" },
+    ]
+  },
+  "arts": {
+    label: "What do you value in arts and crafts?",
+    options: [
+      { id: "creativity", name: "Creativity", description: "Original, creative work" },
+      { id: "skill", name: "Craftsmanship", description: "Technical skill and quality" },
+      { id: "story", name: "Story & Meaning", description: "Pieces with a story" },
+      { id: "local", name: "Local Artists", description: "Supporting local creators" },
+      { id: "affordable", name: "Accessibility", description: "Art for every budget" },
+      { id: "interactive", name: "Interactive", description: "Classes and workshops" },
+    ]
+  },
+  "services": {
+    label: "What matters most in professional services?",
+    options: [
+      { id: "reliability", name: "Reliability", description: "Dependable and on-time" },
+      { id: "expertise", name: "Expertise", description: "Skilled, knowledgeable pros" },
+      { id: "communication", name: "Communication", description: "Clear, responsive contact" },
+      { id: "price", name: "Fair Pricing", description: "Transparent, honest rates" },
+      { id: "trust", name: "Trustworthiness", description: "Honest, ethical practices" },
+      { id: "convenience", name: "Convenience", description: "Flexible scheduling" },
+    ]
   }
 };
 
