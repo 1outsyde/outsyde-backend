@@ -371,6 +371,59 @@ export const loginSchema = z.object({
 
 
 // =========================================
+// CONVERSATIONS TABLE (Real-time Chat)
+// =========================================
+export const conversations = pgTable("conversations", {
+  id: varchar("id", { length: 36 }).primaryKey().default(sql`gen_random_uuid()`),
+  
+  participant1Id: varchar("participant1_id", { length: 36 })
+    .notNull()
+    .references(() => users.id),
+  participant2Id: varchar("participant2_id", { length: 36 })
+    .notNull()
+    .references(() => users.id),
+  
+  lastMessageAt: timestamp("last_message_at").defaultNow(),
+  lastMessagePreview: text("last_message_preview"),
+  
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+});
+
+// =========================================
+// MESSAGES TABLE (Real-time Chat)
+// =========================================
+export const messages = pgTable("messages", {
+  id: varchar("id", { length: 36 }).primaryKey().default(sql`gen_random_uuid()`),
+  
+  conversationId: varchar("conversation_id", { length: 36 })
+    .notNull()
+    .references(() => conversations.id),
+  senderId: varchar("sender_id", { length: 36 })
+    .notNull()
+    .references(() => users.id),
+  
+  content: text("content").notNull(),
+  
+  isRead: boolean("is_read").default(false).notNull(),
+  readAt: timestamp("read_at"),
+  
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+});
+
+export const insertConversationSchema = createInsertSchema(conversations).omit({
+  id: true,
+  createdAt: true,
+  lastMessageAt: true,
+});
+
+export const insertMessageSchema = createInsertSchema(messages).omit({
+  id: true,
+  createdAt: true,
+  isRead: true,
+  readAt: true,
+});
+
+// =========================================
 // TYPES
 // =========================================
 export type InsertUser = z.infer<typeof insertUserSchema>;
@@ -404,3 +457,9 @@ export const insertReviewSchema = createInsertSchema(reviews).omit({
 });
 
 export type InsertReview = z.infer<typeof insertReviewSchema>;
+
+export type Conversation = typeof conversations.$inferSelect;
+export type InsertConversation = z.infer<typeof insertConversationSchema>;
+
+export type Message = typeof messages.$inferSelect;
+export type InsertMessage = z.infer<typeof insertMessageSchema>;

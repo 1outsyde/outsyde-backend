@@ -12,6 +12,10 @@ import {
   type ShootBooking,
   type Appointment,
   type Order,
+  type Conversation,
+  type InsertConversation,
+  type Message,
+  type InsertMessage,
   users,
   businesses,
   cities,
@@ -20,7 +24,9 @@ import {
   reviews,
   shootBookings,
   appointments,
-  orders
+  orders,
+  conversations,
+  messages
 } from "@shared/schema";
 import { db } from "./db";
 import { eq, ilike, or, and, sql, isNull } from "drizzle-orm";
@@ -76,6 +82,15 @@ export interface IStorage {
   verifyCustomerCanReview(customerId: string, targetType: string, targetId: string, bookingType: string, bookingId: string): Promise<{ canReview: boolean; reason?: string }>;
   getReviewableBookings(customerId: string): Promise<{ shootBookings: ShootBooking[]; appointments: Appointment[]; orders: Order[] }>;
   updateTargetRating(targetType: string, targetId: string): Promise<void>;
+
+  // Chat (Real-time messaging)
+  getOrCreateConversation(participant1Id: string, participant2Id: string): Promise<Conversation>;
+  getConversation(id: string): Promise<Conversation | undefined>;
+  getUserConversations(userId: string): Promise<(Conversation & { otherParticipant: User })[]>;
+  createMessage(data: { conversationId: string; senderId: string; content: string }): Promise<Message>;
+  getConversationMessages(conversationId: string, limit?: number, before?: string): Promise<Message[]>;
+  markMessagesAsRead(conversationId: string, userId: string): Promise<void>;
+  getUnreadCount(userId: string): Promise<number>;
 
   seedInitialData(): Promise<void>;
 }
@@ -518,6 +533,173 @@ export class DatabaseStorage implements IStorage {
         .where(eq(businesses.id, targetId));
     }
     // service_businesses would need a rating column added if needed
+  }
+
+  // =========================
+  // CHAT (Real-time messaging)
+  // =========================
+
+  async getOrCreateConversation(participant1Id: string, participant2Id: string): Promise<Conversation> {
+    // Check if conversation exists between these two users
+    const existing = await db.select().from(conversations).where(
+      or(
+        and(
+          eq(conversations.participant1Id, participant1Id),
+          eq(conversations.participant2Id, participant2Id)
+        ),
+        and(
+          eq(conversations.participant1Id, participant2Id),
+          eq(conversations.participant2Id, participant1Id)
+        )
+      )
+    );
+
+    if (existing.length > 0) {
+      return existing[0];
+    }
+
+    // Create new conversation
+    const id = randomUUID();
+    const result = await db.insert(conversations).values({
+      id,
+      participant1Id,
+      participant2Id,
+    }).returning();
+
+    return result[0];
+  }
+
+  async getConversation(id: string): Promise<Conversation | undefined> {
+    const result = await db.select().from(conversations).where(eq(conversations.id, id));
+    return result[0];
+  }
+
+  async getUserConversations(userId: string): Promise<(Conversation & { otherParticipant: User })[]> {
+    // Get all conversations where user is a participant
+    const userConvos = await db.select().from(conversations).where(
+      or(
+        eq(conversations.participant1Id, userId),
+        eq(conversations.participant2Id, userId)
+      )
+    );
+
+    // Sort by last message time (most recent first)
+    userConvos.sort((a, b) => {
+      const aTime = a.lastMessageAt?.getTime() || 0;
+      const bTime = b.lastMessageAt?.getTime() || 0;
+      return bTime - aTime;
+    });
+
+    // Enrich with other participant data
+    const enriched = await Promise.all(
+      userConvos.map(async (convo) => {
+        const otherUserId = convo.participant1Id === userId 
+          ? convo.participant2Id 
+          : convo.participant1Id;
+        const otherParticipant = await this.getUser(otherUserId);
+        return {
+          ...convo,
+          otherParticipant: otherParticipant!,
+        };
+      })
+    );
+
+    return enriched.filter(c => c.otherParticipant);
+  }
+
+  async createMessage(data: { conversationId: string; senderId: string; content: string }): Promise<Message> {
+    const id = randomUUID();
+    const result = await db.insert(messages).values({
+      id,
+      conversationId: data.conversationId,
+      senderId: data.senderId,
+      content: data.content,
+    }).returning();
+
+    // Update conversation's last message info
+    const preview = data.content.length > 50 
+      ? data.content.substring(0, 50) + '...' 
+      : data.content;
+    
+    await db.update(conversations)
+      .set({ 
+        lastMessageAt: new Date(),
+        lastMessagePreview: preview,
+      })
+      .where(eq(conversations.id, data.conversationId));
+
+    return result[0];
+  }
+
+  async getConversationMessages(conversationId: string, limit: number = 50, before?: string): Promise<Message[]> {
+    let query;
+    
+    if (before) {
+      // Get messages before a specific message ID (for pagination)
+      const beforeMessage = await db.select().from(messages).where(eq(messages.id, before));
+      if (beforeMessage.length > 0) {
+        query = await db.select().from(messages).where(
+          and(
+            eq(messages.conversationId, conversationId),
+            sql`${messages.createdAt} < ${beforeMessage[0].createdAt}`
+          )
+        ).limit(limit);
+      } else {
+        query = await db.select().from(messages)
+          .where(eq(messages.conversationId, conversationId))
+          .limit(limit);
+      }
+    } else {
+      query = await db.select().from(messages)
+        .where(eq(messages.conversationId, conversationId))
+        .limit(limit);
+    }
+
+    // Sort by creation time (oldest first for display)
+    return query.sort((a, b) => 
+      new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime()
+    );
+  }
+
+  async markMessagesAsRead(conversationId: string, userId: string): Promise<void> {
+    // Mark all messages in conversation NOT from this user as read
+    await db.update(messages)
+      .set({ 
+        isRead: true, 
+        readAt: new Date() 
+      })
+      .where(
+        and(
+          eq(messages.conversationId, conversationId),
+          sql`${messages.senderId} != ${userId}`,
+          eq(messages.isRead, false)
+        )
+      );
+  }
+
+  async getUnreadCount(userId: string): Promise<number> {
+    // Get all conversations where user is a participant
+    const userConvos = await db.select({ id: conversations.id }).from(conversations).where(
+      or(
+        eq(conversations.participant1Id, userId),
+        eq(conversations.participant2Id, userId)
+      )
+    );
+
+    if (userConvos.length === 0) return 0;
+
+    const convoIds = userConvos.map(c => c.id);
+    
+    // Count unread messages not from this user
+    const unread = await db.select({ count: sql<number>`count(*)` }).from(messages).where(
+      and(
+        sql`${messages.conversationId} IN (${sql.join(convoIds.map(id => sql`${id}`), sql`, `)})`,
+        sql`${messages.senderId} != ${userId}`,
+        eq(messages.isRead, false)
+      )
+    );
+
+    return Number(unread[0]?.count || 0);
   }
 
   // =========================

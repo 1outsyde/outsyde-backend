@@ -8,6 +8,7 @@ import { setupVite } from "./vite";
 import { runMigrations } from "stripe-replit-sync";
 import { getStripeSync } from "./stripe/stripeClient";
 import { WebhookHandlers } from "./stripe/webhookHandlers";
+import { setupWebSocket } from "./websocket";
 
 const app = express();
 const httpServer = createServer(app);
@@ -154,6 +155,9 @@ async function initStripe() {
   }, 60 * 60 * 1000);
 
   await registerRoutes(httpServer, app);
+
+  // Set up WebSocket server for real-time chat
+  setupWebSocket(httpServer);
 
   app.use((err: any, _req: Request, res: Response, _next: NextFunction) => {
     const status = err.status || err.statusCode || 500;

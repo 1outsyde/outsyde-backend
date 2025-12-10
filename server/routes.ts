@@ -494,5 +494,142 @@ export async function registerRoutes(
     }
   });
 
+  // ==================== CHAT ROUTES ====================
+
+  // Get user's conversations
+  app.get("/api/conversations", async (req, res) => {
+    const userId = req.session?.userId;
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    try {
+      const conversations = await storage.getUserConversations(userId);
+      res.json({ conversations });
+    } catch (error) {
+      console.error("Get conversations error:", error);
+      res.status(500).json({ error: "Failed to get conversations" });
+    }
+  });
+
+  // Get or create conversation with another user
+  app.post("/api/conversations", async (req, res) => {
+    const userId = req.session?.userId;
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    try {
+      const createConvoSchema = z.object({
+        participantId: z.string().min(1, "Participant ID is required"),
+      });
+      const { participantId } = createConvoSchema.parse(req.body);
+
+      if (participantId === userId) {
+        return res.status(400).json({ error: "Cannot create conversation with yourself" });
+      }
+
+      const otherUser = await storage.getUser(participantId);
+      if (!otherUser) {
+        return res.status(404).json({ error: "User not found" });
+      }
+
+      const conversation = await storage.getOrCreateConversation(userId, participantId);
+      res.json({ conversation, otherParticipant: { id: otherUser.id, name: otherUser.name } });
+    } catch (error) {
+      if (error instanceof z.ZodError) {
+        return res.status(400).json({ error: "Invalid data", details: error.errors });
+      }
+      console.error("Create conversation error:", error);
+      res.status(500).json({ error: "Failed to create conversation" });
+    }
+  });
+
+  // Get messages in a conversation
+  app.get("/api/conversations/:id/messages", async (req, res) => {
+    const userId = req.session?.userId;
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    try {
+      const conversation = await storage.getConversation(req.params.id);
+      if (!conversation) {
+        return res.status(404).json({ error: "Conversation not found" });
+      }
+
+      if (conversation.participant1Id !== userId && conversation.participant2Id !== userId) {
+        return res.status(403).json({ error: "Not a participant in this conversation" });
+      }
+
+      const limit = parseInt(req.query.limit as string) || 50;
+      const before = req.query.before as string | undefined;
+
+      const messages = await storage.getConversationMessages(req.params.id, limit, before);
+      
+      // Mark messages as read
+      await storage.markMessagesAsRead(req.params.id, userId);
+
+      res.json({ messages });
+    } catch (error) {
+      console.error("Get messages error:", error);
+      res.status(500).json({ error: "Failed to get messages" });
+    }
+  });
+
+  // Send a message (REST fallback - WebSocket preferred)
+  app.post("/api/conversations/:id/messages", async (req, res) => {
+    const userId = req.session?.userId;
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    try {
+      const conversation = await storage.getConversation(req.params.id);
+      if (!conversation) {
+        return res.status(404).json({ error: "Conversation not found" });
+      }
+
+      if (conversation.participant1Id !== userId && conversation.participant2Id !== userId) {
+        return res.status(403).json({ error: "Not a participant in this conversation" });
+      }
+
+      const messageSchema = z.object({
+        content: z.string().min(1, "Message content is required"),
+      });
+      const { content } = messageSchema.parse(req.body);
+
+      const message = await storage.createMessage({
+        conversationId: req.params.id,
+        senderId: userId,
+        content,
+      });
+
+      res.json({ message });
+    } catch (error) {
+      if (error instanceof z.ZodError) {
+        return res.status(400).json({ error: "Invalid data", details: error.errors });
+      }
+      console.error("Send message error:", error);
+      res.status(500).json({ error: "Failed to send message" });
+    }
+  });
+
+  // Get unread message count
+  app.get("/api/messages/unread-count", async (req, res) => {
+    const userId = req.session?.userId;
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    try {
+      const count = await storage.getUnreadCount(userId);
+      res.json({ count });
+    } catch (error) {
+      console.error("Get unread count error:", error);
+      res.status(500).json({ error: "Failed to get unread count" });
+    }
+  });
+
   return httpServer;
 }
