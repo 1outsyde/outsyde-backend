@@ -176,6 +176,10 @@ The MVP includes:
 - REST API endpoints for chat history and conversation management
 - WebSocket integrated with JWT authentication for mobile apps
 - Frontend chat UI with conversation list and message interface
+- **Chat location updated** - Chat now ONLY available in vendor detail pages via Chat tab
+  - BusinessCard shows Book/Shop CTAs based on hasServices/hasProducts (no Chat button)
+  - VendorStorefront has embedded Chat tab with full messaging interface
+  - VendorChat component handles auth checking and conversation creation
 
 ## User Preferences
 - Golden yellow color scheme for branding
