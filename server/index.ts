@@ -1,5 +1,4 @@
 import express, { type Request, Response, NextFunction } from "express";
-import session from "express-session";
 import { createServer } from "http";
 import cors from "cors";
 import { storage } from "./storage";
@@ -9,6 +8,7 @@ import { runMigrations } from "stripe-replit-sync";
 import { getStripeSync } from "./stripe/stripeClient";
 import { WebhookHandlers } from "./stripe/webhookHandlers";
 import { setupWebSocket } from "./websocket";
+import { setupAuth } from "./replitAuth";
 
 const app = express();
 const httpServer = createServer(app);
@@ -49,19 +49,6 @@ app.post(
 // Now apply JSON middleware for all other routes
 app.use(express.json());
 app.use(express.urlencoded({ extended: false }));
-
-app.use(
-  session({
-    secret: process.env.SESSION_SECRET || "outsyde-secret-key",
-    resave: false,
-    saveUninitialized: false,
-    cookie: {
-      secure: process.env.NODE_ENV === "production",
-      httpOnly: true,
-      maxAge: 24 * 60 * 60 * 1000,
-    },
-  })
-);
 
 app.use((req, res, next) => {
   const start = Date.now();
@@ -144,6 +131,10 @@ async function initStripe() {
   await storage.seedInitialData();
   await storage.cleanupExpiredTokens();
   await initStripe();
+
+  // Set up Replit Auth (Google OAuth)
+  await setupAuth(app);
+  log("Replit Auth configured (Google OAuth enabled)", "auth");
 
   setInterval(async () => {
     try {

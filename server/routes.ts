@@ -221,6 +221,38 @@ export async function registerRoutes(
     }
   });
 
+  // Get current authenticated user (supports both session and OAuth)
+  app.get("/api/auth/user", async (req, res) => {
+    try {
+      // Check for OAuth user first (from Replit Auth)
+      const oauthUser = req.user as any;
+      if (oauthUser?.claims?.sub) {
+        const user = await storage.getUser(oauthUser.claims.sub);
+        if (user) {
+          const { password: _, ...safeUser } = user;
+          return res.json(safeUser);
+        }
+      }
+
+      // Fall back to session-based auth
+      const userId = req.session?.userId;
+      if (!userId) {
+        return res.status(401).json({ message: "Unauthorized" });
+      }
+
+      const user = await storage.getUser(userId);
+      if (!user) {
+        return res.status(401).json({ message: "Unauthorized" });
+      }
+
+      const { password: _, ...safeUser } = user;
+      res.json(safeUser);
+    } catch (error) {
+      console.error("Get user error:", error);
+      res.status(500).json({ error: "Failed to get user" });
+    }
+  });
+
   // Get access token for WebSocket authentication (for session users)
   app.get("/api/v1/auth/token", async (req, res) => {
     const userId = req.session?.userId;

@@ -1,7 +1,9 @@
 import { useState } from "react";
 import { ArrowLeft } from "lucide-react";
+import { SiGoogle } from "react-icons/si";
 import { Button } from "@/components/ui/button";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Separator } from "@/components/ui/separator";
 import SignupForm from "@/components/SignupForm";
 import heroImage from "@assets/generated_images/local_community_marketplace_hero.png";
 
@@ -12,6 +14,10 @@ interface AuthPageProps {
 
 export default function AuthPage({ onComplete, onBack }: AuthPageProps) {
   const [activeTab, setActiveTab] = useState<"customer" | "vendor">("customer");
+
+  const handleGoogleLogin = () => {
+    window.location.href = "/api/login";
+  };
 
   return (
     <div className="min-h-screen flex" data-testid="page-auth">
@@ -52,6 +58,25 @@ export default function AuthPage({ onComplete, onBack }: AuthPageProps) {
               <p className="text-muted-foreground">
                 Connect with local businesses
               </p>
+            </div>
+
+            <div className="mb-6">
+              <Button
+                variant="outline"
+                className="w-full gap-2"
+                onClick={handleGoogleLogin}
+                data-testid="button-google-login"
+              >
+                <SiGoogle className="h-4 w-4" />
+                Continue with Google
+              </Button>
+              
+              <div className="relative my-6">
+                <Separator />
+                <span className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 bg-background px-2 text-xs text-muted-foreground">
+                  or create an account
+                </span>
+              </div>
             </div>
 
             <Tabs value={activeTab} onValueChange={(v) => setActiveTab(v as "customer" | "vendor")}>

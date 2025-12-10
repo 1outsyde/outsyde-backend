@@ -1,6 +1,7 @@
 import { 
   type User, 
   type InsertUser, 
+  type UpsertUser,
   type Business, 
   type InsertBusiness,
   type City,
@@ -51,6 +52,7 @@ export interface IStorage {
   getUserByEmail(email: string): Promise<User | undefined>;
   createUser(user: InsertUser): Promise<User>;
   updateUser(id: string, updates: Partial<User>): Promise<User | undefined>;
+  upsertUser(user: UpsertUser): Promise<User>;
 
   getBusiness(id: string): Promise<Business | undefined>;
   getBusinessByOwnerId(ownerId: string): Promise<Business | undefined>;
@@ -183,6 +185,33 @@ export class DatabaseStorage implements IStorage {
       .where(eq(users.id, id))
       .returning();
     return result[0];
+  }
+
+  async upsertUser(userData: UpsertUser): Promise<User> {
+    const [user] = await db
+      .insert(users)
+      .values({
+        id: userData.id,
+        email: userData.email,
+        firstName: userData.firstName,
+        lastName: userData.lastName,
+        profileImageUrl: userData.profileImageUrl,
+        name: userData.firstName && userData.lastName 
+          ? `${userData.firstName} ${userData.lastName}` 
+          : userData.firstName || userData.email?.split('@')[0] || 'User',
+        isOAuthUser: true,
+      })
+      .onConflictDoUpdate({
+        target: users.id,
+        set: {
+          email: userData.email,
+          firstName: userData.firstName,
+          lastName: userData.lastName,
+          profileImageUrl: userData.profileImageUrl,
+        },
+      })
+      .returning();
+    return user;
   }
 
   // =========================

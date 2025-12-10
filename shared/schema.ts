@@ -1,5 +1,5 @@
 import { 
-  pgTable, text, varchar, boolean, integer, jsonb, timestamp 
+  pgTable, text, varchar, boolean, integer, jsonb, timestamp, index 
 } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
@@ -7,15 +7,35 @@ import { sql } from "drizzle-orm";
 
 
 // =========================================
+// SESSION STORAGE TABLE (Required for secure auth)
+// =========================================
+export const sessions = pgTable(
+  "sessions",
+  {
+    sid: varchar("sid").primaryKey(),
+    sess: jsonb("sess").notNull(),
+    expire: timestamp("expire").notNull(),
+  },
+  (table) => [index("IDX_session_expire").on(table.expire)],
+);
+
+
+// =========================================
 // USERS TABLE (Clients + Photographers + Businesses)
 // =========================================
 export const users = pgTable("users", {
   id: varchar("id", { length: 36 }).primaryKey().default(sql`gen_random_uuid()`),
-  email: text("email").notNull().unique(),
-  password: text("password").notNull(),
-  name: text("name").notNull(),
+  email: text("email").unique(),
+  password: text("password"), // Optional for OAuth users
+  name: text("name"),
+  firstName: text("first_name"),
+  lastName: text("last_name"),
+  profileImageUrl: text("profile_image_url"),
   phone: text("phone"),
   isVendor: boolean("is_vendor").default(false).notNull(),
+  
+  // OAuth flags
+  isOAuthUser: boolean("is_oauth_user").default(false),
 
   // Location fields
   address: text("address"),
@@ -488,6 +508,15 @@ export const insertMessageSchema = createInsertSchema(messages).omit({
 // =========================================
 export type InsertUser = z.infer<typeof insertUserSchema>;
 export type User = typeof users.$inferSelect;
+
+// UpsertUser type for OAuth user creation/update
+export type UpsertUser = {
+  id: string;
+  email?: string | null;
+  firstName?: string | null;
+  lastName?: string | null;
+  profileImageUrl?: string | null;
+};
 
 export type InsertBusiness = z.infer<typeof insertBusinessSchema>;
 export type Business = typeof businesses.$inferSelect;
