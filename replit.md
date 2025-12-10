@@ -45,9 +45,15 @@ The MVP includes:
 ### Web Authentication (Session-based)
 - `POST /api/auth/customer/signup` - Customer registration
 - `POST /api/auth/vendor/signup` - Vendor registration
-- `POST /api/auth/login` - User login
+- `POST /api/auth/login` - User login (email/password)
 - `POST /api/auth/logout` - User logout
 - `GET /api/auth/me` - Get current user
+
+### OAuth Authentication (Replit Auth / Google)
+- `GET /api/login` - Initiates OAuth flow (redirects to Replit Auth)
+- `GET /api/callback` - OAuth callback handler
+- `GET /api/logout` - Logs out OAuth user
+- `GET /api/auth/user` - Get current OAuth user info
 
 ### Mobile Authentication (JWT-based) - /api/v1/
 - `POST /api/v1/auth/customer/signup` - Customer registration (returns tokens)
@@ -97,9 +103,12 @@ The MVP includes:
 ## Key Features
 
 ### Dual Authentication System
-- **Web (Session-based)**: Uses express-session with httpOnly cookies
+- **Web (Session-based)**: Uses express-session with PostgreSQL-backed sessions (connect-pg-simple)
 - **Mobile (JWT-based)**: Uses accessToken (1hr) + refreshToken (7 days)
+- **Google OAuth**: Via Replit Auth (OpenID Connect) - supports Google, GitHub, Apple, and email/password
 - Passwords securely hashed with bcrypt (10 rounds)
+- OAuth users have nullable password field, identified by isOAuthUser flag
+- Sessions stored securely in PostgreSQL database
 
 ### Customer Signup (6 steps)
 1. Account info (name, email, password)
