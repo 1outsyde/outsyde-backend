@@ -16,6 +16,7 @@ import {
   type InsertConversation,
   type Message,
   type InsertMessage,
+  type PointTransaction,
   users,
   businesses,
   cities,
@@ -26,7 +27,8 @@ import {
   appointments,
   orders,
   conversations,
-  messages
+  messages,
+  pointTransactions
 } from "@shared/schema";
 import { db } from "./db";
 import { eq, ilike, or, and, sql, isNull } from "drizzle-orm";
@@ -91,6 +93,30 @@ export interface IStorage {
   getConversationMessages(conversationId: string, limit?: number, before?: string): Promise<Message[]>;
   markMessagesAsRead(conversationId: string, userId: string): Promise<void>;
   getUnreadCount(userId: string): Promise<number>;
+
+  // Outsyde Points (Loyalty System)
+  // $1 = 100 points
+  getUserPointsBalance(userId: string): Promise<number>;
+  earnPoints(data: {
+    userId: string;
+    dollarAmountCents: number;
+    businessId?: string;
+    businessName?: string;
+    referenceType?: string;
+    referenceId?: string;
+    description?: string;
+  }): Promise<PointTransaction>;
+  redeemPoints(data: {
+    userId: string;
+    points: number;
+    businessId?: string;
+    businessName?: string;
+    referenceType?: string;
+    referenceId?: string;
+    description?: string;
+  }): Promise<{ transaction: PointTransaction; discountCents: number } | { error: string }>;
+  getPointTransactions(userId: string, limit?: number): Promise<PointTransaction[]>;
+  calculatePointsValue(points: number): number; // Returns discount in cents
 
   seedInitialData(): Promise<void>;
 }
@@ -728,6 +754,127 @@ export class DatabaseStorage implements IStorage {
     );
 
     return Number(unread[0]?.count || 0);
+  }
+
+  // =========================
+  // OUTSYDE POINTS (Loyalty System)
+  // =========================
+  // Conversion: $1 = 100 points
+  // Redemption: 100 points = $1 discount
+
+  private readonly POINTS_PER_DOLLAR = 100;
+
+  async getUserPointsBalance(userId: string): Promise<number> {
+    const user = await this.getUser(userId);
+    return user?.loyaltyPoints || 0;
+  }
+
+  async earnPoints(data: {
+    userId: string;
+    dollarAmountCents: number;
+    businessId?: string;
+    businessName?: string;
+    referenceType?: string;
+    referenceId?: string;
+    description?: string;
+  }): Promise<PointTransaction> {
+    // Calculate points: $1 = 100 points, so cents/100 * 100 = cents
+    // dollarAmountCents is in cents, so $5.00 = 500 cents = 500 points
+    const pointsEarned = Math.floor(data.dollarAmountCents);
+    
+    // Get current balance
+    const currentBalance = await this.getUserPointsBalance(data.userId);
+    const newBalance = currentBalance + pointsEarned;
+
+    // Update user's loyalty points
+    await db.update(users)
+      .set({ loyaltyPoints: newBalance })
+      .where(eq(users.id, data.userId));
+
+    // Create transaction record
+    const id = randomUUID();
+    const result = await db.insert(pointTransactions).values({
+      id,
+      userId: data.userId,
+      type: 'earn',
+      points: pointsEarned,
+      dollarAmountCents: data.dollarAmountCents,
+      businessId: data.businessId || null,
+      businessName: data.businessName || null,
+      referenceType: data.referenceType || null,
+      referenceId: data.referenceId || null,
+      balanceAfter: newBalance,
+      description: data.description || `Earned ${pointsEarned} points`,
+    }).returning();
+
+    return result[0];
+  }
+
+  async redeemPoints(data: {
+    userId: string;
+    points: number;
+    businessId?: string;
+    businessName?: string;
+    referenceType?: string;
+    referenceId?: string;
+    description?: string;
+  }): Promise<{ transaction: PointTransaction; discountCents: number } | { error: string }> {
+    // Check user has enough points
+    const currentBalance = await this.getUserPointsBalance(data.userId);
+    
+    if (data.points > currentBalance) {
+      return { error: `Insufficient points. You have ${currentBalance} points but tried to redeem ${data.points}` };
+    }
+
+    if (data.points <= 0) {
+      return { error: 'Points to redeem must be greater than 0' };
+    }
+
+    // Calculate discount: 100 points = $1 = 100 cents
+    const discountCents = this.calculatePointsValue(data.points);
+    const newBalance = currentBalance - data.points;
+
+    // Update user's loyalty points
+    await db.update(users)
+      .set({ loyaltyPoints: newBalance })
+      .where(eq(users.id, data.userId));
+
+    // Create transaction record
+    const id = randomUUID();
+    const result = await db.insert(pointTransactions).values({
+      id,
+      userId: data.userId,
+      type: 'redeem',
+      points: data.points,
+      dollarAmountCents: discountCents,
+      businessId: data.businessId || null,
+      businessName: data.businessName || null,
+      referenceType: data.referenceType || null,
+      referenceId: data.referenceId || null,
+      balanceAfter: newBalance,
+      description: data.description || `Redeemed ${data.points} points for $${(discountCents / 100).toFixed(2)} discount`,
+    }).returning();
+
+    return { 
+      transaction: result[0], 
+      discountCents 
+    };
+  }
+
+  async getPointTransactions(userId: string, limit: number = 50): Promise<PointTransaction[]> {
+    const transactions = await db.select().from(pointTransactions)
+      .where(eq(pointTransactions.userId, userId))
+      .limit(limit);
+    
+    // Sort by creation time (most recent first)
+    return transactions.sort((a, b) => 
+      new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
+    );
+  }
+
+  calculatePointsValue(points: number): number {
+    // 100 points = $1 = 100 cents
+    return points;
   }
 
   // =========================

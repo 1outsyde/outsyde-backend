@@ -37,6 +37,10 @@ export const users = pgTable("users", {
   // Preferences
   selectedIndustries: jsonb("selected_industries").$type<string[]>().default([]),
   industryNiches: jsonb("industry_niches").$type<Record<string, string[]>>().default({}),
+
+  // Outsyde Points (loyalty program)
+  // $1 = 100 points, redeemable at any Outsyde business
+  loyaltyPoints: integer("loyalty_points").default(0).notNull(),
 });
 
 
@@ -369,6 +373,56 @@ export const loginSchema = z.object({
   password: z.string().min(1),
 });
 
+
+// =========================================
+// OUTSYDE POINTS (Loyalty System)
+// =========================================
+// Points conversion: $1 = 100 points
+// Example: $5 purchase = 500 points, $10 = 1000 points
+// Redemption: Points can be used at any Outsyde business
+
+export const pointTransactions = pgTable("point_transactions", {
+  id: varchar("id", { length: 36 }).primaryKey().default(sql`gen_random_uuid()`),
+  
+  userId: varchar("user_id", { length: 36 })
+    .notNull()
+    .references(() => users.id),
+  
+  // Transaction type: 'earn' or 'redeem'
+  type: text("type").notNull(), // 'earn' | 'redeem'
+  
+  // Amount of points (positive for earn, positive for redeem - we track direction via type)
+  points: integer("points").notNull(),
+  
+  // Dollar amount associated (in cents for precision)
+  // For earn: the purchase amount that generated these points
+  // For redeem: the discount value applied
+  dollarAmountCents: integer("dollar_amount_cents").notNull(),
+  
+  // Where the transaction occurred
+  businessId: varchar("business_id", { length: 36 }),
+  businessName: text("business_name"),
+  
+  // Reference to the order/booking that triggered this transaction
+  referenceType: text("reference_type"), // 'order' | 'appointment' | 'shoot_booking'
+  referenceId: varchar("reference_id", { length: 36 }),
+  
+  // Balance after this transaction
+  balanceAfter: integer("balance_after").notNull(),
+  
+  // Description for display
+  description: text("description"),
+  
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+});
+
+export const insertPointTransactionSchema = createInsertSchema(pointTransactions).omit({
+  id: true,
+  createdAt: true,
+});
+
+export type PointTransaction = typeof pointTransactions.$inferSelect;
+export type InsertPointTransaction = z.infer<typeof insertPointTransactionSchema>;
 
 // =========================================
 // CONVERSATIONS TABLE (Real-time Chat)
