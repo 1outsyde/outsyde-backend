@@ -240,6 +240,63 @@ export const appointments = pgTable("appointments", {
 });
 
 
+// =====================================================
+// NEW: ORDERS (FOR PRODUCT BUSINESSES)
+// =====================================================
+export const orders = pgTable("orders", {
+  id: varchar("id", { length: 36 }).primaryKey().default(sql`gen_random_uuid()`),
+
+  businessId: varchar("business_id", { length: 36 })
+    .notNull()
+    .references(() => businesses.id),
+
+  customerId: varchar("customer_id", { length: 36 })
+    .notNull()
+    .references(() => users.id),
+
+  items: jsonb("items").$type<{ productId: string; name: string; quantity: number; price: number }[]>().notNull(),
+  totalAmount: integer("total_amount").notNull(),
+
+  stripePaymentIntentId: text("stripe_payment_intent_id"),
+  status: text("status").default("pending"), // pending, paid, shipped, delivered, cancelled
+
+  shippingAddress: text("shipping_address"),
+  
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+});
+
+
+// =====================================================
+// NEW: VERIFIED REVIEWS (Only for customers with completed bookings/orders)
+// =====================================================
+export const reviews = pgTable("reviews", {
+  id: varchar("id", { length: 36 }).primaryKey().default(sql`gen_random_uuid()`),
+
+  // Who is being reviewed
+  targetType: text("target_type").notNull(), // 'photographer', 'service_business', 'business'
+  targetId: varchar("target_id", { length: 36 }).notNull(),
+
+  // Who is reviewing (must have completed booking/order)
+  reviewerId: varchar("reviewer_id", { length: 36 })
+    .notNull()
+    .references(() => users.id),
+
+  // What booking/order this review is for (verification)
+  bookingType: text("booking_type").notNull(), // 'shoot_booking', 'appointment', 'order'
+  bookingId: varchar("booking_id", { length: 36 }).notNull(),
+
+  // Review content
+  rating: integer("rating").notNull(), // 1-5 stars
+  title: text("title"),
+  comment: text("comment"),
+
+  // Status
+  isVerified: boolean("is_verified").default(true).notNull(),
+  
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+});
+
+
 // =========================================
 // SCHEMAS FOR INSERTION (Zod)
 // =========================================
@@ -334,3 +391,16 @@ export type ServiceBusiness = typeof serviceBusinesses.$inferSelect;
 export type Service = typeof services.$inferSelect;
 export type ShootBooking = typeof shootBookings.$inferSelect;
 export type Appointment = typeof appointments.$inferSelect;
+export type Order = typeof orders.$inferSelect;
+export type Review = typeof reviews.$inferSelect;
+
+// Review insert schema with validation
+export const insertReviewSchema = createInsertSchema(reviews).omit({
+  id: true,
+  createdAt: true,
+  isVerified: true,
+}).extend({
+  rating: z.number().min(1).max(5),
+});
+
+export type InsertReview = z.infer<typeof insertReviewSchema>;
