@@ -243,6 +243,7 @@ export default function SignupForm({ onComplete, isVendor = false }: SignupFormP
         shoppingFrequency: data.shoppingFrequency || undefined,
         selectedIndustries: data.selectedIndustries,
         industryNiches: data.industryNiches,
+        industryValues: data.industryValues,
       });
       return response.json();
     },
@@ -323,6 +324,7 @@ export default function SignupForm({ onComplete, isVendor = false }: SignupFormP
     interests: [],
     selectedIndustries: [],
     industryNiches: {},
+    industryValues: {},
     businessName: "",
     businessCategory: "",
     businessDescription: "",
@@ -357,6 +359,17 @@ export default function SignupForm({ onComplete, isVendor = false }: SignupFormP
       : [...currentNiches, niche];
     updateField("industryNiches", {
       ...formData.industryNiches,
+      [industryId]: updated
+    });
+  };
+
+  const toggleValueItem = (industryId: string, valueId: string) => {
+    const currentValues = formData.industryValues[industryId] || [];
+    const updated = currentValues.includes(valueId)
+      ? currentValues.filter((v) => v !== valueId)
+      : [...currentValues, valueId];
+    updateField("industryValues", {
+      ...formData.industryValues,
       [industryId]: updated
     });
   };
@@ -682,38 +695,75 @@ export default function SignupForm({ onComplete, isVendor = false }: SignupFormP
               </Button>
             </div>
           ) : (
-            <div className="space-y-6 max-h-[350px] overflow-y-auto pr-2">
+            <div className="space-y-6 max-h-[400px] overflow-y-auto pr-2">
               {formData.selectedIndustries.map((industryId) => {
                 const nicheData = industryNicheOptions[industryId];
+                const valueData = industryValueOptions[industryId];
                 const industry = industries.find(i => i.id === industryId);
                 if (!nicheData || !industry) return null;
                 
                 const selectedNiches = formData.industryNiches[industryId] || [];
+                const selectedValues = formData.industryValues[industryId] || [];
                 const Icon = industry.icon;
 
                 return (
-                  <div key={industryId} className="space-y-3">
+                  <div key={industryId} className="space-y-4 p-4 rounded-lg border bg-card">
                     <div className="flex items-center gap-2">
                       <Icon className="h-5 w-5 text-primary" />
-                      <Label className="text-base font-medium">{nicheData.label}</Label>
+                      <span className="text-base font-semibold">{industry.name}</span>
                     </div>
-                    <div className="flex flex-wrap gap-2">
-                      {nicheData.options.map((niche) => {
-                        const isSelected = selectedNiches.includes(niche);
-                        return (
-                          <Badge
-                            key={niche}
-                            variant={isSelected ? "default" : "outline"}
-                            className="cursor-pointer"
-                            onClick={() => toggleNicheItem(industryId, niche)}
-                            data-testid={`badge-niche-${industryId}-${niche}`}
-                          >
-                            {niche}
-                          </Badge>
-                        );
-                      })}
+                    
+                    <div className="space-y-2">
+                      <Label className="text-sm font-medium text-muted-foreground">{nicheData.label}</Label>
+                      <div className="flex flex-wrap gap-2">
+                        {nicheData.options.map((niche) => {
+                          const isSelected = selectedNiches.includes(niche);
+                          return (
+                            <Badge
+                              key={niche}
+                              variant={isSelected ? "default" : "outline"}
+                              className="cursor-pointer"
+                              onClick={() => toggleNicheItem(industryId, niche)}
+                              data-testid={`badge-niche-${industryId}-${niche}`}
+                            >
+                              {niche}
+                            </Badge>
+                          );
+                        })}
+                      </div>
                     </div>
-                    <Separator />
+
+                    {valueData && (
+                      <div className="space-y-2 pt-2 border-t">
+                        <Label className="text-sm font-medium text-muted-foreground">{valueData.label}</Label>
+                        <p className="text-xs text-muted-foreground">Select all that matter to you</p>
+                        <div className="grid grid-cols-2 gap-2">
+                          {valueData.options.map((value) => {
+                            const isSelected = selectedValues.includes(value.id);
+                            return (
+                              <div
+                                key={value.id}
+                                className={`p-3 rounded-md border cursor-pointer transition-colors ${
+                                  isSelected 
+                                    ? "border-primary bg-primary/10" 
+                                    : "border-border hover-elevate"
+                                }`}
+                                onClick={() => toggleValueItem(industryId, value.id)}
+                                data-testid={`value-${industryId}-${value.id}`}
+                              >
+                                <div className="flex items-center gap-2">
+                                  <Checkbox checked={isSelected} />
+                                  <div>
+                                    <p className="text-sm font-medium">{value.name}</p>
+                                    <p className="text-xs text-muted-foreground">{value.description}</p>
+                                  </div>
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    )}
                   </div>
                 );
               })}
@@ -724,7 +774,7 @@ export default function SignupForm({ onComplete, isVendor = false }: SignupFormP
             <Button 
               variant="ghost" 
               className="w-full"
-              onClick={() => setCurrentStep(7)}
+              onClick={() => setCurrentStep(6)}
               data-testid="button-skip-niches"
             >
               Skip this step

@@ -76,6 +76,7 @@ export async function registerRoutes(
         shoppingFrequency: data.shoppingFrequency,
         selectedIndustries: data.selectedIndustries,
         industryNiches: data.industryNiches,
+        industryValues: data.industryValues,
       });
 
       if (req.session) {
