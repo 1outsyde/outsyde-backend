@@ -29,14 +29,9 @@ interface SignupData {
   city: string;
   state: string;
   zipCode: string;
-  nationality?: string;
   ethnicity?: string;
   ageRange?: string;
   gender?: string;
-  householdSize?: string;
-  incomeRange?: string;
-  education?: string;
-  occupation?: string;
   shoppingFrequency?: string;
   preferredCategories: string[];
   interests: string[];
@@ -59,10 +54,9 @@ const customerSteps = [
   { id: 1, name: "Account" },
   { id: 2, name: "Location" },
   { id: 3, name: "About You" },
-  { id: 4, name: "Lifestyle" },
-  { id: 5, name: "Industries" },
-  { id: 6, name: "Your Tastes" },
-  { id: 7, name: "Finish" },
+  { id: 4, name: "Industries" },
+  { id: 5, name: "Your Tastes" },
+  { id: 6, name: "Finish" },
 ];
 
 const vendorSteps = [
@@ -152,11 +146,6 @@ export default function SignupForm({ onComplete, isVendor = false }: SignupFormP
         ageRange: data.ageRange || undefined,
         gender: data.gender || undefined,
         ethnicity: data.ethnicity || undefined,
-        nationality: data.nationality || undefined,
-        householdSize: data.householdSize || undefined,
-        incomeRange: data.incomeRange || undefined,
-        education: data.education || undefined,
-        occupation: data.occupation || undefined,
         shoppingFrequency: data.shoppingFrequency || undefined,
         selectedIndustries: data.selectedIndustries,
         industryNiches: data.industryNiches,
@@ -232,14 +221,9 @@ export default function SignupForm({ onComplete, isVendor = false }: SignupFormP
     city: "",
     state: "",
     zipCode: "",
-    nationality: "",
     ethnicity: "",
     ageRange: "",
     gender: "",
-    householdSize: "",
-    incomeRange: "",
-    education: "",
-    occupation: "",
     shoppingFrequency: "",
     preferredCategories: [],
     interests: [],
@@ -535,134 +519,11 @@ export default function SignupForm({ onComplete, isVendor = false }: SignupFormP
               </SelectContent>
             </Select>
           </div>
-          <div>
-            <Label htmlFor="nationality">Nationality</Label>
-            <Select
-              value={formData.nationality}
-              onValueChange={(value) => updateField("nationality", value)}
-            >
-              <SelectTrigger data-testid="select-nationality">
-                <SelectValue placeholder="Select nationality" />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="us">United States</SelectItem>
-                <SelectItem value="ca">Canada</SelectItem>
-                <SelectItem value="mx">Mexico</SelectItem>
-                <SelectItem value="uk">United Kingdom</SelectItem>
-                <SelectItem value="other">Other</SelectItem>
-              </SelectContent>
-            </Select>
-          </div>
         </div>
       )}
 
-      {/* CUSTOMER STEP 4: Lifestyle */}
+      {/* CUSTOMER STEP 4: Industry Selection (Optional) */}
       {!isVendor && currentStep === 4 && (
-        <div className="space-y-4">
-          <p className="text-sm text-muted-foreground">
-            Tell us about your lifestyle for better local recommendations
-          </p>
-          <div>
-            <Label htmlFor="householdSize">Household Size</Label>
-            <Select
-              value={formData.householdSize}
-              onValueChange={(value) => updateField("householdSize", value)}
-            >
-              <SelectTrigger data-testid="select-household-size">
-                <SelectValue placeholder="Select household size" />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="1">Just me</SelectItem>
-                <SelectItem value="2">2 people</SelectItem>
-                <SelectItem value="3-4">3-4 people</SelectItem>
-                <SelectItem value="5+">5 or more</SelectItem>
-              </SelectContent>
-            </Select>
-          </div>
-          <div>
-            <Label htmlFor="incomeRange">Household Income Range</Label>
-            <Select
-              value={formData.incomeRange}
-              onValueChange={(value) => updateField("incomeRange", value)}
-            >
-              <SelectTrigger data-testid="select-income-range">
-                <SelectValue placeholder="Select income range" />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="under-25k">Under $25,000</SelectItem>
-                <SelectItem value="25k-50k">$25,000 - $50,000</SelectItem>
-                <SelectItem value="50k-75k">$50,000 - $75,000</SelectItem>
-                <SelectItem value="75k-100k">$75,000 - $100,000</SelectItem>
-                <SelectItem value="100k-150k">$100,000 - $150,000</SelectItem>
-                <SelectItem value="150k+">$150,000+</SelectItem>
-                <SelectItem value="prefer-not">Prefer not to say</SelectItem>
-              </SelectContent>
-            </Select>
-          </div>
-          <div>
-            <Label htmlFor="education">Education Level</Label>
-            <Select
-              value={formData.education}
-              onValueChange={(value) => updateField("education", value)}
-            >
-              <SelectTrigger data-testid="select-education">
-                <SelectValue placeholder="Select education level" />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="high-school">High School</SelectItem>
-                <SelectItem value="some-college">Some College</SelectItem>
-                <SelectItem value="associates">Associate's Degree</SelectItem>
-                <SelectItem value="bachelors">Bachelor's Degree</SelectItem>
-                <SelectItem value="masters">Master's Degree</SelectItem>
-                <SelectItem value="doctorate">Doctorate</SelectItem>
-                <SelectItem value="other">Other</SelectItem>
-              </SelectContent>
-            </Select>
-          </div>
-          <div>
-            <Label htmlFor="occupation">Occupation</Label>
-            <Select
-              value={formData.occupation}
-              onValueChange={(value) => updateField("occupation", value)}
-            >
-              <SelectTrigger data-testid="select-occupation">
-                <SelectValue placeholder="Select occupation type" />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="student">Student</SelectItem>
-                <SelectItem value="employed">Employed Full-time</SelectItem>
-                <SelectItem value="part-time">Employed Part-time</SelectItem>
-                <SelectItem value="self-employed">Self-employed</SelectItem>
-                <SelectItem value="business-owner">Business Owner</SelectItem>
-                <SelectItem value="retired">Retired</SelectItem>
-                <SelectItem value="homemaker">Homemaker</SelectItem>
-                <SelectItem value="other">Other</SelectItem>
-              </SelectContent>
-            </Select>
-          </div>
-          <div>
-            <Label htmlFor="shoppingFrequency">How often do you shop locally?</Label>
-            <Select
-              value={formData.shoppingFrequency}
-              onValueChange={(value) => updateField("shoppingFrequency", value)}
-            >
-              <SelectTrigger data-testid="select-shopping-frequency">
-                <SelectValue placeholder="Select frequency" />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="daily">Daily</SelectItem>
-                <SelectItem value="weekly">Weekly</SelectItem>
-                <SelectItem value="biweekly">Every two weeks</SelectItem>
-                <SelectItem value="monthly">Monthly</SelectItem>
-                <SelectItem value="rarely">Rarely</SelectItem>
-              </SelectContent>
-            </Select>
-          </div>
-        </div>
-      )}
-
-      {/* CUSTOMER STEP 5: Industry Selection (Optional) */}
-      {!isVendor && currentStep === 5 && (
         <div className="space-y-4">
           <div className="flex items-center justify-between">
             <div>
@@ -704,8 +565,8 @@ export default function SignupForm({ onComplete, isVendor = false }: SignupFormP
         </div>
       )}
 
-      {/* CUSTOMER STEP 6: Industry Niches (Optional) */}
-      {!isVendor && currentStep === 6 && (
+      {/* CUSTOMER STEP 5: Industry Niches (Optional) */}
+      {!isVendor && currentStep === 5 && (
         <div className="space-y-5">
           <div className="flex items-center justify-between">
             <div>
@@ -778,8 +639,8 @@ export default function SignupForm({ onComplete, isVendor = false }: SignupFormP
         </div>
       )}
 
-      {/* CUSTOMER STEP 7: Finish */}
-      {!isVendor && currentStep === 7 && (
+      {/* CUSTOMER STEP 6: Finish */}
+      {!isVendor && currentStep === 6 && (
         <div className="space-y-4 text-center py-4">
           <div className="h-16 w-16 rounded-full bg-primary/10 flex items-center justify-center mx-auto">
             <Check className="h-8 w-8 text-primary" />
