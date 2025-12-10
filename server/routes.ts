@@ -663,5 +663,177 @@ export async function registerRoutes(
     }
   });
 
+  // ==================== OUTSYDE POINTS (LOYALTY) ROUTES ====================
+  // $1 = 100 points | 100 points = $1 discount
+  // Points can be redeemed at ANY Outsyde business
+
+  // Get user's points balance and summary
+  app.get("/api/points/balance", async (req, res) => {
+    const userId = req.session?.userId;
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    try {
+      const balance = await storage.getUserPointsBalance(userId);
+      const dollarValue = balance / 100; // 100 points = $1
+      
+      res.json({ 
+        balance, 
+        dollarValue,
+        formattedBalance: balance.toLocaleString(),
+        formattedDollarValue: `$${dollarValue.toFixed(2)}`,
+      });
+    } catch (error) {
+      console.error("Get points balance error:", error);
+      res.status(500).json({ error: "Failed to get points balance" });
+    }
+  });
+
+  // Get user's points transaction history
+  app.get("/api/points/history", async (req, res) => {
+    const userId = req.session?.userId;
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    try {
+      const limit = parseInt(req.query.limit as string) || 50;
+      const transactions = await storage.getPointTransactions(userId, limit);
+      
+      res.json({ transactions });
+    } catch (error) {
+      console.error("Get points history error:", error);
+      res.status(500).json({ error: "Failed to get points history" });
+    }
+  });
+
+  // Calculate points value (for checkout preview)
+  app.post("/api/points/calculate", async (req, res) => {
+    const userId = req.session?.userId;
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    try {
+      const pointsSchema = z.object({
+        points: z.number().int().positive(),
+      });
+      const { points } = pointsSchema.parse(req.body);
+      
+      const balance = await storage.getUserPointsBalance(userId);
+      const availablePoints = Math.min(points, balance);
+      const discountCents = storage.calculatePointsValue(availablePoints);
+      
+      res.json({
+        requestedPoints: points,
+        availablePoints,
+        discountCents,
+        formattedDiscount: `$${(discountCents / 100).toFixed(2)}`,
+        remainingBalance: balance - availablePoints,
+      });
+    } catch (error) {
+      if (error instanceof z.ZodError) {
+        return res.status(400).json({ error: "Invalid data", details: error.errors });
+      }
+      console.error("Calculate points error:", error);
+      res.status(500).json({ error: "Failed to calculate points" });
+    }
+  });
+
+  // Redeem points for discount
+  app.post("/api/points/redeem", async (req, res) => {
+    const userId = req.session?.userId;
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    try {
+      const redeemSchema = z.object({
+        points: z.number().int().positive(),
+        businessId: z.string().optional(),
+        businessName: z.string().optional(),
+        referenceType: z.string().optional(),
+        referenceId: z.string().optional(),
+      });
+      const data = redeemSchema.parse(req.body);
+
+      const result = await storage.redeemPoints({
+        userId,
+        points: data.points,
+        businessId: data.businessId,
+        businessName: data.businessName,
+        referenceType: data.referenceType,
+        referenceId: data.referenceId,
+      });
+
+      if ('error' in result) {
+        return res.status(400).json({ error: result.error });
+      }
+
+      const newBalance = await storage.getUserPointsBalance(userId);
+
+      res.json({
+        success: true,
+        transaction: result.transaction,
+        discountCents: result.discountCents,
+        formattedDiscount: `$${(result.discountCents / 100).toFixed(2)}`,
+        newBalance,
+        formattedNewBalance: newBalance.toLocaleString(),
+      });
+    } catch (error) {
+      if (error instanceof z.ZodError) {
+        return res.status(400).json({ error: "Invalid data", details: error.errors });
+      }
+      console.error("Redeem points error:", error);
+      res.status(500).json({ error: "Failed to redeem points" });
+    }
+  });
+
+  // Earn points (typically called after successful payment - internal use)
+  // In production, this would be triggered by Stripe webhooks
+  app.post("/api/points/earn", async (req, res) => {
+    const userId = req.session?.userId;
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    try {
+      const earnSchema = z.object({
+        dollarAmountCents: z.number().int().positive(),
+        businessId: z.string().optional(),
+        businessName: z.string().optional(),
+        referenceType: z.string().optional(),
+        referenceId: z.string().optional(),
+      });
+      const data = earnSchema.parse(req.body);
+
+      const transaction = await storage.earnPoints({
+        userId,
+        dollarAmountCents: data.dollarAmountCents,
+        businessId: data.businessId,
+        businessName: data.businessName,
+        referenceType: data.referenceType,
+        referenceId: data.referenceId,
+      });
+
+      const newBalance = await storage.getUserPointsBalance(userId);
+
+      res.json({
+        success: true,
+        transaction,
+        pointsEarned: transaction.points,
+        newBalance,
+        formattedNewBalance: newBalance.toLocaleString(),
+      });
+    } catch (error) {
+      if (error instanceof z.ZodError) {
+        return res.status(400).json({ error: "Invalid data", details: error.errors });
+      }
+      console.error("Earn points error:", error);
+      res.status(500).json({ error: "Failed to earn points" });
+    }
+  });
+
   return httpServer;
 }
