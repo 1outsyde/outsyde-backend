@@ -111,6 +111,16 @@ The MVP includes:
 
 Note: The preferences step now includes both niche types (e.g., Italian, BBQ, Mexican for food) AND value priorities (e.g., taste, presentation, service, hospitality). This helps match customers with businesses that align with what matters most to them.
 
+**Value options per industry:**
+- Food: taste, presentation, service, hospitality, ambiance, value, speed, authenticity
+- Clothing: quality, style, sustainability, price, variety, fit, customer_service
+- Beauty: expertise, hygiene, trendy, relaxation, personalization, products, punctuality
+- Fitness: expertise, equipment, atmosphere, community, cleanliness, results
+- Home: craftsmanship, design, timeliness, communication, value, professionalism
+- Health: knowledge, availability, communication, empathy, holistic, reliability
+- Pet: gentleness, expertise, facility, communication, flexibility, transparency
+- Auto: transparency, expertise, timeliness, warranty, convenience, fair_pricing
+
 ### Vendor Signup (6 steps)
 1. Account info
 2. Business info (name, category, description)
