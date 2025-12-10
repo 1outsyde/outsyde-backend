@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { MapPin, Star, MessageCircle, Share2, Heart, Clock } from "lucide-react";
+import { MapPin, Star, Share2, Heart, Clock } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
@@ -7,6 +7,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import ProductCard from "./ProductCard";
 import ServiceCard from "./ServiceCard";
 import BookingCalendar from "./BookingCalendar";
+import VendorChat from "./VendorChat";
 
 interface Product {
   id: string;
@@ -29,6 +30,7 @@ interface Service {
 
 interface VendorStorefrontProps {
   id: string;
+  ownerId: string;
   name: string;
   avatar?: string;
   banner: string;
@@ -43,13 +45,14 @@ interface VendorStorefrontProps {
   availableSlots?: Record<string, { time: string; available: boolean }[]>;
   isFollowing?: boolean;
   onFollow?: () => void;
-  onMessage?: () => void;
   onShare?: () => void;
+  onLoginRequired?: () => void;
   onBookService?: (serviceId: string, date: string, time: string) => void;
 }
 
 export default function VendorStorefront({
   id,
+  ownerId,
   name,
   avatar,
   banner,
@@ -64,8 +67,8 @@ export default function VendorStorefront({
   availableSlots = {},
   isFollowing = false,
   onFollow,
-  onMessage,
   onShare,
+  onLoginRequired,
   onBookService,
 }: VendorStorefrontProps) {
   const [activeTab, setActiveTab] = useState("about");
@@ -126,10 +129,6 @@ export default function VendorStorefront({
               <Heart className={`h-4 w-4 mr-2 ${isFollowing ? "fill-current" : ""}`} />
               {isFollowing ? "Following" : "Follow"}
             </Button>
-            <Button variant="outline" onClick={onMessage} data-testid="button-message-vendor">
-              <MessageCircle className="h-4 w-4 mr-2" />
-              Message
-            </Button>
             <Button size="icon" variant="outline" onClick={onShare} data-testid="button-share-vendor">
               <Share2 className="h-4 w-4" />
             </Button>
@@ -172,6 +171,13 @@ export default function VendorStorefront({
                 Book
               </TabsTrigger>
             )}
+            <TabsTrigger
+              value="chat"
+              className="rounded-none border-b-2 border-transparent data-[state=active]:border-primary data-[state=active]:bg-transparent px-6 py-3"
+              data-testid="tab-chat"
+            >
+              Chat
+            </TabsTrigger>
           </TabsList>
 
           <TabsContent value="about" className="pt-6">
@@ -234,6 +240,18 @@ export default function VendorStorefront({
                 </Button>
               </div>
             )}
+          </TabsContent>
+
+          <TabsContent value="chat" className="pt-6">
+            <div className="max-w-2xl">
+              <h2 className="text-xl font-semibold mb-4">Message Us</h2>
+              <VendorChat
+                vendorId={ownerId}
+                vendorName={name}
+                vendorAvatar={avatar}
+                onLoginRequired={onLoginRequired}
+              />
+            </div>
           </TabsContent>
         </Tabs>
       </div>

@@ -176,13 +176,11 @@ function App() {
             {currentPage === "home" && (
               <HomePage
                 onViewBusiness={handleViewBusiness}
-                onMessage={handleMessage}
               />
             )}
             {currentPage === "search" && (
               <SearchPage
                 onViewBusiness={handleViewBusiness}
-                onMessage={handleMessage}
               />
             )}
             {currentPage === "messages" && (
@@ -199,7 +197,7 @@ function App() {
                   setCurrentPage("home");
                   setActiveTab("home");
                 }}
-                onMessage={handleMessage}
+                onLoginRequired={() => setCurrentPage("auth")}
               />
             )}
           </main>

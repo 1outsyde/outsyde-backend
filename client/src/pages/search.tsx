@@ -15,7 +15,6 @@ import type { Business, City } from "@shared/schema";
 
 interface SearchPageProps {
   onViewBusiness: (id: string) => void;
-  onMessage: (id: string) => void;
 }
 
 const categoryImageMap: Record<string, string> = {
@@ -25,7 +24,7 @@ const categoryImageMap: Record<string, string> = {
   "Health": yogaImage,
 };
 
-export default function SearchPage({ onViewBusiness, onMessage }: SearchPageProps) {
+export default function SearchPage({ onViewBusiness }: SearchPageProps) {
   const [searchValue, setSearchValue] = useState("");
   const [selectedCategories, setSelectedCategories] = useState<string[]>([]);
   const [likedBusinesses, setLikedBusinesses] = useState<Set<string>>(new Set());
@@ -251,10 +250,13 @@ export default function SearchPage({ onViewBusiness, onMessage }: SearchPageProp
                   location={`${business.city || ""}, ${business.state || ""}`}
                   rating={formatRating(business.rating)}
                   reviewCount={business.reviewCount || 0}
+                  hasServices={business.category === "Beauty & Wellness" || business.category === "Health & Fitness"}
+                  hasProducts={business.category === "Food & Drinks" || business.category === "Shopping"}
                   isLiked={likedBusinesses.has(business.id)}
                   onLike={toggleLikeBusiness}
                   onClick={onViewBusiness}
-                  onMessage={onMessage}
+                  onBook={onViewBusiness}
+                  onShop={onViewBusiness}
                 />
               ))}
             </div>

@@ -1,4 +1,4 @@
-import { Heart, MapPin, Star, MessageCircle } from "lucide-react";
+import { Heart, MapPin, Star, Calendar, ShoppingBag } from "lucide-react";
 import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -14,10 +14,13 @@ interface BusinessCardProps {
   location: string;
   rating: number;
   reviewCount: number;
+  hasServices?: boolean;
+  hasProducts?: boolean;
   isLiked?: boolean;
   onLike?: (id: string) => void;
   onClick?: (id: string) => void;
-  onMessage?: (id: string) => void;
+  onBook?: (id: string) => void;
+  onShop?: (id: string) => void;
 }
 
 export default function BusinessCard({
@@ -30,10 +33,13 @@ export default function BusinessCard({
   location,
   rating,
   reviewCount,
+  hasServices = false,
+  hasProducts = false,
   isLiked = false,
   onLike,
   onClick,
-  onMessage,
+  onBook,
+  onShop,
 }: BusinessCardProps) {
   return (
     <Card
@@ -89,24 +95,54 @@ export default function BusinessCard({
           {description}
         </p>
 
-        <div className="flex items-center justify-between">
+        <div className="flex items-center justify-between gap-2">
           <div className="flex items-center gap-1">
             <Star className="h-4 w-4 fill-yellow-400 text-yellow-400" />
             <span className="font-medium">{rating.toFixed(1)}</span>
             <span className="text-sm text-muted-foreground">({reviewCount})</span>
           </div>
-          <Button
-            size="sm"
-            variant="outline"
-            onClick={(e) => {
-              e.stopPropagation();
-              onMessage?.(id);
-            }}
-            data-testid={`button-message-${id}`}
-          >
-            <MessageCircle className="h-4 w-4 mr-1" />
-            Chat
-          </Button>
+          <div className="flex items-center gap-2">
+            {hasServices && (
+              <Button
+                size="sm"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onBook?.(id);
+                }}
+                data-testid={`button-book-${id}`}
+              >
+                <Calendar className="h-4 w-4 mr-1" />
+                Book
+              </Button>
+            )}
+            {hasProducts && (
+              <Button
+                size="sm"
+                variant={hasServices ? "outline" : "default"}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onShop?.(id);
+                }}
+                data-testid={`button-shop-${id}`}
+              >
+                <ShoppingBag className="h-4 w-4 mr-1" />
+                Shop
+              </Button>
+            )}
+            {!hasServices && !hasProducts && (
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onClick?.(id);
+                }}
+                data-testid={`button-view-${id}`}
+              >
+                View
+              </Button>
+            )}
+          </div>
         </div>
       </div>
     </Card>

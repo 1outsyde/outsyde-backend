@@ -12,10 +12,9 @@ import yogaImage from "@assets/generated_images/yoga_studio_vendor_image.png";
 
 interface HomePageProps {
   onViewBusiness: (id: string) => void;
-  onMessage: (id: string) => void;
 }
 
-export default function HomePage({ onViewBusiness, onMessage }: HomePageProps) {
+export default function HomePage({ onViewBusiness }: HomePageProps) {
   const [location, setLocation] = useState("");
   const [searchValue, setSearchValue] = useState("");
   const [selectedCategories, setSelectedCategories] = useState<string[]>([]);
@@ -116,6 +115,8 @@ export default function HomePage({ onViewBusiness, onMessage }: HomePageProps) {
       location: "Downtown, 0.5 mi away",
       rating: 4.8,
       reviewCount: 124,
+      hasProducts: true,
+      hasServices: false,
     },
     {
       id: "2",
@@ -126,6 +127,8 @@ export default function HomePage({ onViewBusiness, onMessage }: HomePageProps) {
       location: "Midtown, 0.8 mi away",
       rating: 4.9,
       reviewCount: 89,
+      hasProducts: true,
+      hasServices: true,
     },
     {
       id: "3",
@@ -136,6 +139,8 @@ export default function HomePage({ onViewBusiness, onMessage }: HomePageProps) {
       location: "Arts District, 1.2 mi away",
       rating: 4.7,
       reviewCount: 56,
+      hasProducts: true,
+      hasServices: false,
     },
     {
       id: "4",
@@ -146,6 +151,8 @@ export default function HomePage({ onViewBusiness, onMessage }: HomePageProps) {
       location: "Wellness Center, 0.6 mi away",
       rating: 4.9,
       reviewCount: 203,
+      hasProducts: false,
+      hasServices: true,
     },
   ];
 
@@ -182,7 +189,8 @@ export default function HomePage({ onViewBusiness, onMessage }: HomePageProps) {
                   isLiked={likedBusinesses.has(business.id)}
                   onLike={toggleLikeBusiness}
                   onClick={onViewBusiness}
-                  onMessage={onMessage}
+                  onBook={onViewBusiness}
+                  onShop={onViewBusiness}
                 />
               ))}
             </div>

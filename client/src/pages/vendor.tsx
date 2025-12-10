@@ -9,10 +9,10 @@ import yogaImage from "@assets/generated_images/yoga_studio_vendor_image.png";
 interface VendorPageProps {
   vendorId: string;
   onBack: () => void;
-  onMessage: (id: string) => void;
+  onLoginRequired: () => void;
 }
 
-export default function VendorPage({ vendorId, onBack, onMessage }: VendorPageProps) {
+export default function VendorPage({ vendorId, onBack, onLoginRequired }: VendorPageProps) {
   const [isFollowing, setIsFollowing] = useState(false);
 
   const today = new Date();
@@ -26,6 +26,7 @@ export default function VendorPage({ vendorId, onBack, onMessage }: VendorPagePr
   const vendorsData: Record<string, any> = {
     "1": {
       id: "1",
+      ownerId: "vendor-test-1",
       name: "Sunrise Coffee Co.",
       banner: coffeeShopImage,
       category: "Coffee & Cafe",
@@ -43,6 +44,7 @@ export default function VendorPage({ vendorId, onBack, onMessage }: VendorPagePr
     },
     "2": {
       id: "2",
+      ownerId: "vendor-test-2",
       name: "Bella's Hair Studio",
       banner: hairSalonImage,
       category: "Beauty & Wellness",
@@ -63,6 +65,7 @@ export default function VendorPage({ vendorId, onBack, onMessage }: VendorPagePr
     },
     "3": {
       id: "3",
+      ownerId: "vendor-test-3",
       name: "Artisan Jewelry Co.",
       banner: jewelryImage,
       category: "Shopping",
@@ -81,6 +84,7 @@ export default function VendorPage({ vendorId, onBack, onMessage }: VendorPagePr
     },
     "4": {
       id: "4",
+      ownerId: "vendor-test-4",
       name: "Zen Yoga Studio",
       banner: yogaImage,
       category: "Health & Fitness",
@@ -98,6 +102,7 @@ export default function VendorPage({ vendorId, onBack, onMessage }: VendorPagePr
     },
     "5": {
       id: "5",
+      ownerId: "vendor-test-5",
       name: "Green Valley Organics",
       banner: produceImage,
       category: "Food & Drinks",
@@ -149,8 +154,8 @@ export default function VendorPage({ vendorId, onBack, onMessage }: VendorPagePr
         availableSlots={availableSlots}
         isFollowing={isFollowing}
         onFollow={() => setIsFollowing(!isFollowing)}
-        onMessage={() => onMessage(vendor.id)}
         onShare={() => console.log("Share vendor")}
+        onLoginRequired={onLoginRequired}
         onBookService={(serviceId, date, time) =>
           console.log("Book:", serviceId, date, time)
         }
