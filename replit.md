@@ -14,15 +14,17 @@ The MVP includes:
 - Mobile API documentation for native app developers
 - **Stripe Connect** integration for marketplace payments (stripe-replit-sync)
 - **Verified Reviews** - only customers with completed bookings/orders can leave reviews
+- **Real-time Chat** - WebSocket-based messaging between customers and businesses
 
 ## Project Architecture
 
 ### Backend (Express + TypeScript)
 - `server/index.ts` - Express server with session middleware and database seeding
-- `server/routes.ts` - API routes for auth, businesses, cities, user preferences, reviews, Stripe
+- `server/routes.ts` - API routes for auth, businesses, cities, user preferences, reviews, Stripe, chat
 - `server/auth.ts` - JWT token generation/verification for mobile apps
 - `server/storage.ts` - DatabaseStorage class with PostgreSQL via Drizzle ORM
 - `server/db.ts` - Drizzle database client configuration
+- `server/websocket.ts` - WebSocket server for real-time chat messaging
 - `server/stripe/` - Stripe Connect integration (stripeClient.ts, stripeService.ts, webhookHandlers.ts)
 - `server/Photographers/` - Photographer business routes and types
 
@@ -76,6 +78,14 @@ The MVP includes:
 - `POST /api/reviews` - Create a verified review (requires completed booking/order)
 - `GET /api/reviews/can-review/:bookingType/:bookingId` - Check if booking can be reviewed
 
+### Real-time Chat
+- `GET /api/conversations` - Get user's conversations
+- `POST /api/conversations` - Create or find conversation with another user
+- `GET /api/conversations/:id/messages` - Get messages in a conversation
+- `POST /api/conversations/:id/messages` - Send a message (REST fallback)
+- `GET /api/messages/unread-count` - Get unread message count
+- WebSocket endpoint: `/ws` - Real-time messaging with JWT auth
+
 ## Key Features
 
 ### Dual Authentication System
@@ -127,6 +137,14 @@ The MVP includes:
 - id, name, state
 - businessCount, imageUrl, trending
 
+### Conversations
+- id (UUID), participant1Id (FK to users), participant2Id (FK to users)
+- lastMessageAt, lastMessagePreview, createdAt
+
+### Messages
+- id (UUID), conversationId (FK to conversations), senderId (FK to users)
+- content, isRead, readAt, createdAt
+
 ### Reviews (verified)
 - id (UUID), reviewerId (FK to users), targetType (photographer/business/service_business)
 - targetId (FK to target), bookingType (shoot_booking/appointment/order)
@@ -153,6 +171,11 @@ The MVP includes:
 - **Verified Reviews** implemented - only customers with completed bookings can review
 - Reviews table added with booking verification fields
 - Stripe routes for checkout and subscription management
+- **Real-time Chat** implemented with WebSocket server
+- Chat database tables (conversations, messages) with read tracking
+- REST API endpoints for chat history and conversation management
+- WebSocket integrated with JWT authentication for mobile apps
+- Frontend chat UI with conversation list and message interface
 
 ## User Preferences
 - Golden yellow color scheme for branding

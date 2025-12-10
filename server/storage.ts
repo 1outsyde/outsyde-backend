@@ -540,7 +540,7 @@ export class DatabaseStorage implements IStorage {
   // =========================
 
   async getOrCreateConversation(participant1Id: string, participant2Id: string): Promise<Conversation> {
-    // Check if conversation exists between these two users
+    // Check if conversation exists between these two users (check both orderings)
     const existing = await db.select().from(conversations).where(
       or(
         and(
@@ -558,15 +558,43 @@ export class DatabaseStorage implements IStorage {
       return existing[0];
     }
 
-    // Create new conversation
-    const id = randomUUID();
-    const result = await db.insert(conversations).values({
-      id,
-      participant1Id,
-      participant2Id,
-    }).returning();
+    // Normalize participant order to prevent duplicate conversations under concurrency
+    // Always store the smaller UUID as participant1Id
+    const [p1, p2] = participant1Id < participant2Id 
+      ? [participant1Id, participant2Id] 
+      : [participant2Id, participant1Id];
 
-    return result[0];
+    // Create new conversation with normalized order
+    const id = randomUUID();
+    try {
+      const result = await db.insert(conversations).values({
+        id,
+        participant1Id: p1,
+        participant2Id: p2,
+      }).returning();
+
+      return result[0];
+    } catch (error: any) {
+      // Handle potential race condition - re-check for existing conversation
+      if (error.code === '23505') { // Unique constraint violation
+        const existingAfterRetry = await db.select().from(conversations).where(
+          or(
+            and(
+              eq(conversations.participant1Id, p1),
+              eq(conversations.participant2Id, p2)
+            ),
+            and(
+              eq(conversations.participant1Id, p2),
+              eq(conversations.participant2Id, p1)
+            )
+          )
+        );
+        if (existingAfterRetry.length > 0) {
+          return existingAfterRetry[0];
+        }
+      }
+      throw error;
+    }
   }
 
   async getConversation(id: string): Promise<Conversation | undefined> {
