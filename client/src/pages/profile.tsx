@@ -7,6 +7,7 @@ import { Badge } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/separator";
 import LoyaltyPointsCard from "@/components/LoyaltyPointsCard";
 import PointsHistory from "@/components/PointsHistory";
+import ReferralCard from "@/components/ReferralCard";
 import { useQuery } from "@tanstack/react-query";
 import { Skeleton } from "@/components/ui/skeleton";
 
@@ -321,6 +322,8 @@ export default function ProfilePage({ onLogout }: ProfilePageProps) {
                 </div>
               </CardContent>
             </Card>
+            
+            <ReferralCard />
             
             <PointsHistory />
           </div>

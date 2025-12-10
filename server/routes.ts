@@ -790,6 +790,70 @@ export async function registerRoutes(
     }
   });
 
+  // =========================
+  // REFERRAL SYSTEM
+  // =========================
+
+  // Get user's referral code (generates one if not exists)
+  app.get("/api/referral/code", async (req, res) => {
+    const userId = req.session?.userId;
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    try {
+      const code = await storage.generateReferralCode(userId);
+      const user = await storage.getUser(userId);
+      
+      res.json({
+        referralCode: code,
+        referralLink: `${req.protocol}://${req.get('host')}/signup?ref=${code}`,
+        bonusForReferrer: 500,
+        bonusForNewUser: 200,
+        referredBy: user?.referredBy || null,
+      });
+    } catch (error) {
+      console.error("Get referral code error:", error);
+      res.status(500).json({ error: "Failed to get referral code" });
+    }
+  });
+
+  // Apply a referral code (for new users)
+  app.post("/api/referral/apply", async (req, res) => {
+    const userId = req.session?.userId;
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    try {
+      const schema = z.object({
+        referralCode: z.string().min(1).max(20),
+      });
+      const { referralCode } = schema.parse(req.body);
+
+      const result = await storage.processReferral(userId, referralCode);
+
+      if (!result.success) {
+        return res.status(400).json({ success: false, error: result.error });
+      }
+
+      const newBalance = await storage.getUserPointsBalance(userId);
+
+      res.json({
+        success: true,
+        message: "Referral applied successfully! You've earned 200 bonus points.",
+        pointsEarned: 200,
+        newBalance,
+      });
+    } catch (error) {
+      if (error instanceof z.ZodError) {
+        return res.status(400).json({ error: "Invalid referral code format" });
+      }
+      console.error("Apply referral error:", error);
+      res.status(500).json({ error: "Failed to apply referral code" });
+    }
+  });
+
   // Earn points (typically called after successful payment - internal use)
   // In production, this would be triggered by Stripe webhooks
   app.post("/api/points/earn", async (req, res) => {

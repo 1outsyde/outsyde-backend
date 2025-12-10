@@ -41,6 +41,10 @@ export const users = pgTable("users", {
   // Outsyde Points (loyalty program)
   // $1 = 100 points, redeemable at any Outsyde business
   loyaltyPoints: integer("loyalty_points").default(0).notNull(),
+
+  // Referral system
+  referralCode: text("referral_code").unique(),
+  referredBy: varchar("referred_by", { length: 36 }).references(() => users.id),
 });
 
 

@@ -118,6 +118,12 @@ export interface IStorage {
   getPointTransactions(userId: string, limit?: number): Promise<PointTransaction[]>;
   calculatePointsValue(points: number): number; // Returns discount in cents
 
+  // Referral system
+  generateReferralCode(userId: string): Promise<string>;
+  getUserReferralCode(userId: string): Promise<string | null>;
+  getUserByReferralCode(code: string): Promise<User | undefined>;
+  processReferral(newUserId: string, referralCode: string): Promise<{ success: boolean; referrerId?: string; error?: string }>;
+
   seedInitialData(): Promise<void>;
 }
 
@@ -875,6 +881,98 @@ export class DatabaseStorage implements IStorage {
   calculatePointsValue(points: number): number {
     // 100 points = $1 = 100 cents
     return points;
+  }
+
+  // =========================
+  // REFERRAL SYSTEM
+  // =========================
+  // Referrers and new users both get bonus points
+
+  private readonly REFERRAL_BONUS_POINTS = 500; // $5 worth of points for referrer
+  private readonly NEW_USER_REFERRAL_BONUS = 200; // $2 worth of points for new user
+
+  async generateReferralCode(userId: string): Promise<string> {
+    // Check if user already has a code
+    const user = await this.getUser(userId);
+    if (user?.referralCode) {
+      return user.referralCode;
+    }
+
+    // Generate a unique 8-character alphanumeric code
+    const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // Excluded similar characters
+    let code = '';
+    for (let i = 0; i < 8; i++) {
+      code += chars.charAt(Math.floor(Math.random() * chars.length));
+    }
+
+    // Ensure uniqueness
+    const existing = await this.getUserByReferralCode(code);
+    if (existing) {
+      return this.generateReferralCode(userId); // Recursively try again
+    }
+
+    // Save the code
+    await db.update(users)
+      .set({ referralCode: code })
+      .where(eq(users.id, userId));
+
+    return code;
+  }
+
+  async getUserReferralCode(userId: string): Promise<string | null> {
+    const user = await this.getUser(userId);
+    return user?.referralCode || null;
+  }
+
+  async getUserByReferralCode(code: string): Promise<User | undefined> {
+    const result = await db.select().from(users).where(
+      sql`UPPER(${users.referralCode}) = UPPER(${code})`
+    );
+    return result[0];
+  }
+
+  async processReferral(newUserId: string, referralCode: string): Promise<{ success: boolean; referrerId?: string; error?: string }> {
+    // Find the referrer
+    const referrer = await this.getUserByReferralCode(referralCode);
+    if (!referrer) {
+      return { success: false, error: 'Invalid referral code' };
+    }
+
+    // Can't refer yourself
+    if (referrer.id === newUserId) {
+      return { success: false, error: 'You cannot use your own referral code' };
+    }
+
+    // Check if user was already referred
+    const newUser = await this.getUser(newUserId);
+    if (newUser?.referredBy) {
+      return { success: false, error: 'You have already used a referral code' };
+    }
+
+    // Mark the new user as referred
+    await db.update(users)
+      .set({ referredBy: referrer.id })
+      .where(eq(users.id, newUserId));
+
+    // Award points to referrer
+    await this.earnPoints({
+      userId: referrer.id,
+      dollarAmountCents: this.REFERRAL_BONUS_POINTS,
+      referenceType: 'referral',
+      referenceId: newUserId,
+      description: `Referral bonus for inviting a friend`,
+    });
+
+    // Award points to new user
+    await this.earnPoints({
+      userId: newUserId,
+      dollarAmountCents: this.NEW_USER_REFERRAL_BONUS,
+      referenceType: 'referral_welcome',
+      referenceId: referrer.id,
+      description: `Welcome bonus for joining via referral`,
+    });
+
+    return { success: true, referrerId: referrer.id };
   }
 
   // =========================

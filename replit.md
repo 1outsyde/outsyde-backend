@@ -207,7 +207,14 @@ The MVP includes:
   - API endpoints for balance, history, calculate, redeem, and earn
   - Frontend: LoyaltyPointsCard component, PointsHistory component
   - Profile page updated with "My Points" section showing balance and transaction history
-  - Integration note: Call POST /api/points/earn after successful payment completion
+  - Stripe webhook integration: Points automatically awarded on checkout completion
+- **Referral System** implemented
+  - Users can earn 500 points ($5 value) for each friend they refer
+  - New users get 200 bonus points ($2 value) when joining via referral
+  - Each user gets a unique 8-character referral code
+  - Database: users.referralCode, users.referredBy fields
+  - API endpoints: GET /api/referral/code, POST /api/referral/apply
+  - Frontend: ReferralCard component in profile "My Points" section
 
 ## User Preferences
 - Golden yellow color scheme for branding
