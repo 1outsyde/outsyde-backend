@@ -1,30 +1,42 @@
 import { useState } from "react";
-import { User, Settings, Heart, Calendar, ShoppingBag, LogOut, ChevronRight } from "lucide-react";
+import { User, Settings, Heart, Calendar, ShoppingBag, LogOut, ChevronRight, Coins } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/separator";
 import LoyaltyPointsCard from "@/components/LoyaltyPointsCard";
+import PointsHistory from "@/components/PointsHistory";
+import { useQuery } from "@tanstack/react-query";
+import { Skeleton } from "@/components/ui/skeleton";
+
+interface ProfileUser {
+  id: string;
+  email: string;
+  name: string;
+  city?: string;
+  state?: string;
+  isVendor: boolean;
+  createdAt?: string;
+}
 
 interface ProfilePageProps {
   onLogout: () => void;
 }
 
 export default function ProfilePage({ onLogout }: ProfilePageProps) {
-  const [activeSection, setActiveSection] = useState<"overview" | "bookings" | "orders" | "favorites">("overview");
+  const [activeSection, setActiveSection] = useState<"overview" | "bookings" | "orders" | "favorites" | "points">("overview");
 
-  // todo: remove mock functionality
-  const user = {
-    name: "Alex Johnson",
-    email: "alex@example.com",
-    location: "New York, NY",
-    memberSince: "January 2024",
-    points: 2450,
-    nextRewardAt: 3000,
-    tier: "Gold",
-    rewardsAvailable: 3,
-  };
+  const { data: userData, isLoading: userLoading } = useQuery<ProfileUser>({
+    queryKey: ["/api/auth/me"],
+  });
+
+  const user = userData ? {
+    name: userData.name || "User",
+    email: userData.email || "",
+    location: userData.city && userData.state ? `${userData.city}, ${userData.state}` : "Location not set",
+    memberSince: userData.createdAt ? new Date(userData.createdAt).toLocaleDateString('en-US', { month: 'long', year: 'numeric' }) : "2024",
+  } : null;
 
   // todo: remove mock functionality
   const recentBookings = [
@@ -68,10 +80,42 @@ export default function ProfilePage({ onLogout }: ProfilePageProps) {
 
   const menuItems = [
     { id: "overview", icon: User, label: "Overview" },
+    { id: "points", icon: Coins, label: "My Points" },
     { id: "bookings", icon: Calendar, label: "My Bookings" },
     { id: "orders", icon: ShoppingBag, label: "My Orders" },
     { id: "favorites", icon: Heart, label: "Favorites" },
   ];
+
+  if (userLoading) {
+    return (
+      <div className="min-h-screen pb-20 md:pb-0" data-testid="page-profile-loading">
+        <div className="max-w-4xl mx-auto px-4 py-6">
+          <Card className="overflow-visible mb-6">
+            <CardContent className="p-6">
+              <div className="flex flex-col sm:flex-row items-center gap-4">
+                <Skeleton className="h-20 w-20 rounded-full" />
+                <div className="flex-1">
+                  <Skeleton className="h-8 w-40 mb-2" />
+                  <Skeleton className="h-4 w-32 mb-2" />
+                  <Skeleton className="h-6 w-48" />
+                </div>
+              </div>
+            </CardContent>
+          </Card>
+        </div>
+      </div>
+    );
+  }
+
+  if (!user) {
+    return (
+      <div className="min-h-screen pb-20 md:pb-0 flex items-center justify-center" data-testid="page-profile-not-found">
+        <Card className="overflow-visible p-6 text-center">
+          <p className="text-muted-foreground">Please log in to view your profile</p>
+        </Card>
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen pb-20 md:pb-0" data-testid="page-profile">
@@ -99,14 +143,10 @@ export default function ProfilePage({ onLogout }: ProfilePageProps) {
         </Card>
 
         <LoyaltyPointsCard
-          points={user.points}
-          nextRewardAt={user.nextRewardAt}
-          tierName={user.tier}
-          rewardsAvailable={user.rewardsAvailable}
-          onViewRewards={() => console.log("View rewards")}
+          onViewHistory={() => setActiveSection("points")}
         />
 
-        <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 my-6">
+        <div className="grid grid-cols-2 sm:grid-cols-5 gap-2 my-6">
           {menuItems.map((item) => (
             <Button
               key={item.id}
@@ -252,6 +292,38 @@ export default function ProfilePage({ onLogout }: ProfilePageProps) {
               </div>
             </CardContent>
           </Card>
+        )}
+
+        {activeSection === "points" && (
+          <div className="space-y-6">
+            <Card className="overflow-visible bg-gradient-to-br from-primary/10 to-primary/5 border-primary/20">
+              <CardContent className="p-6">
+                <h3 className="font-semibold mb-2 flex items-center gap-2">
+                  <Coins className="h-5 w-5 text-primary" />
+                  How Outsyde Points Work
+                </h3>
+                <div className="grid gap-4 sm:grid-cols-3">
+                  <div className="text-center p-3 rounded-md bg-background/50">
+                    <p className="text-2xl font-bold text-primary">$1</p>
+                    <p className="text-sm text-muted-foreground">spent</p>
+                    <p className="text-lg font-semibold mt-1">= 100 pts</p>
+                  </div>
+                  <div className="text-center p-3 rounded-md bg-background/50">
+                    <p className="text-2xl font-bold text-primary">100 pts</p>
+                    <p className="text-sm text-muted-foreground">redeemed</p>
+                    <p className="text-lg font-semibold mt-1">= $1 off</p>
+                  </div>
+                  <div className="text-center p-3 rounded-md bg-background/50">
+                    <p className="text-2xl font-bold text-primary">Any</p>
+                    <p className="text-sm text-muted-foreground">business</p>
+                    <p className="text-lg font-semibold mt-1">platform-wide</p>
+                  </div>
+                </div>
+              </CardContent>
+            </Card>
+            
+            <PointsHistory />
+          </div>
         )}
 
         {activeSection === "favorites" && (
