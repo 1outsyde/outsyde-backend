@@ -101,14 +101,15 @@ The MVP includes:
 - **Mobile (JWT-based)**: Uses accessToken (1hr) + refreshToken (7 days)
 - Passwords securely hashed with bcrypt (10 rounds)
 
-### Customer Signup (7 steps)
+### Customer Signup (6 steps)
 1. Account info (name, email, password)
 2. Location (address, city, state, zip)
-3. Demographics (age, gender, ethnicity, nationality)
-4. Lifestyle (household size, income, education, occupation)
-5. Industry interests (optional - 8 industries to choose from)
-6. Niche preferences (optional - specific preferences per industry)
-7. Completion
+3. Demographics (age, gender, ethnicity)
+4. Industry interests (optional - 8 industries to choose from)
+5. Preferences & Values (optional - specific preferences AND value priorities per industry)
+6. Completion
+
+Note: The preferences step now includes both niche types (e.g., Italian, BBQ, Mexican for food) AND value priorities (e.g., taste, presentation, service, hospitality). This helps match customers with businesses that align with what matters most to them.
 
 ### Vendor Signup (6 steps)
 1. Account info
