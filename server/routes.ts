@@ -225,6 +225,38 @@ export async function registerRoutes(
     }
   });
 
+  // Get access token for WebSocket authentication (for session users)
+  app.get("/api/v1/auth/token", async (req, res) => {
+    const userId = req.session?.userId;
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    try {
+      const user = await storage.getUser(userId);
+      if (!user) {
+        return res.status(404).json({ error: "User not found" });
+      }
+
+      let businessId: string | undefined;
+      if (user.isVendor) {
+        const business = await storage.getBusinessByOwnerId(userId);
+        businessId = business?.id;
+      }
+
+      const accessToken = generateAccessToken({
+        userId,
+        isVendor: user.isVendor,
+        businessId,
+      });
+
+      res.json({ accessToken });
+    } catch (error) {
+      console.error("Token generation error:", error);
+      res.status(500).json({ error: "Failed to generate token" });
+    }
+  });
+
   // ==================== USER PREFERENCES ====================
 
   app.patch("/api/users/preferences", async (req, res) => {

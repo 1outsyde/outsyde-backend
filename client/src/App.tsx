@@ -21,12 +21,18 @@ import jewelryImage from "@assets/generated_images/jewelry_artisan_vendor_image.
 type Page = "home" | "search" | "messages" | "profile" | "vendor" | "auth" | "vendor-dashboard";
 type NavTab = "home" | "search" | "create" | "messages" | "profile";
 
+interface MessageTarget {
+  vendorId: string;
+  vendorName?: string;
+}
+
 function App() {
   const [currentPage, setCurrentPage] = useState<Page>("home");
   const [activeTab, setActiveTab] = useState<NavTab>("home");
   const [isAuthenticated, setIsAuthenticated] = useState(false);
   const [isVendor, setIsVendor] = useState(false);
   const [selectedVendorId, setSelectedVendorId] = useState<string>("1");
+  const [messageTarget, setMessageTarget] = useState<MessageTarget | null>(null);
 
   // todo: remove mock functionality
   const [cartItems, setCartItems] = useState([
@@ -68,11 +74,13 @@ function App() {
     setCurrentPage("vendor");
   };
 
-  const handleMessage = (id: string) => {
+  const handleMessage = (id: string, name?: string) => {
     if (!isAuthenticated) {
       setCurrentPage("auth");
     } else {
+      setMessageTarget({ vendorId: id, vendorName: name });
       setCurrentPage("messages");
+      setActiveTab("messages");
     }
   };
 
@@ -177,7 +185,12 @@ function App() {
                 onMessage={handleMessage}
               />
             )}
-            {currentPage === "messages" && <MessagesPage />}
+            {currentPage === "messages" && (
+              <MessagesPage 
+                targetVendorId={messageTarget?.vendorId}
+                onClearTarget={() => setMessageTarget(null)}
+              />
+            )}
             {currentPage === "profile" && <ProfilePage onLogout={handleLogout} />}
             {currentPage === "vendor" && (
               <VendorPage

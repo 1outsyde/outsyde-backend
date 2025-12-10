@@ -23,6 +23,7 @@ interface ChatInterfaceProps {
   messages: Message[];
   onSendMessage?: (content: string) => void;
   onBack?: () => void;
+  isTyping?: boolean;
 }
 
 export default function ChatInterface({
@@ -32,6 +33,7 @@ export default function ChatInterface({
   messages,
   onSendMessage,
   onBack,
+  isTyping = false,
 }: ChatInterfaceProps) {
   const [inputValue, setInputValue] = useState("");
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -88,6 +90,16 @@ export default function ChatInterface({
           {messages.map((message) => (
             <ChatMessage key={message.id} {...message} />
           ))}
+          {isTyping && (
+            <div className="flex items-center gap-2 text-muted-foreground" data-testid="typing-indicator">
+              <div className="flex gap-1">
+                <div className="h-2 w-2 rounded-full bg-muted-foreground animate-bounce" style={{ animationDelay: "0ms" }} />
+                <div className="h-2 w-2 rounded-full bg-muted-foreground animate-bounce" style={{ animationDelay: "150ms" }} />
+                <div className="h-2 w-2 rounded-full bg-muted-foreground animate-bounce" style={{ animationDelay: "300ms" }} />
+              </div>
+              <span className="text-sm">{recipientName} is typing...</span>
+            </div>
+          )}
         </div>
       </ScrollArea>
 
