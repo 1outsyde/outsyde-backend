@@ -927,5 +927,207 @@ export async function registerRoutes(
     }
   });
 
+  // ==================== PUSH NOTIFICATIONS ====================
+  
+  const { 
+    getVapidPublicKey, 
+    isPushConfigured, 
+    sendCartReminderNotifications 
+  } = await import('./pushService');
+
+  app.get("/api/push/vapid-key", (req, res) => {
+    const key = getVapidPublicKey();
+    res.json({ 
+      publicKey: key,
+      configured: isPushConfigured()
+    });
+  });
+
+  app.post("/api/push/subscribe", async (req, res) => {
+    const userId = req.session?.userId;
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    try {
+      const schema = z.object({
+        endpoint: z.string().url(),
+        keys: z.object({
+          p256dh: z.string(),
+          auth: z.string(),
+        }),
+      });
+      const data = schema.parse(req.body);
+
+      const subscription = await storage.savePushSubscription({
+        userId,
+        endpoint: data.endpoint,
+        p256dh: data.keys.p256dh,
+        auth: data.keys.auth,
+        userAgent: req.headers['user-agent'] || null,
+      });
+
+      res.json({ success: true, subscription });
+    } catch (error) {
+      if (error instanceof z.ZodError) {
+        return res.status(400).json({ error: "Invalid subscription data" });
+      }
+      console.error("Subscribe error:", error);
+      res.status(500).json({ error: "Failed to save subscription" });
+    }
+  });
+
+  app.delete("/api/push/unsubscribe", async (req, res) => {
+    const userId = req.session?.userId;
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    try {
+      const { endpoint } = req.body;
+      if (!endpoint) {
+        return res.status(400).json({ error: "Endpoint required" });
+      }
+
+      await storage.deletePushSubscription(userId, endpoint);
+      res.json({ success: true });
+    } catch (error) {
+      console.error("Unsubscribe error:", error);
+      res.status(500).json({ error: "Failed to unsubscribe" });
+    }
+  });
+
+  app.post("/api/push/send-cart-reminders", async (req, res) => {
+    try {
+      const sentCount = await sendCartReminderNotifications();
+      res.json({ success: true, sentCount });
+    } catch (error) {
+      console.error("Cart reminder error:", error);
+      res.status(500).json({ error: "Failed to send reminders" });
+    }
+  });
+
+  // ==================== CART MANAGEMENT ====================
+
+  app.get("/api/cart", async (req, res) => {
+    const userId = req.session?.userId;
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    try {
+      const items = await storage.getCartItems(userId);
+      const totalCents = items.reduce((sum, item) => sum + item.priceInCents * item.quantity, 0);
+      res.json({ 
+        items,
+        itemCount: items.reduce((sum, item) => sum + item.quantity, 0),
+        totalCents,
+        totalFormatted: `$${(totalCents / 100).toFixed(2)}`
+      });
+    } catch (error) {
+      console.error("Get cart error:", error);
+      res.status(500).json({ error: "Failed to get cart" });
+    }
+  });
+
+  app.post("/api/cart/add", async (req, res) => {
+    const userId = req.session?.userId;
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    try {
+      const schema = z.object({
+        productId: z.string(),
+        productName: z.string(),
+        productImage: z.string().optional(),
+        priceInCents: z.number().int().positive(),
+        quantity: z.number().int().positive().default(1),
+        businessId: z.string().optional(),
+        businessName: z.string().optional(),
+      });
+      const data = schema.parse(req.body);
+
+      const item = await storage.addCartItem({
+        userId,
+        ...data,
+      });
+
+      const items = await storage.getCartItems(userId);
+      res.json({ 
+        success: true, 
+        item,
+        itemCount: items.reduce((sum, i) => sum + i.quantity, 0)
+      });
+    } catch (error) {
+      if (error instanceof z.ZodError) {
+        return res.status(400).json({ error: "Invalid cart item data" });
+      }
+      console.error("Add to cart error:", error);
+      res.status(500).json({ error: "Failed to add item to cart" });
+    }
+  });
+
+  app.patch("/api/cart/:id", async (req, res) => {
+    const userId = req.session?.userId;
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    try {
+      const { quantity } = req.body;
+      if (typeof quantity !== 'number') {
+        return res.status(400).json({ error: "Quantity required" });
+      }
+
+      const item = await storage.updateCartItemQuantity(req.params.id, quantity);
+      const items = await storage.getCartItems(userId);
+      
+      res.json({ 
+        success: true, 
+        item,
+        itemCount: items.reduce((sum, i) => sum + i.quantity, 0)
+      });
+    } catch (error) {
+      console.error("Update cart error:", error);
+      res.status(500).json({ error: "Failed to update cart item" });
+    }
+  });
+
+  app.delete("/api/cart/:id", async (req, res) => {
+    const userId = req.session?.userId;
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    try {
+      await storage.removeCartItem(req.params.id);
+      const items = await storage.getCartItems(userId);
+      
+      res.json({ 
+        success: true,
+        itemCount: items.reduce((sum, i) => sum + i.quantity, 0)
+      });
+    } catch (error) {
+      console.error("Remove from cart error:", error);
+      res.status(500).json({ error: "Failed to remove item from cart" });
+    }
+  });
+
+  app.delete("/api/cart", async (req, res) => {
+    const userId = req.session?.userId;
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    try {
+      await storage.clearCart(userId);
+      res.json({ success: true });
+    } catch (error) {
+      console.error("Clear cart error:", error);
+      res.status(500).json({ error: "Failed to clear cart" });
+    }
+  });
+
   return httpServer;
 }

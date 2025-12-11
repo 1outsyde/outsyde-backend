@@ -18,6 +18,10 @@ import {
   type Message,
   type InsertMessage,
   type PointTransaction,
+  type PushSubscription,
+  type InsertPushSubscription,
+  type CartItem,
+  type InsertCartItem,
   users,
   businesses,
   cities,
@@ -29,7 +33,9 @@ import {
   orders,
   conversations,
   messages,
-  pointTransactions
+  pointTransactions,
+  pushSubscriptions,
+  cartItems
 } from "@shared/schema";
 import { db } from "./db";
 import { eq, ilike, or, and, sql, isNull } from "drizzle-orm";
@@ -125,6 +131,21 @@ export interface IStorage {
   getUserReferralCode(userId: string): Promise<string | null>;
   getUserByReferralCode(code: string): Promise<User | undefined>;
   processReferral(newUserId: string, referralCode: string): Promise<{ success: boolean; referrerId?: string; error?: string }>;
+
+  // Push Subscriptions (Browser Push Notifications)
+  savePushSubscription(data: InsertPushSubscription): Promise<PushSubscription>;
+  getPushSubscription(userId: string, endpoint: string): Promise<PushSubscription | undefined>;
+  getUserPushSubscriptions(userId: string): Promise<PushSubscription[]>;
+  deletePushSubscription(userId: string, endpoint: string): Promise<void>;
+  getAllPushSubscriptions(): Promise<PushSubscription[]>;
+
+  // Cart Items (Persistent Shopping Cart)
+  getCartItems(userId: string): Promise<CartItem[]>;
+  addCartItem(data: InsertCartItem): Promise<CartItem>;
+  updateCartItemQuantity(id: string, quantity: number): Promise<CartItem | undefined>;
+  removeCartItem(id: string): Promise<void>;
+  clearCart(userId: string): Promise<void>;
+  getUsersWithAbandonedCarts(hoursAgo: number): Promise<{ userId: string; items: CartItem[] }[]>;
 
   seedInitialData(): Promise<void>;
 }
@@ -1268,6 +1289,137 @@ export class DatabaseStorage implements IStorage {
     }
 
     console.log("Database seeded successfully!");
+  }
+
+  // ================================
+  // PUSH SUBSCRIPTIONS
+  // ================================
+
+  async savePushSubscription(data: InsertPushSubscription): Promise<PushSubscription> {
+    const existing = await this.getPushSubscription(data.userId, data.endpoint);
+    if (existing) {
+      const [updated] = await db
+        .update(pushSubscriptions)
+        .set({ ...data, updatedAt: new Date() })
+        .where(eq(pushSubscriptions.id, existing.id))
+        .returning();
+      return updated;
+    }
+    
+    const [subscription] = await db
+      .insert(pushSubscriptions)
+      .values(data)
+      .returning();
+    return subscription;
+  }
+
+  async getPushSubscription(userId: string, endpoint: string): Promise<PushSubscription | undefined> {
+    const [subscription] = await db
+      .select()
+      .from(pushSubscriptions)
+      .where(and(
+        eq(pushSubscriptions.userId, userId),
+        eq(pushSubscriptions.endpoint, endpoint)
+      ));
+    return subscription;
+  }
+
+  async getUserPushSubscriptions(userId: string): Promise<PushSubscription[]> {
+    return db
+      .select()
+      .from(pushSubscriptions)
+      .where(eq(pushSubscriptions.userId, userId));
+  }
+
+  async deletePushSubscription(userId: string, endpoint: string): Promise<void> {
+    await db
+      .delete(pushSubscriptions)
+      .where(and(
+        eq(pushSubscriptions.userId, userId),
+        eq(pushSubscriptions.endpoint, endpoint)
+      ));
+  }
+
+  async getAllPushSubscriptions(): Promise<PushSubscription[]> {
+    return db.select().from(pushSubscriptions);
+  }
+
+  // ================================
+  // CART ITEMS
+  // ================================
+
+  async getCartItems(userId: string): Promise<CartItem[]> {
+    return db
+      .select()
+      .from(cartItems)
+      .where(eq(cartItems.userId, userId))
+      .orderBy(cartItems.createdAt);
+  }
+
+  async addCartItem(data: InsertCartItem): Promise<CartItem> {
+    const existing = await db
+      .select()
+      .from(cartItems)
+      .where(and(
+        eq(cartItems.userId, data.userId),
+        eq(cartItems.productId, data.productId)
+      ));
+    
+    if (existing.length > 0) {
+      const [updated] = await db
+        .update(cartItems)
+        .set({ 
+          quantity: existing[0].quantity + (data.quantity || 1),
+          updatedAt: new Date()
+        })
+        .where(eq(cartItems.id, existing[0].id))
+        .returning();
+      return updated;
+    }
+    
+    const [item] = await db.insert(cartItems).values(data).returning();
+    return item;
+  }
+
+  async updateCartItemQuantity(id: string, quantity: number): Promise<CartItem | undefined> {
+    if (quantity <= 0) {
+      await this.removeCartItem(id);
+      return undefined;
+    }
+    
+    const [updated] = await db
+      .update(cartItems)
+      .set({ quantity, updatedAt: new Date() })
+      .where(eq(cartItems.id, id))
+      .returning();
+    return updated;
+  }
+
+  async removeCartItem(id: string): Promise<void> {
+    await db.delete(cartItems).where(eq(cartItems.id, id));
+  }
+
+  async clearCart(userId: string): Promise<void> {
+    await db.delete(cartItems).where(eq(cartItems.userId, userId));
+  }
+
+  async getUsersWithAbandonedCarts(hoursAgo: number): Promise<{ userId: string; items: CartItem[] }[]> {
+    const cutoffTime = new Date(Date.now() - hoursAgo * 60 * 60 * 1000);
+    
+    const items = await db
+      .select()
+      .from(cartItems)
+      .where(sql`${cartItems.updatedAt} < ${cutoffTime}`);
+    
+    const grouped: Record<string, CartItem[]> = {};
+    for (const item of items) {
+      if (!grouped[item.userId]) {
+        grouped[item.userId] = [];
+      }
+      grouped[item.userId].push(item);
+    }
+    
+    return Object.entries(grouped).map(([userId, items]) => ({ userId, items }));
   }
 }
 

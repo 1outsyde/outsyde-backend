@@ -552,3 +552,70 @@ export type InsertConversation = z.infer<typeof insertConversationSchema>;
 
 export type Message = typeof messages.$inferSelect;
 export type InsertMessage = z.infer<typeof insertMessageSchema>;
+
+
+// =========================================
+// PUSH SUBSCRIPTIONS TABLE (Browser Push Notifications)
+// =========================================
+export const pushSubscriptions = pgTable("push_subscriptions", {
+  id: varchar("id", { length: 36 }).primaryKey().default(sql`gen_random_uuid()`),
+  
+  userId: varchar("user_id", { length: 36 })
+    .notNull()
+    .references(() => users.id),
+  
+  // Web Push subscription data
+  endpoint: text("endpoint").notNull(),
+  p256dh: text("p256dh").notNull(), // Public key
+  auth: text("auth").notNull(), // Auth secret
+  
+  // Device info
+  userAgent: text("user_agent"),
+  
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+
+export const insertPushSubscriptionSchema = createInsertSchema(pushSubscriptions).omit({
+  id: true,
+  createdAt: true,
+  updatedAt: true,
+});
+
+export type PushSubscription = typeof pushSubscriptions.$inferSelect;
+export type InsertPushSubscription = z.infer<typeof insertPushSubscriptionSchema>;
+
+
+// =========================================
+// CART ITEMS TABLE (Persistent Shopping Cart)
+// =========================================
+export const cartItems = pgTable("cart_items", {
+  id: varchar("id", { length: 36 }).primaryKey().default(sql`gen_random_uuid()`),
+  
+  userId: varchar("user_id", { length: 36 })
+    .notNull()
+    .references(() => users.id),
+  
+  // Product info
+  productId: varchar("product_id", { length: 36 }).notNull(),
+  productName: text("product_name").notNull(),
+  productImage: text("product_image"),
+  priceInCents: integer("price_in_cents").notNull(),
+  quantity: integer("quantity").notNull().default(1),
+  
+  // Vendor info
+  businessId: varchar("business_id", { length: 36 }),
+  businessName: text("business_name"),
+  
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+
+export const insertCartItemSchema = createInsertSchema(cartItems).omit({
+  id: true,
+  createdAt: true,
+  updatedAt: true,
+});
+
+export type CartItem = typeof cartItems.$inferSelect;
+export type InsertCartItem = z.infer<typeof insertCartItemSchema>;

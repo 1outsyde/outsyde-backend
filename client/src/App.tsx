@@ -7,6 +7,7 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import TopNav from "@/components/TopNav";
 import BottomNav from "@/components/BottomNav";
 import CartDrawer from "@/components/CartDrawer";
+import { useCart } from "@/hooks/useCart";
 
 import HomePage from "@/pages/home";
 import SearchPage from "@/pages/search";
@@ -43,10 +44,17 @@ function AppContent() {
   const isAuthenticated = !!user;
   const isVendor = user?.isVendor ?? false;
 
-  // todo: remove mock functionality
-  const [cartItems, setCartItems] = useState([
+  const { 
+    items: dbCartItems, 
+    updateQuantity, 
+    removeItem, 
+    clearCart,
+    isLoading: cartLoading 
+  } = useCart();
+
+  const [localCartItems, setLocalCartItems] = useState([
     {
-      id: "1",
+      id: "demo-1",
       name: "Handcrafted Silver Pendant",
       image: jewelryImage,
       price: 45.99,
@@ -55,6 +63,17 @@ function AppContent() {
     },
   ]);
   const [pointsToRedeem, setPointsToRedeem] = useState(0);
+
+  const cartItems = isAuthenticated 
+    ? dbCartItems.map(item => ({
+        id: item.id,
+        name: item.productName,
+        image: item.productImage || jewelryImage,
+        price: item.priceInCents / 100,
+        quantity: item.quantity,
+        vendorName: item.businessName || "Local Business",
+      }))
+    : localCartItems;
 
   const handleNavTabChange = (tab: NavTab) => {
     setActiveTab(tab);
@@ -116,19 +135,27 @@ function AppContent() {
   };
 
   const handleUpdateCartQuantity = (id: string, quantity: number) => {
-    if (quantity === 0) {
-      setCartItems(cartItems.filter((item) => item.id !== id));
+    if (isAuthenticated) {
+      updateQuantity(id, quantity);
     } else {
-      setCartItems(
-        cartItems.map((item) =>
-          item.id === id ? { ...item, quantity } : item
-        )
-      );
+      if (quantity === 0) {
+        setLocalCartItems(localCartItems.filter((item) => item.id !== id));
+      } else {
+        setLocalCartItems(
+          localCartItems.map((item) =>
+            item.id === id ? { ...item, quantity } : item
+          )
+        );
+      }
     }
   };
 
   const handleRemoveFromCart = (id: string) => {
-    setCartItems(cartItems.filter((item) => item.id !== id));
+    if (isAuthenticated) {
+      removeItem(id);
+    } else {
+      setLocalCartItems(localCartItems.filter((item) => item.id !== id));
+    }
   };
 
   if (currentPage === "auth") {
