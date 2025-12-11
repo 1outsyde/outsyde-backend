@@ -5,13 +5,8 @@ import ChatInterface from "@/components/ChatInterface";
 import { Card } from "@/components/ui/card";
 import { MessageCircle, Loader2 } from "lucide-react";
 import { useChat, useConversationMessages } from "@/hooks/useChat";
-
-interface User {
-  id: string;
-  name: string;
-  email: string;
-  isVendor: boolean;
-}
+import { getQueryFn } from "@/lib/queryClient";
+import type { User } from "@shared/schema";
 
 interface MessagesPageProps {
   targetVendorId?: string;
@@ -22,11 +17,10 @@ export default function MessagesPage({ targetVendorId, onClearTarget }: Messages
   const [activeConversation, setActiveConversation] = useState<string | null>(null);
   const [authToken, setAuthToken] = useState<string | null>(null);
 
-  const { data: userData } = useQuery<{ user: User }>({
-    queryKey: ["/api/auth/me"],
+  const { data: user } = useQuery<User | null>({
+    queryKey: ["/api/auth/user"],
+    queryFn: getQueryFn({ on401: "returnNull" }),
   });
-
-  const user = userData?.user;
 
   const {
     conversations,

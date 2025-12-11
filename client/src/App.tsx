@@ -1,6 +1,6 @@
 import { useState } from "react";
-import { queryClient } from "./lib/queryClient";
-import { QueryClientProvider } from "@tanstack/react-query";
+import { queryClient, getQueryFn } from "./lib/queryClient";
+import { QueryClientProvider, useQuery } from "@tanstack/react-query";
 import { Toaster } from "@/components/ui/toaster";
 import { TooltipProvider } from "@/components/ui/tooltip";
 
@@ -17,6 +17,7 @@ import AuthPage from "@/pages/auth";
 import VendorDashboardPage from "@/pages/vendor-dashboard";
 
 import jewelryImage from "@assets/generated_images/jewelry_artisan_vendor_image.png";
+import type { User } from "@shared/schema";
 
 type Page = "home" | "search" | "messages" | "profile" | "vendor" | "auth" | "vendor-dashboard";
 type NavTab = "home" | "search" | "create" | "messages" | "profile";
@@ -26,13 +27,21 @@ interface MessageTarget {
   vendorName?: string;
 }
 
-function App() {
+function AppContent() {
   const [currentPage, setCurrentPage] = useState<Page>("home");
   const [activeTab, setActiveTab] = useState<NavTab>("home");
-  const [isAuthenticated, setIsAuthenticated] = useState(false);
-  const [isVendor, setIsVendor] = useState(false);
   const [selectedVendorId, setSelectedVendorId] = useState<string>("1");
   const [messageTarget, setMessageTarget] = useState<MessageTarget | null>(null);
+
+  const { data: user, isLoading: authLoading, refetch: refetchUser } = useQuery<User | null>({
+    queryKey: ["/api/auth/user"],
+    queryFn: getQueryFn({ on401: "returnNull" }),
+    retry: false,
+    staleTime: 1000 * 60 * 5,
+  });
+
+  const isAuthenticated = !!user;
+  const isVendor = user?.isVendor ?? false;
 
   // todo: remove mock functionality
   const [cartItems, setCartItems] = useState([
@@ -84,9 +93,8 @@ function App() {
     }
   };
 
-  const handleAuthComplete = (vendorAccount: boolean) => {
-    setIsAuthenticated(true);
-    setIsVendor(vendorAccount);
+  const handleAuthComplete = async (vendorAccount: boolean) => {
+    await refetchUser();
     if (vendorAccount) {
       setCurrentPage("vendor-dashboard");
     } else {
@@ -95,9 +103,14 @@ function App() {
     }
   };
 
-  const handleLogout = () => {
-    setIsAuthenticated(false);
-    setIsVendor(false);
+  const handleLogout = async () => {
+    try {
+      await fetch("/api/logout", { credentials: "include" });
+      await fetch("/api/auth/logout", { method: "POST", credentials: "include" });
+    } catch (e) {
+      // Ignore errors
+    }
+    queryClient.invalidateQueries({ queryKey: ["/api/auth/user"] });
     setCurrentPage("home");
     setActiveTab("home");
   };
@@ -120,95 +133,99 @@ function App() {
 
   if (currentPage === "auth") {
     return (
-      <QueryClientProvider client={queryClient}>
-        <TooltipProvider>
-          <AuthPage
-            onComplete={handleAuthComplete}
-            onBack={() => {
-              setCurrentPage("home");
-              setActiveTab("home");
-            }}
-          />
-          <Toaster />
-        </TooltipProvider>
-      </QueryClientProvider>
+      <>
+        <AuthPage
+          onComplete={handleAuthComplete}
+          onBack={() => {
+            setCurrentPage("home");
+            setActiveTab("home");
+          }}
+        />
+        <Toaster />
+      </>
     );
   }
 
   if (currentPage === "vendor-dashboard" && isVendor) {
     return (
-      <QueryClientProvider client={queryClient}>
-        <TooltipProvider>
-          <VendorDashboardPage onLogout={handleLogout} />
-          <Toaster />
-        </TooltipProvider>
-      </QueryClientProvider>
+      <>
+        <VendorDashboardPage onLogout={handleLogout} />
+        <Toaster />
+      </>
     );
   }
 
   return (
-    <QueryClientProvider client={queryClient}>
-      <TooltipProvider>
-        <div className="min-h-screen bg-background">
-          <TopNav
-            unreadMessages={3}
-            unreadNotifications={5}
-            onMenuClick={() => console.log("Menu")}
-            onSearchChange={(value) => console.log("Search:", value)}
-            onMessagesClick={() => handleNavTabChange("messages")}
-            onNotificationsClick={() => console.log("Notifications")}
-            onProfileClick={() => handleNavTabChange("profile")}
-          />
+    <>
+      <div className="min-h-screen bg-background">
+        <TopNav
+          unreadMessages={3}
+          unreadNotifications={5}
+          onMenuClick={() => console.log("Menu")}
+          onSearchChange={(value) => console.log("Search:", value)}
+          onMessagesClick={() => handleNavTabChange("messages")}
+          onNotificationsClick={() => console.log("Notifications")}
+          onProfileClick={() => handleNavTabChange("profile")}
+        />
 
-          <div className="fixed top-4 right-20 z-50">
-            <CartDrawer
-              items={cartItems}
-              pointsBalance={2450}
-              pointsToRedeem={pointsToRedeem}
-              onUpdateQuantity={handleUpdateCartQuantity}
-              onRemove={handleRemoveFromCart}
-              onRedeemPoints={setPointsToRedeem}
-              onCheckout={() => console.log("Checkout")}
-            />
-          </div>
-
-          <main>
-            {currentPage === "home" && (
-              <HomePage
-                onViewBusiness={handleViewBusiness}
-              />
-            )}
-            {currentPage === "search" && (
-              <SearchPage
-                onViewBusiness={handleViewBusiness}
-              />
-            )}
-            {currentPage === "messages" && (
-              <MessagesPage 
-                targetVendorId={messageTarget?.vendorId}
-                onClearTarget={() => setMessageTarget(null)}
-              />
-            )}
-            {currentPage === "profile" && <ProfilePage onLogout={handleLogout} />}
-            {currentPage === "vendor" && (
-              <VendorPage
-                vendorId={selectedVendorId}
-                onBack={() => {
-                  setCurrentPage("home");
-                  setActiveTab("home");
-                }}
-                onLoginRequired={() => setCurrentPage("auth")}
-              />
-            )}
-          </main>
-
-          <BottomNav
-            activeTab={activeTab}
-            onTabChange={handleNavTabChange}
-            isVendor={isVendor && isAuthenticated}
+        <div className="fixed top-4 right-20 z-50">
+          <CartDrawer
+            items={cartItems}
+            pointsBalance={2450}
+            pointsToRedeem={pointsToRedeem}
+            onUpdateQuantity={handleUpdateCartQuantity}
+            onRemove={handleRemoveFromCart}
+            onRedeemPoints={setPointsToRedeem}
+            onCheckout={() => console.log("Checkout")}
           />
         </div>
-        <Toaster />
+
+        <main>
+          {currentPage === "home" && (
+            <HomePage
+              onViewBusiness={handleViewBusiness}
+            />
+          )}
+          {currentPage === "search" && (
+            <SearchPage
+              onViewBusiness={handleViewBusiness}
+            />
+          )}
+          {currentPage === "messages" && (
+            <MessagesPage 
+              targetVendorId={messageTarget?.vendorId}
+              onClearTarget={() => setMessageTarget(null)}
+            />
+          )}
+          {currentPage === "profile" && <ProfilePage onLogout={handleLogout} />}
+          {currentPage === "vendor" && (
+            <VendorPage
+              vendorId={selectedVendorId}
+              onBack={() => {
+                setCurrentPage("home");
+                setActiveTab("home");
+              }}
+              onLoginRequired={() => setCurrentPage("auth")}
+            />
+          )}
+        </main>
+
+        <BottomNav
+          activeTab={activeTab}
+          onTabChange={handleNavTabChange}
+          isVendor={isVendor && isAuthenticated}
+        />
+      </div>
+      <Toaster />
+    </>
+  );
+}
+
+function App() {
+  return (
+    <QueryClientProvider client={queryClient}>
+      <TooltipProvider>
+        <AppContent />
       </TooltipProvider>
     </QueryClientProvider>
   );
