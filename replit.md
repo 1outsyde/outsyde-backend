@@ -235,6 +235,18 @@ Note: The preferences step now includes both niche types (e.g., Italian, BBQ, Me
   - Database: users.referralCode, users.referredBy fields
   - API endpoints: GET /api/referral/code, POST /api/referral/apply
   - Frontend: ReferralCard component in profile "My Points" section
+- **Push Notifications** for cart abandonment reminders
+  - Service worker (`public/sw.js`) handles push events
+  - VAPID keys for secure browser push notifications
+  - Database: pushSubscriptions table for subscription storage
+  - API endpoints: POST /api/push/subscribe, DELETE /api/push/unsubscribe
+  - Frontend: PushNotificationSettings component in profile page
+  - Automated scheduler sends reminders every 30 minutes for abandoned carts (24+ hours)
+- **Database-backed Shopping Cart**
+  - Database: cartItems table for authenticated users
+  - Falls back to localStorage for guest users
+  - API endpoints: GET /api/cart, POST /api/cart/add, PATCH /api/cart/:id, DELETE /api/cart/:id
+  - Frontend: useCart hook manages cart state with persistence
 
 ## User Preferences
 - Golden yellow color scheme for branding

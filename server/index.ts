@@ -9,6 +9,7 @@ import { getStripeSync } from "./stripe/stripeClient";
 import { WebhookHandlers } from "./stripe/webhookHandlers";
 import { setupWebSocket } from "./websocket";
 import { setupAuth } from "./replitAuth";
+import { initializePushService, sendCartReminderNotifications, isPushConfigured } from "./pushService";
 
 const app = express();
 const httpServer = createServer(app);
@@ -144,6 +145,22 @@ async function initStripe() {
       console.error("Token cleanup error:", error);
     }
   }, 60 * 60 * 1000);
+
+  initializePushService();
+  
+  if (isPushConfigured()) {
+    setInterval(async () => {
+      try {
+        const sentCount = await sendCartReminderNotifications();
+        if (sentCount > 0) {
+          log(`Sent ${sentCount} cart reminder notifications`, "push");
+        }
+      } catch (error) {
+        console.error("Cart reminder error:", error);
+      }
+    }, 30 * 60 * 1000);
+    log("Cart reminder notifications scheduled (every 30 min)", "push");
+  }
 
   await registerRoutes(httpServer, app);
 

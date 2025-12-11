@@ -68,7 +68,7 @@ export async function sendCartReminderNotifications(): Promise<number> {
     return 0;
   }
 
-  const abandonedCarts = await storage.getUsersWithAbandonedCarts(2);
+  const abandonedCarts = await storage.getUsersWithAbandonedCarts(24);
   let sent = 0;
 
   for (const { userId, items } of abandonedCarts) {
