@@ -193,19 +193,18 @@ function AppContent() {
           onMessagesClick={() => handleNavTabChange("messages")}
           onNotificationsClick={() => console.log("Notifications")}
           onProfileClick={() => handleNavTabChange("profile")}
+          cartDrawer={
+            <CartDrawer
+              items={cartItems}
+              pointsBalance={2450}
+              pointsToRedeem={pointsToRedeem}
+              onUpdateQuantity={handleUpdateCartQuantity}
+              onRemove={handleRemoveFromCart}
+              onRedeemPoints={setPointsToRedeem}
+              onCheckout={() => console.log("Checkout")}
+            />
+          }
         />
-
-        <div className="fixed top-4 right-20 z-50">
-          <CartDrawer
-            items={cartItems}
-            pointsBalance={2450}
-            pointsToRedeem={pointsToRedeem}
-            onUpdateQuantity={handleUpdateCartQuantity}
-            onRemove={handleRemoveFromCart}
-            onRedeemPoints={setPointsToRedeem}
-            onCheckout={() => console.log("Checkout")}
-          />
-        </div>
 
         <main>
           {currentPage === "home" && (

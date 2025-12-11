@@ -4,6 +4,7 @@ import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import ThemeToggle from "./ThemeToggle";
 import logoImage from "@assets/IMG_6664_1765313819403.jpg";
+import type { ReactNode } from "react";
 
 interface TopNavProps {
   onMenuClick?: () => void;
@@ -13,6 +14,7 @@ interface TopNavProps {
   onProfileClick?: () => void;
   unreadMessages?: number;
   unreadNotifications?: number;
+  cartDrawer?: ReactNode;
 }
 
 export default function TopNav({
@@ -23,6 +25,7 @@ export default function TopNav({
   onProfileClick,
   unreadMessages = 0,
   unreadNotifications = 0,
+  cartDrawer,
 }: TopNavProps) {
   return (
     <header className="sticky top-0 z-50 h-16 border-b bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60">
@@ -103,6 +106,8 @@ export default function TopNav({
               </Badge>
             )}
           </div>
+
+          {cartDrawer}
 
           <ThemeToggle />
 
