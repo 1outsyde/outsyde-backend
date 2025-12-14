@@ -321,6 +321,78 @@ export async function registerRoutes(
 
   // ==================== STRIPE ROUTES ====================
 
+  // Get subscription tiers
+  app.get("/api/subscription-tiers", async (req, res) => {
+    try {
+      const tiers = await stripeService.getSubscriptionTiers();
+      res.json({ tiers });
+    } catch (error) {
+      console.error("Get subscription tiers error:", error);
+      res.status(500).json({ error: "Failed to get subscription tiers" });
+    }
+  });
+
+  // Setup Stripe products for subscription tiers (admin endpoint)
+  app.post("/api/stripe/setup-products", async (req, res) => {
+    try {
+      await stripeService.setupSubscriptionProducts();
+      await stripeService.setupAlaCarteProducts();
+      res.json({ success: true, message: "Stripe products setup complete" });
+    } catch (error) {
+      console.error("Setup Stripe products error:", error);
+      res.status(500).json({ error: "Failed to setup Stripe products" });
+    }
+  });
+
+  // Create tier subscription checkout
+  app.post("/api/stripe/checkout/tier-subscription", async (req, res) => {
+    const userId = req.session?.userId;
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    if (!req.session?.isVendor) {
+      return res.status(403).json({ error: "Only vendors can subscribe" });
+    }
+
+    try {
+      const checkoutSchema = z.object({
+        tierId: z.string().min(1, "Tier ID is required"),
+      });
+      const { tierId } = checkoutSchema.parse(req.body);
+
+      const user = await storage.getUser(userId);
+      if (!user) {
+        return res.status(404).json({ error: "User not found" });
+      }
+
+      const business = await storage.getBusinessByOwnerId(userId);
+      if (!business) {
+        return res.status(404).json({ error: "Business not found" });
+      }
+
+      const customer = await stripeService.createCustomer(user.email!, userId, user.name!);
+
+      const baseUrl = `https://${process.env.REPLIT_DOMAINS?.split(',')[0]}`;
+      const session = await stripeService.createTierSubscriptionCheckout(
+        customer.id,
+        tierId,
+        `${baseUrl}/vendor/dashboard?subscription=success`,
+        `${baseUrl}/vendor/dashboard?subscription=cancelled`,
+        userId,
+        business.id
+      );
+
+      res.json({ url: session.url });
+    } catch (error) {
+      if (error instanceof z.ZodError) {
+        return res.status(400).json({ error: "Invalid data", details: error.errors });
+      }
+      console.error("Create tier subscription checkout error:", error);
+      res.status(500).json({ error: "Failed to create checkout session" });
+    }
+  });
+
   // Get Stripe publishable key for frontend
   app.get("/api/stripe/config", async (req, res) => {
     try {

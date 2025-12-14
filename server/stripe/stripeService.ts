@@ -3,7 +3,8 @@
 
 import { getUncachableStripeClient } from './stripeClient';
 import { db } from '../db';
-import { sql } from 'drizzle-orm';
+import { sql, eq } from 'drizzle-orm';
+import { subscriptionTiers, alaCarteServices } from '@shared/schema';
 
 export class StripeService {
   // Create Stripe customer for a user
@@ -16,7 +17,7 @@ export class StripeService {
     });
   }
 
-  // Create checkout session for vendor subscription ($40/month)
+  // Create checkout session for vendor subscription
   async createVendorSubscriptionCheckout(
     customerId: string, 
     priceId: string, 
@@ -118,6 +119,150 @@ export class StripeService {
       sql`SELECT * FROM stripe.customers WHERE id = ${customerId}`
     );
     return result.rows[0] || null;
+  }
+
+  // ==================== SUBSCRIPTION TIER PRODUCTS ====================
+
+  // Setup all subscription tier products in Stripe (run once on startup)
+  async setupSubscriptionProducts() {
+    const stripe = await getUncachableStripeClient();
+    
+    const tiers = await db.select().from(subscriptionTiers).where(eq(subscriptionTiers.isActive, true));
+    
+    for (const tier of tiers) {
+      if (tier.stripeProductId && tier.stripePriceId) {
+        console.log(`Tier ${tier.name} already has Stripe IDs, skipping...`);
+        continue;
+      }
+
+      try {
+        const product = await stripe.products.create({
+          name: `Outsyde ${tier.displayName} Subscription`,
+          description: tier.description || `${tier.displayName} tier subscription`,
+          metadata: {
+            tierId: tier.id,
+            tierName: tier.name,
+            type: 'vendor_subscription',
+          },
+        });
+
+        const price = await stripe.prices.create({
+          product: product.id,
+          unit_amount: tier.priceInCents,
+          currency: 'usd',
+          recurring: { interval: 'month' },
+          metadata: {
+            tierId: tier.id,
+            tierName: tier.name,
+            platformFeeBps: tier.platformFeeBps.toString(),
+          },
+        });
+
+        await db.update(subscriptionTiers)
+          .set({ stripeProductId: product.id, stripePriceId: price.id })
+          .where(eq(subscriptionTiers.id, tier.id));
+
+        console.log(`Created Stripe product for tier ${tier.name}: ${product.id}, price: ${price.id}`);
+      } catch (error) {
+        console.error(`Failed to create Stripe product for tier ${tier.name}:`, error);
+      }
+    }
+  }
+
+  // Setup à la carte service products in Stripe
+  async setupAlaCarteProducts() {
+    const stripe = await getUncachableStripeClient();
+    
+    const services = await db.select().from(alaCarteServices).where(eq(alaCarteServices.isActive, true));
+    
+    for (const service of services) {
+      if (service.stripeProductId && service.stripePriceId) {
+        console.log(`À la carte service ${service.name} already has Stripe IDs, skipping...`);
+        continue;
+      }
+
+      try {
+        const product = await stripe.products.create({
+          name: `Outsyde ${service.displayName}`,
+          description: service.description || service.displayName,
+          metadata: {
+            serviceId: service.id,
+            serviceName: service.name,
+            type: 'ala_carte',
+          },
+        });
+
+        const price = await stripe.prices.create({
+          product: product.id,
+          unit_amount: service.basePriceInCents,
+          currency: 'usd',
+          metadata: { serviceId: service.id, serviceName: service.name },
+        });
+
+        await db.update(alaCarteServices)
+          .set({ stripeProductId: product.id, stripePriceId: price.id })
+          .where(eq(alaCarteServices.id, service.id));
+
+        console.log(`Created Stripe product for à la carte ${service.name}: ${product.id}`);
+      } catch (error) {
+        console.error(`Failed to create Stripe product for service ${service.name}:`, error);
+      }
+    }
+  }
+
+  // Get subscription tiers from database
+  async getSubscriptionTiers() {
+    return await db.select().from(subscriptionTiers)
+      .where(eq(subscriptionTiers.isActive, true))
+      .orderBy(subscriptionTiers.sortOrder);
+  }
+
+  // Get tier by ID
+  async getTier(tierId: string) {
+    const result = await db.select().from(subscriptionTiers).where(eq(subscriptionTiers.id, tierId));
+    return result[0] || null;
+  }
+
+  // Create subscription checkout with tier-specific pricing
+  async createTierSubscriptionCheckout(
+    customerId: string,
+    tierId: string,
+    successUrl: string,
+    cancelUrl: string,
+    vendorId: string,
+    businessId: string
+  ) {
+    const tier = await this.getTier(tierId);
+    if (!tier || !tier.stripePriceId) {
+      throw new Error('Invalid tier or Stripe not configured for this tier');
+    }
+
+    const stripe = await getUncachableStripeClient();
+    
+    return await stripe.checkout.sessions.create({
+      customer: customerId,
+      payment_method_types: ['card'],
+      line_items: [{ price: tier.stripePriceId, quantity: 1 }],
+      mode: 'subscription',
+      success_url: successUrl,
+      cancel_url: cancelUrl,
+      metadata: { 
+        vendorId, 
+        businessId,
+        tierId,
+        tierName: tier.name,
+        type: 'vendor_subscription' 
+      },
+      subscription_data: {
+        metadata: {
+          vendorId,
+          businessId,
+          tierId,
+          tierName: tier.name,
+          platformFeeBps: tier.platformFeeBps.toString(),
+        },
+      },
+    });
   }
 }
 

@@ -7,6 +7,7 @@ import { setupVite } from "./vite";
 import { runMigrations } from "stripe-replit-sync";
 import { getStripeSync } from "./stripe/stripeClient";
 import { WebhookHandlers } from "./stripe/webhookHandlers";
+import { stripeService } from "./stripe/stripeService";
 import { setupWebSocket } from "./websocket";
 import { setupAuth } from "./replitAuth";
 import { initializePushService, sendCartReminderNotifications, isPushConfigured } from "./pushService";
@@ -123,6 +124,12 @@ async function initStripe() {
     stripeSync.syncBackfill()
       .then(() => log('Stripe data synced', 'stripe'))
       .catch((err: any) => console.error('Error syncing Stripe data:', err));
+
+    // Setup subscription tier products in Stripe (creates if not exist)
+    log('Setting up subscription tier products...', 'stripe');
+    await stripeService.setupSubscriptionProducts();
+    await stripeService.setupAlaCarteProducts();
+    log('Subscription products ready', 'stripe');
   } catch (error) {
     console.error('Failed to initialize Stripe:', error);
   }
