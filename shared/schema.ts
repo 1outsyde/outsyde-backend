@@ -619,3 +619,347 @@ export const insertCartItemSchema = createInsertSchema(cartItems).omit({
 
 export type CartItem = typeof cartItems.$inferSelect;
 export type InsertCartItem = z.infer<typeof insertCartItemSchema>;
+
+
+// =========================================
+// VENDOR SUBSCRIPTION TIERS
+// =========================================
+// Access: $20/mo - Basic storefront, no included shoots
+// Growth: $40/mo - 1 shoot/quarter, priority discovery, discounts
+// Pro: $89/mo - 1 shoot/month + 1 influencer promo/quarter + featured
+
+export const subscriptionTiers = pgTable("subscription_tiers", {
+  id: varchar("id", { length: 36 }).primaryKey().default(sql`gen_random_uuid()`),
+  
+  name: text("name").notNull(), // 'access', 'growth', 'pro'
+  displayName: text("display_name").notNull(), // 'Access', 'Growth', 'Pro'
+  description: text("description"),
+  
+  // Pricing (in cents)
+  priceInCents: integer("price_in_cents").notNull(), // 2000, 4000, 8900
+  
+  // Platform fee in basis points (200 = 2%)
+  platformFeeBps: integer("platform_fee_bps").default(200).notNull(),
+  
+  // Stripe product/price IDs
+  stripeProductId: text("stripe_product_id"),
+  stripePriceId: text("stripe_price_id"),
+  
+  // Features flags
+  hasPriorityDiscovery: boolean("has_priority_discovery").default(false).notNull(),
+  hasFeaturedPlacement: boolean("has_featured_placement").default(false).notNull(),
+  hasInfluencerAccess: boolean("has_influencer_access").default(false).notNull(),
+  hasCreativeSupport: boolean("has_creative_support").default(false).notNull(),
+  
+  // À la carte discount percentage (0, 10, 15 for Access, Growth, Pro)
+  alaCarteDiscountPercent: integer("ala_carte_discount_percent").default(0).notNull(),
+  
+  // Sort order for display
+  sortOrder: integer("sort_order").default(0).notNull(),
+  
+  isActive: boolean("is_active").default(true).notNull(),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+});
+
+
+// =========================================
+// TIER BENEFITS (What's included per tier)
+// =========================================
+export const tierBenefits = pgTable("tier_benefits", {
+  id: varchar("id", { length: 36 }).primaryKey().default(sql`gen_random_uuid()`),
+  
+  tierId: varchar("tier_id", { length: 36 })
+    .notNull()
+    .references(() => subscriptionTiers.id),
+  
+  // Benefit type
+  benefitType: text("benefit_type").notNull(), // 'product_shoot', 'lifestyle_shoot', 'influencer_promo'
+  displayName: text("display_name").notNull(),
+  description: text("description"),
+  
+  // How many included per cycle
+  includedQuantity: integer("included_quantity").notNull().default(1),
+  
+  // Cycle type: 'monthly' or 'quarterly'
+  cycleType: text("cycle_type").notNull(), // 'monthly' | 'quarterly'
+  
+  // Can unused benefits roll over?
+  allowRollover: boolean("allow_rollover").default(false).notNull(),
+  
+  // Does this require admin fulfillment?
+  requiresAdminFulfillment: boolean("requires_admin_fulfillment").default(true).notNull(),
+  
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+});
+
+
+// =========================================
+// À LA CARTE SERVICES (Purchasable by all tiers)
+// =========================================
+export const alaCarteServices = pgTable("ala_carte_services", {
+  id: varchar("id", { length: 36 }).primaryKey().default(sql`gen_random_uuid()`),
+  
+  name: text("name").notNull(), // 'product_shoot', 'lifestyle_shoot', 'influencer_promo'
+  displayName: text("display_name").notNull(),
+  description: text("description"),
+  
+  // Base price in cents (Access tier pays this)
+  basePriceInCents: integer("base_price_in_cents").notNull(),
+  
+  // Stripe product/price IDs (base price)
+  stripeProductId: text("stripe_product_id"),
+  stripePriceId: text("stripe_price_id"),
+  
+  // Requires admin fulfillment
+  requiresAdminFulfillment: boolean("requires_admin_fulfillment").default(true).notNull(),
+  
+  isActive: boolean("is_active").default(true).notNull(),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+});
+
+
+// =========================================
+// VENDOR SUBSCRIPTIONS (Active subscriptions)
+// =========================================
+export const vendorSubscriptions = pgTable("vendor_subscriptions", {
+  id: varchar("id", { length: 36 }).primaryKey().default(sql`gen_random_uuid()`),
+  
+  // Link to vendor/business
+  vendorId: varchar("vendor_id", { length: 36 })
+    .notNull()
+    .references(() => users.id),
+  businessId: varchar("business_id", { length: 36 })
+    .references(() => businesses.id),
+  
+  // Current tier
+  tierId: varchar("tier_id", { length: 36 })
+    .notNull()
+    .references(() => subscriptionTiers.id),
+  
+  // Stripe subscription data
+  stripeCustomerId: text("stripe_customer_id"),
+  stripeSubscriptionId: text("stripe_subscription_id"),
+  
+  // Subscription status
+  status: text("status").default("pending").notNull(), // 'pending', 'active', 'past_due', 'canceled', 'paused'
+  
+  // Billing cycle dates
+  currentPeriodStart: timestamp("current_period_start"),
+  currentPeriodEnd: timestamp("current_period_end"),
+  
+  // Quarterly tracking (for quarterly benefits)
+  currentQuarterStart: timestamp("current_quarter_start"),
+  currentQuarterEnd: timestamp("current_quarter_end"),
+  
+  cancelAtPeriodEnd: boolean("cancel_at_period_end").default(false).notNull(),
+  
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+
+
+// =========================================
+// BENEFIT ALLOWANCES (Per-vendor benefit counters)
+// =========================================
+export const benefitAllowances = pgTable("benefit_allowances", {
+  id: varchar("id", { length: 36 }).primaryKey().default(sql`gen_random_uuid()`),
+  
+  subscriptionId: varchar("subscription_id", { length: 36 })
+    .notNull()
+    .references(() => vendorSubscriptions.id),
+  
+  benefitId: varchar("benefit_id", { length: 36 })
+    .notNull()
+    .references(() => tierBenefits.id),
+  
+  // Cycle this allowance is for
+  cycleType: text("cycle_type").notNull(), // 'monthly' | 'quarterly'
+  cycleStart: timestamp("cycle_start").notNull(),
+  cycleEnd: timestamp("cycle_end").notNull(),
+  
+  // Quantities
+  totalQuantity: integer("total_quantity").notNull(), // What they get this cycle
+  usedQuantity: integer("used_quantity").default(0).notNull(),
+  remainingQuantity: integer("remaining_quantity").notNull(),
+  
+  // Expired tracking
+  isExpired: boolean("is_expired").default(false).notNull(),
+  expiredAt: timestamp("expired_at"),
+  
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+});
+
+
+// =========================================
+// BENEFIT USAGE (Consumption records)
+// =========================================
+export const benefitUsage = pgTable("benefit_usage", {
+  id: varchar("id", { length: 36 }).primaryKey().default(sql`gen_random_uuid()`),
+  
+  allowanceId: varchar("allowance_id", { length: 36 })
+    .notNull()
+    .references(() => benefitAllowances.id),
+  
+  // What was used
+  benefitType: text("benefit_type").notNull(),
+  quantityUsed: integer("quantity_used").default(1).notNull(),
+  
+  // Fulfillment tracking
+  fulfillmentTaskId: varchar("fulfillment_task_id", { length: 36 }),
+  
+  // Notes
+  notes: text("notes"),
+  
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+});
+
+
+// =========================================
+// FULFILLMENT TASKS (Admin workflow)
+// =========================================
+export const fulfillmentTasks = pgTable("fulfillment_tasks", {
+  id: varchar("id", { length: 36 }).primaryKey().default(sql`gen_random_uuid()`),
+  
+  // Who requested
+  vendorId: varchar("vendor_id", { length: 36 })
+    .notNull()
+    .references(() => users.id),
+  businessId: varchar("business_id", { length: 36 })
+    .references(() => businesses.id),
+  
+  // What type of task
+  taskType: text("task_type").notNull(), // 'product_shoot', 'lifestyle_shoot', 'influencer_promo'
+  
+  // Source: benefit allowance or à la carte purchase
+  sourceType: text("source_type").notNull(), // 'benefit' | 'ala_carte'
+  sourceId: varchar("source_id", { length: 36 }), // allowanceId or purchaseId
+  
+  // Status
+  status: text("status").default("pending").notNull(), // 'pending', 'scheduled', 'in_progress', 'completed', 'cancelled'
+  
+  // Assignment
+  assignedAdminId: varchar("assigned_admin_id", { length: 36 }),
+  
+  // Scheduling
+  scheduledDate: timestamp("scheduled_date"),
+  completedDate: timestamp("completed_date"),
+  
+  // Priority
+  isPriority: boolean("is_priority").default(false).notNull(),
+  
+  // Notes
+  vendorNotes: text("vendor_notes"),
+  adminNotes: text("admin_notes"),
+  
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+
+
+// =========================================
+// À LA CARTE PURCHASES
+// =========================================
+export const alaCartePurchases = pgTable("ala_carte_purchases", {
+  id: varchar("id", { length: 36 }).primaryKey().default(sql`gen_random_uuid()`),
+  
+  vendorId: varchar("vendor_id", { length: 36 })
+    .notNull()
+    .references(() => users.id),
+  businessId: varchar("business_id", { length: 36 })
+    .references(() => businesses.id),
+  
+  serviceId: varchar("service_id", { length: 36 })
+    .notNull()
+    .references(() => alaCarteServices.id),
+  
+  // What tier they were on at time of purchase (for discount)
+  tierIdAtPurchase: varchar("tier_id_at_purchase", { length: 36 }),
+  
+  // Pricing
+  basePriceInCents: integer("base_price_in_cents").notNull(),
+  discountPercent: integer("discount_percent").default(0).notNull(),
+  finalPriceInCents: integer("final_price_in_cents").notNull(),
+  
+  // Platform fee
+  platformFeeInCents: integer("platform_fee_in_cents").notNull(),
+  
+  // Stripe
+  stripePaymentIntentId: text("stripe_payment_intent_id"),
+  stripeCheckoutSessionId: text("stripe_checkout_session_id"),
+  
+  // Status
+  paymentStatus: text("payment_status").default("pending").notNull(), // 'pending', 'paid', 'failed', 'refunded'
+  
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+});
+
+
+// =========================================
+// SUBSCRIPTION SCHEMAS & TYPES
+// =========================================
+export const insertSubscriptionTierSchema = createInsertSchema(subscriptionTiers).omit({
+  id: true,
+  createdAt: true,
+});
+
+export const insertTierBenefitSchema = createInsertSchema(tierBenefits).omit({
+  id: true,
+  createdAt: true,
+});
+
+export const insertAlaCarteServiceSchema = createInsertSchema(alaCarteServices).omit({
+  id: true,
+  createdAt: true,
+});
+
+export const insertVendorSubscriptionSchema = createInsertSchema(vendorSubscriptions).omit({
+  id: true,
+  createdAt: true,
+  updatedAt: true,
+});
+
+export const insertBenefitAllowanceSchema = createInsertSchema(benefitAllowances).omit({
+  id: true,
+  createdAt: true,
+});
+
+export const insertBenefitUsageSchema = createInsertSchema(benefitUsage).omit({
+  id: true,
+  createdAt: true,
+});
+
+export const insertFulfillmentTaskSchema = createInsertSchema(fulfillmentTasks).omit({
+  id: true,
+  createdAt: true,
+  updatedAt: true,
+});
+
+export const insertAlaCartePurchaseSchema = createInsertSchema(alaCartePurchases).omit({
+  id: true,
+  createdAt: true,
+});
+
+// Types
+export type SubscriptionTier = typeof subscriptionTiers.$inferSelect;
+export type InsertSubscriptionTier = z.infer<typeof insertSubscriptionTierSchema>;
+
+export type TierBenefit = typeof tierBenefits.$inferSelect;
+export type InsertTierBenefit = z.infer<typeof insertTierBenefitSchema>;
+
+export type AlaCarteService = typeof alaCarteServices.$inferSelect;
+export type InsertAlaCarteService = z.infer<typeof insertAlaCarteServiceSchema>;
+
+export type VendorSubscription = typeof vendorSubscriptions.$inferSelect;
+export type InsertVendorSubscription = z.infer<typeof insertVendorSubscriptionSchema>;
+
+export type BenefitAllowance = typeof benefitAllowances.$inferSelect;
+export type InsertBenefitAllowance = z.infer<typeof insertBenefitAllowanceSchema>;
+
+export type BenefitUsage = typeof benefitUsage.$inferSelect;
+export type InsertBenefitUsage = z.infer<typeof insertBenefitUsageSchema>;
+
+export type FulfillmentTask = typeof fulfillmentTasks.$inferSelect;
+export type InsertFulfillmentTask = z.infer<typeof insertFulfillmentTaskSchema>;
+
+export type AlaCartePurchase = typeof alaCartePurchases.$inferSelect;
+export type InsertAlaCartePurchase = z.infer<typeof insertAlaCartePurchaseSchema>;
