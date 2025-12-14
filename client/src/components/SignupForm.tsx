@@ -1,6 +1,6 @@
 import { useState } from "react";
-import { useMutation } from "@tanstack/react-query";
-import { ChevronLeft, ChevronRight, Check, Eye, EyeOff, CreditCard, Building2, Globe, Rocket, Store, Shirt, Scissors, Utensils, SprayCan, Dumbbell, ShoppingBag, Palette, Wrench, Loader2 } from "lucide-react";
+import { useMutation, useQuery } from "@tanstack/react-query";
+import { ChevronLeft, ChevronRight, Check, Eye, EyeOff, Building2, Globe, Rocket, Store, Shirt, Scissors, Utensils, SprayCan, Dumbbell, ShoppingBag, Palette, Wrench, Loader2, Sparkles, Crown, Star } from "lucide-react";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -49,6 +49,21 @@ interface SignupData {
   websiteUrl?: string;
   socialMedia?: string;
   acceptedSubscription?: boolean;
+  selectedTierId?: string;
+}
+
+interface SubscriptionTier {
+  id: string;
+  name: string;
+  displayName: string;
+  description: string | null;
+  priceInCents: number;
+  hasPriorityDiscovery: boolean;
+  hasFeaturedPlacement: boolean;
+  hasInfluencerAccess: boolean;
+  hasCreativeSupport: boolean;
+  alaCarteDiscountPercent: number;
+  sortOrder: number;
 }
 
 const customerSteps = [
@@ -225,6 +240,13 @@ export default function SignupForm({ onComplete, isVendor = false }: SignupFormP
   const [showPassword, setShowPassword] = useState(false);
   const { toast } = useToast();
 
+  // Fetch subscription tiers for vendor signup
+  const { data: tiersData, isLoading: tiersLoading, isError: tiersError, refetch: refetchTiers } = useQuery<{ tiers: SubscriptionTier[] }>({
+    queryKey: ['/api/subscription-tiers'],
+    enabled: isVendor,
+    retry: 2,
+  });
+
   // Signup mutation for customer
   const customerSignupMutation = useMutation({
     mutationFn: async (data: SignupData) => {
@@ -289,7 +311,38 @@ export default function SignupForm({ onComplete, isVendor = false }: SignupFormP
       });
       return response.json();
     },
-    onSuccess: (result) => {
+    onSuccess: async (result) => {
+      // Verify signup was successful before proceeding
+      if (!result || result.error) {
+        toast({
+          title: "Signup failed",
+          description: result?.error || "Please try again",
+          variant: "destructive",
+        });
+        return;
+      }
+
+      // After signup, redirect to Stripe checkout for the selected tier (unless skipped)
+      if (formData.selectedTierId && formData.selectedTierId !== "skip") {
+        try {
+          const checkoutResponse = await apiRequest("POST", "/api/stripe/checkout/tier-subscription", {
+            tierId: formData.selectedTierId,
+          });
+          const checkoutData = await checkoutResponse.json();
+          if (checkoutData.url) {
+            window.location.href = checkoutData.url;
+            return;
+          }
+        } catch (checkoutError) {
+          console.error("Stripe checkout error:", checkoutError);
+          toast({
+            title: "Account created!",
+            description: "Please complete your subscription setup from your dashboard.",
+          });
+          onComplete?.(formData);
+          return;
+        }
+      }
       toast({
         title: "Welcome to Outsyde!",
         description: "Your business account is ready. Start setting up your storefront!",
@@ -336,6 +389,7 @@ export default function SignupForm({ onComplete, isVendor = false }: SignupFormP
     websiteUrl: "",
     socialMedia: "",
     acceptedSubscription: false,
+    selectedTierId: "",
   });
 
   const progress = (currentStep / steps.length) * 100;
@@ -395,7 +449,7 @@ export default function SignupForm({ onComplete, isVendor = false }: SignupFormP
 
   const canProceed = () => {
     if (isVendor && currentStep === 6) {
-      return formData.acceptedSubscription;
+      return !!formData.selectedTierId;
     }
     return true;
   };
@@ -1158,79 +1212,157 @@ export default function SignupForm({ onComplete, isVendor = false }: SignupFormP
         </div>
       )}
 
-      {/* VENDOR STEP 6: Subscription */}
+      {/* VENDOR STEP 6: Subscription Tier Selection */}
       {isVendor && currentStep === 6 && (
         <div className="space-y-5">
-          <div className="p-4 bg-primary/5 border border-primary/20 rounded-lg">
-            <div className="flex items-center gap-3 mb-3">
-              <div className="h-12 w-12 rounded-full bg-primary/10 flex items-center justify-center">
-                <CreditCard className="h-6 w-6 text-primary" />
-              </div>
-              <div>
-                <h3 className="font-semibold text-lg">Outsyde Business Plan</h3>
-                <p className="text-2xl font-bold text-primary">$40<span className="text-sm font-normal text-muted-foreground">/month</span></p>
-              </div>
-            </div>
-            <Separator className="my-4" />
-            <ul className="space-y-2 text-sm">
-              <li className="flex items-center gap-2">
-                <Check className="h-4 w-4 text-primary" />
-                Customizable storefront page
-              </li>
-              <li className="flex items-center gap-2">
-                <Check className="h-4 w-4 text-primary" />
-                Product & service listings
-              </li>
-              <li className="flex items-center gap-2">
-                <Check className="h-4 w-4 text-primary" />
-                Booking & appointment system
-              </li>
-              <li className="flex items-center gap-2">
-                <Check className="h-4 w-4 text-primary" />
-                Customer messaging
-              </li>
-              <li className="flex items-center gap-2">
-                <Check className="h-4 w-4 text-primary" />
-                Promoted visibility in local feed
-              </li>
-              <li className="flex items-center gap-2">
-                <Check className="h-4 w-4 text-primary" />
-                Analytics dashboard
-              </li>
-              <li className="flex items-center gap-2">
-                <Check className="h-4 w-4 text-primary" />
-                Loyalty program integration
-              </li>
-              <li className="flex items-center gap-2">
-                <Check className="h-4 w-4 text-primary" />
-                Stripe payment processing
-              </li>
-            </ul>
+          <div className="text-center mb-4">
+            <h3 className="font-semibold text-lg">Choose Your Plan</h3>
+            <p className="text-sm text-muted-foreground">Select the tier that fits your business needs</p>
           </div>
 
-          <div
-            className={`flex items-start gap-3 p-4 border rounded-md cursor-pointer ${
-              formData.acceptedSubscription ? "border-primary bg-primary/5" : ""
-            }`}
-            onClick={() => updateField("acceptedSubscription", !formData.acceptedSubscription)}
-          >
-            <Checkbox
-              checked={formData.acceptedSubscription}
-              onCheckedChange={(checked) => updateField("acceptedSubscription", checked as boolean)}
-              data-testid="checkbox-accept-subscription"
-            />
-            <div>
-              <Label className="cursor-pointer font-medium">
-                I agree to the $40/month subscription
-              </Label>
-              <p className="text-xs text-muted-foreground mt-1">
-                Your subscription will begin after completing signup. You can cancel anytime from your dashboard. Payment will be processed through Stripe.
+          {tiersLoading ? (
+            <div className="flex items-center justify-center py-8">
+              <Loader2 className="h-6 w-6 animate-spin text-primary" />
+              <span className="ml-2 text-muted-foreground">Loading plans...</span>
+            </div>
+          ) : tiersError ? (
+            <div className="text-center py-8 space-y-4">
+              <p className="text-destructive">Failed to load subscription plans</p>
+              <div className="flex flex-col gap-2">
+                <Button variant="outline" onClick={() => refetchTiers()} data-testid="button-retry-tiers">
+                  Try Again
+                </Button>
+                <Button 
+                  variant="ghost" 
+                  onClick={() => {
+                    updateField("acceptedSubscription", false);
+                    updateField("selectedTierId", "skip");
+                  }}
+                  data-testid="button-skip-subscription"
+                >
+                  Skip for now (set up later)
+                </Button>
+              </div>
+              <p className="text-xs text-muted-foreground">
+                You can set up your subscription from your dashboard after signup.
               </p>
             </div>
-          </div>
+          ) : (
+            <div className="space-y-3">
+              {tiersData?.tiers?.sort((a, b) => a.sortOrder - b.sortOrder).map((tier) => {
+                const isSelected = formData.selectedTierId === tier.id;
+                const tierIcon = tier.name === 'pro' ? Crown : tier.name === 'growth' ? Sparkles : Star;
+                const TierIcon = tierIcon;
+                
+                return (
+                  <div
+                    key={tier.id}
+                    className={`p-4 border rounded-lg cursor-pointer transition-all ${
+                      isSelected 
+                        ? "border-primary bg-primary/5 ring-2 ring-primary/20" 
+                        : "hover-elevate"
+                    }`}
+                    onClick={() => {
+                      updateField("selectedTierId", tier.id);
+                      updateField("acceptedSubscription", true);
+                    }}
+                    data-testid={`tier-card-${tier.name}`}
+                  >
+                    <div className="flex items-start justify-between">
+                      <div className="flex items-center gap-3">
+                        <div className={`h-10 w-10 rounded-full flex items-center justify-center ${
+                          tier.name === 'pro' ? 'bg-amber-100 dark:bg-amber-900/30' :
+                          tier.name === 'growth' ? 'bg-primary/10' :
+                          'bg-muted'
+                        }`}>
+                          <TierIcon className={`h-5 w-5 ${
+                            tier.name === 'pro' ? 'text-amber-600 dark:text-amber-400' :
+                            tier.name === 'growth' ? 'text-primary' :
+                            'text-muted-foreground'
+                          }`} />
+                        </div>
+                        <div>
+                          <h4 className="font-semibold flex items-center gap-2">
+                            {tier.displayName}
+                            {tier.name === 'growth' && (
+                              <Badge variant="secondary" className="text-xs">Popular</Badge>
+                            )}
+                          </h4>
+                          <p className="text-2xl font-bold">
+                            ${tier.priceInCents / 100}
+                            <span className="text-sm font-normal text-muted-foreground">/month</span>
+                          </p>
+                        </div>
+                      </div>
+                      <div className={`h-5 w-5 rounded-full border-2 flex items-center justify-center ${
+                        isSelected ? 'border-primary bg-primary' : 'border-muted-foreground/30'
+                      }`}>
+                        {isSelected && <Check className="h-3 w-3 text-primary-foreground" />}
+                      </div>
+                    </div>
+                    
+                    <div className="mt-3 space-y-1.5 text-sm">
+                      <div className="flex items-center gap-2 text-muted-foreground">
+                        <Check className="h-3.5 w-3.5 text-primary" />
+                        <span>Customizable storefront & messaging</span>
+                      </div>
+                      {tier.hasPriorityDiscovery && (
+                        <div className="flex items-center gap-2 text-muted-foreground">
+                          <Check className="h-3.5 w-3.5 text-primary" />
+                          <span>Priority discovery placement</span>
+                        </div>
+                      )}
+                      {tier.hasFeaturedPlacement && (
+                        <div className="flex items-center gap-2 text-muted-foreground">
+                          <Check className="h-3.5 w-3.5 text-primary" />
+                          <span>Featured placement in feed</span>
+                        </div>
+                      )}
+                      {tier.hasInfluencerAccess && (
+                        <div className="flex items-center gap-2 text-muted-foreground">
+                          <Check className="h-3.5 w-3.5 text-primary" />
+                          <span>Influencer promo access</span>
+                        </div>
+                      )}
+                      {tier.hasCreativeSupport && (
+                        <div className="flex items-center gap-2 text-muted-foreground">
+                          <Check className="h-3.5 w-3.5 text-primary" />
+                          <span>Creative support included</span>
+                        </div>
+                      )}
+                      {tier.alaCarteDiscountPercent > 0 && (
+                        <div className="flex items-center gap-2 text-muted-foreground">
+                          <Check className="h-3.5 w-3.5 text-primary" />
+                          <span>{tier.alaCarteDiscountPercent}% off photo shoots</span>
+                        </div>
+                      )}
+                      {tier.name === 'growth' && (
+                        <div className="flex items-center gap-2 text-muted-foreground">
+                          <Check className="h-3.5 w-3.5 text-primary" />
+                          <span>1 product shoot per quarter</span>
+                        </div>
+                      )}
+                      {tier.name === 'pro' && (
+                        <>
+                          <div className="flex items-center gap-2 text-muted-foreground">
+                            <Check className="h-3.5 w-3.5 text-primary" />
+                            <span>1 product shoot per month</span>
+                          </div>
+                          <div className="flex items-center gap-2 text-muted-foreground">
+                            <Check className="h-3.5 w-3.5 text-primary" />
+                            <span>1 influencer promo per quarter</span>
+                          </div>
+                        </>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
 
           <p className="text-xs text-muted-foreground text-center">
-            By subscribing, you agree to our Terms of Service and Privacy Policy
+            Payment will be processed through Stripe after signup. Cancel anytime.
           </p>
         </div>
       )}
@@ -1257,7 +1389,7 @@ export default function SignupForm({ onComplete, isVendor = false }: SignupFormP
             </>
           ) : (
             <>
-              {currentStep === steps.length ? (isVendor ? "Start Subscription" : "Get Started") : "Continue"}
+              {currentStep === steps.length ? (isVendor ? "Continue to Payment" : "Get Started") : "Continue"}
               {currentStep !== steps.length && <ChevronRight className="h-4 w-4 ml-1" />}
             </>
           )}
