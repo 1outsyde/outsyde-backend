@@ -76,6 +76,18 @@ The MVP includes:
 - `GET /api/businesses/:id` - Get single business
 - `PATCH /api/businesses/:id` - Update business (vendor only)
 
+### Vendor Storefront Management
+- `GET /api/vendor/my-business` - Get current vendor's business profile
+- `PATCH /api/vendor/my-business` - Update business profile (branding, contact, location)
+- `GET /api/vendor/products` - List vendor's products
+- `POST /api/vendor/products` - Create a new product
+- `PATCH /api/vendor/products/:id` - Update a product
+- `DELETE /api/vendor/products/:id` - Delete a product
+- `GET /api/vendor/services` - List vendor's services
+- `POST /api/vendor/services` - Create a new service
+- `PATCH /api/vendor/services/:id` - Update a service
+- `DELETE /api/vendor/services/:id` - Delete a service
+
 ### Cities
 - `GET /api/cities` - List all major cities for discovery
 - `GET /api/cities/:id` - Get single city
