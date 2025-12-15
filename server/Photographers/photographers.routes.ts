@@ -7,6 +7,7 @@ const photographersRouter = Router();
 // Current photographer endpoints (must come before /:id)
 photographersRouter.get("/me",                   PhotographerController.getMe);
 photographersRouter.get("/me/stripe-status",     PhotographerController.getStripeStatus);
+photographersRouter.get("/me/bookings",          PhotographerController.getBookingRecords);
 photographersRouter.post("/me/stripe-onboarding", PhotographerController.startStripeOnboarding);
 
 // Create photographer

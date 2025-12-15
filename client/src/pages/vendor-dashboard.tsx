@@ -1,6 +1,24 @@
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { LayoutDashboard, Package, Calendar, MessageCircle, Settings, PlusCircle, Crown, Store, Users } from "lucide-react";
+import { LayoutDashboard, Package, Calendar, MessageCircle, Settings, PlusCircle, Crown, Store, Users, ClipboardList } from "lucide-react";
+import { format } from "date-fns";
+
+interface OrderRecord {
+  recordId: string;
+  recordType: 'order' | 'appointment';
+  customerId: string;
+  firstName: string | null;
+  lastName: string | null;
+  email: string | null;
+  productsOrServices: string;
+  orderedAt: string | null;
+  bookingDateTime: string | null;
+  totalPaid: number;
+  platformFee: number;
+  vendorNet: number;
+  paymentIntentId: string | null;
+  status: string | null;
+}
 import { Button } from "@/components/ui/button";
 import { SidebarProvider, Sidebar, SidebarContent, SidebarHeader, SidebarMenu, SidebarMenuItem, SidebarMenuButton, SidebarTrigger } from "@/components/ui/sidebar";
 import VendorDashboard from "@/components/VendorDashboard";
@@ -84,19 +102,18 @@ export default function VendorDashboardPage({ onLogout }: VendorDashboardPagePro
   const menuItems = [
     { id: "dashboard", icon: LayoutDashboard, label: "Dashboard" },
     { id: "storefront", icon: Store, label: "Storefront" },
-    { id: "customers", icon: Users, label: "Customers" },
+    { id: "orders", icon: ClipboardList, label: "Orders & Bookings" },
     { id: "subscription", icon: Crown, label: "Subscription" },
-    { id: "bookings", icon: Calendar, label: "Bookings" },
     { id: "messages", icon: MessageCircle, label: "Messages" },
     { id: "settings", icon: Settings, label: "Settings" },
   ];
 
-  // Fetch customers for the business
-  const { data: customersData, isLoading: customersLoading, error: customersError } = useQuery<{
-    customers: { id: string; firstName: string | null; lastName: string | null; email: string | null; phone: string | null }[];
+  // Fetch order/booking records for the business
+  const { data: recordsData, isLoading: recordsLoading, error: recordsError } = useQuery<{
+    records: OrderRecord[];
   }>({
     queryKey: ["/api/vendor/customers"],
-    enabled: activeSection === "customers",
+    enabled: activeSection === "orders",
   });
 
   const sidebarStyle = {
@@ -174,58 +191,114 @@ export default function VendorDashboardPage({ onLogout }: VendorDashboardPagePro
               <VendorSubscriptionDashboard />
             )}
 
-            {activeSection === "customers" && (
+            {activeSection === "orders" && (
               <div className="space-y-6">
                 <div className="flex items-center justify-between">
-                  <h2 className="text-2xl font-semibold" data-testid="heading-customers">Customers</h2>
+                  <h2 className="text-2xl font-semibold" data-testid="heading-orders">Orders & Bookings</h2>
                 </div>
                 
-                {customersLoading ? (
+                {recordsLoading ? (
                   <div className="text-center py-12">
-                    <p className="text-muted-foreground">Loading customers...</p>
+                    <p className="text-muted-foreground">Loading records...</p>
                   </div>
-                ) : customersError ? (
-                  <div className="text-center py-12" data-testid="error-customers">
-                    <Users className="h-16 w-16 mx-auto text-destructive mb-4" />
-                    <h3 className="text-xl font-semibold mb-2">Failed to Load Customers</h3>
+                ) : recordsError ? (
+                  <div className="text-center py-12" data-testid="error-orders">
+                    <ClipboardList className="h-16 w-16 mx-auto text-destructive mb-4" />
+                    <h3 className="text-xl font-semibold mb-2">Failed to Load Records</h3>
                     <p className="text-muted-foreground mb-4">
-                      There was an error loading your customer list. Please try again.
+                      There was an error loading your order records. Please try again.
                     </p>
                     <Button 
                       variant="outline" 
                       onClick={() => window.location.reload()}
-                      data-testid="button-retry-customers"
+                      data-testid="button-retry-orders"
                     >
                       Retry
                     </Button>
                   </div>
-                ) : customersData?.customers && customersData.customers.length > 0 ? (
-                  <div className="bg-card rounded-lg border">
-                    <table className="w-full" data-testid="table-customers">
+                ) : recordsData?.records && recordsData.records.length > 0 ? (
+                  <div className="bg-card rounded-lg border overflow-x-auto">
+                    <table className="w-full min-w-[1200px]" data-testid="table-orders">
                       <thead>
                         <tr className="border-b">
-                          <th className="text-left p-4 font-medium text-muted-foreground">Customer ID</th>
-                          <th className="text-left p-4 font-medium text-muted-foreground">Name</th>
-                          <th className="text-left p-4 font-medium text-muted-foreground">Email</th>
-                          <th className="text-left p-4 font-medium text-muted-foreground">Phone</th>
+                          <th className="text-left p-3 font-medium text-muted-foreground text-sm">Type</th>
+                          <th className="text-left p-3 font-medium text-muted-foreground text-sm">Order ID</th>
+                          <th className="text-left p-3 font-medium text-muted-foreground text-sm">Customer</th>
+                          <th className="text-left p-3 font-medium text-muted-foreground text-sm">Email</th>
+                          <th className="text-left p-3 font-medium text-muted-foreground text-sm">Products/Services</th>
+                          <th className="text-left p-3 font-medium text-muted-foreground text-sm">Ordered At</th>
+                          <th className="text-left p-3 font-medium text-muted-foreground text-sm">Booking Date</th>
+                          <th className="text-right p-3 font-medium text-muted-foreground text-sm">Total</th>
+                          <th className="text-right p-3 font-medium text-muted-foreground text-sm">Platform Fee</th>
+                          <th className="text-right p-3 font-medium text-muted-foreground text-sm">Your Net</th>
+                          <th className="text-left p-3 font-medium text-muted-foreground text-sm">Status</th>
                         </tr>
                       </thead>
                       <tbody>
-                        {customersData.customers.map((customer) => (
-                          <tr key={customer.id} className="border-b last:border-0" data-testid={`row-customer-${customer.id}`}>
-                            <td className="p-4 font-mono text-sm" data-testid={`text-customer-id-${customer.id}`}>
-                              {customer.id.slice(0, 8)}...
+                        {recordsData.records.map((record) => (
+                          <tr key={record.recordId} className="border-b last:border-0" data-testid={`row-order-${record.recordId}`}>
+                            <td className="p-3">
+                              <span className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-medium ${
+                                record.recordType === 'order' 
+                                  ? 'bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-200' 
+                                  : 'bg-purple-100 text-purple-800 dark:bg-purple-900 dark:text-purple-200'
+                              }`}>
+                                {record.recordType === 'order' ? 'Order' : 'Booking'}
+                              </span>
                             </td>
-                            <td className="p-4" data-testid={`text-customer-name-${customer.id}`}>
-                              {customer.firstName || customer.lastName 
-                                ? `${customer.firstName || ''} ${customer.lastName || ''}`.trim()
+                            <td className="p-3 font-mono text-xs" data-testid={`text-order-id-${record.recordId}`}>
+                              {record.recordId.slice(0, 8)}...
+                            </td>
+                            <td className="p-3 text-sm" data-testid={`text-customer-name-${record.recordId}`}>
+                              {record.firstName || record.lastName 
+                                ? `${record.firstName || ''} ${record.lastName || ''}`.trim()
                                 : '—'}
                             </td>
-                            <td className="p-4" data-testid={`text-customer-email-${customer.id}`}>
-                              {customer.email || '—'}
+                            <td className="p-3 text-sm text-muted-foreground" data-testid={`text-customer-email-${record.recordId}`}>
+                              {record.email || '—'}
                             </td>
-                            <td className="p-4" data-testid={`text-customer-phone-${customer.id}`}>
-                              {customer.phone || '—'}
+                            <td className="p-3 text-sm max-w-[200px] truncate" title={record.productsOrServices}>
+                              {record.productsOrServices || '—'}
+                            </td>
+                            <td className="p-3 text-sm text-muted-foreground">
+                              {record.orderedAt ? (() => {
+                                try {
+                                  return format(new Date(record.orderedAt), 'MMM d, yyyy h:mm a');
+                                } catch {
+                                  return '—';
+                                }
+                              })() : '—'}
+                            </td>
+                            <td className="p-3 text-sm text-muted-foreground">
+                              {record.bookingDateTime ? (() => {
+                                try {
+                                  return format(new Date(record.bookingDateTime), 'MMM d, yyyy h:mm a');
+                                } catch {
+                                  return record.bookingDateTime;
+                                }
+                              })() : '—'}
+                            </td>
+                            <td className="p-3 text-sm text-right font-medium">
+                              ${(record.totalPaid / 100).toFixed(2)}
+                            </td>
+                            <td className="p-3 text-sm text-right text-muted-foreground">
+                              ${(record.platformFee / 100).toFixed(2)}
+                            </td>
+                            <td className="p-3 text-sm text-right font-medium text-green-600 dark:text-green-400">
+                              ${(record.vendorNet / 100).toFixed(2)}
+                            </td>
+                            <td className="p-3">
+                              <span className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-medium ${
+                                record.status === 'completed' 
+                                  ? 'bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200'
+                                  : record.status === 'confirmed'
+                                  ? 'bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-200'
+                                  : record.status === 'pending'
+                                  ? 'bg-yellow-100 text-yellow-800 dark:bg-yellow-900 dark:text-yellow-200'
+                                  : 'bg-gray-100 text-gray-800 dark:bg-gray-800 dark:text-gray-200'
+                              }`}>
+                                {record.status || 'Unknown'}
+                              </span>
                             </td>
                           </tr>
                         ))}
@@ -234,23 +307,13 @@ export default function VendorDashboardPage({ onLogout }: VendorDashboardPagePro
                   </div>
                 ) : (
                   <div className="text-center py-12">
-                    <Users className="h-16 w-16 mx-auto text-muted-foreground mb-4" />
-                    <h3 className="text-xl font-semibold mb-2">No Customers Yet</h3>
+                    <ClipboardList className="h-16 w-16 mx-auto text-muted-foreground mb-4" />
+                    <h3 className="text-xl font-semibold mb-2">No Orders Yet</h3>
                     <p className="text-muted-foreground">
-                      Customers who place orders or book appointments will appear here.
+                      Orders and bookings from your customers will appear here.
                     </p>
                   </div>
                 )}
-              </div>
-            )}
-
-            {activeSection === "bookings" && (
-              <div className="text-center py-12">
-                <Calendar className="h-16 w-16 mx-auto text-muted-foreground mb-4" />
-                <h2 className="text-xl font-semibold mb-2">Manage Bookings</h2>
-                <p className="text-muted-foreground">
-                  View and manage your upcoming appointments
-                </p>
               </div>
             )}
 

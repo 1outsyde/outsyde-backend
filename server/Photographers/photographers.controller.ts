@@ -214,4 +214,31 @@ export class PhotographerController {
         .json({ success: false, message: "Failed to delete photographer" });
     }
   }
+
+  // GET /api/photographers/me/bookings
+  static async getBookingRecords(req: Request, res: Response) {
+    try {
+      const photographerId = req.session?.photographerId;
+      const userId = req.session?.userId;
+      
+      if (!photographerId && !userId) {
+        return res.status(401).json({ error: "Not authenticated" });
+      }
+
+      let targetPhotographerId = photographerId;
+      if (!targetPhotographerId && userId) {
+        const photographer = await PhotographerService.getByUserId(userId);
+        if (!photographer) {
+          return res.status(404).json({ error: "Photographer not found" });
+        }
+        targetPhotographerId = photographer.id;
+      }
+
+      const records = await storage.getPhotographerBookingRecords(targetPhotographerId!);
+      res.json({ records });
+    } catch (error) {
+      console.error("Get photographer booking records error:", error);
+      res.status(500).json({ error: "Failed to get booking records" });
+    }
+  }
 }
