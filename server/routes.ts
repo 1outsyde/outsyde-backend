@@ -4,6 +4,7 @@ import { storage } from "./storage";
 import {
   customerSignupSchema,
   vendorSignupSchema,
+  photographerSignupSchema,
   loginSchema,
   insertReviewSchema,
 } from "@shared/schema";
@@ -153,6 +154,106 @@ export async function registerRoutes(
     }
   });
 
+  // Photographer signup
+  app.post("/api/auth/photographer/signup", async (req, res) => {
+    try {
+      const data = photographerSignupSchema.parse(req.body);
+      const skipStripe = req.body.skipStripe === true;
+
+      const existing = await storage.getUserByEmail(data.email);
+      if (existing) {
+        return res.status(400).json({ error: "Email already registered" });
+      }
+
+      const hashedPassword = await hashPassword(data.password);
+      const user = await storage.createUser({
+        email: data.email,
+        password: hashedPassword,
+        name: data.name,
+        phone: data.phone,
+        isVendor: false,
+        isPhotographer: true,
+        city: data.city,
+        state: data.state,
+      });
+
+      const photographer = await storage.createPhotographer({
+        userId: user.id,
+        displayName: data.displayName,
+        bio: data.bio,
+        city: data.city,
+        state: data.state,
+        hourlyRate: data.hourlyRate,
+        portfolioUrl: data.portfolioUrl,
+        specialties: data.specialties,
+      });
+
+      if (req.session) {
+        req.session.userId = user.id;
+        req.session.isVendor = false;
+        req.session.isPhotographer = true;
+        req.session.photographerId = photographer.id;
+      }
+
+      const { password: _, ...safeUser } = user;
+
+      // If not skipping Stripe, create Connect account and onboarding link
+      if (!skipStripe) {
+        try {
+          // Use request host with fallback to REPLIT_DOMAINS
+          // Force HTTPS for Stripe Connect (required for production)
+          const host = req.get('host') || process.env.REPLIT_DOMAINS?.split(',')[0];
+          const forwardedProto = req.get('x-forwarded-proto');
+          const protocol = forwardedProto || (host?.includes('replit') ? 'https' : req.protocol) || 'https';
+          const baseUrl = host ? `${protocol}://${host}` : '';
+          
+          // Create Stripe Connect Express account
+          const account = await stripeService.createConnectAccount(
+            data.email,
+            photographer.id,
+            data.displayName
+          );
+
+          // Update photographer with Stripe account ID
+          await storage.updatePhotographer(photographer.id, {
+            stripeAccountId: account.id,
+          });
+
+          // Create onboarding link
+          const accountLink = await stripeService.createConnectOnboardingLink(
+            account.id,
+            `${baseUrl}/photographer/onboarding?refresh=true`,
+            `${baseUrl}/photographer/dashboard?stripe=success`
+          );
+
+          return res.json({ 
+            user: safeUser, 
+            photographer: { ...photographer, stripeAccountId: account.id },
+            stripeOnboardingUrl: accountLink.url
+          });
+        } catch (stripeError) {
+          console.error("Stripe Connect setup error:", stripeError);
+          // Account created but Stripe failed - return success without Stripe URL
+          return res.json({ 
+            user: safeUser, 
+            photographer,
+            stripeError: "Failed to setup Stripe. You can complete this later from your dashboard."
+          });
+        }
+      }
+
+      res.json({ user: safeUser, photographer });
+    } catch (error) {
+      if (error instanceof z.ZodError) {
+        return res
+          .status(400)
+          .json({ error: "Invalid data", details: error.errors });
+      }
+      console.error("Photographer signup error:", error);
+      res.status(500).json({ error: "Signup failed" });
+    }
+  });
+
   // Login (supports both legacy base64 and new bcrypt passwords)
   app.post("/api/auth/login", async (req, res) => {
     try {
@@ -181,11 +282,19 @@ export async function registerRoutes(
       if (req.session) {
         req.session.userId = user.id;
         req.session.isVendor = user.isVendor;
+        req.session.isPhotographer = user.isPhotographer || false;
 
         if (user.isVendor) {
           const business = await storage.getBusinessByOwnerId(user.id);
           if (business) {
             req.session.businessId = business.id;
+          }
+        }
+
+        if (user.isPhotographer) {
+          const photographer = await storage.getPhotographerByUserId(user.id);
+          if (photographer) {
+            req.session.photographerId = photographer.id;
           }
         }
       }
@@ -195,6 +304,11 @@ export async function registerRoutes(
       if (user.isVendor) {
         const business = await storage.getBusinessByOwnerId(user.id);
         return res.json({ user: safeUser, business });
+      }
+
+      if (user.isPhotographer) {
+        const photographer = await storage.getPhotographerByUserId(user.id);
+        return res.json({ user: safeUser, photographer });
       }
 
       res.json({ user: safeUser });

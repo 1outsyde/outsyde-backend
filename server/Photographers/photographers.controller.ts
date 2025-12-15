@@ -1,8 +1,108 @@
 // server/Photographers/photographers.controller.ts
 import { Request, Response } from "express";
 import { PhotographerService } from "./photographers.service";
+import { stripeService } from "../stripe/stripeService";
+import { storage } from "../storage";
 
 export class PhotographerController {
+  // GET /api/photographers/me
+  static async getMe(req: Request, res: Response) {
+    try {
+      const photographerId = req.session?.photographerId;
+      const userId = req.session?.userId;
+      
+      if (!photographerId && !userId) {
+        return res.status(401).json({ error: "Not authenticated" });
+      }
+
+      let photographer = null;
+      if (photographerId) {
+        photographer = await PhotographerService.get(photographerId);
+      } else if (userId) {
+        photographer = await PhotographerService.getByUserId(userId);
+      }
+      
+      if (!photographer) {
+        return res.status(404).json({ error: "Photographer not found" });
+      }
+
+      res.json(photographer);
+    } catch (error) {
+      console.error("Get me photographer error:", error);
+      res.status(500).json({ error: "Failed to fetch photographer" });
+    }
+  }
+
+  // GET /api/photographers/me/stripe-status
+  static async getStripeStatus(req: Request, res: Response) {
+    try {
+      const photographerId = req.session?.photographerId;
+      if (!photographerId) {
+        return res.status(401).json({ error: "Not authenticated as photographer" });
+      }
+
+      const photographer = await PhotographerService.get(photographerId);
+      if (!photographer?.stripeAccountId) {
+        return res.json({ chargesEnabled: false, payoutsEnabled: false, detailsSubmitted: false });
+      }
+
+      const status = await stripeService.getConnectAccountStatus(photographer.stripeAccountId);
+      res.json(status);
+    } catch (error) {
+      console.error("Get stripe status error:", error);
+      res.status(500).json({ error: "Failed to get Stripe status" });
+    }
+  }
+
+  // POST /api/photographers/me/stripe-onboarding
+  static async startStripeOnboarding(req: Request, res: Response) {
+    try {
+      const userId = req.session?.userId;
+      const photographerId = req.session?.photographerId;
+      if (!photographerId || !userId) {
+        return res.status(401).json({ error: "Not authenticated as photographer" });
+      }
+
+      const photographer = await PhotographerService.get(photographerId);
+      if (!photographer) {
+        return res.status(404).json({ error: "Photographer not found" });
+      }
+
+      const user = await storage.getUser(userId);
+      if (!user) {
+        return res.status(404).json({ error: "User not found" });
+      }
+
+      const host = req.get('host') || process.env.REPLIT_DOMAINS?.split(',')[0];
+      const forwardedProto = req.get('x-forwarded-proto');
+      const protocol = forwardedProto || (host?.includes('replit') ? 'https' : req.protocol) || 'https';
+      const baseUrl = host ? `${protocol}://${host}` : '';
+
+      let stripeAccountId = photographer.stripeAccountId;
+      
+      if (!stripeAccountId) {
+        const account = await stripeService.createConnectAccount(
+          user.email!,
+          photographerId,
+          photographer.displayName
+        );
+        stripeAccountId = account.id;
+        await storage.updatePhotographer(photographerId, { stripeAccountId });
+      }
+
+      const accountLink = await stripeService.createConnectOnboardingLink(
+        stripeAccountId,
+        `${baseUrl}/photographer/onboarding?refresh=true`,
+        `${baseUrl}/photographer/dashboard?stripe=success`
+      );
+
+      res.json({ url: accountLink.url });
+    } catch (error) {
+      console.error("Start stripe onboarding error:", error);
+      res.status(500).json({ error: "Failed to start Stripe onboarding" });
+    }
+  }
+
   // POST /api/photographers
   static async create(req: Request, res: Response) {
     try {

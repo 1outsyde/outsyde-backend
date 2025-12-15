@@ -33,6 +33,7 @@ export const users = pgTable("users", {
   profileImageUrl: text("profile_image_url"),
   phone: text("phone"),
   isVendor: boolean("is_vendor").default(false).notNull(),
+  isPhotographer: boolean("is_photographer").default(false).notNull(),
   isAdmin: boolean("is_admin").default(false).notNull(),
   
   // OAuth flags
@@ -158,7 +159,9 @@ export const photographers = pgTable("photographers", {
   rating: integer("rating").default(0),
   reviewCount: integer("review_count").default(0),
 
-  stripeAccountId: text("stripe_account_id").notNull(),
+  stripeAccountId: text("stripe_account_id"),
+  stripeOnboardingComplete: boolean("stripe_onboarding_complete").default(false),
+  specialties: text("specialties").array(),
 
   createdAt: timestamp("created_at").defaultNow().notNull(),
 });
@@ -398,6 +401,20 @@ export const vendorSignupSchema = z.object({
 export const loginSchema = z.object({
   email: z.string().email(),
   password: z.string().min(1),
+});
+
+export const photographerSignupSchema = z.object({
+  email: z.string().email(),
+  password: z.string().min(6),
+  name: z.string().min(1),
+  phone: z.string().optional(),
+  displayName: z.string().min(1),
+  bio: z.string().optional(),
+  city: z.string().min(1),
+  state: z.string().min(1),
+  hourlyRate: z.number().min(1),
+  portfolioUrl: z.string().min(1),
+  specialties: z.array(z.string()).default([]),
 });
 
 

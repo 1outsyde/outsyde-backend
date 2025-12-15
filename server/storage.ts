@@ -65,7 +65,8 @@ export type NewPhotographerInput = {
   state?: string | null;
   portfolioUrl?: string | null;
   hourlyRate: number;
-  stripeAccountId: string;
+  stripeAccountId?: string | null;
+  specialties?: string[];
 };
 
 export interface IStorage {
@@ -468,7 +469,9 @@ export class DatabaseStorage implements IStorage {
       state: data.state ?? null,
       portfolioUrl: data.portfolioUrl ?? null,
       hourlyRate: data.hourlyRate,
-      stripeAccountId: data.stripeAccountId,
+      stripeAccountId: data.stripeAccountId ?? null,
+      stripeOnboardingComplete: false,
+      specialties: data.specialties ?? [],
     }).returning();
     return result[0];
   }

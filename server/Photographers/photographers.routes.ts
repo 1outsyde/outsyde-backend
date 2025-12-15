@@ -4,6 +4,11 @@ import { PhotographerController } from "./photographers.controller";
 
 const photographersRouter = Router();
 
+// Current photographer endpoints (must come before /:id)
+photographersRouter.get("/me",                   PhotographerController.getMe);
+photographersRouter.get("/me/stripe-status",     PhotographerController.getStripeStatus);
+photographersRouter.post("/me/stripe-onboarding", PhotographerController.startStripeOnboarding);
+
 // Create photographer
 photographersRouter.post("/",      PhotographerController.create);
 // List photographers

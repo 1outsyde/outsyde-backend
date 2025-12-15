@@ -5,15 +5,16 @@ import { Button } from "@/components/ui/button";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Separator } from "@/components/ui/separator";
 import SignupForm from "@/components/SignupForm";
+import PhotographerSignupForm from "@/components/PhotographerSignupForm";
 import heroImage from "@assets/generated_images/local_community_marketplace_hero.png";
 
 interface AuthPageProps {
-  onComplete: (isVendor: boolean) => void;
+  onComplete: (isVendor: boolean, isPhotographer?: boolean) => void;
   onBack: () => void;
 }
 
 export default function AuthPage({ onComplete, onBack }: AuthPageProps) {
-  const [activeTab, setActiveTab] = useState<"customer" | "vendor">("customer");
+  const [activeTab, setActiveTab] = useState<"customer" | "vendor" | "photographer">("customer");
 
   const handleGoogleLogin = () => {
     window.location.href = "/api/login";
@@ -79,13 +80,16 @@ export default function AuthPage({ onComplete, onBack }: AuthPageProps) {
               </div>
             </div>
 
-            <Tabs value={activeTab} onValueChange={(v) => setActiveTab(v as "customer" | "vendor")}>
-              <TabsList className="grid w-full grid-cols-2 mb-6">
+            <Tabs value={activeTab} onValueChange={(v) => setActiveTab(v as "customer" | "vendor" | "photographer")}>
+              <TabsList className="grid w-full grid-cols-3 mb-6">
                 <TabsTrigger value="customer" data-testid="tab-customer">
-                  I'm a Customer
+                  Sign up as a Client
                 </TabsTrigger>
                 <TabsTrigger value="vendor" data-testid="tab-vendor">
-                  I'm a Business
+                  Sign up as a Business
+                </TabsTrigger>
+                <TabsTrigger value="photographer" data-testid="tab-photographer">
+                  Join as a Photographer
                 </TabsTrigger>
               </TabsList>
 
@@ -100,6 +104,12 @@ export default function AuthPage({ onComplete, onBack }: AuthPageProps) {
                 <SignupForm
                   isVendor={true}
                   onComplete={() => onComplete(true)}
+                />
+              </TabsContent>
+
+              <TabsContent value="photographer">
+                <PhotographerSignupForm
+                  onComplete={() => onComplete(false, true)}
                 />
               </TabsContent>
             </Tabs>

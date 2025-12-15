@@ -16,12 +16,13 @@ import ProfilePage from "@/pages/profile";
 import VendorPage from "@/pages/vendor";
 import AuthPage from "@/pages/auth";
 import VendorDashboardPage from "@/pages/vendor-dashboard";
+import PhotographerDashboardPage from "@/pages/photographer-dashboard";
 import AdminFulfillmentPage from "@/pages/admin-fulfillment";
 
 import jewelryImage from "@assets/generated_images/jewelry_artisan_vendor_image.png";
 import type { User } from "@shared/schema";
 
-type Page = "home" | "search" | "messages" | "profile" | "vendor" | "auth" | "vendor-dashboard" | "admin-fulfillment";
+type Page = "home" | "search" | "messages" | "profile" | "vendor" | "auth" | "vendor-dashboard" | "photographer-dashboard" | "admin-fulfillment";
 type NavTab = "home" | "search" | "create" | "messages" | "profile";
 
 interface MessageTarget {
@@ -44,6 +45,7 @@ function AppContent() {
 
   const isAuthenticated = !!user;
   const isVendor = user?.isVendor ?? false;
+  const isPhotographer = user?.isPhotographer ?? false;
 
   const { 
     items: dbCartItems, 
@@ -92,6 +94,8 @@ function AppContent() {
         setCurrentPage("auth");
       } else if (isVendor) {
         setCurrentPage("vendor-dashboard");
+      } else if (isPhotographer) {
+        setCurrentPage("photographer-dashboard");
       } else {
         setCurrentPage("profile");
       }
@@ -113,10 +117,12 @@ function AppContent() {
     }
   };
 
-  const handleAuthComplete = async (vendorAccount: boolean) => {
+  const handleAuthComplete = async (vendorAccount: boolean, photographerAccount?: boolean) => {
     await refetchUser();
     if (vendorAccount) {
       setCurrentPage("vendor-dashboard");
+    } else if (photographerAccount) {
+      setCurrentPage("photographer-dashboard");
     } else {
       setCurrentPage("home");
       setActiveTab("home");
@@ -178,6 +184,15 @@ function AppContent() {
     return (
       <>
         <VendorDashboardPage onLogout={handleLogout} />
+        <Toaster />
+      </>
+    );
+  }
+
+  if (currentPage === "photographer-dashboard" && isPhotographer) {
+    return (
+      <>
+        <PhotographerDashboardPage onLogout={handleLogout} />
         <Toaster />
       </>
     );

@@ -48,6 +48,17 @@ export class PhotographerService {
     return result[0] ?? null;
   }
 
+  // Get photographer by userId
+  static async getByUserId(userId: string) {
+    const result = await db
+      .select()
+      .from(photographers)
+      .where(eq(photographers.userId, userId))
+      .limit(1);
+
+    return result[0] ?? null;
+  }
+
   // Update photographer
   static async update(
     id: string,

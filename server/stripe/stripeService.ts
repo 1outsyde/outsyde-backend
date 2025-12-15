@@ -311,6 +311,60 @@ export class StripeService {
       },
     });
   }
+
+  // ==================== STRIPE CONNECT FOR PHOTOGRAPHERS ====================
+
+  // Create a Stripe Connect Express account for a photographer
+  async createConnectAccount(email: string, photographerId: string, displayName: string) {
+    const stripe = await getUncachableStripeClient();
+    
+    const account = await stripe.accounts.create({
+      type: 'express',
+      email,
+      metadata: {
+        photographerId,
+        type: 'photographer',
+      },
+      business_type: 'individual',
+      capabilities: {
+        card_payments: { requested: true },
+        transfers: { requested: true },
+      },
+      business_profile: {
+        name: displayName,
+        mcc: '7221', // Photographic studios
+      },
+    });
+
+    return account;
+  }
+
+  // Create an onboarding link for a Connect account
+  async createConnectOnboardingLink(accountId: string, refreshUrl: string, returnUrl: string) {
+    const stripe = await getUncachableStripeClient();
+    
+    const accountLink = await stripe.accountLinks.create({
+      account: accountId,
+      refresh_url: refreshUrl,
+      return_url: returnUrl,
+      type: 'account_onboarding',
+    });
+
+    return accountLink;
+  }
+
+  // Check if a Connect account has completed onboarding
+  async getConnectAccountStatus(accountId: string) {
+    const stripe = await getUncachableStripeClient();
+    const account = await stripe.accounts.retrieve(accountId);
+    
+    return {
+      chargesEnabled: account.charges_enabled,
+      payoutsEnabled: account.payouts_enabled,
+      detailsSubmitted: account.details_submitted,
+      requirements: account.requirements,
+    };
+  }
 }
 
 export const stripeService = new StripeService();
