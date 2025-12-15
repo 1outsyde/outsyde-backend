@@ -966,6 +966,40 @@ export async function registerRoutes(
     }
   });
 
+  // Get products for a specific business (public - for customer storefront view)
+  app.get("/api/businesses/:id/products", async (req, res) => {
+    try {
+      const business = await storage.getBusiness(req.params.id);
+      if (!business) {
+        return res.status(404).json({ error: "Business not found" });
+      }
+      const products = await storage.getVendorProducts(req.params.id);
+      // Only return active products for public view
+      const activeProducts = products.filter(p => p.isActive);
+      res.json({ products: activeProducts });
+    } catch (error) {
+      console.error("Get business products error:", error);
+      res.status(500).json({ error: "Failed to get products" });
+    }
+  });
+
+  // Get services for a specific business (public - for customer storefront view)
+  app.get("/api/businesses/:id/services", async (req, res) => {
+    try {
+      const business = await storage.getBusiness(req.params.id);
+      if (!business) {
+        return res.status(404).json({ error: "Business not found" });
+      }
+      const services = await storage.getVendorServices(req.params.id);
+      // Only return active services for public view
+      const activeServices = services.filter(s => s.isActive);
+      res.json({ services: activeServices });
+    } catch (error) {
+      console.error("Get business services error:", error);
+      res.status(500).json({ error: "Failed to get services" });
+    }
+  });
+
   // ==================== VENDOR STOREFRONT ROUTES ====================
 
   // Get current vendor's business

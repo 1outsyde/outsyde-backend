@@ -1,5 +1,9 @@
 import { useState } from "react";
+import { useQuery } from "@tanstack/react-query";
+import { Loader2 } from "lucide-react";
 import VendorStorefront from "@/components/VendorStorefront";
+import type { Business, VendorProduct, VendorService } from "@shared/schema";
+
 import hairSalonImage from "@assets/generated_images/hair_salon_vendor_storefront.png";
 import jewelryImage from "@assets/generated_images/jewelry_artisan_vendor_image.png";
 import coffeeShopImage from "@assets/generated_images/coffee_shop_vendor_storefront.png";
@@ -12,112 +16,52 @@ interface VendorPageProps {
   onLoginRequired: () => void;
 }
 
+const fallbackImages: Record<string, string> = {
+  "1": coffeeShopImage,
+  "2": hairSalonImage,
+  "3": jewelryImage,
+  "4": yogaImage,
+  "5": produceImage,
+};
+
 export default function VendorPage({ vendorId, onBack, onLoginRequired }: VendorPageProps) {
   const [isFollowing, setIsFollowing] = useState(false);
+
+  const { data: businessData, isLoading: businessLoading } = useQuery<{ business: Business }>({
+    queryKey: ["/api/businesses", vendorId],
+    queryFn: async () => {
+      const res = await fetch(`/api/businesses/${vendorId}`);
+      if (!res.ok) throw new Error("Business not found");
+      return res.json();
+    },
+    retry: false,
+  });
+
+  const { data: productsData, isLoading: productsLoading } = useQuery<{ products: VendorProduct[] }>({
+    queryKey: ["/api/businesses", vendorId, "products"],
+    queryFn: async () => {
+      const res = await fetch(`/api/businesses/${vendorId}/products`);
+      if (!res.ok) return { products: [] };
+      return res.json();
+    },
+    enabled: !!businessData?.business,
+  });
+
+  const { data: servicesData, isLoading: servicesLoading } = useQuery<{ services: VendorService[] }>({
+    queryKey: ["/api/businesses", vendorId, "services"],
+    queryFn: async () => {
+      const res = await fetch(`/api/businesses/${vendorId}/services`);
+      if (!res.ok) return { services: [] };
+      return res.json();
+    },
+    enabled: !!businessData?.business,
+  });
 
   const today = new Date();
   const formatDate = (offset: number) => {
     const date = new Date(today);
     date.setDate(date.getDate() + offset);
     return date.toISOString().split("T")[0];
-  };
-
-  // todo: remove mock functionality
-  const vendorsData: Record<string, any> = {
-    "1": {
-      id: "1",
-      ownerId: "vendor-test-1",
-      name: "Sunrise Coffee Co.",
-      banner: coffeeShopImage,
-      category: "Coffee & Cafe",
-      location: "Downtown, 0.5 mi away",
-      rating: 4.8,
-      reviewCount: 124,
-      description: "Welcome to Sunrise Coffee Co.! We've been serving our community with the finest artisanal coffee and fresh pastries since 2015. Every cup is carefully crafted with beans sourced from sustainable farms.",
-      businessHours: "Open 7 AM - 8 PM",
-      products: [
-        { id: "1", name: "Signature Blend Beans", image: coffeeShopImage, price: 18.99 },
-        { id: "2", name: "Organic Cold Brew", image: coffeeShopImage, price: 12.99 },
-        { id: "3", name: "Coffee Gift Set", image: coffeeShopImage, price: 45.99, originalPrice: 55.99 },
-      ],
-      services: [],
-    },
-    "2": {
-      id: "2",
-      ownerId: "vendor-test-2",
-      name: "Bella's Hair Studio",
-      banner: hairSalonImage,
-      category: "Beauty & Wellness",
-      location: "Midtown, 0.8 mi away",
-      rating: 4.9,
-      reviewCount: 89,
-      description: "Welcome to Bella's Hair Studio! We've been serving our community for over 10 years, specializing in modern cuts, vibrant colors, and personalized styling. Our team of expert stylists is dedicated to making you look and feel your best.",
-      businessHours: "Open 9 AM - 7 PM",
-      products: [
-        { id: "1", name: "Hair Styling Gel", image: jewelryImage, price: 24.99 },
-        { id: "2", name: "Organic Shampoo", image: jewelryImage, price: 18.99 },
-      ],
-      services: [
-        { id: "1", name: "Full Hair Styling", image: hairSalonImage, price: 85, duration: 60, category: "Hair Care", description: "Complete styling including wash, cut, and style." },
-        { id: "2", name: "Hair Coloring", image: hairSalonImage, price: 120, duration: 90, category: "Hair Care", description: "Professional coloring with premium products." },
-        { id: "3", name: "Quick Trim", image: hairSalonImage, price: 35, duration: 30, category: "Hair Care", description: "Fast and precise trim to maintain your style." },
-      ],
-    },
-    "3": {
-      id: "3",
-      ownerId: "vendor-test-3",
-      name: "Artisan Jewelry Co.",
-      banner: jewelryImage,
-      category: "Shopping",
-      location: "Arts District, 1.2 mi away",
-      rating: 4.7,
-      reviewCount: 56,
-      description: "Discover unique handcrafted jewelry made with love and attention to detail. Each piece tells a story and is crafted to be one-of-a-kind.",
-      businessHours: "Open 10 AM - 6 PM",
-      products: [
-        { id: "1", name: "Silver Pendant Necklace", image: jewelryImage, price: 45.99 },
-        { id: "2", name: "Gemstone Earrings", image: jewelryImage, price: 38.99 },
-        { id: "3", name: "Gold Ring Set", image: jewelryImage, price: 89.99, originalPrice: 99.99 },
-        { id: "4", name: "Beaded Bracelet", image: jewelryImage, price: 28.99 },
-      ],
-      services: [],
-    },
-    "4": {
-      id: "4",
-      ownerId: "vendor-test-4",
-      name: "Zen Yoga Studio",
-      banner: yogaImage,
-      category: "Health & Fitness",
-      location: "Wellness Center, 0.6 mi away",
-      rating: 4.9,
-      reviewCount: 203,
-      description: "Find your inner peace with our expert-led yoga and meditation classes. We offer classes for all skill levels in a serene and welcoming environment.",
-      businessHours: "Open 6 AM - 9 PM",
-      products: [],
-      services: [
-        { id: "1", name: "Beginner Yoga Class", image: yogaImage, price: 25, duration: 60, category: "Yoga", description: "Perfect for those new to yoga." },
-        { id: "2", name: "Advanced Vinyasa", image: yogaImage, price: 30, duration: 75, category: "Yoga", description: "Challenging flow for experienced practitioners." },
-        { id: "3", name: "Meditation Session", image: yogaImage, price: 20, duration: 45, category: "Mindfulness", description: "Guided meditation for stress relief." },
-      ],
-    },
-    "5": {
-      id: "5",
-      ownerId: "vendor-test-5",
-      name: "Green Valley Organics",
-      banner: produceImage,
-      category: "Food & Drinks",
-      location: "Farmers Market, 1.0 mi away",
-      rating: 4.8,
-      reviewCount: 167,
-      description: "Fresh organic produce sourced directly from local farms. We believe in sustainable agriculture and supporting our local farming community.",
-      businessHours: "Open 8 AM - 5 PM",
-      products: [
-        { id: "1", name: "Organic Veggie Box", image: produceImage, price: 35.99 },
-        { id: "2", name: "Fresh Fruit Basket", image: produceImage, price: 28.99 },
-        { id: "3", name: "Farm Fresh Eggs", image: produceImage, price: 8.99 },
-      ],
-      services: [],
-    },
   };
 
   const availableSlots = {
@@ -145,12 +89,70 @@ export default function VendorPage({ vendorId, onBack, onLoginRequired }: Vendor
     ],
   };
 
-  const vendor = vendorsData[vendorId] || vendorsData["1"];
+  if (businessLoading) {
+    return (
+      <div className="flex items-center justify-center min-h-[50vh]" data-testid="vendor-loading">
+        <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
+      </div>
+    );
+  }
+
+  const business = businessData?.business;
+
+  if (!business) {
+    return (
+      <div className="flex flex-col items-center justify-center min-h-[50vh] p-4" data-testid="vendor-not-found">
+        <h2 className="text-xl font-semibold mb-2">Business Not Found</h2>
+        <p className="text-muted-foreground mb-4">This business doesn't exist or has been removed.</p>
+        <button onClick={onBack} className="text-primary underline">Go Back</button>
+      </div>
+    );
+  }
+
+  const products = (productsData?.products || []).map(p => ({
+    id: p.id,
+    name: p.name,
+    image: p.imageUrl || fallbackImages[vendorId] || jewelryImage,
+    price: p.price / 100,
+    originalPrice: p.compareAtPrice ? p.compareAtPrice / 100 : undefined,
+    category: p.category || undefined,
+  }));
+
+  const services = (servicesData?.services || []).map(s => ({
+    id: s.id,
+    name: s.name,
+    image: fallbackImages[vendorId] || hairSalonImage,
+    price: s.price / 100,
+    duration: s.durationMinutes,
+    category: s.category || undefined,
+    description: s.description || undefined,
+  }));
+
+  const location = business.city && business.state 
+    ? `${business.city}, ${business.state}` 
+    : business.city || "Location not specified";
 
   return (
     <div className="pb-20 md:pb-0" data-testid="page-vendor">
       <VendorStorefront
-        {...vendor}
+        id={business.id}
+        ownerId={business.ownerId}
+        name={business.name}
+        avatar={business.logoImage || undefined}
+        banner={business.coverImage || fallbackImages[vendorId] || coffeeShopImage}
+        category={business.category}
+        location={location}
+        rating={(business.rating || 0) / 10}
+        reviewCount={business.reviewCount || 0}
+        description={business.description || "Welcome to our store!"}
+        tagline={business.tagline || undefined}
+        businessHours={business.hoursOfOperation ? "See hours" : undefined}
+        products={products}
+        services={services}
+        brandColors={business.brandColors || undefined}
+        contactEmail={business.contactEmail || undefined}
+        contactPhone={business.contactPhone || undefined}
+        websiteUrl={business.websiteUrl || undefined}
         availableSlots={availableSlots}
         isFollowing={isFollowing}
         onFollow={() => setIsFollowing(!isFollowing)}

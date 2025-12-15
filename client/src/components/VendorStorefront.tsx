@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { MapPin, Star, Share2, Heart, Clock } from "lucide-react";
+import { MapPin, Star, Share2, Heart, Clock, Mail, Phone, Globe } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
@@ -28,6 +28,11 @@ interface Service {
   description?: string;
 }
 
+interface BrandColors {
+  primary?: string;
+  secondary?: string;
+}
+
 interface VendorStorefrontProps {
   id: string;
   ownerId: string;
@@ -39,9 +44,14 @@ interface VendorStorefrontProps {
   rating: number;
   reviewCount: number;
   description: string;
+  tagline?: string;
   businessHours?: string;
   products: Product[];
   services: Service[];
+  brandColors?: BrandColors;
+  contactEmail?: string;
+  contactPhone?: string;
+  websiteUrl?: string;
   availableSlots?: Record<string, { time: string; available: boolean }[]>;
   isFollowing?: boolean;
   onFollow?: () => void;
@@ -61,9 +71,14 @@ export default function VendorStorefront({
   rating,
   reviewCount,
   description,
+  tagline,
   businessHours,
   products,
   services,
+  brandColors,
+  contactEmail,
+  contactPhone,
+  websiteUrl,
   availableSlots = {},
   isFollowing = false,
   onFollow,
@@ -74,8 +89,17 @@ export default function VendorStorefront({
   const [activeTab, setActiveTab] = useState("about");
   const [selectedService, setSelectedService] = useState<Service | null>(null);
 
+  const customStyles = brandColors?.primary ? {
+    '--vendor-primary': brandColors.primary,
+    '--vendor-secondary': brandColors.secondary || brandColors.primary,
+  } as React.CSSProperties : {};
+
   return (
-    <div className="min-h-screen" data-testid={`vendor-storefront-${id}`}>
+    <div 
+      className="min-h-screen" 
+      data-testid={`vendor-storefront-${id}`}
+      style={customStyles}
+    >
       <div className="relative">
         <div className="aspect-[16/9] max-h-[300px] overflow-hidden">
           <img
@@ -181,9 +205,52 @@ export default function VendorStorefront({
           </TabsList>
 
           <TabsContent value="about" className="pt-6">
-            <div className="max-w-2xl">
-              <h2 className="text-xl font-semibold mb-4">About Us</h2>
-              <p className="text-muted-foreground">{description}</p>
+            <div className="max-w-2xl space-y-6">
+              {tagline && (
+                <p 
+                  className="text-lg font-medium italic"
+                  style={brandColors?.primary ? { color: brandColors.primary } : {}}
+                  data-testid="text-vendor-tagline"
+                >
+                  "{tagline}"
+                </p>
+              )}
+              <div>
+                <h2 className="text-xl font-semibold mb-4">About Us</h2>
+                <p className="text-muted-foreground">{description}</p>
+              </div>
+              
+              {(contactEmail || contactPhone || websiteUrl) && (
+                <div className="pt-4 border-t">
+                  <h3 className="text-lg font-semibold mb-3">Contact Information</h3>
+                  <div className="space-y-2">
+                    {contactEmail && (
+                      <div className="flex items-center gap-2 text-muted-foreground">
+                        <Mail className="h-4 w-4" />
+                        <a href={`mailto:${contactEmail}`} className="hover:underline" data-testid="link-vendor-email">
+                          {contactEmail}
+                        </a>
+                      </div>
+                    )}
+                    {contactPhone && (
+                      <div className="flex items-center gap-2 text-muted-foreground">
+                        <Phone className="h-4 w-4" />
+                        <a href={`tel:${contactPhone}`} className="hover:underline" data-testid="link-vendor-phone">
+                          {contactPhone}
+                        </a>
+                      </div>
+                    )}
+                    {websiteUrl && (
+                      <div className="flex items-center gap-2 text-muted-foreground">
+                        <Globe className="h-4 w-4" />
+                        <a href={websiteUrl} target="_blank" rel="noopener noreferrer" className="hover:underline" data-testid="link-vendor-website">
+                          {websiteUrl}
+                        </a>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
             </div>
           </TabsContent>
 
