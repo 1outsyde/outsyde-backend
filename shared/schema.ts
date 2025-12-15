@@ -109,6 +109,80 @@ export const businesses = pgTable("businesses", {
 
   // Subscription
   subscriptionActive: boolean("subscription_active").default(false),
+
+  // Storefront customization
+  tagline: text("tagline"),
+  hoursOfOperation: jsonb("hours_of_operation").$type<{
+    monday?: { open: string; close: string; closed?: boolean };
+    tuesday?: { open: string; close: string; closed?: boolean };
+    wednesday?: { open: string; close: string; closed?: boolean };
+    thursday?: { open: string; close: string; closed?: boolean };
+    friday?: { open: string; close: string; closed?: boolean };
+    saturday?: { open: string; close: string; closed?: boolean };
+    sunday?: { open: string; close: string; closed?: boolean };
+  }>(),
+  contactEmail: text("contact_email"),
+  contactPhone: text("contact_phone"),
+  brandColors: jsonb("brand_colors").$type<{ primary?: string; secondary?: string }>(),
+
+  // Feature flags
+  hasProducts: boolean("has_products").default(false),
+  hasServices: boolean("has_services").default(false),
+});
+
+
+// =========================================
+// VENDOR PRODUCTS TABLE (For marketplace vendors)
+// =========================================
+export const vendorProducts = pgTable("vendor_products", {
+  id: varchar("id", { length: 36 }).primaryKey().default(sql`gen_random_uuid()`),
+
+  businessId: varchar("business_id", { length: 36 })
+    .notNull()
+    .references(() => businesses.id),
+
+  name: text("name").notNull(),
+  description: text("description"),
+  price: integer("price").notNull(), // in cents
+  compareAtPrice: integer("compare_at_price"), // original price for sales
+  
+  imageUrl: text("image_url"),
+  images: jsonb("images").$type<string[]>().default([]),
+  
+  category: text("category"),
+  tags: text("tags").array(),
+  
+  inventory: integer("inventory").default(0),
+  trackInventory: boolean("track_inventory").default(true),
+  
+  isActive: boolean("is_active").default(true),
+  isFeatured: boolean("is_featured").default(false),
+
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+});
+
+
+// =========================================
+// VENDOR SERVICES TABLE (For service-based vendors)
+// =========================================
+export const vendorServices = pgTable("vendor_services", {
+  id: varchar("id", { length: 36 }).primaryKey().default(sql`gen_random_uuid()`),
+
+  businessId: varchar("business_id", { length: 36 })
+    .notNull()
+    .references(() => businesses.id),
+
+  name: text("name").notNull(),
+  description: text("description"),
+  price: integer("price").notNull(), // in cents
+  durationMinutes: integer("duration_minutes").notNull(),
+  
+  category: text("category"),
+  
+  isActive: boolean("is_active").default(true),
+  isFeatured: boolean("is_featured").default(false),
+
+  createdAt: timestamp("created_at").defaultNow().notNull(),
 });
 
 
@@ -343,6 +417,44 @@ export const insertBusinessSchema = createInsertSchema(businesses).omit({
   reviewCount: true,
 });
 
+export const insertVendorProductSchema = createInsertSchema(vendorProducts).omit({
+  id: true,
+  createdAt: true,
+});
+
+export const insertVendorServiceSchema = createInsertSchema(vendorServices).omit({
+  id: true,
+  createdAt: true,
+});
+
+export const updateBusinessProfileSchema = z.object({
+  name: z.string().min(1).optional(),
+  description: z.string().optional(),
+  tagline: z.string().optional(),
+  category: z.string().optional(),
+  address: z.string().optional(),
+  city: z.string().optional(),
+  state: z.string().optional(),
+  zipCode: z.string().optional(),
+  websiteUrl: z.string().optional(),
+  socialMedia: z.string().optional(),
+  coverImage: z.string().optional(),
+  logoImage: z.string().optional(),
+  contactEmail: z.string().email().optional(),
+  contactPhone: z.string().optional(),
+  hoursOfOperation: z.record(z.string(), z.object({
+    open: z.string(),
+    close: z.string(),
+    closed: z.boolean().optional(),
+  })).optional(),
+  brandColors: z.object({
+    primary: z.string().optional(),
+    secondary: z.string().optional(),
+  }).optional(),
+  hasProducts: z.boolean().optional(),
+  hasServices: z.boolean().optional(),
+});
+
 export const insertCitySchema = createInsertSchema(cities);
 
 export const insertRefreshTokenSchema = createInsertSchema(refreshTokens).omit({
@@ -538,6 +650,13 @@ export type UpsertUser = {
 
 export type InsertBusiness = z.infer<typeof insertBusinessSchema>;
 export type Business = typeof businesses.$inferSelect;
+export type UpdateBusinessProfile = z.infer<typeof updateBusinessProfileSchema>;
+
+export type InsertVendorProduct = z.infer<typeof insertVendorProductSchema>;
+export type VendorProduct = typeof vendorProducts.$inferSelect;
+
+export type InsertVendorService = z.infer<typeof insertVendorServiceSchema>;
+export type VendorService = typeof vendorServices.$inferSelect;
 
 export type InsertCity = z.infer<typeof insertCitySchema>;
 export type City = typeof cities.$inferSelect;

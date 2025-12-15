@@ -966,6 +966,318 @@ export async function registerRoutes(
     }
   });
 
+  // ==================== VENDOR STOREFRONT ROUTES ====================
+
+  // Get current vendor's business
+  app.get("/api/vendor/my-business", async (req, res) => {
+    const userId = req.session?.userId;
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    try {
+      const business = await storage.getBusinessByOwnerId(userId);
+      if (!business) {
+        return res.status(404).json({ error: "No business found for this account" });
+      }
+      res.json({ business });
+    } catch (error) {
+      console.error("Get vendor business error:", error);
+      res.status(500).json({ error: "Failed to get business" });
+    }
+  });
+
+  // Update vendor's business profile
+  app.patch("/api/vendor/my-business", async (req, res) => {
+    const userId = req.session?.userId;
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    try {
+      const business = await storage.getBusinessByOwnerId(userId);
+      if (!business) {
+        return res.status(404).json({ error: "No business found for this account" });
+      }
+
+      const updated = await storage.updateBusiness(business.id, req.body);
+      res.json({ business: updated });
+    } catch (error) {
+      console.error("Update vendor business error:", error);
+      res.status(500).json({ error: "Failed to update business" });
+    }
+  });
+
+  // Get vendor's products
+  app.get("/api/vendor/products", async (req, res) => {
+    const userId = req.session?.userId;
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    try {
+      const business = await storage.getBusinessByOwnerId(userId);
+      if (!business) {
+        return res.status(404).json({ error: "No business found" });
+      }
+
+      const products = await storage.getVendorProducts(business.id);
+      res.json({ products });
+    } catch (error) {
+      console.error("Get vendor products error:", error);
+      res.status(500).json({ error: "Failed to get products" });
+    }
+  });
+
+  // Create vendor product
+  app.post("/api/vendor/products", async (req, res) => {
+    const userId = req.session?.userId;
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    try {
+      const business = await storage.getBusinessByOwnerId(userId);
+      if (!business) {
+        return res.status(404).json({ error: "No business found" });
+      }
+
+      const productSchema = z.object({
+        name: z.string().min(1),
+        description: z.string().nullable().optional(),
+        price: z.number().min(0),
+        compareAtPrice: z.number().nullable().optional(),
+        imageUrl: z.string().nullable().optional(),
+        images: z.array(z.string()).optional(),
+        category: z.string().nullable().optional(),
+        tags: z.array(z.string()).optional(),
+        inventory: z.number().optional(),
+        trackInventory: z.boolean().optional(),
+        isActive: z.boolean().optional(),
+        isFeatured: z.boolean().optional(),
+      });
+
+      const validated = productSchema.parse(req.body);
+      const product = await storage.createVendorProduct({
+        businessId: business.id,
+        ...validated,
+      });
+
+      if (!business.hasProducts) {
+        await storage.updateBusiness(business.id, { hasProducts: true });
+      }
+
+      res.json({ product });
+    } catch (error) {
+      if (error instanceof z.ZodError) {
+        return res.status(400).json({ error: "Invalid data", details: error.errors });
+      }
+      console.error("Create vendor product error:", error);
+      res.status(500).json({ error: "Failed to create product" });
+    }
+  });
+
+  // Update vendor product
+  app.patch("/api/vendor/products/:id", async (req, res) => {
+    const userId = req.session?.userId;
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    try {
+      const business = await storage.getBusinessByOwnerId(userId);
+      if (!business) {
+        return res.status(404).json({ error: "No business found" });
+      }
+
+      const product = await storage.getVendorProduct(req.params.id);
+      if (!product || product.businessId !== business.id) {
+        return res.status(404).json({ error: "Product not found" });
+      }
+
+      const updateSchema = z.object({
+        name: z.string().min(1).optional(),
+        description: z.string().nullable().optional(),
+        price: z.number().min(0).optional(),
+        compareAtPrice: z.number().nullable().optional(),
+        imageUrl: z.string().nullable().optional(),
+        images: z.array(z.string()).optional(),
+        category: z.string().nullable().optional(),
+        tags: z.array(z.string()).optional(),
+        inventory: z.number().optional(),
+        trackInventory: z.boolean().optional(),
+        isActive: z.boolean().optional(),
+        isFeatured: z.boolean().optional(),
+      });
+
+      const validated = updateSchema.parse(req.body);
+      const updated = await storage.updateVendorProduct(req.params.id, validated);
+      res.json({ product: updated });
+    } catch (error) {
+      if (error instanceof z.ZodError) {
+        return res.status(400).json({ error: "Invalid data", details: error.errors });
+      }
+      console.error("Update vendor product error:", error);
+      res.status(500).json({ error: "Failed to update product" });
+    }
+  });
+
+  // Delete vendor product
+  app.delete("/api/vendor/products/:id", async (req, res) => {
+    const userId = req.session?.userId;
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    try {
+      const business = await storage.getBusinessByOwnerId(userId);
+      if (!business) {
+        return res.status(404).json({ error: "No business found" });
+      }
+
+      const product = await storage.getVendorProduct(req.params.id);
+      if (!product || product.businessId !== business.id) {
+        return res.status(404).json({ error: "Product not found" });
+      }
+
+      await storage.deleteVendorProduct(req.params.id);
+      res.json({ success: true });
+    } catch (error) {
+      console.error("Delete vendor product error:", error);
+      res.status(500).json({ error: "Failed to delete product" });
+    }
+  });
+
+  // Get vendor's services
+  app.get("/api/vendor/services", async (req, res) => {
+    const userId = req.session?.userId;
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    try {
+      const business = await storage.getBusinessByOwnerId(userId);
+      if (!business) {
+        return res.status(404).json({ error: "No business found" });
+      }
+
+      const services = await storage.getVendorServicesByBusiness(business.id);
+      res.json({ services });
+    } catch (error) {
+      console.error("Get vendor services error:", error);
+      res.status(500).json({ error: "Failed to get services" });
+    }
+  });
+
+  // Create vendor service
+  app.post("/api/vendor/services", async (req, res) => {
+    const userId = req.session?.userId;
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    try {
+      const business = await storage.getBusinessByOwnerId(userId);
+      if (!business) {
+        return res.status(404).json({ error: "No business found" });
+      }
+
+      const serviceSchema = z.object({
+        name: z.string().min(1),
+        description: z.string().nullable().optional(),
+        price: z.number().min(0),
+        durationMinutes: z.number().min(5),
+        category: z.string().nullable().optional(),
+        isActive: z.boolean().optional(),
+        isFeatured: z.boolean().optional(),
+      });
+
+      const validated = serviceSchema.parse(req.body);
+      const service = await storage.createVendorService({
+        businessId: business.id,
+        ...validated,
+      });
+
+      if (!business.hasServices) {
+        await storage.updateBusiness(business.id, { hasServices: true });
+      }
+
+      res.json({ service });
+    } catch (error) {
+      if (error instanceof z.ZodError) {
+        return res.status(400).json({ error: "Invalid data", details: error.errors });
+      }
+      console.error("Create vendor service error:", error);
+      res.status(500).json({ error: "Failed to create service" });
+    }
+  });
+
+  // Update vendor service
+  app.patch("/api/vendor/services/:id", async (req, res) => {
+    const userId = req.session?.userId;
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    try {
+      const business = await storage.getBusinessByOwnerId(userId);
+      if (!business) {
+        return res.status(404).json({ error: "No business found" });
+      }
+
+      const service = await storage.getVendorService(req.params.id);
+      if (!service || service.businessId !== business.id) {
+        return res.status(404).json({ error: "Service not found" });
+      }
+
+      const updateSchema = z.object({
+        name: z.string().min(1).optional(),
+        description: z.string().nullable().optional(),
+        price: z.number().min(0).optional(),
+        durationMinutes: z.number().min(5).optional(),
+        category: z.string().nullable().optional(),
+        isActive: z.boolean().optional(),
+        isFeatured: z.boolean().optional(),
+      });
+
+      const validated = updateSchema.parse(req.body);
+      const updated = await storage.updateVendorService(req.params.id, validated);
+      res.json({ service: updated });
+    } catch (error) {
+      if (error instanceof z.ZodError) {
+        return res.status(400).json({ error: "Invalid data", details: error.errors });
+      }
+      console.error("Update vendor service error:", error);
+      res.status(500).json({ error: "Failed to update service" });
+    }
+  });
+
+  // Delete vendor service
+  app.delete("/api/vendor/services/:id", async (req, res) => {
+    const userId = req.session?.userId;
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    try {
+      const business = await storage.getBusinessByOwnerId(userId);
+      if (!business) {
+        return res.status(404).json({ error: "No business found" });
+      }
+
+      const service = await storage.getVendorService(req.params.id);
+      if (!service || service.businessId !== business.id) {
+        return res.status(404).json({ error: "Service not found" });
+      }
+
+      await storage.deleteVendorService(req.params.id);
+      res.json({ success: true });
+    } catch (error) {
+      console.error("Delete vendor service error:", error);
+      res.status(500).json({ error: "Failed to delete service" });
+    }
+  });
+
   // ==================== CHAT ROUTES ====================
 
   // Get user's conversations

@@ -1,9 +1,10 @@
 import { useState } from "react";
-import { LayoutDashboard, Package, Calendar, MessageCircle, Settings, PlusCircle, Crown } from "lucide-react";
+import { LayoutDashboard, Package, Calendar, MessageCircle, Settings, PlusCircle, Crown, Store } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { SidebarProvider, Sidebar, SidebarContent, SidebarHeader, SidebarMenu, SidebarMenuItem, SidebarMenuButton, SidebarTrigger } from "@/components/ui/sidebar";
 import VendorDashboard from "@/components/VendorDashboard";
 import VendorSubscriptionDashboard from "@/components/VendorSubscriptionDashboard";
+import StorefrontEditor from "@/components/StorefrontEditor";
 import ThemeToggle from "@/components/ThemeToggle";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 
@@ -81,8 +82,8 @@ export default function VendorDashboardPage({ onLogout }: VendorDashboardPagePro
 
   const menuItems = [
     { id: "dashboard", icon: LayoutDashboard, label: "Dashboard" },
+    { id: "storefront", icon: Store, label: "Storefront" },
     { id: "subscription", icon: Crown, label: "Subscription" },
-    { id: "products", icon: Package, label: "Products" },
     { id: "bookings", icon: Calendar, label: "Bookings" },
     { id: "messages", icon: MessageCircle, label: "Messages" },
     { id: "settings", icon: Settings, label: "Settings" },
@@ -155,22 +156,12 @@ export default function VendorDashboardPage({ onLogout }: VendorDashboardPagePro
               />
             )}
 
-            {activeSection === "subscription" && (
-              <VendorSubscriptionDashboard />
+            {activeSection === "storefront" && (
+              <StorefrontEditor />
             )}
 
-            {activeSection === "products" && (
-              <div className="text-center py-12">
-                <Package className="h-16 w-16 mx-auto text-muted-foreground mb-4" />
-                <h2 className="text-xl font-semibold mb-2">Manage Your Products</h2>
-                <p className="text-muted-foreground mb-4">
-                  Add and manage your product listings here
-                </p>
-                <Button>
-                  <PlusCircle className="h-4 w-4 mr-2" />
-                  Add Product
-                </Button>
-              </div>
+            {activeSection === "subscription" && (
+              <VendorSubscriptionDashboard />
             )}
 
             {activeSection === "bookings" && (

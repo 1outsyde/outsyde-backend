@@ -4,6 +4,7 @@ import {
   type UpsertUser,
   type Business, 
   type InsertBusiness,
+  type UpdateBusinessProfile,
   type City,
   type InsertCity,
   type RefreshToken,
@@ -29,6 +30,10 @@ import {
   type AlaCarteService,
   type AlaCartePurchase,
   type SubscriptionTier,
+  type VendorProduct,
+  type InsertVendorProduct,
+  type VendorService,
+  type InsertVendorService,
   users,
   businesses,
   cities,
@@ -50,7 +55,9 @@ import {
   benefitUsage,
   fulfillmentTasks,
   alaCarteServices,
-  alaCartePurchases
+  alaCartePurchases,
+  vendorProducts,
+  vendorServices
 } from "@shared/schema";
 import { db } from "./db";
 import { eq, ilike, or, and, sql, isNull } from "drizzle-orm";
@@ -194,6 +201,20 @@ export interface IStorage {
   getAlaCartePurchaseByCheckoutSession(sessionId: string): Promise<AlaCartePurchase | undefined>;
   updateAlaCartePurchase(id: string, updates: Partial<AlaCartePurchase>): Promise<AlaCartePurchase | undefined>;
   getVendorAlaCartePurchases(vendorId: string): Promise<AlaCartePurchase[]>;
+
+  // Vendor Storefront - Products
+  getVendorProducts(businessId: string): Promise<VendorProduct[]>;
+  getVendorProduct(id: string): Promise<VendorProduct | undefined>;
+  createVendorProduct(data: InsertVendorProduct): Promise<VendorProduct>;
+  updateVendorProduct(id: string, updates: Partial<VendorProduct>): Promise<VendorProduct | undefined>;
+  deleteVendorProduct(id: string): Promise<void>;
+
+  // Vendor Storefront - Services
+  getVendorServicesByBusiness(businessId: string): Promise<VendorService[]>;
+  getVendorService(id: string): Promise<VendorService | undefined>;
+  createVendorService(data: InsertVendorService): Promise<VendorService>;
+  updateVendorService(id: string, updates: Partial<VendorService>): Promise<VendorService | undefined>;
+  deleteVendorService(id: string): Promise<void>;
 
   seedInitialData(): Promise<void>;
 }
@@ -1985,6 +2006,80 @@ export class DatabaseStorage implements IStorage {
       .from(fulfillmentTasks)
       .where(eq(fulfillmentTasks.vendorId, vendorId))
       .orderBy(desc(fulfillmentTasks.createdAt));
+  }
+
+  // =========================
+  // VENDOR PRODUCTS
+  // =========================
+
+  async getVendorProducts(businessId: string): Promise<VendorProduct[]> {
+    return db.select()
+      .from(vendorProducts)
+      .where(eq(vendorProducts.businessId, businessId));
+  }
+
+  async getVendorProduct(id: string): Promise<VendorProduct | undefined> {
+    const [product] = await db.select()
+      .from(vendorProducts)
+      .where(eq(vendorProducts.id, id));
+    return product;
+  }
+
+  async createVendorProduct(data: InsertVendorProduct): Promise<VendorProduct> {
+    const id = randomUUID();
+    const [product] = await db.insert(vendorProducts)
+      .values({ id, ...data })
+      .returning();
+    return product;
+  }
+
+  async updateVendorProduct(id: string, updates: Partial<VendorProduct>): Promise<VendorProduct | undefined> {
+    const [product] = await db.update(vendorProducts)
+      .set(updates)
+      .where(eq(vendorProducts.id, id))
+      .returning();
+    return product;
+  }
+
+  async deleteVendorProduct(id: string): Promise<void> {
+    await db.delete(vendorProducts).where(eq(vendorProducts.id, id));
+  }
+
+  // =========================
+  // VENDOR SERVICES
+  // =========================
+
+  async getVendorServicesByBusiness(businessId: string): Promise<VendorService[]> {
+    return db.select()
+      .from(vendorServices)
+      .where(eq(vendorServices.businessId, businessId));
+  }
+
+  async getVendorService(id: string): Promise<VendorService | undefined> {
+    const [service] = await db.select()
+      .from(vendorServices)
+      .where(eq(vendorServices.id, id));
+    return service;
+  }
+
+  async createVendorService(data: InsertVendorService): Promise<VendorService> {
+    const id = randomUUID();
+    const [service] = await db.insert(vendorServices)
+      .values({ id, ...data })
+      .returning();
+    return service;
+  }
+
+  async updateVendorService(id: string, updates: Partial<VendorService>): Promise<VendorService | undefined> {
+    const [service] = await db.update(vendorServices)
+      .set(updates)
+      .where(eq(vendorServices.id, id))
+      .returning();
+    return service;
+  }
+
+  async deleteVendorService(id: string): Promise<void> {
+    await db.delete(vendorServices).where(eq(vendorServices.id, id));
   }
 }
 
