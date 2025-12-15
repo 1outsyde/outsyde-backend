@@ -1,8 +1,9 @@
 import { useState } from "react";
-import { LayoutDashboard, Package, Calendar, MessageCircle, Settings, PlusCircle } from "lucide-react";
+import { LayoutDashboard, Package, Calendar, MessageCircle, Settings, PlusCircle, Crown } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { SidebarProvider, Sidebar, SidebarContent, SidebarHeader, SidebarMenu, SidebarMenuItem, SidebarMenuButton, SidebarTrigger } from "@/components/ui/sidebar";
 import VendorDashboard from "@/components/VendorDashboard";
+import VendorSubscriptionDashboard from "@/components/VendorSubscriptionDashboard";
 import ThemeToggle from "@/components/ThemeToggle";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 
@@ -80,6 +81,7 @@ export default function VendorDashboardPage({ onLogout }: VendorDashboardPagePro
 
   const menuItems = [
     { id: "dashboard", icon: LayoutDashboard, label: "Dashboard" },
+    { id: "subscription", icon: Crown, label: "Subscription" },
     { id: "products", icon: Package, label: "Products" },
     { id: "bookings", icon: Calendar, label: "Bookings" },
     { id: "messages", icon: MessageCircle, label: "Messages" },
@@ -151,6 +153,10 @@ export default function VendorDashboardPage({ onLogout }: VendorDashboardPagePro
                 onViewAllOrders={() => setActiveSection("products")}
                 onViewAllBookings={() => setActiveSection("bookings")}
               />
+            )}
+
+            {activeSection === "subscription" && (
+              <VendorSubscriptionDashboard />
             )}
 
             {activeSection === "products" && (
