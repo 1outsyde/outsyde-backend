@@ -45,9 +45,18 @@ The MVP includes:
 ### Web Authentication (Session-based)
 - `POST /api/auth/customer/signup` - Customer registration
 - `POST /api/auth/vendor/signup` - Vendor registration
+- `POST /api/auth/photographer/signup` - Photographer registration with optional Stripe Connect
 - `POST /api/auth/login` - User login (email/password)
 - `POST /api/auth/logout` - User logout
 - `GET /api/auth/me` - Get current user
+
+### Photographer API
+- `GET /api/photographers` - List all photographers
+- `GET /api/photographers/me` - Get current photographer profile
+- `GET /api/photographers/me/stripe-status` - Get Stripe Connect onboarding status
+- `POST /api/photographers/me/stripe-onboarding` - Start/resume Stripe Connect onboarding
+- `GET /api/photographers/:id` - Get photographer by ID
+- `PATCH /api/photographers/:id` - Update photographer profile
 
 ### OAuth Authentication (Replit Auth / Google)
 - `GET /api/login` - Initiates OAuth flow (redirects to Replit Auth)
