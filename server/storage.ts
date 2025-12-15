@@ -699,7 +699,7 @@ export class DatabaseStorage implements IStorage {
       firstName: users.firstName,
       lastName: users.lastName,
       email: users.email,
-      serviceTitle: services.title,
+      serviceTitle: vendorServices.name,
       appointmentDate: appointments.appointmentDate,
       appointmentTime: appointments.appointmentTime,
       orderedAt: appointments.createdAt,
@@ -711,7 +711,7 @@ export class DatabaseStorage implements IStorage {
     })
       .from(appointments)
       .leftJoin(users, eq(appointments.clientId, users.id))
-      .leftJoin(services, eq(appointments.serviceId, services.id))
+      .leftJoin(vendorServices, eq(appointments.serviceId, vendorServices.id))
       .where(eq(appointments.businessId, businessId))
       .orderBy(sql`${appointments.createdAt} DESC`);
 

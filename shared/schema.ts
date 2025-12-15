@@ -34,14 +34,65 @@ export const users = pgTable("users", {
   isVendor: boolean("is_vendor").default(false).notNull(),
   isPhotographer: boolean("is_photographer").default(false).notNull(),
   isAdmin: boolean("is_admin").default(false).notNull(),
+  isOAuthUser: boolean("is_oauth_user").default(false),
+
+  // Location
+  address: text("address"),
+  city: text("city"),
+  state: text("state"),
+  zipCode: text("zip_code"),
+
+  // Demographics
+  ageRange: text("age_range"),
+  gender: text("gender"),
+  ethnicity: text("ethnicity"),
+  nationality: text("nationality"),
+  householdSize: text("household_size"),
+  incomeRange: text("income_range"),
+  education: text("education"),
+  occupation: text("occupation"),
+  shoppingFrequency: text("shopping_frequency"),
+
+  // Preferences
+  selectedIndustries: jsonb("selected_industries").$type<string[]>().default([]),
+  industryNiches: jsonb("industry_niches").$type<Record<string, string[]>>().default({}),
+  industryValues: jsonb("industry_values").$type<Record<string, string[]>>().default({}),
 
   loyaltyPoints: integer("loyalty_points").default(0).notNull(),
+
+  // Referral system
+  referralCode: text("referral_code").unique(),
+  referredBy: varchar("referred_by", { length: 36 }),
 
   createdAt: timestamp("created_at").defaultNow().notNull(),
 });
 
 /* =====================================================
-   BUSINESSES (LEGAL SELLERS)
+   CITIES
+===================================================== */
+export const cities = pgTable("cities", {
+  id: varchar("id", { length: 36 }).primaryKey(),
+  name: text("name").notNull(),
+  state: text("state").notNull(),
+  businessCount: integer("business_count").default(0),
+  imageUrl: text("image_url"),
+  trending: boolean("trending").default(false),
+});
+
+/* =====================================================
+   REFRESH TOKENS
+===================================================== */
+export const refreshTokens = pgTable("refresh_tokens", {
+  id: varchar("id", { length: 36 }).primaryKey().default(sql`gen_random_uuid()`),
+  userId: varchar("user_id", { length: 36 }).notNull().references(() => users.id),
+  tokenHash: text("token_hash").notNull(),
+  expiresAt: timestamp("expires_at").notNull(),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  revokedAt: timestamp("revoked_at"),
+});
+
+/* =====================================================
+   BUSINESSES (Marketplace Vendors)
 ===================================================== */
 export const businesses = pgTable("businesses", {
   id: varchar("id", { length: 36 }).primaryKey().default(sql`gen_random_uuid()`),
@@ -51,18 +102,52 @@ export const businesses = pgTable("businesses", {
   category: text("category").notNull(),
   description: text("description"),
 
+  // Business details
+  isStartup: boolean("is_startup").default(false),
+  yearsInBusiness: text("years_in_business"),
+  employeeCount: text("employee_count"),
+  businessType: text("business_type"),
+
+  // Location
+  hasPhysicalLocation: boolean("has_physical_location").default(true),
   address: text("address"),
   city: text("city"),
   state: text("state"),
   zipCode: text("zip_code"),
 
+  // Online presence
   websiteUrl: text("website_url"),
   socialMedia: text("social_media"),
+
+  // Media
+  coverImage: text("cover_image"),
+  logoImage: text("logo_image"),
+
+  // Ratings
+  rating: integer("rating").default(0),
+  reviewCount: integer("review_count").default(0),
+
+  // Subscription
+  subscriptionActive: boolean("subscription_active").default(false),
+
+  // Storefront customization
+  tagline: text("tagline"),
+  hoursOfOperation: jsonb("hours_of_operation").$type<{
+    monday?: { open: string; close: string; closed?: boolean };
+    tuesday?: { open: string; close: string; closed?: boolean };
+    wednesday?: { open: string; close: string; closed?: boolean };
+    thursday?: { open: string; close: string; closed?: boolean };
+    friday?: { open: string; close: string; closed?: boolean };
+    saturday?: { open: string; close: string; closed?: boolean };
+    sunday?: { open: string; close: string; closed?: boolean };
+  }>(),
+  contactEmail: text("contact_email"),
+  contactPhone: text("contact_phone"),
+  brandColors: jsonb("brand_colors").$type<{ primary?: string; secondary?: string }>(),
 
   hasProducts: boolean("has_products").default(false),
   hasServices: boolean("has_services").default(false),
 
-  /* 🔑 STRIPE CONNECT (KEY ADDITION) */
   stripeAccountId: text("stripe_account_id"),
   stripeOnboardingComplete: boolean("stripe_onboarding_complete").default(false),
 
@@ -70,42 +155,112 @@ export const businesses = pgTable("businesses", {
 });
 
 /* =====================================================
-   BUSINESS SERVICES (WHAT CAN BE BOOKED)
+   VENDOR PRODUCTS
 ===================================================== */
-export const vendorServices = pgTable("vendor_services", {
+export const vendorProducts = pgTable("vendor_products", {
   id: varchar("id", { length: 36 }).primaryKey().default(sql`gen_random_uuid()`),
-
-  businessId: varchar("business_id", { length: 36 })
-    .notNull()
-    .references(() => businesses.id),
+  businessId: varchar("business_id", { length: 36 }).notNull().references(() => businesses.id),
 
   name: text("name").notNull(),
   description: text("description"),
-  price: integer("price").notNull(), // cents
-  durationMinutes: integer("duration_minutes").notNull(),
+  price: integer("price").notNull(),
+  compareAtPrice: integer("compare_at_price"),
+
+  imageUrl: text("image_url"),
+  images: jsonb("images").$type<string[]>().default([]),
+
+  category: text("category"),
+  tags: text("tags").array(),
+
+  inventory: integer("inventory").default(0),
+  trackInventory: boolean("track_inventory").default(true),
 
   isActive: boolean("is_active").default(true),
+  isFeatured: boolean("is_featured").default(false),
 
   createdAt: timestamp("created_at").defaultNow().notNull(),
 });
 
 /* =====================================================
-   APPOINTMENTS (CONFIRMED SERVICE BOOKINGS)
+   VENDOR SERVICES
+===================================================== */
+export const vendorServices = pgTable("vendor_services", {
+  id: varchar("id", { length: 36 }).primaryKey().default(sql`gen_random_uuid()`),
+  businessId: varchar("business_id", { length: 36 }).notNull().references(() => businesses.id),
+
+  name: text("name").notNull(),
+  description: text("description"),
+  price: integer("price").notNull(),
+  durationMinutes: integer("duration_minutes").notNull(),
+
+  category: text("category"),
+
+  isActive: boolean("is_active").default(true),
+  isFeatured: boolean("is_featured").default(false),
+
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+});
+
+/* =====================================================
+   PHOTOGRAPHERS
+===================================================== */
+export const photographers = pgTable("photographers", {
+  id: varchar("id", { length: 36 }).primaryKey().default(sql`gen_random_uuid()`),
+  userId: varchar("user_id", { length: 36 }).notNull().references(() => users.id),
+
+  displayName: text("display_name").notNull(),
+  bio: text("bio"),
+  city: text("city"),
+  state: text("state"),
+  portfolioUrl: text("portfolio_url"),
+
+  hourlyRate: integer("hourly_rate").notNull(),
+
+  rating: integer("rating").default(0),
+  reviewCount: integer("review_count").default(0),
+
+  stripeAccountId: text("stripe_account_id"),
+  stripeOnboardingComplete: boolean("stripe_onboarding_complete").default(false),
+  specialties: text("specialties").array(),
+
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+});
+
+/* =====================================================
+   SHOOT BOOKINGS (Photographers)
+===================================================== */
+export const shootBookings = pgTable("shoot_bookings", {
+  id: varchar("id", { length: 36 }).primaryKey().default(sql`gen_random_uuid()`),
+  photographerId: varchar("photographer_id", { length: 36 }).notNull().references(() => photographers.id),
+  clientId: varchar("client_id", { length: 36 }).notNull().references(() => users.id),
+
+  shootType: text("shoot_type").notNull(),
+  date: text("date").notNull(),
+  startTime: text("start_time").notNull(),
+  endTime: text("end_time").notNull(),
+  durationHours: integer("duration_hours").notNull(),
+
+  locationType: text("location_type"),
+  locationDetails: text("location_details"),
+
+  totalPrice: integer("total_price").notNull(),
+  platformFee: integer("platform_fee").default(0),
+  vendorNet: integer("vendor_net").default(0),
+
+  stripePaymentIntentId: text("stripe_payment_intent_id"),
+  status: text("status").default("pending"),
+
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+});
+
+/* =====================================================
+   APPOINTMENTS (Service Bookings)
 ===================================================== */
 export const appointments = pgTable("appointments", {
   id: varchar("id", { length: 36 }).primaryKey().default(sql`gen_random_uuid()`),
-
-  businessId: varchar("business_id", { length: 36 })
-    .notNull()
-    .references(() => businesses.id),
-
-  serviceId: varchar("service_id", { length: 36 })
-    .notNull()
-    .references(() => vendorServices.id),
-
-  clientId: varchar("client_id", { length: 36 })
-    .notNull()
-    .references(() => users.id),
+  businessId: varchar("business_id", { length: 36 }).notNull().references(() => businesses.id),
+  clientId: varchar("client_id", { length: 36 }).notNull().references(() => users.id),
+  serviceId: varchar("service_id", { length: 36 }).notNull().references(() => vendorServices.id),
 
   appointmentDate: text("appointment_date").notNull(),
   appointmentTime: text("appointment_time").notNull(),
@@ -121,46 +276,14 @@ export const appointments = pgTable("appointments", {
 });
 
 /* =====================================================
-   PRODUCTS (BUSINESS INVENTORY)
-===================================================== */
-export const vendorProducts = pgTable("vendor_products", {
-  id: varchar("id", { length: 36 }).primaryKey().default(sql`gen_random_uuid()`),
-
-  businessId: varchar("business_id", { length: 36 })
-    .notNull()
-    .references(() => businesses.id),
-
-  name: text("name").notNull(),
-  description: text("description"),
-  price: integer("price").notNull(), // cents
-  inventory: integer("inventory").default(0),
-
-  isActive: boolean("is_active").default(true),
-
-  createdAt: timestamp("created_at").defaultNow().notNull(),
-});
-
-/* =====================================================
-   ORDERS (CONFIRMED PRODUCT PURCHASES)
+   ORDERS (Product Purchases)
 ===================================================== */
 export const orders = pgTable("orders", {
   id: varchar("id", { length: 36 }).primaryKey().default(sql`gen_random_uuid()`),
+  businessId: varchar("business_id", { length: 36 }).notNull().references(() => businesses.id),
+  customerId: varchar("customer_id", { length: 36 }).notNull().references(() => users.id),
 
-  businessId: varchar("business_id", { length: 36 })
-    .notNull()
-    .references(() => businesses.id),
-
-  customerId: varchar("customer_id", { length: 36 })
-    .notNull()
-    .references(() => users.id),
-
-  items: jsonb("items").$type<{
-    productId: string;
-    name: string;
-    quantity: number;
-    price: number;
-  }[]>().notNull(),
-
+  items: jsonb("items").$type<{ productId: string; name: string; quantity: number; price: number }[]>().notNull(),
   totalAmount: integer("total_amount").notNull(),
   platformFee: integer("platform_fee").default(0),
   vendorNet: integer("vendor_net").default(0),
@@ -168,55 +291,524 @@ export const orders = pgTable("orders", {
   stripePaymentIntentId: text("stripe_payment_intent_id"),
   status: text("status").default("pending"),
 
+  shippingAddress: text("shipping_address"),
+
   createdAt: timestamp("created_at").defaultNow().notNull(),
 });
 
 /* =====================================================
-   PHOTOGRAPHERS (SEPARATE PROVIDERS)
+   REVIEWS
 ===================================================== */
-export const photographers = pgTable("photographers", {
+export const reviews = pgTable("reviews", {
   id: varchar("id", { length: 36 }).primaryKey().default(sql`gen_random_uuid()`),
 
-  userId: varchar("user_id", { length: 36 })
-    .notNull()
-    .references(() => users.id),
+  targetType: text("target_type").notNull(),
+  targetId: varchar("target_id", { length: 36 }).notNull(),
 
+  reviewerId: varchar("reviewer_id", { length: 36 }).notNull().references(() => users.id),
+
+  bookingType: text("booking_type").notNull(),
+  bookingId: varchar("booking_id", { length: 36 }).notNull(),
+
+  rating: integer("rating").notNull(),
+  title: text("title"),
+  comment: text("comment"),
+
+  isVerified: boolean("is_verified").default(true).notNull(),
+
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+});
+
+/* =====================================================
+   POINT TRANSACTIONS (Loyalty System)
+===================================================== */
+export const pointTransactions = pgTable("point_transactions", {
+  id: varchar("id", { length: 36 }).primaryKey().default(sql`gen_random_uuid()`),
+  userId: varchar("user_id", { length: 36 }).notNull().references(() => users.id),
+
+  type: text("type").notNull(),
+  points: integer("points").notNull(),
+  dollarAmountCents: integer("dollar_amount_cents").notNull(),
+
+  businessId: varchar("business_id", { length: 36 }),
+  businessName: text("business_name"),
+
+  referenceType: text("reference_type"),
+  referenceId: varchar("reference_id", { length: 36 }),
+
+  balanceAfter: integer("balance_after").notNull(),
+  description: text("description"),
+
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+});
+
+/* =====================================================
+   CONVERSATIONS (Real-time Chat)
+===================================================== */
+export const conversations = pgTable("conversations", {
+  id: varchar("id", { length: 36 }).primaryKey().default(sql`gen_random_uuid()`),
+
+  participant1Id: varchar("participant1_id", { length: 36 }).notNull().references(() => users.id),
+  participant2Id: varchar("participant2_id", { length: 36 }).notNull().references(() => users.id),
+
+  lastMessageAt: timestamp("last_message_at").defaultNow(),
+  lastMessagePreview: text("last_message_preview"),
+
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+});
+
+/* =====================================================
+   MESSAGES (Real-time Chat)
+===================================================== */
+export const messages = pgTable("messages", {
+  id: varchar("id", { length: 36 }).primaryKey().default(sql`gen_random_uuid()`),
+
+  conversationId: varchar("conversation_id", { length: 36 }).notNull().references(() => conversations.id),
+  senderId: varchar("sender_id", { length: 36 }).notNull().references(() => users.id),
+
+  content: text("content").notNull(),
+
+  isRead: boolean("is_read").default(false).notNull(),
+  readAt: timestamp("read_at"),
+
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+});
+
+/* =====================================================
+   PUSH SUBSCRIPTIONS
+===================================================== */
+export const pushSubscriptions = pgTable("push_subscriptions", {
+  id: varchar("id", { length: 36 }).primaryKey().default(sql`gen_random_uuid()`),
+  userId: varchar("user_id", { length: 36 }).notNull().references(() => users.id),
+
+  endpoint: text("endpoint").notNull(),
+  p256dh: text("p256dh").notNull(),
+  auth: text("auth").notNull(),
+
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+});
+
+/* =====================================================
+   CART ITEMS
+===================================================== */
+export const cartItems = pgTable("cart_items", {
+  id: varchar("id", { length: 36 }).primaryKey().default(sql`gen_random_uuid()`),
+  userId: varchar("user_id", { length: 36 }).notNull().references(() => users.id),
+
+  productId: varchar("product_id", { length: 36 }).notNull().references(() => vendorProducts.id),
+  quantity: integer("quantity").notNull().default(1),
+
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+
+/* =====================================================
+   SUBSCRIPTION TIERS
+===================================================== */
+export const subscriptionTiers = pgTable("subscription_tiers", {
+  id: varchar("id", { length: 36 }).primaryKey().default(sql`gen_random_uuid()`),
+
+  name: text("name").notNull().unique(),
   displayName: text("display_name").notNull(),
-  bio: text("bio"),
-  hourlyRate: integer("hourly_rate").notNull(),
+  description: text("description"),
 
-  /* 🔑 STRIPE CONNECT */
-  stripeAccountId: text("stripe_account_id"),
-  stripeOnboardingComplete: boolean("stripe_onboarding_complete").default(false),
+  priceInCents: integer("price_in_cents").notNull(),
+  platformFeeBps: integer("platform_fee_bps").notNull(),
+
+  features: jsonb("features").$type<string[]>().default([]),
+
+  stripeProductId: text("stripe_product_id"),
+  stripePriceId: text("stripe_price_id"),
+
+  sortOrder: integer("sort_order").default(0),
+  isActive: boolean("is_active").default(true),
 
   createdAt: timestamp("created_at").defaultNow().notNull(),
 });
 
 /* =====================================================
-   SHOOT BOOKINGS (PHOTOGRAPHER BOOKINGS)
+   TIER BENEFITS
 ===================================================== */
-export const shootBookings = pgTable("shoot_bookings", {
+export const tierBenefits = pgTable("tier_benefits", {
   id: varchar("id", { length: 36 }).primaryKey().default(sql`gen_random_uuid()`),
 
-  photographerId: varchar("photographer_id", { length: 36 })
-    .notNull()
-    .references(() => photographers.id),
+  tierId: varchar("tier_id", { length: 36 }).notNull().references(() => subscriptionTiers.id),
 
-  clientId: varchar("client_id", { length: 36 })
-    .notNull()
-    .references(() => users.id),
+  benefitType: text("benefit_type").notNull(),
+  benefitName: text("benefit_name").notNull(),
+  description: text("description"),
 
-  shootType: text("shoot_type").notNull(),
-  date: text("date").notNull(),
-  startTime: text("start_time").notNull(),
-  endTime: text("end_time").notNull(),
+  monthlyAllowance: integer("monthly_allowance"),
+  isUnlimited: boolean("is_unlimited").default(false),
 
-  totalPrice: integer("total_price").notNull(),
-  platformFee: integer("platform_fee").default(0),
-  photographerNet: integer("photographer_net").default(0),
-
-  stripePaymentIntentId: text("stripe_payment_intent_id"),
-  status: text("status").default("pending"),
+  cycleType: text("cycle_type").default("monthly"),
+  includedQuantity: integer("included_quantity").default(0),
 
   createdAt: timestamp("created_at").defaultNow().notNull(),
 });
+
+/* =====================================================
+   VENDOR SUBSCRIPTIONS
+===================================================== */
+export const vendorSubscriptions = pgTable("vendor_subscriptions", {
+  id: varchar("id", { length: 36 }).primaryKey().default(sql`gen_random_uuid()`),
+
+  vendorId: varchar("vendor_id", { length: 36 }).notNull().references(() => users.id),
+  businessId: varchar("business_id", { length: 36 }).notNull().references(() => businesses.id),
+  tierId: varchar("tier_id", { length: 36 }).notNull().references(() => subscriptionTiers.id),
+
+  stripeSubscriptionId: text("stripe_subscription_id"),
+  stripeCustomerId: text("stripe_customer_id"),
+
+  status: text("status").default("active"),
+
+  currentPeriodStart: timestamp("current_period_start"),
+  currentPeriodEnd: timestamp("current_period_end"),
+  currentQuarterStart: timestamp("current_quarter_start"),
+  currentQuarterEnd: timestamp("current_quarter_end"),
+
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+
+/* =====================================================
+   BENEFIT ALLOWANCES
+===================================================== */
+export const benefitAllowances = pgTable("benefit_allowances", {
+  id: varchar("id", { length: 36 }).primaryKey().default(sql`gen_random_uuid()`),
+
+  subscriptionId: varchar("subscription_id", { length: 36 }).notNull().references(() => vendorSubscriptions.id),
+  benefitId: varchar("benefit_id", { length: 36 }).notNull().references(() => tierBenefits.id),
+
+  monthlyAllowance: integer("monthly_allowance").notNull(),
+  usedThisMonth: integer("used_this_month").default(0),
+  isUnlimited: boolean("is_unlimited").default(false),
+
+  periodStart: timestamp("period_start").notNull(),
+  periodEnd: timestamp("period_end").notNull(),
+
+  cycleStart: timestamp("cycle_start"),
+  cycleEnd: timestamp("cycle_end"),
+  isExpired: boolean("is_expired").default(false),
+  usedQuantity: integer("used_quantity").default(0),
+  remainingQuantity: integer("remaining_quantity").default(0),
+
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+
+/* =====================================================
+   BENEFIT USAGE
+===================================================== */
+export const benefitUsage = pgTable("benefit_usage", {
+  id: varchar("id", { length: 36 }).primaryKey().default(sql`gen_random_uuid()`),
+
+  allowanceId: varchar("allowance_id", { length: 36 }).notNull().references(() => benefitAllowances.id),
+  vendorId: varchar("vendor_id", { length: 36 }).notNull().references(() => users.id),
+
+  usedAt: timestamp("used_at").defaultNow().notNull(),
+  notes: text("notes"),
+
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+});
+
+/* =====================================================
+   FULFILLMENT TASKS
+===================================================== */
+export const fulfillmentTasks = pgTable("fulfillment_tasks", {
+  id: varchar("id", { length: 36 }).primaryKey().default(sql`gen_random_uuid()`),
+
+  vendorId: varchar("vendor_id", { length: 36 }).notNull().references(() => users.id),
+  businessId: varchar("business_id", { length: 36 }).notNull().references(() => businesses.id),
+
+  taskType: text("task_type").notNull(),
+  taskName: text("task_name").notNull(),
+  description: text("description"),
+
+  status: text("status").default("pending"),
+  priority: integer("priority").default(0),
+
+  dueDate: timestamp("due_date"),
+  completedAt: timestamp("completed_at"),
+
+  metadata: jsonb("metadata").$type<Record<string, unknown>>(),
+
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+
+/* =====================================================
+   À LA CARTE SERVICES
+===================================================== */
+export const alaCarteServices = pgTable("ala_carte_services", {
+  id: varchar("id", { length: 36 }).primaryKey().default(sql`gen_random_uuid()`),
+
+  name: text("name").notNull().unique(),
+  displayName: text("display_name").notNull(),
+  description: text("description"),
+
+  basePriceInCents: integer("base_price_in_cents").notNull(),
+
+  stripeProductId: text("stripe_product_id"),
+  stripePriceId: text("stripe_price_id"),
+
+  isActive: boolean("is_active").default(true),
+
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+});
+
+/* =====================================================
+   À LA CARTE PURCHASES
+===================================================== */
+export const alaCartePurchases = pgTable("ala_carte_purchases", {
+  id: varchar("id", { length: 36 }).primaryKey().default(sql`gen_random_uuid()`),
+
+  vendorId: varchar("vendor_id", { length: 36 }).notNull().references(() => users.id),
+  businessId: varchar("business_id", { length: 36 }).notNull().references(() => businesses.id),
+  serviceId: varchar("service_id", { length: 36 }).notNull().references(() => alaCarteServices.id),
+
+  priceInCents: integer("price_in_cents").notNull(),
+  platformFeeInCents: integer("platform_fee_in_cents").notNull(),
+
+  stripeCheckoutSessionId: text("stripe_checkout_session_id"),
+  stripePaymentIntentId: text("stripe_payment_intent_id"),
+
+  status: text("status").default("pending"),
+  notes: text("notes"),
+
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+
+/* =====================================================
+   INSERT SCHEMAS (Zod)
+===================================================== */
+export const insertUserSchema = createInsertSchema(users).omit({
+  id: true,
+  createdAt: true,
+});
+
+export const insertBusinessSchema = createInsertSchema(businesses).omit({
+  id: true,
+  rating: true,
+  reviewCount: true,
+  createdAt: true,
+});
+
+export const insertVendorProductSchema = createInsertSchema(vendorProducts).omit({
+  id: true,
+  createdAt: true,
+});
+
+export const insertVendorServiceSchema = createInsertSchema(vendorServices).omit({
+  id: true,
+  createdAt: true,
+});
+
+export const updateBusinessProfileSchema = z.object({
+  name: z.string().min(1).optional(),
+  description: z.string().optional(),
+  tagline: z.string().optional(),
+  category: z.string().optional(),
+  address: z.string().optional(),
+  city: z.string().optional(),
+  state: z.string().optional(),
+  zipCode: z.string().optional(),
+  websiteUrl: z.string().optional(),
+  socialMedia: z.string().optional(),
+  coverImage: z.string().optional(),
+  logoImage: z.string().optional(),
+  contactEmail: z.string().email().optional(),
+  contactPhone: z.string().optional(),
+  hoursOfOperation: z.record(z.string(), z.object({
+    open: z.string(),
+    close: z.string(),
+    closed: z.boolean().optional(),
+  })).optional(),
+  brandColors: z.object({
+    primary: z.string().optional(),
+    secondary: z.string().optional(),
+  }).optional(),
+  hasProducts: z.boolean().optional(),
+  hasServices: z.boolean().optional(),
+});
+
+export const insertCitySchema = createInsertSchema(cities);
+
+export const insertRefreshTokenSchema = createInsertSchema(refreshTokens).omit({
+  id: true,
+  createdAt: true,
+});
+
+export const insertReviewSchema = createInsertSchema(reviews).omit({
+  id: true,
+  createdAt: true,
+  isVerified: true,
+});
+
+export const insertConversationSchema = createInsertSchema(conversations).omit({
+  id: true,
+  createdAt: true,
+  lastMessageAt: true,
+});
+
+export const insertMessageSchema = createInsertSchema(messages).omit({
+  id: true,
+  createdAt: true,
+  isRead: true,
+  readAt: true,
+});
+
+export const insertPointTransactionSchema = createInsertSchema(pointTransactions).omit({
+  id: true,
+  createdAt: true,
+});
+
+export const insertPushSubscriptionSchema = createInsertSchema(pushSubscriptions).omit({
+  id: true,
+  createdAt: true,
+});
+
+export const insertCartItemSchema = createInsertSchema(cartItems).omit({
+  id: true,
+  createdAt: true,
+  updatedAt: true,
+});
+
+/* =====================================================
+   SIGNUP SCHEMAS
+===================================================== */
+export const customerSignupSchema = z.object({
+  email: z.string().email(),
+  password: z.string().min(6),
+  name: z.string().min(1),
+  phone: z.string().optional(),
+  address: z.string().optional(),
+  city: z.string().optional(),
+  state: z.string().optional(),
+  zipCode: z.string().optional(),
+  ageRange: z.string().optional(),
+  gender: z.string().optional(),
+  ethnicity: z.string().optional(),
+  nationality: z.string().optional(),
+  householdSize: z.string().optional(),
+  incomeRange: z.string().optional(),
+  education: z.string().optional(),
+  occupation: z.string().optional(),
+  shoppingFrequency: z.string().optional(),
+  selectedIndustries: z.array(z.string()).default([]),
+  industryNiches: z.record(z.string(), z.array(z.string())).default({}),
+  industryValues: z.record(z.string(), z.array(z.string())).default({}),
+});
+
+export const vendorSignupSchema = z.object({
+  email: z.string().email(),
+  password: z.string().min(6),
+  name: z.string().min(1),
+  phone: z.string().optional(),
+  businessName: z.string().min(1),
+  businessCategory: z.string().min(1),
+  businessDescription: z.string().optional(),
+  isStartup: z.boolean().optional(),
+  yearsInBusiness: z.string().optional(),
+  employeeCount: z.string().optional(),
+  businessType: z.string().optional(),
+  hasPhysicalLocation: z.boolean().optional(),
+  address: z.string().optional(),
+  city: z.string().optional(),
+  state: z.string().optional(),
+  zipCode: z.string().optional(),
+  websiteUrl: z.string().optional(),
+  socialMedia: z.string().optional(),
+  acceptedSubscription: z.boolean().refine((val) => val === true, {
+    message: "You must accept the subscription terms",
+  }),
+});
+
+export const photographerSignupSchema = z.object({
+  email: z.string().email(),
+  password: z.string().min(6),
+  name: z.string().min(1),
+  phone: z.string().optional(),
+  displayName: z.string().min(1),
+  bio: z.string().optional(),
+  city: z.string().min(1),
+  state: z.string().min(1),
+  hourlyRate: z.number().min(1),
+  portfolioUrl: z.string().min(1),
+  specialties: z.array(z.string()).default([]),
+});
+
+export const loginSchema = z.object({
+  email: z.string().email(),
+  password: z.string().min(1),
+});
+
+/* =====================================================
+   TYPES
+===================================================== */
+export type InsertUser = z.infer<typeof insertUserSchema>;
+export type User = typeof users.$inferSelect;
+
+export type UpsertUser = {
+  id: string;
+  email?: string | null;
+  firstName?: string | null;
+  lastName?: string | null;
+  profileImageUrl?: string | null;
+};
+
+export type InsertBusiness = z.infer<typeof insertBusinessSchema>;
+export type Business = typeof businesses.$inferSelect;
+export type UpdateBusinessProfile = z.infer<typeof updateBusinessProfileSchema>;
+
+export type InsertVendorProduct = z.infer<typeof insertVendorProductSchema>;
+export type VendorProduct = typeof vendorProducts.$inferSelect;
+
+export type InsertVendorService = z.infer<typeof insertVendorServiceSchema>;
+export type VendorService = typeof vendorServices.$inferSelect;
+
+export type InsertCity = z.infer<typeof insertCitySchema>;
+export type City = typeof cities.$inferSelect;
+
+export type RefreshToken = typeof refreshTokens.$inferSelect;
+
+export type Photographer = typeof photographers.$inferSelect;
+
+export type ShootBooking = typeof shootBookings.$inferSelect;
+
+export type Appointment = typeof appointments.$inferSelect;
+
+export type Order = typeof orders.$inferSelect;
+
+export type InsertReview = z.infer<typeof insertReviewSchema>;
+export type Review = typeof reviews.$inferSelect;
+
+export type PointTransaction = typeof pointTransactions.$inferSelect;
+export type InsertPointTransaction = z.infer<typeof insertPointTransactionSchema>;
+
+export type Conversation = typeof conversations.$inferSelect;
+export type InsertConversation = z.infer<typeof insertConversationSchema>;
+
+export type Message = typeof messages.$inferSelect;
+export type InsertMessage = z.infer<typeof insertMessageSchema>;
+
+export type PushSubscription = typeof pushSubscriptions.$inferSelect;
+export type InsertPushSubscription = z.infer<typeof insertPushSubscriptionSchema>;
+
+export type CartItem = typeof cartItems.$inferSelect;
+export type InsertCartItem = z.infer<typeof insertCartItemSchema>;
+
+export type SubscriptionTier = typeof subscriptionTiers.$inferSelect;
+
+export type TierBenefit = typeof tierBenefits.$inferSelect;
+
+export type VendorSubscription = typeof vendorSubscriptions.$inferSelect;
+
+export type BenefitAllowance = typeof benefitAllowances.$inferSelect;
+
+export type FulfillmentTask = typeof fulfillmentTasks.$inferSelect;
+
+export type AlaCarteService = typeof alaCarteServices.$inferSelect;
+
+export type AlaCartePurchase = typeof alaCartePurchases.$inferSelect;
