@@ -552,6 +552,149 @@ export async function registerRoutes(
     }
   });
 
+  // ==================== À LA CARTE ROUTES ====================
+
+  // Get all à la carte services
+  app.get("/api/ala-carte/services", async (req, res) => {
+    try {
+      const services = await storage.getAlaCarteServices();
+      res.json({ services });
+    } catch (error) {
+      console.error("Get à la carte services error:", error);
+      res.status(500).json({ error: "Failed to get services" });
+    }
+  });
+
+  // Get pricing for a specific service (includes tier discounts)
+  app.get("/api/ala-carte/services/:id/pricing", async (req, res) => {
+    const userId = req.session?.userId;
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    try {
+      const { id } = req.params;
+      const pricing = await storage.getAlaCarteServicePricing(id, userId);
+      
+      if (!pricing) {
+        return res.status(404).json({ error: "Service not found" });
+      }
+
+      res.json(pricing);
+    } catch (error) {
+      console.error("Get service pricing error:", error);
+      res.status(500).json({ error: "Failed to get pricing" });
+    }
+  });
+
+  // Create checkout for à la carte purchase
+  app.post("/api/ala-carte/checkout", async (req, res) => {
+    const userId = req.session?.userId;
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    if (!req.session?.isVendor) {
+      return res.status(403).json({ error: "Only vendors can purchase services" });
+    }
+
+    try {
+      const checkoutSchema = z.object({
+        serviceId: z.string().min(1, "Service ID is required"),
+        notes: z.string().optional(),
+      });
+      const { serviceId, notes } = checkoutSchema.parse(req.body);
+
+      const user = await storage.getUser(userId);
+      if (!user) {
+        return res.status(404).json({ error: "User not found" });
+      }
+
+      const business = await storage.getBusinessByOwnerId(userId);
+      if (!business) {
+        return res.status(404).json({ error: "Business not found" });
+      }
+
+      const pricing = await storage.getAlaCarteServicePricing(serviceId, userId);
+      if (!pricing) {
+        return res.status(404).json({ error: "Service not found" });
+      }
+
+      // Platform fee is 2% of the final price
+      const platformFeeInCents = Math.round(pricing.finalPriceCents * 0.02);
+
+      // Create the purchase record first
+      const purchase = await storage.createAlaCartePurchase({
+        vendorId: userId,
+        businessId: business.id,
+        serviceId,
+        tierIdAtPurchase: pricing.tier?.id || null,
+        basePriceInCents: pricing.basePriceCents,
+        discountPercent: pricing.discountPercent,
+        finalPriceInCents: pricing.finalPriceCents,
+        platformFeeInCents,
+      });
+
+      // Reuse existing Stripe customer ID if available, otherwise create new
+      const vendorSubscription = await storage.getVendorSubscription(userId);
+      let customerId: string;
+      if (vendorSubscription?.stripeCustomerId) {
+        customerId = vendorSubscription.stripeCustomerId;
+      } else {
+        const customer = await stripeService.createCustomer(user.email!, userId, user.name!);
+        customerId = customer.id;
+      }
+
+      const baseUrl = `https://${process.env.REPLIT_DOMAINS?.split(',')[0]}`;
+      
+      const session = await stripeService.createAlaCarteCheckout(
+        customerId,
+        pricing.service,
+        pricing.finalPriceCents,
+        platformFeeInCents,
+        `${baseUrl}/vendor/dashboard?purchase=success&purchaseId=${purchase.id}`,
+        `${baseUrl}/vendor/dashboard?purchase=cancelled`,
+        purchase.id,
+        userId,
+        business.id,
+        notes
+      );
+
+      // Update purchase with checkout session ID
+      await storage.updateAlaCartePurchase(purchase.id, {
+        stripeCheckoutSessionId: session.id,
+      });
+
+      res.json({ url: session.url, purchaseId: purchase.id });
+    } catch (error) {
+      if (error instanceof z.ZodError) {
+        return res.status(400).json({ error: "Invalid data", details: error.errors });
+      }
+      console.error("Create à la carte checkout error:", error);
+      res.status(500).json({ error: "Failed to create checkout session" });
+    }
+  });
+
+  // Get vendor's à la carte purchases
+  app.get("/api/vendor/ala-carte-purchases", async (req, res) => {
+    const userId = req.session?.userId;
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    if (!req.session?.isVendor) {
+      return res.status(403).json({ error: "Only vendors can access this" });
+    }
+
+    try {
+      const purchases = await storage.getVendorAlaCartePurchases(userId);
+      res.json({ purchases });
+    } catch (error) {
+      console.error("Get vendor purchases error:", error);
+      res.status(500).json({ error: "Failed to get purchases" });
+    }
+  });
+
   // ==================== VERIFIED REVIEW ROUTES ====================
 
   // Get reviews for a target (photographer, business, service_business)

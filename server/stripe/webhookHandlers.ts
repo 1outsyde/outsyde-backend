@@ -44,7 +44,13 @@ export class WebhookHandlers {
       }
       
       if (metadata.type === 'vendor_subscription') {
-        console.log('Vendor subscription checkout completed, no points awarded');
+        await WebhookHandlers.handleVendorSubscriptionCheckoutCompleted(session);
+        return;
+      }
+
+      // Handle à la carte purchase completion
+      if (metadata.type === 'ala_carte_purchase') {
+        await WebhookHandlers.handleAlaCartePurchaseCompleted(session);
         return;
       }
 
@@ -69,6 +75,103 @@ export class WebhookHandlers {
       console.log(`Successfully awarded ${amountTotal} points to user ${user.id}`);
     } catch (error) {
       console.error('Error awarding points on checkout:', error);
+    }
+  }
+
+  static async handleVendorSubscriptionCheckoutCompleted(session: any): Promise<void> {
+    try {
+      const metadata = session.metadata || {};
+      const vendorId = metadata.vendorId;
+      const businessId = metadata.businessId;
+      const tierId = metadata.tierId;
+      const stripeSubscriptionId = session.subscription;
+      const customerId = session.customer;
+
+      if (!vendorId || !businessId || !tierId) {
+        console.error('Vendor subscription checkout missing required metadata:', { vendorId, businessId, tierId });
+        return;
+      }
+
+      console.log(`Creating vendor subscription for vendor ${vendorId}, tier ${tierId}`);
+
+      const existingSub = await storage.getVendorSubscription(vendorId);
+      if (existingSub) {
+        console.log(`Vendor ${vendorId} already has subscription ${existingSub.id}, updating...`);
+        await storage.updateVendorSubscription(existingSub.id, {
+          tierId,
+          stripeCustomerId: customerId,
+          stripeSubscriptionId,
+        });
+        return;
+      }
+
+      await storage.createVendorSubscription({
+        vendorId,
+        businessId,
+        tierId,
+        stripeCustomerId: customerId,
+        stripeSubscriptionId,
+      });
+
+      console.log(`Created vendor subscription for vendor ${vendorId}`);
+    } catch (error) {
+      console.error('Error handling vendor subscription checkout:', error);
+    }
+  }
+
+  static async handleAlaCartePurchaseCompleted(session: any): Promise<void> {
+    try {
+      const metadata = session.metadata || {};
+      const purchaseId = metadata.purchaseId;
+      
+      if (!purchaseId) {
+        console.error('À la carte checkout completed but no purchaseId in metadata');
+        return;
+      }
+
+      console.log(`Processing à la carte purchase completion: ${purchaseId}`);
+
+      const purchase = await storage.getAlaCartePurchase(purchaseId);
+      if (!purchase) {
+        console.error('À la carte purchase not found:', purchaseId);
+        return;
+      }
+
+      if (purchase.paymentStatus === 'paid') {
+        console.log(`À la carte purchase ${purchaseId} already processed, skipping`);
+        return;
+      }
+
+      await storage.updateAlaCartePurchase(purchaseId, {
+        paymentStatus: 'paid',
+        stripePaymentIntentId: session.payment_intent,
+      });
+
+      // Get the service to determine task type
+      const service = await storage.getAlaCarteService(purchase.serviceId);
+      if (!service) {
+        console.error('À la carte service not found:', purchase.serviceId);
+        return;
+      }
+
+      // Import fulfillmentTasks for creating task
+      const { db } = await import('../db');
+      const { fulfillmentTasks } = await import('@shared/schema');
+
+      // Create fulfillment task
+      const [task] = await db.insert(fulfillmentTasks).values({
+        vendorId: purchase.vendorId,
+        businessId: purchase.businessId,
+        taskType: service.name,
+        sourceType: 'ala_carte',
+        sourceId: purchaseId,
+        status: 'pending',
+        vendorNotes: metadata.notes || null,
+      }).returning();
+
+      console.log(`Created fulfillment task ${task.id} for à la carte purchase ${purchaseId}`);
+    } catch (error) {
+      console.error('Error processing à la carte purchase completion:', error);
     }
   }
 

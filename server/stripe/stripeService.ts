@@ -264,6 +264,53 @@ export class StripeService {
       },
     });
   }
+
+  // Create checkout for à la carte purchase
+  async createAlaCarteCheckout(
+    customerId: string,
+    service: { id: string; name: string; displayName: string },
+    finalPriceInCents: number,
+    platformFeeInCents: number,
+    successUrl: string,
+    cancelUrl: string,
+    purchaseId: string,
+    vendorId: string,
+    businessId: string,
+    notes?: string
+  ) {
+    const stripe = await getUncachableStripeClient();
+    
+    return await stripe.checkout.sessions.create({
+      customer: customerId,
+      payment_method_types: ['card'],
+      line_items: [{
+        price_data: {
+          currency: 'usd',
+          unit_amount: finalPriceInCents,
+          product_data: {
+            name: `Outsyde ${service.displayName}`,
+            description: notes || `À la carte ${service.displayName} purchase`,
+          },
+        },
+        quantity: 1,
+      }],
+      mode: 'payment',
+      success_url: successUrl,
+      cancel_url: cancelUrl,
+      payment_intent_data: {
+        application_fee_amount: platformFeeInCents,
+      },
+      metadata: {
+        type: 'ala_carte_purchase',
+        purchaseId,
+        serviceId: service.id,
+        serviceName: service.name,
+        vendorId,
+        businessId,
+        notes: notes || '',
+      },
+    });
+  }
 }
 
 export const stripeService = new StripeService();

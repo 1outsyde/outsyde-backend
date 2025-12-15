@@ -26,6 +26,9 @@ import {
   type TierBenefit,
   type BenefitAllowance,
   type FulfillmentTask,
+  type AlaCarteService,
+  type AlaCartePurchase,
+  type SubscriptionTier,
   users,
   businesses,
   cities,
@@ -45,7 +48,9 @@ import {
   tierBenefits,
   benefitAllowances,
   benefitUsage,
-  fulfillmentTasks
+  fulfillmentTasks,
+  alaCarteServices,
+  alaCartePurchases
 } from "@shared/schema";
 import { db } from "./db";
 import { eq, ilike, or, and, sql, isNull } from "drizzle-orm";
@@ -168,6 +173,26 @@ export interface IStorage {
   getVendorBenefitAllowances(vendorId: string): Promise<(BenefitAllowance & { benefit: TierBenefit })[]>;
   useBenefit(allowanceId: string, vendorId: string, businessId: string, notes?: string): Promise<{ success: boolean; allowance?: BenefitAllowance; task?: FulfillmentTask; error?: string }>;
   expireOldAllowances(): Promise<number>;
+
+  // À la carte services
+  getAlaCarteServices(): Promise<AlaCarteService[]>;
+  getAlaCarteService(id: string): Promise<AlaCarteService | undefined>;
+  getAlaCarteServicePricing(serviceId: string, vendorId: string): Promise<{ service: AlaCarteService; tier: SubscriptionTier | null; basePriceCents: number; discountPercent: number; finalPriceCents: number } | null>;
+  createAlaCartePurchase(data: {
+    vendorId: string;
+    businessId: string;
+    serviceId: string;
+    tierIdAtPurchase: string | null;
+    basePriceInCents: number;
+    discountPercent: number;
+    finalPriceInCents: number;
+    platformFeeInCents: number;
+    stripeCheckoutSessionId?: string;
+  }): Promise<AlaCartePurchase>;
+  getAlaCartePurchase(id: string): Promise<AlaCartePurchase | undefined>;
+  getAlaCartePurchaseByCheckoutSession(sessionId: string): Promise<AlaCartePurchase | undefined>;
+  updateAlaCartePurchase(id: string, updates: Partial<AlaCartePurchase>): Promise<AlaCartePurchase | undefined>;
+  getVendorAlaCartePurchases(vendorId: string): Promise<AlaCartePurchase[]>;
 
   seedInitialData(): Promise<void>;
 }
@@ -1760,6 +1785,118 @@ export class DatabaseStorage implements IStorage {
       ))
       .returning();
     return result.length;
+  }
+
+  // =========================
+  // À LA CARTE SERVICES
+  // =========================
+
+  async getAlaCarteServices(): Promise<AlaCarteService[]> {
+    return db.select()
+      .from(alaCarteServices)
+      .where(eq(alaCarteServices.isActive, true));
+  }
+
+  async getAlaCarteService(id: string): Promise<AlaCarteService | undefined> {
+    const [service] = await db.select()
+      .from(alaCarteServices)
+      .where(eq(alaCarteServices.id, id));
+    return service;
+  }
+
+  async getAlaCarteServicePricing(
+    serviceId: string, 
+    vendorId: string
+  ): Promise<{ 
+    service: AlaCarteService; 
+    tier: SubscriptionTier | null; 
+    basePriceCents: number; 
+    discountPercent: number; 
+    finalPriceCents: number 
+  } | null> {
+    const service = await this.getAlaCarteService(serviceId);
+    if (!service) {
+      return null;
+    }
+
+    const subscription = await this.getVendorSubscription(vendorId);
+    let tier: SubscriptionTier | null = null;
+    let discountPercent = 0;
+
+    if (subscription) {
+      const [tierRow] = await db.select()
+        .from(subscriptionTiers)
+        .where(eq(subscriptionTiers.id, subscription.tierId));
+      if (tierRow) {
+        tier = tierRow;
+        discountPercent = tierRow.alaCarteDiscountPercent;
+      }
+    }
+
+    const basePriceCents = service.basePriceInCents;
+    const finalPriceCents = Math.round(basePriceCents * (100 - discountPercent) / 100);
+
+    return {
+      service,
+      tier,
+      basePriceCents,
+      discountPercent,
+      finalPriceCents,
+    };
+  }
+
+  async createAlaCartePurchase(data: {
+    vendorId: string;
+    businessId: string;
+    serviceId: string;
+    tierIdAtPurchase: string | null;
+    basePriceInCents: number;
+    discountPercent: number;
+    finalPriceInCents: number;
+    platformFeeInCents: number;
+    stripeCheckoutSessionId?: string;
+  }): Promise<AlaCartePurchase> {
+    const [purchase] = await db.insert(alaCartePurchases).values({
+      vendorId: data.vendorId,
+      businessId: data.businessId,
+      serviceId: data.serviceId,
+      tierIdAtPurchase: data.tierIdAtPurchase,
+      basePriceInCents: data.basePriceInCents,
+      discountPercent: data.discountPercent,
+      finalPriceInCents: data.finalPriceInCents,
+      platformFeeInCents: data.platformFeeInCents,
+      stripeCheckoutSessionId: data.stripeCheckoutSessionId,
+      paymentStatus: 'pending',
+    }).returning();
+    return purchase;
+  }
+
+  async getAlaCartePurchase(id: string): Promise<AlaCartePurchase | undefined> {
+    const [purchase] = await db.select()
+      .from(alaCartePurchases)
+      .where(eq(alaCartePurchases.id, id));
+    return purchase;
+  }
+
+  async getAlaCartePurchaseByCheckoutSession(sessionId: string): Promise<AlaCartePurchase | undefined> {
+    const [purchase] = await db.select()
+      .from(alaCartePurchases)
+      .where(eq(alaCartePurchases.stripeCheckoutSessionId, sessionId));
+    return purchase;
+  }
+
+  async updateAlaCartePurchase(id: string, updates: Partial<AlaCartePurchase>): Promise<AlaCartePurchase | undefined> {
+    const [purchase] = await db.update(alaCartePurchases)
+      .set(updates)
+      .where(eq(alaCartePurchases.id, id))
+      .returning();
+    return purchase;
+  }
+
+  async getVendorAlaCartePurchases(vendorId: string): Promise<AlaCartePurchase[]> {
+    return db.select()
+      .from(alaCartePurchases)
+      .where(eq(alaCartePurchases.vendorId, vendorId));
   }
 }
 
