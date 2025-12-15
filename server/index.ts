@@ -169,6 +169,40 @@ async function initStripe() {
     log("Cart reminder notifications scheduled (every 30 min)", "push");
   }
 
+  // Schedule benefit expiration and renewal checks (hourly)
+  setInterval(async () => {
+    try {
+      // Expire old allowances
+      const expiredCount = await storage.expireOldAllowances();
+      if (expiredCount > 0) {
+        log(`Expired ${expiredCount} benefit allowances`, "benefits");
+      }
+      
+      // Renew allowances for new cycles (monthly/quarterly)
+      const renewedCount = await storage.renewBenefitAllowancesForNewCycle();
+      if (renewedCount > 0) {
+        log(`Created ${renewedCount} new benefit allowances for new cycle`, "benefits");
+      }
+    } catch (error) {
+      console.error("Benefit maintenance error:", error);
+    }
+  }, 60 * 60 * 1000);
+  log("Benefit expiration and renewal scheduled (hourly)", "benefits");
+  
+  // Run initial maintenance on startup
+  try {
+    const expiredCount = await storage.expireOldAllowances();
+    if (expiredCount > 0) {
+      log(`Initial cleanup: expired ${expiredCount} benefit allowances`, "benefits");
+    }
+    const renewedCount = await storage.renewBenefitAllowancesForNewCycle();
+    if (renewedCount > 0) {
+      log(`Initial renewal: created ${renewedCount} new benefit allowances`, "benefits");
+    }
+  } catch (error) {
+    console.error("Initial benefit maintenance error:", error);
+  }
+
   await registerRoutes(httpServer, app);
 
   // Set up WebSocket server for real-time chat

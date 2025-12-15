@@ -22,6 +22,10 @@ import {
   type InsertPushSubscription,
   type CartItem,
   type InsertCartItem,
+  type VendorSubscription,
+  type TierBenefit,
+  type BenefitAllowance,
+  type FulfillmentTask,
   users,
   businesses,
   cities,
@@ -35,7 +39,13 @@ import {
   messages,
   pointTransactions,
   pushSubscriptions,
-  cartItems
+  cartItems,
+  vendorSubscriptions,
+  subscriptionTiers,
+  tierBenefits,
+  benefitAllowances,
+  benefitUsage,
+  fulfillmentTasks
 } from "@shared/schema";
 import { db } from "./db";
 import { eq, ilike, or, and, sql, isNull } from "drizzle-orm";
@@ -146,6 +156,18 @@ export interface IStorage {
   removeCartItem(id: string): Promise<void>;
   clearCart(userId: string): Promise<void>;
   getUsersWithAbandonedCarts(hoursAgo: number): Promise<{ userId: string; items: CartItem[] }[]>;
+
+  // Vendor Subscriptions & Benefits
+  createVendorSubscription(data: { vendorId: string; businessId: string; tierId: string; stripeCustomerId?: string; stripeSubscriptionId?: string }): Promise<VendorSubscription>;
+  getVendorSubscription(vendorId: string): Promise<VendorSubscription | undefined>;
+  getVendorSubscriptionByStripeId(stripeSubscriptionId: string): Promise<VendorSubscription | undefined>;
+  updateVendorSubscription(id: string, updates: Partial<VendorSubscription>): Promise<VendorSubscription | undefined>;
+  getTierBenefits(tierId: string): Promise<TierBenefit[]>;
+  createBenefitAllowances(subscriptionId: string, overrideCycleDates?: { periodStart: Date; periodEnd: Date; quarterStart: Date; quarterEnd: Date }): Promise<BenefitAllowance[]>;
+  renewBenefitAllowancesForNewCycle(): Promise<number>;
+  getVendorBenefitAllowances(vendorId: string): Promise<(BenefitAllowance & { benefit: TierBenefit })[]>;
+  useBenefit(allowanceId: string, vendorId: string, businessId: string, notes?: string): Promise<{ success: boolean; allowance?: BenefitAllowance; task?: FulfillmentTask; error?: string }>;
+  expireOldAllowances(): Promise<number>;
 
   seedInitialData(): Promise<void>;
 }
@@ -1420,6 +1442,324 @@ export class DatabaseStorage implements IStorage {
     }
     
     return Object.entries(grouped).map(([userId, items]) => ({ userId, items }));
+  }
+
+  // =========================
+  // VENDOR SUBSCRIPTIONS & BENEFITS
+  // =========================
+
+  async createVendorSubscription(data: { 
+    vendorId: string; 
+    businessId: string; 
+    tierId: string; 
+    stripeCustomerId?: string; 
+    stripeSubscriptionId?: string 
+  }): Promise<VendorSubscription> {
+    const now = new Date();
+    const monthEnd = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59);
+    const quarterEnd = this.getQuarterEnd(now);
+    
+    const [subscription] = await db.insert(vendorSubscriptions).values({
+      vendorId: data.vendorId,
+      businessId: data.businessId,
+      tierId: data.tierId,
+      stripeCustomerId: data.stripeCustomerId || null,
+      stripeSubscriptionId: data.stripeSubscriptionId || null,
+      status: 'pending',
+      currentPeriodStart: now,
+      currentPeriodEnd: monthEnd,
+      currentQuarterStart: this.getQuarterStart(now),
+      currentQuarterEnd: quarterEnd,
+    }).returning();
+    return subscription;
+  }
+
+  private getQuarterStart(date: Date): Date {
+    const quarter = Math.floor(date.getMonth() / 3);
+    return new Date(date.getFullYear(), quarter * 3, 1);
+  }
+
+  private getQuarterEnd(date: Date): Date {
+    const quarter = Math.floor(date.getMonth() / 3);
+    return new Date(date.getFullYear(), (quarter + 1) * 3, 0, 23, 59, 59);
+  }
+
+  async getVendorSubscription(vendorId: string): Promise<VendorSubscription | undefined> {
+    const [subscription] = await db.select()
+      .from(vendorSubscriptions)
+      .where(eq(vendorSubscriptions.vendorId, vendorId));
+    return subscription;
+  }
+
+  async getVendorSubscriptionByStripeId(stripeSubscriptionId: string): Promise<VendorSubscription | undefined> {
+    const [subscription] = await db.select()
+      .from(vendorSubscriptions)
+      .where(eq(vendorSubscriptions.stripeSubscriptionId, stripeSubscriptionId));
+    return subscription;
+  }
+
+  async updateVendorSubscription(id: string, updates: Partial<VendorSubscription>): Promise<VendorSubscription | undefined> {
+    const [updated] = await db.update(vendorSubscriptions)
+      .set({ ...updates, updatedAt: new Date() })
+      .where(eq(vendorSubscriptions.id, id))
+      .returning();
+    return updated;
+  }
+
+  async getTierBenefits(tierId: string): Promise<TierBenefit[]> {
+    return db.select()
+      .from(tierBenefits)
+      .where(eq(tierBenefits.tierId, tierId));
+  }
+
+  async createBenefitAllowances(subscriptionId: string, overrideCycleDates?: { periodStart: Date; periodEnd: Date; quarterStart: Date; quarterEnd: Date }): Promise<BenefitAllowance[]> {
+    // Fetch fresh subscription data
+    const [subscription] = await db.select()
+      .from(vendorSubscriptions)
+      .where(eq(vendorSubscriptions.id, subscriptionId));
+    
+    if (!subscription) {
+      throw new Error('Subscription not found');
+    }
+
+    const benefits = await this.getTierBenefits(subscription.tierId);
+    const allowances: BenefitAllowance[] = [];
+    const now = new Date();
+
+    // Use override dates if provided, otherwise use stored subscription dates, then fallback to calendar
+    const periodStart = overrideCycleDates?.periodStart || subscription.currentPeriodStart || now;
+    const periodEnd = overrideCycleDates?.periodEnd || subscription.currentPeriodEnd || new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59);
+    const quarterStart = overrideCycleDates?.quarterStart || subscription.currentQuarterStart || this.getQuarterStart(periodStart);
+    const quarterEnd = overrideCycleDates?.quarterEnd || subscription.currentQuarterEnd || this.getQuarterEnd(periodStart);
+
+    for (const benefit of benefits) {
+      // Use appropriate dates based on cycle type
+      let cycleStart: Date;
+      let cycleEnd: Date;
+      
+      if (benefit.cycleType === 'monthly') {
+        cycleStart = periodStart;
+        cycleEnd = periodEnd;
+      } else {
+        cycleStart = quarterStart;
+        cycleEnd = quarterEnd;
+      }
+
+      // Check if allowance already exists for this benefit and cycle (idempotency)
+      const existing = await db.select()
+        .from(benefitAllowances)
+        .where(and(
+          eq(benefitAllowances.subscriptionId, subscriptionId),
+          eq(benefitAllowances.benefitId, benefit.id),
+          eq(benefitAllowances.cycleStart, cycleStart),
+          eq(benefitAllowances.isExpired, false)
+        ));
+      
+      if (existing.length > 0) {
+        allowances.push(existing[0]);
+        continue;
+      }
+
+      // Expire any previous non-expired allowances for this benefit before creating new one
+      await db.update(benefitAllowances)
+        .set({ isExpired: true, expiredAt: now })
+        .where(and(
+          eq(benefitAllowances.subscriptionId, subscriptionId),
+          eq(benefitAllowances.benefitId, benefit.id),
+          eq(benefitAllowances.isExpired, false)
+        ));
+
+      const [allowance] = await db.insert(benefitAllowances).values({
+        subscriptionId,
+        benefitId: benefit.id,
+        cycleType: benefit.cycleType,
+        cycleStart,
+        cycleEnd,
+        totalQuantity: benefit.includedQuantity,
+        usedQuantity: 0,
+        remainingQuantity: benefit.includedQuantity,
+      }).returning();
+      
+      allowances.push(allowance);
+    }
+
+    return allowances;
+  }
+
+  async renewBenefitAllowancesForNewCycle(): Promise<number> {
+    // Note: This is a backup/fallback method. Primary renewal happens via invoice.paid webhook.
+    // This method uses stored subscription cycle dates for consistency with Stripe.
+    
+    const activeSubscriptions = await db.select()
+      .from(vendorSubscriptions)
+      .where(eq(vendorSubscriptions.status, 'active'));
+    
+    let createdCount = 0;
+
+    for (const subscription of activeSubscriptions) {
+      // Skip if subscription doesn't have stored cycle dates (wait for webhook to set them)
+      if (!subscription.currentPeriodStart || !subscription.currentPeriodEnd) {
+        continue;
+      }
+
+      const benefits = await this.getTierBenefits(subscription.tierId);
+      
+      for (const benefit of benefits) {
+        // Use subscription's stored Stripe billing cycle dates
+        let cycleStart: Date;
+        let cycleEnd: Date;
+        
+        if (benefit.cycleType === 'monthly') {
+          cycleStart = subscription.currentPeriodStart;
+          cycleEnd = subscription.currentPeriodEnd;
+        } else {
+          // Quarterly benefits use the quarterly dates
+          cycleStart = subscription.currentQuarterStart || this.getQuarterStart(subscription.currentPeriodStart);
+          cycleEnd = subscription.currentQuarterEnd || this.getQuarterEnd(subscription.currentPeriodStart);
+        }
+
+        // Check if allowance exists for current cycle (idempotency check)
+        const existing = await db.select()
+          .from(benefitAllowances)
+          .where(and(
+            eq(benefitAllowances.subscriptionId, subscription.id),
+            eq(benefitAllowances.benefitId, benefit.id),
+            eq(benefitAllowances.cycleStart, cycleStart),
+            eq(benefitAllowances.isExpired, false)
+          ));
+        
+        if (existing.length === 0) {
+          // Expire old allowances before creating new
+          const now = new Date();
+          await db.update(benefitAllowances)
+            .set({ isExpired: true, expiredAt: now })
+            .where(and(
+              eq(benefitAllowances.subscriptionId, subscription.id),
+              eq(benefitAllowances.benefitId, benefit.id),
+              eq(benefitAllowances.isExpired, false)
+            ));
+
+          await db.insert(benefitAllowances).values({
+            subscriptionId: subscription.id,
+            benefitId: benefit.id,
+            cycleType: benefit.cycleType,
+            cycleStart,
+            cycleEnd,
+            totalQuantity: benefit.includedQuantity,
+            usedQuantity: 0,
+            remainingQuantity: benefit.includedQuantity,
+          });
+          createdCount++;
+        }
+      }
+    }
+
+    return createdCount;
+  }
+
+  async getVendorBenefitAllowances(vendorId: string): Promise<(BenefitAllowance & { benefit: TierBenefit })[]> {
+    const subscription = await this.getVendorSubscription(vendorId);
+    if (!subscription) {
+      return [];
+    }
+
+    const allowanceRows = await db.select()
+      .from(benefitAllowances)
+      .where(and(
+        eq(benefitAllowances.subscriptionId, subscription.id),
+        eq(benefitAllowances.isExpired, false)
+      ));
+
+    const result: (BenefitAllowance & { benefit: TierBenefit })[] = [];
+    for (const allowance of allowanceRows) {
+      const [benefit] = await db.select()
+        .from(tierBenefits)
+        .where(eq(tierBenefits.id, allowance.benefitId));
+      if (benefit) {
+        result.push({ ...allowance, benefit });
+      }
+    }
+
+    return result;
+  }
+
+  async useBenefit(
+    allowanceId: string, 
+    vendorId: string, 
+    businessId: string, 
+    notes?: string
+  ): Promise<{ success: boolean; allowance?: BenefitAllowance; task?: FulfillmentTask; error?: string }> {
+    const [allowance] = await db.select()
+      .from(benefitAllowances)
+      .where(eq(benefitAllowances.id, allowanceId));
+
+    if (!allowance) {
+      return { success: false, error: 'Allowance not found' };
+    }
+
+    if (allowance.isExpired) {
+      return { success: false, error: 'Benefit has expired' };
+    }
+
+    if (allowance.remainingQuantity <= 0) {
+      return { success: false, error: 'No remaining uses for this benefit' };
+    }
+
+    const now = new Date();
+    if (now > allowance.cycleEnd) {
+      return { success: false, error: 'Benefit cycle has ended' };
+    }
+
+    const [benefit] = await db.select()
+      .from(tierBenefits)
+      .where(eq(tierBenefits.id, allowance.benefitId));
+
+    if (!benefit) {
+      return { success: false, error: 'Benefit definition not found' };
+    }
+
+    const [updatedAllowance] = await db.update(benefitAllowances)
+      .set({
+        usedQuantity: allowance.usedQuantity + 1,
+        remainingQuantity: allowance.remainingQuantity - 1,
+      })
+      .where(eq(benefitAllowances.id, allowanceId))
+      .returning();
+
+    await db.insert(benefitUsage).values({
+      allowanceId,
+      benefitType: benefit.benefitType,
+      quantityUsed: 1,
+      notes,
+    });
+
+    let task: FulfillmentTask | undefined;
+    if (benefit.requiresAdminFulfillment) {
+      const [newTask] = await db.insert(fulfillmentTasks).values({
+        vendorId,
+        businessId,
+        taskType: benefit.benefitType,
+        sourceType: 'benefit',
+        sourceId: allowanceId,
+        status: 'pending',
+        vendorNotes: notes,
+      }).returning();
+      task = newTask;
+    }
+
+    return { success: true, allowance: updatedAllowance, task };
+  }
+
+  async expireOldAllowances(): Promise<number> {
+    const now = new Date();
+    const result = await db.update(benefitAllowances)
+      .set({ isExpired: true, expiredAt: now })
+      .where(and(
+        eq(benefitAllowances.isExpired, false),
+        sql`${benefitAllowances.cycleEnd} < ${now}`
+      ))
+      .returning();
+    return result.length;
   }
 }
 

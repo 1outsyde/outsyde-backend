@@ -23,6 +23,10 @@ export class WebhookHandlers {
         await WebhookHandlers.handleCheckoutCompleted(event.data.object);
       } else if (event.type === 'payment_intent.succeeded') {
         await WebhookHandlers.handlePaymentSucceeded(event.data.object);
+      } else if (event.type === 'customer.subscription.created' || event.type === 'customer.subscription.updated') {
+        await WebhookHandlers.handleSubscriptionChange(event.data.object);
+      } else if (event.type === 'invoice.paid') {
+        await WebhookHandlers.handleInvoicePaid(event.data.object);
       }
     } catch (error) {
       console.error('Error processing custom webhook logic:', error);
@@ -103,6 +107,151 @@ export class WebhookHandlers {
       console.log(`Successfully awarded ${amount} points to user ${user.id}`);
     } catch (error) {
       console.error('Error awarding points on payment:', error);
+    }
+  }
+
+  static async handleSubscriptionChange(subscription: any): Promise<void> {
+    try {
+      const stripeSubscriptionId = subscription.id;
+      const status = subscription.status;
+      
+      console.log(`Subscription ${stripeSubscriptionId} status changed to: ${status}`);
+      
+      const vendorSub = await storage.getVendorSubscriptionByStripeId(stripeSubscriptionId);
+      if (!vendorSub) {
+        console.log('No vendor subscription found for Stripe subscription:', stripeSubscriptionId);
+        return;
+      }
+
+      // Extract Stripe billing cycle dates
+      const currentPeriodStart = subscription.current_period_start 
+        ? new Date(subscription.current_period_start * 1000) 
+        : null;
+      const currentPeriodEnd = subscription.current_period_end 
+        ? new Date(subscription.current_period_end * 1000) 
+        : null;
+
+      // Calculate quarterly dates based on Stripe period start
+      let currentQuarterStart: Date | null = null;
+      let currentQuarterEnd: Date | null = null;
+      if (currentPeriodStart) {
+        const quarter = Math.floor(currentPeriodStart.getMonth() / 3);
+        currentQuarterStart = new Date(currentPeriodStart.getFullYear(), quarter * 3, 1);
+        currentQuarterEnd = new Date(currentPeriodStart.getFullYear(), (quarter + 1) * 3, 0, 23, 59, 59);
+      }
+
+      if (status === 'active' && vendorSub.status !== 'active') {
+        console.log(`Activating vendor subscription ${vendorSub.id} and creating benefit allowances`);
+        
+        // Update with Stripe billing cycle dates
+        await storage.updateVendorSubscription(vendorSub.id, { 
+          status: 'active',
+          currentPeriodStart,
+          currentPeriodEnd,
+          currentQuarterStart,
+          currentQuarterEnd,
+        });
+        
+        // Pass cycle dates directly to avoid stale data issues
+        const cycleDates = currentPeriodStart && currentPeriodEnd && currentQuarterStart && currentQuarterEnd
+          ? { periodStart: currentPeriodStart, periodEnd: currentPeriodEnd, quarterStart: currentQuarterStart, quarterEnd: currentQuarterEnd }
+          : undefined;
+        const allowances = await storage.createBenefitAllowances(vendorSub.id, cycleDates);
+        console.log(`Created ${allowances.length} benefit allowances for vendor subscription ${vendorSub.id}`);
+        
+        if (vendorSub.businessId) {
+          const business = await storage.getBusiness(vendorSub.businessId);
+          if (business) {
+            await storage.updateBusiness(vendorSub.businessId, { subscriptionActive: true });
+          }
+        }
+      } else if (status === 'active') {
+        // Already active - just update the billing cycle dates
+        await storage.updateVendorSubscription(vendorSub.id, {
+          currentPeriodStart,
+          currentPeriodEnd,
+          currentQuarterStart,
+          currentQuarterEnd,
+        });
+      } else if (status === 'canceled' || status === 'unpaid' || status === 'past_due') {
+        console.log(`Deactivating vendor subscription ${vendorSub.id} due to status: ${status}`);
+        
+        await storage.updateVendorSubscription(vendorSub.id, { status: status });
+        
+        if (vendorSub.businessId) {
+          const business = await storage.getBusiness(vendorSub.businessId);
+          if (business) {
+            await storage.updateBusiness(vendorSub.businessId, { subscriptionActive: false });
+          }
+        }
+      }
+    } catch (error) {
+      console.error('Error processing subscription change:', error);
+    }
+  }
+
+  static async handleInvoicePaid(invoice: any): Promise<void> {
+    try {
+      // Only process subscription invoices
+      if (!invoice.subscription) {
+        return;
+      }
+
+      const stripeSubscriptionId = invoice.subscription;
+      console.log(`Invoice paid for subscription ${stripeSubscriptionId}`);
+
+      const vendorSub = await storage.getVendorSubscriptionByStripeId(stripeSubscriptionId);
+      if (!vendorSub) {
+        console.log('No vendor subscription found for Stripe subscription:', stripeSubscriptionId);
+        return;
+      }
+
+      // Only process if subscription is active
+      if (vendorSub.status !== 'active') {
+        console.log('Vendor subscription is not active, skipping renewal');
+        return;
+      }
+
+      // Get the subscription from Stripe to get accurate billing cycle dates
+      const stripe = await getUncachableStripeClient();
+      const subscription = await stripe.subscriptions.retrieve(stripeSubscriptionId) as any;
+
+      const currentPeriodStart = new Date(subscription.current_period_start * 1000);
+      const currentPeriodEnd = new Date(subscription.current_period_end * 1000);
+
+      // Check if this is a new billing cycle (period start is after stored period start)
+      const storedPeriodStart = vendorSub.currentPeriodStart;
+      if (storedPeriodStart && currentPeriodStart <= storedPeriodStart) {
+        console.log('Invoice is for current or past cycle, skipping renewal');
+        return;
+      }
+
+      console.log(`Renewing benefit allowances for new billing cycle starting ${currentPeriodStart.toISOString()}`);
+
+      // Calculate quarterly dates
+      const quarter = Math.floor(currentPeriodStart.getMonth() / 3);
+      const currentQuarterStart = new Date(currentPeriodStart.getFullYear(), quarter * 3, 1);
+      const currentQuarterEnd = new Date(currentPeriodStart.getFullYear(), (quarter + 1) * 3, 0, 23, 59, 59);
+
+      // Update subscription with new billing cycle dates
+      await storage.updateVendorSubscription(vendorSub.id, {
+        currentPeriodStart,
+        currentPeriodEnd,
+        currentQuarterStart,
+        currentQuarterEnd,
+      });
+
+      // Create new benefit allowances for the new cycle - pass dates directly to avoid stale data
+      const cycleDates = {
+        periodStart: currentPeriodStart,
+        periodEnd: currentPeriodEnd,
+        quarterStart: currentQuarterStart,
+        quarterEnd: currentQuarterEnd,
+      };
+      const allowances = await storage.createBenefitAllowances(vendorSub.id, cycleDates);
+      console.log(`Created ${allowances.length} benefit allowances for new billing cycle`);
+    } catch (error) {
+      console.error('Error processing invoice paid:', error);
     }
   }
 

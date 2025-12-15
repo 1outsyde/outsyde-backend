@@ -469,6 +469,89 @@ export async function registerRoutes(
     }
   });
 
+  // ==================== VENDOR SUBSCRIPTION & BENEFITS ROUTES ====================
+
+  // Get vendor's subscription details
+  app.get("/api/vendor/subscription", async (req, res) => {
+    const userId = req.session?.userId;
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    if (!req.session?.isVendor) {
+      return res.status(403).json({ error: "Only vendors can access this" });
+    }
+
+    try {
+      const subscription = await storage.getVendorSubscription(userId);
+      if (!subscription) {
+        return res.json({ subscription: null });
+      }
+
+      res.json({ subscription });
+    } catch (error) {
+      console.error("Get vendor subscription error:", error);
+      res.status(500).json({ error: "Failed to get subscription" });
+    }
+  });
+
+  // Get vendor's benefit allowances
+  app.get("/api/vendor/benefits", async (req, res) => {
+    const userId = req.session?.userId;
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    if (!req.session?.isVendor) {
+      return res.status(403).json({ error: "Only vendors can access this" });
+    }
+
+    try {
+      const allowances = await storage.getVendorBenefitAllowances(userId);
+      res.json({ allowances });
+    } catch (error) {
+      console.error("Get vendor benefits error:", error);
+      res.status(500).json({ error: "Failed to get benefits" });
+    }
+  });
+
+  // Use a benefit (creates fulfillment task)
+  app.post("/api/vendor/benefits/:id/use", async (req, res) => {
+    const userId = req.session?.userId;
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    if (!req.session?.isVendor) {
+      return res.status(403).json({ error: "Only vendors can use benefits" });
+    }
+
+    try {
+      const { id } = req.params;
+      const { notes } = req.body;
+
+      const business = await storage.getBusinessByOwnerId(userId);
+      if (!business) {
+        return res.status(404).json({ error: "Business not found" });
+      }
+
+      const result = await storage.useBenefit(id, userId, business.id, notes);
+      
+      if (!result.success) {
+        return res.status(400).json({ error: result.error });
+      }
+
+      res.json({ 
+        success: true, 
+        allowance: result.allowance, 
+        task: result.task 
+      });
+    } catch (error) {
+      console.error("Use benefit error:", error);
+      res.status(500).json({ error: "Failed to use benefit" });
+    }
+  });
+
   // ==================== VERIFIED REVIEW ROUTES ====================
 
   // Get reviews for a target (photographer, business, service_business)
