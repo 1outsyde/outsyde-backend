@@ -117,7 +117,37 @@ export interface IStorage {
   updateTargetRating(targetType: string, targetId: string): Promise<void>;
 
   // Business Customers
-  getBusinessCustomers(businessId: string): Promise<{ id: string; firstName: string | null; lastName: string | null; email: string | null; phone: string | null }[]>;
+  getBusinessOrderRecords(businessId: string): Promise<{
+    recordId: string;
+    recordType: 'order' | 'appointment';
+    customerId: string;
+    firstName: string | null;
+    lastName: string | null;
+    email: string | null;
+    productsOrServices: string;
+    orderedAt: Date | null;
+    bookingDateTime: string | null;
+    totalPaid: number;
+    platformFee: number;
+    vendorNet: number;
+    paymentIntentId: string | null;
+    status: string | null;
+  }[]>;
+  getPhotographerBookingRecords(photographerId: string): Promise<{
+    recordId: string;
+    clientId: string;
+    firstName: string | null;
+    lastName: string | null;
+    email: string | null;
+    shootType: string;
+    orderedAt: Date | null;
+    bookingDateTime: string;
+    totalPaid: number;
+    platformFee: number;
+    vendorNet: number;
+    paymentIntentId: string | null;
+    status: string | null;
+  }[]>;
 
   // Chat (Real-time messaging)
   getOrCreateConversation(participant1Id: string, participant2Id: string): Promise<Conversation>;
@@ -625,40 +655,162 @@ export class DatabaseStorage implements IStorage {
     return { canReview: true };
   }
 
-  // Get all customers who have interacted with a business (via orders or appointments)
-  async getBusinessCustomers(businessId: string): Promise<{ id: string; firstName: string | null; lastName: string | null; email: string | null; phone: string | null }[]> {
-    // Get customer IDs from orders
-    const orderCustomers = await db.selectDistinct({ customerId: orders.customerId })
-      .from(orders)
-      .where(eq(orders.businessId, businessId));
-    
-    // Get customer IDs from appointments (if this is a service business)
-    const appointmentClients = await db.selectDistinct({ clientId: appointments.clientId })
-      .from(appointments)
-      .where(eq(appointments.businessId, businessId));
-    
-    // Combine unique customer IDs
-    const customerIds = new Set([
-      ...orderCustomers.map(o => o.customerId),
-      ...appointmentClients.map(a => a.clientId)
-    ]);
-    
-    if (customerIds.size === 0) {
-      return [];
-    }
-    
-    // Fetch customer profiles
-    const customers = await db.select({
-      id: users.id,
+  // Get all order/booking records for a business with customer details
+  async getBusinessOrderRecords(businessId: string): Promise<{
+    recordId: string;
+    recordType: 'order' | 'appointment';
+    customerId: string;
+    firstName: string | null;
+    lastName: string | null;
+    email: string | null;
+    productsOrServices: string;
+    orderedAt: Date | null;
+    bookingDateTime: string | null;
+    totalPaid: number;
+    platformFee: number;
+    vendorNet: number;
+    paymentIntentId: string | null;
+    status: string | null;
+  }[]> {
+    // Get orders with customer info
+    const orderRecords = await db.select({
+      recordId: orders.id,
+      customerId: orders.customerId,
       firstName: users.firstName,
       lastName: users.lastName,
       email: users.email,
-      phone: users.phone
-    }).from(users).where(
-      sql`${users.id} IN (${sql.join([...customerIds].map(id => sql`${id}`), sql`, `)})`
-    );
-    
-    return customers;
+      items: orders.items,
+      orderedAt: orders.createdAt,
+      totalPaid: orders.totalAmount,
+      platformFee: orders.platformFee,
+      vendorNet: orders.vendorNet,
+      paymentIntentId: orders.stripePaymentIntentId,
+      status: orders.status,
+    })
+      .from(orders)
+      .leftJoin(users, eq(orders.customerId, users.id))
+      .where(eq(orders.businessId, businessId))
+      .orderBy(sql`${orders.createdAt} DESC`);
+
+    // Get appointments with customer and service info
+    const appointmentRecords = await db.select({
+      recordId: appointments.id,
+      customerId: appointments.clientId,
+      firstName: users.firstName,
+      lastName: users.lastName,
+      email: users.email,
+      serviceTitle: services.title,
+      appointmentDate: appointments.appointmentDate,
+      appointmentTime: appointments.appointmentTime,
+      orderedAt: appointments.createdAt,
+      totalPaid: appointments.totalPrice,
+      platformFee: appointments.platformFee,
+      vendorNet: appointments.vendorNet,
+      paymentIntentId: appointments.stripePaymentIntentId,
+      status: appointments.status,
+    })
+      .from(appointments)
+      .leftJoin(users, eq(appointments.clientId, users.id))
+      .leftJoin(services, eq(appointments.serviceId, services.id))
+      .where(eq(appointments.businessId, businessId))
+      .orderBy(sql`${appointments.createdAt} DESC`);
+
+    // Format orders
+    const formattedOrders = orderRecords.map(o => ({
+      recordId: o.recordId,
+      recordType: 'order' as const,
+      customerId: o.customerId,
+      firstName: o.firstName,
+      lastName: o.lastName,
+      email: o.email,
+      productsOrServices: (o.items as any[]).map((i: any) => `${i.name} x${i.quantity}`).join(', '),
+      orderedAt: o.orderedAt,
+      bookingDateTime: null,
+      totalPaid: o.totalPaid,
+      platformFee: o.platformFee || 0,
+      vendorNet: o.vendorNet || 0,
+      paymentIntentId: o.paymentIntentId,
+      status: o.status,
+    }));
+
+    // Format appointments
+    const formattedAppointments = appointmentRecords.map(a => ({
+      recordId: a.recordId,
+      recordType: 'appointment' as const,
+      customerId: a.customerId,
+      firstName: a.firstName,
+      lastName: a.lastName,
+      email: a.email,
+      productsOrServices: a.serviceTitle || 'Service',
+      orderedAt: a.orderedAt,
+      bookingDateTime: `${a.appointmentDate} ${a.appointmentTime}`,
+      totalPaid: a.totalPaid,
+      platformFee: a.platformFee || 0,
+      vendorNet: a.vendorNet || 0,
+      paymentIntentId: a.paymentIntentId,
+      status: a.status,
+    }));
+
+    // Combine and sort by orderedAt
+    return [...formattedOrders, ...formattedAppointments].sort((a, b) => {
+      const dateA = a.orderedAt ? new Date(a.orderedAt).getTime() : 0;
+      const dateB = b.orderedAt ? new Date(b.orderedAt).getTime() : 0;
+      return dateB - dateA;
+    });
+  }
+
+  // Get all shoot booking records for a photographer with client details
+  async getPhotographerBookingRecords(photographerId: string): Promise<{
+    recordId: string;
+    clientId: string;
+    firstName: string | null;
+    lastName: string | null;
+    email: string | null;
+    shootType: string;
+    orderedAt: Date | null;
+    bookingDateTime: string;
+    totalPaid: number;
+    platformFee: number;
+    vendorNet: number;
+    paymentIntentId: string | null;
+    status: string | null;
+  }[]> {
+    const bookingRecords = await db.select({
+      recordId: shootBookings.id,
+      clientId: shootBookings.clientId,
+      firstName: users.firstName,
+      lastName: users.lastName,
+      email: users.email,
+      shootType: shootBookings.shootType,
+      orderedAt: shootBookings.createdAt,
+      date: shootBookings.date,
+      startTime: shootBookings.startTime,
+      totalPaid: shootBookings.totalPrice,
+      platformFee: shootBookings.platformFee,
+      vendorNet: shootBookings.vendorNet,
+      paymentIntentId: shootBookings.stripePaymentIntentId,
+      status: shootBookings.status,
+    })
+      .from(shootBookings)
+      .leftJoin(users, eq(shootBookings.clientId, users.id))
+      .where(eq(shootBookings.photographerId, photographerId))
+      .orderBy(sql`${shootBookings.createdAt} DESC`);
+
+    return bookingRecords.map(b => ({
+      recordId: b.recordId,
+      clientId: b.clientId,
+      firstName: b.firstName,
+      lastName: b.lastName,
+      email: b.email,
+      shootType: b.shootType,
+      orderedAt: b.orderedAt,
+      bookingDateTime: `${b.date} ${b.startTime}`,
+      totalPaid: b.totalPaid,
+      platformFee: b.platformFee || 0,
+      vendorNet: b.vendorNet || 0,
+      paymentIntentId: b.paymentIntentId,
+      status: b.status,
+    }));
   }
 
   // Get all completed bookings/orders for a customer that can be reviewed

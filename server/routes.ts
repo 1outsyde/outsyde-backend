@@ -1042,7 +1042,7 @@ export async function registerRoutes(
     }
   });
 
-  // Get vendor's customers
+  // Get vendor's order/booking records
   app.get("/api/vendor/customers", async (req, res) => {
     const userId = req.session?.userId;
     if (!userId) {
@@ -1055,11 +1055,11 @@ export async function registerRoutes(
         return res.status(404).json({ error: "No business found" });
       }
 
-      const customers = await storage.getBusinessCustomers(business.id);
-      res.json({ customers });
+      const records = await storage.getBusinessOrderRecords(business.id);
+      res.json({ records });
     } catch (error) {
-      console.error("Get vendor customers error:", error);
-      res.status(500).json({ error: "Failed to get customers" });
+      console.error("Get vendor order records error:", error);
+      res.status(500).json({ error: "Failed to get order records" });
     }
   });
 

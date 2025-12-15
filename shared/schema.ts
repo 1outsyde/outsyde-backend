@@ -309,6 +309,8 @@ export const shootBookings = pgTable("shoot_bookings", {
   locationDetails: text("location_details"),
 
   totalPrice: integer("total_price").notNull(),
+  platformFee: integer("platform_fee").default(0),
+  vendorNet: integer("vendor_net").default(0),
 
   stripePaymentIntentId: text("stripe_payment_intent_id"),
   status: text("status").default("pending"),
@@ -339,6 +341,8 @@ export const appointments = pgTable("appointments", {
   appointmentTime: text("appointment_time").notNull(),
 
   totalPrice: integer("total_price").notNull(),
+  platformFee: integer("platform_fee").default(0),
+  vendorNet: integer("vendor_net").default(0),
 
   stripePaymentIntentId: text("stripe_payment_intent_id"),
   status: text("status").default("pending"),
@@ -363,9 +367,11 @@ export const orders = pgTable("orders", {
 
   items: jsonb("items").$type<{ productId: string; name: string; quantity: number; price: number }[]>().notNull(),
   totalAmount: integer("total_amount").notNull(),
+  platformFee: integer("platform_fee").default(0),
+  vendorNet: integer("vendor_net").default(0),
 
   stripePaymentIntentId: text("stripe_payment_intent_id"),
-  status: text("status").default("pending"), // pending, paid, shipped, delivered, cancelled
+  status: text("status").default("pending"), // pending, paid, shipped, delivered, cancelled, refunded, partially_refunded
 
   shippingAddress: text("shipping_address"),
   
