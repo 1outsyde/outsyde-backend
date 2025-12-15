@@ -410,6 +410,16 @@ export default function PhotographerSignupForm({ onComplete }: PhotographerSignu
             </p>
           </div>
 
+          <div className="bg-green-50 dark:bg-green-950 border border-green-200 dark:border-green-800 rounded-lg p-4 text-center" data-testid="pricing-info">
+            <p className="text-2xl font-bold text-green-700 dark:text-green-300">$0 to join</p>
+            <p className="text-sm text-green-600 dark:text-green-400 mt-1">
+              Outsyde takes a <span className="font-semibold">15% service fee</span> per completed booking.
+            </p>
+            <p className="text-xs text-green-600 dark:text-green-400 mt-1">
+              No monthly fees. No contracts.
+            </p>
+          </div>
+
           <div className="bg-muted/50 rounded-lg p-4 space-y-3">
             <div className="flex items-start gap-3">
               <Check className="h-5 w-5 text-green-500 shrink-0 mt-0.5" />
