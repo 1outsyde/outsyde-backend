@@ -1,14 +1,14 @@
 import { useState } from "react";
+import { useQuery } from "@tanstack/react-query";
 import HeroSection from "@/components/HeroSection";
 import SearchFilter from "@/components/SearchFilter";
 import FeedPost from "@/components/FeedPost";
 import BusinessCard from "@/components/BusinessCard";
+import { Skeleton } from "@/components/ui/skeleton";
 import heroImage from "@assets/generated_images/local_community_marketplace_hero.png";
 import coffeeShopImage from "@assets/generated_images/coffee_shop_vendor_storefront.png";
 import hairSalonImage from "@assets/generated_images/hair_salon_vendor_storefront.png";
-import jewelryImage from "@assets/generated_images/jewelry_artisan_vendor_image.png";
-import produceImage from "@assets/generated_images/organic_produce_vendor_image.png";
-import yogaImage from "@assets/generated_images/yoga_studio_vendor_image.png";
+import type { Business } from "@shared/schema";
 
 interface HomePageProps {
   onViewBusiness: (id: string) => void;
@@ -22,6 +22,11 @@ export default function HomePage({ onViewBusiness }: HomePageProps) {
   const [likedPosts, setLikedPosts] = useState<Set<string>>(new Set());
   const [savedPosts, setSavedPosts] = useState<Set<string>>(new Set());
   const [likedBusinesses, setLikedBusinesses] = useState<Set<string>>(new Set());
+
+  const { data: businessesResponse, isLoading: businessesLoading } = useQuery<{ businesses: Business[] }>({
+    queryKey: ["/api/businesses"],
+  });
+  const businesses = businessesResponse?.businesses;
 
   const categories = [
     "All",
@@ -96,7 +101,7 @@ export default function HomePage({ onViewBusiness }: HomePageProps) {
       id: "3",
       businessName: "Green Valley Organics",
       businessCategory: "Food & Drinks",
-      postImage: produceImage,
+      postImage: coffeeShopImage,
       caption: "Fresh harvest just arrived from local farms! Organic vegetables, fruits, and herbs. Support local agriculture and eat healthy.",
       likes: 312,
       comments: 28,
@@ -104,57 +109,21 @@ export default function HomePage({ onViewBusiness }: HomePageProps) {
     },
   ];
 
-  // todo: remove mock functionality
-  const nearbyBusinesses = [
-    {
-      id: "1",
-      name: "Sunrise Coffee Co.",
-      category: "Coffee & Cafe",
-      image: coffeeShopImage,
-      description: "Artisanal coffee and fresh pastries made daily. Supporting local farmers since 2015.",
-      location: "Downtown, 0.5 mi away",
-      rating: 4.8,
-      reviewCount: 124,
-      hasProducts: true,
-      hasServices: false,
-    },
-    {
-      id: "2",
-      name: "Bella's Hair Studio",
-      category: "Beauty",
-      image: hairSalonImage,
-      description: "Expert stylists specializing in modern cuts, vibrant colors, and personalized styling.",
-      location: "Midtown, 0.8 mi away",
-      rating: 4.9,
-      reviewCount: 89,
-      hasProducts: true,
-      hasServices: true,
-    },
-    {
-      id: "3",
-      name: "Artisan Jewelry Co.",
-      category: "Shopping",
-      image: jewelryImage,
-      description: "Handcrafted jewelry made with love. Unique pieces for every occasion.",
-      location: "Arts District, 1.2 mi away",
-      rating: 4.7,
-      reviewCount: 56,
-      hasProducts: true,
-      hasServices: false,
-    },
-    {
-      id: "4",
-      name: "Zen Yoga Studio",
-      category: "Health",
-      image: yogaImage,
-      description: "Find your inner peace with our expert-led yoga and meditation classes.",
-      location: "Wellness Center, 0.6 mi away",
-      rating: 4.9,
-      reviewCount: 203,
-      hasProducts: false,
-      hasServices: true,
-    },
-  ];
+  const defaultImage = coffeeShopImage;
+
+  const mapBusinessToCard = (business: Business) => ({
+    id: business.id,
+    name: business.name,
+    category: business.category,
+    image: business.coverImage || defaultImage,
+    avatar: business.logoImage || undefined,
+    description: business.description || "Discover what this local business has to offer.",
+    location: business.city && business.state ? `${business.city}, ${business.state}` : "Local Business",
+    rating: business.rating || 0,
+    reviewCount: business.reviewCount || 0,
+    hasProducts: business.hasProducts || false,
+    hasServices: business.hasServices || false,
+  });
 
   return (
     <div className="min-h-screen pb-20 md:pb-0" data-testid="page-home">
@@ -182,17 +151,34 @@ export default function HomePage({ onViewBusiness }: HomePageProps) {
           <>
             <h2 className="text-2xl font-bold mb-6">Discover Nearby Businesses</h2>
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-12">
-              {nearbyBusinesses.map((business) => (
-                <BusinessCard
-                  key={business.id}
-                  {...business}
-                  isLiked={likedBusinesses.has(business.id)}
-                  onLike={toggleLikeBusiness}
-                  onClick={onViewBusiness}
-                  onBook={onViewBusiness}
-                  onShop={onViewBusiness}
-                />
-              ))}
+              {businessesLoading ? (
+                Array.from({ length: 4 }).map((_, i) => (
+                  <div key={i} className="space-y-3">
+                    <Skeleton className="h-48 w-full rounded-md" />
+                    <Skeleton className="h-4 w-3/4" />
+                    <Skeleton className="h-4 w-1/2" />
+                  </div>
+                ))
+              ) : businesses && businesses.length > 0 ? (
+                businesses.slice(0, 8).map((business) => {
+                  const cardData = mapBusinessToCard(business);
+                  return (
+                    <BusinessCard
+                      key={cardData.id}
+                      {...cardData}
+                      isLiked={likedBusinesses.has(cardData.id)}
+                      onLike={toggleLikeBusiness}
+                      onClick={onViewBusiness}
+                      onBook={onViewBusiness}
+                      onShop={onViewBusiness}
+                    />
+                  );
+                })
+              ) : (
+                <p className="col-span-4 text-center text-muted-foreground py-8">
+                  No businesses found. Check back soon!
+                </p>
+              )}
             </div>
           </>
         )}
