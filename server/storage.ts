@@ -1898,6 +1898,91 @@ export class DatabaseStorage implements IStorage {
       .from(alaCartePurchases)
       .where(eq(alaCartePurchases.vendorId, vendorId));
   }
+
+  // =========================
+  // FULFILLMENT TASKS (Admin)
+  // =========================
+
+  async getAllFulfillmentTasks(filters?: {
+    status?: string;
+    taskType?: string;
+    limit?: number;
+    offset?: number;
+  }): Promise<{ tasks: FulfillmentTask[]; total: number }> {
+    const conditions: any[] = [];
+    
+    if (filters?.status) {
+      conditions.push(eq(fulfillmentTasks.status, filters.status));
+    }
+    if (filters?.taskType) {
+      conditions.push(eq(fulfillmentTasks.taskType, filters.taskType));
+    }
+
+    const whereClause = conditions.length > 0 ? and(...conditions) : undefined;
+
+    const [countResult] = await db.select({ count: sql<number>`count(*)::int` })
+      .from(fulfillmentTasks)
+      .where(whereClause);
+    
+    const tasks = await db.select()
+      .from(fulfillmentTasks)
+      .where(whereClause)
+      .orderBy(desc(fulfillmentTasks.isPriority), desc(fulfillmentTasks.createdAt))
+      .limit(filters?.limit || 50)
+      .offset(filters?.offset || 0);
+
+    return { tasks, total: countResult?.count || 0 };
+  }
+
+  async getFulfillmentTask(id: string): Promise<FulfillmentTask | undefined> {
+    const [task] = await db.select()
+      .from(fulfillmentTasks)
+      .where(eq(fulfillmentTasks.id, id));
+    return task;
+  }
+
+  async getFulfillmentTaskWithDetails(id: string): Promise<{
+    task: FulfillmentTask;
+    vendor: User | undefined;
+    business: Business | undefined;
+    purchase?: AlaCartePurchase;
+    allowance?: BenefitAllowance;
+  } | undefined> {
+    const task = await this.getFulfillmentTask(id);
+    if (!task) return undefined;
+
+    const vendor = await this.getUser(task.vendorId);
+    const business = task.businessId ? await this.getBusiness(task.businessId) : undefined;
+
+    let purchase: AlaCartePurchase | undefined;
+    let allowance: BenefitAllowance | undefined;
+
+    if (task.sourceType === 'ala_carte' && task.sourceId) {
+      purchase = await this.getAlaCartePurchase(task.sourceId);
+    } else if (task.sourceType === 'benefit' && task.sourceId) {
+      const [found] = await db.select()
+        .from(benefitAllowances)
+        .where(eq(benefitAllowances.id, task.sourceId));
+      allowance = found;
+    }
+
+    return { task, vendor, business, purchase, allowance };
+  }
+
+  async updateFulfillmentTask(id: string, updates: Partial<FulfillmentTask>): Promise<FulfillmentTask | undefined> {
+    const [task] = await db.update(fulfillmentTasks)
+      .set({ ...updates, updatedAt: new Date() })
+      .where(eq(fulfillmentTasks.id, id))
+      .returning();
+    return task;
+  }
+
+  async getVendorFulfillmentTasks(vendorId: string): Promise<FulfillmentTask[]> {
+    return db.select()
+      .from(fulfillmentTasks)
+      .where(eq(fulfillmentTasks.vendorId, vendorId))
+      .orderBy(desc(fulfillmentTasks.createdAt));
+  }
 }
 
 export const storage = new DatabaseStorage();

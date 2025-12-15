@@ -33,6 +33,7 @@ export const users = pgTable("users", {
   profileImageUrl: text("profile_image_url"),
   phone: text("phone"),
   isVendor: boolean("is_vendor").default(false).notNull(),
+  isAdmin: boolean("is_admin").default(false).notNull(),
   
   // OAuth flags
   isOAuthUser: boolean("is_oauth_user").default(false),

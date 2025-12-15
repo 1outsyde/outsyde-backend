@@ -16,11 +16,12 @@ import ProfilePage from "@/pages/profile";
 import VendorPage from "@/pages/vendor";
 import AuthPage from "@/pages/auth";
 import VendorDashboardPage from "@/pages/vendor-dashboard";
+import AdminFulfillmentPage from "@/pages/admin-fulfillment";
 
 import jewelryImage from "@assets/generated_images/jewelry_artisan_vendor_image.png";
 import type { User } from "@shared/schema";
 
-type Page = "home" | "search" | "messages" | "profile" | "vendor" | "auth" | "vendor-dashboard";
+type Page = "home" | "search" | "messages" | "profile" | "vendor" | "auth" | "vendor-dashboard" | "admin-fulfillment";
 type NavTab = "home" | "search" | "create" | "messages" | "profile";
 
 interface MessageTarget {
@@ -177,6 +178,15 @@ function AppContent() {
     return (
       <>
         <VendorDashboardPage onLogout={handleLogout} />
+        <Toaster />
+      </>
+    );
+  }
+
+  if (currentPage === "admin-fulfillment" && user?.isAdmin) {
+    return (
+      <>
+        <AdminFulfillmentPage />
         <Toaster />
       </>
     );

@@ -1427,5 +1427,119 @@ export async function registerRoutes(
     }
   });
 
+  // ==================== ADMIN FULFILLMENT ROUTES ====================
+
+  // Middleware to check if user is admin
+  const requireAdmin = async (req: any, res: any, next: any) => {
+    const userId = req.session?.userId;
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    const user = await storage.getUser(userId);
+    if (!user?.isAdmin) {
+      return res.status(403).json({ error: "Admin access required" });
+    }
+
+    req.adminUser = user;
+    next();
+  };
+
+  // Get all fulfillment tasks with optional filters
+  app.get("/api/admin/fulfillment-tasks", requireAdmin, async (req, res) => {
+    try {
+      const { status, taskType, limit, offset } = req.query;
+      
+      const result = await storage.getAllFulfillmentTasks({
+        status: status as string | undefined,
+        taskType: taskType as string | undefined,
+        limit: limit ? parseInt(limit as string) : undefined,
+        offset: offset ? parseInt(offset as string) : undefined,
+      });
+
+      res.json(result);
+    } catch (error) {
+      console.error("Get fulfillment tasks error:", error);
+      res.status(500).json({ error: "Failed to get fulfillment tasks" });
+    }
+  });
+
+  // Get single fulfillment task with details
+  app.get("/api/admin/fulfillment-tasks/:id", requireAdmin, async (req, res) => {
+    try {
+      const { id } = req.params;
+      const result = await storage.getFulfillmentTaskWithDetails(id);
+
+      if (!result) {
+        return res.status(404).json({ error: "Task not found" });
+      }
+
+      res.json(result);
+    } catch (error) {
+      console.error("Get fulfillment task error:", error);
+      res.status(500).json({ error: "Failed to get task" });
+    }
+  });
+
+  // Update fulfillment task
+  app.patch("/api/admin/fulfillment-tasks/:id", requireAdmin, async (req, res) => {
+    try {
+      const { id } = req.params;
+      const updateSchema = z.object({
+        status: z.enum(['pending', 'scheduled', 'in_progress', 'completed', 'cancelled']).optional(),
+        scheduledDate: z.string().datetime().optional().nullable(),
+        adminNotes: z.string().optional().nullable(),
+        isPriority: z.boolean().optional(),
+        assignedAdminId: z.string().optional().nullable(),
+      });
+
+      const updates = updateSchema.parse(req.body);
+      
+      // Convert string date to Date object
+      const updateData: any = { ...updates };
+      if (updates.scheduledDate) {
+        updateData.scheduledDate = new Date(updates.scheduledDate);
+      }
+      if (updates.status === 'completed') {
+        updateData.completedDate = new Date();
+      }
+
+      const task = await storage.updateFulfillmentTask(id, updateData);
+
+      if (!task) {
+        return res.status(404).json({ error: "Task not found" });
+      }
+
+      res.json({ task });
+    } catch (error) {
+      if (error instanceof z.ZodError) {
+        return res.status(400).json({ error: "Invalid data", details: error.errors });
+      }
+      console.error("Update fulfillment task error:", error);
+      res.status(500).json({ error: "Failed to update task" });
+    }
+  });
+
+  // Get fulfillment task stats for dashboard
+  app.get("/api/admin/fulfillment-stats", requireAdmin, async (req, res) => {
+    try {
+      const pending = await storage.getAllFulfillmentTasks({ status: 'pending' });
+      const scheduled = await storage.getAllFulfillmentTasks({ status: 'scheduled' });
+      const inProgress = await storage.getAllFulfillmentTasks({ status: 'in_progress' });
+      const completed = await storage.getAllFulfillmentTasks({ status: 'completed' });
+
+      res.json({
+        pending: pending.total,
+        scheduled: scheduled.total,
+        inProgress: inProgress.total,
+        completed: completed.total,
+        total: pending.total + scheduled.total + inProgress.total + completed.total,
+      });
+    } catch (error) {
+      console.error("Get fulfillment stats error:", error);
+      res.status(500).json({ error: "Failed to get stats" });
+    }
+  });
+
   return httpServer;
 }
