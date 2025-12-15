@@ -1,5 +1,6 @@
 import { useState } from "react";
-import { LayoutDashboard, Package, Calendar, MessageCircle, Settings, PlusCircle, Crown, Store } from "lucide-react";
+import { useQuery } from "@tanstack/react-query";
+import { LayoutDashboard, Package, Calendar, MessageCircle, Settings, PlusCircle, Crown, Store, Users } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { SidebarProvider, Sidebar, SidebarContent, SidebarHeader, SidebarMenu, SidebarMenuItem, SidebarMenuButton, SidebarTrigger } from "@/components/ui/sidebar";
 import VendorDashboard from "@/components/VendorDashboard";
@@ -83,11 +84,20 @@ export default function VendorDashboardPage({ onLogout }: VendorDashboardPagePro
   const menuItems = [
     { id: "dashboard", icon: LayoutDashboard, label: "Dashboard" },
     { id: "storefront", icon: Store, label: "Storefront" },
+    { id: "customers", icon: Users, label: "Customers" },
     { id: "subscription", icon: Crown, label: "Subscription" },
     { id: "bookings", icon: Calendar, label: "Bookings" },
     { id: "messages", icon: MessageCircle, label: "Messages" },
     { id: "settings", icon: Settings, label: "Settings" },
   ];
+
+  // Fetch customers for the business
+  const { data: customersData, isLoading: customersLoading, error: customersError } = useQuery<{
+    customers: { id: string; firstName: string | null; lastName: string | null; email: string | null; phone: string | null }[];
+  }>({
+    queryKey: ["/api/vendor/customers"],
+    enabled: activeSection === "customers",
+  });
 
   const sidebarStyle = {
     "--sidebar-width": "16rem",
@@ -162,6 +172,76 @@ export default function VendorDashboardPage({ onLogout }: VendorDashboardPagePro
 
             {activeSection === "subscription" && (
               <VendorSubscriptionDashboard />
+            )}
+
+            {activeSection === "customers" && (
+              <div className="space-y-6">
+                <div className="flex items-center justify-between">
+                  <h2 className="text-2xl font-semibold" data-testid="heading-customers">Customers</h2>
+                </div>
+                
+                {customersLoading ? (
+                  <div className="text-center py-12">
+                    <p className="text-muted-foreground">Loading customers...</p>
+                  </div>
+                ) : customersError ? (
+                  <div className="text-center py-12" data-testid="error-customers">
+                    <Users className="h-16 w-16 mx-auto text-destructive mb-4" />
+                    <h3 className="text-xl font-semibold mb-2">Failed to Load Customers</h3>
+                    <p className="text-muted-foreground mb-4">
+                      There was an error loading your customer list. Please try again.
+                    </p>
+                    <Button 
+                      variant="outline" 
+                      onClick={() => window.location.reload()}
+                      data-testid="button-retry-customers"
+                    >
+                      Retry
+                    </Button>
+                  </div>
+                ) : customersData?.customers && customersData.customers.length > 0 ? (
+                  <div className="bg-card rounded-lg border">
+                    <table className="w-full" data-testid="table-customers">
+                      <thead>
+                        <tr className="border-b">
+                          <th className="text-left p-4 font-medium text-muted-foreground">Customer ID</th>
+                          <th className="text-left p-4 font-medium text-muted-foreground">Name</th>
+                          <th className="text-left p-4 font-medium text-muted-foreground">Email</th>
+                          <th className="text-left p-4 font-medium text-muted-foreground">Phone</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {customersData.customers.map((customer) => (
+                          <tr key={customer.id} className="border-b last:border-0" data-testid={`row-customer-${customer.id}`}>
+                            <td className="p-4 font-mono text-sm" data-testid={`text-customer-id-${customer.id}`}>
+                              {customer.id.slice(0, 8)}...
+                            </td>
+                            <td className="p-4" data-testid={`text-customer-name-${customer.id}`}>
+                              {customer.firstName || customer.lastName 
+                                ? `${customer.firstName || ''} ${customer.lastName || ''}`.trim()
+                                : '—'}
+                            </td>
+                            <td className="p-4" data-testid={`text-customer-email-${customer.id}`}>
+                              {customer.email || '—'}
+                            </td>
+                            <td className="p-4" data-testid={`text-customer-phone-${customer.id}`}>
+                              {customer.phone || '—'}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                ) : (
+                  <div className="text-center py-12">
+                    <Users className="h-16 w-16 mx-auto text-muted-foreground mb-4" />
+                    <h3 className="text-xl font-semibold mb-2">No Customers Yet</h3>
+                    <p className="text-muted-foreground">
+                      Customers who place orders or book appointments will appear here.
+                    </p>
+                  </div>
+                )}
+              </div>
             )}
 
             {activeSection === "bookings" && (

@@ -1042,6 +1042,27 @@ export async function registerRoutes(
     }
   });
 
+  // Get vendor's customers
+  app.get("/api/vendor/customers", async (req, res) => {
+    const userId = req.session?.userId;
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    try {
+      const business = await storage.getBusinessByOwnerId(userId);
+      if (!business) {
+        return res.status(404).json({ error: "No business found" });
+      }
+
+      const customers = await storage.getBusinessCustomers(business.id);
+      res.json({ customers });
+    } catch (error) {
+      console.error("Get vendor customers error:", error);
+      res.status(500).json({ error: "Failed to get customers" });
+    }
+  });
+
   // Get vendor's products
   app.get("/api/vendor/products", async (req, res) => {
     const userId = req.session?.userId;

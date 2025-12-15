@@ -116,6 +116,9 @@ export interface IStorage {
   getReviewableBookings(customerId: string): Promise<{ shootBookings: ShootBooking[]; appointments: Appointment[]; orders: Order[] }>;
   updateTargetRating(targetType: string, targetId: string): Promise<void>;
 
+  // Business Customers
+  getBusinessCustomers(businessId: string): Promise<{ id: string; firstName: string | null; lastName: string | null; email: string | null; phone: string | null }[]>;
+
   // Chat (Real-time messaging)
   getOrCreateConversation(participant1Id: string, participant2Id: string): Promise<Conversation>;
   getConversation(id: string): Promise<Conversation | undefined>;
@@ -620,6 +623,42 @@ export class DatabaseStorage implements IStorage {
     }
 
     return { canReview: true };
+  }
+
+  // Get all customers who have interacted with a business (via orders or appointments)
+  async getBusinessCustomers(businessId: string): Promise<{ id: string; firstName: string | null; lastName: string | null; email: string | null; phone: string | null }[]> {
+    // Get customer IDs from orders
+    const orderCustomers = await db.selectDistinct({ customerId: orders.customerId })
+      .from(orders)
+      .where(eq(orders.businessId, businessId));
+    
+    // Get customer IDs from appointments (if this is a service business)
+    const appointmentClients = await db.selectDistinct({ clientId: appointments.clientId })
+      .from(appointments)
+      .where(eq(appointments.businessId, businessId));
+    
+    // Combine unique customer IDs
+    const customerIds = new Set([
+      ...orderCustomers.map(o => o.customerId),
+      ...appointmentClients.map(a => a.clientId)
+    ]);
+    
+    if (customerIds.size === 0) {
+      return [];
+    }
+    
+    // Fetch customer profiles
+    const customers = await db.select({
+      id: users.id,
+      firstName: users.firstName,
+      lastName: users.lastName,
+      email: users.email,
+      phone: users.phone
+    }).from(users).where(
+      sql`${users.id} IN (${sql.join([...customerIds].map(id => sql`${id}`), sql`, `)})`
+    );
+    
+    return customers;
   }
 
   // Get all completed bookings/orders for a customer that can be reviewed
