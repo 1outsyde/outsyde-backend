@@ -87,6 +87,7 @@ The MVP includes:
 - `POST /api/vendor/services` - Create a new service
 - `PATCH /api/vendor/services/:id` - Update a service
 - `DELETE /api/vendor/services/:id` - Delete a service
+- `GET /api/vendor/customers` - List customers who have ordered/booked with the business
 
 ### Cities
 - `GET /api/cities` - List all major cities for discovery
