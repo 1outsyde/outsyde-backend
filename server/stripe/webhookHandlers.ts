@@ -1,385 +1,171 @@
-import { getStripeSync, getUncachableStripeClient } from './stripeClient';
-import { storage } from '../storage';
+import { getStripeSync, getUncachableStripeClient } from "./stripeClient";
+import { storage } from "../storage";
+import { db } from "../db";
+import { fulfillmentTasks } from "@shared/schema";
+import { sql } from "drizzle-orm";
 
 export class WebhookHandlers {
-  static async processWebhook(payload: Buffer, signature: string, uuid: string): Promise<void> {
-    if (!Buffer.isBuffer(payload)) {
-      throw new Error(
-        'STRIPE WEBHOOK ERROR: Payload must be a Buffer. ' +
-        'Received type: ' + typeof payload + '. ' +
-        'This usually means express.json() parsed the body before reaching this handler. ' +
-        'FIX: Ensure webhook route is registered BEFORE app.use(express.json()).'
-      );
-    }
-
+  static async processWebhook(
+    payload: Buffer,
+    signature: string,
+    uuid: string
+  ): Promise<void> {
     const sync = await getStripeSync();
     await sync.processWebhook(payload, signature, uuid);
 
-    try {
-      const stripe = await getUncachableStripeClient();
-      const event = JSON.parse(payload.toString());
-      
-      if (event.type === 'checkout.session.completed') {
-        await WebhookHandlers.handleCheckoutCompleted(event.data.object);
-      } else if (event.type === 'payment_intent.succeeded') {
-        await WebhookHandlers.handlePaymentSucceeded(event.data.object);
-      } else if (event.type === 'customer.subscription.created' || event.type === 'customer.subscription.updated') {
-        await WebhookHandlers.handleSubscriptionChange(event.data.object);
-      } else if (event.type === 'invoice.paid') {
-        await WebhookHandlers.handleInvoicePaid(event.data.object);
-      }
-    } catch (error) {
-      console.error('Error processing custom webhook logic:', error);
+    const event = JSON.parse(payload.toString());
+
+    switch (event.type) {
+      case "checkout.session.completed":
+        await this.handleCheckoutCompleted(event.data.object);
+        break;
+
+      case "customer.subscription.created":
+      case "customer.subscription.updated":
+        await this.handleSubscriptionChange(event.data.object);
+        break;
+
+      case "invoice.paid":
+        await this.handleInvoicePaid(event.data.object);
+        break;
     }
   }
 
-  static async handleCheckoutCompleted(session: any): Promise<void> {
-    try {
-      const customerId = session.customer;
-      const amountTotal = session.amount_total || 0;
-      const metadata = session.metadata || {};
-      
-      if (amountTotal <= 0) {
-        return;
-      }
-      
-      if (metadata.type === 'vendor_subscription') {
-        await WebhookHandlers.handleVendorSubscriptionCheckoutCompleted(session);
-        return;
-      }
+  /* =====================================================
+     CHECKOUT COMPLETED (SINGLE SOURCE OF TRUTH)
+  ===================================================== */
+  static async handleCheckoutCompleted(session: any) {
+    const metadata = session.metadata || {};
 
-      // Handle à la carte purchase completion
-      if (metadata.type === 'ala_carte_purchase') {
-        await WebhookHandlers.handleAlaCartePurchaseCompleted(session);
-        return;
-      }
-
-      const user = await WebhookHandlers.findUserByStripeCustomer(customerId);
-      if (!user) {
-        console.log('Could not find user for Stripe customer:', customerId);
-        return;
-      }
-
-      console.log(`Awarding points to user ${user.id} for checkout of ${amountTotal} cents`);
-      
-      await storage.earnPoints({
-        userId: user.id,
-        dollarAmountCents: amountTotal,
-        businessId: metadata.businessId || undefined,
-        businessName: metadata.businessName || undefined,
-        referenceType: 'checkout_session',
-        referenceId: session.id,
-        description: `Points earned from purchase`,
-      });
-      
-      console.log(`Successfully awarded ${amountTotal} points to user ${user.id}`);
-    } catch (error) {
-      console.error('Error awarding points on checkout:', error);
+    if (metadata.type === "vendor_subscription") {
+      await this.handleVendorSubscriptionCheckoutCompleted(session);
+      return;
     }
+
+    if (metadata.type === "ala_carte_purchase") {
+      await this.handleAlaCartePurchaseCompleted(session);
+      return;
+    }
+
+    // Award points ONLY here
+    const user = await this.findUserByStripeCustomer(session.customer);
+    if (!user) return;
+
+    await storage.earnPoints({
+      userId: user.id,
+      dollarAmountCents: session.amount_total,
+      referenceType: "checkout_session",
+      referenceId: session.id,
+      description: "Points earned from purchase",
+    });
   }
 
-  static async handleVendorSubscriptionCheckoutCompleted(session: any): Promise<void> {
-    try {
-      const metadata = session.metadata || {};
-      const vendorId = metadata.vendorId;
-      const businessId = metadata.businessId;
-      const tierId = metadata.tierId;
-      const stripeSubscriptionId = session.subscription;
-      const customerId = session.customer;
+  /* =====================================================
+     VENDOR SUBSCRIPTION
+  ===================================================== */
+  static async handleVendorSubscriptionCheckoutCompleted(session: any) {
+    const { vendorId, businessId, tierId } = session.metadata || {};
+    if (!vendorId || !businessId || !tierId) return;
 
-      if (!vendorId || !businessId || !tierId) {
-        console.error('Vendor subscription checkout missing required metadata:', { vendorId, businessId, tierId });
-        return;
-      }
+    const existing = await storage.getVendorSubscription(vendorId);
 
-      console.log(`Creating vendor subscription for vendor ${vendorId}, tier ${tierId}`);
-
-      const existingSub = await storage.getVendorSubscription(vendorId);
-      if (existingSub) {
-        console.log(`Vendor ${vendorId} already has subscription ${existingSub.id}, updating...`);
-        await storage.updateVendorSubscription(existingSub.id, {
-          tierId,
-          stripeCustomerId: customerId,
-          stripeSubscriptionId,
-        });
-        return;
-      }
-
-      await storage.createVendorSubscription({
-        vendorId,
-        businessId,
+    if (existing) {
+      await storage.updateVendorSubscription(existing.id, {
         tierId,
-        stripeCustomerId: customerId,
-        stripeSubscriptionId,
+        stripeSubscriptionId: session.subscription,
+        stripeCustomerId: session.customer,
       });
-
-      console.log(`Created vendor subscription for vendor ${vendorId}`);
-    } catch (error) {
-      console.error('Error handling vendor subscription checkout:', error);
+      return;
     }
+
+    await storage.createVendorSubscription({
+      vendorId,
+      businessId,
+      tierId,
+      stripeCustomerId: session.customer,
+      stripeSubscriptionId: session.subscription,
+    });
   }
 
-  static async handleAlaCartePurchaseCompleted(session: any): Promise<void> {
-    try {
-      const metadata = session.metadata || {};
-      const purchaseId = metadata.purchaseId;
-      
-      if (!purchaseId) {
-        console.error('À la carte checkout completed but no purchaseId in metadata');
-        return;
-      }
+  /* =====================================================
+     À LA CARTE PURCHASE
+  ===================================================== */
+  static async handleAlaCartePurchaseCompleted(session: any) {
+    const { purchaseId } = session.metadata || {};
+    if (!purchaseId) return;
 
-      console.log(`Processing à la carte purchase completion: ${purchaseId}`);
+    const purchase = await storage.getAlaCartePurchase(purchaseId);
+    if (!purchase || purchase.status === "paid") return;
 
-      const purchase = await storage.getAlaCartePurchase(purchaseId);
-      if (!purchase) {
-        console.error('À la carte purchase not found:', purchaseId);
-        return;
-      }
+    await storage.updateAlaCartePurchase(purchaseId, {
+      status: "paid",
+      stripePaymentIntentId: session.payment_intent,
+    });
 
-      if (purchase.paymentStatus === 'paid') {
-        console.log(`À la carte purchase ${purchaseId} already processed, skipping`);
-        return;
-      }
+    await db.insert(fulfillmentTasks).values({
+      vendorId: purchase.vendorId,
+      businessId: purchase.businessId,
+      taskType: "ala_carte",
+      taskName: "À la carte fulfillment",
+      description: `Fulfill à la carte service`,
+      metadata: { purchaseId },
+    });
+  }
 
-      await storage.updateAlaCartePurchase(purchaseId, {
-        paymentStatus: 'paid',
-        stripePaymentIntentId: session.payment_intent,
+  /* =====================================================
+     SUBSCRIPTION STATUS CHANGES
+  ===================================================== */
+  static async handleSubscriptionChange(subscription: any) {
+    const vendorSub = await storage.getVendorSubscriptionByStripeId(subscription.id);
+    if (!vendorSub) return;
+
+    const status = subscription.status;
+
+    await storage.updateVendorSubscription(vendorSub.id, {
+      status,
+      currentPeriodStart: new Date(subscription.current_period_start * 1000),
+      currentPeriodEnd: new Date(subscription.current_period_end * 1000),
+    });
+
+    if (vendorSub.businessId) {
+      await storage.updateBusiness(vendorSub.businessId, {
+        subscriptionActive: status === "active",
       });
-
-      // Get the service to determine task type
-      const service = await storage.getAlaCarteService(purchase.serviceId);
-      if (!service) {
-        console.error('À la carte service not found:', purchase.serviceId);
-        return;
-      }
-
-      // Import fulfillmentTasks for creating task
-      const { db } = await import('../db');
-      const { fulfillmentTasks } = await import('@shared/schema');
-
-      // Create fulfillment task
-      const [task] = await db.insert(fulfillmentTasks).values({
-        vendorId: purchase.vendorId,
-        businessId: purchase.businessId,
-        taskType: service.name,
-        sourceType: 'ala_carte',
-        sourceId: purchaseId,
-        status: 'pending',
-        vendorNotes: metadata.notes || null,
-      }).returning();
-
-      console.log(`Created fulfillment task ${task.id} for à la carte purchase ${purchaseId}`);
-    } catch (error) {
-      console.error('Error processing à la carte purchase completion:', error);
     }
   }
 
-  static async handlePaymentSucceeded(paymentIntent: any): Promise<void> {
-    try {
-      const customerId = paymentIntent.customer;
-      const amount = paymentIntent.amount || 0;
-      const metadata = paymentIntent.metadata || {};
-      
-      if (amount <= 0) {
-        return;
-      }
+  /* =====================================================
+     INVOICE PAID (RENEW BENEFITS)
+  ===================================================== */
+  static async handleInvoicePaid(invoice: any) {
+    if (!invoice.subscription) return;
 
-      if (metadata.pointsAwarded === 'true') {
-        return;
-      }
+    const vendorSub = await storage.getVendorSubscriptionByStripeId(invoice.subscription);
+    if (!vendorSub || vendorSub.status !== "active") return;
 
-      const user = await WebhookHandlers.findUserByStripeCustomer(customerId);
-      if (!user) {
-        console.log('Could not find user for Stripe customer:', customerId);
-        return;
-      }
+    const stripe = await getUncachableStripeClient();
+    const sub = await stripe.subscriptions.retrieve(invoice.subscription);
 
-      console.log(`Awarding points to user ${user.id} for payment of ${amount} cents`);
-      
-      await storage.earnPoints({
-        userId: user.id,
-        dollarAmountCents: amount,
-        businessId: metadata.businessId || undefined,
-        businessName: metadata.businessName || undefined,
-        referenceType: 'payment_intent',
-        referenceId: paymentIntent.id,
-        description: `Points earned from payment`,
-      });
-      
-      console.log(`Successfully awarded ${amount} points to user ${user.id}`);
-    } catch (error) {
-      console.error('Error awarding points on payment:', error);
-    }
+    await storage.updateVendorSubscription(vendorSub.id, {
+      currentPeriodStart: new Date(sub.current_period_start * 1000),
+      currentPeriodEnd: new Date(sub.current_period_end * 1000),
+    });
+
+    await storage.createBenefitAllowances(vendorSub.id);
   }
 
-  static async handleSubscriptionChange(subscription: any): Promise<void> {
-    try {
-      const stripeSubscriptionId = subscription.id;
-      const status = subscription.status;
-      
-      console.log(`Subscription ${stripeSubscriptionId} status changed to: ${status}`);
-      
-      const vendorSub = await storage.getVendorSubscriptionByStripeId(stripeSubscriptionId);
-      if (!vendorSub) {
-        console.log('No vendor subscription found for Stripe subscription:', stripeSubscriptionId);
-        return;
-      }
+  /* =====================================================
+     STRIPE CUSTOMER → USER
+  ===================================================== */
+  static async findUserByStripeCustomer(customerId: string) {
+    if (!customerId) return null;
 
-      // Extract Stripe billing cycle dates
-      const currentPeriodStart = subscription.current_period_start 
-        ? new Date(subscription.current_period_start * 1000) 
-        : null;
-      const currentPeriodEnd = subscription.current_period_end 
-        ? new Date(subscription.current_period_end * 1000) 
-        : null;
+    const result = await db.execute(
+      sql`SELECT metadata->>'userId' AS user_id FROM stripe.customers WHERE id = ${customerId}`
+    );
 
-      // Calculate quarterly dates based on Stripe period start
-      let currentQuarterStart: Date | null = null;
-      let currentQuarterEnd: Date | null = null;
-      if (currentPeriodStart) {
-        const quarter = Math.floor(currentPeriodStart.getMonth() / 3);
-        currentQuarterStart = new Date(currentPeriodStart.getFullYear(), quarter * 3, 1);
-        currentQuarterEnd = new Date(currentPeriodStart.getFullYear(), (quarter + 1) * 3, 0, 23, 59, 59);
-      }
+    if (!result.rows?.[0]?.user_id) return null;
 
-      if (status === 'active' && vendorSub.status !== 'active') {
-        console.log(`Activating vendor subscription ${vendorSub.id} and creating benefit allowances`);
-        
-        // Update with Stripe billing cycle dates
-        await storage.updateVendorSubscription(vendorSub.id, { 
-          status: 'active',
-          currentPeriodStart,
-          currentPeriodEnd,
-          currentQuarterStart,
-          currentQuarterEnd,
-        });
-        
-        // Pass cycle dates directly to avoid stale data issues
-        const cycleDates = currentPeriodStart && currentPeriodEnd && currentQuarterStart && currentQuarterEnd
-          ? { periodStart: currentPeriodStart, periodEnd: currentPeriodEnd, quarterStart: currentQuarterStart, quarterEnd: currentQuarterEnd }
-          : undefined;
-        const allowances = await storage.createBenefitAllowances(vendorSub.id, cycleDates);
-        console.log(`Created ${allowances.length} benefit allowances for vendor subscription ${vendorSub.id}`);
-        
-        if (vendorSub.businessId) {
-          const business = await storage.getBusiness(vendorSub.businessId);
-          if (business) {
-            await storage.updateBusiness(vendorSub.businessId, { subscriptionActive: true });
-          }
-        }
-      } else if (status === 'active') {
-        // Already active - just update the billing cycle dates
-        await storage.updateVendorSubscription(vendorSub.id, {
-          currentPeriodStart,
-          currentPeriodEnd,
-          currentQuarterStart,
-          currentQuarterEnd,
-        });
-      } else if (status === 'canceled' || status === 'unpaid' || status === 'past_due') {
-        console.log(`Deactivating vendor subscription ${vendorSub.id} due to status: ${status}`);
-        
-        await storage.updateVendorSubscription(vendorSub.id, { status: status });
-        
-        if (vendorSub.businessId) {
-          const business = await storage.getBusiness(vendorSub.businessId);
-          if (business) {
-            await storage.updateBusiness(vendorSub.businessId, { subscriptionActive: false });
-          }
-        }
-      }
-    } catch (error) {
-      console.error('Error processing subscription change:', error);
-    }
-  }
-
-  static async handleInvoicePaid(invoice: any): Promise<void> {
-    try {
-      // Only process subscription invoices
-      if (!invoice.subscription) {
-        return;
-      }
-
-      const stripeSubscriptionId = invoice.subscription;
-      console.log(`Invoice paid for subscription ${stripeSubscriptionId}`);
-
-      const vendorSub = await storage.getVendorSubscriptionByStripeId(stripeSubscriptionId);
-      if (!vendorSub) {
-        console.log('No vendor subscription found for Stripe subscription:', stripeSubscriptionId);
-        return;
-      }
-
-      // Only process if subscription is active
-      if (vendorSub.status !== 'active') {
-        console.log('Vendor subscription is not active, skipping renewal');
-        return;
-      }
-
-      // Get the subscription from Stripe to get accurate billing cycle dates
-      const stripe = await getUncachableStripeClient();
-      const subscription = await stripe.subscriptions.retrieve(stripeSubscriptionId) as any;
-
-      const currentPeriodStart = new Date(subscription.current_period_start * 1000);
-      const currentPeriodEnd = new Date(subscription.current_period_end * 1000);
-
-      // Check if this is a new billing cycle (period start is after stored period start)
-      const storedPeriodStart = vendorSub.currentPeriodStart;
-      if (storedPeriodStart && currentPeriodStart <= storedPeriodStart) {
-        console.log('Invoice is for current or past cycle, skipping renewal');
-        return;
-      }
-
-      console.log(`Renewing benefit allowances for new billing cycle starting ${currentPeriodStart.toISOString()}`);
-
-      // Calculate quarterly dates
-      const quarter = Math.floor(currentPeriodStart.getMonth() / 3);
-      const currentQuarterStart = new Date(currentPeriodStart.getFullYear(), quarter * 3, 1);
-      const currentQuarterEnd = new Date(currentPeriodStart.getFullYear(), (quarter + 1) * 3, 0, 23, 59, 59);
-
-      // Update subscription with new billing cycle dates
-      await storage.updateVendorSubscription(vendorSub.id, {
-        currentPeriodStart,
-        currentPeriodEnd,
-        currentQuarterStart,
-        currentQuarterEnd,
-      });
-
-      // Create new benefit allowances for the new cycle - pass dates directly to avoid stale data
-      const cycleDates = {
-        periodStart: currentPeriodStart,
-        periodEnd: currentPeriodEnd,
-        quarterStart: currentQuarterStart,
-        quarterEnd: currentQuarterEnd,
-      };
-      const allowances = await storage.createBenefitAllowances(vendorSub.id, cycleDates);
-      console.log(`Created ${allowances.length} benefit allowances for new billing cycle`);
-    } catch (error) {
-      console.error('Error processing invoice paid:', error);
-    }
-  }
-
-  static async findUserByStripeCustomer(stripeCustomerId: string): Promise<{ id: string; email: string } | null> {
-    if (!stripeCustomerId) return null;
-    
-    try {
-      const { db } = await import('../db');
-      const { sql } = await import('drizzle-orm');
-      
-      const result = await db.execute(
-        sql`SELECT metadata->>'userId' as user_id FROM stripe.customers WHERE id = ${stripeCustomerId}`
-      );
-      
-      if (result.rows.length > 0 && result.rows[0].user_id) {
-        const user = await storage.getUser(result.rows[0].user_id as string);
-        if (user) {
-          return { id: user.id, email: user.email };
-        }
-      }
-      
-      return null;
-    } catch (error) {
-      console.error('Error finding user by Stripe customer:', error);
-      return null;
-    }
+    return storage.getUser(result.rows[0].user_id);
   }
 }

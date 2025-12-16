@@ -19,7 +19,7 @@ export const sessions = pgTable(
 );
 
 /* =====================================================
-   USERS (Clients, Vendors, Photographers, Admins)
+   USERS
 ===================================================== */
 export const users = pgTable("users", {
   id: varchar("id", { length: 36 }).primaryKey().default(sql`gen_random_uuid()`),
@@ -36,13 +36,11 @@ export const users = pgTable("users", {
   isAdmin: boolean("is_admin").default(false).notNull(),
   isOAuthUser: boolean("is_oauth_user").default(false),
 
-  // Location
   address: text("address"),
   city: text("city"),
   state: text("state"),
   zipCode: text("zip_code"),
 
-  // Demographics
   ageRange: text("age_range"),
   gender: text("gender"),
   ethnicity: text("ethnicity"),
@@ -53,14 +51,12 @@ export const users = pgTable("users", {
   occupation: text("occupation"),
   shoppingFrequency: text("shopping_frequency"),
 
-  // Preferences
   selectedIndustries: jsonb("selected_industries").$type<string[]>().default([]),
   industryNiches: jsonb("industry_niches").$type<Record<string, string[]>>().default({}),
   industryValues: jsonb("industry_values").$type<Record<string, string[]>>().default({}),
 
   loyaltyPoints: integer("loyalty_points").default(0).notNull(),
 
-  // Referral system
   referralCode: text("referral_code").unique(),
   referredBy: varchar("referred_by", { length: 36 }),
 
@@ -92,7 +88,7 @@ export const refreshTokens = pgTable("refresh_tokens", {
 });
 
 /* =====================================================
-   BUSINESSES (Marketplace Vendors)
+   BUSINESSES
 ===================================================== */
 export const businesses = pgTable("businesses", {
   id: varchar("id", { length: 36 }).primaryKey().default(sql`gen_random_uuid()`),
@@ -102,35 +98,28 @@ export const businesses = pgTable("businesses", {
   category: text("category").notNull(),
   description: text("description"),
 
-  // Business details
   isStartup: boolean("is_startup").default(false),
   yearsInBusiness: text("years_in_business"),
   employeeCount: text("employee_count"),
   businessType: text("business_type"),
 
-  // Location
   hasPhysicalLocation: boolean("has_physical_location").default(true),
   address: text("address"),
   city: text("city"),
   state: text("state"),
   zipCode: text("zip_code"),
 
-  // Online presence
   websiteUrl: text("website_url"),
   socialMedia: text("social_media"),
 
-  // Media
   coverImage: text("cover_image"),
   logoImage: text("logo_image"),
 
-  // Ratings
   rating: integer("rating").default(0),
   reviewCount: integer("review_count").default(0),
 
-  // Subscription
   subscriptionActive: boolean("subscription_active").default(false),
 
-  // Storefront customization
   tagline: text("tagline"),
   hoursOfOperation: jsonb("hours_of_operation").$type<{
     monday?: { open: string; close: string; closed?: boolean };
@@ -538,7 +527,7 @@ export const fulfillmentTasks = pgTable("fulfillment_tasks", {
 });
 
 /* =====================================================
-   À LA CARTE SERVICES
+   A LA CARTE SERVICES
 ===================================================== */
 export const alaCarteServices = pgTable("ala_carte_services", {
   id: varchar("id", { length: 36 }).primaryKey().default(sql`gen_random_uuid()`),
@@ -558,7 +547,7 @@ export const alaCarteServices = pgTable("ala_carte_services", {
 });
 
 /* =====================================================
-   À LA CARTE PURCHASES
+   A LA CARTE PURCHASES
 ===================================================== */
 export const alaCartePurchases = pgTable("ala_carte_purchases", {
   id: varchar("id", { length: 36 }).primaryKey().default(sql`gen_random_uuid()`),
