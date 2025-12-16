@@ -14,6 +14,8 @@ interface VendorPageProps {
   vendorId: string;
   onBack: () => void;
   onLoginRequired: () => void;
+  viewerIsPhotographer?: boolean;
+  onCollaborate?: (id: string, name?: string) => void;
 }
 
 const fallbackImages: Record<string, string> = {
@@ -24,7 +26,7 @@ const fallbackImages: Record<string, string> = {
   "5": produceImage,
 };
 
-export default function VendorPage({ vendorId, onBack, onLoginRequired }: VendorPageProps) {
+export default function VendorPage({ vendorId, onBack, onLoginRequired, viewerIsPhotographer = false, onCollaborate }: VendorPageProps) {
   const [isFollowing, setIsFollowing] = useState(false);
 
   const { data: businessData, isLoading: businessLoading } = useQuery<{ business: Business }>({
@@ -161,6 +163,8 @@ export default function VendorPage({ vendorId, onBack, onLoginRequired }: Vendor
         onBookService={(serviceId, date, time) =>
           console.log("Book:", serviceId, date, time)
         }
+        viewerIsPhotographer={viewerIsPhotographer}
+        onCollaborate={onCollaborate ? () => onCollaborate(business.id, business.name) : undefined}
       />
     </div>
   );

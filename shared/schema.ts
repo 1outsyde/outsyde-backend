@@ -236,7 +236,16 @@ export const photographerServices = pgTable("photographer_services", {
   description: text("description"),
   category: text("category"),
 
+  // Pricing model: 'hourly' = charge by hour, 'package' = flat rate for set hours
+  pricingModel: text("pricing_model").default("package"), // 'hourly' | 'package'
+  
+  // For hourly pricing - rate per hour in cents
+  hourlyRateCents: integer("hourly_rate_cents"),
+  
+  // For package pricing - total price for included hours in cents
   priceCents: integer("price_cents"),
+  packageHours: integer("package_hours"), // How many hours included in package (e.g., "3hr car photography")
+  
   isContactForPricing: boolean("is_contact_for_pricing").default(false),
   estimatedDurationMinutes: integer("estimated_duration_minutes"),
 

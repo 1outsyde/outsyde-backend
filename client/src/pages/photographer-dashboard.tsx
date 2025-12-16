@@ -58,7 +58,10 @@ export default function PhotographerDashboardPage({ onLogout }: PhotographerDash
   const [serviceName, setServiceName] = useState("");
   const [serviceDescription, setServiceDescription] = useState("");
   const [serviceCategory, setServiceCategory] = useState("");
+  const [servicePricingModel, setServicePricingModel] = useState<"hourly" | "package">("package");
+  const [serviceHourlyRateCents, setServiceHourlyRateCents] = useState<number | null>(null);
   const [servicePriceCents, setServicePriceCents] = useState<number | null>(null);
+  const [servicePackageHours, setServicePackageHours] = useState<number | null>(null);
   const [serviceIsContactForPricing, setServiceIsContactForPricing] = useState(false);
   const [serviceEstimatedDuration, setServiceEstimatedDuration] = useState<number | null>(null);
 
@@ -79,8 +82,20 @@ export default function PhotographerDashboardPage({ onLogout }: PhotographerDash
   });
 
   // Service mutations
+  interface ServiceData {
+    name: string;
+    description?: string;
+    category?: string;
+    pricingModel?: "hourly" | "package";
+    hourlyRateCents?: number | null;
+    priceCents?: number | null;
+    packageHours?: number | null;
+    isContactForPricing?: boolean;
+    estimatedDurationMinutes?: number | null;
+  }
+
   const createServiceMutation = useMutation({
-    mutationFn: async (data: { name: string; description?: string; category?: string; priceCents?: number | null; isContactForPricing?: boolean; estimatedDurationMinutes?: number | null }) => {
+    mutationFn: async (data: ServiceData) => {
       const response = await apiRequest("POST", "/api/photographers/me/services", data);
       return response.json();
     },
@@ -95,7 +110,7 @@ export default function PhotographerDashboardPage({ onLogout }: PhotographerDash
   });
 
   const updateServiceMutation = useMutation({
-    mutationFn: async ({ id, ...data }: { id: string; name?: string; description?: string; category?: string; priceCents?: number | null; isContactForPricing?: boolean; estimatedDurationMinutes?: number | null }) => {
+    mutationFn: async ({ id, ...data }: { id: string } & ServiceData) => {
       const response = await apiRequest("PATCH", `/api/photographers/me/services/${id}`, data);
       return response.json();
     },
@@ -170,7 +185,10 @@ export default function PhotographerDashboardPage({ onLogout }: PhotographerDash
       setServiceName(service.name);
       setServiceDescription(service.description || "");
       setServiceCategory(service.category || "");
+      setServicePricingModel((service.pricingModel as "hourly" | "package") || "package");
+      setServiceHourlyRateCents(service.hourlyRateCents || null);
       setServicePriceCents(service.priceCents);
+      setServicePackageHours(service.packageHours || null);
       setServiceIsContactForPricing(service.isContactForPricing || false);
       setServiceEstimatedDuration(service.estimatedDurationMinutes);
     } else {
@@ -178,7 +196,10 @@ export default function PhotographerDashboardPage({ onLogout }: PhotographerDash
       setServiceName("");
       setServiceDescription("");
       setServiceCategory("");
+      setServicePricingModel("package");
+      setServiceHourlyRateCents(null);
       setServicePriceCents(null);
+      setServicePackageHours(null);
       setServiceIsContactForPricing(false);
       setServiceEstimatedDuration(null);
     }
@@ -191,7 +212,10 @@ export default function PhotographerDashboardPage({ onLogout }: PhotographerDash
     setServiceName("");
     setServiceDescription("");
     setServiceCategory("");
+    setServicePricingModel("package");
+    setServiceHourlyRateCents(null);
     setServicePriceCents(null);
+    setServicePackageHours(null);
     setServiceIsContactForPricing(false);
     setServiceEstimatedDuration(null);
   };
@@ -199,11 +223,14 @@ export default function PhotographerDashboardPage({ onLogout }: PhotographerDash
   const handleSaveService = () => {
     if (!serviceName.trim()) return;
     
-    const data = {
+    const data: ServiceData = {
       name: serviceName.trim(),
       description: serviceDescription.trim() || undefined,
       category: serviceCategory.trim() || undefined,
-      priceCents: serviceIsContactForPricing ? null : servicePriceCents,
+      pricingModel: servicePricingModel,
+      hourlyRateCents: serviceIsContactForPricing ? null : (servicePricingModel === "hourly" ? serviceHourlyRateCents : null),
+      priceCents: serviceIsContactForPricing ? null : (servicePricingModel === "package" ? servicePriceCents : null),
+      packageHours: servicePricingModel === "package" ? servicePackageHours : null,
       isContactForPricing: serviceIsContactForPricing,
       estimatedDurationMinutes: serviceEstimatedDuration,
     };
@@ -619,8 +646,15 @@ export default function PhotographerDashboardPage({ onLogout }: PhotographerDash
                                   <Phone className="h-3 w-3" />
                                   <span>Contact for pricing</span>
                                 </div>
+                              ) : service.pricingModel === "hourly" && service.hourlyRateCents ? (
+                                <span className="font-medium text-foreground">
+                                  ${(service.hourlyRateCents / 100).toFixed(2)}/hr
+                                </span>
                               ) : service.priceCents ? (
-                                <span className="font-medium text-foreground">${(service.priceCents / 100).toFixed(2)}</span>
+                                <span className="font-medium text-foreground">
+                                  ${(service.priceCents / 100).toFixed(2)}
+                                  {service.packageHours && ` for ${service.packageHours}hr${service.packageHours > 1 ? 's' : ''}`}
+                                </span>
                               ) : null}
                               {service.estimatedDurationMinutes && (
                                 <span>{service.estimatedDurationMinutes} min</span>
@@ -777,19 +811,75 @@ export default function PhotographerDashboardPage({ onLogout }: PhotographerDash
             </div>
 
             {!serviceIsContactForPricing && (
-              <div className="space-y-2">
-                <Label htmlFor="service-price">Price ($)</Label>
-                <Input
-                  id="service-price"
-                  type="number"
-                  min="0"
-                  step="0.01"
-                  placeholder="0.00"
-                  value={servicePriceCents ? (servicePriceCents / 100).toFixed(2) : ""}
-                  onChange={(e) => setServicePriceCents(e.target.value ? Math.round(parseFloat(e.target.value) * 100) : null)}
-                  data-testid="input-service-price"
-                />
-              </div>
+              <>
+                <div className="space-y-2">
+                  <Label>Pricing Type</Label>
+                  <div className="flex gap-2">
+                    <Button
+                      type="button"
+                      variant={servicePricingModel === "package" ? "default" : "outline"}
+                      onClick={() => setServicePricingModel("package")}
+                      className="flex-1"
+                      data-testid="button-pricing-package"
+                    >
+                      Package (Flat Rate)
+                    </Button>
+                    <Button
+                      type="button"
+                      variant={servicePricingModel === "hourly" ? "default" : "outline"}
+                      onClick={() => setServicePricingModel("hourly")}
+                      className="flex-1"
+                      data-testid="button-pricing-hourly"
+                    >
+                      Hourly Rate
+                    </Button>
+                  </div>
+                </div>
+
+                {servicePricingModel === "package" ? (
+                  <div className="grid grid-cols-2 gap-4">
+                    <div className="space-y-2">
+                      <Label htmlFor="service-price">Package Price ($)</Label>
+                      <Input
+                        id="service-price"
+                        type="number"
+                        min="0"
+                        step="0.01"
+                        placeholder="e.g., 600"
+                        value={servicePriceCents ? (servicePriceCents / 100).toFixed(2) : ""}
+                        onChange={(e) => setServicePriceCents(e.target.value ? Math.round(parseFloat(e.target.value) * 100) : null)}
+                        data-testid="input-service-price"
+                      />
+                    </div>
+                    <div className="space-y-2">
+                      <Label htmlFor="package-hours">Hours Included</Label>
+                      <Input
+                        id="package-hours"
+                        type="number"
+                        min="1"
+                        placeholder="e.g., 3"
+                        value={servicePackageHours || ""}
+                        onChange={(e) => setServicePackageHours(e.target.value ? parseInt(e.target.value) : null)}
+                        data-testid="input-package-hours"
+                      />
+                    </div>
+                  </div>
+                ) : (
+                  <div className="space-y-2">
+                    <Label htmlFor="hourly-rate">Hourly Rate ($)</Label>
+                    <Input
+                      id="hourly-rate"
+                      type="number"
+                      min="0"
+                      step="0.01"
+                      placeholder="e.g., 150"
+                      value={serviceHourlyRateCents ? (serviceHourlyRateCents / 100).toFixed(2) : ""}
+                      onChange={(e) => setServiceHourlyRateCents(e.target.value ? Math.round(parseFloat(e.target.value) * 100) : null)}
+                      data-testid="input-hourly-rate"
+                    />
+                  </div>
+                )}
+              </>
             )}
 
             <div className="space-y-2">

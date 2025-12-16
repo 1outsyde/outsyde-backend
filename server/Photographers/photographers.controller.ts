@@ -288,7 +288,17 @@ export class PhotographerController {
         targetPhotographerId = photographer.id;
       }
 
-      const { name, description, category, priceCents, isContactForPricing, estimatedDurationMinutes } = req.body;
+      const { 
+        name, 
+        description, 
+        category, 
+        priceCents, 
+        isContactForPricing, 
+        estimatedDurationMinutes,
+        pricingModel,
+        hourlyRateCents,
+        packageHours
+      } = req.body;
 
       if (!name) {
         return res.status(400).json({ error: "Service name is required" });
@@ -302,6 +312,9 @@ export class PhotographerController {
         priceCents: isContactForPricing ? null : priceCents,
         isContactForPricing: isContactForPricing || false,
         estimatedDurationMinutes,
+        pricingModel: pricingModel || "package",
+        hourlyRateCents: hourlyRateCents || null,
+        packageHours: packageHours || null,
       });
 
       res.status(201).json({ service });
@@ -341,7 +354,18 @@ export class PhotographerController {
         return res.status(403).json({ error: "Not authorized to update this service" });
       }
 
-      const { name, description, category, priceCents, isContactForPricing, estimatedDurationMinutes, isActive } = req.body;
+      const { 
+        name, 
+        description, 
+        category, 
+        priceCents, 
+        isContactForPricing, 
+        estimatedDurationMinutes, 
+        isActive,
+        pricingModel,
+        hourlyRateCents,
+        packageHours
+      } = req.body;
 
       const updated = await storage.updatePhotographerService(serviceId, {
         name,
@@ -351,6 +375,9 @@ export class PhotographerController {
         isContactForPricing,
         estimatedDurationMinutes,
         isActive,
+        pricingModel,
+        hourlyRateCents,
+        packageHours,
       });
 
       res.json({ service: updated });

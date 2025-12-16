@@ -1,19 +1,28 @@
-import { Home, Search, PlusCircle, MessageCircle, User } from "lucide-react";
+import { Home, Search, PlusCircle, MessageCircle, User, Camera, LayoutDashboard } from "lucide-react";
 import { Button } from "@/components/ui/button";
 
 interface BottomNavProps {
-  activeTab: "home" | "search" | "create" | "messages" | "profile";
-  onTabChange: (tab: "home" | "search" | "create" | "messages" | "profile") => void;
+  activeTab: "home" | "search" | "create" | "messages" | "profile" | "dashboard";
+  onTabChange: (tab: "home" | "search" | "create" | "messages" | "profile" | "dashboard") => void;
   isVendor?: boolean;
+  isPhotographer?: boolean;
 }
 
-export default function BottomNav({ activeTab, onTabChange, isVendor = false }: BottomNavProps) {
+export default function BottomNav({ activeTab, onTabChange, isVendor = false, isPhotographer = false }: BottomNavProps) {
+  // Photographers and vendors can post to feed
+  const canPost = isVendor || isPhotographer;
+  
   const tabs = [
     { id: "home" as const, icon: Home, label: "Home" },
     { id: "search" as const, icon: Search, label: "Search" },
-    ...(isVendor ? [{ id: "create" as const, icon: PlusCircle, label: "Post" }] : []),
+    ...(canPost ? [{ id: "create" as const, icon: PlusCircle, label: "Post" }] : []),
     { id: "messages" as const, icon: MessageCircle, label: "Messages" },
-    { id: "profile" as const, icon: User, label: "Profile" },
+    // Show Dashboard for photographer/vendor, Profile for customers
+    ...(isPhotographer 
+      ? [{ id: "dashboard" as const, icon: Camera, label: "Studio" }]
+      : isVendor 
+        ? [{ id: "dashboard" as const, icon: LayoutDashboard, label: "Dashboard" }]
+        : [{ id: "profile" as const, icon: User, label: "Profile" }]),
   ];
 
   return (

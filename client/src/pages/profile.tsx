@@ -19,6 +19,7 @@ interface ProfileUser {
   city?: string;
   state?: string;
   isVendor: boolean;
+  isPhotographer?: boolean;
   createdAt?: string;
 }
 
@@ -32,6 +33,8 @@ export default function ProfilePage({ onLogout }: ProfilePageProps) {
   const { data: userData, isLoading: userLoading } = useQuery<ProfileUser>({
     queryKey: ["/api/auth/user"],
   });
+
+  const isPhotographer = userData?.isPhotographer ?? false;
 
   const user = userData ? {
     name: userData.name || "User",
@@ -82,7 +85,7 @@ export default function ProfilePage({ onLogout }: ProfilePageProps) {
 
   const menuItems = [
     { id: "overview", icon: User, label: "Overview" },
-    { id: "points", icon: Coins, label: "My Points" },
+    ...(!isPhotographer ? [{ id: "points", icon: Coins, label: "My Points" }] : []),
     { id: "bookings", icon: Calendar, label: "My Bookings" },
     { id: "orders", icon: ShoppingBag, label: "My Orders" },
     { id: "favorites", icon: Heart, label: "Favorites" },
@@ -144,9 +147,11 @@ export default function ProfilePage({ onLogout }: ProfilePageProps) {
           </CardContent>
         </Card>
 
-        <LoyaltyPointsCard
-          onViewHistory={() => setActiveSection("points")}
-        />
+        {!isPhotographer && (
+          <LoyaltyPointsCard
+            onViewHistory={() => setActiveSection("points")}
+          />
+        )}
 
         <div className="grid grid-cols-2 sm:grid-cols-5 gap-2 my-6">
           {menuItems.map((item) => (
@@ -298,7 +303,7 @@ export default function ProfilePage({ onLogout }: ProfilePageProps) {
           </Card>
         )}
 
-        {activeSection === "points" && (
+        {activeSection === "points" && !isPhotographer && (
           <div className="space-y-6">
             <Card className="overflow-visible bg-gradient-to-br from-primary/10 to-primary/5 border-primary/20">
               <CardContent className="p-6">

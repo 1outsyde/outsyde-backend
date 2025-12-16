@@ -18,12 +18,13 @@ import AuthPage from "@/pages/auth";
 import VendorDashboardPage from "@/pages/vendor-dashboard";
 import PhotographerDashboardPage from "@/pages/photographer-dashboard";
 import AdminFulfillmentPage from "@/pages/admin-fulfillment";
+import CreatePostPage from "@/pages/create-post";
 
 import jewelryImage from "@assets/generated_images/jewelry_artisan_vendor_image.png";
 import type { User } from "@shared/schema";
 
-type Page = "home" | "search" | "messages" | "profile" | "vendor" | "auth" | "vendor-dashboard" | "photographer-dashboard" | "admin-fulfillment";
-type NavTab = "home" | "search" | "create" | "messages" | "profile";
+type Page = "home" | "search" | "messages" | "profile" | "vendor" | "auth" | "vendor-dashboard" | "photographer-dashboard" | "admin-fulfillment" | "create-post" | "photographer-page";
+type NavTab = "home" | "search" | "create" | "messages" | "profile" | "dashboard";
 
 interface MessageTarget {
   vendorId: string;
@@ -82,6 +83,13 @@ function AppContent() {
     setActiveTab(tab);
     if (tab === "home") setCurrentPage("home");
     else if (tab === "search") setCurrentPage("search");
+    else if (tab === "create") {
+      if (!isAuthenticated) {
+        setCurrentPage("auth");
+      } else {
+        setCurrentPage("create-post");
+      }
+    }
     else if (tab === "messages") {
       if (!isAuthenticated) {
         setCurrentPage("auth");
@@ -89,13 +97,20 @@ function AppContent() {
         setCurrentPage("messages");
       }
     }
+    else if (tab === "dashboard") {
+      if (!isAuthenticated) {
+        setCurrentPage("auth");
+      } else if (isPhotographer) {
+        setCurrentPage("photographer-dashboard");
+      } else if (isVendor) {
+        setCurrentPage("vendor-dashboard");
+      } else {
+        setCurrentPage("profile");
+      }
+    }
     else if (tab === "profile") {
       if (!isAuthenticated) {
         setCurrentPage("auth");
-      } else if (isVendor) {
-        setCurrentPage("vendor-dashboard");
-      } else if (isPhotographer) {
-        setCurrentPage("photographer-dashboard");
       } else {
         setCurrentPage("profile");
       }
@@ -180,23 +195,6 @@ function AppContent() {
     );
   }
 
-  if (currentPage === "vendor-dashboard" && isVendor) {
-    return (
-      <>
-        <VendorDashboardPage onLogout={handleLogout} />
-        <Toaster />
-      </>
-    );
-  }
-
-  if (currentPage === "photographer-dashboard" && isPhotographer) {
-    return (
-      <>
-        <PhotographerDashboardPage onLogout={handleLogout} />
-        <Toaster />
-      </>
-    );
-  }
 
   if (currentPage === "admin-fulfillment" && user?.isAdmin) {
     return (
@@ -221,7 +219,7 @@ function AppContent() {
           cartDrawer={
             <CartDrawer
               items={cartItems}
-              pointsBalance={2450}
+              pointsBalance={isPhotographer ? 0 : 2450}
               pointsToRedeem={pointsToRedeem}
               onUpdateQuantity={handleUpdateCartQuantity}
               onRemove={handleRemoveFromCart}
@@ -257,7 +255,21 @@ function AppContent() {
                 setActiveTab("home");
               }}
               onLoginRequired={() => setCurrentPage("auth")}
+              viewerIsPhotographer={isPhotographer}
+              onCollaborate={(id, name) => handleMessage(id, name)}
             />
+          )}
+          {currentPage === "vendor-dashboard" && isVendor && (
+            <VendorDashboardPage onLogout={handleLogout} />
+          )}
+          {currentPage === "photographer-dashboard" && isPhotographer && (
+            <PhotographerDashboardPage onLogout={handleLogout} />
+          )}
+          {currentPage === "create-post" && (
+            <CreatePostPage onBack={() => {
+              setCurrentPage("home");
+              setActiveTab("home");
+            }} />
           )}
         </main>
 
@@ -265,6 +277,7 @@ function AppContent() {
           activeTab={activeTab}
           onTabChange={handleNavTabChange}
           isVendor={isVendor && isAuthenticated}
+          isPhotographer={isPhotographer && isAuthenticated}
         />
       </div>
       <Toaster />

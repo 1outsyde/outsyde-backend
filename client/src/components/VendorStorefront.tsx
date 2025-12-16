@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { MapPin, Star, Share2, Heart, Clock, Mail, Phone, Globe } from "lucide-react";
+import { MapPin, Star, Share2, Heart, Clock, Mail, Phone, Globe, Handshake } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
@@ -58,6 +58,8 @@ interface VendorStorefrontProps {
   onShare?: () => void;
   onLoginRequired?: () => void;
   onBookService?: (serviceId: string, date: string, time: string) => void;
+  viewerIsPhotographer?: boolean;
+  onCollaborate?: () => void;
 }
 
 export default function VendorStorefront({
@@ -85,6 +87,8 @@ export default function VendorStorefront({
   onShare,
   onLoginRequired,
   onBookService,
+  viewerIsPhotographer = false,
+  onCollaborate,
 }: VendorStorefrontProps) {
   const [activeTab, setActiveTab] = useState("about");
   const [selectedService, setSelectedService] = useState<Service | null>(null);
@@ -145,14 +149,25 @@ export default function VendorStorefront({
             )}
           </div>
           <div className="flex items-center gap-2">
-            <Button
-              variant={isFollowing ? "secondary" : "default"}
-              onClick={onFollow}
-              data-testid="button-follow"
-            >
-              <Heart className={`h-4 w-4 mr-2 ${isFollowing ? "fill-current" : ""}`} />
-              {isFollowing ? "Following" : "Follow"}
-            </Button>
+            {viewerIsPhotographer && onCollaborate ? (
+              <Button
+                onClick={onCollaborate}
+                data-testid="button-collaborate"
+                className="bg-primary"
+              >
+                <Handshake className="h-4 w-4 mr-2" />
+                Collaborate
+              </Button>
+            ) : (
+              <Button
+                variant={isFollowing ? "secondary" : "default"}
+                onClick={onFollow}
+                data-testid="button-follow"
+              >
+                <Heart className={`h-4 w-4 mr-2 ${isFollowing ? "fill-current" : ""}`} />
+                {isFollowing ? "Following" : "Follow"}
+              </Button>
+            )}
             <Button size="icon" variant="outline" onClick={onShare} data-testid="button-share-vendor">
               <Share2 className="h-4 w-4" />
             </Button>
