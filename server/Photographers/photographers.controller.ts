@@ -33,6 +33,48 @@ export class PhotographerController {
     }
   }
 
+  // PATCH /api/photographers/me - Update authenticated photographer's profile
+  static async updateMe(req: Request, res: Response) {
+    try {
+      const photographerId = req.session?.photographerId;
+      const userId = req.session?.userId;
+      
+      if (!photographerId && !userId) {
+        return res.status(401).json({ error: "Not authenticated" });
+      }
+
+      let targetPhotographerId = photographerId;
+      if (!targetPhotographerId && userId) {
+        const photographer = await PhotographerService.getByUserId(userId);
+        if (!photographer) {
+          return res.status(404).json({ error: "Photographer not found" });
+        }
+        targetPhotographerId = photographer.id;
+      }
+
+      const { displayName, bio, city, state, portfolioUrl, hourlyRate, specialties } = req.body;
+      
+      const updates: any = {};
+      if (displayName !== undefined) updates.displayName = displayName;
+      if (bio !== undefined) updates.bio = bio;
+      if (city !== undefined) updates.city = city;
+      if (state !== undefined) updates.state = state;
+      if (portfolioUrl !== undefined) updates.portfolioUrl = portfolioUrl;
+      if (hourlyRate !== undefined) updates.hourlyRate = hourlyRate;
+      if (specialties !== undefined) updates.specialties = specialties;
+
+      const updated = await PhotographerService.update(targetPhotographerId!, updates);
+      if (!updated) {
+        return res.status(404).json({ error: "Photographer not found" });
+      }
+
+      res.json({ photographer: updated });
+    } catch (error) {
+      console.error("Update me photographer error:", error);
+      res.status(500).json({ error: "Failed to update photographer" });
+    }
+  }
+
   // GET /api/photographers/me/stripe-status
   static async getStripeStatus(req: Request, res: Response) {
     try {

@@ -1,6 +1,6 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
-import { Camera, DollarSign, Calendar, MessageCircle, Star, Eye, ExternalLink, AlertCircle, Check, Loader2, RotateCcw, Plus, Pencil, Trash2, MapPin, FileText, Phone } from "lucide-react";
+import { Camera, DollarSign, Calendar, MessageCircle, Star, Eye, ExternalLink, AlertCircle, Check, Loader2, RotateCcw, Plus, Pencil, Trash2, MapPin, FileText, Phone, User as UserIcon } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -64,6 +64,14 @@ export default function PhotographerDashboardPage({ onLogout }: PhotographerDash
   const [servicePackageHours, setServicePackageHours] = useState<number | null>(null);
   const [serviceIsContactForPricing, setServiceIsContactForPricing] = useState(false);
   const [serviceEstimatedDuration, setServiceEstimatedDuration] = useState<number | null>(null);
+
+  const [profileDisplayName, setProfileDisplayName] = useState("");
+  const [profileBio, setProfileBio] = useState("");
+  const [profileCity, setProfileCity] = useState("");
+  const [profileState, setProfileState] = useState("");
+  const [profilePortfolioUrl, setProfilePortfolioUrl] = useState("");
+  const [profileHourlyRate, setProfileHourlyRate] = useState("");
+  const [profileSpecialties, setProfileSpecialties] = useState<string[]>([]);
 
   const { data: user } = useQuery<User | null>({
     queryKey: ["/api/auth/user"],
@@ -279,6 +287,52 @@ export default function PhotographerDashboardPage({ onLogout }: PhotographerDash
 
   const stripeConnected = stripeStatus?.chargesEnabled && stripeStatus?.payoutsEnabled;
   const stripePartial = stripeStatus?.detailsSubmitted && !stripeConnected;
+
+  useEffect(() => {
+    if (photographer) {
+      setProfileDisplayName(photographer.displayName || "");
+      setProfileBio(photographer.bio || "");
+      setProfileCity(photographer.city || "");
+      setProfileState(photographer.state || "");
+      setProfilePortfolioUrl(photographer.portfolioUrl || "");
+      setProfileHourlyRate(photographer.hourlyRate?.toString() || "");
+      setProfileSpecialties(photographer.specialties || []);
+    }
+  }, [photographer]);
+
+  const updateProfileMutation = useMutation({
+    mutationFn: async (data: {
+      displayName?: string;
+      bio?: string;
+      city?: string;
+      state?: string;
+      portfolioUrl?: string;
+      hourlyRate?: number;
+      specialties?: string[];
+    }) => {
+      const response = await apiRequest("PATCH", "/api/photographers/me", data);
+      return response.json();
+    },
+    onSuccess: () => {
+      toast({ title: "Profile Updated", description: "Your profile has been saved." });
+      queryClient.invalidateQueries({ queryKey: ["/api/photographers/me"] });
+    },
+    onError: () => {
+      toast({ title: "Error", description: "Failed to update profile.", variant: "destructive" });
+    },
+  });
+
+  const handleSaveProfile = () => {
+    updateProfileMutation.mutate({
+      displayName: profileDisplayName.trim(),
+      bio: profileBio.trim(),
+      city: profileCity.trim(),
+      state: profileState.trim(),
+      portfolioUrl: profilePortfolioUrl.trim(),
+      hourlyRate: parseInt(profileHourlyRate) || 0,
+      specialties: profileSpecialties,
+    });
+  };
 
   const statCards = [
     {
@@ -533,7 +587,8 @@ export default function PhotographerDashboardPage({ onLogout }: PhotographerDash
                 <div className="flex items-center justify-between gap-2 flex-wrap">
                   <TabsList>
                     <TabsTrigger value="bookings" data-testid="tab-bookings">Bookings</TabsTrigger>
-                    <TabsTrigger value="services" data-testid="tab-services">My Services</TabsTrigger>
+                    <TabsTrigger value="services" data-testid="tab-services">Services</TabsTrigger>
+                    <TabsTrigger value="profile" data-testid="tab-profile">Profile</TabsTrigger>
                   </TabsList>
                   {activeTab === "services" && (
                     <Button size="sm" onClick={() => openServiceDialog()} data-testid="button-add-service">
@@ -693,6 +748,119 @@ export default function PhotographerDashboardPage({ onLogout }: PhotographerDash
                       </Button>
                     </div>
                   )}
+                </TabsContent>
+
+                <TabsContent value="profile" className="mt-0">
+                  <div className="space-y-4">
+                    <div className="grid gap-4 sm:grid-cols-2">
+                      <div>
+                        <Label htmlFor="profile-displayName">Display Name</Label>
+                        <Input
+                          id="profile-displayName"
+                          value={profileDisplayName}
+                          onChange={(e) => setProfileDisplayName(e.target.value)}
+                          placeholder="Your photographer name"
+                          data-testid="input-profile-displayName"
+                        />
+                      </div>
+                      <div>
+                        <Label htmlFor="profile-hourlyRate">Hourly Rate ($)</Label>
+                        <Input
+                          id="profile-hourlyRate"
+                          type="number"
+                          value={profileHourlyRate}
+                          onChange={(e) => setProfileHourlyRate(e.target.value)}
+                          placeholder="150"
+                          data-testid="input-profile-hourlyRate"
+                        />
+                      </div>
+                    </div>
+
+                    <div>
+                      <Label htmlFor="profile-bio">Bio</Label>
+                      <Textarea
+                        id="profile-bio"
+                        value={profileBio}
+                        onChange={(e) => setProfileBio(e.target.value)}
+                        placeholder="Tell clients about yourself and your photography style..."
+                        className="resize-none"
+                        rows={3}
+                        data-testid="input-profile-bio"
+                      />
+                    </div>
+
+                    <div className="grid gap-4 sm:grid-cols-2">
+                      <div>
+                        <Label htmlFor="profile-city">City</Label>
+                        <Input
+                          id="profile-city"
+                          value={profileCity}
+                          onChange={(e) => setProfileCity(e.target.value)}
+                          placeholder="Los Angeles"
+                          data-testid="input-profile-city"
+                        />
+                      </div>
+                      <div>
+                        <Label htmlFor="profile-state">State</Label>
+                        <Input
+                          id="profile-state"
+                          value={profileState}
+                          onChange={(e) => setProfileState(e.target.value)}
+                          placeholder="CA"
+                          data-testid="input-profile-state"
+                        />
+                      </div>
+                    </div>
+
+                    <div>
+                      <Label htmlFor="profile-portfolioUrl">Portfolio URL</Label>
+                      <Input
+                        id="profile-portfolioUrl"
+                        type="url"
+                        value={profilePortfolioUrl}
+                        onChange={(e) => setProfilePortfolioUrl(e.target.value)}
+                        placeholder="https://yourportfolio.com"
+                        data-testid="input-profile-portfolioUrl"
+                      />
+                    </div>
+
+                    <div>
+                      <Label>Specialties</Label>
+                      <div className="flex flex-wrap gap-2 mt-2">
+                        {["Portraits", "Weddings", "Events", "Products", "Fashion", "Real Estate", "Concerts", "Sports"].map((specialty) => (
+                          <Badge
+                            key={specialty}
+                            variant={profileSpecialties.includes(specialty) ? "default" : "outline"}
+                            className="cursor-pointer"
+                            onClick={() => {
+                              if (profileSpecialties.includes(specialty)) {
+                                setProfileSpecialties(profileSpecialties.filter(s => s !== specialty));
+                              } else {
+                                setProfileSpecialties([...profileSpecialties, specialty]);
+                              }
+                            }}
+                            data-testid={`badge-specialty-${specialty.toLowerCase()}`}
+                          >
+                            {specialty}
+                          </Badge>
+                        ))}
+                      </div>
+                    </div>
+
+                    <Button
+                      onClick={handleSaveProfile}
+                      disabled={updateProfileMutation.isPending || !profileDisplayName.trim()}
+                      className="w-full"
+                      data-testid="button-save-profile"
+                    >
+                      {updateProfileMutation.isPending ? (
+                        <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                      ) : (
+                        <UserIcon className="h-4 w-4 mr-2" />
+                      )}
+                      Save Profile
+                    </Button>
+                  </div>
                 </TabsContent>
               </CardContent>
             </Tabs>
