@@ -73,6 +73,11 @@ export default function PhotographerDashboardPage({ onLogout }: PhotographerDash
   const [profileHourlyRate, setProfileHourlyRate] = useState("");
   const [profileSpecialties, setProfileSpecialties] = useState<string[]>([]);
 
+  // Storefront customization state
+  const [storefrontCoverImage, setStorefrontCoverImage] = useState("");
+  const [storefrontLogoImage, setStorefrontLogoImage] = useState("");
+  const [storefrontPrimaryColor, setStorefrontPrimaryColor] = useState("#eab308");
+
   const { data: user } = useQuery<User | null>({
     queryKey: ["/api/auth/user"],
   });
@@ -298,6 +303,10 @@ export default function PhotographerDashboardPage({ onLogout }: PhotographerDash
       // Convert cents to dollars for display
       setProfileHourlyRate(photographer.hourlyRate ? (photographer.hourlyRate / 100).toString() : "");
       setProfileSpecialties(photographer.specialties || []);
+      // Storefront customization
+      setStorefrontCoverImage(photographer.coverImage || "");
+      setStorefrontLogoImage(photographer.logoImage || "");
+      setStorefrontPrimaryColor((photographer.brandColors as { primary?: string })?.primary || "#eab308");
     }
   }, [photographer]);
 
@@ -310,16 +319,19 @@ export default function PhotographerDashboardPage({ onLogout }: PhotographerDash
       portfolioUrl?: string;
       hourlyRate?: number;
       specialties?: string[];
+      coverImage?: string;
+      logoImage?: string;
+      brandColors?: { primary?: string; secondary?: string };
     }) => {
       const response = await apiRequest("PATCH", "/api/photographers/me", data);
       return response.json();
     },
     onSuccess: () => {
-      toast({ title: "Profile Updated", description: "Your profile has been saved." });
+      toast({ title: "Changes Saved", description: "Your changes have been saved." });
       queryClient.invalidateQueries({ queryKey: ["/api/photographers/me"] });
     },
     onError: () => {
-      toast({ title: "Error", description: "Failed to update profile.", variant: "destructive" });
+      toast({ title: "Error", description: "Failed to save changes.", variant: "destructive" });
     },
   });
 
@@ -334,6 +346,25 @@ export default function PhotographerDashboardPage({ onLogout }: PhotographerDash
       specialties: profileSpecialties,
     });
   };
+
+  const handleSaveStorefront = () => {
+    updateProfileMutation.mutate({
+      coverImage: storefrontCoverImage.trim(),
+      logoImage: storefrontLogoImage.trim(),
+      brandColors: { primary: storefrontPrimaryColor },
+    });
+  };
+
+  const colorPresets = [
+    { name: "Golden Yellow", color: "#eab308" },
+    { name: "Rose Pink", color: "#ec4899" },
+    { name: "Ocean Blue", color: "#3b82f6" },
+    { name: "Forest Green", color: "#22c55e" },
+    { name: "Royal Purple", color: "#8b5cf6" },
+    { name: "Sunset Orange", color: "#f97316" },
+    { name: "Teal", color: "#14b8a6" },
+    { name: "Slate Gray", color: "#64748b" },
+  ];
 
   const statCards = [
     {
@@ -589,6 +620,7 @@ export default function PhotographerDashboardPage({ onLogout }: PhotographerDash
                   <TabsList>
                     <TabsTrigger value="bookings" data-testid="tab-bookings">Bookings</TabsTrigger>
                     <TabsTrigger value="services" data-testid="tab-services">Services</TabsTrigger>
+                    <TabsTrigger value="storefront" data-testid="tab-storefront">Storefront</TabsTrigger>
                     <TabsTrigger value="profile" data-testid="tab-profile">Profile</TabsTrigger>
                   </TabsList>
                   {activeTab === "services" && (
@@ -749,6 +781,157 @@ export default function PhotographerDashboardPage({ onLogout }: PhotographerDash
                       </Button>
                     </div>
                   )}
+                </TabsContent>
+
+                <TabsContent value="storefront" className="mt-0">
+                  <div className="space-y-6">
+                    <div>
+                      <h3 className="text-lg font-medium mb-4">Customize Your Storefront</h3>
+                      <p className="text-sm text-muted-foreground mb-6">
+                        Personalize how your page looks to clients. Choose your brand color and add images to make your storefront stand out.
+                      </p>
+                    </div>
+
+                    <div className="space-y-4">
+                      <div>
+                        <Label className="text-base font-medium">Brand Color</Label>
+                        <p className="text-sm text-muted-foreground mb-3">
+                          Choose a color that represents your brand. This will be used as the accent color on your page.
+                        </p>
+                        <div className="flex flex-wrap gap-3 mb-4">
+                          {colorPresets.map((preset) => (
+                            <button
+                              key={preset.color}
+                              type="button"
+                              onClick={() => setStorefrontPrimaryColor(preset.color)}
+                              className={`w-10 h-10 rounded-full border-2 transition-all ${
+                                storefrontPrimaryColor === preset.color 
+                                  ? "border-foreground scale-110" 
+                                  : "border-transparent hover:scale-105"
+                              }`}
+                              style={{ backgroundColor: preset.color }}
+                              title={preset.name}
+                              data-testid={`color-preset-${preset.name.toLowerCase().replace(/\s/g, '-')}`}
+                            />
+                          ))}
+                        </div>
+                        <div className="flex items-center gap-3">
+                          <Label htmlFor="custom-color" className="text-sm">Custom Color:</Label>
+                          <input
+                            id="custom-color"
+                            type="color"
+                            value={storefrontPrimaryColor}
+                            onChange={(e) => setStorefrontPrimaryColor(e.target.value)}
+                            className="w-12 h-10 rounded cursor-pointer border"
+                            data-testid="input-custom-color"
+                          />
+                          <Input
+                            value={storefrontPrimaryColor}
+                            onChange={(e) => setStorefrontPrimaryColor(e.target.value)}
+                            placeholder="#eab308"
+                            className="w-28"
+                            data-testid="input-color-hex"
+                          />
+                        </div>
+                      </div>
+
+                      <div className="pt-4 border-t">
+                        <Label htmlFor="storefront-cover">Cover Image URL</Label>
+                        <p className="text-sm text-muted-foreground mb-2">
+                          Add a banner image for the top of your page. Use a landscape photo (recommended: 1920x600px).
+                        </p>
+                        <Input
+                          id="storefront-cover"
+                          type="url"
+                          value={storefrontCoverImage}
+                          onChange={(e) => setStorefrontCoverImage(e.target.value)}
+                          placeholder="https://example.com/your-cover-image.jpg"
+                          data-testid="input-storefront-cover"
+                        />
+                        {storefrontCoverImage && (
+                          <div className="mt-3 rounded-lg overflow-hidden border">
+                            <img 
+                              src={storefrontCoverImage} 
+                              alt="Cover preview" 
+                              className="w-full h-32 object-cover"
+                              onError={(e) => (e.currentTarget.style.display = 'none')}
+                            />
+                          </div>
+                        )}
+                      </div>
+
+                      <div>
+                        <Label htmlFor="storefront-logo">Logo Image URL</Label>
+                        <p className="text-sm text-muted-foreground mb-2">
+                          Add your logo or profile photo. Use a square image (recommended: 400x400px).
+                        </p>
+                        <Input
+                          id="storefront-logo"
+                          type="url"
+                          value={storefrontLogoImage}
+                          onChange={(e) => setStorefrontLogoImage(e.target.value)}
+                          placeholder="https://example.com/your-logo.jpg"
+                          data-testid="input-storefront-logo"
+                        />
+                        {storefrontLogoImage && (
+                          <div className="mt-3 flex items-center gap-3">
+                            <div className="w-16 h-16 rounded-full overflow-hidden border">
+                              <img 
+                                src={storefrontLogoImage} 
+                                alt="Logo preview" 
+                                className="w-full h-full object-cover"
+                                onError={(e) => (e.currentTarget.style.display = 'none')}
+                              />
+                            </div>
+                            <span className="text-sm text-muted-foreground">Logo preview</span>
+                          </div>
+                        )}
+                      </div>
+
+                      <div className="pt-4 border-t">
+                        <Label className="text-base font-medium">Preview</Label>
+                        <p className="text-sm text-muted-foreground mb-3">
+                          This is how your brand color will appear on your page.
+                        </p>
+                        <div className="p-4 border rounded-lg">
+                          <div 
+                            className="h-2 rounded-full mb-3" 
+                            style={{ backgroundColor: storefrontPrimaryColor }}
+                          />
+                          <div className="flex items-center gap-2">
+                            <div 
+                              className="w-3 h-3 rounded-full" 
+                              style={{ backgroundColor: storefrontPrimaryColor }}
+                            />
+                            <span className="text-sm font-medium" style={{ color: storefrontPrimaryColor }}>
+                              Accent text in your brand color
+                            </span>
+                          </div>
+                          <Button 
+                            size="sm" 
+                            className="mt-3"
+                            style={{ backgroundColor: storefrontPrimaryColor }}
+                          >
+                            Sample Button
+                          </Button>
+                        </div>
+                      </div>
+                    </div>
+
+                    <Button
+                      onClick={handleSaveStorefront}
+                      disabled={updateProfileMutation.isPending}
+                      className="w-full"
+                      data-testid="button-save-storefront"
+                    >
+                      {updateProfileMutation.isPending ? (
+                        <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                      ) : (
+                        <Check className="h-4 w-4 mr-2" />
+                      )}
+                      Save Storefront
+                    </Button>
+                  </div>
                 </TabsContent>
 
                 <TabsContent value="profile" className="mt-0">

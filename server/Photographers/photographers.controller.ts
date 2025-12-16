@@ -52,7 +52,7 @@ export class PhotographerController {
         targetPhotographerId = photographer.id;
       }
 
-      const { displayName, bio, city, state, portfolioUrl, hourlyRate, specialties } = req.body;
+      const { displayName, bio, city, state, portfolioUrl, hourlyRate, specialties, coverImage, logoImage, brandColors } = req.body;
       
       const updates: any = {};
       if (displayName !== undefined) updates.displayName = displayName;
@@ -63,6 +63,10 @@ export class PhotographerController {
       // Convert hourlyRate from dollars to cents for storage
       if (hourlyRate !== undefined) updates.hourlyRate = Math.round(Number(hourlyRate) * 100);
       if (specialties !== undefined && Array.isArray(specialties)) updates.specialties = specialties;
+      // Storefront customization
+      if (coverImage !== undefined) updates.coverImage = coverImage;
+      if (logoImage !== undefined) updates.logoImage = logoImage;
+      if (brandColors !== undefined) updates.brandColors = brandColors;
 
       const updated = await PhotographerService.update(targetPhotographerId!, updates);
       if (!updated) {

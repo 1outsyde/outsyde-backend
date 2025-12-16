@@ -212,6 +212,11 @@ export const photographers = pgTable("photographers", {
   stripeOnboardingComplete: boolean("stripe_onboarding_complete").default(false),
   specialties: text("specialties").array(),
 
+  // Storefront customization
+  coverImage: text("cover_image"),
+  logoImage: text("logo_image"),
+  brandColors: jsonb("brand_colors").$type<{ primary?: string; secondary?: string }>(),
+
   hoursOfOperation: jsonb("hours_of_operation").$type<{
     monday?: { open: string; close: string; closed?: boolean };
     tuesday?: { open: string; close: string; closed?: boolean };

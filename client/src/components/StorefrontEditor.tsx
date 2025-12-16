@@ -135,9 +135,23 @@ export default function StorefrontEditor() {
 function BrandingTab({ business, onUpdate, isPending }: { business: Business; onUpdate: (data: Partial<Business>) => void; isPending: boolean }) {
   const [coverImage, setCoverImage] = useState(business.coverImage || "");
   const [logoImage, setLogoImage] = useState(business.logoImage || "");
+  const [primaryColor, setPrimaryColor] = useState(
+    (business.brandColors as { primary?: string })?.primary || "#eab308"
+  );
+
+  const colorPresets = [
+    { name: "Golden Yellow", color: "#eab308" },
+    { name: "Rose Pink", color: "#ec4899" },
+    { name: "Ocean Blue", color: "#3b82f6" },
+    { name: "Forest Green", color: "#22c55e" },
+    { name: "Royal Purple", color: "#8b5cf6" },
+    { name: "Sunset Orange", color: "#f97316" },
+    { name: "Teal", color: "#14b8a6" },
+    { name: "Slate Gray", color: "#64748b" },
+  ];
 
   const handleSave = () => {
-    onUpdate({ coverImage, logoImage });
+    onUpdate({ coverImage, logoImage, brandColors: { primary: primaryColor } });
   };
 
   return (
@@ -199,6 +213,77 @@ function BrandingTab({ business, onUpdate, isPending }: { business: Business; on
               placeholder="https://example.com/logo.jpg"
               data-testid="input-logo-image"
             />
+          </div>
+        </CardContent>
+      </Card>
+
+      <Card className="md:col-span-2 overflow-visible">
+        <CardHeader>
+          <CardTitle className="text-lg">Brand Color</CardTitle>
+          <CardDescription>
+            Choose a color that represents your brand. This will be used as the accent color on your storefront.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="flex flex-wrap gap-3">
+            {colorPresets.map((preset) => (
+              <button
+                key={preset.color}
+                type="button"
+                onClick={() => setPrimaryColor(preset.color)}
+                className={`w-10 h-10 rounded-full border-2 transition-all ${
+                  primaryColor === preset.color 
+                    ? "border-foreground scale-110" 
+                    : "border-transparent hover:scale-105"
+                }`}
+                style={{ backgroundColor: preset.color }}
+                title={preset.name}
+                data-testid={`color-preset-${preset.name.toLowerCase().replace(/\s/g, '-')}`}
+              />
+            ))}
+          </div>
+          <div className="flex items-center gap-3">
+            <Label htmlFor="custom-color" className="text-sm">Custom Color:</Label>
+            <input
+              id="custom-color"
+              type="color"
+              value={primaryColor}
+              onChange={(e) => setPrimaryColor(e.target.value)}
+              className="w-12 h-10 rounded cursor-pointer border"
+              data-testid="input-custom-color"
+            />
+            <Input
+              value={primaryColor}
+              onChange={(e) => setPrimaryColor(e.target.value)}
+              placeholder="#eab308"
+              className="w-28"
+              data-testid="input-color-hex"
+            />
+          </div>
+          <div className="pt-4 border-t">
+            <Label className="text-sm font-medium">Preview</Label>
+            <div className="mt-3 p-4 border rounded-lg">
+              <div 
+                className="h-2 rounded-full mb-3" 
+                style={{ backgroundColor: primaryColor }}
+              />
+              <div className="flex items-center gap-2">
+                <div 
+                  className="w-3 h-3 rounded-full" 
+                  style={{ backgroundColor: primaryColor }}
+                />
+                <span className="text-sm font-medium" style={{ color: primaryColor }}>
+                  Accent text in your brand color
+                </span>
+              </div>
+              <Button 
+                size="sm" 
+                className="mt-3"
+                style={{ backgroundColor: primaryColor }}
+              >
+                Sample Button
+              </Button>
+            </div>
           </div>
         </CardContent>
       </Card>
