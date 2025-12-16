@@ -93,10 +93,14 @@ export default function VendorStorefront({
   const [activeTab, setActiveTab] = useState("about");
   const [selectedService, setSelectedService] = useState<Service | null>(null);
 
-  const customStyles = brandColors?.primary ? {
+  const hasBrandColor = !!brandColors?.primary;
+  const customStyles = hasBrandColor ? {
     '--vendor-primary': brandColors.primary,
     '--vendor-secondary': brandColors.secondary || brandColors.primary,
   } as React.CSSProperties : {};
+  
+  const brandButtonStyle = hasBrandColor ? { backgroundColor: brandColors.primary } : undefined;
+  const brandBorderStyle = hasBrandColor ? { borderColor: brandColors.primary } : undefined;
 
   return (
     <div 
@@ -153,7 +157,7 @@ export default function VendorStorefront({
               <Button
                 onClick={onCollaborate}
                 data-testid="button-collaborate"
-                className="bg-primary"
+                style={brandButtonStyle}
               >
                 <Handshake className="h-4 w-4 mr-2" />
                 Collaborate
@@ -163,6 +167,7 @@ export default function VendorStorefront({
                 variant={isFollowing ? "secondary" : "default"}
                 onClick={onFollow}
                 data-testid="button-follow"
+                style={!isFollowing ? brandButtonStyle : undefined}
               >
                 <Heart className={`h-4 w-4 mr-2 ${isFollowing ? "fill-current" : ""}`} />
                 {isFollowing ? "Following" : "Follow"}
