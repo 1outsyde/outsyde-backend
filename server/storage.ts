@@ -40,6 +40,10 @@ import {
   type InsertAvailabilitySlot,
   type Scheduling,
   type InsertScheduling,
+  type FeedPost,
+  type InsertFeedPost,
+  type PostComment,
+  type InsertPostComment,
   users,
   businesses,
   cities,
@@ -66,7 +70,10 @@ import {
   vendorServices,
   refundRequests,
   availabilitySlots,
-  scheduling
+  scheduling,
+  feedPosts,
+  postLikes,
+  postComments
 } from "@shared/schema";
 import { db } from "./db";
 import { eq, ilike, or, and, sql, isNull } from "drizzle-orm";
@@ -278,6 +285,22 @@ export interface IStorage {
   getSchedulingByProvider(providerType: string, providerId: string): Promise<Scheduling[]>;
   getSchedulingByClient(clientId: string): Promise<Scheduling[]>;
   updateScheduling(id: string, updates: Partial<Scheduling>): Promise<Scheduling | undefined>;
+
+  // Feed Posts
+  createFeedPost(data: InsertFeedPost): Promise<FeedPost>;
+  getFeedPost(id: string): Promise<FeedPost | undefined>;
+  getFeedPosts(limit?: number, offset?: number): Promise<FeedPost[]>;
+  getUserFeedPosts(authorId: string): Promise<FeedPost[]>;
+  getBusinessFeedPosts(businessId: string): Promise<FeedPost[]>;
+  getPhotographerFeedPosts(photographerId: string): Promise<FeedPost[]>;
+  deleteFeedPost(id: string): Promise<void>;
+  likePost(postId: string, userId: string): Promise<boolean>;
+  unlikePost(postId: string, userId: string): Promise<boolean>;
+  hasUserLikedPost(postId: string, userId: string): Promise<boolean>;
+  addPostComment(data: InsertPostComment): Promise<PostComment>;
+  getPostComments(postId: string): Promise<PostComment[]>;
+  canCustomerTagBusiness(customerId: string, businessId: string): Promise<boolean>;
+  canCustomerTagPhotographer(customerId: string, photographerId: string): Promise<boolean>;
 
   seedInitialData(): Promise<void>;
 }
@@ -2478,6 +2501,193 @@ export class DatabaseStorage implements IStorage {
       .where(eq(scheduling.id, id))
       .returning();
     return sched;
+  }
+
+  // =========================
+  // FEED POSTS
+  // =========================
+
+  async createFeedPost(data: InsertFeedPost): Promise<FeedPost> {
+    const id = randomUUID();
+    const [post] = await db.insert(feedPosts)
+      .values({
+        id,
+        authorId: data.authorId,
+        authorType: data.authorType,
+        content: data.content,
+        imageUrl: data.imageUrl || null,
+        taggedBusinessId: data.taggedBusinessId || null,
+        taggedPhotographerId: data.taggedPhotographerId || null,
+      })
+      .returning();
+    return post;
+  }
+
+  async getFeedPost(id: string): Promise<FeedPost | undefined> {
+    const [post] = await db.select()
+      .from(feedPosts)
+      .where(eq(feedPosts.id, id));
+    return post;
+  }
+
+  async getFeedPosts(limit = 50, offset = 0): Promise<FeedPost[]> {
+    return db.select()
+      .from(feedPosts)
+      .where(eq(feedPosts.isActive, true))
+      .orderBy(sql`${feedPosts.createdAt} DESC`)
+      .limit(limit)
+      .offset(offset);
+  }
+
+  async getUserFeedPosts(authorId: string): Promise<FeedPost[]> {
+    return db.select()
+      .from(feedPosts)
+      .where(and(
+        eq(feedPosts.authorId, authorId),
+        eq(feedPosts.isActive, true)
+      ))
+      .orderBy(sql`${feedPosts.createdAt} DESC`);
+  }
+
+  async getBusinessFeedPosts(businessId: string): Promise<FeedPost[]> {
+    return db.select()
+      .from(feedPosts)
+      .where(and(
+        eq(feedPosts.taggedBusinessId, businessId),
+        eq(feedPosts.isActive, true)
+      ))
+      .orderBy(sql`${feedPosts.createdAt} DESC`);
+  }
+
+  async getPhotographerFeedPosts(photographerId: string): Promise<FeedPost[]> {
+    return db.select()
+      .from(feedPosts)
+      .where(and(
+        eq(feedPosts.taggedPhotographerId, photographerId),
+        eq(feedPosts.isActive, true)
+      ))
+      .orderBy(sql`${feedPosts.createdAt} DESC`);
+  }
+
+  async deleteFeedPost(id: string): Promise<void> {
+    await db.update(feedPosts)
+      .set({ isActive: false, updatedAt: new Date() })
+      .where(eq(feedPosts.id, id));
+  }
+
+  async likePost(postId: string, userId: string): Promise<boolean> {
+    const existing = await db.select()
+      .from(postLikes)
+      .where(and(
+        eq(postLikes.postId, postId),
+        eq(postLikes.userId, userId)
+      ));
+    
+    if (existing.length > 0) return false;
+
+    await db.insert(postLikes)
+      .values({
+        id: randomUUID(),
+        postId,
+        userId,
+      });
+    
+    await db.update(feedPosts)
+      .set({ likesCount: sql`${feedPosts.likesCount} + 1` })
+      .where(eq(feedPosts.id, postId));
+    
+    return true;
+  }
+
+  async unlikePost(postId: string, userId: string): Promise<boolean> {
+    const [deleted] = await db.delete(postLikes)
+      .where(and(
+        eq(postLikes.postId, postId),
+        eq(postLikes.userId, userId)
+      ))
+      .returning();
+    
+    if (!deleted) return false;
+
+    await db.update(feedPosts)
+      .set({ likesCount: sql`GREATEST(${feedPosts.likesCount} - 1, 0)` })
+      .where(eq(feedPosts.id, postId));
+    
+    return true;
+  }
+
+  async hasUserLikedPost(postId: string, userId: string): Promise<boolean> {
+    const [like] = await db.select()
+      .from(postLikes)
+      .where(and(
+        eq(postLikes.postId, postId),
+        eq(postLikes.userId, userId)
+      ));
+    return !!like;
+  }
+
+  async addPostComment(data: InsertPostComment): Promise<PostComment> {
+    const id = randomUUID();
+    const [comment] = await db.insert(postComments)
+      .values({
+        id,
+        postId: data.postId,
+        userId: data.userId,
+        content: data.content,
+      })
+      .returning();
+    
+    await db.update(feedPosts)
+      .set({ commentsCount: sql`${feedPosts.commentsCount} + 1` })
+      .where(eq(feedPosts.id, data.postId));
+    
+    return comment;
+  }
+
+  async getPostComments(postId: string): Promise<PostComment[]> {
+    return db.select()
+      .from(postComments)
+      .where(eq(postComments.postId, postId))
+      .orderBy(sql`${postComments.createdAt} ASC`);
+  }
+
+  async canCustomerTagBusiness(customerId: string, businessId: string): Promise<boolean> {
+    // Check if customer has an order or appointment with this business
+    const [orderExists] = await db.select({ id: orders.id })
+      .from(orders)
+      .where(and(
+        eq(orders.customerId, customerId),
+        eq(orders.businessId, businessId),
+        eq(orders.status, 'completed')
+      ))
+      .limit(1);
+    
+    if (orderExists) return true;
+
+    const [appointmentExists] = await db.select({ id: appointments.id })
+      .from(appointments)
+      .where(and(
+        eq(appointments.customerId, customerId),
+        eq(appointments.businessId, businessId),
+        eq(appointments.status, 'completed')
+      ))
+      .limit(1);
+    
+    return !!appointmentExists;
+  }
+
+  async canCustomerTagPhotographer(customerId: string, photographerId: string): Promise<boolean> {
+    // Check if customer has a completed shoot booking with this photographer
+    const [bookingExists] = await db.select({ id: shootBookings.id })
+      .from(shootBookings)
+      .where(and(
+        eq(shootBookings.clientId, customerId),
+        eq(shootBookings.photographerId, photographerId),
+        eq(shootBookings.status, 'completed')
+      ))
+      .limit(1);
+    
+    return !!bookingExists;
   }
 }
 

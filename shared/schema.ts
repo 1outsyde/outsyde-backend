@@ -652,6 +652,50 @@ export const refundRequests = pgTable("refund_requests", {
 });
 
 /* =====================================================
+   FEED POSTS
+===================================================== */
+export const feedPosts = pgTable("feed_posts", {
+  id: varchar("id", { length: 36 }).primaryKey().default(sql`gen_random_uuid()`),
+
+  authorId: varchar("author_id", { length: 36 }).notNull().references(() => users.id),
+  authorType: text("author_type").notNull(), // 'customer', 'vendor', 'photographer'
+
+  content: text("content").notNull(),
+  imageUrl: text("image_url"),
+
+  taggedBusinessId: varchar("tagged_business_id", { length: 36 }).references(() => businesses.id),
+  taggedPhotographerId: varchar("tagged_photographer_id", { length: 36 }).references(() => photographers.id),
+
+  likesCount: integer("likes_count").default(0),
+  commentsCount: integer("comments_count").default(0),
+
+  isActive: boolean("is_active").default(true),
+
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+
+export const postLikes = pgTable("post_likes", {
+  id: varchar("id", { length: 36 }).primaryKey().default(sql`gen_random_uuid()`),
+
+  postId: varchar("post_id", { length: 36 }).notNull().references(() => feedPosts.id),
+  userId: varchar("user_id", { length: 36 }).notNull().references(() => users.id),
+
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+});
+
+export const postComments = pgTable("post_comments", {
+  id: varchar("id", { length: 36 }).primaryKey().default(sql`gen_random_uuid()`),
+
+  postId: varchar("post_id", { length: 36 }).notNull().references(() => feedPosts.id),
+  userId: varchar("user_id", { length: 36 }).notNull().references(() => users.id),
+
+  content: text("content").notNull(),
+
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+});
+
+/* =====================================================
    INSERT SCHEMAS (Zod)
 ===================================================== */
 export const insertUserSchema = createInsertSchema(users).omit({
@@ -764,6 +808,25 @@ export const insertRefundRequestSchema = createInsertSchema(refundRequests).omit
   adminNotifiedAt: true,
   resolvedAt: true,
   resolvedBy: true,
+});
+
+export const insertFeedPostSchema = createInsertSchema(feedPosts).omit({
+  id: true,
+  likesCount: true,
+  commentsCount: true,
+  isActive: true,
+  createdAt: true,
+  updatedAt: true,
+});
+
+export const insertPostLikeSchema = createInsertSchema(postLikes).omit({
+  id: true,
+  createdAt: true,
+});
+
+export const insertPostCommentSchema = createInsertSchema(postComments).omit({
+  id: true,
+  createdAt: true,
 });
 
 /* =====================================================
@@ -913,3 +976,12 @@ export type InsertScheduling = z.infer<typeof insertSchedulingSchema>;
 
 export type RefundRequest = typeof refundRequests.$inferSelect;
 export type InsertRefundRequest = z.infer<typeof insertRefundRequestSchema>;
+
+export type FeedPost = typeof feedPosts.$inferSelect;
+export type InsertFeedPost = z.infer<typeof insertFeedPostSchema>;
+
+export type PostLike = typeof postLikes.$inferSelect;
+export type InsertPostLike = z.infer<typeof insertPostLikeSchema>;
+
+export type PostComment = typeof postComments.$inferSelect;
+export type InsertPostComment = z.infer<typeof insertPostCommentSchema>;

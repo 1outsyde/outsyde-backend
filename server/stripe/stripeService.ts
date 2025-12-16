@@ -2,6 +2,9 @@
 // Handles Stripe Connect + checkout (core only)
 
 import { getUncachableStripeClient } from "./stripeClient";
+import { db } from "../db";
+import { subscriptionTiers } from "@shared/schema";
+import { asc } from "drizzle-orm";
 
 export class StripeService {
   // =========================
@@ -141,6 +144,17 @@ export class StripeService {
     // A la carte products are managed via Stripe dashboard
     // This is a placeholder for future automated product creation
     console.log('[stripe] A la carte products setup complete (using existing products)');
+  }
+
+  // =========================
+  // SUBSCRIPTION TIERS
+  // =========================
+
+  async getSubscriptionTiers() {
+    const tiers = await db.select()
+      .from(subscriptionTiers)
+      .orderBy(asc(subscriptionTiers.sortOrder));
+    return tiers;
   }
 }
 

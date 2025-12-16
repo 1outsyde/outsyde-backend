@@ -2133,5 +2133,298 @@ export async function registerRoutes(
     }
   });
 
+  // ==================== FEED POSTS ROUTES ====================
+
+  // Get feed posts (public)
+  app.get("/api/feed", async (req, res) => {
+    try {
+      const limit = parseInt(req.query.limit as string) || 50;
+      const offset = parseInt(req.query.offset as string) || 0;
+      const posts = await storage.getFeedPosts(limit, offset);
+      
+      // Enrich posts with author and tagged entity info
+      const enrichedPosts = await Promise.all(posts.map(async (post) => {
+        const author = await storage.getUser(post.authorId);
+        let taggedBusiness = null;
+        let taggedPhotographer = null;
+        
+        if (post.taggedBusinessId) {
+          taggedBusiness = await storage.getBusiness(post.taggedBusinessId);
+        }
+        if (post.taggedPhotographerId) {
+          taggedPhotographer = await storage.getPhotographer(post.taggedPhotographerId);
+        }
+        
+        return {
+          ...post,
+          author: author ? { id: author.id, name: author.name, profileImageUrl: author.profileImageUrl } : null,
+          taggedBusiness: taggedBusiness ? { id: taggedBusiness.id, name: taggedBusiness.name, logoImage: taggedBusiness.logoImage } : null,
+          taggedPhotographer: taggedPhotographer ? { id: taggedPhotographer.id, displayName: taggedPhotographer.displayName } : null,
+        };
+      }));
+      
+      res.json({ posts: enrichedPosts });
+    } catch (error) {
+      console.error("Get feed error:", error);
+      res.status(500).json({ error: "Failed to get feed" });
+    }
+  });
+
+  // Create a new post
+  app.post("/api/feed", async (req, res) => {
+    const userId = req.session?.userId;
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    try {
+      const schema = z.object({
+        content: z.string().min(1).max(2000),
+        imageUrl: z.string().optional(),
+        taggedBusinessId: z.string().optional(),
+        taggedPhotographerId: z.string().optional(),
+      });
+
+      const data = schema.parse(req.body);
+      const user = await storage.getUser(userId);
+      
+      if (!user) {
+        return res.status(404).json({ error: "User not found" });
+      }
+
+      // Determine author type
+      let authorType = 'customer';
+      if (user.isVendor) authorType = 'vendor';
+      if (user.isPhotographer) authorType = 'photographer';
+
+      // If customer, they must tag a business or photographer they've used
+      if (authorType === 'customer') {
+        if (!data.taggedBusinessId && !data.taggedPhotographerId) {
+          return res.status(400).json({ 
+            error: "Customers must tag a business or photographer they've purchased from or used services of" 
+          });
+        }
+
+        // Verify customer can tag the business or photographer
+        if (data.taggedBusinessId) {
+          const canTag = await storage.canCustomerTagBusiness(userId, data.taggedBusinessId);
+          if (!canTag) {
+            return res.status(403).json({ 
+              error: "You can only tag businesses you've purchased from or used services of" 
+            });
+          }
+        }
+
+        if (data.taggedPhotographerId) {
+          const canTag = await storage.canCustomerTagPhotographer(userId, data.taggedPhotographerId);
+          if (!canTag) {
+            return res.status(403).json({ 
+              error: "You can only tag photographers you've had sessions with" 
+            });
+          }
+        }
+      }
+
+      const post = await storage.createFeedPost({
+        authorId: userId,
+        authorType,
+        content: data.content,
+        imageUrl: data.imageUrl,
+        taggedBusinessId: data.taggedBusinessId,
+        taggedPhotographerId: data.taggedPhotographerId,
+      });
+
+      res.json({ success: true, post });
+    } catch (error) {
+      if (error instanceof z.ZodError) {
+        return res.status(400).json({ error: "Invalid data", details: error.errors });
+      }
+      console.error("Create post error:", error);
+      res.status(500).json({ error: "Failed to create post" });
+    }
+  });
+
+  // Like a post
+  app.post("/api/feed/:postId/like", async (req, res) => {
+    const userId = req.session?.userId;
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    try {
+      const { postId } = req.params;
+      const liked = await storage.likePost(postId, userId);
+      res.json({ success: true, liked });
+    } catch (error) {
+      console.error("Like post error:", error);
+      res.status(500).json({ error: "Failed to like post" });
+    }
+  });
+
+  // Unlike a post
+  app.delete("/api/feed/:postId/like", async (req, res) => {
+    const userId = req.session?.userId;
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    try {
+      const { postId } = req.params;
+      const unliked = await storage.unlikePost(postId, userId);
+      res.json({ success: true, unliked });
+    } catch (error) {
+      console.error("Unlike post error:", error);
+      res.status(500).json({ error: "Failed to unlike post" });
+    }
+  });
+
+  // Add a comment to a post
+  app.post("/api/feed/:postId/comments", async (req, res) => {
+    const userId = req.session?.userId;
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    try {
+      const { postId } = req.params;
+      const schema = z.object({
+        content: z.string().min(1).max(500),
+      });
+
+      const data = schema.parse(req.body);
+      const comment = await storage.addPostComment({
+        postId,
+        userId,
+        content: data.content,
+      });
+
+      res.json({ success: true, comment });
+    } catch (error) {
+      if (error instanceof z.ZodError) {
+        return res.status(400).json({ error: "Invalid data", details: error.errors });
+      }
+      console.error("Add comment error:", error);
+      res.status(500).json({ error: "Failed to add comment" });
+    }
+  });
+
+  // Get comments for a post
+  app.get("/api/feed/:postId/comments", async (req, res) => {
+    try {
+      const { postId } = req.params;
+      const comments = await storage.getPostComments(postId);
+      
+      // Enrich with user info
+      const enrichedComments = await Promise.all(comments.map(async (comment) => {
+        const user = await storage.getUser(comment.userId);
+        return {
+          ...comment,
+          user: user ? { id: user.id, name: user.name, profileImageUrl: user.profileImageUrl } : null,
+        };
+      }));
+      
+      res.json({ comments: enrichedComments });
+    } catch (error) {
+      console.error("Get comments error:", error);
+      res.status(500).json({ error: "Failed to get comments" });
+    }
+  });
+
+  // Get taggable businesses for customer
+  app.get("/api/feed/taggable-businesses", async (req, res) => {
+    const userId = req.session?.userId;
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    try {
+      // Get businesses the user has ordered from or had appointments with
+      const reviewable = await storage.getReviewableBookings(userId);
+      
+      // Extract unique businesses from orders and appointments
+      const businessIds = new Set<string>();
+      for (const order of reviewable.orders) {
+        if (order.businessId) businessIds.add(order.businessId);
+      }
+      for (const apt of reviewable.appointments) {
+        if (apt.businessId) businessIds.add(apt.businessId);
+      }
+      
+      const businesses = await Promise.all(
+        Array.from(businessIds).map(id => storage.getBusiness(id))
+      );
+      
+      res.json({ 
+        businesses: businesses.filter(Boolean).map(b => ({
+          id: b!.id,
+          name: b!.name,
+          logoImage: b!.logoImage,
+        }))
+      });
+    } catch (error) {
+      console.error("Get taggable businesses error:", error);
+      res.status(500).json({ error: "Failed to get taggable businesses" });
+    }
+  });
+
+  // Get taggable photographers for customer
+  app.get("/api/feed/taggable-photographers", async (req, res) => {
+    const userId = req.session?.userId;
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    try {
+      // Get photographers the user has had sessions with
+      const reviewable = await storage.getReviewableBookings(userId);
+      
+      const photographerIds = new Set<string>();
+      for (const booking of reviewable.shootBookings) {
+        if (booking.photographerId) photographerIds.add(booking.photographerId);
+      }
+      
+      const photographers = await Promise.all(
+        Array.from(photographerIds).map(id => storage.getPhotographer(id))
+      );
+      
+      res.json({ 
+        photographers: photographers.filter(Boolean).map(p => ({
+          id: p!.id,
+          displayName: p!.displayName,
+        }))
+      });
+    } catch (error) {
+      console.error("Get taggable photographers error:", error);
+      res.status(500).json({ error: "Failed to get taggable photographers" });
+    }
+  });
+
+  // Delete a post (author only)
+  app.delete("/api/feed/:postId", async (req, res) => {
+    const userId = req.session?.userId;
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    try {
+      const { postId } = req.params;
+      const post = await storage.getFeedPost(postId);
+      
+      if (!post) {
+        return res.status(404).json({ error: "Post not found" });
+      }
+      
+      if (post.authorId !== userId) {
+        return res.status(403).json({ error: "You can only delete your own posts" });
+      }
+      
+      await storage.deleteFeedPost(postId);
+      res.json({ success: true });
+    } catch (error) {
+      console.error("Delete post error:", error);
+      res.status(500).json({ error: "Failed to delete post" });
+    }
+  });
+
   return httpServer;
 }
