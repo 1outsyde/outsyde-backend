@@ -800,6 +800,7 @@ export const vendorSignupSchema = z.object({
   businessName: z.string().min(1),
   businessCategory: z.string().min(1),
   businessDescription: z.string().optional(),
+  offerType: z.enum(["products", "services", "both"]),
   isStartup: z.boolean().optional(),
   yearsInBusiness: z.string().optional(),
   employeeCount: z.string().optional(),

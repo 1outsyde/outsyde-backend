@@ -42,6 +42,7 @@ interface SignupData {
   businessCategory?: string;
   businessDescription?: string;
   businessType?: string;
+  offerType?: "products" | "services" | "both";
   isStartup?: boolean;
   yearsInBusiness?: string;
   employeeCount?: string;
@@ -78,10 +79,11 @@ const customerSteps = [
 const vendorSteps = [
   { id: 1, name: "Account" },
   { id: 2, name: "Business Info" },
-  { id: 3, name: "Business Details" },
-  { id: 4, name: "Location" },
-  { id: 5, name: "Online Presence" },
-  { id: 6, name: "Subscription" },
+  { id: 3, name: "What You Offer" },
+  { id: 4, name: "Business Details" },
+  { id: 5, name: "Location" },
+  { id: 6, name: "Online Presence" },
+  { id: 7, name: "Subscription" },
 ];
 
 const categories = [
@@ -296,6 +298,7 @@ export default function SignupForm({ onComplete, isVendor = false }: SignupFormP
         businessName: data.businessName,
         businessCategory: data.businessCategory,
         businessDescription: data.businessDescription || undefined,
+        offerType: data.offerType,
         isStartup: data.isStartup,
         yearsInBusiness: data.yearsInBusiness || undefined,
         employeeCount: data.employeeCount || undefined,
@@ -382,6 +385,7 @@ export default function SignupForm({ onComplete, isVendor = false }: SignupFormP
     businessCategory: "",
     businessDescription: "",
     businessType: "",
+    offerType: undefined,
     isStartup: undefined,
     yearsInBusiness: "",
     employeeCount: "",
@@ -448,7 +452,10 @@ export default function SignupForm({ onComplete, isVendor = false }: SignupFormP
   };
 
   const canProceed = () => {
-    if (isVendor && currentStep === 6) {
+    if (isVendor && currentStep === 3) {
+      return !!formData.offerType;
+    }
+    if (isVendor && currentStep === 7) {
       return !!formData.selectedTierId;
     }
     return true;
@@ -986,8 +993,71 @@ export default function SignupForm({ onComplete, isVendor = false }: SignupFormP
         </div>
       )}
 
-      {/* VENDOR STEP 3: Business Details */}
+      {/* VENDOR STEP 3: What You Offer */}
       {isVendor && currentStep === 3 && (
+        <div className="space-y-5">
+          <div>
+            <h3 className="font-medium text-base">What does your business offer?</h3>
+            <p className="text-sm text-muted-foreground mb-4">
+              Let us know what type of offerings your business provides
+            </p>
+            <RadioGroup
+              value={formData.offerType || ""}
+              onValueChange={(value) => updateField("offerType", value as "products" | "services" | "both")}
+              className="space-y-3"
+            >
+              <div 
+                className={`flex items-center gap-3 p-4 border rounded-md cursor-pointer hover-elevate ${formData.offerType === "products" ? "border-primary bg-primary/5" : ""}`}
+                onClick={() => updateField("offerType", "products")}
+              >
+                <RadioGroupItem value="products" id="offer-products" data-testid="radio-offer-products" />
+                <Label htmlFor="offer-products" className="cursor-pointer flex-1">
+                  <div className="flex items-center gap-2">
+                    <ShoppingBag className="h-5 w-5 text-primary" />
+                    <span className="font-medium">Products</span>
+                  </div>
+                  <p className="text-sm text-muted-foreground mt-1">
+                    I sell physical or digital products
+                  </p>
+                </Label>
+              </div>
+              <div 
+                className={`flex items-center gap-3 p-4 border rounded-md cursor-pointer hover-elevate ${formData.offerType === "services" ? "border-primary bg-primary/5" : ""}`}
+                onClick={() => updateField("offerType", "services")}
+              >
+                <RadioGroupItem value="services" id="offer-services" data-testid="radio-offer-services" />
+                <Label htmlFor="offer-services" className="cursor-pointer flex-1">
+                  <div className="flex items-center gap-2">
+                    <Wrench className="h-5 w-5 text-primary" />
+                    <span className="font-medium">Services</span>
+                  </div>
+                  <p className="text-sm text-muted-foreground mt-1">
+                    I provide services that customers can book
+                  </p>
+                </Label>
+              </div>
+              <div 
+                className={`flex items-center gap-3 p-4 border rounded-md cursor-pointer hover-elevate ${formData.offerType === "both" ? "border-primary bg-primary/5" : ""}`}
+                onClick={() => updateField("offerType", "both")}
+              >
+                <RadioGroupItem value="both" id="offer-both" data-testid="radio-offer-both" />
+                <Label htmlFor="offer-both" className="cursor-pointer flex-1">
+                  <div className="flex items-center gap-2">
+                    <Sparkles className="h-5 w-5 text-primary" />
+                    <span className="font-medium">Both Products & Services</span>
+                  </div>
+                  <p className="text-sm text-muted-foreground mt-1">
+                    I offer a combination of products and services
+                  </p>
+                </Label>
+              </div>
+            </RadioGroup>
+          </div>
+        </div>
+      )}
+
+      {/* VENDOR STEP 4: Business Details */}
+      {isVendor && currentStep === 4 && (
         <div className="space-y-5">
           <div>
             <Label className="text-base font-medium">Are you a startup?</Label>
@@ -1078,8 +1148,8 @@ export default function SignupForm({ onComplete, isVendor = false }: SignupFormP
         </div>
       )}
 
-      {/* VENDOR STEP 4: Location */}
-      {isVendor && currentStep === 4 && (
+      {/* VENDOR STEP 5: Location */}
+      {isVendor && currentStep === 5 && (
         <div className="space-y-5">
           <div>
             <Label className="text-base font-medium">Do you have a physical location?</Label>
@@ -1179,8 +1249,8 @@ export default function SignupForm({ onComplete, isVendor = false }: SignupFormP
         </div>
       )}
 
-      {/* VENDOR STEP 5: Online Presence */}
-      {isVendor && currentStep === 5 && (
+      {/* VENDOR STEP 6: Online Presence */}
+      {isVendor && currentStep === 6 && (
         <div className="space-y-4">
           <p className="text-sm text-muted-foreground">
             Help customers find you online (optional)
@@ -1212,8 +1282,8 @@ export default function SignupForm({ onComplete, isVendor = false }: SignupFormP
         </div>
       )}
 
-      {/* VENDOR STEP 6: Subscription Tier Selection */}
-      {isVendor && currentStep === 6 && (
+      {/* VENDOR STEP 7: Subscription Tier Selection */}
+      {isVendor && currentStep === 7 && (
         <div className="space-y-5">
           <div className="text-center mb-4">
             <h3 className="font-semibold text-lg">Choose Your Plan</h3>
