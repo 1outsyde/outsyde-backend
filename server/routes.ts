@@ -480,8 +480,8 @@ export async function registerRoutes(
       const endDateTime = new Date(dateTime.getTime() + 2 * 60 * 60 * 1000);
       const endTime = `${endDateTime.getHours().toString().padStart(2, "0")}:${endDateTime.getMinutes().toString().padStart(2, "0")}`;
 
-      // Calculate fees (4% Outsyde platform fee)
-      const platformFee = Math.round(data.totalPriceCents * 0.04);
+      // Calculate fees (10% Outsyde platform fee for photographers)
+      const platformFee = Math.round(data.totalPriceCents * 0.10);
       const vendorNet = data.totalPriceCents - platformFee;
 
       const booking = await storage.createShootBooking({

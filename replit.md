@@ -24,7 +24,7 @@ The Outsyde platform is built with a clear separation of concerns, utilizing a R
     -   The UI adopts a modern, social media-inspired design aesthetic.
     -   A consistent golden yellow color scheme is used for branding.
     -   Typefaces include Inter, DM Sans, and Poppins for a contemporary look.
--   **Transaction Fees:** A 4% Outsyde platform fee is applied to all transactions (orders, bookings, and service purchases).
+-   **Transaction Fees:** Photographers pay 10% Outsyde fee per booking. Businesses pay 4% per transaction plus their monthly subscription.
 -   **Key Features:**
     -   **Customer & Vendor Onboarding:** Multi-step signup processes for both customer and vendor types, capturing demographic, preference, and business-specific information. Vendors acknowledge a monthly subscription.
     -   **Verified Reviews:** A system ensuring only customers with completed bookings or orders can leave reviews.
