@@ -435,6 +435,68 @@ export async function registerRoutes(
 
   app.use("/api/photographers", photographersRouter);
 
+  // ==================== PHOTOGRAPHER BOOKING ROUTES ====================
+
+  // Create photographer booking (customer facing)
+  app.post("/api/bookings/photographer", async (req, res) => {
+    const userId = req.session?.userId;
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    try {
+      const bookingSchema = z.object({
+        photographerId: z.string().min(1, "Photographer ID is required"),
+        serviceId: z.string().optional(),
+        shootType: z.string().min(1, "Shoot type is required"),
+        bookingDateTime: z.string().min(1, "Booking date/time is required"),
+        locationDetails: z.string().min(1, "Location is required"),
+        specialRequests: z.string().optional(),
+        totalPriceCents: z.number().default(0),
+      });
+
+      const data = bookingSchema.parse(req.body);
+
+      // Parse datetime into date and time components
+      const dateTime = new Date(data.bookingDateTime);
+      const date = dateTime.toISOString().split("T")[0];
+      const startTime = `${dateTime.getHours().toString().padStart(2, "0")}:${dateTime.getMinutes().toString().padStart(2, "0")}`;
+      
+      // Estimate end time (default 2 hour session)
+      const endDateTime = new Date(dateTime.getTime() + 2 * 60 * 60 * 1000);
+      const endTime = `${endDateTime.getHours().toString().padStart(2, "0")}:${endDateTime.getMinutes().toString().padStart(2, "0")}`;
+
+      // Calculate fees (10% platform fee)
+      const platformFee = Math.round(data.totalPriceCents * 0.10);
+      const vendorNet = data.totalPriceCents - platformFee;
+
+      const booking = await storage.createShootBooking({
+        photographerId: data.photographerId,
+        clientId: userId,
+        serviceId: data.serviceId || null,
+        shootType: data.shootType,
+        date,
+        startTime,
+        endTime,
+        durationHours: 2,
+        locationDetails: data.locationDetails,
+        specialRequests: data.specialRequests || null,
+        totalPrice: data.totalPriceCents,
+        platformFee,
+        vendorNet,
+        status: "pending",
+      });
+
+      res.status(201).json({ booking });
+    } catch (error) {
+      if (error instanceof z.ZodError) {
+        return res.status(400).json({ error: "Invalid data", details: error.errors });
+      }
+      console.error("Create photographer booking error:", error);
+      res.status(500).json({ error: "Failed to create booking" });
+    }
+  });
+
   // ==================== STRIPE ROUTES ====================
 
   // Get subscription tiers

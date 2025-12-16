@@ -179,6 +179,23 @@ export interface IStorage {
     paymentIntentId: string | null;
     status: string | null;
   }[]>;
+  createShootBooking(data: {
+    photographerId: string;
+    clientId: string;
+    serviceId?: string | null;
+    shootType: string;
+    date: string;
+    startTime: string;
+    endTime: string;
+    durationHours: number;
+    locationType?: string | null;
+    locationDetails?: string | null;
+    specialRequests?: string | null;
+    totalPrice: number;
+    platformFee: number;
+    vendorNet: number;
+    status?: string;
+  }): Promise<ShootBooking>;
 
   // Chat (Real-time messaging)
   getOrCreateConversation(participant1Id: string, participant2Id: string): Promise<Conversation>;
@@ -939,6 +956,47 @@ export class DatabaseStorage implements IStorage {
       paymentIntentId: b.paymentIntentId,
       status: b.status,
     }));
+  }
+
+  // Create a new shoot booking
+  async createShootBooking(data: {
+    photographerId: string;
+    clientId: string;
+    serviceId?: string | null;
+    shootType: string;
+    date: string;
+    startTime: string;
+    endTime: string;
+    durationHours: number;
+    locationType?: string | null;
+    locationDetails?: string | null;
+    specialRequests?: string | null;
+    totalPrice: number;
+    platformFee: number;
+    vendorNet: number;
+    status?: string;
+  }): Promise<ShootBooking> {
+    const [booking] = await db
+      .insert(shootBookings)
+      .values({
+        photographerId: data.photographerId,
+        clientId: data.clientId,
+        serviceId: data.serviceId || null,
+        shootType: data.shootType,
+        date: data.date,
+        startTime: data.startTime,
+        endTime: data.endTime,
+        durationHours: data.durationHours,
+        locationType: data.locationType || null,
+        locationDetails: data.locationDetails || null,
+        specialRequests: data.specialRequests || null,
+        totalPrice: data.totalPrice,
+        platformFee: data.platformFee,
+        vendorNet: data.vendorNet,
+        status: data.status || "pending",
+      })
+      .returning();
+    return booking;
   }
 
   // Get all completed bookings/orders for a customer that can be reviewed

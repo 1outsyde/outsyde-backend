@@ -34,6 +34,17 @@ The Outsyde platform is built with a clear separation of concerns, utilizing a R
     -   **Refund Request System:** Vendors, photographers, and customers can request refunds via dashboards. Refund requests are stored in the database and admin is notified for processing.
 
 ## Recent Changes (Dec 16, 2025)
+- **Photographer Custom Services System**
+  - Added `photographer_services` table to support custom services with flexible pricing (fixed price or "contact for pricing")
+  - Enhanced `shoot_bookings` table with `serviceId`, `locationDetails`, and `specialRequests` columns
+  - Photographer dashboard now has tabs for "Bookings" and "My Services"
+  - Bookings display shows customer name, email, service type, location, and special requests
+  - Photographers can create, edit, and delete custom services (e.g., wedding photography, studio shoots, music video cinematography)
+  - Each service can have: name, description, category, price (or contact for pricing), and estimated duration
+  - New `PhotographerBookingDialog` component for customers to book photography sessions
+  - Customer booking flow: Select Service → Choose Date/Time → Enter Location & Special Requests
+  - API endpoint `POST /api/bookings/photographer` for creating bookings with all new fields
+  - `GET /api/photographers/:id/services` returns public services for a photographer
 - **Fixed subscription tier selection bug in vendor signup**
   - Changed `updateField` function to use functional state update pattern: `setFormData(prev => ({ ...prev, [field]: value }))`
   - Changed tier card onClick to update both selectedTierId and acceptedSubscription in a single setFormData call
