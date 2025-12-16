@@ -34,6 +34,16 @@ The Outsyde platform is built with a clear separation of concerns, utilizing a R
     -   **Refund Request System:** Vendors, photographers, and customers can request refunds via dashboards. Refund requests are stored in the database and admin is notified for processing.
 
 ## Recent Changes (Dec 16, 2025)
+- **Photographer Dashboard Profile Tab**
+  - Added "Profile" tab to photographer dashboard alongside Bookings and Services tabs
+  - Photographers can edit: displayName, bio, city, state, portfolioUrl, hourlyRate, and specialties
+  - PATCH /api/photographers/me endpoint for saving profile updates
+  - HourlyRate properly converted between dollars (UI) and cents (database)
+  - Specialties selection via clickable badges (Portraits, Weddings, Events, etc.)
+- **Fixed isPhotographer Flag Detection**
+  - /api/auth/user endpoint now checks photographers table if isPhotographer isn't set on user
+  - Ensures photographers are correctly identified even after database migrations
+  - Session properly stores photographerId for authenticated photographers
 - **Photographer Dual Pricing Model**
   - Services now support two pricing models: "hourly" (e.g., $150/hr) and "package" (e.g., $600 for 3 hours)
   - Schema updated with `pricingModel`, `hourlyRateCents`, `packageHours` columns in `photographer_services` table
