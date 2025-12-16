@@ -399,7 +399,7 @@ export default function SignupForm({ onComplete, isVendor = false }: SignupFormP
   const progress = (currentStep / steps.length) * 100;
 
   const updateField = (field: keyof SignupData, value: string | string[] | boolean | undefined | Record<string, string[]>) => {
-    setFormData({ ...formData, [field]: value });
+    setFormData(prev => ({ ...prev, [field]: value }));
   };
 
   const toggleArrayItem = (field: "interests" | "preferredCategories" | "selectedIndustries", item: string) => {
@@ -1333,8 +1333,11 @@ export default function SignupForm({ onComplete, isVendor = false }: SignupFormP
                         : "hover-elevate"
                     }`}
                     onClick={() => {
-                      updateField("selectedTierId", tier.id);
-                      updateField("acceptedSubscription", true);
+                      setFormData(prev => ({
+                        ...prev,
+                        selectedTierId: tier.id,
+                        acceptedSubscription: true
+                      }));
                     }}
                     data-testid={`tier-card-${tier.name}`}
                   >

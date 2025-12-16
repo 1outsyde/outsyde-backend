@@ -34,6 +34,10 @@ The Outsyde platform is built with a clear separation of concerns, utilizing a R
     -   **Refund Request System:** Vendors, photographers, and customers can request refunds via dashboards. Refund requests are stored in the database and admin is notified for processing.
 
 ## Recent Changes (Dec 16, 2025)
+- **Fixed subscription tier selection bug in vendor signup**
+  - Changed `updateField` function to use functional state update pattern: `setFormData(prev => ({ ...prev, [field]: value }))`
+  - Changed tier card onClick to update both selectedTierId and acceptedSubscription in a single setFormData call
+  - This fixes React state batching issue where successive state updates using stale closure would overwrite each other
 - **Fixed signup functionality for all user types (customer, vendor, photographer)**
   - Added "What You Offer" step to vendor signup (step 3) allowing businesses to choose: products, services, or both
   - The offerType selection maps to hasProducts/hasServices boolean fields in the business record
