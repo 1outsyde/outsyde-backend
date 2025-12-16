@@ -226,12 +226,33 @@ export const photographers = pgTable("photographers", {
 });
 
 /* =====================================================
+   PHOTOGRAPHER SERVICES
+===================================================== */
+export const photographerServices = pgTable("photographer_services", {
+  id: varchar("id", { length: 36 }).primaryKey().default(sql`gen_random_uuid()`),
+  photographerId: varchar("photographer_id", { length: 36 }).notNull().references(() => photographers.id),
+
+  name: text("name").notNull(),
+  description: text("description"),
+  category: text("category"),
+
+  priceCents: integer("price_cents"),
+  isContactForPricing: boolean("is_contact_for_pricing").default(false),
+  estimatedDurationMinutes: integer("estimated_duration_minutes"),
+
+  isActive: boolean("is_active").default(true),
+
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+});
+
+/* =====================================================
    SHOOT BOOKINGS (Photographers)
 ===================================================== */
 export const shootBookings = pgTable("shoot_bookings", {
   id: varchar("id", { length: 36 }).primaryKey().default(sql`gen_random_uuid()`),
   photographerId: varchar("photographer_id", { length: 36 }).notNull().references(() => photographers.id),
   clientId: varchar("client_id", { length: 36 }).notNull().references(() => users.id),
+  serviceId: varchar("service_id", { length: 36 }).references(() => photographerServices.id),
 
   shootType: text("shoot_type").notNull(),
   date: text("date").notNull(),
@@ -241,6 +262,7 @@ export const shootBookings = pgTable("shoot_bookings", {
 
   locationType: text("location_type"),
   locationDetails: text("location_details"),
+  specialRequests: text("special_requests"),
 
   totalPrice: integer("total_price").notNull(),
   platformFee: integer("platform_fee").default(0),
@@ -934,6 +956,9 @@ export type City = typeof cities.$inferSelect;
 export type RefreshToken = typeof refreshTokens.$inferSelect;
 
 export type Photographer = typeof photographers.$inferSelect;
+
+export type PhotographerService = typeof photographerServices.$inferSelect;
+export type InsertPhotographerService = typeof photographerServices.$inferInsert;
 
 export type ShootBooking = typeof shootBookings.$inferSelect;
 
