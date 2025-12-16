@@ -30,7 +30,7 @@ export default function ProfilePage({ onLogout }: ProfilePageProps) {
   const [activeSection, setActiveSection] = useState<"overview" | "bookings" | "orders" | "favorites" | "points">("overview");
 
   const { data: userData, isLoading: userLoading } = useQuery<ProfileUser>({
-    queryKey: ["/api/auth/me"],
+    queryKey: ["/api/auth/user"],
   });
 
   const user = userData ? {
