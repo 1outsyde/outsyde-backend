@@ -9,6 +9,8 @@ import {
   type InsertCity,
   type RefreshToken,
   type Photographer,
+  type PhotographerService,
+  type InsertPhotographerService,
   type Review,
   type InsertReview,
   type ShootBooking,
@@ -49,6 +51,7 @@ import {
   cities,
   refreshTokens,
   photographers,
+  photographerServices,
   reviews,
   shootBookings,
   appointments,
@@ -119,9 +122,17 @@ export interface IStorage {
   // Photographer CRUD
   createPhotographer(data: NewPhotographerInput): Promise<Photographer>;
   getPhotographer(id: string): Promise<Photographer | undefined>;
+  getPhotographerByUserId(userId: string): Promise<Photographer | undefined>;
   listPhotographers(): Promise<Photographer[]>;
   updatePhotographer(id: string, updates: Partial<Photographer>): Promise<Photographer | undefined>;
   deletePhotographer(id: string): Promise<void>;
+
+  // Photographer Services CRUD
+  createPhotographerService(data: InsertPhotographerService): Promise<PhotographerService>;
+  getPhotographerService(id: string): Promise<PhotographerService | undefined>;
+  getPhotographerServices(photographerId: string): Promise<PhotographerService[]>;
+  updatePhotographerService(id: string, updates: Partial<PhotographerService>): Promise<PhotographerService | undefined>;
+  deletePhotographerService(id: string): Promise<void>;
 
   // Reviews (verified purchases only)
   createReview(data: InsertReview): Promise<Review>;
@@ -156,6 +167,10 @@ export interface IStorage {
     lastName: string | null;
     email: string | null;
     shootType: string;
+    serviceName: string | null;
+    serviceId: string | null;
+    locationDetails: string | null;
+    specialRequests: string | null;
     orderedAt: Date | null;
     bookingDateTime: string;
     totalPaid: number;
@@ -606,6 +621,51 @@ export class DatabaseStorage implements IStorage {
     await db.delete(photographers).where(eq(photographers.id, id));
   }
 
+  async getPhotographerByUserId(userId: string): Promise<Photographer | undefined> {
+    const result = await db.select().from(photographers).where(eq(photographers.userId, userId));
+    return result[0];
+  }
+
+  // =========================
+  // PHOTOGRAPHER SERVICES
+  // =========================
+
+  async createPhotographerService(data: InsertPhotographerService): Promise<PhotographerService> {
+    const result = await db.insert(photographerServices).values({
+      ...data,
+      id: randomUUID(),
+    }).returning();
+    return result[0];
+  }
+
+  async getPhotographerService(id: string): Promise<PhotographerService | undefined> {
+    const result = await db.select().from(photographerServices).where(eq(photographerServices.id, id));
+    return result[0];
+  }
+
+  async getPhotographerServices(photographerId: string): Promise<PhotographerService[]> {
+    return db.select()
+      .from(photographerServices)
+      .where(and(
+        eq(photographerServices.photographerId, photographerId),
+        eq(photographerServices.isActive, true)
+      ));
+  }
+
+  async updatePhotographerService(id: string, updates: Partial<PhotographerService>): Promise<PhotographerService | undefined> {
+    const result = await db.update(photographerServices)
+      .set(updates)
+      .where(eq(photographerServices.id, id))
+      .returning();
+    return result[0];
+  }
+
+  async deletePhotographerService(id: string): Promise<void> {
+    await db.update(photographerServices)
+      .set({ isActive: false })
+      .where(eq(photographerServices.id, id));
+  }
+
   // =========================
   // REVIEWS (Verified purchases only)
   // =========================
@@ -822,6 +882,10 @@ export class DatabaseStorage implements IStorage {
     lastName: string | null;
     email: string | null;
     shootType: string;
+    serviceName: string | null;
+    serviceId: string | null;
+    locationDetails: string | null;
+    specialRequests: string | null;
     orderedAt: Date | null;
     bookingDateTime: string;
     totalPaid: number;
@@ -837,6 +901,10 @@ export class DatabaseStorage implements IStorage {
       lastName: users.lastName,
       email: users.email,
       shootType: shootBookings.shootType,
+      serviceId: shootBookings.serviceId,
+      serviceName: photographerServices.name,
+      locationDetails: shootBookings.locationDetails,
+      specialRequests: shootBookings.specialRequests,
       orderedAt: shootBookings.createdAt,
       date: shootBookings.date,
       startTime: shootBookings.startTime,
@@ -848,6 +916,7 @@ export class DatabaseStorage implements IStorage {
     })
       .from(shootBookings)
       .leftJoin(users, eq(shootBookings.clientId, users.id))
+      .leftJoin(photographerServices, eq(shootBookings.serviceId, photographerServices.id))
       .where(eq(shootBookings.photographerId, photographerId))
       .orderBy(sql`${shootBookings.createdAt} DESC`);
 
@@ -858,6 +927,10 @@ export class DatabaseStorage implements IStorage {
       lastName: b.lastName,
       email: b.email,
       shootType: b.shootType,
+      serviceName: b.serviceName,
+      serviceId: b.serviceId,
+      locationDetails: b.locationDetails,
+      specialRequests: b.specialRequests,
       orderedAt: b.orderedAt,
       bookingDateTime: `${b.date} ${b.startTime}`,
       totalPaid: b.totalPaid,
