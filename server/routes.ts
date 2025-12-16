@@ -2142,11 +2142,13 @@ export async function registerRoutes(
       const offset = parseInt(req.query.offset as string) || 0;
       const posts = await storage.getFeedPosts(limit, offset);
       
-      // Enrich posts with author and tagged entity info
+      // Enrich posts with author, tagged entities, and product/service info
       const enrichedPosts = await Promise.all(posts.map(async (post) => {
         const author = await storage.getUser(post.authorId);
         let taggedBusiness = null;
         let taggedPhotographer = null;
+        let product = null;
+        let service = null;
         
         if (post.taggedBusinessId) {
           taggedBusiness = await storage.getBusiness(post.taggedBusinessId);
@@ -2154,12 +2156,34 @@ export async function registerRoutes(
         if (post.taggedPhotographerId) {
           taggedPhotographer = await storage.getPhotographer(post.taggedPhotographerId);
         }
+        if (post.productId) {
+          product = await storage.getVendorProduct(post.productId);
+        }
+        if (post.serviceId) {
+          service = await storage.getVendorService(post.serviceId);
+        }
         
         return {
           ...post,
           author: author ? { id: author.id, name: author.name, profileImageUrl: author.profileImageUrl } : null,
           taggedBusiness: taggedBusiness ? { id: taggedBusiness.id, name: taggedBusiness.name, logoImage: taggedBusiness.logoImage } : null,
           taggedPhotographer: taggedPhotographer ? { id: taggedPhotographer.id, displayName: taggedPhotographer.displayName } : null,
+          product: product ? {
+            id: product.id,
+            name: product.name,
+            description: product.description,
+            price: product.price,
+            imageUrl: product.imageUrl,
+            businessId: product.businessId,
+          } : null,
+          service: service ? {
+            id: service.id,
+            name: service.name,
+            description: service.description,
+            price: service.price,
+            durationMinutes: service.durationMinutes,
+            businessId: service.businessId,
+          } : null,
         };
       }));
       
@@ -2179,11 +2203,21 @@ export async function registerRoutes(
 
     try {
       const schema = z.object({
-        content: z.string().min(1).max(2000),
+        content: z.string().max(2000).optional().default(""),
         imageUrl: z.string().optional(),
         taggedBusinessId: z.string().optional(),
         taggedPhotographerId: z.string().optional(),
-      });
+        postType: z.enum(['text', 'product', 'service']).optional(),
+        productId: z.string().optional(),
+        serviceId: z.string().optional(),
+      }).refine(data => {
+        // For text posts, content is required
+        if (!data.postType || data.postType === 'text') {
+          return data.content && data.content.length > 0;
+        }
+        // For product/service posts, content is optional
+        return true;
+      }, { message: "Content is required for text posts" });
 
       const data = schema.parse(req.body);
       const user = await storage.getUser(userId);
@@ -2196,6 +2230,38 @@ export async function registerRoutes(
       let authorType = 'customer';
       if (user.isVendor) authorType = 'vendor';
       if (user.isPhotographer) authorType = 'photographer';
+
+      // Validate product/service posts - only vendors can create them
+      if (data.postType === 'product' || data.postType === 'service') {
+        if (authorType !== 'vendor') {
+          return res.status(403).json({ 
+            error: "Only vendors can create product or service posts" 
+          });
+        }
+        
+        // Verify the product/service belongs to the vendor
+        if (data.postType === 'product' && data.productId) {
+          const product = await storage.getVendorProduct(data.productId);
+          if (!product) {
+            return res.status(404).json({ error: "Product not found" });
+          }
+          const business = await storage.getBusinessByOwner(userId);
+          if (!business || product.businessId !== business.id) {
+            return res.status(403).json({ error: "You can only share your own products" });
+          }
+        }
+        
+        if (data.postType === 'service' && data.serviceId) {
+          const service = await storage.getVendorService(data.serviceId);
+          if (!service) {
+            return res.status(404).json({ error: "Service not found" });
+          }
+          const business = await storage.getBusinessByOwner(userId);
+          if (!business || service.businessId !== business.id) {
+            return res.status(403).json({ error: "You can only share your own services" });
+          }
+        }
+      }
 
       // If customer, they must tag a business or photographer they've used
       if (authorType === 'customer') {
@@ -2228,10 +2294,13 @@ export async function registerRoutes(
       const post = await storage.createFeedPost({
         authorId: userId,
         authorType,
+        postType: data.postType || 'text',
         content: data.content,
         imageUrl: data.imageUrl,
         taggedBusinessId: data.taggedBusinessId,
         taggedPhotographerId: data.taggedPhotographerId,
+        productId: data.productId,
+        serviceId: data.serviceId,
       });
 
       res.json({ success: true, post });

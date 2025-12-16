@@ -2514,10 +2514,13 @@ export class DatabaseStorage implements IStorage {
         id,
         authorId: data.authorId,
         authorType: data.authorType,
+        postType: data.postType || 'text',
         content: data.content,
         imageUrl: data.imageUrl || null,
         taggedBusinessId: data.taggedBusinessId || null,
         taggedPhotographerId: data.taggedPhotographerId || null,
+        productId: data.productId || null,
+        serviceId: data.serviceId || null,
       })
       .returning();
     return post;

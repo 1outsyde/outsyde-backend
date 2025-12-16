@@ -660,11 +660,16 @@ export const feedPosts = pgTable("feed_posts", {
   authorId: varchar("author_id", { length: 36 }).notNull().references(() => users.id),
   authorType: text("author_type").notNull(), // 'customer', 'vendor', 'photographer'
 
+  postType: text("post_type").default("text").notNull(), // 'text', 'product', 'service'
+
   content: text("content").notNull(),
   imageUrl: text("image_url"),
 
   taggedBusinessId: varchar("tagged_business_id", { length: 36 }).references(() => businesses.id),
   taggedPhotographerId: varchar("tagged_photographer_id", { length: 36 }).references(() => photographers.id),
+
+  productId: varchar("product_id", { length: 36 }).references(() => vendorProducts.id),
+  serviceId: varchar("service_id", { length: 36 }).references(() => vendorServices.id),
 
   likesCount: integer("likes_count").default(0),
   commentsCount: integer("comments_count").default(0),

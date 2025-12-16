@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
-import { Loader2, Store, Palette, Package, Clock, Plus, Pencil, Trash2, Image, DollarSign } from "lucide-react";
+import { Loader2, Store, Palette, Package, Clock, Plus, Pencil, Trash2, Image, DollarSign, Share2 } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Button } from "@/components/ui/button";
@@ -427,6 +427,24 @@ function ProductsTab({ products, isLoading, businessId }: { products: VendorProd
     },
   });
 
+  const shareToFeedMutation = useMutation({
+    mutationFn: async (productId: string) => {
+      const res = await apiRequest("POST", "/api/feed", {
+        postType: "product",
+        productId,
+        content: "",
+      });
+      return res.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/feed"] });
+      toast({ title: "Shared to feed", description: "Product has been posted to your feed." });
+    },
+    onError: () => {
+      toast({ title: "Error", description: "Failed to share product.", variant: "destructive" });
+    },
+  });
+
   if (isLoading) {
     return (
       <div className="flex items-center justify-center py-12">
@@ -507,6 +525,16 @@ function ProductsTab({ products, isLoading, businessId }: { products: VendorProd
                     )}
                   </div>
                   <div className="flex gap-1">
+                    <Button
+                      size="icon"
+                      variant="ghost"
+                      onClick={() => shareToFeedMutation.mutate(product.id)}
+                      disabled={shareToFeedMutation.isPending}
+                      data-testid={`button-share-product-${product.id}`}
+                      title="Share to Feed"
+                    >
+                      <Share2 className="h-4 w-4" />
+                    </Button>
                     <Button
                       size="icon"
                       variant="ghost"
@@ -683,6 +711,24 @@ function ServicesTab({ services, isLoading, businessId }: { services: VendorServ
     },
   });
 
+  const shareToFeedMutation = useMutation({
+    mutationFn: async (serviceId: string) => {
+      const res = await apiRequest("POST", "/api/feed", {
+        postType: "service",
+        serviceId,
+        content: "",
+      });
+      return res.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/feed"] });
+      toast({ title: "Shared to feed", description: "Service has been posted to your feed." });
+    },
+    onError: () => {
+      toast({ title: "Error", description: "Failed to share service.", variant: "destructive" });
+    },
+  });
+
   if (isLoading) {
     return (
       <div className="flex items-center justify-center py-12">
@@ -764,6 +810,16 @@ function ServicesTab({ services, isLoading, businessId }: { services: VendorServ
                     </div>
                   </div>
                   <div className="flex gap-1">
+                    <Button
+                      size="icon"
+                      variant="ghost"
+                      onClick={() => shareToFeedMutation.mutate(service.id)}
+                      disabled={shareToFeedMutation.isPending}
+                      data-testid={`button-share-service-${service.id}`}
+                      title="Share to Feed"
+                    >
+                      <Share2 className="h-4 w-4" />
+                    </Button>
                     <Button
                       size="icon"
                       variant="ghost"

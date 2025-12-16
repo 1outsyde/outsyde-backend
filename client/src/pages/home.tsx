@@ -13,6 +13,7 @@ import heroImage from "@assets/generated_images/local_community_marketplace_hero
 import coffeeShopImage from "@assets/generated_images/coffee_shop_vendor_storefront.png";
 import type { Business, User } from "@shared/schema";
 import { getQueryFn, apiRequest } from "@/lib/queryClient";
+import { useToast } from "@/hooks/use-toast";
 
 interface HomePageProps {
   onViewBusiness: (id: string) => void;
@@ -22,10 +23,13 @@ interface FeedPostData {
   id: string;
   authorId: string;
   authorType: "customer" | "vendor" | "photographer";
+  postType?: "text" | "product" | "service";
   content: string;
   imageUrl?: string;
   taggedBusinessId?: string;
   taggedPhotographerId?: string;
+  productId?: string;
+  serviceId?: string;
   likesCount: number;
   commentsCount: number;
   createdAt: string;
@@ -42,6 +46,22 @@ interface FeedPostData {
   taggedPhotographer: {
     id: string;
     displayName: string;
+  } | null;
+  product?: {
+    id: string;
+    name: string;
+    description?: string | null;
+    price: number;
+    imageUrl?: string | null;
+    businessId: string;
+  } | null;
+  service?: {
+    id: string;
+    name: string;
+    description?: string | null;
+    price: number;
+    durationMinutes?: number | null;
+    businessId: string;
   } | null;
 }
 
@@ -89,6 +109,29 @@ export default function HomePage({ onViewBusiness }: HomePageProps) {
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["/api/feed"] });
+    },
+  });
+
+  const { toast } = useToast();
+
+  const addToCartMutation = useMutation({
+    mutationFn: async (productId: string) => {
+      const res = await apiRequest("POST", "/api/cart/items", { productId, quantity: 1 });
+      return res.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/cart"] });
+      toast({
+        title: "Added to cart",
+        description: "Product has been added to your cart.",
+      });
+    },
+    onError: () => {
+      toast({
+        title: "Error",
+        description: "Failed to add product to cart. Please try again.",
+        variant: "destructive",
+      });
     },
   });
 
@@ -262,6 +305,7 @@ export default function HomePage({ onViewBusiness }: HomePageProps) {
                 authorName={post.author?.name || "Unknown User"}
                 authorAvatar={post.author?.profileImageUrl}
                 authorType={post.authorType}
+                postType={post.postType || "text"}
                 taggedBusinessName={post.taggedBusiness?.name}
                 taggedPhotographerName={post.taggedPhotographer?.displayName}
                 postImage={post.imageUrl}
@@ -271,11 +315,37 @@ export default function HomePage({ onViewBusiness }: HomePageProps) {
                 timestamp={formatTimestamp(post.createdAt)}
                 isLiked={likedPosts.has(post.id)}
                 isSaved={savedPosts.has(post.id)}
+                product={post.product}
+                service={post.service}
                 onLike={toggleLikePost}
                 onSave={toggleSavePost}
                 onComment={(id) => console.log("Comment:", id)}
                 onShare={(id) => console.log("Share:", id)}
-                onAuthorClick={() => post.taggedBusiness && onViewBusiness(post.taggedBusiness.id)}
+                onAuthorClick={() => {
+                  if (post.product?.businessId) {
+                    onViewBusiness(post.product.businessId);
+                  } else if (post.service?.businessId) {
+                    onViewBusiness(post.service.businessId);
+                  } else if (post.taggedBusiness) {
+                    onViewBusiness(post.taggedBusiness.id);
+                  }
+                }}
+                onAddToCart={(productId) => {
+                  if (!user) {
+                    toast({
+                      title: "Login required",
+                      description: "Please log in to add items to your cart.",
+                      variant: "destructive",
+                    });
+                    return;
+                  }
+                  addToCartMutation.mutate(productId);
+                }}
+                onBookService={(serviceId) => {
+                  if (post.service?.businessId) {
+                    onViewBusiness(post.service.businessId);
+                  }
+                }}
               />
             ))
           ) : (
