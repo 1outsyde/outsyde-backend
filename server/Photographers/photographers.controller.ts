@@ -241,4 +241,172 @@ export class PhotographerController {
       res.status(500).json({ error: "Failed to get booking records" });
     }
   }
+
+  // GET /api/photographers/me/services - Get all services for authenticated photographer
+  static async getMyServices(req: Request, res: Response) {
+    try {
+      const photographerId = req.session?.photographerId;
+      const userId = req.session?.userId;
+      
+      if (!photographerId && !userId) {
+        return res.status(401).json({ error: "Not authenticated" });
+      }
+
+      let targetPhotographerId = photographerId;
+      if (!targetPhotographerId && userId) {
+        const photographer = await PhotographerService.getByUserId(userId);
+        if (!photographer) {
+          return res.status(404).json({ error: "Photographer not found" });
+        }
+        targetPhotographerId = photographer.id;
+      }
+
+      const services = await storage.getPhotographerServices(targetPhotographerId!);
+      res.json({ services });
+    } catch (error) {
+      console.error("Get photographer services error:", error);
+      res.status(500).json({ error: "Failed to get services" });
+    }
+  }
+
+  // POST /api/photographers/me/services - Create a new service
+  static async createService(req: Request, res: Response) {
+    try {
+      const photographerId = req.session?.photographerId;
+      const userId = req.session?.userId;
+      
+      if (!photographerId && !userId) {
+        return res.status(401).json({ error: "Not authenticated" });
+      }
+
+      let targetPhotographerId = photographerId;
+      if (!targetPhotographerId && userId) {
+        const photographer = await PhotographerService.getByUserId(userId);
+        if (!photographer) {
+          return res.status(404).json({ error: "Photographer not found" });
+        }
+        targetPhotographerId = photographer.id;
+      }
+
+      const { name, description, category, priceCents, isContactForPricing, estimatedDurationMinutes } = req.body;
+
+      if (!name) {
+        return res.status(400).json({ error: "Service name is required" });
+      }
+
+      const service = await storage.createPhotographerService({
+        photographerId: targetPhotographerId!,
+        name,
+        description,
+        category,
+        priceCents: isContactForPricing ? null : priceCents,
+        isContactForPricing: isContactForPricing || false,
+        estimatedDurationMinutes,
+      });
+
+      res.status(201).json({ service });
+    } catch (error) {
+      console.error("Create photographer service error:", error);
+      res.status(500).json({ error: "Failed to create service" });
+    }
+  }
+
+  // PATCH /api/photographers/me/services/:serviceId - Update a service
+  static async updateService(req: Request, res: Response) {
+    try {
+      const photographerId = req.session?.photographerId;
+      const userId = req.session?.userId;
+      
+      if (!photographerId && !userId) {
+        return res.status(401).json({ error: "Not authenticated" });
+      }
+
+      const { serviceId } = req.params;
+      const service = await storage.getPhotographerService(serviceId);
+      
+      if (!service) {
+        return res.status(404).json({ error: "Service not found" });
+      }
+
+      let targetPhotographerId = photographerId;
+      if (!targetPhotographerId && userId) {
+        const photographer = await PhotographerService.getByUserId(userId);
+        if (!photographer) {
+          return res.status(404).json({ error: "Photographer not found" });
+        }
+        targetPhotographerId = photographer.id;
+      }
+
+      if (service.photographerId !== targetPhotographerId) {
+        return res.status(403).json({ error: "Not authorized to update this service" });
+      }
+
+      const { name, description, category, priceCents, isContactForPricing, estimatedDurationMinutes, isActive } = req.body;
+
+      const updated = await storage.updatePhotographerService(serviceId, {
+        name,
+        description,
+        category,
+        priceCents: isContactForPricing ? null : priceCents,
+        isContactForPricing,
+        estimatedDurationMinutes,
+        isActive,
+      });
+
+      res.json({ service: updated });
+    } catch (error) {
+      console.error("Update photographer service error:", error);
+      res.status(500).json({ error: "Failed to update service" });
+    }
+  }
+
+  // DELETE /api/photographers/me/services/:serviceId - Delete a service
+  static async deleteService(req: Request, res: Response) {
+    try {
+      const photographerId = req.session?.photographerId;
+      const userId = req.session?.userId;
+      
+      if (!photographerId && !userId) {
+        return res.status(401).json({ error: "Not authenticated" });
+      }
+
+      const { serviceId } = req.params;
+      const service = await storage.getPhotographerService(serviceId);
+      
+      if (!service) {
+        return res.status(404).json({ error: "Service not found" });
+      }
+
+      let targetPhotographerId = photographerId;
+      if (!targetPhotographerId && userId) {
+        const photographer = await PhotographerService.getByUserId(userId);
+        if (!photographer) {
+          return res.status(404).json({ error: "Photographer not found" });
+        }
+        targetPhotographerId = photographer.id;
+      }
+
+      if (service.photographerId !== targetPhotographerId) {
+        return res.status(403).json({ error: "Not authorized to delete this service" });
+      }
+
+      await storage.deletePhotographerService(serviceId);
+      res.json({ success: true });
+    } catch (error) {
+      console.error("Delete photographer service error:", error);
+      res.status(500).json({ error: "Failed to delete service" });
+    }
+  }
+
+  // GET /api/photographers/:id/services - Get all services for a photographer (public)
+  static async getPublicServices(req: Request, res: Response) {
+    try {
+      const { id } = req.params;
+      const services = await storage.getPhotographerServices(id);
+      res.json({ services });
+    } catch (error) {
+      console.error("Get public photographer services error:", error);
+      res.status(500).json({ error: "Failed to get services" });
+    }
+  }
 }
