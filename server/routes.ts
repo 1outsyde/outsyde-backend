@@ -480,8 +480,8 @@ export async function registerRoutes(
       const endDateTime = new Date(dateTime.getTime() + 2 * 60 * 60 * 1000);
       const endTime = `${endDateTime.getHours().toString().padStart(2, "0")}:${endDateTime.getMinutes().toString().padStart(2, "0")}`;
 
-      // Calculate fees (10% platform fee)
-      const platformFee = Math.round(data.totalPriceCents * 0.10);
+      // Calculate fees (4% Outsyde platform fee)
+      const platformFee = Math.round(data.totalPriceCents * 0.04);
       const vendorNet = data.totalPriceCents - platformFee;
 
       const booking = await storage.createShootBooking({
@@ -812,8 +812,8 @@ export async function registerRoutes(
         return res.status(404).json({ error: "Service not found" });
       }
 
-      // Platform fee is 2% of the final price
-      const platformFeeInCents = Math.round(pricing.finalPriceCents * 0.02);
+      // Platform fee is 4% Outsyde fee of the final price
+      const platformFeeInCents = Math.round(pricing.finalPriceCents * 0.04);
 
       // Create the purchase record first
       const purchase = await storage.createAlaCartePurchase({

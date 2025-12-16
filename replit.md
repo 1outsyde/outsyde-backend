@@ -24,10 +24,11 @@ The Outsyde platform is built with a clear separation of concerns, utilizing a R
     -   The UI adopts a modern, social media-inspired design aesthetic.
     -   A consistent golden yellow color scheme is used for branding.
     -   Typefaces include Inter, DM Sans, and Poppins for a contemporary look.
+-   **Transaction Fees:** A 4% Outsyde platform fee is applied to all transactions (orders, bookings, and service purchases).
 -   **Key Features:**
     -   **Customer & Vendor Onboarding:** Multi-step signup processes for both customer and vendor types, capturing demographic, preference, and business-specific information. Vendors acknowledge a monthly subscription.
     -   **Verified Reviews:** A system ensuring only customers with completed bookings or orders can leave reviews.
-    -   **Outsyde Points:** A loyalty rewards program where customers earn points for purchases and can redeem them for discounts.
+    -   **Outsyde Points:** A loyalty rewards program where customers earn points for purchases and can redeem them for discounts. Note: Photographers do NOT earn or see loyalty points since they earn income from clients instead.
     -   **Referral System:** Users can earn points by referring new users, and new users receive bonus points upon joining via a referral.
     -   **Cart Management:** Database-backed shopping cart for authenticated users, with `localStorage` fallback for guests.
     -   **Push Notifications:** Web Push Notifications for cart abandonment reminders, managed via a service worker and VAPID keys.
