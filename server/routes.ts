@@ -2022,5 +2022,114 @@ export async function registerRoutes(
     }
   });
 
+  // ==================== REFUND REQUEST ROUTES ====================
+
+  // Create a refund request (vendors, photographers, or customers)
+  app.post("/api/refund-requests", async (req, res) => {
+    const userId = req.session?.userId;
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    try {
+      const schema = z.object({
+        targetType: z.enum(['order', 'appointment', 'shoot_booking']),
+        targetId: z.string(),
+        reason: z.string().min(1),
+        amount: z.number().int().positive(),
+      });
+
+      const data = schema.parse(req.body);
+      const user = await storage.getUser(userId);
+      
+      // Determine requester type
+      let requesterType = 'customer';
+      if (user?.isVendor) requesterType = 'vendor';
+      if (user?.isPhotographer) requesterType = 'photographer';
+
+      const request = await storage.createRefundRequest({
+        requesterId: userId,
+        requesterType,
+        targetType: data.targetType,
+        targetId: data.targetId,
+        reason: data.reason,
+        amount: data.amount,
+      });
+
+      res.json({ success: true, request });
+    } catch (error) {
+      if (error instanceof z.ZodError) {
+        return res.status(400).json({ error: "Invalid data", details: error.errors });
+      }
+      console.error("Create refund request error:", error);
+      res.status(500).json({ error: "Failed to create refund request" });
+    }
+  });
+
+  // Get user's refund requests
+  app.get("/api/refund-requests", async (req, res) => {
+    const userId = req.session?.userId;
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    try {
+      const requests = await storage.getRefundRequestsByRequester(userId);
+      res.json({ requests });
+    } catch (error) {
+      console.error("Get refund requests error:", error);
+      res.status(500).json({ error: "Failed to get refund requests" });
+    }
+  });
+
+  // Admin: Get all pending refund requests
+  app.get("/api/admin/refund-requests", requireAdmin, async (req, res) => {
+    try {
+      const requests = await storage.getAllPendingRefundRequests();
+      res.json({ requests });
+    } catch (error) {
+      console.error("Get pending refund requests error:", error);
+      res.status(500).json({ error: "Failed to get refund requests" });
+    }
+  });
+
+  // Admin: Update refund request status
+  app.patch("/api/admin/refund-requests/:id", requireAdmin, async (req, res) => {
+    try {
+      const { id } = req.params;
+      const schema = z.object({
+        status: z.enum(['approved', 'rejected', 'pending']),
+        adminNotes: z.string().optional(),
+      });
+
+      const data = schema.parse(req.body);
+      const adminUser = (req as any).adminUser;
+
+      const updates: any = {
+        status: data.status,
+        adminNotes: data.adminNotes,
+      };
+
+      if (data.status !== 'pending') {
+        updates.resolvedAt = new Date();
+        updates.resolvedBy = adminUser.id;
+      }
+
+      const request = await storage.updateRefundRequest(id, updates);
+
+      if (!request) {
+        return res.status(404).json({ error: "Refund request not found" });
+      }
+
+      res.json({ success: true, request });
+    } catch (error) {
+      if (error instanceof z.ZodError) {
+        return res.status(400).json({ error: "Invalid data", details: error.errors });
+      }
+      console.error("Update refund request error:", error);
+      res.status(500).json({ error: "Failed to update refund request" });
+    }
+  });
+
   return httpServer;
 }

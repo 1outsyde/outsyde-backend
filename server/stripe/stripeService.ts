@@ -126,6 +126,22 @@ export class StripeService {
       amount: amountInCents,
     });
   }
+
+  // =========================
+  // SUBSCRIPTION PRODUCTS SETUP
+  // =========================
+
+  async setupSubscriptionProducts() {
+    // Subscription products are managed via Stripe dashboard
+    // This is a placeholder for future automated product creation
+    console.log('[stripe] Subscription products setup complete (using existing products)');
+  }
+
+  async setupAlaCarteProducts() {
+    // A la carte products are managed via Stripe dashboard
+    // This is a placeholder for future automated product creation
+    console.log('[stripe] A la carte products setup complete (using existing products)');
+  }
 }
 
 export const stripeService = new StripeService();

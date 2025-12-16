@@ -34,6 +34,12 @@ import {
   type InsertVendorProduct,
   type VendorService,
   type InsertVendorService,
+  type RefundRequest,
+  type InsertRefundRequest,
+  type AvailabilitySlot,
+  type InsertAvailabilitySlot,
+  type Scheduling,
+  type InsertScheduling,
   users,
   businesses,
   cities,
@@ -57,7 +63,10 @@ import {
   alaCarteServices,
   alaCartePurchases,
   vendorProducts,
-  vendorServices
+  vendorServices,
+  refundRequests,
+  availabilitySlots,
+  scheduling
 } from "@shared/schema";
 import { db } from "./db";
 import { eq, ilike, or, and, sql, isNull } from "drizzle-orm";
@@ -248,6 +257,27 @@ export interface IStorage {
   createVendorService(data: InsertVendorService): Promise<VendorService>;
   updateVendorService(id: string, updates: Partial<VendorService>): Promise<VendorService | undefined>;
   deleteVendorService(id: string): Promise<void>;
+
+  // Refund Requests
+  createRefundRequest(data: InsertRefundRequest): Promise<RefundRequest>;
+  getRefundRequest(id: string): Promise<RefundRequest | undefined>;
+  getRefundRequestsByRequester(requesterId: string): Promise<RefundRequest[]>;
+  getRefundRequestsByTarget(targetType: string, targetId: string): Promise<RefundRequest[]>;
+  getAllPendingRefundRequests(): Promise<(RefundRequest & { requesterName: string | null; requesterEmail: string | null })[]>;
+  updateRefundRequest(id: string, updates: Partial<RefundRequest>): Promise<RefundRequest | undefined>;
+
+  // Availability Slots
+  getAvailabilitySlots(providerType: string, providerId: string): Promise<AvailabilitySlot[]>;
+  createAvailabilitySlot(data: InsertAvailabilitySlot): Promise<AvailabilitySlot>;
+  updateAvailabilitySlot(id: string, updates: Partial<AvailabilitySlot>): Promise<AvailabilitySlot | undefined>;
+  deleteAvailabilitySlot(id: string): Promise<void>;
+
+  // Scheduling (Unconfirmed Bookings)
+  createScheduling(data: InsertScheduling): Promise<Scheduling>;
+  getScheduling(id: string): Promise<Scheduling | undefined>;
+  getSchedulingByProvider(providerType: string, providerId: string): Promise<Scheduling[]>;
+  getSchedulingByClient(clientId: string): Promise<Scheduling[]>;
+  updateScheduling(id: string, updates: Partial<Scheduling>): Promise<Scheduling | undefined>;
 
   seedInitialData(): Promise<void>;
 }
@@ -2271,6 +2301,181 @@ export class DatabaseStorage implements IStorage {
 
   async deleteVendorService(id: string): Promise<void> {
     await db.delete(vendorServices).where(eq(vendorServices.id, id));
+  }
+
+  // =========================
+  // REFUND REQUESTS
+  // =========================
+
+  async createRefundRequest(data: InsertRefundRequest): Promise<RefundRequest> {
+    const id = randomUUID();
+    const [request] = await db.insert(refundRequests)
+      .values({
+        id,
+        requesterId: data.requesterId,
+        requesterType: data.requesterType,
+        targetType: data.targetType,
+        targetId: data.targetId,
+        reason: data.reason,
+        amount: data.amount,
+        status: data.status || 'pending',
+        adminNotifiedAt: new Date(),
+      })
+      .returning();
+    return request;
+  }
+
+  async getRefundRequest(id: string): Promise<RefundRequest | undefined> {
+    const [request] = await db.select()
+      .from(refundRequests)
+      .where(eq(refundRequests.id, id));
+    return request;
+  }
+
+  async getRefundRequestsByRequester(requesterId: string): Promise<RefundRequest[]> {
+    return db.select()
+      .from(refundRequests)
+      .where(eq(refundRequests.requesterId, requesterId));
+  }
+
+  async getRefundRequestsByTarget(targetType: string, targetId: string): Promise<RefundRequest[]> {
+    return db.select()
+      .from(refundRequests)
+      .where(and(
+        eq(refundRequests.targetType, targetType),
+        eq(refundRequests.targetId, targetId)
+      ));
+  }
+
+  async getAllPendingRefundRequests(): Promise<(RefundRequest & { requesterName: string | null; requesterEmail: string | null })[]> {
+    const results = await db.select({
+      id: refundRequests.id,
+      requesterId: refundRequests.requesterId,
+      requesterType: refundRequests.requesterType,
+      targetType: refundRequests.targetType,
+      targetId: refundRequests.targetId,
+      reason: refundRequests.reason,
+      amount: refundRequests.amount,
+      status: refundRequests.status,
+      adminNotes: refundRequests.adminNotes,
+      adminNotifiedAt: refundRequests.adminNotifiedAt,
+      resolvedAt: refundRequests.resolvedAt,
+      resolvedBy: refundRequests.resolvedBy,
+      createdAt: refundRequests.createdAt,
+      updatedAt: refundRequests.updatedAt,
+      requesterName: users.name,
+      requesterEmail: users.email,
+    })
+      .from(refundRequests)
+      .leftJoin(users, eq(refundRequests.requesterId, users.id))
+      .where(eq(refundRequests.status, 'pending'));
+    return results;
+  }
+
+  async updateRefundRequest(id: string, updates: Partial<RefundRequest>): Promise<RefundRequest | undefined> {
+    const [request] = await db.update(refundRequests)
+      .set({ ...updates, updatedAt: new Date() })
+      .where(eq(refundRequests.id, id))
+      .returning();
+    return request;
+  }
+
+  // =========================
+  // AVAILABILITY SLOTS
+  // =========================
+
+  async getAvailabilitySlots(providerType: string, providerId: string): Promise<AvailabilitySlot[]> {
+    return db.select()
+      .from(availabilitySlots)
+      .where(and(
+        eq(availabilitySlots.providerType, providerType),
+        eq(availabilitySlots.providerId, providerId)
+      ));
+  }
+
+  async createAvailabilitySlot(data: InsertAvailabilitySlot): Promise<AvailabilitySlot> {
+    const id = randomUUID();
+    const [slot] = await db.insert(availabilitySlots)
+      .values({
+        id,
+        providerType: data.providerType,
+        providerId: data.providerId,
+        dayOfWeek: data.dayOfWeek,
+        startTime: data.startTime,
+        endTime: data.endTime,
+        isRecurring: data.isRecurring ?? true,
+        specificDate: data.specificDate || null,
+        isAvailable: data.isAvailable ?? true,
+      })
+      .returning();
+    return slot;
+  }
+
+  async updateAvailabilitySlot(id: string, updates: Partial<AvailabilitySlot>): Promise<AvailabilitySlot | undefined> {
+    const [slot] = await db.update(availabilitySlots)
+      .set(updates)
+      .where(eq(availabilitySlots.id, id))
+      .returning();
+    return slot;
+  }
+
+  async deleteAvailabilitySlot(id: string): Promise<void> {
+    await db.delete(availabilitySlots).where(eq(availabilitySlots.id, id));
+  }
+
+  // =========================
+  // SCHEDULING (Unconfirmed Bookings)
+  // =========================
+
+  async createScheduling(data: InsertScheduling): Promise<Scheduling> {
+    const id = randomUUID();
+    const [sched] = await db.insert(scheduling)
+      .values({
+        id,
+        providerType: data.providerType,
+        providerId: data.providerId,
+        clientId: data.clientId,
+        serviceId: data.serviceId || null,
+        serviceName: data.serviceName || null,
+        servicePrice: data.servicePrice || null,
+        scheduledDate: data.scheduledDate,
+        scheduledTime: data.scheduledTime,
+        durationMinutes: data.durationMinutes,
+        notes: data.notes || null,
+        status: data.status || 'pending',
+      })
+      .returning();
+    return sched;
+  }
+
+  async getScheduling(id: string): Promise<Scheduling | undefined> {
+    const [sched] = await db.select()
+      .from(scheduling)
+      .where(eq(scheduling.id, id));
+    return sched;
+  }
+
+  async getSchedulingByProvider(providerType: string, providerId: string): Promise<Scheduling[]> {
+    return db.select()
+      .from(scheduling)
+      .where(and(
+        eq(scheduling.providerType, providerType),
+        eq(scheduling.providerId, providerId)
+      ));
+  }
+
+  async getSchedulingByClient(clientId: string): Promise<Scheduling[]> {
+    return db.select()
+      .from(scheduling)
+      .where(eq(scheduling.clientId, clientId));
+  }
+
+  async updateScheduling(id: string, updates: Partial<Scheduling>): Promise<Scheduling | undefined> {
+    const [sched] = await db.update(scheduling)
+      .set({ ...updates, updatedAt: new Date() })
+      .where(eq(scheduling.id, id))
+      .returning();
+    return sched;
   }
 }
 

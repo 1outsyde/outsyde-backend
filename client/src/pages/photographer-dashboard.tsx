@@ -1,12 +1,32 @@
+import { useState } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
-import { Camera, DollarSign, Calendar, MessageCircle, Star, Eye, ExternalLink, AlertCircle, Check, Loader2 } from "lucide-react";
+import { Camera, DollarSign, Calendar, MessageCircle, Star, Eye, ExternalLink, AlertCircle, Check, Loader2, RotateCcw } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { useToast } from "@/hooks/use-toast";
 import { apiRequest } from "@/lib/queryClient";
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogDescription } from "@/components/ui/dialog";
+import { Textarea } from "@/components/ui/textarea";
+import { Label } from "@/components/ui/label";
 import type { Photographer, User } from "@shared/schema";
+
+interface BookingRecord {
+  recordId: string;
+  clientId: string;
+  firstName: string | null;
+  lastName: string | null;
+  email: string | null;
+  shootType: string;
+  orderedAt: string | null;
+  bookingDateTime: string;
+  totalPaid: number;
+  platformFee: number;
+  vendorNet: number;
+  paymentIntentId: string | null;
+  status: string | null;
+}
 
 interface PhotographerDashboardPageProps {
   onLogout: () => void;
@@ -20,10 +40,61 @@ interface StripeStatus {
 
 export default function PhotographerDashboardPage({ onLogout }: PhotographerDashboardPageProps) {
   const { toast } = useToast();
+  const [refundDialogOpen, setRefundDialogOpen] = useState(false);
+  const [selectedRecord, setSelectedRecord] = useState<BookingRecord | null>(null);
+  const [refundReason, setRefundReason] = useState("");
+  const [refundAttempted, setRefundAttempted] = useState(false);
 
   const { data: user } = useQuery<User | null>({
     queryKey: ["/api/auth/user"],
   });
+
+  // Fetch photographer bookings
+  const { data: bookingsData } = useQuery<{ bookings: BookingRecord[] }>({
+    queryKey: ["/api/photographers/me/bookings"],
+    enabled: !!user,
+  });
+
+  // Refund request mutation
+  const refundMutation = useMutation({
+    mutationFn: async (data: { targetType: string; targetId: string; reason: string; amount: number }) => {
+      const response = await apiRequest("POST", "/api/refund-requests", data);
+      return response.json();
+    },
+    onSuccess: () => {
+      toast({
+        title: "Refund Request Submitted",
+        description: "Admin has been notified and will review your request.",
+      });
+      closeRefundDialog();
+    },
+    onError: () => {
+      toast({
+        title: "Error",
+        description: "Failed to submit refund request. Please try again.",
+        variant: "destructive",
+      });
+    },
+  });
+
+  const handleRefundRequest = () => {
+    setRefundAttempted(true);
+    if (!selectedRecord || !refundReason.trim()) return;
+    
+    refundMutation.mutate({
+      targetType: "appointment",
+      targetId: selectedRecord.recordId,
+      reason: refundReason,
+      amount: selectedRecord.totalPaid,
+    });
+  };
+
+  const closeRefundDialog = () => {
+    setRefundDialogOpen(false);
+    setSelectedRecord(null);
+    setRefundReason("");
+    setRefundAttempted(false);
+  };
 
   const { data: photographer, isLoading: photographerLoading } = useQuery<Photographer>({
     queryKey: ["/api/photographers/me"],
@@ -312,18 +383,114 @@ export default function PhotographerDashboardPage({ onLogout }: PhotographerDash
 
           <Card className="overflow-visible">
             <CardHeader className="pb-2">
-              <CardTitle className="text-lg">Upcoming Bookings</CardTitle>
+              <CardTitle className="text-lg">Bookings</CardTitle>
             </CardHeader>
             <CardContent>
-              <div className="text-center py-8 text-muted-foreground">
-                <Calendar className="h-12 w-12 mx-auto mb-3 opacity-50" />
-                <p className="text-sm">No upcoming bookings</p>
-                <p className="text-xs mt-1">Bookings will appear here once clients book your services</p>
-              </div>
+              {bookingsData?.bookings && bookingsData.bookings.length > 0 ? (
+                <div className="space-y-3">
+                  {bookingsData.bookings.map((booking) => (
+                    <div
+                      key={booking.recordId}
+                      className="flex items-center justify-between p-3 rounded-lg border bg-card"
+                      data-testid={`booking-${booking.recordId}`}
+                    >
+                      <div className="flex-1 min-w-0">
+                        <p className="font-medium text-sm truncate">
+                          {booking.firstName || ''} {booking.lastName || ''}
+                        </p>
+                        <p className="text-xs text-muted-foreground truncate">{booking.email || 'No email'}</p>
+                        <p className="text-xs text-muted-foreground">{booking.shootType}</p>
+                        <p className="text-xs text-muted-foreground">{new Date(booking.bookingDateTime).toLocaleString()}</p>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <div className="text-right">
+                          <p className="font-medium text-sm text-green-600 dark:text-green-400">
+                            ${(booking.vendorNet / 100).toFixed(2)}
+                          </p>
+                          <Badge variant="secondary" className="text-xs">
+                            {booking.status || 'pending'}
+                          </Badge>
+                        </div>
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          onClick={() => {
+                            setSelectedRecord(booking);
+                            setRefundDialogOpen(true);
+                          }}
+                          data-testid={`button-refund-${booking.recordId}`}
+                        >
+                          <RotateCcw className="h-3 w-3" />
+                        </Button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <div className="text-center py-8 text-muted-foreground">
+                  <Calendar className="h-12 w-12 mx-auto mb-3 opacity-50" />
+                  <p className="text-sm">No bookings yet</p>
+                  <p className="text-xs mt-1">Bookings will appear here once clients book your services</p>
+                </div>
+              )}
             </CardContent>
           </Card>
         </div>
       </main>
+
+      {/* Refund Request Dialog */}
+      <Dialog open={refundDialogOpen} onOpenChange={(open) => !open && closeRefundDialog()}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Request Refund</DialogTitle>
+            <DialogDescription>
+              Submit a refund request for this booking. Admin will be notified and review your request.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4 py-4">
+            <div>
+              <p className="text-sm text-muted-foreground mb-2">
+                <strong>Client:</strong> {selectedRecord?.firstName || ''} {selectedRecord?.lastName || ''} ({selectedRecord?.email || 'No email'})
+              </p>
+              <p className="text-sm text-muted-foreground">
+                <strong>Amount:</strong> ${((selectedRecord?.totalPaid || 0) / 100).toFixed(2)}
+              </p>
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="refund-reason">Reason for Refund <span className="text-destructive">*</span></Label>
+              <Textarea
+                id="refund-reason"
+                placeholder="Please explain why you're requesting this refund..."
+                value={refundReason}
+                onChange={(e) => setRefundReason(e.target.value)}
+                className={refundAttempted && !refundReason.trim() ? "border-destructive" : ""}
+                data-testid="input-refund-reason"
+              />
+              {refundAttempted && !refundReason.trim() && (
+                <p className="text-xs text-destructive" data-testid="text-refund-reason-error">
+                  Please provide a reason for the refund request.
+                </p>
+              )}
+            </div>
+          </div>
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={closeRefundDialog}
+              data-testid="button-cancel-refund"
+            >
+              Cancel
+            </Button>
+            <Button
+              onClick={handleRefundRequest}
+              disabled={!refundReason.trim() || refundMutation.isPending}
+              data-testid="button-submit-refund"
+            >
+              {refundMutation.isPending ? "Submitting..." : "Submit Request"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

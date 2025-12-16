@@ -212,6 +212,16 @@ export const photographers = pgTable("photographers", {
   stripeOnboardingComplete: boolean("stripe_onboarding_complete").default(false),
   specialties: text("specialties").array(),
 
+  hoursOfOperation: jsonb("hours_of_operation").$type<{
+    monday?: { open: string; close: string; closed?: boolean };
+    tuesday?: { open: string; close: string; closed?: boolean };
+    wednesday?: { open: string; close: string; closed?: boolean };
+    thursday?: { open: string; close: string; closed?: boolean };
+    friday?: { open: string; close: string; closed?: boolean };
+    saturday?: { open: string; close: string; closed?: boolean };
+    sunday?: { open: string; close: string; closed?: boolean };
+  }>(),
+
   createdAt: timestamp("created_at").defaultNow().notNull(),
 });
 
@@ -570,6 +580,78 @@ export const alaCartePurchases = pgTable("ala_carte_purchases", {
 });
 
 /* =====================================================
+   AVAILABILITY SLOTS (Businesses + Photographers)
+===================================================== */
+export const availabilitySlots = pgTable("availability_slots", {
+  id: varchar("id", { length: 36 }).primaryKey().default(sql`gen_random_uuid()`),
+
+  providerType: text("provider_type").notNull(),
+  providerId: varchar("provider_id", { length: 36 }).notNull(),
+
+  dayOfWeek: integer("day_of_week").notNull(),
+  startTime: text("start_time").notNull(),
+  endTime: text("end_time").notNull(),
+
+  isRecurring: boolean("is_recurring").default(true),
+  specificDate: text("specific_date"),
+
+  isAvailable: boolean("is_available").default(true),
+
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+});
+
+/* =====================================================
+   SCHEDULING (Unconfirmed Bookings)
+===================================================== */
+export const scheduling = pgTable("scheduling", {
+  id: varchar("id", { length: 36 }).primaryKey().default(sql`gen_random_uuid()`),
+
+  providerType: text("provider_type").notNull(),
+  providerId: varchar("provider_id", { length: 36 }).notNull(),
+  clientId: varchar("client_id", { length: 36 }).notNull().references(() => users.id),
+
+  serviceId: varchar("service_id", { length: 36 }),
+  serviceName: text("service_name"),
+  servicePrice: integer("service_price"),
+
+  scheduledDate: text("scheduled_date").notNull(),
+  scheduledTime: text("scheduled_time").notNull(),
+  durationMinutes: integer("duration_minutes").notNull(),
+
+  notes: text("notes"),
+
+  status: text("status").default("pending"),
+
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+
+/* =====================================================
+   REFUND REQUESTS
+===================================================== */
+export const refundRequests = pgTable("refund_requests", {
+  id: varchar("id", { length: 36 }).primaryKey().default(sql`gen_random_uuid()`),
+
+  requesterId: varchar("requester_id", { length: 36 }).notNull().references(() => users.id),
+  requesterType: text("requester_type").notNull(),
+
+  targetType: text("target_type").notNull(),
+  targetId: varchar("target_id", { length: 36 }).notNull(),
+
+  reason: text("reason").notNull(),
+  amount: integer("amount").notNull(),
+
+  status: text("status").default("pending"),
+  adminNotes: text("admin_notes"),
+  adminNotifiedAt: timestamp("admin_notified_at"),
+  resolvedAt: timestamp("resolved_at"),
+  resolvedBy: varchar("resolved_by", { length: 36 }),
+
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+
+/* =====================================================
    INSERT SCHEMAS (Zod)
 ===================================================== */
 export const insertUserSchema = createInsertSchema(users).omit({
@@ -662,6 +744,26 @@ export const insertCartItemSchema = createInsertSchema(cartItems).omit({
   id: true,
   createdAt: true,
   updatedAt: true,
+});
+
+export const insertAvailabilitySlotSchema = createInsertSchema(availabilitySlots).omit({
+  id: true,
+  createdAt: true,
+});
+
+export const insertSchedulingSchema = createInsertSchema(scheduling).omit({
+  id: true,
+  createdAt: true,
+  updatedAt: true,
+});
+
+export const insertRefundRequestSchema = createInsertSchema(refundRequests).omit({
+  id: true,
+  createdAt: true,
+  updatedAt: true,
+  adminNotifiedAt: true,
+  resolvedAt: true,
+  resolvedBy: true,
 });
 
 /* =====================================================
@@ -801,3 +903,12 @@ export type FulfillmentTask = typeof fulfillmentTasks.$inferSelect;
 export type AlaCarteService = typeof alaCarteServices.$inferSelect;
 
 export type AlaCartePurchase = typeof alaCartePurchases.$inferSelect;
+
+export type AvailabilitySlot = typeof availabilitySlots.$inferSelect;
+export type InsertAvailabilitySlot = z.infer<typeof insertAvailabilitySlotSchema>;
+
+export type Scheduling = typeof scheduling.$inferSelect;
+export type InsertScheduling = z.infer<typeof insertSchedulingSchema>;
+
+export type RefundRequest = typeof refundRequests.$inferSelect;
+export type InsertRefundRequest = z.infer<typeof insertRefundRequestSchema>;

@@ -31,6 +31,19 @@ The Outsyde platform is built with a clear separation of concerns, utilizing a R
     -   **Referral System:** Users can earn points by referring new users, and new users receive bonus points upon joining via a referral.
     -   **Cart Management:** Database-backed shopping cart for authenticated users, with `localStorage` fallback for guests.
     -   **Push Notifications:** Web Push Notifications for cart abandonment reminders, managed via a service worker and VAPID keys.
+    -   **Refund Request System:** Vendors, photographers, and customers can request refunds via dashboards. Refund requests are stored in the database and admin is notified for processing.
+
+## Recent Changes (Dec 16, 2025)
+- Added refund request button and dialog to vendor dashboard (vendor-dashboard.tsx)
+  - Shows customer first name, last name, email, and total amount
+  - Includes reason textarea with validation (required field)
+  - Submit button disabled when reason empty or mutation pending
+  - Toast notifications for success/error feedback
+- Added refund request button and dialog to photographer dashboard (photographer-dashboard.tsx)
+  - Shows booking records with client details and refund request capability
+  - Same validation UX as vendor dashboard
+- Fixed Stripe initialization error by adding stub methods for setupSubscriptionProducts and setupAlaCarteProducts
+- Photographer bookings endpoint returns proper `bookings` format for frontend consumption
 
 ## External Dependencies
 -   **PostgreSQL:** Primary database for all application data.

@@ -1,6 +1,8 @@
 import { useState } from "react";
-import { useQuery } from "@tanstack/react-query";
-import { LayoutDashboard, Package, Calendar, MessageCircle, Settings, PlusCircle, Crown, Store, Users, ClipboardList } from "lucide-react";
+import { useQuery, useMutation } from "@tanstack/react-query";
+import { LayoutDashboard, Package, Calendar, MessageCircle, Settings, PlusCircle, Crown, Store, Users, ClipboardList, RotateCcw } from "lucide-react";
+import { queryClient, apiRequest } from "@/lib/queryClient";
+import { useToast } from "@/hooks/use-toast";
 import { format } from "date-fns";
 
 interface OrderRecord {
@@ -26,6 +28,9 @@ import VendorSubscriptionDashboard from "@/components/VendorSubscriptionDashboar
 import StorefrontEditor from "@/components/StorefrontEditor";
 import ThemeToggle from "@/components/ThemeToggle";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogDescription } from "@/components/ui/dialog";
+import { Textarea } from "@/components/ui/textarea";
+import { Label } from "@/components/ui/label";
 
 interface VendorDashboardPageProps {
   onLogout: () => void;
@@ -33,6 +38,52 @@ interface VendorDashboardPageProps {
 
 export default function VendorDashboardPage({ onLogout }: VendorDashboardPageProps) {
   const [activeSection, setActiveSection] = useState("dashboard");
+  const [refundDialogOpen, setRefundDialogOpen] = useState(false);
+  const [selectedRecord, setSelectedRecord] = useState<OrderRecord | null>(null);
+  const [refundReason, setRefundReason] = useState("");
+  const [refundAttempted, setRefundAttempted] = useState(false);
+  const { toast } = useToast();
+
+  // Refund request mutation
+  const refundMutation = useMutation({
+    mutationFn: async (data: { targetType: string; targetId: string; reason: string; amount: number }) => {
+      const response = await apiRequest("POST", "/api/refund-requests", data);
+      return response.json();
+    },
+    onSuccess: () => {
+      toast({
+        title: "Refund Request Submitted",
+        description: "Admin has been notified and will review your request.",
+      });
+      closeRefundDialog();
+    },
+    onError: () => {
+      toast({
+        title: "Error",
+        description: "Failed to submit refund request. Please try again.",
+        variant: "destructive",
+      });
+    },
+  });
+
+  const handleRefundRequest = () => {
+    setRefundAttempted(true);
+    if (!selectedRecord || !refundReason.trim()) return;
+    
+    refundMutation.mutate({
+      targetType: selectedRecord.recordType === 'order' ? 'order' : 'appointment',
+      targetId: selectedRecord.recordId,
+      reason: refundReason,
+      amount: selectedRecord.totalPaid,
+    });
+  };
+
+  const closeRefundDialog = () => {
+    setRefundDialogOpen(false);
+    setSelectedRecord(null);
+    setRefundReason("");
+    setRefundAttempted(false);
+  };
 
   // todo: remove mock functionality
   const stats = {
@@ -232,6 +283,7 @@ export default function VendorDashboardPage({ onLogout }: VendorDashboardPagePro
                           <th className="text-right p-3 font-medium text-muted-foreground text-sm">Platform Fee</th>
                           <th className="text-right p-3 font-medium text-muted-foreground text-sm">Your Net</th>
                           <th className="text-left p-3 font-medium text-muted-foreground text-sm">Status</th>
+                          <th className="text-center p-3 font-medium text-muted-foreground text-sm">Actions</th>
                         </tr>
                       </thead>
                       <tbody>
@@ -300,6 +352,20 @@ export default function VendorDashboardPage({ onLogout }: VendorDashboardPagePro
                                 {record.status || 'Unknown'}
                               </span>
                             </td>
+                            <td className="p-3 text-center">
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                onClick={() => {
+                                  setSelectedRecord(record);
+                                  setRefundDialogOpen(true);
+                                }}
+                                data-testid={`button-refund-${record.recordId}`}
+                              >
+                                <RotateCcw className="h-3 w-3 mr-1" />
+                                Request Refund
+                              </Button>
+                            </td>
                           </tr>
                         ))}
                       </tbody>
@@ -342,6 +408,61 @@ export default function VendorDashboardPage({ onLogout }: VendorDashboardPagePro
           </main>
         </div>
       </div>
+
+      {/* Refund Request Dialog */}
+      <Dialog open={refundDialogOpen} onOpenChange={(open) => !open && closeRefundDialog()}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Request Refund</DialogTitle>
+            <DialogDescription>
+              Submit a refund request for this {selectedRecord?.recordType === 'order' ? 'order' : 'booking'}.
+              Admin will be notified and review your request.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4 py-4">
+            <div>
+              <p className="text-sm text-muted-foreground mb-2">
+                <strong>Customer:</strong> {selectedRecord?.firstName || ''} {selectedRecord?.lastName || ''} ({selectedRecord?.email || 'No email'})
+              </p>
+              <p className="text-sm text-muted-foreground">
+                <strong>Amount:</strong> ${((selectedRecord?.totalPaid || 0) / 100).toFixed(2)}
+              </p>
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="refund-reason">Reason for Refund <span className="text-destructive">*</span></Label>
+              <Textarea
+                id="refund-reason"
+                placeholder="Please explain why you're requesting this refund..."
+                value={refundReason}
+                onChange={(e) => setRefundReason(e.target.value)}
+                className={refundAttempted && !refundReason.trim() ? "border-destructive" : ""}
+                data-testid="input-refund-reason"
+              />
+              {refundAttempted && !refundReason.trim() && (
+                <p className="text-xs text-destructive" data-testid="text-refund-reason-error">
+                  Please provide a reason for the refund request.
+                </p>
+              )}
+            </div>
+          </div>
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={closeRefundDialog}
+              data-testid="button-cancel-refund"
+            >
+              Cancel
+            </Button>
+            <Button
+              onClick={handleRefundRequest}
+              disabled={!refundReason.trim() || refundMutation.isPending}
+              data-testid="button-submit-refund"
+            >
+              {refundMutation.isPending ? "Submitting..." : "Submit Request"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </SidebarProvider>
   );
 }

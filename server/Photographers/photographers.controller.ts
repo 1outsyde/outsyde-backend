@@ -234,8 +234,8 @@ export class PhotographerController {
         targetPhotographerId = photographer.id;
       }
 
-      const records = await storage.getPhotographerBookingRecords(targetPhotographerId!);
-      res.json({ records });
+      const bookings = await storage.getPhotographerBookingRecords(targetPhotographerId!);
+      res.json({ bookings });
     } catch (error) {
       console.error("Get photographer booking records error:", error);
       res.status(500).json({ error: "Failed to get booking records" });
