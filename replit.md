@@ -34,6 +34,13 @@ The Outsyde platform is built with a clear separation of concerns, utilizing a R
     -   **Refund Request System:** Vendors, photographers, and customers can request refunds via dashboards. Refund requests are stored in the database and admin is notified for processing.
 
 ## Recent Changes (Dec 16, 2025)
+- **Fixed signup functionality for all user types (customer, vendor, photographer)**
+  - Added "What You Offer" step to vendor signup (step 3) allowing businesses to choose: products, services, or both
+  - The offerType selection maps to hasProducts/hasServices boolean fields in the business record
+  - Fixed createBusiness storage function to include hasProducts and hasServices fields
+  - Fixed photographers table by adding missing `specialties` column
+  - Fixed photographers table by dropping NOT NULL constraint on `stripe_account_id` (nullable during signup, filled during Stripe onboarding)
+  - Vendor signup now has 7 steps: Account → Business Info → What You Offer → Business Details → Location → Online Presence → Subscription
 - Added refund request button and dialog to vendor dashboard (vendor-dashboard.tsx)
   - Shows customer first name, last name, email, and total amount
   - Includes reason textarea with validation (required field)
