@@ -1,16 +1,19 @@
 import { useState } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
-import { Camera, DollarSign, Calendar, MessageCircle, Star, Eye, ExternalLink, AlertCircle, Check, Loader2, RotateCcw } from "lucide-react";
+import { Camera, DollarSign, Calendar, MessageCircle, Star, Eye, ExternalLink, AlertCircle, Check, Loader2, RotateCcw, Plus, Pencil, Trash2, MapPin, FileText, Phone } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { useToast } from "@/hooks/use-toast";
-import { apiRequest } from "@/lib/queryClient";
+import { apiRequest, queryClient } from "@/lib/queryClient";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogDescription } from "@/components/ui/dialog";
 import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
-import type { Photographer, User } from "@shared/schema";
+import { Input } from "@/components/ui/input";
+import { Switch } from "@/components/ui/switch";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import type { Photographer, User, PhotographerService } from "@shared/schema";
 
 interface BookingRecord {
   recordId: string;
@@ -19,6 +22,10 @@ interface BookingRecord {
   lastName: string | null;
   email: string | null;
   shootType: string;
+  serviceName: string | null;
+  serviceId: string | null;
+  locationDetails: string | null;
+  specialRequests: string | null;
   orderedAt: string | null;
   bookingDateTime: string;
   totalPaid: number;
@@ -44,6 +51,16 @@ export default function PhotographerDashboardPage({ onLogout }: PhotographerDash
   const [selectedRecord, setSelectedRecord] = useState<BookingRecord | null>(null);
   const [refundReason, setRefundReason] = useState("");
   const [refundAttempted, setRefundAttempted] = useState(false);
+  const [activeTab, setActiveTab] = useState("bookings");
+
+  const [serviceDialogOpen, setServiceDialogOpen] = useState(false);
+  const [editingService, setEditingService] = useState<PhotographerService | null>(null);
+  const [serviceName, setServiceName] = useState("");
+  const [serviceDescription, setServiceDescription] = useState("");
+  const [serviceCategory, setServiceCategory] = useState("");
+  const [servicePriceCents, setServicePriceCents] = useState<number | null>(null);
+  const [serviceIsContactForPricing, setServiceIsContactForPricing] = useState(false);
+  const [serviceEstimatedDuration, setServiceEstimatedDuration] = useState<number | null>(null);
 
   const { data: user } = useQuery<User | null>({
     queryKey: ["/api/auth/user"],
@@ -53,6 +70,57 @@ export default function PhotographerDashboardPage({ onLogout }: PhotographerDash
   const { data: bookingsData } = useQuery<{ bookings: BookingRecord[] }>({
     queryKey: ["/api/photographers/me/bookings"],
     enabled: !!user,
+  });
+
+  // Fetch photographer services
+  const { data: servicesData, isLoading: servicesLoading } = useQuery<{ services: PhotographerService[] }>({
+    queryKey: ["/api/photographers/me/services"],
+    enabled: !!user,
+  });
+
+  // Service mutations
+  const createServiceMutation = useMutation({
+    mutationFn: async (data: { name: string; description?: string; category?: string; priceCents?: number | null; isContactForPricing?: boolean; estimatedDurationMinutes?: number | null }) => {
+      const response = await apiRequest("POST", "/api/photographers/me/services", data);
+      return response.json();
+    },
+    onSuccess: () => {
+      toast({ title: "Service Created", description: "Your new service has been added." });
+      queryClient.invalidateQueries({ queryKey: ["/api/photographers/me/services"] });
+      closeServiceDialog();
+    },
+    onError: () => {
+      toast({ title: "Error", description: "Failed to create service.", variant: "destructive" });
+    },
+  });
+
+  const updateServiceMutation = useMutation({
+    mutationFn: async ({ id, ...data }: { id: string; name?: string; description?: string; category?: string; priceCents?: number | null; isContactForPricing?: boolean; estimatedDurationMinutes?: number | null }) => {
+      const response = await apiRequest("PATCH", `/api/photographers/me/services/${id}`, data);
+      return response.json();
+    },
+    onSuccess: () => {
+      toast({ title: "Service Updated", description: "Your service has been updated." });
+      queryClient.invalidateQueries({ queryKey: ["/api/photographers/me/services"] });
+      closeServiceDialog();
+    },
+    onError: () => {
+      toast({ title: "Error", description: "Failed to update service.", variant: "destructive" });
+    },
+  });
+
+  const deleteServiceMutation = useMutation({
+    mutationFn: async (id: string) => {
+      const response = await apiRequest("DELETE", `/api/photographers/me/services/${id}`);
+      return response.json();
+    },
+    onSuccess: () => {
+      toast({ title: "Service Deleted", description: "Your service has been removed." });
+      queryClient.invalidateQueries({ queryKey: ["/api/photographers/me/services"] });
+    },
+    onError: () => {
+      toast({ title: "Error", description: "Failed to delete service.", variant: "destructive" });
+    },
   });
 
   // Refund request mutation
@@ -94,6 +162,57 @@ export default function PhotographerDashboardPage({ onLogout }: PhotographerDash
     setSelectedRecord(null);
     setRefundReason("");
     setRefundAttempted(false);
+  };
+
+  const openServiceDialog = (service?: PhotographerService) => {
+    if (service) {
+      setEditingService(service);
+      setServiceName(service.name);
+      setServiceDescription(service.description || "");
+      setServiceCategory(service.category || "");
+      setServicePriceCents(service.priceCents);
+      setServiceIsContactForPricing(service.isContactForPricing || false);
+      setServiceEstimatedDuration(service.estimatedDurationMinutes);
+    } else {
+      setEditingService(null);
+      setServiceName("");
+      setServiceDescription("");
+      setServiceCategory("");
+      setServicePriceCents(null);
+      setServiceIsContactForPricing(false);
+      setServiceEstimatedDuration(null);
+    }
+    setServiceDialogOpen(true);
+  };
+
+  const closeServiceDialog = () => {
+    setServiceDialogOpen(false);
+    setEditingService(null);
+    setServiceName("");
+    setServiceDescription("");
+    setServiceCategory("");
+    setServicePriceCents(null);
+    setServiceIsContactForPricing(false);
+    setServiceEstimatedDuration(null);
+  };
+
+  const handleSaveService = () => {
+    if (!serviceName.trim()) return;
+    
+    const data = {
+      name: serviceName.trim(),
+      description: serviceDescription.trim() || undefined,
+      category: serviceCategory.trim() || undefined,
+      priceCents: serviceIsContactForPricing ? null : servicePriceCents,
+      isContactForPricing: serviceIsContactForPricing,
+      estimatedDurationMinutes: serviceEstimatedDuration,
+    };
+
+    if (editingService) {
+      updateServiceMutation.mutate({ id: editingService.id, ...data });
+    } else {
+      createServiceMutation.mutate(data);
+    }
   };
 
   const { data: photographer, isLoading: photographerLoading } = useQuery<Photographer>({
@@ -382,58 +501,167 @@ export default function PhotographerDashboardPage({ onLogout }: PhotographerDash
           </div>
 
           <Card className="overflow-visible">
-            <CardHeader className="pb-2">
-              <CardTitle className="text-lg">Bookings</CardTitle>
-            </CardHeader>
-            <CardContent>
-              {bookingsData?.bookings && bookingsData.bookings.length > 0 ? (
-                <div className="space-y-3">
-                  {bookingsData.bookings.map((booking) => (
-                    <div
-                      key={booking.recordId}
-                      className="flex items-center justify-between p-3 rounded-lg border bg-card"
-                      data-testid={`booking-${booking.recordId}`}
-                    >
-                      <div className="flex-1 min-w-0">
-                        <p className="font-medium text-sm truncate">
-                          {booking.firstName || ''} {booking.lastName || ''}
-                        </p>
-                        <p className="text-xs text-muted-foreground truncate">{booking.email || 'No email'}</p>
-                        <p className="text-xs text-muted-foreground">{booking.shootType}</p>
-                        <p className="text-xs text-muted-foreground">{new Date(booking.bookingDateTime).toLocaleString()}</p>
-                      </div>
-                      <div className="flex items-center gap-2">
-                        <div className="text-right">
-                          <p className="font-medium text-sm text-green-600 dark:text-green-400">
-                            ${(booking.vendorNet / 100).toFixed(2)}
-                          </p>
-                          <Badge variant="secondary" className="text-xs">
-                            {booking.status || 'pending'}
-                          </Badge>
-                        </div>
-                        <Button
-                          size="sm"
-                          variant="outline"
-                          onClick={() => {
-                            setSelectedRecord(booking);
-                            setRefundDialogOpen(true);
-                          }}
-                          data-testid={`button-refund-${booking.recordId}`}
-                        >
-                          <RotateCcw className="h-3 w-3" />
-                        </Button>
-                      </div>
+            <Tabs value={activeTab} onValueChange={setActiveTab}>
+              <CardHeader className="pb-2">
+                <div className="flex items-center justify-between gap-2 flex-wrap">
+                  <TabsList>
+                    <TabsTrigger value="bookings" data-testid="tab-bookings">Bookings</TabsTrigger>
+                    <TabsTrigger value="services" data-testid="tab-services">My Services</TabsTrigger>
+                  </TabsList>
+                  {activeTab === "services" && (
+                    <Button size="sm" onClick={() => openServiceDialog()} data-testid="button-add-service">
+                      <Plus className="h-4 w-4 mr-1" /> Add Service
+                    </Button>
+                  )}
+                </div>
+              </CardHeader>
+              <CardContent>
+                <TabsContent value="bookings" className="mt-0">
+                  {bookingsData?.bookings && bookingsData.bookings.length > 0 ? (
+                    <div className="space-y-4">
+                      {bookingsData.bookings.map((booking) => (
+                        <Card key={booking.recordId} className="overflow-visible" data-testid={`booking-${booking.recordId}`}>
+                          <CardContent className="p-4">
+                            <div className="flex items-start justify-between gap-4 flex-wrap">
+                              <div className="flex-1 min-w-0 space-y-2">
+                                <div className="flex items-center gap-2 flex-wrap">
+                                  <p className="font-semibold">
+                                    {booking.firstName || ''} {booking.lastName || ''}
+                                  </p>
+                                  <Badge variant="secondary" className="text-xs">
+                                    {booking.status || 'pending'}
+                                  </Badge>
+                                </div>
+                                <p className="text-sm text-muted-foreground">{booking.email || 'No email'}</p>
+                                
+                                <div className="flex items-center gap-2 text-sm">
+                                  <Camera className="h-4 w-4 text-muted-foreground" />
+                                  <span className="font-medium">{booking.serviceName || booking.shootType}</span>
+                                </div>
+                                
+                                <div className="flex items-center gap-2 text-sm text-muted-foreground">
+                                  <Calendar className="h-4 w-4" />
+                                  <span>{new Date(booking.bookingDateTime).toLocaleString()}</span>
+                                </div>
+                                
+                                {booking.locationDetails && (
+                                  <div className="flex items-start gap-2 text-sm text-muted-foreground">
+                                    <MapPin className="h-4 w-4 mt-0.5 shrink-0" />
+                                    <span>{booking.locationDetails}</span>
+                                  </div>
+                                )}
+                                
+                                {booking.specialRequests && (
+                                  <div className="mt-3 p-3 rounded-md bg-muted/50">
+                                    <div className="flex items-center gap-2 text-sm font-medium mb-1">
+                                      <FileText className="h-4 w-4" />
+                                      <span>Client Notes</span>
+                                    </div>
+                                    <p className="text-sm text-muted-foreground">{booking.specialRequests}</p>
+                                  </div>
+                                )}
+                              </div>
+                              
+                              <div className="flex flex-col items-end gap-2">
+                                <p className="font-semibold text-lg text-green-600 dark:text-green-400">
+                                  ${(booking.vendorNet / 100).toFixed(2)}
+                                </p>
+                                <Button
+                                  size="sm"
+                                  variant="outline"
+                                  onClick={() => {
+                                    setSelectedRecord(booking);
+                                    setRefundDialogOpen(true);
+                                  }}
+                                  data-testid={`button-refund-${booking.recordId}`}
+                                >
+                                  <RotateCcw className="h-3 w-3 mr-1" /> Refund
+                                </Button>
+                              </div>
+                            </div>
+                          </CardContent>
+                        </Card>
+                      ))}
                     </div>
-                  ))}
-                </div>
-              ) : (
-                <div className="text-center py-8 text-muted-foreground">
-                  <Calendar className="h-12 w-12 mx-auto mb-3 opacity-50" />
-                  <p className="text-sm">No bookings yet</p>
-                  <p className="text-xs mt-1">Bookings will appear here once clients book your services</p>
-                </div>
-              )}
-            </CardContent>
+                  ) : (
+                    <div className="text-center py-8 text-muted-foreground">
+                      <Calendar className="h-12 w-12 mx-auto mb-3 opacity-50" />
+                      <p className="text-sm">No bookings yet</p>
+                      <p className="text-xs mt-1">Bookings will appear here once clients book your services</p>
+                    </div>
+                  )}
+                </TabsContent>
+
+                <TabsContent value="services" className="mt-0">
+                  {servicesLoading ? (
+                    <div className="flex items-center justify-center py-8">
+                      <Loader2 className="h-6 w-6 animate-spin" />
+                    </div>
+                  ) : servicesData?.services && servicesData.services.length > 0 ? (
+                    <div className="space-y-3">
+                      {servicesData.services.map((service) => (
+                        <div
+                          key={service.id}
+                          className="flex items-center justify-between p-4 rounded-lg border bg-card"
+                          data-testid={`service-${service.id}`}
+                        >
+                          <div className="flex-1 min-w-0">
+                            <p className="font-medium">{service.name}</p>
+                            {service.category && (
+                              <Badge variant="outline" className="text-xs mt-1">{service.category}</Badge>
+                            )}
+                            {service.description && (
+                              <p className="text-sm text-muted-foreground mt-1 line-clamp-2">{service.description}</p>
+                            )}
+                            <div className="flex items-center gap-4 mt-2 text-sm text-muted-foreground">
+                              {service.isContactForPricing ? (
+                                <div className="flex items-center gap-1">
+                                  <Phone className="h-3 w-3" />
+                                  <span>Contact for pricing</span>
+                                </div>
+                              ) : service.priceCents ? (
+                                <span className="font-medium text-foreground">${(service.priceCents / 100).toFixed(2)}</span>
+                              ) : null}
+                              {service.estimatedDurationMinutes && (
+                                <span>{service.estimatedDurationMinutes} min</span>
+                              )}
+                            </div>
+                          </div>
+                          <div className="flex items-center gap-2">
+                            <Button
+                              size="icon"
+                              variant="ghost"
+                              onClick={() => openServiceDialog(service)}
+                              data-testid={`button-edit-service-${service.id}`}
+                            >
+                              <Pencil className="h-4 w-4" />
+                            </Button>
+                            <Button
+                              size="icon"
+                              variant="ghost"
+                              onClick={() => deleteServiceMutation.mutate(service.id)}
+                              disabled={deleteServiceMutation.isPending}
+                              data-testid={`button-delete-service-${service.id}`}
+                            >
+                              <Trash2 className="h-4 w-4" />
+                            </Button>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <div className="text-center py-8 text-muted-foreground">
+                      <Camera className="h-12 w-12 mx-auto mb-3 opacity-50" />
+                      <p className="text-sm">No services yet</p>
+                      <p className="text-xs mt-1">Add custom services like wedding photography, studio shoots, etc.</p>
+                      <Button className="mt-4" onClick={() => openServiceDialog()} data-testid="button-add-first-service">
+                        <Plus className="h-4 w-4 mr-1" /> Add Your First Service
+                      </Button>
+                    </div>
+                  )}
+                </TabsContent>
+              </CardContent>
+            </Tabs>
           </Card>
         </div>
       </main>
@@ -487,6 +715,106 @@ export default function PhotographerDashboardPage({ onLogout }: PhotographerDash
               data-testid="button-submit-refund"
             >
               {refundMutation.isPending ? "Submitting..." : "Submit Request"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Service Dialog */}
+      <Dialog open={serviceDialogOpen} onOpenChange={(open) => !open && closeServiceDialog()}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>{editingService ? "Edit Service" : "Add New Service"}</DialogTitle>
+            <DialogDescription>
+              {editingService 
+                ? "Update your service details below."
+                : "Add a custom service like wedding photography, studio shoots, music video cinematography, etc."
+              }
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4 py-4">
+            <div className="space-y-2">
+              <Label htmlFor="service-name">Service Name *</Label>
+              <Input
+                id="service-name"
+                placeholder="e.g., Wedding Photography, Studio Session"
+                value={serviceName}
+                onChange={(e) => setServiceName(e.target.value)}
+                data-testid="input-service-name"
+              />
+            </div>
+
+            <div className="space-y-2">
+              <Label htmlFor="service-category">Category</Label>
+              <Input
+                id="service-category"
+                placeholder="e.g., Weddings, Portraits, Events"
+                value={serviceCategory}
+                onChange={(e) => setServiceCategory(e.target.value)}
+                data-testid="input-service-category"
+              />
+            </div>
+
+            <div className="space-y-2">
+              <Label htmlFor="service-description">Description</Label>
+              <Textarea
+                id="service-description"
+                placeholder="Describe what's included in this service..."
+                value={serviceDescription}
+                onChange={(e) => setServiceDescription(e.target.value)}
+                data-testid="input-service-description"
+              />
+            </div>
+
+            <div className="flex items-center justify-between">
+              <Label htmlFor="contact-for-pricing">Contact for Pricing</Label>
+              <Switch
+                id="contact-for-pricing"
+                checked={serviceIsContactForPricing}
+                onCheckedChange={setServiceIsContactForPricing}
+                data-testid="switch-contact-for-pricing"
+              />
+            </div>
+
+            {!serviceIsContactForPricing && (
+              <div className="space-y-2">
+                <Label htmlFor="service-price">Price ($)</Label>
+                <Input
+                  id="service-price"
+                  type="number"
+                  min="0"
+                  step="0.01"
+                  placeholder="0.00"
+                  value={servicePriceCents ? (servicePriceCents / 100).toFixed(2) : ""}
+                  onChange={(e) => setServicePriceCents(e.target.value ? Math.round(parseFloat(e.target.value) * 100) : null)}
+                  data-testid="input-service-price"
+                />
+              </div>
+            )}
+
+            <div className="space-y-2">
+              <Label htmlFor="service-duration">Estimated Duration (minutes)</Label>
+              <Input
+                id="service-duration"
+                type="number"
+                min="0"
+                placeholder="e.g., 60, 120, 180"
+                value={serviceEstimatedDuration || ""}
+                onChange={(e) => setServiceEstimatedDuration(e.target.value ? parseInt(e.target.value) : null)}
+                data-testid="input-service-duration"
+              />
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={closeServiceDialog} data-testid="button-cancel-service">
+              Cancel
+            </Button>
+            <Button
+              onClick={handleSaveService}
+              disabled={!serviceName.trim() || createServiceMutation.isPending || updateServiceMutation.isPending}
+              data-testid="button-save-service"
+            >
+              {createServiceMutation.isPending || updateServiceMutation.isPending ? "Saving..." : editingService ? "Update Service" : "Add Service"}
             </Button>
           </DialogFooter>
         </DialogContent>
