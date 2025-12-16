@@ -34,6 +34,28 @@ The Outsyde platform is built with a clear separation of concerns, utilizing a R
     -   **Refund Request System:** Vendors, photographers, and customers can request refunds via dashboards. Refund requests are stored in the database and admin is notified for processing.
 
 ## Recent Changes (Dec 16, 2025)
+- **Photographer Dual Pricing Model**
+  - Services now support two pricing models: "hourly" (e.g., $150/hr) and "package" (e.g., $600 for 3 hours)
+  - Schema updated with `pricingModel`, `hourlyRateCents`, `packageHours` columns in `photographer_services` table
+  - Create/edit service dialog lets photographers choose pricing model and enter appropriate values
+  - Service display shows pricing correctly: "$X/hr" for hourly or "$Y for Xhr(s)" for packages
+  - API endpoints updated to persist and return all pricing fields
+- **Role-Aware Navigation for Photographers**
+  - BottomNav component shows different tabs based on user role (customer, vendor, photographer)
+  - Photographers see: Dashboard, Post, Home, Search, Messages tabs
+  - "Post" tab leads to a dedicated create-post page where photographers can share updates
+- **Collaboration Feature**
+  - "Collaborate" button appears on business pages when viewed by a photographer
+  - Clicking opens messages with the business to discuss collaborations
+  - Photographers and businesses can both post to the main feed
+- **Points/Loyalty System Hidden for Photographers**
+  - Photographers don't earn/see loyalty points (they earn income from clients instead)
+  - Profile page hides "My Points" menu and LoyaltyPointsCard for photographers
+  - Cart drawer shows 0 points balance for photographers
+- **Create Post Page**
+  - New dedicated page at `/create-post` for creating feed posts
+  - Supports all user types: customers, vendors, photographers
+  - Role-aware UI descriptions and placeholder text
 - **Photographer Custom Services System**
   - Added `photographer_services` table to support custom services with flexible pricing (fixed price or "contact for pricing")
   - Enhanced `shoot_bookings` table with `serviceId`, `locationDetails`, and `specialRequests` columns
