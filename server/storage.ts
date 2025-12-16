@@ -364,6 +364,7 @@ export class DatabaseStorage implements IStorage {
       name: insertUser.name,
       phone: insertUser.phone || null,
       isVendor: insertUser.isVendor ?? false,
+      isPhotographer: insertUser.isPhotographer ?? false,
 
       address: insertUser.address || null,
       city: insertUser.city || null,
