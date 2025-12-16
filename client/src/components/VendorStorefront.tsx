@@ -183,7 +183,8 @@ export default function VendorStorefront({
           <TabsList className="w-full justify-start border-b rounded-none h-auto p-0 bg-transparent">
             <TabsTrigger
               value="about"
-              className="rounded-none border-b-2 border-transparent data-[state=active]:border-primary data-[state=active]:bg-transparent px-6 py-3"
+              className="rounded-none border-b-2 data-[state=active]:bg-transparent px-6 py-3"
+              style={activeTab === 'about' ? (hasBrandColor ? { borderColor: brandColors.primary } : { borderColor: 'hsl(var(--primary))' }) : { borderColor: 'transparent' }}
               data-testid="tab-about"
             >
               About
@@ -191,7 +192,8 @@ export default function VendorStorefront({
             {products.length > 0 && (
               <TabsTrigger
                 value="products"
-                className="rounded-none border-b-2 border-transparent data-[state=active]:border-primary data-[state=active]:bg-transparent px-6 py-3"
+                className="rounded-none border-b-2 data-[state=active]:bg-transparent px-6 py-3"
+                style={activeTab === 'products' ? (hasBrandColor ? { borderColor: brandColors.primary } : { borderColor: 'hsl(var(--primary))' }) : { borderColor: 'transparent' }}
                 data-testid="tab-products"
               >
                 Products
@@ -200,7 +202,8 @@ export default function VendorStorefront({
             {services.length > 0 && (
               <TabsTrigger
                 value="services"
-                className="rounded-none border-b-2 border-transparent data-[state=active]:border-primary data-[state=active]:bg-transparent px-6 py-3"
+                className="rounded-none border-b-2 data-[state=active]:bg-transparent px-6 py-3"
+                style={activeTab === 'services' ? (hasBrandColor ? { borderColor: brandColors.primary } : { borderColor: 'hsl(var(--primary))' }) : { borderColor: 'transparent' }}
                 data-testid="tab-services"
               >
                 Services
@@ -209,7 +212,8 @@ export default function VendorStorefront({
             {services.length > 0 && (
               <TabsTrigger
                 value="book"
-                className="rounded-none border-b-2 border-transparent data-[state=active]:border-primary data-[state=active]:bg-transparent px-6 py-3"
+                className="rounded-none border-b-2 data-[state=active]:bg-transparent px-6 py-3"
+                style={activeTab === 'book' ? (hasBrandColor ? { borderColor: brandColors.primary } : { borderColor: 'hsl(var(--primary))' }) : { borderColor: 'transparent' }}
                 data-testid="tab-book"
               >
                 Book
@@ -217,7 +221,8 @@ export default function VendorStorefront({
             )}
             <TabsTrigger
               value="chat"
-              className="rounded-none border-b-2 border-transparent data-[state=active]:border-primary data-[state=active]:bg-transparent px-6 py-3"
+              className="rounded-none border-b-2 data-[state=active]:bg-transparent px-6 py-3"
+              style={activeTab === 'chat' ? (hasBrandColor ? { borderColor: brandColors.primary } : { borderColor: 'hsl(var(--primary))' }) : { borderColor: 'transparent' }}
               data-testid="tab-chat"
             >
               Chat

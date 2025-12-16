@@ -35,6 +35,15 @@ The Outsyde platform is built with a clear separation of concerns, utilizing a R
     -   **Refund Request System:** Vendors, photographers, and customers can request refunds via dashboards. Refund requests are stored in the database and admin is notified for processing.
 
 ## Recent Changes (Dec 16, 2025)
+- **Storefront Brand Color Customization**
+  - Both photographers and businesses can customize their storefront brand colors
+  - Color presets available: Golden Yellow, Rose Pink, Ocean Blue, Forest Green, Royal Purple, Sunset Orange, Teal, Slate Gray
+  - Custom color picker and hex input for any color
+  - Brand colors stored in `brandColors` JSONB column with `primary` property
+  - Photographer dashboard has "Storefront" tab with cover image, logo image, and brand color selection
+  - Business StorefrontEditor has "Branding" tab with same customization options
+  - VendorStorefront component applies brand colors to Follow/Collaborate buttons and tab active borders
+  - Preview section shows how brand color will appear on buttons and text
 - **Photographer Dashboard Profile Tab**
   - Added "Profile" tab to photographer dashboard alongside Bookings and Services tabs
   - Photographers can edit: displayName, bio, city, state, portfolioUrl, hourlyRate, and specialties
