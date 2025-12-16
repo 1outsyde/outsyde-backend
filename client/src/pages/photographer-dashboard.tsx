@@ -295,7 +295,8 @@ export default function PhotographerDashboardPage({ onLogout }: PhotographerDash
       setProfileCity(photographer.city || "");
       setProfileState(photographer.state || "");
       setProfilePortfolioUrl(photographer.portfolioUrl || "");
-      setProfileHourlyRate(photographer.hourlyRate?.toString() || "");
+      // Convert cents to dollars for display
+      setProfileHourlyRate(photographer.hourlyRate ? (photographer.hourlyRate / 100).toString() : "");
       setProfileSpecialties(photographer.specialties || []);
     }
   }, [photographer]);
@@ -329,7 +330,7 @@ export default function PhotographerDashboardPage({ onLogout }: PhotographerDash
       city: profileCity.trim(),
       state: profileState.trim(),
       portfolioUrl: profilePortfolioUrl.trim(),
-      hourlyRate: parseInt(profileHourlyRate) || 0,
+      hourlyRate: parseFloat(profileHourlyRate) || 0,
       specialties: profileSpecialties,
     });
   };

@@ -346,6 +346,13 @@ export async function registerRoutes(
         const user = await storage.getUser(oauthUser.claims.sub);
         if (user) {
           const { password: _, ...safeUser } = user;
+          // Check if user has a photographer record (in case isPhotographer wasn't set properly)
+          if (!safeUser.isPhotographer) {
+            const photographer = await storage.getPhotographerByUserId(user.id);
+            if (photographer) {
+              (safeUser as any).isPhotographer = true;
+            }
+          }
           return res.json(safeUser);
         }
       }
@@ -362,6 +369,13 @@ export async function registerRoutes(
       }
 
       const { password: _, ...safeUser } = user;
+      // Check if user has a photographer record (in case isPhotographer wasn't set properly)
+      if (!safeUser.isPhotographer) {
+        const photographer = await storage.getPhotographerByUserId(userId);
+        if (photographer) {
+          (safeUser as any).isPhotographer = true;
+        }
+      }
       res.json(safeUser);
     } catch (error) {
       console.error("Get user error:", error);

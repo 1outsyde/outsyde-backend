@@ -60,8 +60,9 @@ export class PhotographerController {
       if (city !== undefined) updates.city = city;
       if (state !== undefined) updates.state = state;
       if (portfolioUrl !== undefined) updates.portfolioUrl = portfolioUrl;
-      if (hourlyRate !== undefined) updates.hourlyRate = hourlyRate;
-      if (specialties !== undefined) updates.specialties = specialties;
+      // Convert hourlyRate from dollars to cents for storage
+      if (hourlyRate !== undefined) updates.hourlyRate = Math.round(Number(hourlyRate) * 100);
+      if (specialties !== undefined && Array.isArray(specialties)) updates.specialties = specialties;
 
       const updated = await PhotographerService.update(targetPhotographerId!, updates);
       if (!updated) {
