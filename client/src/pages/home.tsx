@@ -1,17 +1,48 @@
 import { useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { formatDistanceToNow } from "date-fns";
 import HeroSection from "@/components/HeroSection";
 import SearchFilter from "@/components/SearchFilter";
 import FeedPost from "@/components/FeedPost";
 import BusinessCard from "@/components/BusinessCard";
+import CreatePostDialog from "@/components/CreatePostDialog";
 import { Skeleton } from "@/components/ui/skeleton";
+import { Button } from "@/components/ui/button";
+import { PenSquare } from "lucide-react";
 import heroImage from "@assets/generated_images/local_community_marketplace_hero.png";
 import coffeeShopImage from "@assets/generated_images/coffee_shop_vendor_storefront.png";
-import hairSalonImage from "@assets/generated_images/hair_salon_vendor_storefront.png";
-import type { Business } from "@shared/schema";
+import type { Business, User } from "@shared/schema";
+import { getQueryFn, apiRequest } from "@/lib/queryClient";
 
 interface HomePageProps {
   onViewBusiness: (id: string) => void;
+}
+
+interface FeedPostData {
+  id: string;
+  authorId: string;
+  authorType: "customer" | "vendor" | "photographer";
+  content: string;
+  imageUrl?: string;
+  taggedBusinessId?: string;
+  taggedPhotographerId?: string;
+  likesCount: number;
+  commentsCount: number;
+  createdAt: string;
+  author: {
+    id: string;
+    name: string;
+    profileImageUrl?: string;
+  } | null;
+  taggedBusiness: {
+    id: string;
+    name: string;
+    logoImage?: string;
+  } | null;
+  taggedPhotographer: {
+    id: string;
+    displayName: string;
+  } | null;
 }
 
 export default function HomePage({ onViewBusiness }: HomePageProps) {
@@ -23,10 +54,43 @@ export default function HomePage({ onViewBusiness }: HomePageProps) {
   const [savedPosts, setSavedPosts] = useState<Set<string>>(new Set());
   const [likedBusinesses, setLikedBusinesses] = useState<Set<string>>(new Set());
 
+  const queryClient = useQueryClient();
+
+  const { data: user } = useQuery<User | null>({
+    queryKey: ["/api/auth/user"],
+    queryFn: getQueryFn({ on401: "returnNull" }),
+    retry: false,
+  });
+
   const { data: businessesResponse, isLoading: businessesLoading } = useQuery<{ businesses: Business[] }>({
     queryKey: ["/api/businesses"],
   });
   const businesses = businessesResponse?.businesses;
+
+  const { data: feedResponse, isLoading: feedLoading } = useQuery<{ posts: FeedPostData[] }>({
+    queryKey: ["/api/feed"],
+  });
+  const feedPosts = feedResponse?.posts || [];
+
+  const likeMutation = useMutation({
+    mutationFn: async (postId: string) => {
+      const res = await apiRequest("POST", `/api/feed/${postId}/like`);
+      return res.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/feed"] });
+    },
+  });
+
+  const unlikeMutation = useMutation({
+    mutationFn: async (postId: string) => {
+      const res = await apiRequest("DELETE", `/api/feed/${postId}/like`);
+      return res.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/feed"] });
+    },
+  });
 
   const categories = [
     "All",
@@ -49,8 +113,10 @@ export default function HomePage({ onViewBusiness }: HomePageProps) {
     const newLiked = new Set(likedPosts);
     if (newLiked.has(id)) {
       newLiked.delete(id);
+      unlikeMutation.mutate(id);
     } else {
       newLiked.add(id);
+      likeMutation.mutate(id);
     }
     setLikedPosts(newLiked);
   };
@@ -75,40 +141,6 @@ export default function HomePage({ onViewBusiness }: HomePageProps) {
     setLikedBusinesses(newLiked);
   };
 
-  // todo: remove mock functionality
-  const feedPosts = [
-    {
-      id: "1",
-      businessName: "Sunrise Coffee Co.",
-      businessCategory: "Coffee & Cafe",
-      postImage: coffeeShopImage,
-      caption: "Fresh batch of our signature caramel lattes ready to go! Stop by today and get 20% off your first order. We're supporting local farmers with every cup you enjoy.",
-      likes: 234,
-      comments: 18,
-      timestamp: "2h ago",
-    },
-    {
-      id: "2",
-      businessName: "Bella's Hair Studio",
-      businessCategory: "Beauty",
-      postImage: hairSalonImage,
-      caption: "New fall colors are in! Book your appointment now and get a free deep conditioning treatment. Limited slots available this week.",
-      likes: 189,
-      comments: 12,
-      timestamp: "4h ago",
-    },
-    {
-      id: "3",
-      businessName: "Green Valley Organics",
-      businessCategory: "Food & Drinks",
-      postImage: coffeeShopImage,
-      caption: "Fresh harvest just arrived from local farms! Organic vegetables, fruits, and herbs. Support local agriculture and eat healthy.",
-      likes: 312,
-      comments: 28,
-      timestamp: "6h ago",
-    },
-  ];
-
   const defaultImage = coffeeShopImage;
 
   const mapBusinessToCard = (business: Business) => ({
@@ -124,6 +156,14 @@ export default function HomePage({ onViewBusiness }: HomePageProps) {
     hasProducts: business.hasProducts || false,
     hasServices: business.hasServices || false,
   });
+
+  const formatTimestamp = (dateStr: string) => {
+    try {
+      return formatDistanceToNow(new Date(dateStr), { addSuffix: true });
+    } catch {
+      return "recently";
+    }
+  };
 
   return (
     <div className="min-h-screen pb-20 md:pb-0" data-testid="page-home">
@@ -183,23 +223,78 @@ export default function HomePage({ onViewBusiness }: HomePageProps) {
           </>
         )}
 
-        <h2 className="text-2xl font-bold mb-6">
-          {showFeed ? "Your Feed" : "Latest from Local Businesses"}
-        </h2>
-        <div className="max-w-2xl mx-auto space-y-6">
-          {feedPosts.map((post) => (
-            <FeedPost
-              key={post.id}
-              {...post}
-              isLiked={likedPosts.has(post.id)}
-              isSaved={savedPosts.has(post.id)}
-              onLike={toggleLikePost}
-              onSave={toggleSavePost}
-              onComment={(id) => console.log("Comment:", id)}
-              onShare={(id) => console.log("Share:", id)}
-              onBusinessClick={onViewBusiness}
+        <div className="flex items-center justify-between mb-6">
+          <h2 className="text-2xl font-bold">
+            {showFeed ? "Your Feed" : "Latest from the Community"}
+          </h2>
+          {user && (
+            <CreatePostDialog
+              trigger={
+                <Button data-testid="button-create-post">
+                  <PenSquare className="h-4 w-4 mr-2" />
+                  Create Post
+                </Button>
+              }
             />
-          ))}
+          )}
+        </div>
+
+        <div className="max-w-2xl mx-auto space-y-6">
+          {feedLoading ? (
+            Array.from({ length: 3 }).map((_, i) => (
+              <div key={i} className="space-y-3">
+                <div className="flex items-center gap-3">
+                  <Skeleton className="h-10 w-10 rounded-full" />
+                  <div className="space-y-1">
+                    <Skeleton className="h-4 w-32" />
+                    <Skeleton className="h-3 w-20" />
+                  </div>
+                </div>
+                <Skeleton className="h-64 w-full rounded-md" />
+                <Skeleton className="h-4 w-full" />
+              </div>
+            ))
+          ) : feedPosts.length > 0 ? (
+            feedPosts.map((post) => (
+              <FeedPost
+                key={post.id}
+                id={post.id}
+                authorName={post.author?.name || "Unknown User"}
+                authorAvatar={post.author?.profileImageUrl}
+                authorType={post.authorType}
+                taggedBusinessName={post.taggedBusiness?.name}
+                taggedPhotographerName={post.taggedPhotographer?.displayName}
+                postImage={post.imageUrl}
+                content={post.content}
+                likes={post.likesCount}
+                comments={post.commentsCount}
+                timestamp={formatTimestamp(post.createdAt)}
+                isLiked={likedPosts.has(post.id)}
+                isSaved={savedPosts.has(post.id)}
+                onLike={toggleLikePost}
+                onSave={toggleSavePost}
+                onComment={(id) => console.log("Comment:", id)}
+                onShare={(id) => console.log("Share:", id)}
+                onAuthorClick={() => post.taggedBusiness && onViewBusiness(post.taggedBusiness.id)}
+              />
+            ))
+          ) : (
+            <div className="text-center py-12">
+              <p className="text-muted-foreground mb-4">
+                No posts yet. Be the first to share something!
+              </p>
+              {user && (
+                <CreatePostDialog
+                  trigger={
+                    <Button data-testid="button-create-first-post">
+                      <PenSquare className="h-4 w-4 mr-2" />
+                      Create the First Post
+                    </Button>
+                  }
+                />
+              )}
+            </div>
+          )}
         </div>
       </div>
     </div>

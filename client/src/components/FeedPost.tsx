@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Heart, MessageCircle, Share2, Bookmark, MoreHorizontal } from "lucide-react";
+import { Heart, MessageCircle, Share2, Bookmark, MoreHorizontal, Store, Camera } from "lucide-react";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
@@ -7,11 +7,13 @@ import { Badge } from "@/components/ui/badge";
 
 interface FeedPostProps {
   id: string;
-  businessName: string;
-  businessAvatar?: string;
-  businessCategory: string;
-  postImage: string;
-  caption: string;
+  authorName: string;
+  authorAvatar?: string;
+  authorType: "customer" | "vendor" | "photographer";
+  taggedBusinessName?: string;
+  taggedPhotographerName?: string;
+  postImage?: string;
+  content: string;
   likes: number;
   comments: number;
   timestamp: string;
@@ -21,16 +23,18 @@ interface FeedPostProps {
   onComment?: (id: string) => void;
   onShare?: (id: string) => void;
   onSave?: (id: string) => void;
-  onBusinessClick?: (id: string) => void;
+  onAuthorClick?: (id: string) => void;
 }
 
 export default function FeedPost({
   id,
-  businessName,
-  businessAvatar,
-  businessCategory,
+  authorName,
+  authorAvatar,
+  authorType,
+  taggedBusinessName,
+  taggedPhotographerName,
   postImage,
-  caption,
+  content,
   likes,
   comments,
   timestamp,
@@ -40,9 +44,31 @@ export default function FeedPost({
   onComment,
   onShare,
   onSave,
-  onBusinessClick,
+  onAuthorClick,
 }: FeedPostProps) {
   const [showFullCaption, setShowFullCaption] = useState(false);
+
+  const getAuthorTypeLabel = () => {
+    switch (authorType) {
+      case "vendor":
+        return "Business";
+      case "photographer":
+        return "Photographer";
+      default:
+        return "Customer";
+    }
+  };
+
+  const getAuthorTypeBadgeVariant = () => {
+    switch (authorType) {
+      case "vendor":
+        return "default";
+      case "photographer":
+        return "secondary";
+      default:
+        return "outline";
+    }
+  };
 
   return (
     <Card className="overflow-visible" data-testid={`post-${id}`}>
@@ -50,16 +76,18 @@ export default function FeedPost({
         <div className="flex items-center justify-between gap-4">
           <div
             className="flex items-center gap-3 cursor-pointer"
-            onClick={() => onBusinessClick?.(id)}
-            data-testid={`button-business-profile-${id}`}
+            onClick={() => onAuthorClick?.(id)}
+            data-testid={`button-author-profile-${id}`}
           >
             <Avatar className="h-10 w-10 border">
-              <AvatarImage src={businessAvatar} alt={businessName} />
-              <AvatarFallback>{businessName.charAt(0)}</AvatarFallback>
+              <AvatarImage src={authorAvatar} alt={authorName || "User"} />
+              <AvatarFallback>{(authorName || "U").charAt(0)}</AvatarFallback>
             </Avatar>
             <div>
-              <h4 className="font-semibold text-sm">{businessName}</h4>
-              <Badge variant="secondary">{businessCategory}</Badge>
+              <h4 className="font-semibold text-sm">{authorName}</h4>
+              <Badge variant={getAuthorTypeBadgeVariant()} className="text-xs">
+                {getAuthorTypeLabel()}
+              </Badge>
             </div>
           </div>
           <div className="flex items-center gap-2">
@@ -69,15 +97,34 @@ export default function FeedPost({
             </Button>
           </div>
         </div>
+
+        {(taggedBusinessName || taggedPhotographerName) && (
+          <div className="mt-2 flex items-center gap-2 text-sm text-muted-foreground">
+            {taggedBusinessName && (
+              <div className="flex items-center gap-1">
+                <Store className="h-3 w-3" />
+                <span>@{taggedBusinessName}</span>
+              </div>
+            )}
+            {taggedPhotographerName && (
+              <div className="flex items-center gap-1">
+                <Camera className="h-3 w-3" />
+                <span>@{taggedPhotographerName}</span>
+              </div>
+            )}
+          </div>
+        )}
       </div>
 
-      <div className="aspect-[4/3] overflow-hidden">
-        <img
-          src={postImage}
-          alt="Post"
-          className="w-full h-full object-cover"
-        />
-      </div>
+      {postImage && (
+        <div className="aspect-[4/3] overflow-hidden">
+          <img
+            src={postImage}
+            alt="Post"
+            className="w-full h-full object-cover"
+          />
+        </div>
+      )}
 
       <div className="p-4 space-y-3">
         <div className="flex items-center justify-between">
@@ -127,11 +174,11 @@ export default function FeedPost({
         </div>
 
         <div className="text-sm">
-          <span className="font-semibold">{businessName}</span>{" "}
+          <span className="font-semibold">{authorName}</span>{" "}
           <span className={showFullCaption ? "" : "line-clamp-2"}>
-            {caption}
+            {content}
           </span>
-          {caption.length > 100 && !showFullCaption && (
+          {content.length > 100 && !showFullCaption && (
             <button
               className="text-muted-foreground ml-1"
               onClick={() => setShowFullCaption(true)}
