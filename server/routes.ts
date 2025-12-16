@@ -992,7 +992,7 @@ export async function registerRoutes(
       if (!business) {
         return res.status(404).json({ error: "Business not found" });
       }
-      const services = await storage.getVendorServices(req.params.id);
+      const services = await storage.getVendorServicesByBusiness(req.params.id);
       // Only return active services for public view
       const activeServices = services.filter(s => s.isActive);
       res.json({ services: activeServices });
