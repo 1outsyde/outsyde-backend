@@ -1,6 +1,7 @@
 import { useState, useEffect } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
-import { Camera, DollarSign, Calendar, MessageCircle, Star, Eye, ExternalLink, AlertCircle, Check, Loader2, RotateCcw, Plus, Pencil, Trash2, MapPin, FileText, Phone, User as UserIcon } from "lucide-react";
+import { Camera, DollarSign, Calendar, MessageCircle, Star, Eye, ExternalLink, AlertCircle, Check, Loader2, RotateCcw, Plus, Pencil, Trash2, MapPin, FileText, Phone, User as UserIcon, X, Image } from "lucide-react";
+import { ImageUploader } from "@/components/ImageUploader";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -836,55 +837,86 @@ export default function PhotographerDashboardPage({ onLogout }: PhotographerDash
                       </div>
 
                       <div className="pt-4 border-t">
-                        <Label htmlFor="storefront-cover">Cover Image URL</Label>
+                        <Label className="flex items-center gap-2">
+                          <Image className="h-4 w-4" />
+                          Cover Image
+                        </Label>
                         <p className="text-sm text-muted-foreground mb-2">
                           Add a banner image for the top of your page. Use a landscape photo (recommended: 1920x600px).
                         </p>
-                        <Input
-                          id="storefront-cover"
-                          type="url"
-                          value={storefrontCoverImage}
-                          onChange={(e) => setStorefrontCoverImage(e.target.value)}
-                          placeholder="https://example.com/your-cover-image.jpg"
-                          data-testid="input-storefront-cover"
-                        />
-                        {storefrontCoverImage && (
-                          <div className="mt-3 rounded-lg overflow-hidden border">
-                            <img 
-                              src={storefrontCoverImage} 
-                              alt="Cover preview" 
-                              className="w-full h-32 object-cover"
-                              onError={(e) => (e.currentTarget.style.display = 'none')}
-                            />
+                        {storefrontCoverImage ? (
+                          <div className="relative">
+                            <div className="mt-3 rounded-lg overflow-hidden border">
+                              <img 
+                                src={storefrontCoverImage} 
+                                alt="Cover preview" 
+                                className="w-full h-32 object-cover"
+                                onError={(e) => (e.currentTarget.style.display = 'none')}
+                              />
+                            </div>
+                            <Button
+                              type="button"
+                              size="icon"
+                              variant="secondary"
+                              className="absolute top-5 right-2"
+                              onClick={() => setStorefrontCoverImage("")}
+                              data-testid="button-remove-cover"
+                            >
+                              <X className="h-4 w-4" />
+                            </Button>
                           </div>
+                        ) : (
+                          <ImageUploader
+                            onUploadComplete={(url) => setStorefrontCoverImage(url)}
+                            buttonVariant="outline"
+                            buttonClassName="w-full"
+                          >
+                            <Camera className="h-4 w-4 mr-2" />
+                            Upload Cover Image
+                          </ImageUploader>
                         )}
                       </div>
 
                       <div>
-                        <Label htmlFor="storefront-logo">Logo Image URL</Label>
+                        <Label className="flex items-center gap-2">
+                          <Image className="h-4 w-4" />
+                          Logo / Profile Photo
+                        </Label>
                         <p className="text-sm text-muted-foreground mb-2">
                           Add your logo or profile photo. Use a square image (recommended: 400x400px).
                         </p>
-                        <Input
-                          id="storefront-logo"
-                          type="url"
-                          value={storefrontLogoImage}
-                          onChange={(e) => setStorefrontLogoImage(e.target.value)}
-                          placeholder="https://example.com/your-logo.jpg"
-                          data-testid="input-storefront-logo"
-                        />
-                        {storefrontLogoImage && (
-                          <div className="mt-3 flex items-center gap-3">
-                            <div className="w-16 h-16 rounded-full overflow-hidden border">
-                              <img 
-                                src={storefrontLogoImage} 
-                                alt="Logo preview" 
-                                className="w-full h-full object-cover"
-                                onError={(e) => (e.currentTarget.style.display = 'none')}
-                              />
+                        {storefrontLogoImage ? (
+                          <div className="flex items-center gap-3">
+                            <div className="relative">
+                              <div className="w-16 h-16 rounded-full overflow-hidden border">
+                                <img 
+                                  src={storefrontLogoImage} 
+                                  alt="Logo preview" 
+                                  className="w-full h-full object-cover"
+                                  onError={(e) => (e.currentTarget.style.display = 'none')}
+                                />
+                              </div>
+                              <Button
+                                type="button"
+                                size="icon"
+                                variant="secondary"
+                                className="absolute -top-2 -right-2 h-6 w-6"
+                                onClick={() => setStorefrontLogoImage("")}
+                                data-testid="button-remove-logo"
+                              >
+                                <X className="h-3 w-3" />
+                              </Button>
                             </div>
                             <span className="text-sm text-muted-foreground">Logo preview</span>
                           </div>
+                        ) : (
+                          <ImageUploader
+                            onUploadComplete={(url) => setStorefrontLogoImage(url)}
+                            buttonVariant="outline"
+                          >
+                            <Camera className="h-4 w-4 mr-2" />
+                            Upload Logo
+                          </ImageUploader>
                         )}
                       </div>
 

@@ -45,14 +45,15 @@ export function ImageUploader({
     }
 
     setError(null);
-    setPreview(URL.createObjectURL(file));
+    const objectUrl = URL.createObjectURL(file);
+    setPreview(objectUrl);
     setIsUploading(true);
 
     try {
       const uploadResponse = await apiRequest("POST", "/api/objects/upload");
       const { uploadURL } = await uploadResponse.json();
 
-      await fetch(uploadURL, {
+      const putResponse = await fetch(uploadURL, {
         method: "PUT",
         body: file,
         headers: {
@@ -60,17 +61,24 @@ export function ImageUploader({
         },
       });
 
+      if (!putResponse.ok) {
+        throw new Error(`Upload failed with status ${putResponse.status}`);
+      }
+
       const finalizeResponse = await apiRequest("POST", "/api/objects/finalize", {
         uploadURL,
       });
       const { objectPath } = await finalizeResponse.json();
 
+      URL.revokeObjectURL(objectUrl);
       onUploadComplete(objectPath);
       setShowModal(false);
       setPreview(null);
     } catch (err) {
       console.error("Upload error:", err);
       setError("Failed to upload image. Please try again.");
+      URL.revokeObjectURL(objectUrl);
+      setPreview(null);
     } finally {
       setIsUploading(false);
     }

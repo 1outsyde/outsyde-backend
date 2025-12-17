@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
-import { Loader2, Store, Palette, Package, Clock, Plus, Pencil, Trash2, Image, DollarSign, Share2 } from "lucide-react";
+import { Loader2, Store, Palette, Package, Clock, Plus, Pencil, Trash2, Image, DollarSign, Share2, Camera, X } from "lucide-react";
+import { ImageUploader } from "@/components/ImageUploader";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Button } from "@/components/ui/button";
@@ -164,26 +165,37 @@ function BrandingTab({ business, onUpdate, isPending }: { business: Business; on
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
-          <div className="aspect-video bg-muted rounded-lg flex items-center justify-center overflow-hidden">
-            {coverImage ? (
-              <img src={coverImage} alt="Cover" className="w-full h-full object-cover" />
-            ) : (
-              <div className="text-center text-muted-foreground">
-                <Image className="h-12 w-12 mx-auto mb-2" />
-                <p className="text-sm">No cover image</p>
+          {coverImage ? (
+            <div className="relative">
+              <div className="aspect-video bg-muted rounded-lg overflow-hidden">
+                <img src={coverImage} alt="Cover" className="w-full h-full object-cover" />
               </div>
-            )}
-          </div>
-          <div>
-            <Label htmlFor="coverImage">Cover Image URL</Label>
-            <Input
-              id="coverImage"
-              value={coverImage}
-              onChange={(e) => setCoverImage(e.target.value)}
-              placeholder="https://example.com/cover.jpg"
-              data-testid="input-cover-image"
-            />
-          </div>
+              <Button
+                type="button"
+                size="icon"
+                variant="secondary"
+                className="absolute top-2 right-2"
+                onClick={() => setCoverImage("")}
+                data-testid="button-remove-cover"
+              >
+                <X className="h-4 w-4" />
+              </Button>
+            </div>
+          ) : (
+            <div className="aspect-video bg-muted rounded-lg flex items-center justify-center">
+              <div className="text-center">
+                <Image className="h-12 w-12 mx-auto mb-2 text-muted-foreground" />
+                <p className="text-sm text-muted-foreground mb-4">No cover image</p>
+                <ImageUploader
+                  onUploadComplete={(url) => setCoverImage(url)}
+                  buttonVariant="outline"
+                >
+                  <Camera className="h-4 w-4 mr-2" />
+                  Upload Cover Image
+                </ImageUploader>
+              </div>
+            </div>
+          )}
         </CardContent>
       </Card>
 
@@ -195,25 +207,40 @@ function BrandingTab({ business, onUpdate, isPending }: { business: Business; on
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
-          <div className="h-32 w-32 bg-muted rounded-lg flex items-center justify-center mx-auto overflow-hidden">
-            {logoImage ? (
-              <img src={logoImage} alt="Logo" className="w-full h-full object-cover" />
-            ) : (
-              <div className="text-center text-muted-foreground">
-                <Store className="h-8 w-8 mx-auto" />
+          {logoImage ? (
+            <div className="flex items-center gap-4">
+              <div className="relative">
+                <div className="h-32 w-32 bg-muted rounded-lg overflow-hidden">
+                  <img src={logoImage} alt="Logo" className="w-full h-full object-cover" />
+                </div>
+                <Button
+                  type="button"
+                  size="icon"
+                  variant="secondary"
+                  className="absolute -top-2 -right-2 h-6 w-6"
+                  onClick={() => setLogoImage("")}
+                  data-testid="button-remove-logo"
+                >
+                  <X className="h-3 w-3" />
+                </Button>
               </div>
-            )}
-          </div>
-          <div>
-            <Label htmlFor="logoImage">Logo URL</Label>
-            <Input
-              id="logoImage"
-              value={logoImage}
-              onChange={(e) => setLogoImage(e.target.value)}
-              placeholder="https://example.com/logo.jpg"
-              data-testid="input-logo-image"
-            />
-          </div>
+              <span className="text-sm text-muted-foreground">Logo preview</span>
+            </div>
+          ) : (
+            <div className="h-32 w-32 bg-muted rounded-lg flex items-center justify-center mx-auto">
+              <div className="text-center">
+                <Store className="h-8 w-8 mx-auto text-muted-foreground mb-2" />
+                <ImageUploader
+                  onUploadComplete={(url) => setLogoImage(url)}
+                  buttonVariant="ghost"
+                  buttonSize="sm"
+                >
+                  <Camera className="h-3 w-3 mr-1" />
+                  Upload
+                </ImageUploader>
+              </div>
+            </div>
+          )}
         </CardContent>
       </Card>
 
@@ -720,14 +747,36 @@ function ProductForm({ product, onSubmit, isPending }: { product: VendorProduct 
         </div>
       </div>
       <div>
-        <Label htmlFor="product-image">Image URL</Label>
-        <Input
-          id="product-image"
-          value={imageUrl}
-          onChange={(e) => setImageUrl(e.target.value)}
-          placeholder="https://example.com/product.jpg"
-          data-testid="input-product-image"
-        />
+        <Label className="flex items-center gap-2 mb-2">
+          <Image className="h-4 w-4" />
+          Product Image
+        </Label>
+        {imageUrl ? (
+          <div className="relative">
+            <div className="aspect-square w-32 bg-muted rounded-lg overflow-hidden">
+              <img src={imageUrl} alt="Product preview" className="w-full h-full object-cover" />
+            </div>
+            <Button
+              type="button"
+              size="icon"
+              variant="secondary"
+              className="absolute top-1 right-1 h-6 w-6"
+              onClick={() => setImageUrl("")}
+              data-testid="button-remove-product-image"
+            >
+              <X className="h-3 w-3" />
+            </Button>
+          </div>
+        ) : (
+          <ImageUploader
+            onUploadComplete={(url) => setImageUrl(url)}
+            buttonVariant="outline"
+            buttonSize="sm"
+          >
+            <Camera className="h-4 w-4 mr-2" />
+            Upload Image
+          </ImageUploader>
+        )}
       </div>
       <div className="flex items-center gap-2">
         <Switch

@@ -7,8 +7,9 @@ import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Label } from "@/components/ui/label";
 import { useToast } from "@/hooks/use-toast";
-import { Camera, Image, Loader2, ArrowLeft } from "lucide-react";
+import { Camera, Image, Loader2, ArrowLeft, X } from "lucide-react";
 import { apiRequest, getQueryFn } from "@/lib/queryClient";
+import { ImageUploader } from "@/components/ImageUploader";
 import type { User } from "@shared/schema";
 
 interface TaggableBusiness {
@@ -168,18 +169,38 @@ export default function CreatePostPage({ onBack }: CreatePostPageProps) {
           </div>
 
           <div>
-            <Label htmlFor="imageUrl" className="flex items-center gap-2">
+            <Label className="flex items-center gap-2 mb-2">
               <Image className="h-4 w-4" />
-              Image URL (optional)
+              Add Image (optional)
             </Label>
-            <Input
-              id="imageUrl"
-              placeholder="https://example.com/image.jpg"
-              value={imageUrl}
-              onChange={(e) => setImageUrl(e.target.value)}
-              className="mt-2"
-              data-testid="input-image-url"
-            />
+            {imageUrl ? (
+              <div className="relative">
+                <img 
+                  src={imageUrl} 
+                  alt="Post preview" 
+                  className="w-full h-48 object-cover rounded-lg"
+                />
+                <Button
+                  type="button"
+                  size="icon"
+                  variant="secondary"
+                  className="absolute top-2 right-2"
+                  onClick={() => setImageUrl("")}
+                  data-testid="button-remove-image"
+                >
+                  <X className="h-4 w-4" />
+                </Button>
+              </div>
+            ) : (
+              <ImageUploader
+                onUploadComplete={(url) => setImageUrl(url)}
+                buttonVariant="outline"
+                buttonClassName="w-full"
+              >
+                <Camera className="h-4 w-4 mr-2" />
+                Upload Photo
+              </ImageUploader>
+            )}
           </div>
 
           {isCustomer && (
