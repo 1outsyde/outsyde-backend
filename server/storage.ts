@@ -347,6 +347,19 @@ export interface IStorage {
     photographers: Photographer[];
   }>;
 
+  // Admin Dashboard Methods
+  getAllUsers(): Promise<User[]>;
+  getAllBusinesses(): Promise<Business[]>;
+  getAllPhotographers(): Promise<Photographer[]>;
+  getAllOrders(): Promise<Order[]>;
+  getAllShootBookings(): Promise<ShootBooking[]>;
+  getAllConversations(): Promise<Conversation[]>;
+  getUserOrders(userId: string): Promise<Order[]>;
+  getUserBookings(userId: string): Promise<ShootBooking[]>;
+  getVendorOrders(businessId: string): Promise<Order[]>;
+  getPhotographerBookings(photographerId: string): Promise<ShootBooking[]>;
+  getMessages(conversationId: string): Promise<Message[]>;
+
   seedInitialData(): Promise<void>;
 }
 
@@ -1486,6 +1499,54 @@ export class DatabaseStorage implements IStorage {
     });
 
     return { success: true, referrerId: referrer.id };
+  }
+
+  // =========================
+  // ADMIN DASHBOARD METHODS
+  // =========================
+
+  async getAllUsers(): Promise<User[]> {
+    return db.select().from(users);
+  }
+
+  async getAllBusinesses(): Promise<Business[]> {
+    return db.select().from(businesses);
+  }
+
+  async getAllPhotographers(): Promise<Photographer[]> {
+    return db.select().from(photographers);
+  }
+
+  async getAllOrders(): Promise<Order[]> {
+    return db.select().from(orders);
+  }
+
+  async getAllShootBookings(): Promise<ShootBooking[]> {
+    return db.select().from(shootBookings);
+  }
+
+  async getAllConversations(): Promise<Conversation[]> {
+    return db.select().from(conversations);
+  }
+
+  async getUserOrders(userId: string): Promise<Order[]> {
+    return db.select().from(orders).where(eq(orders.userId, userId));
+  }
+
+  async getUserBookings(userId: string): Promise<ShootBooking[]> {
+    return db.select().from(shootBookings).where(eq(shootBookings.customerId, userId));
+  }
+
+  async getVendorOrders(businessId: string): Promise<Order[]> {
+    return db.select().from(orders).where(eq(orders.businessId, businessId));
+  }
+
+  async getPhotographerBookings(photographerId: string): Promise<ShootBooking[]> {
+    return db.select().from(shootBookings).where(eq(shootBookings.photographerId, photographerId));
+  }
+
+  async getMessages(conversationId: string): Promise<Message[]> {
+    return db.select().from(messages).where(eq(messages.conversationId, conversationId));
   }
 
   // =========================

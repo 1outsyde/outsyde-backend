@@ -2288,6 +2288,469 @@ export async function registerRoutes(
     }
   });
 
+  // ==================== ADMIN DASHBOARD ROUTES ====================
+
+  // Admin: Get dashboard overview stats
+  app.get("/api/admin/stats", requireAdmin, async (req, res) => {
+    try {
+      const users = await storage.getAllUsers();
+      const businesses = await storage.getAllBusinesses();
+      const photographers = await storage.getAllPhotographers();
+      const orders = await storage.getAllOrders();
+      const bookings = await storage.getAllShootBookings();
+      const refundRequests = await storage.getAllPendingRefundRequests();
+
+      const totalRevenue = orders.reduce((sum, order) => sum + (order.totalCents || 0), 0);
+      const totalBookingRevenue = bookings.reduce((sum, booking) => sum + (booking.totalPriceCents || 0), 0);
+
+      res.json({
+        stats: {
+          totalUsers: users.length,
+          totalBusinesses: businesses.length,
+          totalPhotographers: photographers.length,
+          totalOrders: orders.length,
+          totalBookings: bookings.length,
+          pendingRefunds: refundRequests.length,
+          totalRevenue: (totalRevenue + totalBookingRevenue) / 100,
+          regularCustomers: users.filter(u => !u.isVendor && !u.isPhotographer).length,
+        }
+      });
+    } catch (error) {
+      console.error("Get admin stats error:", error);
+      res.status(500).json({ error: "Failed to get admin stats" });
+    }
+  });
+
+  // Admin: Get all users
+  app.get("/api/admin/users", requireAdmin, async (req, res) => {
+    try {
+      const { type, search, limit = "50", offset = "0" } = req.query;
+      let users = await storage.getAllUsers();
+
+      // Filter by type
+      if (type === "customers") {
+        users = users.filter(u => !u.isVendor && !u.isPhotographer);
+      } else if (type === "vendors") {
+        users = users.filter(u => u.isVendor);
+      } else if (type === "photographers") {
+        users = users.filter(u => u.isPhotographer);
+      }
+
+      // Search filter
+      if (search) {
+        const searchLower = (search as string).toLowerCase();
+        users = users.filter(u => 
+          u.email?.toLowerCase().includes(searchLower) ||
+          u.name?.toLowerCase().includes(searchLower) ||
+          u.firstName?.toLowerCase().includes(searchLower) ||
+          u.lastName?.toLowerCase().includes(searchLower)
+        );
+      }
+
+      // Pagination
+      const start = parseInt(offset as string);
+      const end = start + parseInt(limit as string);
+      const paginatedUsers = users.slice(start, end);
+
+      // Remove sensitive data
+      const safeUsers = paginatedUsers.map(u => ({
+        id: u.id,
+        email: u.email,
+        name: u.name,
+        firstName: u.firstName,
+        lastName: u.lastName,
+        city: u.city,
+        state: u.state,
+        isVendor: u.isVendor,
+        isPhotographer: u.isPhotographer,
+        isAdmin: u.isAdmin,
+        createdAt: u.createdAt,
+        loyaltyPoints: u.loyaltyPoints,
+      }));
+
+      res.json({ users: safeUsers, total: users.length });
+    } catch (error) {
+      console.error("Get admin users error:", error);
+      res.status(500).json({ error: "Failed to get users" });
+    }
+  });
+
+  // Admin: Get single user details
+  app.get("/api/admin/users/:id", requireAdmin, async (req, res) => {
+    try {
+      const { id } = req.params;
+      const user = await storage.getUser(id);
+
+      if (!user) {
+        return res.status(404).json({ error: "User not found" });
+      }
+
+      // Get related data
+      let business = null;
+      let photographer = null;
+      let orders: any[] = [];
+      let bookings: any[] = [];
+
+      if (user.isVendor) {
+        business = await storage.getBusinessByOwnerId(id);
+        if (business) {
+          orders = await storage.getVendorOrders(business.id);
+        }
+      }
+
+      if (user.isPhotographer) {
+        photographer = await storage.getPhotographerByUserId(id);
+        if (photographer) {
+          bookings = await storage.getPhotographerBookings(photographer.id);
+        }
+      }
+
+      // Get customer orders if regular user
+      if (!user.isVendor && !user.isPhotographer) {
+        orders = await storage.getUserOrders(id);
+        bookings = await storage.getUserBookings(id);
+      }
+
+      res.json({
+        user: {
+          id: user.id,
+          email: user.email,
+          name: user.name,
+          firstName: user.firstName,
+          lastName: user.lastName,
+          phone: user.phone,
+          city: user.city,
+          state: user.state,
+          isVendor: user.isVendor,
+          isPhotographer: user.isPhotographer,
+          isAdmin: user.isAdmin,
+          createdAt: user.createdAt,
+          loyaltyPoints: user.loyaltyPoints,
+        },
+        business,
+        photographer,
+        orders,
+        bookings,
+      });
+    } catch (error) {
+      console.error("Get admin user details error:", error);
+      res.status(500).json({ error: "Failed to get user details" });
+    }
+  });
+
+  // Admin: Update user
+  app.patch("/api/admin/users/:id", requireAdmin, async (req, res) => {
+    try {
+      const { id } = req.params;
+      const schema = z.object({
+        name: z.string().optional(),
+        firstName: z.string().optional(),
+        lastName: z.string().optional(),
+        email: z.string().email().optional(),
+        phone: z.string().optional(),
+        city: z.string().optional(),
+        state: z.string().optional(),
+        isAdmin: z.boolean().optional(),
+        loyaltyPoints: z.number().optional(),
+      });
+
+      const data = schema.parse(req.body);
+      const user = await storage.updateUser(id, data);
+
+      if (!user) {
+        return res.status(404).json({ error: "User not found" });
+      }
+
+      res.json({ success: true, user });
+    } catch (error) {
+      if (error instanceof z.ZodError) {
+        return res.status(400).json({ error: "Invalid data", details: error.errors });
+      }
+      console.error("Update admin user error:", error);
+      res.status(500).json({ error: "Failed to update user" });
+    }
+  });
+
+  // Admin: Get all businesses
+  app.get("/api/admin/businesses", requireAdmin, async (req, res) => {
+    try {
+      const { search, category, limit = "50", offset = "0" } = req.query;
+      let businesses = await storage.getAllBusinesses();
+
+      // Category filter
+      if (category) {
+        businesses = businesses.filter(b => b.category === category);
+      }
+
+      // Search filter
+      if (search) {
+        const searchLower = (search as string).toLowerCase();
+        businesses = businesses.filter(b =>
+          b.name.toLowerCase().includes(searchLower) ||
+          b.description?.toLowerCase().includes(searchLower)
+        );
+      }
+
+      // Pagination
+      const start = parseInt(offset as string);
+      const end = start + parseInt(limit as string);
+      const paginatedBusinesses = businesses.slice(start, end);
+
+      // Get owner info for each business
+      const enrichedBusinesses = await Promise.all(paginatedBusinesses.map(async (b) => {
+        const owner = await storage.getUser(b.ownerId);
+        return {
+          ...b,
+          ownerEmail: owner?.email,
+          ownerName: owner?.name || `${owner?.firstName || ''} ${owner?.lastName || ''}`.trim(),
+        };
+      }));
+
+      res.json({ businesses: enrichedBusinesses, total: businesses.length });
+    } catch (error) {
+      console.error("Get admin businesses error:", error);
+      res.status(500).json({ error: "Failed to get businesses" });
+    }
+  });
+
+  // Admin: Update business
+  app.patch("/api/admin/businesses/:id", requireAdmin, async (req, res) => {
+    try {
+      const { id } = req.params;
+      const schema = z.object({
+        name: z.string().optional(),
+        description: z.string().optional(),
+        category: z.string().optional(),
+        contactEmail: z.string().email().optional(),
+        contactPhone: z.string().optional(),
+        city: z.string().optional(),
+        state: z.string().optional(),
+      });
+
+      const data = schema.parse(req.body);
+      const business = await storage.updateBusiness(id, data);
+
+      if (!business) {
+        return res.status(404).json({ error: "Business not found" });
+      }
+
+      res.json({ success: true, business });
+    } catch (error) {
+      if (error instanceof z.ZodError) {
+        return res.status(400).json({ error: "Invalid data", details: error.errors });
+      }
+      console.error("Update admin business error:", error);
+      res.status(500).json({ error: "Failed to update business" });
+    }
+  });
+
+  // Admin: Get all photographers
+  app.get("/api/admin/photographers", requireAdmin, async (req, res) => {
+    try {
+      const { search, limit = "50", offset = "0" } = req.query;
+      let photographers = await storage.getAllPhotographers();
+
+      // Search filter
+      if (search) {
+        const searchLower = (search as string).toLowerCase();
+        photographers = photographers.filter(p =>
+          p.displayName?.toLowerCase().includes(searchLower) ||
+          p.bio?.toLowerCase().includes(searchLower)
+        );
+      }
+
+      // Pagination
+      const start = parseInt(offset as string);
+      const end = start + parseInt(limit as string);
+      const paginatedPhotographers = photographers.slice(start, end);
+
+      // Get user info for each photographer
+      const enrichedPhotographers = await Promise.all(paginatedPhotographers.map(async (p) => {
+        const user = await storage.getUser(p.userId);
+        return {
+          ...p,
+          userEmail: user?.email,
+          userName: user?.name || `${user?.firstName || ''} ${user?.lastName || ''}`.trim(),
+        };
+      }));
+
+      res.json({ photographers: enrichedPhotographers, total: photographers.length });
+    } catch (error) {
+      console.error("Get admin photographers error:", error);
+      res.status(500).json({ error: "Failed to get photographers" });
+    }
+  });
+
+  // Admin: Update photographer
+  app.patch("/api/admin/photographers/:id", requireAdmin, async (req, res) => {
+    try {
+      const { id } = req.params;
+      const schema = z.object({
+        displayName: z.string().optional(),
+        bio: z.string().optional(),
+        city: z.string().optional(),
+        state: z.string().optional(),
+        hourlyRate: z.number().optional(),
+        specialties: z.array(z.string()).optional(),
+      });
+
+      const data = schema.parse(req.body);
+      const photographer = await storage.updatePhotographer(id, data);
+
+      if (!photographer) {
+        return res.status(404).json({ error: "Photographer not found" });
+      }
+
+      res.json({ success: true, photographer });
+    } catch (error) {
+      if (error instanceof z.ZodError) {
+        return res.status(400).json({ error: "Invalid data", details: error.errors });
+      }
+      console.error("Update admin photographer error:", error);
+      res.status(500).json({ error: "Failed to update photographer" });
+    }
+  });
+
+  // Admin: Get all orders/transactions
+  app.get("/api/admin/orders", requireAdmin, async (req, res) => {
+    try {
+      const { status, limit = "50", offset = "0" } = req.query;
+      let orders = await storage.getAllOrders();
+
+      // Status filter
+      if (status) {
+        orders = orders.filter(o => o.status === status);
+      }
+
+      // Sort by date descending
+      orders.sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime());
+
+      // Pagination
+      const start = parseInt(offset as string);
+      const end = start + parseInt(limit as string);
+      const paginatedOrders = orders.slice(start, end);
+
+      // Enrich with customer and business info
+      const enrichedOrders = await Promise.all(paginatedOrders.map(async (order) => {
+        const customer = await storage.getUser(order.userId);
+        const business = await storage.getBusiness(order.businessId);
+        return {
+          ...order,
+          customerEmail: customer?.email,
+          customerName: customer?.name || `${customer?.firstName || ''} ${customer?.lastName || ''}`.trim(),
+          businessName: business?.name,
+        };
+      }));
+
+      res.json({ orders: enrichedOrders, total: orders.length });
+    } catch (error) {
+      console.error("Get admin orders error:", error);
+      res.status(500).json({ error: "Failed to get orders" });
+    }
+  });
+
+  // Admin: Get all photographer bookings
+  app.get("/api/admin/bookings", requireAdmin, async (req, res) => {
+    try {
+      const { status, limit = "50", offset = "0" } = req.query;
+      let bookings = await storage.getAllShootBookings();
+
+      // Status filter
+      if (status) {
+        bookings = bookings.filter(b => b.status === status);
+      }
+
+      // Sort by date descending
+      bookings.sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime());
+
+      // Pagination
+      const start = parseInt(offset as string);
+      const end = start + parseInt(limit as string);
+      const paginatedBookings = bookings.slice(start, end);
+
+      // Enrich with customer and photographer info
+      const enrichedBookings = await Promise.all(paginatedBookings.map(async (booking) => {
+        const customer = await storage.getUser(booking.customerId);
+        const photographer = await storage.getPhotographer(booking.photographerId);
+        return {
+          ...booking,
+          customerEmail: customer?.email,
+          customerName: customer?.name || `${customer?.firstName || ''} ${customer?.lastName || ''}`.trim(),
+          photographerName: photographer?.displayName,
+        };
+      }));
+
+      res.json({ bookings: enrichedBookings, total: bookings.length });
+    } catch (error) {
+      console.error("Get admin bookings error:", error);
+      res.status(500).json({ error: "Failed to get bookings" });
+    }
+  });
+
+  // Admin: Get all conversations/messages
+  app.get("/api/admin/conversations", requireAdmin, async (req, res) => {
+    try {
+      const { limit = "50", offset = "0" } = req.query;
+      const conversations = await storage.getAllConversations();
+
+      // Pagination
+      const start = parseInt(offset as string);
+      const end = start + parseInt(limit as string);
+      const paginatedConversations = conversations.slice(start, end);
+
+      // Enrich with participant info
+      const enrichedConversations = await Promise.all(paginatedConversations.map(async (conv) => {
+        const participants = await Promise.all(conv.participants.map(async (pId: string) => {
+          const user = await storage.getUser(pId);
+          return {
+            id: pId,
+            email: user?.email,
+            name: user?.name || `${user?.firstName || ''} ${user?.lastName || ''}`.trim(),
+          };
+        }));
+
+        const messages = await storage.getMessages(conv.id);
+        const lastMessage = messages[messages.length - 1];
+
+        return {
+          ...conv,
+          participants,
+          messageCount: messages.length,
+          lastMessageAt: lastMessage?.createdAt,
+          lastMessagePreview: lastMessage?.content?.substring(0, 100),
+        };
+      }));
+
+      res.json({ conversations: enrichedConversations, total: conversations.length });
+    } catch (error) {
+      console.error("Get admin conversations error:", error);
+      res.status(500).json({ error: "Failed to get conversations" });
+    }
+  });
+
+  // Admin: Get messages in a conversation
+  app.get("/api/admin/conversations/:id/messages", requireAdmin, async (req, res) => {
+    try {
+      const { id } = req.params;
+      const messages = await storage.getMessages(id);
+
+      // Enrich with sender info
+      const enrichedMessages = await Promise.all(messages.map(async (msg) => {
+        const sender = await storage.getUser(msg.senderId);
+        return {
+          ...msg,
+          senderEmail: sender?.email,
+          senderName: sender?.name || `${sender?.firstName || ''} ${sender?.lastName || ''}`.trim(),
+        };
+      }));
+
+      res.json({ messages: enrichedMessages });
+    } catch (error) {
+      console.error("Get admin conversation messages error:", error);
+      res.status(500).json({ error: "Failed to get messages" });
+    }
+  });
+
   // ==================== FEED POSTS ROUTES ====================
 
   // Get feed posts (public)
