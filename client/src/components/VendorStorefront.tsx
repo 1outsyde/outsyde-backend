@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { MapPin, Star, Share2, Heart, Clock, Mail, Phone, Globe, Handshake } from "lucide-react";
+import { MapPin, Star, Share2, Heart, Clock, Mail, Phone, Globe, Handshake, MessageSquare } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
@@ -8,6 +8,7 @@ import ProductCard from "./ProductCard";
 import ServiceCard from "./ServiceCard";
 import BookingCalendar from "./BookingCalendar";
 import VendorChat from "./VendorChat";
+import ProfileComments from "./ProfileComments";
 
 interface Product {
   id: string;
@@ -60,6 +61,7 @@ interface VendorStorefrontProps {
   onBookService?: (serviceId: string, date: string, time: string) => void;
   viewerIsPhotographer?: boolean;
   onCollaborate?: () => void;
+  isAuthenticated?: boolean;
 }
 
 export default function VendorStorefront({
@@ -89,6 +91,7 @@ export default function VendorStorefront({
   onBookService,
   viewerIsPhotographer = false,
   onCollaborate,
+  isAuthenticated = false,
 }: VendorStorefrontProps) {
   const [activeTab, setActiveTab] = useState("about");
   const [selectedService, setSelectedService] = useState<Service | null>(null);
@@ -227,6 +230,15 @@ export default function VendorStorefront({
             >
               Chat
             </TabsTrigger>
+            <TabsTrigger
+              value="comments"
+              className="rounded-none border-b-2 data-[state=active]:bg-transparent px-6 py-3"
+              style={activeTab === 'comments' ? (hasBrandColor ? { borderColor: brandColors.primary } : { borderColor: 'hsl(var(--primary))' }) : { borderColor: 'transparent' }}
+              data-testid="tab-comments"
+            >
+              <MessageSquare className="h-4 w-4 mr-1" />
+              Comments
+            </TabsTrigger>
           </TabsList>
 
           <TabsContent value="about" className="pt-6">
@@ -341,6 +353,18 @@ export default function VendorStorefront({
                 vendorId={ownerId}
                 vendorName={name}
                 vendorAvatar={avatar}
+                onLoginRequired={onLoginRequired}
+              />
+            </div>
+          </TabsContent>
+
+          <TabsContent value="comments" className="pt-6">
+            <div className="max-w-2xl">
+              <h2 className="text-xl font-semibold mb-4">Comments</h2>
+              <ProfileComments
+                targetType="business"
+                targetId={id}
+                isAuthenticated={isAuthenticated}
                 onLoginRequired={onLoginRequired}
               />
             </div>

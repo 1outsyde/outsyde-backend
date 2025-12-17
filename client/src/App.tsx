@@ -257,6 +257,7 @@ function AppContent() {
               onLoginRequired={() => setCurrentPage("auth")}
               viewerIsPhotographer={isPhotographer}
               onCollaborate={(id, name) => handleMessage(id, name)}
+              isAuthenticated={isAuthenticated}
             />
           )}
           {currentPage === "vendor-dashboard" && isVendor && (
