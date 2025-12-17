@@ -46,6 +46,8 @@ interface FeedPostProps {
   authorName: string;
   authorAvatar?: string;
   authorType: "customer" | "vendor" | "photographer";
+  authorBusinessId?: string | null;
+  authorPhotographerId?: string | null;
   postType?: "text" | "product" | "service";
   taggedBusinessName?: string;
   taggedPhotographerName?: string;
@@ -63,7 +65,8 @@ interface FeedPostProps {
   onComment?: (id: string) => void;
   onShare?: (id: string) => void;
   onSave?: (id: string) => void;
-  onAuthorClick?: (id: string) => void;
+  onViewBusiness?: (id: string) => void;
+  onViewPhotographer?: (id: string) => void;
   onAddToCart?: (productId: string) => void;
   onBookService?: (serviceId: string) => void;
   onLoginRequired?: () => void;
@@ -74,6 +77,8 @@ export default function FeedPost({
   authorName,
   authorAvatar,
   authorType,
+  authorBusinessId,
+  authorPhotographerId,
   postType = "text",
   taggedBusinessName,
   taggedPhotographerName,
@@ -91,7 +96,8 @@ export default function FeedPost({
   onComment,
   onShare,
   onSave,
-  onAuthorClick,
+  onViewBusiness,
+  onViewPhotographer,
   onAddToCart,
   onBookService,
   onLoginRequired,
@@ -169,7 +175,13 @@ export default function FeedPost({
         <div className="flex items-center justify-between gap-4">
           <div
             className="flex items-center gap-3 cursor-pointer"
-            onClick={() => onAuthorClick?.(id)}
+            onClick={() => {
+              if (authorType === 'vendor' && authorBusinessId) {
+                onViewBusiness?.(authorBusinessId);
+              } else if (authorType === 'photographer' && authorPhotographerId) {
+                onViewPhotographer?.(authorPhotographerId);
+              }
+            }}
             data-testid={`button-author-profile-${id}`}
           >
             <Avatar className="h-10 w-10 border">

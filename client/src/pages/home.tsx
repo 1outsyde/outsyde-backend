@@ -38,6 +38,8 @@ interface FeedPostData {
     id: string;
     name: string;
     profileImageUrl?: string;
+    businessId?: string | null;
+    photographerId?: string | null;
   } | null;
   taggedBusiness: {
     id: string;
@@ -306,6 +308,8 @@ export default function HomePage({ onViewBusiness, onLoginRequired }: HomePagePr
                 authorName={post.author?.name || "Unknown User"}
                 authorAvatar={post.author?.profileImageUrl}
                 authorType={post.authorType}
+                authorBusinessId={post.author?.businessId}
+                authorPhotographerId={post.author?.photographerId}
                 postType={post.postType || "text"}
                 taggedBusinessName={post.taggedBusiness?.name}
                 taggedPhotographerName={post.taggedPhotographer?.displayName}
@@ -322,14 +326,9 @@ export default function HomePage({ onViewBusiness, onLoginRequired }: HomePagePr
                 onLike={toggleLikePost}
                 onSave={toggleSavePost}
                 onShare={(id) => console.log("Share:", id)}
-                onAuthorClick={() => {
-                  if (post.product?.businessId) {
-                    onViewBusiness(post.product.businessId);
-                  } else if (post.service?.businessId) {
-                    onViewBusiness(post.service.businessId);
-                  } else if (post.taggedBusiness) {
-                    onViewBusiness(post.taggedBusiness.id);
-                  }
+                onViewBusiness={onViewBusiness}
+                onViewPhotographer={(photographerId) => {
+                  onViewBusiness(photographerId);
                 }}
                 onAddToCart={(productId) => {
                   if (!user) {
