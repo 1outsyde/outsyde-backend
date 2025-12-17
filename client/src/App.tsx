@@ -227,7 +227,7 @@ function AppContent() {
           cartDrawer={
             <CartDrawer
               items={cartItems}
-              pointsBalance={isPhotographer ? 0 : 2450}
+              pointsBalance={(isPhotographer || isVendor) ? 0 : 2450}
               pointsToRedeem={pointsToRedeem}
               onUpdateQuantity={handleUpdateCartQuantity}
               onRemove={handleRemoveFromCart}

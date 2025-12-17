@@ -35,6 +35,10 @@ export default function ProfilePage({ onLogout }: ProfilePageProps) {
   });
 
   const isPhotographer = userData?.isPhotographer ?? false;
+  const isVendor = userData?.isVendor ?? false;
+  
+  // Only regular customers (not photographers or business owners) can see/earn points
+  const isRegularCustomer = !isPhotographer && !isVendor;
 
   const user = userData ? {
     name: userData.name || "User",
@@ -85,7 +89,7 @@ export default function ProfilePage({ onLogout }: ProfilePageProps) {
 
   const menuItems = [
     { id: "overview", icon: User, label: "Overview" },
-    ...(!isPhotographer ? [{ id: "points", icon: Coins, label: "My Points" }] : []),
+    ...(isRegularCustomer ? [{ id: "points", icon: Coins, label: "My Points" }] : []),
     { id: "bookings", icon: Calendar, label: "My Bookings" },
     { id: "orders", icon: ShoppingBag, label: "My Orders" },
     { id: "favorites", icon: Heart, label: "Favorites" },
@@ -147,7 +151,7 @@ export default function ProfilePage({ onLogout }: ProfilePageProps) {
           </CardContent>
         </Card>
 
-        {!isPhotographer && (
+        {isRegularCustomer && (
           <LoyaltyPointsCard
             onViewHistory={() => setActiveSection("points")}
           />
@@ -303,7 +307,7 @@ export default function ProfilePage({ onLogout }: ProfilePageProps) {
           </Card>
         )}
 
-        {activeSection === "points" && !isPhotographer && (
+        {activeSection === "points" && isRegularCustomer && (
           <div className="space-y-6">
             <Card className="overflow-visible bg-gradient-to-br from-primary/10 to-primary/5 border-primary/20">
               <CardContent className="p-6">
