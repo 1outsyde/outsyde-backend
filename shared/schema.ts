@@ -19,6 +19,18 @@ export const sessions = pgTable(
 );
 
 /* =====================================================
+   BILLING ADDRESS TYPE
+===================================================== */
+export interface BillingAddress {
+  line1: string;
+  line2?: string;
+  city: string;
+  state: string;
+  postalCode: string;
+  country: string;
+}
+
+/* =====================================================
    USERS
 ===================================================== */
 export const users = pgTable("users", {
@@ -40,6 +52,8 @@ export const users = pgTable("users", {
   city: text("city"),
   state: text("state"),
   zipCode: text("zip_code"),
+
+  billingAddress: jsonb("billing_address").$type<BillingAddress>(),
 
   ageRange: text("age_range"),
   gender: text("gender"),
@@ -140,6 +154,8 @@ export const businesses = pgTable("businesses", {
   stripeAccountId: text("stripe_account_id"),
   stripeOnboardingComplete: boolean("stripe_onboarding_complete").default(false),
 
+  billingAddress: jsonb("billing_address").$type<BillingAddress>(),
+
   createdAt: timestamp("created_at").defaultNow().notNull(),
 });
 
@@ -226,6 +242,8 @@ export const photographers = pgTable("photographers", {
     saturday?: { open: string; close: string; closed?: boolean };
     sunday?: { open: string; close: string; closed?: boolean };
   }>(),
+
+  billingAddress: jsonb("billing_address").$type<BillingAddress>(),
 
   createdAt: timestamp("created_at").defaultNow().notNull(),
 });
@@ -752,6 +770,16 @@ export const profileComments = pgTable("profile_comments", {
 /* =====================================================
    INSERT SCHEMAS (Zod)
 ===================================================== */
+
+export const billingAddressSchema = z.object({
+  line1: z.string().min(1, "Address line 1 is required"),
+  line2: z.string().optional(),
+  city: z.string().min(1, "City is required"),
+  state: z.string().min(1, "State is required"),
+  postalCode: z.string().min(1, "Postal code is required"),
+  country: z.string().min(1, "Country is required"),
+});
+
 export const insertUserSchema = createInsertSchema(users).omit({
   id: true,
   createdAt: true,
