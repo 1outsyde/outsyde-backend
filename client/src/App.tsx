@@ -35,6 +35,7 @@ function AppContent() {
   const [currentPage, setCurrentPage] = useState<Page>("home");
   const [activeTab, setActiveTab] = useState<NavTab>("home");
   const [selectedVendorId, setSelectedVendorId] = useState<string>("1");
+  const [selectedVendorType, setSelectedVendorType] = useState<"business" | "photographer">("business");
   const [messageTarget, setMessageTarget] = useState<MessageTarget | null>(null);
 
   const { data: user, isLoading: authLoading, refetch: refetchUser } = useQuery<User | null>({
@@ -119,6 +120,13 @@ function AppContent() {
 
   const handleViewBusiness = (id: string) => {
     setSelectedVendorId(id);
+    setSelectedVendorType("business");
+    setCurrentPage("vendor");
+  };
+
+  const handleViewPhotographer = (id: string) => {
+    setSelectedVendorId(id);
+    setSelectedVendorType("photographer");
     setCurrentPage("vendor");
   };
 
@@ -233,12 +241,14 @@ function AppContent() {
           {currentPage === "home" && (
             <HomePage
               onViewBusiness={handleViewBusiness}
+              onViewPhotographer={handleViewPhotographer}
               onLoginRequired={() => setCurrentPage("auth")}
             />
           )}
           {currentPage === "search" && (
             <SearchPage
               onViewBusiness={handleViewBusiness}
+              onViewPhotographer={handleViewPhotographer}
             />
           )}
           {currentPage === "messages" && (
@@ -251,6 +261,7 @@ function AppContent() {
           {currentPage === "vendor" && (
             <VendorPage
               vendorId={selectedVendorId}
+              vendorType={selectedVendorType}
               onBack={() => {
                 setCurrentPage("home");
                 setActiveTab("home");

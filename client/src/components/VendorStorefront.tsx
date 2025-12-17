@@ -24,7 +24,7 @@ interface Service {
   name: string;
   image: string;
   price: number;
-  duration: number;
+  duration?: number;
   category?: string;
   description?: string;
 }
@@ -62,6 +62,7 @@ interface VendorStorefrontProps {
   viewerIsPhotographer?: boolean;
   onCollaborate?: () => void;
   isAuthenticated?: boolean;
+  storefrontType?: "business" | "photographer";
 }
 
 export default function VendorStorefront({
@@ -92,6 +93,7 @@ export default function VendorStorefront({
   viewerIsPhotographer = false,
   onCollaborate,
   isAuthenticated = false,
+  storefrontType = "business",
 }: VendorStorefrontProps) {
   const [activeTab, setActiveTab] = useState("about");
   const [selectedService, setSelectedService] = useState<Service | null>(null);
@@ -362,7 +364,7 @@ export default function VendorStorefront({
             <div className="max-w-2xl">
               <h2 className="text-xl font-semibold mb-4">Comments</h2>
               <ProfileComments
-                targetType="business"
+                targetType={storefrontType}
                 targetId={id}
                 isAuthenticated={isAuthenticated}
                 onLoginRequired={onLoginRequired}
