@@ -2,6 +2,7 @@ import { useState, useEffect } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { Camera, DollarSign, Calendar, MessageCircle, Star, Eye, ExternalLink, AlertCircle, Check, Loader2, RotateCcw, Plus, Pencil, Trash2, MapPin, FileText, Phone, User as UserIcon, X, Image } from "lucide-react";
 import { ImageUploader } from "@/components/ImageUploader";
+import BillingAddressForm from "@/components/BillingAddressForm";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -1081,6 +1082,13 @@ export default function PhotographerDashboardPage({ onLogout }: PhotographerDash
               </CardContent>
             </Tabs>
           </Card>
+
+          <BillingAddressForm
+            currentAddress={photographer?.billingAddress}
+            endpoint="/api/photographers/me/billing-address"
+            queryKeyToInvalidate={["/api/photographers/me"]}
+            title="Billing Address"
+          />
         </div>
       </main>
 

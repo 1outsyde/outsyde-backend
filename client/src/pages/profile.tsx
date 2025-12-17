@@ -9,8 +9,18 @@ import LoyaltyPointsCard from "@/components/LoyaltyPointsCard";
 import PointsHistory from "@/components/PointsHistory";
 import ReferralCard from "@/components/ReferralCard";
 import PushNotificationSettings from "@/components/PushNotificationSettings";
+import BillingAddressForm from "@/components/BillingAddressForm";
 import { useQuery } from "@tanstack/react-query";
 import { Skeleton } from "@/components/ui/skeleton";
+
+interface BillingAddress {
+  line1: string;
+  line2?: string;
+  city: string;
+  state: string;
+  postalCode: string;
+  country: string;
+}
 
 interface ProfileUser {
   id: string;
@@ -22,6 +32,7 @@ interface ProfileUser {
   isPhotographer?: boolean;
   isAdmin?: boolean;
   createdAt?: string;
+  billingAddress?: BillingAddress | null;
 }
 
 interface ProfilePageProps {
@@ -248,6 +259,13 @@ export default function ProfilePage({ onLogout, onAdminDashboard }: ProfilePageP
             </Card>
 
             <PushNotificationSettings />
+
+            <BillingAddressForm
+              currentAddress={userData?.billingAddress}
+              endpoint="/api/profile/billing-address"
+              queryKeyToInvalidate={["/api/auth/user"]}
+              title="Billing Address"
+            />
           </div>
         )}
 

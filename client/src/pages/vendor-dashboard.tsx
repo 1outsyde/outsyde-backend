@@ -4,6 +4,8 @@ import { LayoutDashboard, Package, Calendar, MessageCircle, Settings, PlusCircle
 import { queryClient, apiRequest } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
 import { format } from "date-fns";
+import BillingAddressForm from "@/components/BillingAddressForm";
+import type { Business } from "@shared/schema";
 
 interface OrderRecord {
   recordId: string;
@@ -165,6 +167,11 @@ export default function VendorDashboardPage({ onLogout }: VendorDashboardPagePro
   }>({
     queryKey: ["/api/vendor/customers"],
     enabled: activeSection === "orders",
+  });
+
+  // Fetch business data
+  const { data: businessData } = useQuery<{ business: Business }>({
+    queryKey: ["/api/vendor/my-business"],
   });
 
   const sidebarStyle = {
@@ -394,15 +401,27 @@ export default function VendorDashboardPage({ onLogout }: VendorDashboardPagePro
             )}
 
             {activeSection === "settings" && (
-              <div className="text-center py-12">
-                <Settings className="h-16 w-16 mx-auto text-muted-foreground mb-4" />
-                <h2 className="text-xl font-semibold mb-2">Settings</h2>
-                <p className="text-muted-foreground mb-4">
-                  Manage your business settings
-                </p>
-                <Button variant="outline" onClick={onLogout} data-testid="button-vendor-logout">
-                  Sign Out
-                </Button>
+              <div className="space-y-6">
+                <div className="flex items-center gap-3 mb-6">
+                  <Settings className="h-8 w-8 text-muted-foreground" />
+                  <div>
+                    <h2 className="text-xl font-semibold">Settings</h2>
+                    <p className="text-muted-foreground">Manage your business settings</p>
+                  </div>
+                </div>
+
+                <BillingAddressForm
+                  currentAddress={businessData?.business?.billingAddress}
+                  endpoint="/api/businesses/me/billing-address"
+                  queryKeyToInvalidate={["/api/vendor/my-business"]}
+                  title="Business Billing Address"
+                />
+
+                <div className="pt-4">
+                  <Button variant="outline" onClick={onLogout} data-testid="button-vendor-logout">
+                    Sign Out
+                  </Button>
+                </div>
               </div>
             )}
           </main>

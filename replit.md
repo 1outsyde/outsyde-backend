@@ -35,6 +35,17 @@ The Outsyde platform is built with a clear separation of concerns, utilizing a R
     -   **Refund Request System:** Vendors, photographers, and customers can request refunds via dashboards. Refund requests are stored in the database and admin is notified for processing.
 
 ## Recent Changes (Dec 17, 2025)
+- **Billing Address for All User Types**
+  - Added BillingAddress interface and billingAddressSchema to shared/schema.ts
+  - New `billing_address` JSONB column added to users, photographers, and businesses tables
+  - API endpoints for updating billing address:
+    - `/api/profile/billing-address` (regular users)
+    - `/api/photographers/me/billing-address` (photographers)
+    - `/api/businesses/me/billing-address` (businesses)
+  - Reusable BillingAddressForm component with US state selector and form validation
+  - Integrated in: customer profile (overview section), photographer dashboard, vendor dashboard (settings section)
+  - Form properly hydrates existing address data when editing
+
 - **Direct Image Upload from Device**
   - New ImageUploader component using Replit App Storage for cloud-based image hosting
   - Users can upload images directly from their device (camera, camera roll, files)
