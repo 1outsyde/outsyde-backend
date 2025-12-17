@@ -1014,6 +1014,85 @@ export async function registerRoutes(
     }
   });
 
+  // ==================== UNIFIED SEARCH ====================
+
+  app.get("/api/search", async (req, res) => {
+    try {
+      const { city, category, search } = req.query;
+      const results = await storage.searchAll({
+        city: city as string | undefined,
+        category: category as string | undefined,
+        search: search as string | undefined,
+      });
+      res.json(results);
+    } catch (error) {
+      console.error("Search error:", error);
+      res.status(500).json({ error: "Failed to search" });
+    }
+  });
+
+  // ==================== PROFILE COMMENTS ====================
+
+  // Get comments for a business or photographer profile
+  app.get("/api/profile-comments/:targetType/:targetId", async (req, res) => {
+    try {
+      const { targetType, targetId } = req.params;
+      if (targetType !== "business" && targetType !== "photographer") {
+        return res.status(400).json({ error: "Invalid target type" });
+      }
+      const comments = await storage.getProfileComments(targetType, targetId);
+      res.json({ comments });
+    } catch (error) {
+      console.error("Get profile comments error:", error);
+      res.status(500).json({ error: "Failed to get comments" });
+    }
+  });
+
+  // Add a comment to a business or photographer profile (authenticated users only)
+  app.post("/api/profile-comments", async (req, res) => {
+    const userId = req.session?.userId;
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    try {
+      const { targetType, targetId, content } = req.body;
+      
+      if (!targetType || !targetId || !content) {
+        return res.status(400).json({ error: "Missing required fields" });
+      }
+      
+      if (targetType !== "business" && targetType !== "photographer") {
+        return res.status(400).json({ error: "Invalid target type" });
+      }
+
+      if (content.trim().length === 0) {
+        return res.status(400).json({ error: "Comment cannot be empty" });
+      }
+
+      const comment = await storage.createProfileComment({
+        targetType,
+        targetId,
+        userId,
+        content: content.trim()
+      });
+
+      // Get author info
+      const user = await storage.getUser(userId);
+
+      res.status(201).json({ 
+        comment: {
+          ...comment,
+          authorName: user?.name || null,
+          authorImage: user?.profileImageUrl || null
+        }
+      });
+    } catch (error) {
+      console.error("Create profile comment error:", error);
+      res.status(500).json({ error: "Failed to create comment" });
+    }
+  });
+
   // ==================== BUSINESSES ROUTES ====================
 
   app.get("/api/businesses", async (req, res) => {

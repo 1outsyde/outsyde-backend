@@ -46,6 +46,8 @@ import {
   type InsertFeedPost,
   type PostComment,
   type InsertPostComment,
+  type ProfileComment,
+  type InsertProfileComment,
   users,
   businesses,
   cities,
@@ -76,7 +78,8 @@ import {
   scheduling,
   feedPosts,
   postLikes,
-  postComments
+  postComments,
+  profileComments
 } from "@shared/schema";
 import { db } from "./db";
 import { eq, ilike, or, and, sql, isNull } from "drizzle-orm";
@@ -333,6 +336,16 @@ export interface IStorage {
   getPostComments(postId: string): Promise<PostComment[]>;
   canCustomerTagBusiness(customerId: string, businessId: string): Promise<boolean>;
   canCustomerTagPhotographer(customerId: string, photographerId: string): Promise<boolean>;
+
+  // Profile Comments (for businesses and photographers)
+  createProfileComment(data: InsertProfileComment): Promise<ProfileComment>;
+  getProfileComments(targetType: string, targetId: string): Promise<(ProfileComment & { authorName: string | null; authorImage: string | null })[]>;
+
+  // Unified Search
+  searchAll(filters?: { city?: string; category?: string; search?: string }): Promise<{
+    businesses: Business[];
+    photographers: Photographer[];
+  }>;
 
   seedInitialData(): Promise<void>;
 }
@@ -2823,6 +2836,81 @@ export class DatabaseStorage implements IStorage {
       .limit(1);
     
     return !!bookingExists;
+  }
+
+  // =========================
+  // PROFILE COMMENTS
+  // =========================
+
+  async createProfileComment(data: InsertProfileComment): Promise<ProfileComment> {
+    const id = randomUUID();
+    const [comment] = await db.insert(profileComments)
+      .values({
+        id,
+        targetType: data.targetType,
+        targetId: data.targetId,
+        userId: data.userId,
+        content: data.content
+      })
+      .returning();
+    return comment;
+  }
+
+  async getProfileComments(targetType: string, targetId: string): Promise<(ProfileComment & { authorName: string | null; authorImage: string | null })[]> {
+    const result = await db.select({
+      id: profileComments.id,
+      targetType: profileComments.targetType,
+      targetId: profileComments.targetId,
+      userId: profileComments.userId,
+      content: profileComments.content,
+      createdAt: profileComments.createdAt,
+      authorName: users.name,
+      authorImage: users.profileImageUrl
+    })
+    .from(profileComments)
+    .leftJoin(users, eq(profileComments.userId, users.id))
+    .where(and(
+      eq(profileComments.targetType, targetType),
+      eq(profileComments.targetId, targetId)
+    ))
+    .orderBy(sql`${profileComments.createdAt} DESC`);
+    
+    return result;
+  }
+
+  // =========================
+  // UNIFIED SEARCH
+  // =========================
+
+  async searchAll(filters?: { city?: string; category?: string; search?: string }): Promise<{
+    businesses: Business[];
+    photographers: Photographer[];
+  }> {
+    // Search businesses
+    const businessResults = await this.getBusinesses(filters);
+
+    // Search photographers with similar filters
+    let photographerResults = await db.select().from(photographers);
+    
+    if (filters?.city) {
+      photographerResults = photographerResults.filter(p => 
+        p.city?.toLowerCase().includes(filters.city!.toLowerCase())
+      );
+    }
+    
+    if (filters?.search) {
+      const searchLower = filters.search.toLowerCase();
+      photographerResults = photographerResults.filter(p => 
+        p.displayName?.toLowerCase().includes(searchLower) ||
+        p.bio?.toLowerCase().includes(searchLower) ||
+        p.specialties?.some(s => s.toLowerCase().includes(searchLower))
+      );
+    }
+
+    return {
+      businesses: businessResults,
+      photographers: photographerResults
+    };
   }
 }
 

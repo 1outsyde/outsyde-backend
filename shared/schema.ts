@@ -736,6 +736,19 @@ export const postComments = pgTable("post_comments", {
   createdAt: timestamp("created_at").defaultNow().notNull(),
 });
 
+// Profile comments for businesses and photographers
+export const profileComments = pgTable("profile_comments", {
+  id: varchar("id", { length: 36 }).primaryKey().default(sql`gen_random_uuid()`),
+
+  targetType: text("target_type").notNull(), // "business" or "photographer"
+  targetId: varchar("target_id", { length: 36 }).notNull(),
+  userId: varchar("user_id", { length: 36 }).notNull().references(() => users.id),
+
+  content: text("content").notNull(),
+
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+});
+
 /* =====================================================
    INSERT SCHEMAS (Zod)
 ===================================================== */
@@ -866,6 +879,11 @@ export const insertPostLikeSchema = createInsertSchema(postLikes).omit({
 });
 
 export const insertPostCommentSchema = createInsertSchema(postComments).omit({
+  id: true,
+  createdAt: true,
+});
+
+export const insertProfileCommentSchema = createInsertSchema(profileComments).omit({
   id: true,
   createdAt: true,
 });
@@ -1029,3 +1047,6 @@ export type InsertPostLike = z.infer<typeof insertPostLikeSchema>;
 
 export type PostComment = typeof postComments.$inferSelect;
 export type InsertPostComment = z.infer<typeof insertPostCommentSchema>;
+
+export type ProfileComment = typeof profileComments.$inferSelect;
+export type InsertProfileComment = z.infer<typeof insertProfileCommentSchema>;
