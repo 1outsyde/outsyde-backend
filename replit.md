@@ -34,7 +34,20 @@ The Outsyde platform is built with a clear separation of concerns, utilizing a R
     -   **Push Notifications:** Web Push Notifications for cart abandonment reminders, managed via a service worker and VAPID keys.
     -   **Refund Request System:** Vendors, photographers, and customers can request refunds via dashboards. Refund requests are stored in the database and admin is notified for processing.
 
-## Recent Changes (Dec 16, 2025)
+## Recent Changes (Dec 17, 2025)
+- **Admin Dashboard & Control Panel**
+  - New admin-dashboard.tsx page accessible from profile page for users with isAdmin=true
+  - Tabbed navigation: Users, Businesses, Photographers, Payments, Messages, Support
+  - Users tab: View all users, edit user accounts (name, email, location), toggle admin status
+  - Businesses tab: View all registered businesses with details (name, category, location, subscription tier)
+  - Photographers tab: View all photographers with portfolio links and service counts
+  - Payments tab: View orders and photo bookings with revenue totals, pending refund requests
+  - Messages tab: View all conversations with participant details and message counts
+  - Admin API endpoints secured with requireAdmin middleware
+  - Storage methods: getAllUsers, getAllBusinesses, getAllPhotographers, getAllOrders, getAllShootBookings, getAllConversations
+  - Profile page shows "Admin" button (ShieldCheck icon) for admin users
+
+## Previous Changes (Dec 16, 2025)
 - **Storefront Brand Color Customization**
   - Both photographers and businesses can customize their storefront brand colors
   - Color presets available: Golden Yellow, Rose Pink, Ocean Blue, Forest Green, Royal Purple, Sunset Orange, Teal, Slate Gray
