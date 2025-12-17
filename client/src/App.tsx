@@ -233,6 +233,7 @@ function AppContent() {
           {currentPage === "home" && (
             <HomePage
               onViewBusiness={handleViewBusiness}
+              onLoginRequired={() => setCurrentPage("auth")}
             />
           )}
           {currentPage === "search" && (

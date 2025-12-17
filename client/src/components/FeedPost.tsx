@@ -1,9 +1,13 @@
 import { useState } from "react";
-import { Heart, MessageCircle, Share2, Bookmark, MoreHorizontal, Store, Camera, ShoppingCart, Calendar, Clock } from "lucide-react";
+import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { Heart, MessageCircle, Share2, Bookmark, MoreHorizontal, Store, Camera, ShoppingCart, Calendar, Clock, Send, Loader2 } from "lucide-react";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
+import { Textarea } from "@/components/ui/textarea";
+import { apiRequest } from "@/lib/queryClient";
+import { formatDistanceToNow } from "date-fns";
 
 interface ProductData {
   id: string;
@@ -23,6 +27,20 @@ interface ServiceData {
   businessId: string;
 }
 
+interface PostComment {
+  id: string;
+  postId: string;
+  userId: string;
+  content: string;
+  createdAt: string;
+  user?: {
+    id: string;
+    firstName: string;
+    lastName: string;
+    profileImageUrl?: string;
+  };
+}
+
 interface FeedPostProps {
   id: string;
   authorName: string;
@@ -40,6 +58,7 @@ interface FeedPostProps {
   isSaved?: boolean;
   product?: ProductData | null;
   service?: ServiceData | null;
+  isAuthenticated?: boolean;
   onLike?: (id: string) => void;
   onComment?: (id: string) => void;
   onShare?: (id: string) => void;
@@ -47,6 +66,7 @@ interface FeedPostProps {
   onAuthorClick?: (id: string) => void;
   onAddToCart?: (productId: string) => void;
   onBookService?: (serviceId: string) => void;
+  onLoginRequired?: () => void;
 }
 
 export default function FeedPost({
@@ -66,6 +86,7 @@ export default function FeedPost({
   isSaved = false,
   product,
   service,
+  isAuthenticated = false,
   onLike,
   onComment,
   onShare,
@@ -73,8 +94,52 @@ export default function FeedPost({
   onAuthorClick,
   onAddToCart,
   onBookService,
+  onLoginRequired,
 }: FeedPostProps) {
   const [showFullCaption, setShowFullCaption] = useState(false);
+  const [showComments, setShowComments] = useState(false);
+  const [newComment, setNewComment] = useState("");
+  const queryClient = useQueryClient();
+
+  const { data: commentsData, isLoading: commentsLoading } = useQuery<{ comments: PostComment[] }>({
+    queryKey: ["/api/feed", id, "comments"],
+    enabled: showComments,
+  });
+
+  const postCommentMutation = useMutation({
+    mutationFn: async (commentContent: string) => {
+      const res = await apiRequest("POST", `/api/feed/${id}/comments`, { content: commentContent });
+      return res.json();
+    },
+    onSuccess: () => {
+      setNewComment("");
+      queryClient.invalidateQueries({ queryKey: ["/api/feed", id, "comments"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/feed"] });
+    },
+  });
+
+  const handleSubmitComment = () => {
+    if (!isAuthenticated) {
+      onLoginRequired?.();
+      return;
+    }
+    if (newComment.trim()) {
+      postCommentMutation.mutate(newComment.trim());
+    }
+  };
+
+  const handleCommentClick = () => {
+    setShowComments(!showComments);
+    onComment?.(id);
+  };
+
+  const formatCommentTime = (dateStr: string) => {
+    try {
+      return formatDistanceToNow(new Date(dateStr), { addSuffix: true });
+    } catch {
+      return "recently";
+    }
+  };
 
   const getAuthorTypeLabel = () => {
     switch (authorType) {
@@ -256,10 +321,10 @@ export default function FeedPost({
             <Button
               size="icon"
               variant="ghost"
-              onClick={() => onComment?.(id)}
+              onClick={handleCommentClick}
               data-testid={`button-comment-${id}`}
             >
-              <MessageCircle className="h-5 w-5" />
+              <MessageCircle className={`h-5 w-5 ${showComments ? "fill-primary text-primary" : ""}`} />
             </Button>
             <Button
               size="icon"
@@ -302,6 +367,80 @@ export default function FeedPost({
             </button>
           )}
         </div>
+
+        {/* Comments Section */}
+        {showComments && (
+          <div className="border-t pt-3 space-y-3" data-testid={`comments-section-${id}`}>
+            {/* Comment Input */}
+            <div className="flex gap-2">
+              <Textarea
+                placeholder={isAuthenticated ? "Write a comment..." : "Log in to comment"}
+                value={newComment}
+                onChange={(e) => setNewComment(e.target.value)}
+                disabled={!isAuthenticated || postCommentMutation.isPending}
+                className="min-h-[60px] resize-none flex-1"
+                data-testid={`input-comment-${id}`}
+              />
+              <Button
+                size="icon"
+                onClick={handleSubmitComment}
+                disabled={!newComment.trim() || postCommentMutation.isPending}
+                data-testid={`button-submit-comment-${id}`}
+              >
+                {postCommentMutation.isPending ? (
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                ) : (
+                  <Send className="h-4 w-4" />
+                )}
+              </Button>
+            </div>
+
+            {!isAuthenticated && (
+              <button
+                onClick={() => onLoginRequired?.()}
+                className="text-sm text-primary hover:underline"
+                data-testid={`button-login-to-comment-${id}`}
+              >
+                Log in to comment
+              </button>
+            )}
+
+            {/* Comments List */}
+            {commentsLoading ? (
+              <div className="flex items-center justify-center py-4">
+                <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
+              </div>
+            ) : commentsData?.comments && commentsData.comments.length > 0 ? (
+              <div className="space-y-3 max-h-[300px] overflow-y-auto">
+                {commentsData.comments.map((comment) => (
+                  <div key={comment.id} className="flex gap-2" data-testid={`comment-${comment.id}`}>
+                    <Avatar className="h-8 w-8 flex-shrink-0">
+                      <AvatarImage src={comment.user?.profileImageUrl} alt={`${comment.user?.firstName || "User"}`} />
+                      <AvatarFallback className="text-xs">
+                        {(comment.user?.firstName || "U").charAt(0)}
+                      </AvatarFallback>
+                    </Avatar>
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <span className="font-semibold text-sm">
+                          {comment.user ? `${comment.user.firstName} ${comment.user.lastName}` : "User"}
+                        </span>
+                        <span className="text-xs text-muted-foreground">
+                          {formatCommentTime(comment.createdAt)}
+                        </span>
+                      </div>
+                      <p className="text-sm">{comment.content}</p>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <p className="text-sm text-muted-foreground text-center py-2">
+                No comments yet. Be the first to comment!
+              </p>
+            )}
+          </div>
+        )}
       </div>
     </Card>
   );

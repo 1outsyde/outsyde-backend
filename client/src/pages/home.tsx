@@ -17,6 +17,7 @@ import { useToast } from "@/hooks/use-toast";
 
 interface HomePageProps {
   onViewBusiness: (id: string) => void;
+  onLoginRequired?: () => void;
 }
 
 interface FeedPostData {
@@ -65,7 +66,7 @@ interface FeedPostData {
   } | null;
 }
 
-export default function HomePage({ onViewBusiness }: HomePageProps) {
+export default function HomePage({ onViewBusiness, onLoginRequired }: HomePageProps) {
   const [location, setLocation] = useState("");
   const [searchValue, setSearchValue] = useState("");
   const [selectedCategories, setSelectedCategories] = useState<string[]>([]);
@@ -317,9 +318,9 @@ export default function HomePage({ onViewBusiness }: HomePageProps) {
                 isSaved={savedPosts.has(post.id)}
                 product={post.product}
                 service={post.service}
+                isAuthenticated={!!user}
                 onLike={toggleLikePost}
                 onSave={toggleSavePost}
-                onComment={(id) => console.log("Comment:", id)}
                 onShare={(id) => console.log("Share:", id)}
                 onAuthorClick={() => {
                   if (post.product?.businessId) {
@@ -346,6 +347,7 @@ export default function HomePage({ onViewBusiness }: HomePageProps) {
                     onViewBusiness(post.service.businessId);
                   }
                 }}
+                onLoginRequired={onLoginRequired}
               />
             ))
           ) : (
