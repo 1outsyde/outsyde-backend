@@ -2304,6 +2304,21 @@ export async function registerRoutes(
         let taggedPhotographer = null;
         let product = null;
         let service = null;
+        let authorBusinessId: string | null = null;
+        let authorPhotographerId: string | null = null;
+        
+        // Get the author's storefront ID based on their type
+        if (post.authorType === 'vendor' && post.authorId) {
+          const business = await storage.getBusinessByOwnerId(post.authorId);
+          if (business) {
+            authorBusinessId = business.id;
+          }
+        } else if (post.authorType === 'photographer' && post.authorId) {
+          const photographer = await storage.getPhotographerByUserId(post.authorId);
+          if (photographer) {
+            authorPhotographerId = photographer.id;
+          }
+        }
         
         if (post.taggedBusinessId) {
           taggedBusiness = await storage.getBusiness(post.taggedBusinessId);
@@ -2320,7 +2335,13 @@ export async function registerRoutes(
         
         return {
           ...post,
-          author: author ? { id: author.id, name: author.name, profileImageUrl: author.profileImageUrl } : null,
+          author: author ? { 
+            id: author.id, 
+            name: author.name, 
+            profileImageUrl: author.profileImageUrl,
+            businessId: authorBusinessId,
+            photographerId: authorPhotographerId,
+          } : null,
           taggedBusiness: taggedBusiness ? { id: taggedBusiness.id, name: taggedBusiness.name, logoImage: taggedBusiness.logoImage } : null,
           taggedPhotographer: taggedPhotographer ? { id: taggedPhotographer.id, displayName: taggedPhotographer.displayName } : null,
           product: product ? {
