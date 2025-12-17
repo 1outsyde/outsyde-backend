@@ -35,6 +35,16 @@ The Outsyde platform is built with a clear separation of concerns, utilizing a R
     -   **Refund Request System:** Vendors, photographers, and customers can request refunds via dashboards. Refund requests are stored in the database and admin is notified for processing.
 
 ## Recent Changes (Dec 17, 2025)
+- **Direct Image Upload from Device**
+  - New ImageUploader component using Replit App Storage for cloud-based image hosting
+  - Users can upload images directly from their device (camera, camera roll, files)
+  - Authenticated upload endpoints: `/api/objects/upload` (get presigned URL), `/api/objects/finalize` (set ACL policy)
+  - Public serving endpoint: `/objects/:path` with ACL-based access control
+  - Integrated in: create-post page, photographer storefront (cover/logo), business storefront (cover/logo)
+  - Files stored in private bucket with public visibility ACL after upload
+  - Memory leak prevention with proper blob URL cleanup
+  - Upload verification before finalization
+
 - **Admin Dashboard & Control Panel**
   - New admin-dashboard.tsx page accessible from profile page for users with isAdmin=true
   - Tabbed navigation: Users, Businesses, Photographers, Payments, Messages, Support
