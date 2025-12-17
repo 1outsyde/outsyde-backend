@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { User, Settings, Heart, Calendar, ShoppingBag, LogOut, ChevronRight, Coins } from "lucide-react";
+import { User, Settings, Heart, Calendar, ShoppingBag, LogOut, ChevronRight, Coins, ShieldCheck } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
@@ -20,14 +20,16 @@ interface ProfileUser {
   state?: string;
   isVendor: boolean;
   isPhotographer?: boolean;
+  isAdmin?: boolean;
   createdAt?: string;
 }
 
 interface ProfilePageProps {
   onLogout: () => void;
+  onAdminDashboard?: () => void;
 }
 
-export default function ProfilePage({ onLogout }: ProfilePageProps) {
+export default function ProfilePage({ onLogout, onAdminDashboard }: ProfilePageProps) {
   const [activeSection, setActiveSection] = useState<"overview" | "bookings" | "orders" | "favorites" | "points">("overview");
 
   const { data: userData, isLoading: userLoading } = useQuery<ProfileUser>({
@@ -36,6 +38,7 @@ export default function ProfilePage({ onLogout }: ProfilePageProps) {
 
   const isPhotographer = userData?.isPhotographer ?? false;
   const isVendor = userData?.isVendor ?? false;
+  const isAdmin = userData?.isAdmin ?? false;
   
   // Only regular customers (not photographers or business owners) can see/earn points
   const isRegularCustomer = !isPhotographer && !isVendor;
@@ -144,9 +147,17 @@ export default function ProfilePage({ onLogout }: ProfilePageProps) {
                   <Badge variant="outline">Member since {user.memberSince}</Badge>
                 </div>
               </div>
-              <Button variant="outline" size="icon" data-testid="button-settings">
-                <Settings className="h-5 w-5" />
-              </Button>
+              <div className="flex gap-2">
+                {isAdmin && onAdminDashboard && (
+                  <Button variant="default" onClick={onAdminDashboard} data-testid="button-admin-dashboard">
+                    <ShieldCheck className="h-5 w-5 mr-2" />
+                    Admin
+                  </Button>
+                )}
+                <Button variant="outline" size="icon" data-testid="button-settings">
+                  <Settings className="h-5 w-5" />
+                </Button>
+              </div>
             </div>
           </CardContent>
         </Card>

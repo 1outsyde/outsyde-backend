@@ -18,12 +18,13 @@ import AuthPage from "@/pages/auth";
 import VendorDashboardPage from "@/pages/vendor-dashboard";
 import PhotographerDashboardPage from "@/pages/photographer-dashboard";
 import AdminFulfillmentPage from "@/pages/admin-fulfillment";
+import AdminDashboardPage from "@/pages/admin-dashboard";
 import CreatePostPage from "@/pages/create-post";
 
 import jewelryImage from "@assets/generated_images/jewelry_artisan_vendor_image.png";
 import type { User } from "@shared/schema";
 
-type Page = "home" | "search" | "messages" | "profile" | "vendor" | "auth" | "vendor-dashboard" | "photographer-dashboard" | "admin-fulfillment" | "create-post" | "photographer-page";
+type Page = "home" | "search" | "messages" | "profile" | "vendor" | "auth" | "vendor-dashboard" | "photographer-dashboard" | "admin-fulfillment" | "admin-dashboard" | "create-post" | "photographer-page";
 type NavTab = "home" | "search" | "create" | "messages" | "profile" | "dashboard";
 
 interface MessageTarget {
@@ -213,6 +214,15 @@ function AppContent() {
     );
   }
 
+  if (currentPage === "admin-dashboard" && user?.isAdmin) {
+    return (
+      <>
+        <AdminDashboardPage onBack={() => setCurrentPage("profile")} />
+        <Toaster />
+      </>
+    );
+  }
+
   return (
     <>
       <div className="min-h-screen bg-background">
@@ -257,7 +267,7 @@ function AppContent() {
               onClearTarget={() => setMessageTarget(null)}
             />
           )}
-          {currentPage === "profile" && <ProfilePage onLogout={handleLogout} />}
+          {currentPage === "profile" && <ProfilePage onLogout={handleLogout} onAdminDashboard={() => setCurrentPage("admin-dashboard")} />}
           {currentPage === "vendor" && (
             <VendorPage
               vendorId={selectedVendorId}
