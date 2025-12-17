@@ -7,6 +7,7 @@ import {
   photographerSignupSchema,
   loginSchema,
   insertReviewSchema,
+  billingAddressSchema,
 } from "@shared/schema";
 import { z } from "zod";
 import {
@@ -444,6 +445,87 @@ export async function registerRoutes(
       res
         .status(500)
         .json({ error: "Failed to update preferences" });
+    }
+  });
+
+  // ==================== BILLING ADDRESS ENDPOINTS ====================
+
+  // Update user billing address
+  app.patch("/api/profile/billing-address", async (req, res) => {
+    const userId = req.session?.userId;
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    try {
+      const billingAddress = billingAddressSchema.parse(req.body);
+      const user = await storage.updateUser(userId, { billingAddress });
+      if (!user) {
+        return res.status(404).json({ error: "User not found" });
+      }
+      res.json({ billingAddress: user.billingAddress });
+    } catch (error) {
+      if (error instanceof z.ZodError) {
+        return res.status(400).json({ error: "Invalid billing address", details: error.errors });
+      }
+      console.error("Update billing address error:", error);
+      res.status(500).json({ error: "Failed to update billing address" });
+    }
+  });
+
+  // Update photographer billing address
+  app.patch("/api/photographers/me/billing-address", async (req, res) => {
+    const userId = req.session?.userId;
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    try {
+      const photographer = await storage.getPhotographerByUserId(userId);
+      if (!photographer) {
+        return res.status(404).json({ error: "Photographer not found" });
+      }
+
+      const billingAddress = billingAddressSchema.parse(req.body);
+      const updated = await storage.updatePhotographer(photographer.id, { billingAddress });
+      if (!updated) {
+        return res.status(404).json({ error: "Failed to update photographer" });
+      }
+      res.json({ billingAddress: updated.billingAddress });
+    } catch (error) {
+      if (error instanceof z.ZodError) {
+        return res.status(400).json({ error: "Invalid billing address", details: error.errors });
+      }
+      console.error("Update photographer billing address error:", error);
+      res.status(500).json({ error: "Failed to update billing address" });
+    }
+  });
+
+  // Update business billing address
+  app.patch("/api/businesses/me/billing-address", async (req, res) => {
+    const userId = req.session?.userId;
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    try {
+      const business = await storage.getBusinessByOwnerId(userId);
+      if (!business) {
+        return res.status(404).json({ error: "Business not found" });
+      }
+
+      const billingAddress = billingAddressSchema.parse(req.body);
+      const updated = await storage.updateBusiness(business.id, { billingAddress });
+      if (!updated) {
+        return res.status(404).json({ error: "Failed to update business" });
+      }
+      res.json({ billingAddress: updated.billingAddress });
+    } catch (error) {
+      if (error instanceof z.ZodError) {
+        return res.status(400).json({ error: "Invalid billing address", details: error.errors });
+      }
+      console.error("Update business billing address error:", error);
+      res.status(500).json({ error: "Failed to update billing address" });
     }
   });
 
