@@ -14,9 +14,30 @@ import {
   type User,
 } from "@shared/schema";
 
-// Helper to sanitize user data for non-admin responses (removes sensitive fields like DOB)
-function sanitizeUserForResponse(user: User): Omit<User, 'dateOfBirth' | 'password'> & { ageRange: string | null } {
-  const { dateOfBirth, password, ...safeUser } = user;
+// Helper to sanitize user data for non-admin responses (removes sensitive fields)
+// DOB: replaced with age range for privacy
+// Ethnicity/race: never exposed at individual level, only aggregated
+function sanitizeUserForResponse(user: User, options: { includeOwnData?: boolean } = {}) {
+  const { 
+    dateOfBirth, 
+    password, 
+    ethnicity,
+    householdSize,
+    incomeRange,
+    education,
+    occupation,
+    ...safeUser 
+  } = user;
+  
+  // Users can see their own DOB but not ethnicity (that's for aggregation only)
+  if (options.includeOwnData) {
+    return {
+      ...safeUser,
+      dateOfBirth,
+      ageRange: calculateAgeRange(dateOfBirth),
+    };
+  }
+  
   return {
     ...safeUser,
     ageRange: calculateAgeRange(dateOfBirth),
@@ -111,7 +132,8 @@ export async function registerRoutes(
         req.session.isVendor = false;
       }
 
-      const { password: _, ...safeUser } = user;
+      // User sees their own data on signup (includes DOB, excludes ethnicity)
+      const safeUser = sanitizeUserForResponse(user, { includeOwnData: true });
       res.json({ user: safeUser });
     } catch (error) {
       if (error instanceof z.ZodError) {
@@ -174,7 +196,7 @@ export async function registerRoutes(
         req.session.businessId = business.id;
       }
 
-      const { password: _, ...safeUser } = user;
+      const safeUser = sanitizeUserForResponse(user, { includeOwnData: true });
       res.json({ user: safeUser, business });
     } catch (error) {
       if (error instanceof z.ZodError) {
@@ -332,7 +354,8 @@ export async function registerRoutes(
         }
       }
 
-      const { password: _, ...safeUser } = user;
+      // User sees their own data on login (includes DOB, excludes ethnicity)
+      const safeUser = sanitizeUserForResponse(user, { includeOwnData: true });
 
       if (user.isVendor) {
         const business = await storage.getBusinessByOwnerId(user.id);
@@ -369,6 +392,7 @@ export async function registerRoutes(
   });
 
   // Get current authenticated user (supports both session and OAuth)
+  // Returns user's own data including DOB, but excludes ethnicity (aggregation only)
   app.get("/api/auth/user", async (req, res) => {
     try {
       // Check for OAuth user first (from Replit Auth)
@@ -376,7 +400,8 @@ export async function registerRoutes(
       if (oauthUser?.claims?.sub) {
         const user = await storage.getUser(oauthUser.claims.sub);
         if (user) {
-          const { password: _, ...safeUser } = user;
+          // Use sanitizeUserForResponse with includeOwnData for user's own profile
+          const safeUser = sanitizeUserForResponse(user, { includeOwnData: true });
           // Check if user has a photographer record (in case isPhotographer wasn't set properly)
           if (!safeUser.isPhotographer) {
             const photographer = await storage.getPhotographerByUserId(user.id);
@@ -399,7 +424,8 @@ export async function registerRoutes(
         return res.status(401).json({ message: "Unauthorized" });
       }
 
-      const { password: _, ...safeUser } = user;
+      // Use sanitizeUserForResponse with includeOwnData for user's own profile
+      const safeUser = sanitizeUserForResponse(user, { includeOwnData: true });
       // Check if user has a photographer record (in case isPhotographer wasn't set properly)
       if (!safeUser.isPhotographer) {
         const photographer = await storage.getPhotographerByUserId(userId);

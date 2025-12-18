@@ -15,10 +15,29 @@ Outsyde is a social marketplace platform connecting customers with local small b
 
 ## DOB Privacy Rules
 - **Full DOB:** Collected at user signup, stored in database
+- **User's Own Data:** Users can see their own DOB when viewing their profile
 - **Vendor Access:** NEVER visible in photographer or business dashboards; vendors only see calculated age ranges (18-24, 25-34, etc.)
 - **Admin Access:** Full DOB available to admin-level users only
 - **API Safety:** `sanitizeUserForResponse()` helper removes DOB from non-admin API responses and replaces with `ageRange`
 - **Age Range Calculation:** Uses `calculateAgeRange()` utility function in shared/schema.ts
+
+## Race/Ethnicity Privacy Rules
+- **Collection:** Optional field during customer signup
+- **Individual Exposure:** NEVER exposed at individual level in any API response
+- **Aggregation Only:** Can only be shown as aggregated percentages (future analytics feature)
+- **Vendor Access:** Never visible to vendors or photographers
+- **API Safety:** `sanitizeUserForResponse()` removes ethnicity, householdSize, incomeRange, education, occupation from all responses
+
+## Data Access & Authorization Rules
+- **Vendor/Business ID:** Always derived from authenticated session (`req.session?.userId` → `storage.getBusinessByOwnerId(userId)`)
+- **Cross-Vendor Access:** Impossible - no API endpoint accepts vendorId/businessId as a parameter for sensitive data
+- **Order/Booking Verification:** All vendor operations verify ownership before allowing access
+- **Photographer Access:** Same pattern - photographerId derived from session, not from client input
+
+## Demographic Aggregation Rules (Future Analytics)
+- **Minimum Sample Size:** Aggregations require ≥5 customers before showing breakdowns
+- **Rounding:** Percentages rounded to prevent reverse-identification
+- **Unknown Bucket:** "Unknown / Not provided" cleanly bucketed in all aggregations
 
 ## System Architecture
 The Outsyde platform uses a React frontend, an Express (TypeScript) backend, and a PostgreSQL database with Drizzle ORM, organized in a monorepo (`client/`, `server/`, `shared/`).
