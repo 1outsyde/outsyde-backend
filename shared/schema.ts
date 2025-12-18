@@ -463,6 +463,28 @@ export const pushSubscriptions = pgTable("push_subscriptions", {
 });
 
 /* =====================================================
+   NOTIFICATIONS (In-app notifications)
+===================================================== */
+export const notifications = pgTable("notifications", {
+  id: varchar("id", { length: 36 }).primaryKey().default(sql`gen_random_uuid()`),
+  userId: varchar("user_id", { length: 36 }).notNull().references(() => users.id),
+
+  type: text("type").notNull(), // booking_confirmed, payment_succeeded, payment_failed, subscription_activated, subscription_canceled, addon_charged, refund_issued, new_order, photographer_assigned
+  title: text("title").notNull(),
+  message: text("message").notNull(),
+
+  referenceType: text("reference_type"), // order, booking, subscription, refund, etc.
+  referenceId: varchar("reference_id", { length: 36 }),
+
+  isRead: boolean("is_read").default(false).notNull(),
+  readAt: timestamp("read_at"),
+
+  metadata: jsonb("metadata").$type<Record<string, any>>(),
+
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+});
+
+/* =====================================================
    CART ITEMS
 ===================================================== */
 export const cartItems = pgTable("cart_items", {
@@ -892,6 +914,13 @@ export const insertPushSubscriptionSchema = createInsertSchema(pushSubscriptions
   createdAt: true,
 });
 
+export const insertNotificationSchema = createInsertSchema(notifications).omit({
+  id: true,
+  createdAt: true,
+  isRead: true,
+  readAt: true,
+});
+
 export const insertCartItemSchema = createInsertSchema(cartItems).omit({
   id: true,
   createdAt: true,
@@ -1069,6 +1098,9 @@ export type InsertMessage = z.infer<typeof insertMessageSchema>;
 
 export type PushSubscription = typeof pushSubscriptions.$inferSelect;
 export type InsertPushSubscription = z.infer<typeof insertPushSubscriptionSchema>;
+
+export type Notification = typeof notifications.$inferSelect;
+export type InsertNotification = z.infer<typeof insertNotificationSchema>;
 
 export type CartItem = typeof cartItems.$inferSelect;
 export type InsertCartItem = z.infer<typeof insertCartItemSchema>;
