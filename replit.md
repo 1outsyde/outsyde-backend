@@ -28,6 +28,7 @@ The Outsyde platform uses a React frontend, an Express (TypeScript) backend, and
     -   **Referral System:** Users earn points for referrals; new users get bonus points.
     -   **Cart Management:** Database-backed for authenticated users, `localStorage` for guests.
     -   **Push Notifications:** Web Push for cart abandonment reminders.
+    -   **In-App Notifications:** Server-side notification system with triggers for booking confirmed, payment succeeded/failed, subscription activated/canceled, add-on charged, refund issued, new order received, and photographer assigned events. API endpoints: GET /api/notifications, GET /api/notifications/unread-count, PATCH /api/notifications/:id/read, POST /api/notifications/mark-all-read.
     -   **Refund System:** Allows vendors, photographers, and customers to request refunds via dashboards, notifying admin.
     -   **Business Availability Calendar:** Manages date-specific time slots for businesses, including CRUD operations via API and a UI component for viewing/managing availability.
     -   **Billing Address Management:** Billing address support for all user types (customer, photographer, business) with dedicated API endpoints and a reusable form component.
