@@ -2423,6 +2423,18 @@ export async function registerRoutes(
         return res.status(403).json({ error: "Not a participant in this conversation" });
       }
 
+      // Check if either user has blocked the other
+      const otherUserId = conversation.participant1Id === userId 
+        ? conversation.participant2Id 
+        : conversation.participant1Id;
+      const isBlocked = await storage.isUserBlockedEitherWay(userId, otherUserId);
+      if (isBlocked) {
+        return res.status(403).json({ 
+          error: "Cannot send message",
+          message: "You cannot send messages in this conversation."
+        });
+      }
+
       const messageSchema = z.object({
         content: z.string()
           .min(1, "Message content is required")
