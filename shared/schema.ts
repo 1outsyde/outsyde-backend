@@ -1263,6 +1263,42 @@ export type AuditLog = typeof auditLogs.$inferSelect;
 export type InsertAuditLog = z.infer<typeof insertAuditLogSchema>;
 
 /* =====================================================
+   USER BLOCKS - Block/Mute Users
+===================================================== */
+export const userBlocks = pgTable("user_blocks", {
+  id: varchar("id", { length: 36 }).primaryKey().default(sql`gen_random_uuid()`),
+  blockerId: varchar("blocker_id", { length: 36 }).notNull(),
+  blockedId: varchar("blocked_id", { length: 36 }).notNull(),
+  reason: text("reason"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+});
+
+export const insertUserBlockSchema = createInsertSchema(userBlocks).omit({ id: true, createdAt: true });
+export type UserBlock = typeof userBlocks.$inferSelect;
+export type InsertUserBlock = z.infer<typeof insertUserBlockSchema>;
+
+/* =====================================================
+   MESSAGE REPORTS - Report Abusive Messages
+===================================================== */
+export const messageReports = pgTable("message_reports", {
+  id: varchar("id", { length: 36 }).primaryKey().default(sql`gen_random_uuid()`),
+  reporterId: varchar("reporter_id", { length: 36 }).notNull(),
+  messageId: varchar("message_id", { length: 36 }).notNull(),
+  conversationId: varchar("conversation_id", { length: 36 }).notNull(),
+  reportedUserId: varchar("reported_user_id", { length: 36 }).notNull(),
+  reason: text("reason").notNull(),
+  status: text("status").default("pending"),
+  adminNotes: text("admin_notes"),
+  resolvedAt: timestamp("resolved_at"),
+  resolvedBy: varchar("resolved_by", { length: 36 }),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+});
+
+export const insertMessageReportSchema = createInsertSchema(messageReports).omit({ id: true, createdAt: true, resolvedAt: true, resolvedBy: true, status: true, adminNotes: true });
+export type MessageReport = typeof messageReports.$inferSelect;
+export type InsertMessageReport = z.infer<typeof insertMessageReportSchema>;
+
+/* =====================================================
    ORDER STATE MACHINE - Valid Transitions
 ===================================================== */
 export const ORDER_STATUS_TRANSITIONS: Record<string, string[]> = {
