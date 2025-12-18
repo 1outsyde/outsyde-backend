@@ -399,7 +399,7 @@ export interface IStorage {
 
   // Profile Comments (for businesses and photographers)
   createProfileComment(data: InsertProfileComment): Promise<ProfileComment>;
-  getProfileComments(targetType: string, targetId: string): Promise<(ProfileComment & { authorName: string | null; authorImage: string | null })[]>;
+  getProfileComments(targetType: string, targetId: string): Promise<(ProfileComment & { authorName: string | null; authorUsername: string | null; authorImage: string | null })[]>;
 
   // Unified Search
   searchAll(filters?: { city?: string; category?: string; search?: string }): Promise<{
@@ -481,7 +481,8 @@ export class DatabaseStorage implements IStorage {
       state: insertUser.state || null,
       zipCode: insertUser.zipCode || null,
 
-      ageRange: insertUser.ageRange || null,
+      username: insertUser.username || null,
+      dateOfBirth: insertUser.dateOfBirth || null,
       gender: insertUser.gender || null,
       ethnicity: insertUser.ethnicity || null,
       nationality: insertUser.nationality || null,
@@ -3509,7 +3510,7 @@ export class DatabaseStorage implements IStorage {
     return comment;
   }
 
-  async getProfileComments(targetType: string, targetId: string): Promise<(ProfileComment & { authorName: string | null; authorImage: string | null })[]> {
+  async getProfileComments(targetType: string, targetId: string): Promise<(ProfileComment & { authorName: string | null; authorUsername: string | null; authorImage: string | null })[]> {
     const result = await db.select({
       id: profileComments.id,
       targetType: profileComments.targetType,
@@ -3518,6 +3519,7 @@ export class DatabaseStorage implements IStorage {
       content: profileComments.content,
       createdAt: profileComments.createdAt,
       authorName: users.name,
+      authorUsername: users.username,
       authorImage: users.profileImageUrl
     })
     .from(profileComments)

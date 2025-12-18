@@ -30,7 +30,8 @@ interface SignupData {
   state: string;
   zipCode: string;
   ethnicity?: string;
-  ageRange?: string;
+  username?: string;
+  dateOfBirth?: string;
   gender?: string;
   shoppingFrequency?: string;
   preferredCategories: string[];
@@ -261,7 +262,8 @@ export default function SignupForm({ onComplete, isVendor = false }: SignupFormP
         city: data.city || undefined,
         state: data.state || undefined,
         zipCode: data.zipCode || undefined,
-        ageRange: data.ageRange || undefined,
+        username: data.username || undefined,
+        dateOfBirth: data.dateOfBirth || undefined,
         gender: data.gender || undefined,
         ethnicity: data.ethnicity || undefined,
         shoppingFrequency: data.shoppingFrequency || undefined,
@@ -373,7 +375,8 @@ export default function SignupForm({ onComplete, isVendor = false }: SignupFormP
     state: "",
     zipCode: "",
     ethnicity: "",
-    ageRange: "",
+    username: "",
+    dateOfBirth: "",
     gender: "",
     shoppingFrequency: "",
     preferredCategories: [],
@@ -630,23 +633,27 @@ export default function SignupForm({ onComplete, isVendor = false }: SignupFormP
             Help us personalize your experience with better recommendations
           </p>
           <div>
-            <Label htmlFor="ageRange">Age Range</Label>
-            <Select
-              value={formData.ageRange}
-              onValueChange={(value) => updateField("ageRange", value)}
-            >
-              <SelectTrigger data-testid="select-age-range">
-                <SelectValue placeholder="Select age range" />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="18-24">18-24</SelectItem>
-                <SelectItem value="25-34">25-34</SelectItem>
-                <SelectItem value="35-44">35-44</SelectItem>
-                <SelectItem value="45-54">45-54</SelectItem>
-                <SelectItem value="55-64">55-64</SelectItem>
-                <SelectItem value="65+">65+</SelectItem>
-              </SelectContent>
-            </Select>
+            <Label htmlFor="username">Username</Label>
+            <Input
+              id="username"
+              value={formData.username}
+              onChange={(e) => updateField("username", e.target.value)}
+              placeholder="Choose a unique username"
+              data-testid="input-username"
+            />
+            <p className="text-xs text-muted-foreground mt-1">
+              This will be displayed publicly instead of your real name
+            </p>
+          </div>
+          <div>
+            <Label htmlFor="dateOfBirth">Date of Birth</Label>
+            <Input
+              id="dateOfBirth"
+              type="date"
+              value={formData.dateOfBirth}
+              onChange={(e) => updateField("dateOfBirth", e.target.value)}
+              data-testid="input-date-of-birth"
+            />
           </div>
           <div>
             <Label htmlFor="gender">Gender</Label>

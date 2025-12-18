@@ -8,6 +8,11 @@ Outsyde is a social marketplace platform connecting customers with local small b
 - Modern, social media-inspired UI
 - Inter/DM Sans/Poppins font family
 
+## User Profile Fields
+- **Username:** Optional unique identifier displayed publicly in comments instead of real name
+- **Date of Birth:** Replaces age range for customer profiles (date input, not age range select)
+- **Privacy:** Real names only shown during booking/purchasing transactions; usernames used for social interactions
+
 ## System Architecture
 The Outsyde platform uses a React frontend, an Express (TypeScript) backend, and a PostgreSQL database with Drizzle ORM, organized in a monorepo (`client/`, `server/`, `shared/`).
 

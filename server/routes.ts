@@ -85,7 +85,8 @@ export async function registerRoutes(
         city: data.city,
         state: data.state,
         zipCode: data.zipCode,
-        ageRange: data.ageRange,
+        username: data.username,
+        dateOfBirth: data.dateOfBirth ? new Date(data.dateOfBirth) : undefined,
         gender: data.gender,
         ethnicity: data.ethnicity,
         shoppingFrequency: data.shoppingFrequency,
@@ -1633,6 +1634,7 @@ export async function registerRoutes(
         comment: {
           ...comment,
           authorName: user?.name || null,
+          authorUsername: user?.username || null,
           authorImage: user?.profileImageUrl || null
         }
       });
@@ -3962,7 +3964,14 @@ export async function registerRoutes(
         const user = await storage.getUser(comment.userId);
         return {
           ...comment,
-          user: user ? { id: user.id, name: user.name, profileImageUrl: user.profileImageUrl } : null,
+          user: user ? { 
+            id: user.id, 
+            name: user.name, 
+            username: user.username,
+            firstName: user.firstName,
+            lastName: user.lastName,
+            profileImageUrl: user.profileImageUrl 
+          } : null,
         };
       }));
       

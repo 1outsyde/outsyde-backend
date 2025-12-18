@@ -35,8 +35,10 @@ interface PostComment {
   createdAt: string;
   user?: {
     id: string;
-    firstName: string;
-    lastName: string;
+    name?: string;
+    username?: string;
+    firstName?: string;
+    lastName?: string;
     profileImageUrl?: string;
   };
 }
@@ -427,15 +429,15 @@ export default function FeedPost({
                 {commentsData.comments.map((comment) => (
                   <div key={comment.id} className="flex gap-2" data-testid={`comment-${comment.id}`}>
                     <Avatar className="h-8 w-8 flex-shrink-0">
-                      <AvatarImage src={comment.user?.profileImageUrl} alt={`${comment.user?.firstName || "User"}`} />
+                      <AvatarImage src={comment.user?.profileImageUrl} alt={comment.user?.username || comment.user?.firstName || "User"} />
                       <AvatarFallback className="text-xs">
-                        {(comment.user?.firstName || "U").charAt(0)}
+                        {(comment.user?.username || comment.user?.firstName || "U").charAt(0).toUpperCase()}
                       </AvatarFallback>
                     </Avatar>
                     <div className="flex-1 min-w-0">
                       <div className="flex items-center gap-2 flex-wrap">
                         <span className="font-semibold text-sm">
-                          {comment.user ? `${comment.user.firstName} ${comment.user.lastName}` : "User"}
+                          {comment.user?.username || (comment.user ? `${comment.user.firstName} ${comment.user.lastName}` : "User")}
                         </span>
                         <span className="text-xs text-muted-foreground">
                           {formatCommentTime(comment.createdAt)}

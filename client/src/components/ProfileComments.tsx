@@ -18,6 +18,7 @@ interface ProfileComment {
   content: string;
   createdAt: string;
   authorName: string | null;
+  authorUsername: string | null;
   authorImage: string | null;
 }
 
@@ -147,15 +148,15 @@ export default function ProfileComments({
               <CardContent className="p-4">
                 <div className="flex gap-3">
                   <Avatar className="h-10 w-10">
-                    <AvatarImage src={comment.authorImage || undefined} alt={comment.authorName || "User"} />
+                    <AvatarImage src={comment.authorImage || undefined} alt={comment.authorUsername || comment.authorName || "User"} />
                     <AvatarFallback>
-                      {(comment.authorName || "U").charAt(0).toUpperCase()}
+                      {(comment.authorUsername || comment.authorName || "U").charAt(0).toUpperCase()}
                     </AvatarFallback>
                   </Avatar>
                   <div className="flex-1">
                     <div className="flex items-center gap-2 mb-1">
                       <span className="font-medium" data-testid={`comment-author-${comment.id}`}>
-                        {comment.authorName || "Anonymous"}
+                        {comment.authorUsername || comment.authorName || "Anonymous"}
                       </span>
                       <span className="text-sm text-muted-foreground">
                         {formatDistanceToNow(new Date(comment.createdAt), { addSuffix: true })}
