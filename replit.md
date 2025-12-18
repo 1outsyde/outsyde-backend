@@ -26,7 +26,7 @@ Outsyde is a social marketplace platform connecting customers with local small b
 - **Individual Exposure:** NEVER exposed at individual level in any API response
 - **Aggregation Only:** Can only be shown as aggregated percentages (future analytics feature)
 - **Vendor Access:** Never visible to vendors or photographers
-- **API Safety:** `sanitizeUserForResponse()` removes ethnicity, householdSize, incomeRange, education, occupation from all responses
+- **API Safety:** `sanitizeUserForResponse()` removes ethnicity from all responses
 
 ## Data Access & Authorization Rules
 - **Vendor/Business ID:** Always derived from authenticated session (`req.session?.userId` → `storage.getBusinessByOwnerId(userId)`)
