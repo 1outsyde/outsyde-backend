@@ -52,6 +52,8 @@ import {
   type InsertProfileComment,
   type BusinessAvailability,
   type InsertBusinessAvailability,
+  type PhotographerAvailability,
+  type InsertPhotographerAvailability,
   type Shipment,
   type InsertShipment,
   users,
@@ -88,6 +90,7 @@ import {
   postComments,
   profileComments,
   businessAvailability,
+  photographerAvailability,
   shipments
 } from "@shared/schema";
 import { db } from "./db";
@@ -322,6 +325,17 @@ export interface IStorage {
   createBusinessAvailability(data: InsertBusinessAvailability): Promise<BusinessAvailability>;
   updateBusinessAvailability(id: string, updates: Partial<BusinessAvailability>): Promise<BusinessAvailability | undefined>;
   deleteBusinessAvailability(id: string): Promise<void>;
+  checkBusinessSlotAvailable(businessId: string, date: string, startTime: string, endTime: string, excludeSlotId?: string): Promise<boolean>;
+  reserveBusinessSlot(businessId: string, date: string, startTime: string, endTime: string, appointmentId: string): Promise<BusinessAvailability>;
+
+  // Photographer Availability
+  getPhotographerAvailability(photographerId: string, startDate?: string, endDate?: string): Promise<PhotographerAvailability[]>;
+  getPhotographerAvailabilitySlot(id: string): Promise<PhotographerAvailability | undefined>;
+  createPhotographerAvailability(data: InsertPhotographerAvailability): Promise<PhotographerAvailability>;
+  updatePhotographerAvailability(id: string, updates: Partial<PhotographerAvailability>): Promise<PhotographerAvailability | undefined>;
+  deletePhotographerAvailability(id: string): Promise<void>;
+  checkPhotographerSlotAvailable(photographerId: string, date: string, startTime: string, endTime: string, excludeSlotId?: string): Promise<boolean>;
+  reservePhotographerSlot(photographerId: string, date: string, startTime: string, endTime: string, shootBookingId: string): Promise<PhotographerAvailability>;
 
   // Refund Requests
   createRefundRequest(data: InsertRefundRequest): Promise<RefundRequest>;
@@ -2668,6 +2682,129 @@ export class DatabaseStorage implements IStorage {
 
   async deleteBusinessAvailability(id: string): Promise<void> {
     await db.delete(businessAvailability).where(eq(businessAvailability.id, id));
+  }
+
+  async checkBusinessSlotAvailable(businessId: string, date: string, startTime: string, endTime: string, excludeSlotId?: string): Promise<boolean> {
+    // Check for overlapping booked or blocked slots
+    const overlappingSlots = await db.select()
+      .from(businessAvailability)
+      .where(and(
+        eq(businessAvailability.businessId, businessId),
+        eq(businessAvailability.date, date),
+        or(
+          eq(businessAvailability.slotType, 'booked'),
+          eq(businessAvailability.slotType, 'blocked')
+        ),
+        // Time overlap check: new slot starts before existing ends AND new slot ends after existing starts
+        sql`${businessAvailability.startTime} < ${endTime}`,
+        sql`${businessAvailability.endTime} > ${startTime}`,
+        excludeSlotId ? sql`${businessAvailability.id} != ${excludeSlotId}` : sql`1=1`
+      ));
+    
+    return overlappingSlots.length === 0;
+  }
+
+  async reserveBusinessSlot(businessId: string, date: string, startTime: string, endTime: string, appointmentId: string): Promise<BusinessAvailability> {
+    const id = randomUUID();
+    const [slot] = await db.insert(businessAvailability)
+      .values({
+        id,
+        businessId,
+        date,
+        startTime,
+        endTime,
+        slotType: 'booked',
+        appointmentId,
+        title: 'Booked Appointment',
+      })
+      .returning();
+    return slot;
+  }
+
+  // =========================
+  // PHOTOGRAPHER AVAILABILITY
+  // =========================
+
+  async getPhotographerAvailability(photographerId: string, startDate?: string, endDate?: string): Promise<PhotographerAvailability[]> {
+    let query = db.select()
+      .from(photographerAvailability)
+      .where(eq(photographerAvailability.photographerId, photographerId));
+    
+    if (startDate && endDate) {
+      query = db.select()
+        .from(photographerAvailability)
+        .where(and(
+          eq(photographerAvailability.photographerId, photographerId),
+          sql`${photographerAvailability.date} >= ${startDate}`,
+          sql`${photographerAvailability.date} <= ${endDate}`
+        ));
+    }
+    
+    return query;
+  }
+
+  async getPhotographerAvailabilitySlot(id: string): Promise<PhotographerAvailability | undefined> {
+    const [slot] = await db.select()
+      .from(photographerAvailability)
+      .where(eq(photographerAvailability.id, id));
+    return slot;
+  }
+
+  async createPhotographerAvailability(data: InsertPhotographerAvailability): Promise<PhotographerAvailability> {
+    const id = randomUUID();
+    const [slot] = await db.insert(photographerAvailability)
+      .values({ id, ...data })
+      .returning();
+    return slot;
+  }
+
+  async updatePhotographerAvailability(id: string, updates: Partial<PhotographerAvailability>): Promise<PhotographerAvailability | undefined> {
+    const [slot] = await db.update(photographerAvailability)
+      .set(updates)
+      .where(eq(photographerAvailability.id, id))
+      .returning();
+    return slot;
+  }
+
+  async deletePhotographerAvailability(id: string): Promise<void> {
+    await db.delete(photographerAvailability).where(eq(photographerAvailability.id, id));
+  }
+
+  async checkPhotographerSlotAvailable(photographerId: string, date: string, startTime: string, endTime: string, excludeSlotId?: string): Promise<boolean> {
+    // Check for overlapping booked or blocked slots
+    const overlappingSlots = await db.select()
+      .from(photographerAvailability)
+      .where(and(
+        eq(photographerAvailability.photographerId, photographerId),
+        eq(photographerAvailability.date, date),
+        or(
+          eq(photographerAvailability.slotType, 'booked'),
+          eq(photographerAvailability.slotType, 'blocked')
+        ),
+        // Time overlap check
+        sql`${photographerAvailability.startTime} < ${endTime}`,
+        sql`${photographerAvailability.endTime} > ${startTime}`,
+        excludeSlotId ? sql`${photographerAvailability.id} != ${excludeSlotId}` : sql`1=1`
+      ));
+    
+    return overlappingSlots.length === 0;
+  }
+
+  async reservePhotographerSlot(photographerId: string, date: string, startTime: string, endTime: string, shootBookingId: string): Promise<PhotographerAvailability> {
+    const id = randomUUID();
+    const [slot] = await db.insert(photographerAvailability)
+      .values({
+        id,
+        photographerId,
+        date,
+        startTime,
+        endTime,
+        slotType: 'booked',
+        shootBookingId,
+        title: 'Booked Shoot',
+      })
+      .returning();
+    return slot;
   }
 
   // =========================

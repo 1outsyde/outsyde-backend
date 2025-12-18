@@ -217,9 +217,12 @@ export const businessAvailability = pgTable("business_availability", {
   startTime: text("start_time").notNull(), // Format: HH:MM (24hr)
   endTime: text("end_time").notNull(), // Format: HH:MM (24hr)
 
-  slotType: text("slot_type").default("available"), // 'available' | 'blocked' | 'special'
+  slotType: text("slot_type").default("available"), // 'available' | 'blocked' | 'booked' | 'special'
   title: text("title"), // Optional title for the slot (e.g., "Holiday Hours", "Closed for Vacation")
   notes: text("notes"), // Optional notes
+
+  // Booking reference - when a slot is booked, this links to the appointment
+  appointmentId: varchar("appointment_id", { length: 36 }),
 
   isRecurring: boolean("is_recurring").default(false),
   recurringDayOfWeek: integer("recurring_day_of_week"), // 0 = Sunday, 6 = Saturday (only if isRecurring)
@@ -265,6 +268,30 @@ export const photographers = pgTable("photographers", {
   }>(),
 
   billingAddress: jsonb("billing_address").$type<BillingAddress>(),
+
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+});
+
+/* =====================================================
+   PHOTOGRAPHER AVAILABILITY (Date-specific time slots)
+===================================================== */
+export const photographerAvailability = pgTable("photographer_availability", {
+  id: varchar("id", { length: 36 }).primaryKey().default(sql`gen_random_uuid()`),
+  photographerId: varchar("photographer_id", { length: 36 }).notNull().references(() => photographers.id),
+
+  date: text("date").notNull(), // Format: YYYY-MM-DD
+  startTime: text("start_time").notNull(), // Format: HH:MM (24hr)
+  endTime: text("end_time").notNull(), // Format: HH:MM (24hr)
+
+  slotType: text("slot_type").default("available"), // 'available' | 'blocked' | 'booked'
+  title: text("title"), // Optional title for the slot
+  notes: text("notes"), // Optional notes
+
+  // Booking reference - when a slot is booked, this links to the shoot booking
+  shootBookingId: varchar("shoot_booking_id", { length: 36 }),
+
+  isRecurring: boolean("is_recurring").default(false),
+  recurringDayOfWeek: integer("recurring_day_of_week"), // 0 = Sunday, 6 = Saturday
 
   createdAt: timestamp("created_at").defaultNow().notNull(),
 });
@@ -871,6 +898,11 @@ export const insertBusinessAvailabilitySchema = createInsertSchema(businessAvail
   createdAt: true,
 });
 
+export const insertPhotographerAvailabilitySchema = createInsertSchema(photographerAvailability).omit({
+  id: true,
+  createdAt: true,
+});
+
 export const updateBusinessProfileSchema = z.object({
   name: z.string().min(1).optional(),
   description: z.string().optional(),
@@ -1094,6 +1126,9 @@ export type VendorService = typeof vendorServices.$inferSelect;
 
 export type InsertBusinessAvailability = z.infer<typeof insertBusinessAvailabilitySchema>;
 export type BusinessAvailability = typeof businessAvailability.$inferSelect;
+
+export type InsertPhotographerAvailability = z.infer<typeof insertPhotographerAvailabilitySchema>;
+export type PhotographerAvailability = typeof photographerAvailability.$inferSelect;
 
 export type InsertCity = z.infer<typeof insertCitySchema>;
 export type City = typeof cities.$inferSelect;
