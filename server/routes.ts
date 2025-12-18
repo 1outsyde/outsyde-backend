@@ -24,6 +24,7 @@ import { stripeService } from "./stripe/stripeService";
 import { getStripePublishableKey } from "./stripe/stripeClient";
 import { ObjectStorageService, ObjectNotFoundError } from "./objectStorage";
 import { ObjectPermission } from "./objectAcl";
+import { NotificationTriggers } from "./notificationService";
 
 // ✅ CORRECT IMPORT (default export)
 import { photographersRouter } from "./Photographers/photographers.routes";
@@ -584,6 +585,19 @@ export async function registerRoutes(
         vendorNet,
         status: "pending",
       });
+
+      const photographer = await storage.getPhotographer(data.photographerId);
+      const photographerName = photographer?.displayName || 'Photographer';
+      
+      NotificationTriggers.bookingConfirmed({
+        customerId: userId,
+        photographerId: data.photographerId,
+        bookingId: booking.id,
+        photographerName,
+        shootType: data.shootType,
+        date,
+        time: startTime,
+      }).catch(err => console.error('Notification error:', err));
 
       res.status(201).json({ booking });
     } catch (error) {
@@ -2584,6 +2598,16 @@ export async function registerRoutes(
 
       if (!request) {
         return res.status(404).json({ error: "Refund request not found" });
+      }
+
+      if (data.status === 'approved') {
+        NotificationTriggers.refundIssued({
+          userId: request.requesterId,
+          amount: request.amountCents,
+          referenceType: request.referenceType || 'refund_request',
+          referenceId: request.referenceId || id,
+          reason: data.adminNotes || undefined,
+        }).catch(err => console.error('Notification error:', err));
       }
 
       res.json({ success: true, request });
