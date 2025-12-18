@@ -3692,6 +3692,41 @@ export async function registerRoutes(
     }
   });
 
+  // ==================== ADMIN AUDIT LOGS ====================
+
+  // Admin: Get audit logs with filtering
+  app.get("/api/admin/audit-logs", requireAdmin, async (req, res) => {
+    try {
+      const { action, targetType, targetId, actorId, limit = "50", offset = "0" } = req.query;
+      
+      const logs = await storage.getAuditLogsFiltered({
+        action: action as string | undefined,
+        targetType: targetType as string | undefined,
+        targetId: targetId as string | undefined,
+        actorId: actorId as string | undefined,
+        limit: parseInt(limit as string),
+        offset: parseInt(offset as string),
+      });
+
+      res.json({ logs, filters: { action, targetType, targetId, actorId } });
+    } catch (error) {
+      console.error("Get audit logs error:", error);
+      res.status(500).json({ error: "Failed to get audit logs" });
+    }
+  });
+
+  // Admin: Get audit logs for a specific target
+  app.get("/api/admin/audit-logs/:targetType/:targetId", requireAdmin, async (req, res) => {
+    try {
+      const { targetType, targetId } = req.params;
+      const logs = await storage.getAuditLogs(targetType, targetId);
+      res.json({ logs });
+    } catch (error) {
+      console.error("Get target audit logs error:", error);
+      res.status(500).json({ error: "Failed to get audit logs" });
+    }
+  });
+
   // ==================== FEED POSTS ROUTES ====================
 
   // Get feed posts (public)

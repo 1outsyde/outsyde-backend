@@ -433,6 +433,14 @@ export interface IStorage {
   // Audit Logging
   createAuditLog(data: InsertAuditLog): Promise<AuditLog>;
   getAuditLogs(targetType: string, targetId: string): Promise<AuditLog[]>;
+  getAuditLogsFiltered(filters: {
+    action?: string;
+    targetType?: string;
+    targetId?: string;
+    actorId?: string;
+    limit?: number;
+    offset?: number;
+  }): Promise<AuditLog[]>;
 
   // Order State Machine (with validation)
   updateOrderWithValidation(orderId: string, updates: Partial<Order>, actorId?: string): Promise<{ success: boolean; order?: Order; error?: string }>;
@@ -3643,6 +3651,41 @@ export class DatabaseStorage implements IStorage {
         eq(auditLogs.targetId, targetId)
       ))
       .orderBy(desc(auditLogs.createdAt));
+  }
+
+  async getAuditLogsFiltered(filters: {
+    action?: string;
+    targetType?: string;
+    targetId?: string;
+    actorId?: string;
+    limit?: number;
+    offset?: number;
+  }): Promise<AuditLog[]> {
+    const conditions = [];
+    
+    if (filters.action) {
+      conditions.push(eq(auditLogs.action, filters.action));
+    }
+    if (filters.targetType) {
+      conditions.push(eq(auditLogs.targetType, filters.targetType));
+    }
+    if (filters.targetId) {
+      conditions.push(eq(auditLogs.targetId, filters.targetId));
+    }
+    if (filters.actorId) {
+      conditions.push(eq(auditLogs.actorId, filters.actorId));
+    }
+
+    let query = db.select().from(auditLogs);
+    
+    if (conditions.length > 0) {
+      query = query.where(and(...conditions)) as typeof query;
+    }
+    
+    return query
+      .orderBy(desc(auditLogs.createdAt))
+      .limit(filters.limit || 50)
+      .offset(filters.offset || 0);
   }
 
   // =========================

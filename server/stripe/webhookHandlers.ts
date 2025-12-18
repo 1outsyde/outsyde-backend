@@ -233,6 +233,22 @@ export class WebhookHandlers {
       const newPrice = newTier?.priceInCents || 0;
       const isUpgrade = newPrice > previousPrice;
 
+      // Audit log for subscription tier change
+      await storage.createAuditLog({
+        actorId: vendorSub.vendorId,
+        actorType: 'vendor',
+        action: isUpgrade ? 'subscription_upgraded' : 'subscription_downgraded',
+        targetType: 'vendor_subscription',
+        targetId: vendorSub.id,
+        beforeState: { tierId: previousTierId, tierName: previousTierName, priceInCents: previousPrice },
+        afterState: { tierId: newTierId, tierName: newTierName, priceInCents: newPrice },
+        metadata: {
+          businessId: vendorSub.businessId,
+          stripeSubscriptionId: vendorSub.stripeSubscriptionId,
+          changeType: isUpgrade ? 'upgrade' : 'downgrade',
+        }
+      });
+
       // Migrate benefits to the new tier
       await storage.migrateBenefitsForTierChange(vendorSub.id, previousTierId, newTierId);
 
@@ -247,11 +263,28 @@ export class WebhookHandlers {
       });
     }
 
-    // Handle cancellation notifications
+    // Handle cancellation notifications and audit logging
     if (previousStatus === 'active' && (newStatus === 'canceled' || newStatus === 'past_due')) {
       const [tier] = await db.select().from(subscriptionTiers).where(eq(subscriptionTiers.id, vendorSub.tierId));
       const tierName = tier?.displayName || tier?.name || 'subscription';
       const effectiveDate = new Date(subscription.current_period_end * 1000).toLocaleDateString();
+
+      // Audit log for subscription status change
+      await storage.createAuditLog({
+        actorId: vendorSub.vendorId,
+        actorType: newStatus === 'canceled' ? 'vendor' : 'system',
+        action: newStatus === 'canceled' ? 'subscription_canceled' : 'subscription_payment_failed',
+        targetType: 'vendor_subscription',
+        targetId: vendorSub.id,
+        beforeState: { status: previousStatus, tierId: vendorSub.tierId },
+        afterState: { status: newStatus, tierId: vendorSub.tierId },
+        metadata: {
+          businessId: vendorSub.businessId,
+          stripeSubscriptionId: vendorSub.stripeSubscriptionId,
+          effectiveDate,
+          tierName,
+        }
+      });
 
       await NotificationTriggers.subscriptionCanceled({
         userId: vendorSub.vendorId,

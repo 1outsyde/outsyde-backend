@@ -1247,8 +1247,8 @@ export const auditLogs = pgTable("audit_logs", {
   targetType: text("target_type").notNull(),
   targetId: varchar("target_id", { length: 36 }).notNull(),
   
-  beforeState: jsonb("before_state"),
-  afterState: jsonb("after_state"),
+  beforeState: jsonb("before_state").$type<Record<string, any>>(),
+  afterState: jsonb("after_state").$type<Record<string, any>>(),
   
   metadata: jsonb("metadata").$type<Record<string, any>>(),
   

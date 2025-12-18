@@ -73,6 +73,7 @@ The Outsyde platform uses a React frontend, an Express (TypeScript) backend, and
         - API endpoints: GET /api/referral/code (get code + stats), POST /api/referral/apply (apply code), GET /api/referral/stats (view referral stats)
         - Referral completion triggered by Stripe checkout.session.completed webhook
         - Points conversion: 100 points = $1
+    -   **Audit Logging:** Complete audit trail for financial actions via `audit_logs` table. Captures actorId, actorType, action, targetType, targetId, beforeState, afterState, metadata, IP address, and user agent. Automatically logs order/booking status changes, subscription tier changes (upgrades/downgrades), subscription cancellations, and refund approvals. Admin API endpoints: GET /api/admin/audit-logs (with filtering), GET /api/admin/audit-logs/:targetType/:targetId.
     -   **Subscription Enforcement (Server-Side):** Comprehensive enforcement of vendor subscriptions:
         - **Vendor Operations Blocked:** All product/service/availability CRUD endpoints require active subscription
         - **Storefront Hidden:** Public business listings, individual business pages, and feed posts filtered to exclude inactive vendors
