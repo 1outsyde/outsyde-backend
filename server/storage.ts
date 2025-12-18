@@ -380,6 +380,7 @@ export interface IStorage {
   getUserOrders(userId: string): Promise<Order[]>;
   getUserBookings(userId: string): Promise<ShootBooking[]>;
   getVendorOrders(businessId: string): Promise<Order[]>;
+  updateOrder(orderId: string, updates: Partial<Order>): Promise<Order | undefined>;
   getPhotographerBookings(photographerId: string): Promise<ShootBooking[]>;
   getMessages(conversationId: string): Promise<Message[]>;
 
@@ -1569,6 +1570,14 @@ export class DatabaseStorage implements IStorage {
 
   async getVendorOrders(businessId: string): Promise<Order[]> {
     return db.select().from(orders).where(eq(orders.businessId, businessId));
+  }
+
+  async updateOrder(orderId: string, updates: Partial<Order>): Promise<Order | undefined> {
+    const result = await db.update(orders)
+      .set(updates)
+      .where(eq(orders.id, orderId))
+      .returning();
+    return result[0];
   }
 
   async getPhotographerBookings(photographerId: string): Promise<ShootBooking[]> {

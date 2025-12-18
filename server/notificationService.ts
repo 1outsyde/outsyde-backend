@@ -248,6 +248,26 @@ export const NotificationTriggers = {
     });
   },
 
+  async orderShipped(params: {
+    customerId: string;
+    orderId: string;
+    carrier: string;
+    trackingNumber: string;
+  }): Promise<void> {
+    await sendNotification({
+      userId: params.customerId,
+      type: 'order_shipped',
+      title: 'Your Order Has Shipped',
+      message: `Your order has been shipped via ${params.carrier}. Tracking number: ${params.trackingNumber}`,
+      referenceType: 'order',
+      referenceId: params.orderId,
+      metadata: {
+        carrier: params.carrier,
+        trackingNumber: params.trackingNumber,
+      },
+    });
+  },
+
   async photographerAssigned(params: {
     customerId: string;
     photographerId: string;

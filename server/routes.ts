@@ -3538,5 +3538,216 @@ export async function registerRoutes(
     }
   });
 
+  // =====================================================
+  // SHIPMENT TRACKING ROUTES
+  // =====================================================
+
+  // Vendor: Create shipment for an order
+  app.post("/api/orders/:orderId/shipments", async (req, res) => {
+    const userId = req.session?.userId;
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    if (!req.session?.isVendor) {
+      return res.status(403).json({ error: "Only vendors can create shipments" });
+    }
+
+    try {
+      const { orderId } = req.params;
+      const shipmentSchema = z.object({
+        carrier: z.string().min(1, "Carrier is required"),
+        trackingNumber: z.string().min(1, "Tracking number is required"),
+        estimatedDelivery: z.string().optional(),
+        notes: z.string().optional(),
+      });
+
+      const data = shipmentSchema.parse(req.body);
+
+      // Get the business for this vendor
+      const business = await storage.getBusinessByOwnerId(userId);
+      if (!business) {
+        return res.status(404).json({ error: "Business not found" });
+      }
+
+      // Get the order and verify it belongs to this business
+      const orders = await storage.getVendorOrders(business.id);
+      const order = orders.find(o => o.id === orderId);
+      if (!order) {
+        return res.status(404).json({ error: "Order not found" });
+      }
+
+      // Create the shipment
+      const shipment = await storage.createShipment({
+        orderId,
+        businessId: business.id,
+        carrier: data.carrier,
+        trackingNumber: data.trackingNumber,
+        status: 'shipped',
+        estimatedDelivery: data.estimatedDelivery ? new Date(data.estimatedDelivery) : null,
+        notes: data.notes || null,
+      });
+
+      // Update order status to shipped
+      await storage.updateOrder(orderId, { status: 'shipped' });
+
+      // Create notification for customer
+      NotificationTriggers.orderShipped({
+        customerId: order.customerId,
+        orderId,
+        carrier: data.carrier,
+        trackingNumber: data.trackingNumber,
+      }).catch(err => console.error('Notification error:', err));
+
+      res.status(201).json({ shipment });
+    } catch (error) {
+      if (error instanceof z.ZodError) {
+        return res.status(400).json({ error: "Invalid data", details: error.errors });
+      }
+      console.error("Create shipment error:", error);
+      res.status(500).json({ error: "Failed to create shipment" });
+    }
+  });
+
+  // Get shipments for an order (accessible by vendor owner or customer)
+  app.get("/api/orders/:orderId/shipments", async (req, res) => {
+    const userId = req.session?.userId;
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    try {
+      const { orderId } = req.params;
+      
+      // Check authorization - must be either the customer or the vendor
+      let authorized = false;
+      
+      // Check if user is the customer
+      const customerOrders = await storage.getUserOrders(userId);
+      if (customerOrders.some(o => o.id === orderId)) {
+        authorized = true;
+      }
+      
+      // Check if user is the vendor
+      if (!authorized && req.session?.isVendor) {
+        const business = await storage.getBusinessByOwnerId(userId);
+        if (business) {
+          const vendorOrders = await storage.getVendorOrders(business.id);
+          if (vendorOrders.some(o => o.id === orderId)) {
+            authorized = true;
+          }
+        }
+      }
+      
+      if (!authorized) {
+        return res.status(403).json({ error: "Not authorized to view this order's shipments" });
+      }
+      
+      const shipments = await storage.getShipmentsByOrder(orderId);
+      res.json({ shipments });
+    } catch (error) {
+      console.error("Get order shipments error:", error);
+      res.status(500).json({ error: "Failed to get shipments" });
+    }
+  });
+
+  // Vendor: Update shipment status
+  app.patch("/api/shipments/:shipmentId", async (req, res) => {
+    const userId = req.session?.userId;
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    if (!req.session?.isVendor) {
+      return res.status(403).json({ error: "Only vendors can update shipments" });
+    }
+
+    try {
+      const { shipmentId } = req.params;
+      const updateSchema = z.object({
+        status: z.enum(['pending', 'shipped', 'in_transit', 'delivered', 'exception']).optional(),
+        trackingNumber: z.string().optional(),
+        estimatedDelivery: z.string().optional().nullable(),
+        deliveredAt: z.string().optional().nullable(),
+        notes: z.string().optional().nullable(),
+      });
+
+      const data = updateSchema.parse(req.body);
+
+      // Get business for this vendor
+      const business = await storage.getBusinessByOwnerId(userId);
+      if (!business) {
+        return res.status(404).json({ error: "Business not found" });
+      }
+
+      // Get the shipment and verify it belongs to this business
+      const shipment = await storage.getShipment(shipmentId);
+      if (!shipment) {
+        return res.status(404).json({ error: "Shipment not found" });
+      }
+      
+      if (shipment.businessId !== business.id) {
+        return res.status(403).json({ error: "Not authorized to update this shipment" });
+      }
+
+      // Build updates
+      const updates: any = {};
+      if (data.status) updates.status = data.status;
+      if (data.trackingNumber) updates.trackingNumber = data.trackingNumber;
+      if (data.estimatedDelivery !== undefined) {
+        updates.estimatedDelivery = data.estimatedDelivery ? new Date(data.estimatedDelivery) : null;
+      }
+      if (data.deliveredAt !== undefined) {
+        updates.deliveredAt = data.deliveredAt ? new Date(data.deliveredAt) : null;
+      }
+      if (data.notes !== undefined) updates.notes = data.notes;
+
+      // If marking as delivered, set deliveredAt if not provided
+      if (data.status === 'delivered' && !data.deliveredAt) {
+        updates.deliveredAt = new Date();
+      }
+
+      const updatedShipment = await storage.updateShipment(shipmentId, updates);
+
+      // If status changed to delivered, update order status
+      if (data.status === 'delivered') {
+        await storage.updateOrder(shipment.orderId, { status: 'delivered' });
+      }
+
+      res.json({ shipment: updatedShipment });
+    } catch (error) {
+      if (error instanceof z.ZodError) {
+        return res.status(400).json({ error: "Invalid data", details: error.errors });
+      }
+      console.error("Update shipment error:", error);
+      res.status(500).json({ error: "Failed to update shipment" });
+    }
+  });
+
+  // Vendor: Get all shipments for their business
+  app.get("/api/vendor/shipments", async (req, res) => {
+    const userId = req.session?.userId;
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    if (!req.session?.isVendor) {
+      return res.status(403).json({ error: "Only vendors can access this endpoint" });
+    }
+
+    try {
+      const business = await storage.getBusinessByOwnerId(userId);
+      if (!business) {
+        return res.status(404).json({ error: "Business not found" });
+      }
+
+      const shipments = await storage.getShipmentsByBusiness(business.id);
+      res.json({ shipments });
+    } catch (error) {
+      console.error("Get vendor shipments error:", error);
+      res.status(500).json({ error: "Failed to get shipments" });
+    }
+  });
+
   return httpServer;
 }
