@@ -2484,6 +2484,133 @@ export async function registerRoutes(
     }
   });
 
+  // ==================== USER BLOCKING ROUTES ====================
+
+  // Block a user
+  app.post("/api/users/:userId/block", async (req, res) => {
+    const blockerId = req.session?.userId;
+    if (!blockerId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    const blockedId = req.params.userId;
+    if (blockerId === blockedId) {
+      return res.status(400).json({ error: "You cannot block yourself" });
+    }
+
+    try {
+      const { reason } = req.body || {};
+      const block = await storage.blockUser(blockerId, blockedId, reason);
+      res.json({ success: true, block });
+    } catch (error) {
+      console.error("Block user error:", error);
+      res.status(500).json({ error: "Failed to block user" });
+    }
+  });
+
+  // Unblock a user
+  app.delete("/api/users/:userId/block", async (req, res) => {
+    const blockerId = req.session?.userId;
+    if (!blockerId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    try {
+      const success = await storage.unblockUser(blockerId, req.params.userId);
+      res.json({ success });
+    } catch (error) {
+      console.error("Unblock user error:", error);
+      res.status(500).json({ error: "Failed to unblock user" });
+    }
+  });
+
+  // Get list of blocked users
+  app.get("/api/users/blocked", async (req, res) => {
+    const userId = req.session?.userId;
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    try {
+      const blockedUsers = await storage.getBlockedUsers(userId);
+      res.json({ blockedUsers });
+    } catch (error) {
+      console.error("Get blocked users error:", error);
+      res.status(500).json({ error: "Failed to get blocked users" });
+    }
+  });
+
+  // Check if a user is blocked
+  app.get("/api/users/:userId/blocked", async (req, res) => {
+    const userId = req.session?.userId;
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    try {
+      const isBlocked = await storage.isUserBlocked(userId, req.params.userId);
+      res.json({ isBlocked });
+    } catch (error) {
+      console.error("Check blocked status error:", error);
+      res.status(500).json({ error: "Failed to check blocked status" });
+    }
+  });
+
+  // ==================== MESSAGE REPORTING ROUTES ====================
+
+  // Report a message
+  app.post("/api/messages/:messageId/report", async (req, res) => {
+    const reporterId = req.session?.userId;
+    if (!reporterId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    try {
+      const reportSchema = z.object({
+        reason: z.string().min(1, "Reason is required").max(500, "Reason too long"),
+        conversationId: z.string(),
+        reportedUserId: z.string(),
+      });
+      const { reason, conversationId, reportedUserId } = reportSchema.parse(req.body);
+
+      if (reporterId === reportedUserId) {
+        return res.status(400).json({ error: "You cannot report your own messages" });
+      }
+
+      const report = await storage.createMessageReport({
+        reporterId,
+        messageId: req.params.messageId,
+        conversationId,
+        reportedUserId,
+        reason,
+      });
+
+      res.json({ success: true, report });
+    } catch (error) {
+      if (error instanceof z.ZodError) {
+        return res.status(400).json({ error: "Invalid data", details: error.errors });
+      }
+      console.error("Report message error:", error);
+      res.status(500).json({ error: "Failed to report message" });
+    }
+  });
+
+  // Get user's submitted reports
+  app.get("/api/messages/my-reports", async (req, res) => {
+    const userId = req.session?.userId;
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    try {
+      const reports = await storage.getMessageReports({ reporterId: userId });
+      res.json({ reports });
+    } catch (error) {
+      console.error("Get my reports error:", error);
+      res.status(500).json({ error: "Failed to get reports" });
+    }
+  });
+
   // ==================== OUTSYDE POINTS (LOYALTY) ROUTES ====================
   // $1 = 100 points | 100 points = $1 discount
   // Points can be redeemed at ANY Outsyde business
