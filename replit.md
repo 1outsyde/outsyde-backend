@@ -52,6 +52,15 @@ The Outsyde platform uses a React frontend, an Express (TypeScript) backend, and
         - API endpoints: POST /api/vendor/subscription/change-tier (execute change with proration), POST /api/vendor/subscription/preview-change (preview proration costs)
         - Notifications for tier changes with upgrade/downgrade context
         - Validation: only active subscriptions can be changed, same-tier changes rejected
+    -   **Referral Program (Deferred Rewards):** Secure referral system with backend validation:
+        - Referrer reward: 500 points ($5) - ONLY awarded after referred user's first paid transaction
+        - Referred user: 250 points ($2.50) welcome bonus - awarded immediately on code application
+        - Self-referral prevention: Users cannot use their own referral code
+        - One-to-many abuse prevention: Maximum 50 successful referrals per user
+        - Duplicate referral prevention: Users can only use one referral code
+        - API endpoints: GET /api/referral/code (get code + stats), POST /api/referral/apply (apply code), GET /api/referral/stats (view referral stats)
+        - Referral completion triggered by Stripe checkout.session.completed webhook
+        - Points conversion: 100 points = $1
 
 ## External Dependencies
 -   **PostgreSQL:** Primary database.

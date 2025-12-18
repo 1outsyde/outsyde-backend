@@ -444,6 +444,29 @@ export const pointTransactions = pgTable("point_transactions", {
 });
 
 /* =====================================================
+   REFERRALS (Deferred Reward System)
+===================================================== */
+export const referrals = pgTable("referrals", {
+  id: varchar("id", { length: 36 }).primaryKey().default(sql`gen_random_uuid()`),
+
+  referrerId: varchar("referrer_id", { length: 36 }).notNull().references(() => users.id),
+  referredUserId: varchar("referred_user_id", { length: 36 }).notNull().references(() => users.id),
+
+  status: text("status").notNull().default("pending"),
+
+  referrerBonusPoints: integer("referrer_bonus_points").notNull().default(500),
+  referredBonusPoints: integer("referred_bonus_points").notNull().default(250),
+
+  referrerBonusPaidAt: timestamp("referrer_bonus_paid_at"),
+  referredBonusPaidAt: timestamp("referred_bonus_paid_at"),
+
+  firstTransactionId: varchar("first_transaction_id", { length: 36 }),
+  firstTransactionType: text("first_transaction_type"),
+
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+});
+
+/* =====================================================
    CONVERSATIONS (Real-time Chat)
 ===================================================== */
 export const conversations = pgTable("conversations", {
@@ -1152,6 +1175,8 @@ export type Review = typeof reviews.$inferSelect;
 
 export type PointTransaction = typeof pointTransactions.$inferSelect;
 export type InsertPointTransaction = z.infer<typeof insertPointTransactionSchema>;
+
+export type Referral = typeof referrals.$inferSelect;
 
 export type Conversation = typeof conversations.$inferSelect;
 export type InsertConversation = z.infer<typeof insertConversationSchema>;

@@ -59,6 +59,7 @@ import {
   type InsertShipment,
   type AuditLog,
   type InsertAuditLog,
+  type Referral,
   users,
   businesses,
   cities,
@@ -72,6 +73,7 @@ import {
   conversations,
   messages,
   pointTransactions,
+  referrals,
   pushSubscriptions,
   notifications,
   cartItems,
@@ -258,11 +260,15 @@ export interface IStorage {
   getPointTransactions(userId: string, limit?: number): Promise<PointTransaction[]>;
   calculatePointsValue(points: number): number; // Returns discount in cents
 
-  // Referral system
+  // Referral system (deferred rewards - only after first transaction)
   generateReferralCode(userId: string): Promise<string>;
   getUserReferralCode(userId: string): Promise<string | null>;
   getUserByReferralCode(code: string): Promise<User | undefined>;
   processReferral(newUserId: string, referralCode: string): Promise<{ success: boolean; referrerId?: string; error?: string }>;
+  getPendingReferral(referredUserId: string): Promise<Referral | undefined>;
+  completeReferral(referredUserId: string, transactionId: string, transactionType: string): Promise<{ success: boolean; error?: string }>;
+  getReferralStats(userId: string): Promise<{ totalReferrals: number; completedReferrals: number; pendingReferrals: number; totalPointsEarned: number }>;
+  getSuccessfulReferralCount(referrerId: string): Promise<number>;
 
   // Push Subscriptions (Browser Push Notifications)
   savePushSubscription(data: InsertPushSubscription): Promise<PushSubscription>;
@@ -1526,34 +1532,32 @@ export class DatabaseStorage implements IStorage {
   }
 
   // =========================
-  // REFERRAL SYSTEM
+  // REFERRAL SYSTEM (Deferred Rewards)
   // =========================
-  // Referrers and new users both get bonus points
+  // Referrer bonus is ONLY paid after referred user completes first transaction
+  // Referred user gets welcome bonus immediately upon applying code
 
-  private readonly REFERRAL_BONUS_POINTS = 500; // $5 worth of points for referrer
-  private readonly NEW_USER_REFERRAL_BONUS = 200; // $2 worth of points for new user
+  private readonly REFERRAL_BONUS_POINTS = 500; // $5 for referrer (paid after first transaction)
+  private readonly NEW_USER_REFERRAL_BONUS = 250; // $2.50 for new user (paid immediately)
+  private readonly MAX_SUCCESSFUL_REFERRALS = 50; // One-to-many abuse prevention
 
   async generateReferralCode(userId: string): Promise<string> {
-    // Check if user already has a code
     const user = await this.getUser(userId);
     if (user?.referralCode) {
       return user.referralCode;
     }
 
-    // Generate a unique 8-character alphanumeric code
-    const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // Excluded similar characters
+    const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
     let code = '';
     for (let i = 0; i < 8; i++) {
       code += chars.charAt(Math.floor(Math.random() * chars.length));
     }
 
-    // Ensure uniqueness
     const existing = await this.getUserByReferralCode(code);
     if (existing) {
-      return this.generateReferralCode(userId); // Recursively try again
+      return this.generateReferralCode(userId);
     }
 
-    // Save the code
     await db.update(users)
       .set({ referralCode: code })
       .where(eq(users.id, userId));
@@ -1573,14 +1577,23 @@ export class DatabaseStorage implements IStorage {
     return result[0];
   }
 
+  async getSuccessfulReferralCount(referrerId: string): Promise<number> {
+    const result = await db.select({ count: sql<number>`count(*)` })
+      .from(referrals)
+      .where(and(
+        eq(referrals.referrerId, referrerId),
+        eq(referrals.status, 'completed')
+      ));
+    return Number(result[0]?.count || 0);
+  }
+
   async processReferral(newUserId: string, referralCode: string): Promise<{ success: boolean; referrerId?: string; error?: string }> {
-    // Find the referrer
     const referrer = await this.getUserByReferralCode(referralCode);
     if (!referrer) {
       return { success: false, error: 'Invalid referral code' };
     }
 
-    // Can't refer yourself
+    // Self-referral prevention
     if (referrer.id === newUserId) {
       return { success: false, error: 'You cannot use your own referral code' };
     }
@@ -1591,21 +1604,35 @@ export class DatabaseStorage implements IStorage {
       return { success: false, error: 'You have already used a referral code' };
     }
 
+    // Check existing referral record
+    const existingReferral = await this.getPendingReferral(newUserId);
+    if (existingReferral) {
+      return { success: false, error: 'Referral already applied' };
+    }
+
+    // One-to-many abuse prevention: limit referrals per user
+    const successfulCount = await this.getSuccessfulReferralCount(referrer.id);
+    if (successfulCount >= this.MAX_SUCCESSFUL_REFERRALS) {
+      return { success: false, error: 'Referrer has reached the maximum number of referrals' };
+    }
+
     // Mark the new user as referred
     await db.update(users)
       .set({ referredBy: referrer.id })
       .where(eq(users.id, newUserId));
 
-    // Award points to referrer
-    await this.earnPoints({
-      userId: referrer.id,
-      dollarAmountCents: this.REFERRAL_BONUS_POINTS,
-      referenceType: 'referral',
-      referenceId: newUserId,
-      description: `Referral bonus for inviting a friend`,
+    // Create pending referral record (referrer bonus is deferred)
+    const referralId = randomUUID();
+    await db.insert(referrals).values({
+      id: referralId,
+      referrerId: referrer.id,
+      referredUserId: newUserId,
+      status: 'pending',
+      referrerBonusPoints: this.REFERRAL_BONUS_POINTS,
+      referredBonusPoints: this.NEW_USER_REFERRAL_BONUS,
     });
 
-    // Award points to new user
+    // Award welcome bonus to new user immediately
     await this.earnPoints({
       userId: newUserId,
       dollarAmountCents: this.NEW_USER_REFERRAL_BONUS,
@@ -1614,7 +1641,72 @@ export class DatabaseStorage implements IStorage {
       description: `Welcome bonus for joining via referral`,
     });
 
+    // Update referral record to mark referred bonus as paid
+    await db.update(referrals)
+      .set({ referredBonusPaidAt: new Date() })
+      .where(eq(referrals.id, referralId));
+
     return { success: true, referrerId: referrer.id };
+  }
+
+  async getPendingReferral(referredUserId: string): Promise<Referral | undefined> {
+    const result = await db.select()
+      .from(referrals)
+      .where(eq(referrals.referredUserId, referredUserId));
+    return result[0];
+  }
+
+  async completeReferral(referredUserId: string, transactionId: string, transactionType: string): Promise<{ success: boolean; error?: string }> {
+    // Find the pending referral for this user
+    const referral = await this.getPendingReferral(referredUserId);
+    
+    if (!referral) {
+      return { success: false, error: 'No referral found for this user' };
+    }
+
+    if (referral.status === 'completed') {
+      return { success: false, error: 'Referral already completed' };
+    }
+
+    // Award bonus to referrer now that referred user has completed a transaction
+    await this.earnPoints({
+      userId: referral.referrerId,
+      dollarAmountCents: referral.referrerBonusPoints,
+      referenceType: 'referral',
+      referenceId: referredUserId,
+      description: `Referral bonus - your friend completed their first purchase!`,
+    });
+
+    // Update referral record to completed
+    await db.update(referrals)
+      .set({
+        status: 'completed',
+        referrerBonusPaidAt: new Date(),
+        firstTransactionId: transactionId,
+        firstTransactionType: transactionType,
+      })
+      .where(eq(referrals.id, referral.id));
+
+    console.log(`Referral completed: referrer ${referral.referrerId} earned ${referral.referrerBonusPoints} points for referring ${referredUserId}`);
+
+    return { success: true };
+  }
+
+  async getReferralStats(userId: string): Promise<{ totalReferrals: number; completedReferrals: number; pendingReferrals: number; totalPointsEarned: number }> {
+    const allReferrals = await db.select()
+      .from(referrals)
+      .where(eq(referrals.referrerId, userId));
+    
+    const completed = allReferrals.filter(r => r.status === 'completed');
+    const pending = allReferrals.filter(r => r.status === 'pending');
+    const totalPointsEarned = completed.reduce((sum, r) => sum + r.referrerBonusPoints, 0);
+
+    return {
+      totalReferrals: allReferrals.length,
+      completedReferrals: completed.length,
+      pendingReferrals: pending.length,
+      totalPointsEarned,
+    };
   }
 
   // =========================

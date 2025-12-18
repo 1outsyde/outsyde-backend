@@ -59,6 +59,31 @@ export class WebhookHandlers {
       referenceId: session.id,
       description: "Points earned from purchase",
     });
+
+    // Complete referral bonus if this is the referred user's first transaction
+    await this.tryCompleteReferral(user.id, session.id, 'checkout_session');
+  }
+
+  /* =====================================================
+     REFERRAL COMPLETION (Triggered on first transaction)
+  ===================================================== */
+  static async tryCompleteReferral(userId: string, transactionId: string, transactionType: string) {
+    try {
+      // Check if user was referred and has a pending referral
+      const pendingReferral = await storage.getPendingReferral(userId);
+      if (!pendingReferral || pendingReferral.status === 'completed') {
+        return; // No pending referral or already completed
+      }
+
+      // Complete the referral - awards bonus to referrer
+      const result = await storage.completeReferral(userId, transactionId, transactionType);
+      if (result.success) {
+        console.log(`Referral bonus awarded for user ${userId}'s first transaction`);
+      }
+    } catch (error) {
+      console.error('Error completing referral:', error);
+      // Don't throw - referral completion shouldn't block the main flow
+    }
   }
 
   /* =====================================================
@@ -105,6 +130,9 @@ export class WebhookHandlers {
       referenceId: subscriptionId,
       description: `Your ${tierName} subscription payment was successful.`,
     });
+
+    // Complete referral bonus if this is the vendor's first paid transaction
+    await this.tryCompleteReferral(vendorId, subscriptionId, 'vendor_subscription');
   }
 
   /* =====================================================
@@ -140,6 +168,9 @@ export class WebhookHandlers {
       amount: purchase.finalPriceInCents,
       purchaseId,
     });
+
+    // Complete referral bonus if this is the vendor's first paid transaction
+    await this.tryCompleteReferral(purchase.vendorId, purchaseId, 'ala_carte_purchase');
   }
 
   /* =====================================================

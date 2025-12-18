@@ -2484,13 +2484,21 @@ export async function registerRoutes(
     try {
       const code = await storage.generateReferralCode(userId);
       const user = await storage.getUser(userId);
+      const stats = await storage.getReferralStats(userId);
       
       res.json({
         referralCode: code,
         referralLink: `${req.protocol}://${req.get('host')}/signup?ref=${code}`,
-        bonusForReferrer: 500,
-        bonusForNewUser: 200,
+        bonusForReferrer: 500, // $5 worth, awarded after referred user's first transaction
+        bonusForNewUser: 250, // $2.50 welcome bonus, awarded immediately
         referredBy: user?.referredBy || null,
+        stats: {
+          totalReferrals: stats.totalReferrals,
+          completedReferrals: stats.completedReferrals,
+          pendingReferrals: stats.pendingReferrals,
+          totalPointsEarned: stats.totalPointsEarned,
+        },
+        note: "Your referral bonus (500 points) is awarded after your friend completes their first purchase.",
       });
     } catch (error) {
       console.error("Get referral code error:", error);
@@ -2521,9 +2529,10 @@ export async function registerRoutes(
 
       res.json({
         success: true,
-        message: "Referral applied successfully! You've earned 200 bonus points.",
-        pointsEarned: 200,
+        message: "Referral applied! You've earned 250 welcome bonus points. Your friend will earn 500 points when you complete your first purchase.",
+        pointsEarned: 250,
         newBalance,
+        referrerBonusPending: true,
       });
     } catch (error) {
       if (error instanceof z.ZodError) {
@@ -2531,6 +2540,31 @@ export async function registerRoutes(
       }
       console.error("Apply referral error:", error);
       res.status(500).json({ error: "Failed to apply referral code" });
+    }
+  });
+
+  // Get referral stats for the current user
+  app.get("/api/referral/stats", async (req, res) => {
+    const userId = req.session?.userId;
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    try {
+      const stats = await storage.getReferralStats(userId);
+      const pendingReferral = await storage.getPendingReferral(userId);
+      
+      res.json({
+        asReferrer: stats,
+        asReferred: pendingReferral ? {
+          status: pendingReferral.status,
+          referrerBonusPending: pendingReferral.status === 'pending',
+          completedAt: pendingReferral.referrerBonusPaidAt,
+        } : null,
+      });
+    } catch (error) {
+      console.error("Get referral stats error:", error);
+      res.status(500).json({ error: "Failed to get referral stats" });
     }
   });
 
