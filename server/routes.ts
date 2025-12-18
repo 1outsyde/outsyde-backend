@@ -3862,6 +3862,103 @@ export async function registerRoutes(
     }
   });
 
+  // ==================== ADMIN MESSAGE REPORTS ====================
+
+  // Admin: Get all message reports
+  app.get("/api/admin/message-reports", requireAdmin, async (req, res) => {
+    try {
+      const { status } = req.query;
+      const reports = await storage.getMessageReports({ 
+        status: status as string | undefined 
+      });
+
+      // Enrich with user info
+      const enrichedReports = await Promise.all(reports.map(async (report) => {
+        const [reporter, reported] = await Promise.all([
+          storage.getUser(report.reporterId),
+          storage.getUser(report.reportedUserId),
+        ]);
+        return {
+          ...report,
+          reporterEmail: reporter?.email,
+          reporterName: reporter?.name || `${reporter?.firstName || ''} ${reporter?.lastName || ''}`.trim(),
+          reportedUserEmail: reported?.email,
+          reportedUserName: reported?.name || `${reported?.firstName || ''} ${reported?.lastName || ''}`.trim(),
+        };
+      }));
+
+      res.json({ reports: enrichedReports, total: reports.length });
+    } catch (error) {
+      console.error("Get admin message reports error:", error);
+      res.status(500).json({ error: "Failed to get message reports" });
+    }
+  });
+
+  // Admin: Update a message report (resolve or dismiss)
+  app.patch("/api/admin/message-reports/:id", requireAdmin, async (req, res) => {
+    try {
+      const { id } = req.params;
+      const updateSchema = z.object({
+        status: z.enum(["pending", "resolved", "dismissed"]),
+        adminNotes: z.string().max(1000).optional(),
+      });
+      const data = updateSchema.parse(req.body);
+
+      const report = await storage.updateMessageReport(id, {
+        status: data.status,
+        adminNotes: data.adminNotes,
+        resolvedAt: data.status !== "pending" ? new Date() : undefined,
+        resolvedByAdminId: data.status !== "pending" ? req.session?.userId : undefined,
+      });
+
+      if (!report) {
+        return res.status(404).json({ error: "Report not found" });
+      }
+
+      res.json({ success: true, report });
+    } catch (error) {
+      if (error instanceof z.ZodError) {
+        return res.status(400).json({ error: "Invalid data", details: error.errors });
+      }
+      console.error("Update message report error:", error);
+      res.status(500).json({ error: "Failed to update message report" });
+    }
+  });
+
+  // Admin: Get single message report details
+  app.get("/api/admin/message-reports/:id", requireAdmin, async (req, res) => {
+    try {
+      const { id } = req.params;
+      const report = await storage.getMessageReport(id);
+
+      if (!report) {
+        return res.status(404).json({ error: "Report not found" });
+      }
+
+      // Get related data
+      const [reporter, reported, message] = await Promise.all([
+        storage.getUser(report.reporterId),
+        storage.getUser(report.reportedUserId),
+        storage.getMessage(report.messageId),
+      ]);
+
+      res.json({
+        report: {
+          ...report,
+          reporterEmail: reporter?.email,
+          reporterName: reporter?.name || `${reporter?.firstName || ''} ${reporter?.lastName || ''}`.trim(),
+          reportedUserEmail: reported?.email,
+          reportedUserName: reported?.name || `${reported?.firstName || ''} ${reported?.lastName || ''}`.trim(),
+          messageContent: message?.content,
+          messageSentAt: message?.createdAt,
+        },
+      });
+    } catch (error) {
+      console.error("Get message report error:", error);
+      res.status(500).json({ error: "Failed to get message report" });
+    }
+  });
+
   // ==================== ADMIN AUDIT LOGS ====================
 
   // Admin: Get audit logs with filtering
