@@ -10,7 +10,18 @@ import {
   insertReviewSchema,
   billingAddressSchema,
   subscriptionTiers,
+  calculateAgeRange,
+  type User,
 } from "@shared/schema";
+
+// Helper to sanitize user data for non-admin responses (removes sensitive fields like DOB)
+function sanitizeUserForResponse(user: User): Omit<User, 'dateOfBirth' | 'password'> & { ageRange: string | null } {
+  const { dateOfBirth, password, ...safeUser } = user;
+  return {
+    ...safeUser,
+    ageRange: calculateAgeRange(dateOfBirth),
+  };
+}
 import { eq } from "drizzle-orm";
 import { z } from "zod";
 import {
@@ -2291,7 +2302,12 @@ export async function registerRoutes(
 
     try {
       const conversations = await storage.getUserConversations(userId);
-      res.json({ conversations });
+      // Sanitize user data to remove sensitive fields like DOB
+      const sanitizedConversations = conversations.map(convo => ({
+        ...convo,
+        otherParticipant: sanitizeUserForResponse(convo.otherParticipant),
+      }));
+      res.json({ conversations: sanitizedConversations });
     } catch (error) {
       console.error("Get conversations error:", error);
       res.status(500).json({ error: "Failed to get conversations" });

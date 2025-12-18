@@ -10,8 +10,15 @@ Outsyde is a social marketplace platform connecting customers with local small b
 
 ## User Profile Fields
 - **Username:** Optional unique identifier displayed publicly in comments instead of real name
-- **Date of Birth:** Replaces age range for customer profiles (date input, not age range select)
+- **Date of Birth:** Collected at signup for eligibility and internal analytics
 - **Privacy:** Real names only shown during booking/purchasing transactions; usernames used for social interactions
+
+## DOB Privacy Rules
+- **Full DOB:** Collected at user signup, stored in database
+- **Vendor Access:** NEVER visible in photographer or business dashboards; vendors only see calculated age ranges (18-24, 25-34, etc.)
+- **Admin Access:** Full DOB available to admin-level users only
+- **API Safety:** `sanitizeUserForResponse()` helper removes DOB from non-admin API responses and replaces with `ageRange`
+- **Age Range Calculation:** Uses `calculateAgeRange()` utility function in shared/schema.ts
 
 ## System Architecture
 The Outsyde platform uses a React frontend, an Express (TypeScript) backend, and a PostgreSQL database with Drizzle ORM, organized in a monorepo (`client/`, `server/`, `shared/`).

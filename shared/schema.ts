@@ -1292,3 +1292,55 @@ export function isValidBookingTransition(currentStatus: string, newStatus: strin
   const validTransitions = BOOKING_STATUS_TRANSITIONS[currentStatus] || [];
   return validTransitions.includes(newStatus);
 }
+
+/* =====================================================
+   AGE RANGE UTILITY - DOB Privacy
+===================================================== */
+export type AgeRange = '18-24' | '25-34' | '35-44' | '45-54' | '55-64' | '65+' | null;
+
+export function calculateAgeRange(dateOfBirth: Date | string | null | undefined): AgeRange {
+  if (!dateOfBirth) return null;
+  
+  const dob = typeof dateOfBirth === 'string' ? new Date(dateOfBirth) : dateOfBirth;
+  if (isNaN(dob.getTime())) return null;
+  
+  const today = new Date();
+  let age = today.getFullYear() - dob.getFullYear();
+  const monthDiff = today.getMonth() - dob.getMonth();
+  
+  if (monthDiff < 0 || (monthDiff === 0 && today.getDate() < dob.getDate())) {
+    age--;
+  }
+  
+  if (age < 18) return null;
+  if (age <= 24) return '18-24';
+  if (age <= 34) return '25-34';
+  if (age <= 44) return '35-44';
+  if (age <= 54) return '45-54';
+  if (age <= 64) return '55-64';
+  return '65+';
+}
+
+export interface VendorSafeUser {
+  id: string;
+  firstName: string | null;
+  lastName: string | null;
+  email: string | null;
+  phone: string | null;
+  profileImageUrl: string | null;
+  ageRange: AgeRange;
+  gender: string | null;
+}
+
+export function toVendorSafeUser(user: User): VendorSafeUser {
+  return {
+    id: user.id,
+    firstName: user.firstName,
+    lastName: user.lastName,
+    email: user.email,
+    phone: user.phone,
+    profileImageUrl: user.profileImageUrl,
+    ageRange: calculateAgeRange(user.dateOfBirth),
+    gender: user.gender,
+  };
+}
