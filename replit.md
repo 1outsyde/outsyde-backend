@@ -39,6 +39,7 @@ The Outsyde platform uses a React frontend, an Express (TypeScript) backend, and
     -   **Collaboration Feature:** "Collaborate" button on business pages allows photographers to initiate direct communication.
     -   **Role-Aware Navigation:** Navigation components adapt based on user role (customer, vendor, photographer).
     -   **Create Post Page:** Dedicated page for all user types to create feed posts.
+    -   **Shipment Tracking:** Comprehensive shipment fulfillment system with carrier integration. Vendors can mark orders as shipped via carrier dropdown (FedEx, UPS, USPS, DHL, Amazon, OnTrac, LaserShip, Other) and tracking number input. Customers see carrier logo, tracking number, and "Track Package" button linking to carrier's tracking site. Order status auto-updates to 'shipped' when shipment created. API endpoints: POST /api/orders/:orderId/shipments, GET /api/orders/:orderId/shipments, PATCH /api/shipments/:shipmentId, GET /api/vendor/shipments, GET /api/my-orders.
 
 ## External Dependencies
 -   **PostgreSQL:** Primary database.
