@@ -1,8 +1,9 @@
 import { getStripeSync, getUncachableStripeClient } from "./stripeClient";
 import { storage } from "../storage";
 import { db } from "../db";
-import { fulfillmentTasks } from "@shared/schema";
-import { sql } from "drizzle-orm";
+import { fulfillmentTasks, subscriptionTiers } from "@shared/schema";
+import { sql, eq } from "drizzle-orm";
+import { NotificationTriggers } from "../notificationService";
 
 export class WebhookHandlers {
   static async processWebhook(
@@ -69,21 +70,40 @@ export class WebhookHandlers {
 
     const existing = await storage.getVendorSubscription(vendorId);
 
+    let subscriptionId: string;
     if (existing) {
       await storage.updateVendorSubscription(existing.id, {
         tierId,
         stripeSubscriptionId: session.subscription,
         stripeCustomerId: session.customer,
       });
-      return;
+      subscriptionId = existing.id;
+    } else {
+      const newSub = await storage.createVendorSubscription({
+        vendorId,
+        businessId,
+        tierId,
+        stripeCustomerId: session.customer,
+        stripeSubscriptionId: session.subscription,
+      });
+      subscriptionId = newSub.id;
     }
 
-    await storage.createVendorSubscription({
-      vendorId,
-      businessId,
-      tierId,
-      stripeCustomerId: session.customer,
-      stripeSubscriptionId: session.subscription,
+    const [tier] = await db.select().from(subscriptionTiers).where(eq(subscriptionTiers.id, tierId));
+    const tierName = tier?.displayName || tier?.name || 'subscription';
+
+    await NotificationTriggers.subscriptionActivated({
+      userId: vendorId,
+      tierName,
+      subscriptionId,
+    });
+
+    await NotificationTriggers.paymentSucceeded({
+      userId: vendorId,
+      amount: session.amount_total || 0,
+      referenceType: 'vendor_subscription',
+      referenceId: subscriptionId,
+      description: `Your ${tierName} subscription payment was successful.`,
     });
   }
 
@@ -110,6 +130,16 @@ export class WebhookHandlers {
       description: `Fulfill à la carte service`,
       metadata: { purchaseId },
     });
+
+    const service = await storage.getAlaCarteService(purchase.serviceId);
+    const serviceName = service?.name || 'Add-on service';
+
+    await NotificationTriggers.addonCharged({
+      userId: purchase.vendorId,
+      serviceName,
+      amount: purchase.finalPriceInCents,
+      purchaseId,
+    });
   }
 
   /* =====================================================
@@ -119,17 +149,31 @@ export class WebhookHandlers {
     const vendorSub = await storage.getVendorSubscriptionByStripeId(subscription.id);
     if (!vendorSub) return;
 
-    const status = subscription.status;
+    const previousStatus = vendorSub.status;
+    const newStatus = subscription.status;
 
     await storage.updateVendorSubscription(vendorSub.id, {
-      status,
+      status: newStatus,
       currentPeriodStart: new Date(subscription.current_period_start * 1000),
       currentPeriodEnd: new Date(subscription.current_period_end * 1000),
     });
 
     if (vendorSub.businessId) {
       await storage.updateBusiness(vendorSub.businessId, {
-        subscriptionActive: status === "active",
+        subscriptionActive: newStatus === "active",
+      });
+    }
+
+    if (previousStatus === 'active' && (newStatus === 'canceled' || newStatus === 'past_due')) {
+      const [tier] = await db.select().from(subscriptionTiers).where(eq(subscriptionTiers.id, vendorSub.tierId));
+      const tierName = tier?.displayName || tier?.name || 'subscription';
+      const effectiveDate = new Date(subscription.current_period_end * 1000).toLocaleDateString();
+
+      await NotificationTriggers.subscriptionCanceled({
+        userId: vendorSub.vendorId,
+        tierName,
+        subscriptionId: vendorSub.id,
+        effectiveDate,
       });
     }
   }
