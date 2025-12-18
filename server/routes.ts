@@ -3105,7 +3105,20 @@ export async function registerRoutes(
 
   // ==================== ADMIN FULFILLMENT ROUTES ====================
 
-  // Middleware to check if user is admin
+  // Email-locked admin access - only these emails can have admin privileges
+  // This list is hardcoded server-side and cannot be modified by client-side logic
+  const ALLOWED_ADMIN_EMAILS = [
+    'info@goutsyde.com',
+    'jamesmeyers2304@gmail.com',
+  ].map(e => e.toLowerCase());
+
+  // Helper to check if an email is allowed to be admin
+  const isAllowedAdminEmail = (email: string | null | undefined): boolean => {
+    if (!email) return false;
+    return ALLOWED_ADMIN_EMAILS.includes(email.toLowerCase());
+  };
+
+  // Middleware to check if user is admin (email-locked, server-enforced)
   const requireAdmin = async (req: any, res: any, next: any) => {
     const userId = req.session?.userId;
     if (!userId) {
@@ -3113,7 +3126,9 @@ export async function registerRoutes(
     }
 
     const user = await storage.getUser(userId);
-    if (!user?.isAdmin) {
+    
+    // Check both isAdmin flag AND email is in allowed list
+    if (!user?.isAdmin || !isAllowedAdminEmail(user.email)) {
       return res.status(403).json({ error: "Admin access required" });
     }
 
@@ -3566,6 +3581,22 @@ export async function registerRoutes(
       });
 
       const data = schema.parse(req.body);
+
+      // Enforce email-locked admin access
+      // Cannot set isAdmin=true on users whose email is not in ALLOWED_ADMIN_EMAILS
+      if (data.isAdmin === true) {
+        const targetUser = await storage.getUser(id);
+        if (!targetUser) {
+          return res.status(404).json({ error: "User not found" });
+        }
+        if (!isAllowedAdminEmail(targetUser.email)) {
+          return res.status(403).json({ 
+            error: "Cannot grant admin access",
+            message: "This email is not authorized for admin privileges."
+          });
+        }
+      }
+
       const user = await storage.updateUser(id, data);
 
       if (!user) {

@@ -9,7 +9,10 @@ Outsyde is a social marketplace platform connecting customers with local small b
 - Inter/DM Sans/Poppins font family
 
 ## Admin Access
-- **Admin Email:** info@goutsyde.com
+- **Admin Emails:** info@goutsyde.com, jamesmeyers2304@gmail.com
+- **Email-Locked:** Only users with emails in the `ALLOWED_ADMIN_EMAILS` list can have admin access
+- **Server-Enforced:** `requireAdmin` middleware checks both `isAdmin` flag AND email is in allowed list
+- **Not Client-Modifiable:** The allowed emails list is hardcoded in `server/routes.ts` and cannot be changed via API
 
 ## User Profile Fields
 - **Username:** Optional unique identifier displayed publicly in comments instead of real name
