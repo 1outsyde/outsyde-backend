@@ -28,6 +28,7 @@ import { SidebarProvider, Sidebar, SidebarContent, SidebarHeader, SidebarMenu, S
 import VendorDashboard from "@/components/VendorDashboard";
 import VendorSubscriptionDashboard from "@/components/VendorSubscriptionDashboard";
 import StorefrontEditor from "@/components/StorefrontEditor";
+import AvailabilityCalendar from "@/components/AvailabilityCalendar";
 import ThemeToggle from "@/components/ThemeToggle";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogDescription } from "@/components/ui/dialog";
@@ -155,6 +156,7 @@ export default function VendorDashboardPage({ onLogout }: VendorDashboardPagePro
   const menuItems = [
     { id: "dashboard", icon: LayoutDashboard, label: "Dashboard" },
     { id: "storefront", icon: Store, label: "Storefront" },
+    { id: "availability", icon: Calendar, label: "Availability" },
     { id: "orders", icon: ClipboardList, label: "Orders & Bookings" },
     { id: "subscription", icon: Crown, label: "Subscription" },
     { id: "messages", icon: MessageCircle, label: "Messages" },
@@ -243,6 +245,10 @@ export default function VendorDashboardPage({ onLogout }: VendorDashboardPagePro
 
             {activeSection === "storefront" && (
               <StorefrontEditor />
+            )}
+
+            {activeSection === "availability" && (
+              <AvailabilityCalendar />
             )}
 
             {activeSection === "subscription" && (
