@@ -483,4 +483,242 @@ export class PhotographerController {
       res.status(500).json({ error: "Failed to get services" });
     }
   }
+
+  // ==================== AVAILABILITY MANAGEMENT ====================
+
+  // GET /api/photographers/me/availability - Get photographer's availability slots
+  static async getAvailability(req: Request, res: Response) {
+    try {
+      const photographerId = req.session?.photographerId;
+      const userId = req.session?.userId;
+      
+      if (!photographerId && !userId) {
+        return res.status(401).json({ error: "Not authenticated" });
+      }
+
+      let targetPhotographerId = photographerId;
+      if (!targetPhotographerId && userId) {
+        const photographer = await PhotographerService.getByUserId(userId);
+        if (!photographer) {
+          return res.status(404).json({ error: "Photographer not found" });
+        }
+        targetPhotographerId = photographer.id;
+      }
+
+      const { startDate, endDate } = req.query;
+      const slots = await storage.getPhotographerAvailability(
+        targetPhotographerId!,
+        startDate as string | undefined,
+        endDate as string | undefined
+      );
+
+      res.json({ slots });
+    } catch (error) {
+      console.error("Get photographer availability error:", error);
+      res.status(500).json({ error: "Failed to get availability" });
+    }
+  }
+
+  // POST /api/photographers/me/availability - Create availability slot
+  static async createAvailabilitySlot(req: Request, res: Response) {
+    try {
+      const photographerId = req.session?.photographerId;
+      const userId = req.session?.userId;
+      
+      if (!photographerId && !userId) {
+        return res.status(401).json({ error: "Not authenticated" });
+      }
+
+      let targetPhotographerId = photographerId;
+      if (!targetPhotographerId && userId) {
+        const photographer = await PhotographerService.getByUserId(userId);
+        if (!photographer) {
+          return res.status(404).json({ error: "Photographer not found" });
+        }
+        targetPhotographerId = photographer.id;
+      }
+
+      const { date, startTime, endTime, slotType, title, notes, isRecurring, recurringDayOfWeek } = req.body;
+
+      if (!date || !startTime || !endTime) {
+        return res.status(400).json({ error: "Date, start time, and end time are required" });
+      }
+
+      const slot = await storage.createPhotographerAvailability({
+        photographerId: targetPhotographerId!,
+        date,
+        startTime,
+        endTime,
+        slotType: slotType || 'available',
+        title,
+        notes,
+        isRecurring: isRecurring || false,
+        recurringDayOfWeek,
+      });
+
+      res.status(201).json({ slot });
+    } catch (error) {
+      console.error("Create photographer availability error:", error);
+      res.status(500).json({ error: "Failed to create availability slot" });
+    }
+  }
+
+  // PATCH /api/photographers/me/availability/:slotId - Update availability slot
+  static async updateAvailabilitySlot(req: Request, res: Response) {
+    try {
+      const photographerId = req.session?.photographerId;
+      const userId = req.session?.userId;
+      
+      if (!photographerId && !userId) {
+        return res.status(401).json({ error: "Not authenticated" });
+      }
+
+      const { slotId } = req.params;
+      const existingSlot = await storage.getPhotographerAvailabilitySlot(slotId);
+      
+      if (!existingSlot) {
+        return res.status(404).json({ error: "Slot not found" });
+      }
+
+      let targetPhotographerId = photographerId;
+      if (!targetPhotographerId && userId) {
+        const photographer = await PhotographerService.getByUserId(userId);
+        if (!photographer) {
+          return res.status(404).json({ error: "Photographer not found" });
+        }
+        targetPhotographerId = photographer.id;
+      }
+
+      if (existingSlot.photographerId !== targetPhotographerId) {
+        return res.status(403).json({ error: "Not authorized to update this slot" });
+      }
+
+      const { date, startTime, endTime, slotType, title, notes, isRecurring, recurringDayOfWeek } = req.body;
+
+      const updates: any = {};
+      if (date !== undefined) updates.date = date;
+      if (startTime !== undefined) updates.startTime = startTime;
+      if (endTime !== undefined) updates.endTime = endTime;
+      if (slotType !== undefined) updates.slotType = slotType;
+      if (title !== undefined) updates.title = title;
+      if (notes !== undefined) updates.notes = notes;
+      if (isRecurring !== undefined) updates.isRecurring = isRecurring;
+      if (recurringDayOfWeek !== undefined) updates.recurringDayOfWeek = recurringDayOfWeek;
+
+      const updated = await storage.updatePhotographerAvailability(slotId, updates);
+      res.json({ slot: updated });
+    } catch (error) {
+      console.error("Update photographer availability error:", error);
+      res.status(500).json({ error: "Failed to update availability slot" });
+    }
+  }
+
+  // DELETE /api/photographers/me/availability/:slotId - Delete availability slot
+  static async deleteAvailabilitySlot(req: Request, res: Response) {
+    try {
+      const photographerId = req.session?.photographerId;
+      const userId = req.session?.userId;
+      
+      if (!photographerId && !userId) {
+        return res.status(401).json({ error: "Not authenticated" });
+      }
+
+      const { slotId } = req.params;
+      const existingSlot = await storage.getPhotographerAvailabilitySlot(slotId);
+      
+      if (!existingSlot) {
+        return res.status(404).json({ error: "Slot not found" });
+      }
+
+      // Prevent deletion of booked slots (server-side protection)
+      if (existingSlot.slotType === "booked") {
+        return res.status(403).json({ 
+          error: "Cannot delete booked slot",
+          message: "This time slot has an active booking and cannot be deleted."
+        });
+      }
+
+      let targetPhotographerId = photographerId;
+      if (!targetPhotographerId && userId) {
+        const photographer = await PhotographerService.getByUserId(userId);
+        if (!photographer) {
+          return res.status(404).json({ error: "Photographer not found" });
+        }
+        targetPhotographerId = photographer.id;
+      }
+
+      if (existingSlot.photographerId !== targetPhotographerId) {
+        return res.status(403).json({ error: "Not authorized to delete this slot" });
+      }
+
+      await storage.deletePhotographerAvailability(slotId);
+      res.json({ success: true });
+    } catch (error) {
+      console.error("Delete photographer availability error:", error);
+      res.status(500).json({ error: "Failed to delete availability slot" });
+    }
+  }
+
+  // PATCH /api/photographers/me/availability/:slotId - Update availability slot (with booked protection)
+  static async updateAvailabilitySlotProtected(req: Request, res: Response) {
+    try {
+      const photographerId = req.session?.photographerId;
+      const userId = req.session?.userId;
+      
+      if (!photographerId && !userId) {
+        return res.status(401).json({ error: "Not authenticated" });
+      }
+
+      const { slotId } = req.params;
+      const existingSlot = await storage.getPhotographerAvailabilitySlot(slotId);
+      
+      if (!existingSlot) {
+        return res.status(404).json({ error: "Slot not found" });
+      }
+
+      // Prevent modification of booked slots (server-side protection)
+      if (existingSlot.slotType === "booked") {
+        return res.status(403).json({ 
+          error: "Cannot modify booked slot",
+          message: "This time slot has an active booking and cannot be modified."
+        });
+      }
+
+      let targetPhotographerId = photographerId;
+      if (!targetPhotographerId && userId) {
+        const photographer = await PhotographerService.getByUserId(userId);
+        if (!photographer) {
+          return res.status(404).json({ error: "Photographer not found" });
+        }
+        targetPhotographerId = photographer.id;
+      }
+
+      if (existingSlot.photographerId !== targetPhotographerId) {
+        return res.status(403).json({ error: "Not authorized to update this slot" });
+      }
+
+      const { date, startTime, endTime, slotType, title, notes, isRecurring, recurringDayOfWeek } = req.body;
+
+      // Prevent changing slotType to "booked" via API (only internal reservation can do this)
+      if (slotType === "booked") {
+        return res.status(400).json({ error: "Cannot manually set slot as booked" });
+      }
+
+      const updates: any = {};
+      if (date !== undefined) updates.date = date;
+      if (startTime !== undefined) updates.startTime = startTime;
+      if (endTime !== undefined) updates.endTime = endTime;
+      if (slotType !== undefined) updates.slotType = slotType;
+      if (title !== undefined) updates.title = title;
+      if (notes !== undefined) updates.notes = notes;
+      if (isRecurring !== undefined) updates.isRecurring = isRecurring;
+      if (recurringDayOfWeek !== undefined) updates.recurringDayOfWeek = recurringDayOfWeek;
+
+      const updated = await storage.updatePhotographerAvailability(slotId, updates);
+      res.json({ slot: updated });
+    } catch (error) {
+      console.error("Update photographer availability error:", error);
+      res.status(500).json({ error: "Failed to update availability slot" });
+    }
+  }
 }

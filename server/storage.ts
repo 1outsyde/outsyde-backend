@@ -15,6 +15,7 @@ import {
   type InsertReview,
   type ShootBooking,
   type Appointment,
+  type InsertAppointment,
   type Order,
   type Conversation,
   type InsertConversation,
@@ -156,6 +157,13 @@ export interface IStorage {
   hasReviewedBooking(bookingType: string, bookingId: string): Promise<boolean>;
   verifyCustomerCanReview(customerId: string, targetType: string, targetId: string, bookingType: string, bookingId: string): Promise<{ canReview: boolean; reason?: string }>;
   getReviewableBookings(customerId: string): Promise<{ shootBookings: ShootBooking[]; appointments: Appointment[]; orders: Order[] }>;
+
+  // Appointments
+  createAppointment(data: InsertAppointment): Promise<Appointment>;
+  getAppointment(id: string): Promise<Appointment | undefined>;
+  getAppointmentsByBusiness(businessId: string): Promise<Appointment[]>;
+  getAppointmentsByClient(clientId: string): Promise<Appointment[]>;
+  updateAppointment(id: string, updates: Partial<Appointment>): Promise<Appointment | undefined>;
   updateTargetRating(targetType: string, targetId: string): Promise<void>;
 
   // Business Customers
@@ -1112,6 +1120,47 @@ export class DatabaseStorage implements IStorage {
       appointments: completedAppointments.filter(a => !reviewedIds.has(a.id)),
       orders: completedOrders.filter(o => !reviewedIds.has(o.id)),
     };
+  }
+
+  // =========================
+  // APPOINTMENTS
+  // =========================
+
+  async createAppointment(data: InsertAppointment): Promise<Appointment> {
+    const id = randomUUID();
+    const [appointment] = await db.insert(appointments)
+      .values({ id, ...data })
+      .returning();
+    return appointment;
+  }
+
+  async getAppointment(id: string): Promise<Appointment | undefined> {
+    const [appointment] = await db.select()
+      .from(appointments)
+      .where(eq(appointments.id, id));
+    return appointment;
+  }
+
+  async getAppointmentsByBusiness(businessId: string): Promise<Appointment[]> {
+    return db.select()
+      .from(appointments)
+      .where(eq(appointments.businessId, businessId))
+      .orderBy(desc(appointments.createdAt));
+  }
+
+  async getAppointmentsByClient(clientId: string): Promise<Appointment[]> {
+    return db.select()
+      .from(appointments)
+      .where(eq(appointments.clientId, clientId))
+      .orderBy(desc(appointments.createdAt));
+  }
+
+  async updateAppointment(id: string, updates: Partial<Appointment>): Promise<Appointment | undefined> {
+    const [appointment] = await db.update(appointments)
+      .set(updates)
+      .where(eq(appointments.id, id))
+      .returning();
+    return appointment;
   }
 
   // Update rating on target after a review
@@ -2685,7 +2734,7 @@ export class DatabaseStorage implements IStorage {
   }
 
   async checkBusinessSlotAvailable(businessId: string, date: string, startTime: string, endTime: string, excludeSlotId?: string): Promise<boolean> {
-    // Check for overlapping booked or blocked slots
+    // Check for overlapping booked or blocked slots in availability table
     const overlappingSlots = await db.select()
       .from(businessAvailability)
       .where(and(
@@ -2701,7 +2750,20 @@ export class DatabaseStorage implements IStorage {
         excludeSlotId ? sql`${businessAvailability.id} != ${excludeSlotId}` : sql`1=1`
       ));
     
-    return overlappingSlots.length === 0;
+    if (overlappingSlots.length > 0) return false;
+
+    // Also check for existing appointments (legacy data without availability slots)
+    const overlappingAppointments = await db.select()
+      .from(appointments)
+      .where(and(
+        eq(appointments.businessId, businessId),
+        eq(appointments.appointmentDate, date),
+        sql`${appointments.status} NOT IN ('cancelled', 'refunded')`,
+        sql`${appointments.appointmentTime} < ${endTime}`,
+        sql`${appointments.appointmentTime} >= ${startTime}`
+      ));
+
+    return overlappingAppointments.length === 0;
   }
 
   async reserveBusinessSlot(businessId: string, date: string, startTime: string, endTime: string, appointmentId: string): Promise<BusinessAvailability> {
@@ -2771,7 +2833,7 @@ export class DatabaseStorage implements IStorage {
   }
 
   async checkPhotographerSlotAvailable(photographerId: string, date: string, startTime: string, endTime: string, excludeSlotId?: string): Promise<boolean> {
-    // Check for overlapping booked or blocked slots
+    // Check for overlapping booked or blocked slots in availability table
     const overlappingSlots = await db.select()
       .from(photographerAvailability)
       .where(and(
@@ -2787,7 +2849,20 @@ export class DatabaseStorage implements IStorage {
         excludeSlotId ? sql`${photographerAvailability.id} != ${excludeSlotId}` : sql`1=1`
       ));
     
-    return overlappingSlots.length === 0;
+    if (overlappingSlots.length > 0) return false;
+
+    // Also check for existing shoot bookings (legacy data without availability slots)
+    const overlappingBookings = await db.select()
+      .from(shootBookings)
+      .where(and(
+        eq(shootBookings.photographerId, photographerId),
+        eq(shootBookings.date, date),
+        sql`${shootBookings.status} NOT IN ('cancelled', 'refunded')`,
+        sql`${shootBookings.startTime} < ${endTime}`,
+        sql`${shootBookings.endTime} > ${startTime}`
+      ));
+
+    return overlappingBookings.length === 0;
   }
 
   async reservePhotographerSlot(photographerId: string, date: string, startTime: string, endTime: string, shootBookingId: string): Promise<PhotographerAvailability> {

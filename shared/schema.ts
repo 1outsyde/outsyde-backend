@@ -1143,6 +1143,7 @@ export type InsertPhotographerService = typeof photographerServices.$inferInsert
 export type ShootBooking = typeof shootBookings.$inferSelect;
 
 export type Appointment = typeof appointments.$inferSelect;
+export type InsertAppointment = typeof appointments.$inferInsert;
 
 export type Order = typeof orders.$inferSelect;
 

@@ -17,6 +17,12 @@ photographersRouter.post("/me/services",         PhotographerController.createSe
 photographersRouter.patch("/me/services/:serviceId", PhotographerController.updateService);
 photographersRouter.delete("/me/services/:serviceId", PhotographerController.deleteService);
 
+// Photographer Availability (must come before /:id routes)
+photographersRouter.get("/me/availability",          PhotographerController.getAvailability);
+photographersRouter.post("/me/availability",         PhotographerController.createAvailabilitySlot);
+photographersRouter.patch("/me/availability/:slotId", PhotographerController.updateAvailabilitySlot);
+photographersRouter.delete("/me/availability/:slotId", PhotographerController.deleteAvailabilitySlot);
+
 // Create photographer
 photographersRouter.post("/",      PhotographerController.create);
 // List photographers

@@ -637,6 +637,21 @@ export async function registerRoutes(
       const endDateTime = new Date(dateTime.getTime() + 2 * 60 * 60 * 1000);
       const endTime = `${endDateTime.getHours().toString().padStart(2, "0")}:${endDateTime.getMinutes().toString().padStart(2, "0")}`;
 
+      // Check photographer availability before booking
+      const isAvailable = await storage.checkPhotographerSlotAvailable(
+        data.photographerId,
+        date,
+        startTime,
+        endTime
+      );
+
+      if (!isAvailable) {
+        return res.status(409).json({ 
+          error: "Time slot unavailable",
+          message: "This photographer is not available during the selected time. Please choose a different time slot."
+        });
+      }
+
       // Calculate fees (10% Outsyde platform fee for photographers)
       const platformFee = Math.round(data.totalPriceCents * 0.10);
       const vendorNet = data.totalPriceCents - platformFee;
@@ -658,6 +673,15 @@ export async function registerRoutes(
         status: "pending",
       });
 
+      // Reserve the photographer's time slot to prevent double bookings
+      await storage.reservePhotographerSlot(
+        data.photographerId,
+        date,
+        startTime,
+        endTime,
+        booking.id
+      );
+
       const photographer = await storage.getPhotographer(data.photographerId);
       const photographerName = photographer?.displayName || 'Photographer';
       
@@ -678,6 +702,103 @@ export async function registerRoutes(
       }
       console.error("Create photographer booking error:", error);
       res.status(500).json({ error: "Failed to create booking" });
+    }
+  });
+
+  // ==================== BUSINESS APPOINTMENT ROUTES ====================
+
+  // Create business appointment (customer facing)
+  app.post("/api/appointments", async (req, res) => {
+    const userId = req.session?.userId;
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    try {
+      const appointmentSchema = z.object({
+        businessId: z.string().min(1, "Business ID is required"),
+        serviceId: z.string().min(1, "Service ID is required"),
+        appointmentDate: z.string().min(1, "Date is required"),
+        appointmentTime: z.string().min(1, "Time is required"),
+        totalPriceCents: z.number().default(0),
+      });
+
+      const data = appointmentSchema.parse(req.body);
+
+      // Get service to determine duration
+      const service = await storage.getVendorService(data.serviceId);
+      const serviceDurationMinutes = service?.durationMinutes || 60;
+
+      // Calculate end time based on service duration
+      const [hours, minutes] = data.appointmentTime.split(':').map(Number);
+      const totalMinutes = hours * 60 + minutes + serviceDurationMinutes;
+      const endHours = Math.floor(totalMinutes / 60) % 24;
+      const endMinutes = totalMinutes % 60;
+      const endTime = `${endHours.toString().padStart(2, '0')}:${endMinutes.toString().padStart(2, '0')}`;
+
+      // Check business availability before booking
+      const isAvailable = await storage.checkBusinessSlotAvailable(
+        data.businessId,
+        data.appointmentDate,
+        data.appointmentTime,
+        endTime
+      );
+
+      if (!isAvailable) {
+        return res.status(409).json({ 
+          error: "Time slot unavailable",
+          message: "This business is not available during the selected time. Please choose a different time slot."
+        });
+      }
+
+      // Calculate fees (4% Outsyde platform fee for businesses)
+      const platformFee = Math.round(data.totalPriceCents * 0.04);
+      const vendorNet = data.totalPriceCents - platformFee;
+
+      const appointment = await storage.createAppointment({
+        businessId: data.businessId,
+        clientId: userId,
+        serviceId: data.serviceId,
+        appointmentDate: data.appointmentDate,
+        appointmentTime: data.appointmentTime,
+        totalPrice: data.totalPriceCents,
+        platformFee,
+        vendorNet,
+        status: "pending",
+      });
+
+      // Reserve the business time slot to prevent double bookings
+      await storage.reserveBusinessSlot(
+        data.businessId,
+        data.appointmentDate,
+        data.appointmentTime,
+        endTime,
+        appointment.id
+      );
+
+      res.status(201).json({ appointment });
+    } catch (error) {
+      if (error instanceof z.ZodError) {
+        return res.status(400).json({ error: "Invalid data", details: error.errors });
+      }
+      console.error("Create appointment error:", error);
+      res.status(500).json({ error: "Failed to create appointment" });
+    }
+  });
+
+  // Get customer's appointments
+  app.get("/api/my-appointments", async (req, res) => {
+    const userId = req.session?.userId;
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    try {
+      const appointments = await storage.getAppointmentsByClient(userId);
+      res.json({ appointments });
+    } catch (error) {
+      console.error("Get appointments error:", error);
+      res.status(500).json({ error: "Failed to get appointments" });
     }
   });
 
