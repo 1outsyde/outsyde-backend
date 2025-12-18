@@ -1,8 +1,9 @@
 import { useState, useEffect } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
-import { Camera, DollarSign, Calendar, MessageCircle, Star, Eye, ExternalLink, AlertCircle, Check, Loader2, RotateCcw, Plus, Pencil, Trash2, MapPin, FileText, Phone, User as UserIcon, X, Image } from "lucide-react";
+import { Camera, DollarSign, Calendar, MessageCircle, Star, Eye, ExternalLink, AlertCircle, Check, Loader2, RotateCcw, Plus, Pencil, Trash2, MapPin, FileText, Phone, User as UserIcon, X, Image, CalendarClock } from "lucide-react";
 import { ImageUploader } from "@/components/ImageUploader";
 import BillingAddressForm from "@/components/BillingAddressForm";
+import BusinessHoursEditor, { type HoursOfOperation } from "@/components/BusinessHoursEditor";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -324,6 +325,7 @@ export default function PhotographerDashboardPage({ onLogout }: PhotographerDash
       coverImage?: string;
       logoImage?: string;
       brandColors?: { primary?: string; secondary?: string };
+      hoursOfOperation?: HoursOfOperation;
     }) => {
       const response = await apiRequest("PATCH", "/api/photographers/me", data);
       return response.json();
@@ -622,6 +624,10 @@ export default function PhotographerDashboardPage({ onLogout }: PhotographerDash
                   <TabsList>
                     <TabsTrigger value="bookings" data-testid="tab-bookings">Bookings</TabsTrigger>
                     <TabsTrigger value="services" data-testid="tab-services">Services</TabsTrigger>
+                    <TabsTrigger value="hours" data-testid="tab-hours">
+                      <CalendarClock className="h-4 w-4 mr-1" />
+                      Hours
+                    </TabsTrigger>
                     <TabsTrigger value="storefront" data-testid="tab-storefront">Storefront</TabsTrigger>
                     <TabsTrigger value="profile" data-testid="tab-profile">Profile</TabsTrigger>
                   </TabsList>
@@ -783,6 +789,14 @@ export default function PhotographerDashboardPage({ onLogout }: PhotographerDash
                       </Button>
                     </div>
                   )}
+                </TabsContent>
+
+                <TabsContent value="hours" className="mt-0">
+                  <BusinessHoursEditor
+                    hours={photographer?.hoursOfOperation as HoursOfOperation | null}
+                    onSave={(hours) => updateProfileMutation.mutate({ hoursOfOperation: hours })}
+                    isPending={updateProfileMutation.isPending}
+                  />
                 </TabsContent>
 
                 <TabsContent value="storefront" className="mt-0">

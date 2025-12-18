@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { MapPin, Star, Share2, Heart, Clock, Mail, Phone, Globe, Handshake, MessageSquare } from "lucide-react";
+import { MapPin, Star, Share2, Heart, Mail, Phone, Globe, Handshake, MessageSquare } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
@@ -9,6 +9,7 @@ import ServiceCard from "./ServiceCard";
 import BookingCalendar from "./BookingCalendar";
 import VendorChat from "./VendorChat";
 import ProfileComments from "./ProfileComments";
+import BusinessHoursDisplay, { type HoursOfOperation } from "./BusinessHoursDisplay";
 
 interface Product {
   id: string;
@@ -46,7 +47,7 @@ interface VendorStorefrontProps {
   reviewCount: number;
   description: string;
   tagline?: string;
-  businessHours?: string;
+  hoursOfOperation?: HoursOfOperation | null;
   products: Product[];
   services: Service[];
   brandColors?: BrandColors;
@@ -77,7 +78,7 @@ export default function VendorStorefront({
   reviewCount,
   description,
   tagline,
-  businessHours,
+  hoursOfOperation,
   products,
   services,
   brandColors,
@@ -150,11 +151,8 @@ export default function VendorStorefront({
               <span className="font-semibold">{rating.toFixed(1)}</span>
               <span className="text-muted-foreground">({reviewCount} reviews)</span>
             </div>
-            {businessHours && (
-              <div className="flex items-center gap-1 text-sm text-muted-foreground">
-                <Clock className="h-4 w-4" />
-                <span>{businessHours}</span>
-              </div>
+            {hoursOfOperation && (
+              <BusinessHoursDisplay hours={hoursOfOperation} compact />
             )}
           </div>
           <div className="flex items-center gap-2">
@@ -288,6 +286,12 @@ export default function VendorStorefront({
                       </div>
                     )}
                   </div>
+                </div>
+              )}
+
+              {hoursOfOperation && (
+                <div className="pt-4 border-t">
+                  <BusinessHoursDisplay hours={hoursOfOperation} />
                 </div>
               )}
             </div>

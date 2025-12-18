@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
-import { Loader2, Store, Palette, Package, Clock, Plus, Pencil, Trash2, Image, DollarSign, Share2, Camera, X } from "lucide-react";
+import { Loader2, Store, Palette, Package, Clock, Plus, Pencil, Trash2, Image, DollarSign, Share2, Camera, X, CalendarClock } from "lucide-react";
 import { ImageUploader } from "@/components/ImageUploader";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -14,6 +14,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from 
 import { useToast } from "@/hooks/use-toast";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import type { Business, VendorProduct, VendorService } from "@shared/schema";
+import BusinessHoursEditor, { type HoursOfOperation } from "./BusinessHoursEditor";
 
 interface BusinessResponse {
   business: Business;
@@ -94,7 +95,7 @@ export default function StorefrontEditor() {
       </div>
 
       <Tabs value={activeTab} onValueChange={setActiveTab} className="w-full">
-        <TabsList className="grid w-full grid-cols-4">
+        <TabsList className="grid w-full grid-cols-5">
           <TabsTrigger value="branding" data-testid="tab-branding">
             <Palette className="h-4 w-4 mr-2" />
             Branding
@@ -102,6 +103,10 @@ export default function StorefrontEditor() {
           <TabsTrigger value="profile" data-testid="tab-profile">
             <Store className="h-4 w-4 mr-2" />
             Profile
+          </TabsTrigger>
+          <TabsTrigger value="hours" data-testid="tab-hours">
+            <CalendarClock className="h-4 w-4 mr-2" />
+            Hours
           </TabsTrigger>
           <TabsTrigger value="products" data-testid="tab-products">
             <Package className="h-4 w-4 mr-2" />
@@ -119,6 +124,14 @@ export default function StorefrontEditor() {
 
         <TabsContent value="profile" className="mt-6">
           <ProfileTab business={business} onUpdate={updateBusinessMutation.mutate} isPending={updateBusinessMutation.isPending} />
+        </TabsContent>
+
+        <TabsContent value="hours" className="mt-6">
+          <BusinessHoursEditor
+            hours={business.hoursOfOperation as HoursOfOperation | null}
+            onSave={(hours) => updateBusinessMutation.mutate({ hoursOfOperation: hours })}
+            isPending={updateBusinessMutation.isPending}
+          />
         </TabsContent>
 
         <TabsContent value="products" className="mt-6">
