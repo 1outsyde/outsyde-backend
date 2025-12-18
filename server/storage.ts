@@ -60,6 +60,10 @@ import {
   type AuditLog,
   type InsertAuditLog,
   type Referral,
+  type UserBlock,
+  type InsertUserBlock,
+  type MessageReport,
+  type InsertMessageReport,
   users,
   businesses,
   cities,
@@ -98,6 +102,8 @@ import {
   photographerAvailability,
   shipments,
   auditLogs,
+  userBlocks,
+  messageReports,
   isValidOrderTransition,
   isValidBookingTransition
 } from "@shared/schema";
@@ -454,6 +460,19 @@ export interface IStorage {
 
   // Review Revocation on Refund
   revokeReviewsForRefund(bookingType: string, bookingId: string): Promise<number>;
+
+  // User Blocking
+  blockUser(blockerId: string, blockedId: string, reason?: string): Promise<UserBlock>;
+  unblockUser(blockerId: string, blockedId: string): Promise<boolean>;
+  isUserBlocked(blockerId: string, blockedId: string): Promise<boolean>;
+  isUserBlockedEitherWay(userId1: string, userId2: string): Promise<boolean>;
+  getBlockedUsers(userId: string): Promise<UserBlock[]>;
+
+  // Message Reports
+  createMessageReport(data: InsertMessageReport): Promise<MessageReport>;
+  getMessageReports(filters?: { status?: string; reporterId?: string; reportedUserId?: string }): Promise<MessageReport[]>;
+  updateMessageReport(id: string, updates: Partial<MessageReport>): Promise<MessageReport | undefined>;
+  getMessageReport(id: string): Promise<MessageReport | undefined>;
 
   seedInitialData(): Promise<void>;
 }
@@ -1863,6 +1882,89 @@ export class DatabaseStorage implements IStorage {
 
   async getMessages(conversationId: string): Promise<Message[]> {
     return db.select().from(messages).where(eq(messages.conversationId, conversationId));
+  }
+
+  // =========================
+  // USER BLOCKING
+  // =========================
+
+  async blockUser(blockerId: string, blockedId: string, reason?: string): Promise<UserBlock> {
+    const existing = await db.select().from(userBlocks).where(
+      and(eq(userBlocks.blockerId, blockerId), eq(userBlocks.blockedId, blockedId))
+    );
+    if (existing[0]) {
+      return existing[0];
+    }
+    const [block] = await db.insert(userBlocks).values({
+      blockerId,
+      blockedId,
+      reason: reason || null,
+    }).returning();
+    return block;
+  }
+
+  async unblockUser(blockerId: string, blockedId: string): Promise<boolean> {
+    const result = await db.delete(userBlocks).where(
+      and(eq(userBlocks.blockerId, blockerId), eq(userBlocks.blockedId, blockedId))
+    ).returning();
+    return result.length > 0;
+  }
+
+  async isUserBlocked(blockerId: string, blockedId: string): Promise<boolean> {
+    const result = await db.select().from(userBlocks).where(
+      and(eq(userBlocks.blockerId, blockerId), eq(userBlocks.blockedId, blockedId))
+    );
+    return result.length > 0;
+  }
+
+  async isUserBlockedEitherWay(userId1: string, userId2: string): Promise<boolean> {
+    const result = await db.select().from(userBlocks).where(
+      or(
+        and(eq(userBlocks.blockerId, userId1), eq(userBlocks.blockedId, userId2)),
+        and(eq(userBlocks.blockerId, userId2), eq(userBlocks.blockedId, userId1))
+      )
+    );
+    return result.length > 0;
+  }
+
+  async getBlockedUsers(userId: string): Promise<UserBlock[]> {
+    return db.select().from(userBlocks).where(eq(userBlocks.blockerId, userId)).orderBy(desc(userBlocks.createdAt));
+  }
+
+  // =========================
+  // MESSAGE REPORTS
+  // =========================
+
+  async createMessageReport(data: InsertMessageReport): Promise<MessageReport> {
+    const [report] = await db.insert(messageReports).values(data).returning();
+    return report;
+  }
+
+  async getMessageReports(filters?: { status?: string; reporterId?: string; reportedUserId?: string }): Promise<MessageReport[]> {
+    let conditions = [];
+    if (filters?.status) {
+      conditions.push(eq(messageReports.status, filters.status));
+    }
+    if (filters?.reporterId) {
+      conditions.push(eq(messageReports.reporterId, filters.reporterId));
+    }
+    if (filters?.reportedUserId) {
+      conditions.push(eq(messageReports.reportedUserId, filters.reportedUserId));
+    }
+    if (conditions.length > 0) {
+      return db.select().from(messageReports).where(and(...conditions)).orderBy(desc(messageReports.createdAt));
+    }
+    return db.select().from(messageReports).orderBy(desc(messageReports.createdAt));
+  }
+
+  async updateMessageReport(id: string, updates: Partial<MessageReport>): Promise<MessageReport | undefined> {
+    const [report] = await db.update(messageReports).set(updates).where(eq(messageReports.id, id)).returning();
+    return report;
+  }
+
+  async getMessageReport(id: string): Promise<MessageReport | undefined> {
+    const result = await db.select().from(messageReports).where(eq(messageReports.id, id));
+    return result[0];
   }
 
   // =========================
