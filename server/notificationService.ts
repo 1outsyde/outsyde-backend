@@ -305,6 +305,31 @@ export const NotificationTriggers = {
       });
     }
   },
+
+  async subscriptionTierChanged(params: {
+    userId: string;
+    previousTierName: string;
+    newTierName: string;
+    isUpgrade: boolean;
+    subscriptionId: string;
+    effectiveDate: string;
+  }): Promise<void> {
+    const changeType = params.isUpgrade ? 'upgraded' : 'downgraded';
+    await sendNotification({
+      userId: params.userId,
+      type: 'subscription_tier_changed',
+      title: `Subscription ${params.isUpgrade ? 'Upgraded' : 'Downgraded'}`,
+      message: `Your subscription has been ${changeType} from ${params.previousTierName} to ${params.newTierName}. Your new benefits are now active.`,
+      referenceType: 'vendor_subscription',
+      referenceId: params.subscriptionId,
+      metadata: {
+        previousTierName: params.previousTierName,
+        newTierName: params.newTierName,
+        isUpgrade: params.isUpgrade,
+        effectiveDate: params.effectiveDate,
+      },
+    });
+  },
 };
 
 export default NotificationTriggers;

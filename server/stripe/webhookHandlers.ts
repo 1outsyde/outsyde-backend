@@ -151,12 +151,37 @@ export class WebhookHandlers {
 
     const previousStatus = vendorSub.status;
     const newStatus = subscription.status;
+    const previousTierId = vendorSub.tierId;
 
-    await storage.updateVendorSubscription(vendorSub.id, {
+    // Detect tier change by checking the Stripe subscription's price
+    const stripePriceId = subscription.items?.data?.[0]?.price?.id;
+    let newTierId = previousTierId;
+    let tierChanged = false;
+
+    if (stripePriceId) {
+      // Find the tier that matches this Stripe price
+      const [matchingTier] = await db.select()
+        .from(subscriptionTiers)
+        .where(eq(subscriptionTiers.stripePriceId, stripePriceId));
+
+      if (matchingTier && matchingTier.id !== previousTierId) {
+        newTierId = matchingTier.id;
+        tierChanged = true;
+      }
+    }
+
+    // Update subscription with new status and potentially new tier
+    const updateData: any = {
       status: newStatus,
       currentPeriodStart: new Date(subscription.current_period_start * 1000),
       currentPeriodEnd: new Date(subscription.current_period_end * 1000),
-    });
+    };
+
+    if (tierChanged) {
+      updateData.tierId = newTierId;
+    }
+
+    await storage.updateVendorSubscription(vendorSub.id, updateData);
 
     if (vendorSub.businessId) {
       await storage.updateBusiness(vendorSub.businessId, {
@@ -164,6 +189,34 @@ export class WebhookHandlers {
       });
     }
 
+    // Handle tier change notifications and benefit migration
+    if (tierChanged && newStatus === 'active') {
+      const [previousTier] = await db.select().from(subscriptionTiers).where(eq(subscriptionTiers.id, previousTierId));
+      const [newTier] = await db.select().from(subscriptionTiers).where(eq(subscriptionTiers.id, newTierId));
+      
+      const previousTierName = previousTier?.displayName || previousTier?.name || 'previous plan';
+      const newTierName = newTier?.displayName || newTier?.name || 'new plan';
+      
+      // Determine if this is an upgrade or downgrade
+      const previousPrice = previousTier?.priceInCents || 0;
+      const newPrice = newTier?.priceInCents || 0;
+      const isUpgrade = newPrice > previousPrice;
+
+      // Migrate benefits to the new tier
+      await storage.migrateBenefitsForTierChange(vendorSub.id, previousTierId, newTierId);
+
+      // Send notification about the plan change
+      await NotificationTriggers.subscriptionTierChanged({
+        userId: vendorSub.vendorId,
+        previousTierName,
+        newTierName,
+        isUpgrade,
+        subscriptionId: vendorSub.id,
+        effectiveDate: new Date().toLocaleDateString(),
+      });
+    }
+
+    // Handle cancellation notifications
     if (previousStatus === 'active' && (newStatus === 'canceled' || newStatus === 'past_due')) {
       const [tier] = await db.select().from(subscriptionTiers).where(eq(subscriptionTiers.id, vendorSub.tierId));
       const tierName = tier?.displayName || tier?.name || 'subscription';

@@ -1,6 +1,7 @@
 import type { Express } from "express";
 import type { Server } from "http";
 import { storage } from "./storage";
+import { db } from "./db";
 import {
   customerSignupSchema,
   vendorSignupSchema,
@@ -8,7 +9,9 @@ import {
   loginSchema,
   insertReviewSchema,
   billingAddressSchema,
+  subscriptionTiers,
 } from "@shared/schema";
+import { eq } from "drizzle-orm";
 import { z } from "zod";
 import {
   hashPassword,
@@ -21,7 +24,7 @@ import {
   type AuthenticatedRequest,
 } from "./auth";
 import { stripeService } from "./stripe/stripeService";
-import { getStripePublishableKey } from "./stripe/stripeClient";
+import { getStripePublishableKey, getUncachableStripeClient } from "./stripe/stripeClient";
 import { ObjectStorageService, ObjectNotFoundError } from "./objectStorage";
 import { ObjectPermission } from "./objectAcl";
 import { NotificationTriggers } from "./notificationService";
@@ -943,6 +946,179 @@ export async function registerRoutes(
       }
       console.error("Create tier subscription checkout error:", error);
       res.status(500).json({ error: "Failed to create checkout session" });
+    }
+  });
+
+  // Change subscription tier (upgrade or downgrade)
+  app.post("/api/vendor/subscription/change-tier", async (req, res) => {
+    const userId = req.session?.userId;
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    if (!req.session?.isVendor) {
+      return res.status(403).json({ error: "Only vendors can change subscription tier" });
+    }
+
+    try {
+      const changeSchema = z.object({
+        newTierId: z.string().min(1, "New tier ID is required"),
+        prorationBehavior: z.enum(['create_prorations', 'none', 'always_invoice']).default('create_prorations'),
+      });
+      const { newTierId, prorationBehavior } = changeSchema.parse(req.body);
+
+      // Get current subscription
+      const subscription = await storage.getVendorSubscription(userId);
+      if (!subscription) {
+        return res.status(404).json({ error: "No active subscription found" });
+      }
+
+      if (!subscription.stripeSubscriptionId) {
+        return res.status(400).json({ error: "No Stripe subscription linked" });
+      }
+
+      if (subscription.status !== 'active') {
+        return res.status(400).json({ error: "Cannot change tier: subscription is not active" });
+      }
+
+      if (subscription.tierId === newTierId) {
+        return res.status(400).json({ error: "Already on this tier" });
+      }
+
+      // Get the new tier
+      const [newTier] = await db.select().from(subscriptionTiers).where(eq(subscriptionTiers.id, newTierId));
+      if (!newTier || !newTier.stripePriceId) {
+        return res.status(404).json({ error: "Tier not found or not configured for Stripe" });
+      }
+
+      // Get current tier for comparison
+      const [currentTier] = await db.select().from(subscriptionTiers).where(eq(subscriptionTiers.id, subscription.tierId));
+      const isUpgrade = (newTier.priceInCents || 0) > (currentTier?.priceInCents || 0);
+
+      // Update the Stripe subscription with the new price
+      const stripe = await getUncachableStripeClient();
+      const stripeSub = await stripe.subscriptions.retrieve(subscription.stripeSubscriptionId);
+      const itemId = stripeSub.items.data[0]?.id;
+
+      if (!itemId) {
+        return res.status(400).json({ error: "No subscription items found" });
+      }
+
+      // Update the subscription - Stripe will handle proration
+      const updatedStripeSub = await stripe.subscriptions.update(subscription.stripeSubscriptionId, {
+        items: [{
+          id: itemId,
+          price: newTier.stripePriceId,
+        }],
+        proration_behavior: prorationBehavior,
+      });
+
+      // The tier change will be detected and processed by the webhook handler
+      // when Stripe sends the customer.subscription.updated event
+
+      res.json({ 
+        success: true, 
+        message: isUpgrade ? 'Your subscription has been upgraded!' : 'Your subscription has been downgraded.',
+        subscription: {
+          previousTier: currentTier?.displayName || currentTier?.name,
+          newTier: newTier.displayName || newTier.name,
+          isUpgrade,
+          effectiveImmediately: true,
+        }
+      });
+    } catch (error) {
+      if (error instanceof z.ZodError) {
+        return res.status(400).json({ error: "Invalid data", details: error.errors });
+      }
+      console.error("Change subscription tier error:", error);
+      res.status(500).json({ error: "Failed to change subscription tier" });
+    }
+  });
+
+  // Preview tier change proration
+  app.post("/api/vendor/subscription/preview-change", async (req, res) => {
+    const userId = req.session?.userId;
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    if (!req.session?.isVendor) {
+      return res.status(403).json({ error: "Only vendors can preview subscription changes" });
+    }
+
+    try {
+      const previewSchema = z.object({
+        newTierId: z.string().min(1, "New tier ID is required"),
+      });
+      const { newTierId } = previewSchema.parse(req.body);
+
+      // Get current subscription
+      const subscription = await storage.getVendorSubscription(userId);
+      if (!subscription || !subscription.stripeSubscriptionId) {
+        return res.status(404).json({ error: "No active subscription found" });
+      }
+
+      if (subscription.status !== 'active') {
+        return res.status(400).json({ error: "Cannot preview tier change: subscription is not active" });
+      }
+
+      // Get tier details
+      const [newTier] = await db.select().from(subscriptionTiers).where(eq(subscriptionTiers.id, newTierId));
+      const [currentTier] = await db.select().from(subscriptionTiers).where(eq(subscriptionTiers.id, subscription.tierId));
+      
+      if (!newTier || !newTier.stripePriceId) {
+        return res.status(404).json({ error: "Tier not found" });
+      }
+
+      const isUpgrade = (newTier.priceInCents || 0) > (currentTier?.priceInCents || 0);
+
+      // Get proration preview from Stripe
+      const stripe = await getUncachableStripeClient();
+      const stripeSub = await stripe.subscriptions.retrieve(subscription.stripeSubscriptionId);
+      const itemId = stripeSub.items.data[0]?.id;
+
+      if (!itemId) {
+        return res.status(400).json({ error: "No subscription items found" });
+      }
+
+      const invoice = await stripe.invoices.createPreview({
+        customer: subscription.stripeCustomerId!,
+        subscription: subscription.stripeSubscriptionId,
+        subscription_details: {
+          items: [{
+            id: itemId,
+            price: newTier.stripePriceId,
+          }],
+          proration_behavior: 'create_prorations',
+        },
+      });
+
+      res.json({
+        currentTier: {
+          id: currentTier?.id,
+          name: currentTier?.displayName || currentTier?.name,
+          priceInCents: currentTier?.priceInCents || 0,
+        },
+        newTier: {
+          id: newTier.id,
+          name: newTier.displayName || newTier.name,
+          priceInCents: newTier.priceInCents,
+        },
+        isUpgrade,
+        proration: {
+          amountDueCents: invoice.amount_due,
+          creditAppliedCents: Math.abs(invoice.lines.data
+            .filter(line => line.amount < 0)
+            .reduce((sum, line) => sum + line.amount, 0)),
+          immediateChargeCents: invoice.amount_due > 0 ? invoice.amount_due : 0,
+        },
+      });
+    } catch (error) {
+      if (error instanceof z.ZodError) {
+        return res.status(400).json({ error: "Invalid data", details: error.errors });
+      }
+      console.error("Preview tier change error:", error);
+      res.status(500).json({ error: "Failed to preview tier change" });
     }
   });
 

@@ -46,6 +46,12 @@ The Outsyde platform uses a React frontend, an Express (TypeScript) backend, and
     -   **Audit Logging:** Complete audit trail for financial actions via `audit_logs` table. Captures actorId, actorType, action, targetType, targetId, beforeState, afterState, metadata, IP address, and user agent. Automatically logs order/booking status changes.
     -   **Refund Cascading Effects:** When refunds are approved: points are automatically reversed via `reversePointsForRefund()`, verified reviews are revoked via `revokeVerifiedReviewsForRefund()`, and target ratings are recalculated.
     -   **Message Abuse Prevention:** Chat messages validated with 2000 character limit, max 5 links per message, and duplicate message detection. General API rate limiting (100 req/min authenticated, 20 req/min unauthenticated) provides baseline protection.
+    -   **Subscription Tier Changes:** Complete upgrade/downgrade flow for business subscriptions. Features include:
+        - Tier change detection in webhook handler (compares Stripe price to current tier)
+        - Automatic benefit migration when tier changes (expires old allowances, creates new ones)
+        - API endpoints: POST /api/vendor/subscription/change-tier (execute change with proration), POST /api/vendor/subscription/preview-change (preview proration costs)
+        - Notifications for tier changes with upgrade/downgrade context
+        - Validation: only active subscriptions can be changed, same-tier changes rejected
 
 ## External Dependencies
 -   **PostgreSQL:** Primary database.

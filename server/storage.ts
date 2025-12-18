@@ -297,6 +297,7 @@ export interface IStorage {
   getVendorBenefitAllowances(vendorId: string): Promise<(BenefitAllowance & { benefit: TierBenefit })[]>;
   useBenefit(allowanceId: string, vendorId: string, businessId: string, notes?: string): Promise<{ success: boolean; allowance?: BenefitAllowance; task?: FulfillmentTask; error?: string }>;
   expireOldAllowances(): Promise<number>;
+  migrateBenefitsForTierChange(subscriptionId: string, previousTierId: string, newTierId: string): Promise<void>;
 
   // À la carte services
   getAlaCarteServices(): Promise<AlaCarteService[]>;
@@ -2442,6 +2443,50 @@ export class DatabaseStorage implements IStorage {
       ))
       .returning();
     return result.length;
+  }
+
+  async migrateBenefitsForTierChange(
+    subscriptionId: string, 
+    previousTierId: string, 
+    newTierId: string
+  ): Promise<void> {
+    const now = new Date();
+
+    // Get the subscription to find cycle dates
+    const [subscription] = await db.select()
+      .from(vendorSubscriptions)
+      .where(eq(vendorSubscriptions.id, subscriptionId));
+    
+    if (!subscription) {
+      console.error(`Cannot migrate benefits: subscription ${subscriptionId} not found`);
+      return;
+    }
+
+    // Expire all current allowances for the old tier
+    await db.update(benefitAllowances)
+      .set({ 
+        isExpired: true, 
+        expiredAt: now 
+      })
+      .where(and(
+        eq(benefitAllowances.subscriptionId, subscriptionId),
+        eq(benefitAllowances.isExpired, false)
+      ));
+
+    // Create new allowances for the new tier using current cycle dates
+    const periodStart = subscription.currentPeriodStart || now;
+    const periodEnd = subscription.currentPeriodEnd || new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59);
+    const quarterStart = subscription.currentQuarterStart || this.getQuarterStart(periodStart);
+    const quarterEnd = subscription.currentQuarterEnd || this.getQuarterEnd(periodStart);
+
+    await this.createBenefitAllowances(subscriptionId, {
+      periodStart,
+      periodEnd,
+      quarterStart,
+      quarterEnd,
+    });
+
+    console.log(`Migrated benefits for subscription ${subscriptionId}: ${previousTierId} -> ${newTierId}`);
   }
 
   // =========================
