@@ -23,6 +23,8 @@ import {
   type PointTransaction,
   type PushSubscription,
   type InsertPushSubscription,
+  type Notification,
+  type InsertNotification,
   type CartItem,
   type InsertCartItem,
   type VendorSubscription,
@@ -64,6 +66,7 @@ import {
   messages,
   pointTransactions,
   pushSubscriptions,
+  notifications,
   cartItems,
   vendorSubscriptions,
   subscriptionTiers,
@@ -248,6 +251,13 @@ export interface IStorage {
   getUserPushSubscriptions(userId: string): Promise<PushSubscription[]>;
   deletePushSubscription(userId: string, endpoint: string): Promise<void>;
   getAllPushSubscriptions(): Promise<PushSubscription[]>;
+
+  // Notifications (In-app notifications)
+  createNotification(data: InsertNotification): Promise<Notification>;
+  getUserNotifications(userId: string, options?: { limit?: number; unreadOnly?: boolean }): Promise<Notification[]>;
+  markNotificationRead(id: string): Promise<Notification | undefined>;
+  markAllNotificationsRead(userId: string): Promise<void>;
+  getUnreadNotificationCount(userId: string): Promise<number>;
 
   // Cart Items (Persistent Shopping Cart)
   getCartItems(userId: string): Promise<CartItem[]>;
@@ -1875,6 +1885,57 @@ export class DatabaseStorage implements IStorage {
 
   async getAllPushSubscriptions(): Promise<PushSubscription[]> {
     return db.select().from(pushSubscriptions);
+  }
+
+  // ================================
+  // NOTIFICATIONS (In-app)
+  // ================================
+
+  async createNotification(data: InsertNotification): Promise<Notification> {
+    const [notification] = await db.insert(notifications).values(data).returning();
+    return notification;
+  }
+
+  async getUserNotifications(userId: string, options?: { limit?: number; unreadOnly?: boolean }): Promise<Notification[]> {
+    let query = db
+      .select()
+      .from(notifications)
+      .where(
+        options?.unreadOnly
+          ? and(eq(notifications.userId, userId), eq(notifications.isRead, false))
+          : eq(notifications.userId, userId)
+      )
+      .orderBy(sql`${notifications.createdAt} DESC`);
+
+    if (options?.limit) {
+      query = query.limit(options.limit) as typeof query;
+    }
+
+    return query;
+  }
+
+  async markNotificationRead(id: string): Promise<Notification | undefined> {
+    const [notification] = await db
+      .update(notifications)
+      .set({ isRead: true, readAt: new Date() })
+      .where(eq(notifications.id, id))
+      .returning();
+    return notification;
+  }
+
+  async markAllNotificationsRead(userId: string): Promise<void> {
+    await db
+      .update(notifications)
+      .set({ isRead: true, readAt: new Date() })
+      .where(and(eq(notifications.userId, userId), eq(notifications.isRead, false)));
+  }
+
+  async getUnreadNotificationCount(userId: string): Promise<number> {
+    const result = await db
+      .select({ count: sql<number>`count(*)` })
+      .from(notifications)
+      .where(and(eq(notifications.userId, userId), eq(notifications.isRead, false)));
+    return Number(result[0]?.count || 0);
   }
 
   // ================================
