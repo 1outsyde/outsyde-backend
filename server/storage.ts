@@ -48,6 +48,8 @@ import {
   type InsertPostComment,
   type ProfileComment,
   type InsertProfileComment,
+  type BusinessAvailability,
+  type InsertBusinessAvailability,
   users,
   businesses,
   cities,
@@ -79,7 +81,8 @@ import {
   feedPosts,
   postLikes,
   postComments,
-  profileComments
+  profileComments,
+  businessAvailability
 } from "@shared/schema";
 import { db } from "./db";
 import { eq, ilike, or, and, sql, isNull } from "drizzle-orm";
@@ -299,6 +302,13 @@ export interface IStorage {
   createVendorService(data: InsertVendorService): Promise<VendorService>;
   updateVendorService(id: string, updates: Partial<VendorService>): Promise<VendorService | undefined>;
   deleteVendorService(id: string): Promise<void>;
+
+  // Business Availability Calendar
+  getBusinessAvailability(businessId: string, startDate?: string, endDate?: string): Promise<BusinessAvailability[]>;
+  getBusinessAvailabilitySlot(id: string): Promise<BusinessAvailability | undefined>;
+  createBusinessAvailability(data: InsertBusinessAvailability): Promise<BusinessAvailability>;
+  updateBusinessAvailability(id: string, updates: Partial<BusinessAvailability>): Promise<BusinessAvailability | undefined>;
+  deleteBusinessAvailability(id: string): Promise<void>;
 
   // Refund Requests
   createRefundRequest(data: InsertRefundRequest): Promise<RefundRequest>;
@@ -2532,6 +2542,55 @@ export class DatabaseStorage implements IStorage {
 
   async deleteVendorService(id: string): Promise<void> {
     await db.delete(vendorServices).where(eq(vendorServices.id, id));
+  }
+
+  // =========================
+  // BUSINESS AVAILABILITY CALENDAR
+  // =========================
+
+  async getBusinessAvailability(businessId: string, startDate?: string, endDate?: string): Promise<BusinessAvailability[]> {
+    let query = db.select()
+      .from(businessAvailability)
+      .where(eq(businessAvailability.businessId, businessId));
+    
+    if (startDate && endDate) {
+      query = db.select()
+        .from(businessAvailability)
+        .where(and(
+          eq(businessAvailability.businessId, businessId),
+          sql`${businessAvailability.date} >= ${startDate}`,
+          sql`${businessAvailability.date} <= ${endDate}`
+        ));
+    }
+    
+    return query;
+  }
+
+  async getBusinessAvailabilitySlot(id: string): Promise<BusinessAvailability | undefined> {
+    const [slot] = await db.select()
+      .from(businessAvailability)
+      .where(eq(businessAvailability.id, id));
+    return slot;
+  }
+
+  async createBusinessAvailability(data: InsertBusinessAvailability): Promise<BusinessAvailability> {
+    const id = randomUUID();
+    const [slot] = await db.insert(businessAvailability)
+      .values({ id, ...data })
+      .returning();
+    return slot;
+  }
+
+  async updateBusinessAvailability(id: string, updates: Partial<BusinessAvailability>): Promise<BusinessAvailability | undefined> {
+    const [slot] = await db.update(businessAvailability)
+      .set(updates)
+      .where(eq(businessAvailability.id, id))
+      .returning();
+    return slot;
+  }
+
+  async deleteBusinessAvailability(id: string): Promise<void> {
+    await db.delete(businessAvailability).where(eq(businessAvailability.id, id));
   }
 
   // =========================
