@@ -61,6 +61,14 @@ The Outsyde platform uses a React frontend, an Express (TypeScript) backend, and
         - API endpoints: GET /api/referral/code (get code + stats), POST /api/referral/apply (apply code), GET /api/referral/stats (view referral stats)
         - Referral completion triggered by Stripe checkout.session.completed webhook
         - Points conversion: 100 points = $1
+    -   **Subscription Enforcement (Server-Side):** Comprehensive enforcement of vendor subscriptions:
+        - **Vendor Operations Blocked:** All product/service/availability CRUD endpoints require active subscription
+        - **Storefront Hidden:** Public business listings, individual business pages, and feed posts filtered to exclude inactive vendors
+        - **Transactions Blocked:** Cart additions blocked for products from inactive businesses
+        - **Grace Period:** 3-day grace period for `past_due` subscriptions, measured from `updatedAt` timestamp (when status changed)
+        - **Status Handling:** `active`, `trialing` = allowed; `canceled` = allowed until period end; `past_due` = allowed during grace period
+        - **Read-Only Access:** Vendors can still view their data even with inactive subscription
+        - Uses `isVendorSubscriptionActive()` and `isBusinessSubscriptionActive()` storage methods
 
 ## External Dependencies
 -   **PostgreSQL:** Primary database.

@@ -296,7 +296,10 @@ export interface IStorage {
   createVendorSubscription(data: { vendorId: string; businessId: string; tierId: string; stripeCustomerId?: string; stripeSubscriptionId?: string }): Promise<VendorSubscription>;
   getVendorSubscription(vendorId: string): Promise<VendorSubscription | undefined>;
   getVendorSubscriptionByStripeId(stripeSubscriptionId: string): Promise<VendorSubscription | undefined>;
+  getVendorSubscriptionByBusinessId(businessId: string): Promise<VendorSubscription | undefined>;
   updateVendorSubscription(id: string, updates: Partial<VendorSubscription>): Promise<VendorSubscription | undefined>;
+  isBusinessSubscriptionActive(businessId: string, gracePeriodDays?: number): Promise<{ active: boolean; status?: string; reason?: string }>;
+  isVendorSubscriptionActive(vendorId: string, gracePeriodDays?: number): Promise<{ active: boolean; status?: string; reason?: string }>;
   getTierBenefits(tierId: string): Promise<TierBenefit[]>;
   createBenefitAllowances(subscriptionId: string, overrideCycleDates?: { periodStart: Date; periodEnd: Date; quarterStart: Date; quarterEnd: Date }): Promise<BenefitAllowance[]>;
   renewBenefitAllowancesForNewCycle(): Promise<number>;
@@ -2271,6 +2274,79 @@ export class DatabaseStorage implements IStorage {
       .from(vendorSubscriptions)
       .where(eq(vendorSubscriptions.stripeSubscriptionId, stripeSubscriptionId));
     return subscription;
+  }
+
+  async getVendorSubscriptionByBusinessId(businessId: string): Promise<VendorSubscription | undefined> {
+    const [subscription] = await db.select()
+      .from(vendorSubscriptions)
+      .where(eq(vendorSubscriptions.businessId, businessId));
+    return subscription;
+  }
+
+  async isBusinessSubscriptionActive(businessId: string, gracePeriodDays: number = 3): Promise<{ active: boolean; status?: string; reason?: string }> {
+    const subscription = await this.getVendorSubscriptionByBusinessId(businessId);
+    
+    if (!subscription) {
+      return { active: false, reason: 'No subscription found for this business' };
+    }
+
+    return this.checkSubscriptionActiveStatus(subscription, gracePeriodDays);
+  }
+
+  async isVendorSubscriptionActive(vendorId: string, gracePeriodDays: number = 3): Promise<{ active: boolean; status?: string; reason?: string }> {
+    const subscription = await this.getVendorSubscription(vendorId);
+    
+    if (!subscription) {
+      return { active: false, reason: 'No subscription found' };
+    }
+
+    return this.checkSubscriptionActiveStatus(subscription, gracePeriodDays);
+  }
+
+  private checkSubscriptionActiveStatus(subscription: VendorSubscription, gracePeriodDays: number): { active: boolean; status?: string; reason?: string } {
+    const status = subscription.status;
+    
+    // Active subscription
+    if (status === 'active') {
+      return { active: true, status };
+    }
+
+    // Trialing is also considered active
+    if (status === 'trialing') {
+      return { active: true, status };
+    }
+
+    // Past due - allow grace period from when status changed (updatedAt)
+    if (status === 'past_due') {
+      // Use updatedAt as the timestamp when subscription became past_due
+      const statusChangeDate = subscription.updatedAt;
+      if (statusChangeDate) {
+        const gracePeriodEnd = new Date(statusChangeDate);
+        gracePeriodEnd.setDate(gracePeriodEnd.getDate() + gracePeriodDays);
+        
+        if (new Date() <= gracePeriodEnd) {
+          return { active: true, status, reason: 'Payment past due - grace period active' };
+        }
+      }
+      return { active: false, status, reason: 'Subscription payment failed and grace period expired' };
+    }
+
+    // Cancelled but still in period
+    if (status === 'canceled') {
+      const periodEnd = subscription.currentPeriodEnd;
+      if (periodEnd && new Date() <= periodEnd) {
+        return { active: true, status, reason: 'Subscription cancelled - active until period end' };
+      }
+      return { active: false, status, reason: 'Subscription has been cancelled' };
+    }
+
+    // Pending subscription (just created, not yet activated via Stripe)
+    if (status === 'pending') {
+      return { active: false, status, reason: 'Subscription pending activation' };
+    }
+
+    // Other statuses (incomplete, incomplete_expired, unpaid, paused)
+    return { active: false, status, reason: `Subscription is ${status}` };
   }
 
   async updateVendorSubscription(id: string, updates: Partial<VendorSubscription>): Promise<VendorSubscription | undefined> {

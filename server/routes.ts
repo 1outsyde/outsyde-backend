@@ -37,6 +37,18 @@ function legacyHashPassword(password: string): string {
   return Buffer.from(password).toString("base64");
 }
 
+// Helper to check if vendor has active subscription (for mutation endpoints)
+async function requireActiveVendorSubscription(userId: string): Promise<{ allowed: boolean; error?: string }> {
+  const result = await storage.isVendorSubscriptionActive(userId);
+  if (!result.active) {
+    return { 
+      allowed: false, 
+      error: result.reason || 'Your subscription is not active. Please reactivate to continue managing your business.' 
+    };
+  }
+  return { allowed: true };
+}
+
 function legacyVerifyPassword(password: string, hash: string): boolean {
   return legacyHashPassword(password) === hash;
 }
@@ -1640,7 +1652,17 @@ export async function registerRoutes(
         category: category as string | undefined,
         search: search as string | undefined,
       });
-      res.json({ businesses });
+      
+      // Filter out businesses without active subscriptions
+      const activeBusinesses = [];
+      for (const business of businesses) {
+        const subStatus = await storage.isBusinessSubscriptionActive(business.id);
+        if (subStatus.active) {
+          activeBusinesses.push(business);
+        }
+      }
+      
+      res.json({ businesses: activeBusinesses });
     } catch (error) {
       console.error("Get businesses error:", error);
       res.status(500).json({ error: "Failed to get businesses" });
@@ -1653,6 +1675,13 @@ export async function registerRoutes(
       if (!business) {
         return res.status(404).json({ error: "Business not found" });
       }
+      
+      // Check if business has active subscription
+      const subStatus = await storage.isBusinessSubscriptionActive(business.id);
+      if (!subStatus.active) {
+        return res.status(404).json({ error: "This business is currently unavailable" });
+      }
+      
       res.json({ business });
     } catch (error) {
       console.error("Get business error:", error);
@@ -1667,6 +1696,13 @@ export async function registerRoutes(
       if (!business) {
         return res.status(404).json({ error: "Business not found" });
       }
+      
+      // Check if business has active subscription
+      const subStatus = await storage.isBusinessSubscriptionActive(business.id);
+      if (!subStatus.active) {
+        return res.status(404).json({ error: "This business is currently unavailable" });
+      }
+      
       const products = await storage.getVendorProducts(req.params.id);
       // Only return active products for public view
       const activeProducts = products.filter(p => p.isActive);
@@ -1684,6 +1720,13 @@ export async function registerRoutes(
       if (!business) {
         return res.status(404).json({ error: "Business not found" });
       }
+      
+      // Check if business has active subscription
+      const subStatus = await storage.isBusinessSubscriptionActive(business.id);
+      if (!subStatus.active) {
+        return res.status(404).json({ error: "This business is currently unavailable" });
+      }
+      
       const services = await storage.getVendorServicesByBusiness(req.params.id);
       // Only return active services for public view
       const activeServices = services.filter(s => s.isActive);
@@ -1788,6 +1831,12 @@ export async function registerRoutes(
     }
 
     try {
+      // Check subscription status
+      const subCheck = await requireActiveVendorSubscription(userId);
+      if (!subCheck.allowed) {
+        return res.status(403).json({ error: subCheck.error });
+      }
+
       const business = await storage.getBusinessByOwnerId(userId);
       if (!business) {
         return res.status(404).json({ error: "No business found" });
@@ -1828,6 +1877,12 @@ export async function registerRoutes(
     }
 
     try {
+      // Check subscription status
+      const subCheck = await requireActiveVendorSubscription(userId);
+      if (!subCheck.allowed) {
+        return res.status(403).json({ error: subCheck.error });
+      }
+
       const business = await storage.getBusinessByOwnerId(userId);
       if (!business) {
         return res.status(404).json({ error: "No business found" });
@@ -1871,6 +1926,12 @@ export async function registerRoutes(
     }
 
     try {
+      // Check subscription status
+      const subCheck = await requireActiveVendorSubscription(userId);
+      if (!subCheck.allowed) {
+        return res.status(403).json({ error: subCheck.error });
+      }
+
       const business = await storage.getBusinessByOwnerId(userId);
       if (!business) {
         return res.status(404).json({ error: "No business found" });
@@ -1940,6 +2001,12 @@ export async function registerRoutes(
     }
 
     try {
+      // Check subscription status
+      const subCheck = await requireActiveVendorSubscription(userId);
+      if (!subCheck.allowed) {
+        return res.status(403).json({ error: subCheck.error });
+      }
+
       const business = await storage.getBusinessByOwnerId(userId);
       if (!business) {
         return res.status(404).json({ error: "No business found" });
@@ -1988,6 +2055,12 @@ export async function registerRoutes(
     }
 
     try {
+      // Check subscription status
+      const subCheck = await requireActiveVendorSubscription(userId);
+      if (!subCheck.allowed) {
+        return res.status(403).json({ error: subCheck.error });
+      }
+
       const business = await storage.getBusinessByOwnerId(userId);
       if (!business) {
         return res.status(404).json({ error: "No business found" });
@@ -2033,6 +2106,12 @@ export async function registerRoutes(
     }
 
     try {
+      // Check subscription status
+      const subCheck = await requireActiveVendorSubscription(userId);
+      if (!subCheck.allowed) {
+        return res.status(403).json({ error: subCheck.error });
+      }
+
       const business = await storage.getBusinessByOwnerId(userId);
       if (!business) {
         return res.status(404).json({ error: "No business found" });
@@ -2080,6 +2159,12 @@ export async function registerRoutes(
     }
 
     try {
+      // Check subscription status
+      const subCheck = await requireActiveVendorSubscription(userId);
+      if (!subCheck.allowed) {
+        return res.status(403).json({ error: subCheck.error });
+      }
+
       const business = await storage.getBusinessByOwnerId(userId);
       if (!business) {
         return res.status(404).json({ error: "No business found" });
@@ -2123,6 +2208,12 @@ export async function registerRoutes(
     }
 
     try {
+      // Check subscription status
+      const subCheck = await requireActiveVendorSubscription(userId);
+      if (!subCheck.allowed) {
+        return res.status(403).json({ error: subCheck.error });
+      }
+
       const business = await storage.getBusinessByOwnerId(userId);
       if (!business) {
         return res.status(404).json({ error: "No business found" });
@@ -2163,6 +2254,12 @@ export async function registerRoutes(
     }
 
     try {
+      // Check subscription status
+      const subCheck = await requireActiveVendorSubscription(userId);
+      if (!subCheck.allowed) {
+        return res.status(403).json({ error: subCheck.error });
+      }
+
       const business = await storage.getBusinessByOwnerId(userId);
       if (!business) {
         return res.status(404).json({ error: "No business found" });
@@ -2733,6 +2830,14 @@ export async function registerRoutes(
         businessName: z.string().optional(),
       });
       const data = schema.parse(req.body);
+
+      // Block adding items from businesses with inactive subscriptions
+      if (data.businessId) {
+        const subStatus = await storage.isBusinessSubscriptionActive(data.businessId);
+        if (!subStatus.active) {
+          return res.status(403).json({ error: "This business is currently unavailable for purchases" });
+        }
+      }
 
       const item = await storage.addCartItem({
         userId,
@@ -3578,8 +3683,20 @@ export async function registerRoutes(
       const offset = parseInt(req.query.offset as string) || 0;
       const posts = await storage.getFeedPosts(limit, offset);
       
+      // Filter out posts from vendors with inactive subscriptions
+      const activePosts = [];
+      for (const post of posts) {
+        if (post.authorType === 'vendor' && post.authorId) {
+          const subStatus = await storage.isVendorSubscriptionActive(post.authorId);
+          if (!subStatus.active) {
+            continue; // Skip posts from inactive vendors
+          }
+        }
+        activePosts.push(post);
+      }
+      
       // Enrich posts with author, tagged entities, and product/service info
-      const enrichedPosts = await Promise.all(posts.map(async (post) => {
+      const enrichedPosts = await Promise.all(activePosts.map(async (post) => {
         const author = await storage.getUser(post.authorId);
         let taggedBusiness = null;
         let taggedPhotographer = null;
@@ -3968,6 +4085,12 @@ export async function registerRoutes(
     }
 
     try {
+      // Check subscription status
+      const subCheck = await requireActiveVendorSubscription(userId);
+      if (!subCheck.allowed) {
+        return res.status(403).json({ error: subCheck.error });
+      }
+
       const { orderId } = req.params;
       const shipmentSchema = z.object({
         carrier: z.string().min(1, "Carrier is required"),
