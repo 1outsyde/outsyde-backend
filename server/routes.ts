@@ -1353,6 +1353,160 @@ export async function registerRoutes(
     }
   });
 
+  // ==================== BUSINESS AVAILABILITY CALENDAR ROUTES ====================
+
+  // Get business availability (for the current vendor)
+  app.get("/api/vendor/availability", async (req, res) => {
+    const userId = req.session?.userId;
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    try {
+      const business = await storage.getBusinessByOwnerId(userId);
+      if (!business) {
+        return res.status(404).json({ error: "No business found" });
+      }
+
+      const { startDate, endDate } = req.query;
+      const availability = await storage.getBusinessAvailability(
+        business.id,
+        startDate as string | undefined,
+        endDate as string | undefined
+      );
+      res.json({ availability });
+    } catch (error) {
+      console.error("Get vendor availability error:", error);
+      res.status(500).json({ error: "Failed to get availability" });
+    }
+  });
+
+  // Get public business availability (for customers booking)
+  app.get("/api/businesses/:businessId/availability", async (req, res) => {
+    try {
+      const { startDate, endDate } = req.query;
+      const availability = await storage.getBusinessAvailability(
+        req.params.businessId,
+        startDate as string | undefined,
+        endDate as string | undefined
+      );
+      res.json({ availability });
+    } catch (error) {
+      console.error("Get business availability error:", error);
+      res.status(500).json({ error: "Failed to get availability" });
+    }
+  });
+
+  // Create availability slot
+  app.post("/api/vendor/availability", async (req, res) => {
+    const userId = req.session?.userId;
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    try {
+      const business = await storage.getBusinessByOwnerId(userId);
+      if (!business) {
+        return res.status(404).json({ error: "No business found" });
+      }
+
+      const slotSchema = z.object({
+        date: z.string().min(1),
+        startTime: z.string().min(1),
+        endTime: z.string().min(1),
+        slotType: z.enum(["available", "blocked", "special"]).optional(),
+        title: z.string().optional(),
+        notes: z.string().optional(),
+        isRecurring: z.boolean().optional(),
+        recurringDayOfWeek: z.number().min(0).max(6).optional(),
+      });
+
+      const validated = slotSchema.parse(req.body);
+      const slot = await storage.createBusinessAvailability({
+        businessId: business.id,
+        ...validated,
+      });
+
+      res.status(201).json({ slot });
+    } catch (error) {
+      console.error("Create availability slot error:", error);
+      if (error instanceof z.ZodError) {
+        return res.status(400).json({ error: "Invalid data", details: error.errors });
+      }
+      res.status(500).json({ error: "Failed to create availability slot" });
+    }
+  });
+
+  // Update availability slot
+  app.patch("/api/vendor/availability/:slotId", async (req, res) => {
+    const userId = req.session?.userId;
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    try {
+      const business = await storage.getBusinessByOwnerId(userId);
+      if (!business) {
+        return res.status(404).json({ error: "No business found" });
+      }
+
+      // Verify the slot belongs to this business
+      const existingSlot = await storage.getBusinessAvailabilitySlot(req.params.slotId);
+      if (!existingSlot || existingSlot.businessId !== business.id) {
+        return res.status(404).json({ error: "Slot not found" });
+      }
+
+      const updateSchema = z.object({
+        date: z.string().optional(),
+        startTime: z.string().optional(),
+        endTime: z.string().optional(),
+        slotType: z.enum(["available", "blocked", "special"]).optional(),
+        title: z.string().nullable().optional(),
+        notes: z.string().nullable().optional(),
+        isRecurring: z.boolean().optional(),
+        recurringDayOfWeek: z.number().min(0).max(6).nullable().optional(),
+      });
+
+      const validated = updateSchema.parse(req.body);
+      const updated = await storage.updateBusinessAvailability(req.params.slotId, validated);
+
+      res.json({ slot: updated });
+    } catch (error) {
+      console.error("Update availability slot error:", error);
+      if (error instanceof z.ZodError) {
+        return res.status(400).json({ error: "Invalid data", details: error.errors });
+      }
+      res.status(500).json({ error: "Failed to update availability slot" });
+    }
+  });
+
+  // Delete availability slot
+  app.delete("/api/vendor/availability/:slotId", async (req, res) => {
+    const userId = req.session?.userId;
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    try {
+      const business = await storage.getBusinessByOwnerId(userId);
+      if (!business) {
+        return res.status(404).json({ error: "No business found" });
+      }
+
+      // Verify the slot belongs to this business
+      const existingSlot = await storage.getBusinessAvailabilitySlot(req.params.slotId);
+      if (!existingSlot || existingSlot.businessId !== business.id) {
+        return res.status(404).json({ error: "Slot not found" });
+      }
+
+      await storage.deleteBusinessAvailability(req.params.slotId);
+      res.json({ success: true });
+    } catch (error) {
+      console.error("Delete availability slot error:", error);
+      res.status(500).json({ error: "Failed to delete availability slot" });
+    }
+  });
+
   // Get vendor's order/booking records
   app.get("/api/vendor/customers", async (req, res) => {
     const userId = req.session?.userId;
