@@ -3197,6 +3197,11 @@ export async function registerRoutes(
           if (!bookingResult.success) {
             console.warn('Failed to update booking status to refunded:', bookingResult.error);
           }
+          // Release photographer availability slot
+          await storage.releasePhotographerSlot(request.targetId);
+        } else if (request.targetType === 'appointment' && request.targetId) {
+          // Release business availability slot
+          await storage.releaseBusinessSlot(request.targetId);
         }
 
         // Reverse loyalty points earned from this transaction

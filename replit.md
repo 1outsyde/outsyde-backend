@@ -54,7 +54,7 @@ The Outsyde platform uses a React frontend, an Express (TypeScript) backend, and
 -   **Transaction Fees:** 10% for photographers per booking; 4% for businesses per transaction plus subscription.
 -   **Core Features:**
     -   **Onboarding:** Multi-step signup for customers and vendors (including business details, location, online presence, and subscription acknowledgment).
-    -   **Verified Reviews:** Only customers with completed bookings/orders can leave reviews.
+    -   **Verified Reviews:** Only customers with completed bookings/orders can leave reviews. Reviews are locked after 30 days from completion date (`REVIEW_WINDOW_DAYS = 30`).
     -   **Outsyde Points:** Loyalty program for customers (earn and redeem points); photographers do not participate.
     -   **Referral System:** Users earn points for referrals; new users get bonus points.
     -   **Cart Management:** Database-backed for authenticated users, `localStorage` for guests.
@@ -64,6 +64,7 @@ The Outsyde platform uses a React frontend, an Express (TypeScript) backend, and
     -   **Business Availability Calendar:** Manages date-specific time slots for businesses, including CRUD operations via API and a UI component for viewing/managing availability. Slot types: 'available', 'blocked', 'booked'. Booked slots are protected from deletion/modification.
     -   **Photographer Availability Calendar:** Similar to business availability with dedicated API endpoints: GET /api/photographers/me/availability, POST /api/photographers/me/availability, PATCH /api/photographers/me/availability/:slotId, DELETE /api/photographers/me/availability/:slotId. Slot types: 'available', 'blocked', 'booked' with server-side protection for booked slots.
     -   **Double-Booking Prevention:** Both photographer and business booking flows check slot availability before creating bookings. Returns 409 Conflict with user-friendly message when slot unavailable. Availability checks query both availability tables (for manual blocks) AND existing bookings (for legacy data). Slots are atomically reserved when bookings are created.
+    -   **Availability Release on Cancellation:** When bookings/appointments are cancelled or refunded, availability slots are automatically released via `releaseBusinessSlot()` and `releasePhotographerSlot()`. This is handled automatically by `updateBookingWithValidation()` and `updateAppointmentWithValidation()` methods.
     -   **Billing Address Management:** Billing address support for all user types (customer, photographer, business) with dedicated API endpoints and a reusable form component.
     -   **Direct Image Upload:** Utilizes Replit App Storage for cloud-based image hosting, integrated into various user flows (e.g., post creation, storefront customization).
     -   **Admin Dashboard:** Provides administrative capabilities for managing users, businesses, photographers, payments, and messages, with role-based access.

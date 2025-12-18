@@ -171,6 +171,7 @@ export interface IStorage {
   getAppointmentsByBusiness(businessId: string): Promise<Appointment[]>;
   getAppointmentsByClient(clientId: string): Promise<Appointment[]>;
   updateAppointment(id: string, updates: Partial<Appointment>): Promise<Appointment | undefined>;
+  updateAppointmentWithValidation(appointmentId: string, updates: Partial<Appointment>, actorId?: string): Promise<{ success: boolean; appointment?: Appointment; error?: string }>;
   updateTargetRating(targetType: string, targetId: string): Promise<void>;
 
   // Business Customers
@@ -350,6 +351,7 @@ export interface IStorage {
   deleteBusinessAvailability(id: string): Promise<void>;
   checkBusinessSlotAvailable(businessId: string, date: string, startTime: string, endTime: string, excludeSlotId?: string): Promise<boolean>;
   reserveBusinessSlot(businessId: string, date: string, startTime: string, endTime: string, appointmentId: string): Promise<BusinessAvailability>;
+  releaseBusinessSlot(appointmentId: string): Promise<boolean>;
 
   // Photographer Availability
   getPhotographerAvailability(photographerId: string, startDate?: string, endDate?: string): Promise<PhotographerAvailability[]>;
@@ -359,6 +361,7 @@ export interface IStorage {
   deletePhotographerAvailability(id: string): Promise<void>;
   checkPhotographerSlotAvailable(photographerId: string, date: string, startTime: string, endTime: string, excludeSlotId?: string): Promise<boolean>;
   reservePhotographerSlot(photographerId: string, date: string, startTime: string, endTime: string, shootBookingId: string): Promise<PhotographerAvailability>;
+  releasePhotographerSlot(shootBookingId: string): Promise<boolean>;
 
   // Refund Requests
   createRefundRequest(data: InsertRefundRequest): Promise<RefundRequest>;
@@ -848,7 +851,20 @@ export class DatabaseStorage implements IStorage {
     return !!existing;
   }
 
+  // Review time window: 30 days from completion
+  private REVIEW_WINDOW_DAYS = 30;
+
+  // Check if a date is within the review window
+  private isWithinReviewWindow(completedAt: Date | null): boolean {
+    if (!completedAt) return false;
+    const now = new Date();
+    const windowEnd = new Date(completedAt);
+    windowEnd.setDate(windowEnd.getDate() + this.REVIEW_WINDOW_DAYS);
+    return now <= windowEnd;
+  }
+
   // Verify customer has a completed booking/order with the target
+  // Reviews are locked after 30 days from completion
   async verifyCustomerCanReview(
     customerId: string, 
     targetType: string, 
@@ -863,7 +879,7 @@ export class DatabaseStorage implements IStorage {
       return { canReview: false, reason: 'You have already reviewed this booking' };
     }
 
-    // Verify the booking exists and belongs to this customer
+    // Verify the booking exists, belongs to this customer, and is within review window
     if (bookingType === 'shoot_booking') {
       const booking = await db.select().from(shootBookings).where(
         and(
@@ -875,6 +891,10 @@ export class DatabaseStorage implements IStorage {
       );
       if (booking.length === 0) {
         return { canReview: false, reason: 'No completed shoot booking found' };
+      }
+      // Check review time window (use updatedAt as completion timestamp)
+      if (!this.isWithinReviewWindow(booking[0].updatedAt)) {
+        return { canReview: false, reason: 'Review window has expired (30 days from completion)' };
       }
     } else if (bookingType === 'appointment') {
       const booking = await db.select().from(appointments).where(
@@ -888,6 +908,10 @@ export class DatabaseStorage implements IStorage {
       if (booking.length === 0) {
         return { canReview: false, reason: 'No completed appointment found' };
       }
+      // Check review time window
+      if (!this.isWithinReviewWindow(booking[0].updatedAt)) {
+        return { canReview: false, reason: 'Review window has expired (30 days from completion)' };
+      }
     } else if (bookingType === 'order') {
       const order = await db.select().from(orders).where(
         and(
@@ -899,6 +923,10 @@ export class DatabaseStorage implements IStorage {
       );
       if (order.length === 0) {
         return { canReview: false, reason: 'No completed order found' };
+      }
+      // Check review time window (use updatedAt as delivery/completion timestamp)
+      if (!this.isWithinReviewWindow(order[0].updatedAt)) {
+        return { canReview: false, reason: 'Review window has expired (30 days from delivery)' };
       }
     } else {
       return { canReview: false, reason: 'Invalid booking type' };
@@ -1201,6 +1229,56 @@ export class DatabaseStorage implements IStorage {
       .where(eq(appointments.id, id))
       .returning();
     return appointment;
+  }
+
+  // Update appointment with state machine validation and automatic slot release
+  async updateAppointmentWithValidation(
+    appointmentId: string,
+    updates: Partial<Appointment>,
+    actorId?: string
+  ): Promise<{ success: boolean; appointment?: Appointment; error?: string }> {
+    const currentAppointment = await this.getAppointment(appointmentId);
+    if (!currentAppointment) {
+      return { success: false, error: 'Appointment not found' };
+    }
+
+    // Use booking transitions for appointments (similar state machine)
+    if (updates.status && updates.status !== currentAppointment.status) {
+      if (!isValidBookingTransition(currentAppointment.status || 'pending', updates.status)) {
+        return { 
+          success: false, 
+          error: `Invalid status transition from '${currentAppointment.status}' to '${updates.status}'` 
+        };
+      }
+    }
+
+    const beforeState = { ...currentAppointment };
+    const result = await db.update(appointments)
+      .set(updates)
+      .where(eq(appointments.id, appointmentId))
+      .returning();
+    
+    if (!result[0]) {
+      return { success: false, error: 'Failed to update appointment' };
+    }
+
+    // Release availability slot when appointment is cancelled or refunded
+    if (updates.status && (updates.status === 'cancelled' || updates.status === 'refunded')) {
+      await this.releaseBusinessSlot(appointmentId);
+    }
+
+    await this.createAuditLog({
+      actorId: actorId ?? null,
+      actorType: actorId ? 'user' : 'system',
+      action: 'appointment_status_change',
+      targetType: 'appointment',
+      targetId: appointmentId,
+      beforeState,
+      afterState: result[0],
+      metadata: { statusChange: { from: currentAppointment.status, to: updates.status } }
+    });
+
+    return { success: true, appointment: result[0] };
   }
 
   // Update rating on target after a review
@@ -3036,6 +3114,14 @@ export class DatabaseStorage implements IStorage {
     return slot;
   }
 
+  // Release a business slot when appointment is cancelled/refunded
+  async releaseBusinessSlot(appointmentId: string): Promise<boolean> {
+    const result = await db.delete(businessAvailability)
+      .where(eq(businessAvailability.appointmentId, appointmentId))
+      .returning();
+    return result.length > 0;
+  }
+
   // =========================
   // PHOTOGRAPHER AVAILABILITY
   // =========================
@@ -3133,6 +3219,14 @@ export class DatabaseStorage implements IStorage {
       })
       .returning();
     return slot;
+  }
+
+  // Release a photographer slot when shoot booking is cancelled/refunded
+  async releasePhotographerSlot(shootBookingId: string): Promise<boolean> {
+    const result = await db.delete(photographerAvailability)
+      .where(eq(photographerAvailability.shootBookingId, shootBookingId))
+      .returning();
+    return result.length > 0;
   }
 
   // =========================
@@ -3762,6 +3856,11 @@ export class DatabaseStorage implements IStorage {
     
     if (!result[0]) {
       return { success: false, error: 'Failed to update booking' };
+    }
+
+    // Release availability slot when booking is cancelled or refunded
+    if (updates.status && (updates.status === 'cancelled' || updates.status === 'refunded')) {
+      await this.releasePhotographerSlot(bookingId);
     }
 
     await this.createAuditLog({
