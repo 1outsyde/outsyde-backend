@@ -810,6 +810,27 @@ export const profileComments = pgTable("profile_comments", {
   createdAt: timestamp("created_at").defaultNow().notNull(),
 });
 
+// Shipments for order fulfillment tracking
+export const shipments = pgTable("shipments", {
+  id: varchar("id", { length: 36 }).primaryKey().default(sql`gen_random_uuid()`),
+
+  orderId: varchar("order_id", { length: 36 }).notNull().references(() => orders.id),
+  businessId: varchar("business_id", { length: 36 }).notNull().references(() => businesses.id),
+
+  carrier: text("carrier").notNull(), // 'fedex', 'ups', 'usps', 'dhl', 'other'
+  trackingNumber: text("tracking_number").notNull(),
+  status: text("status").default("shipped"), // 'pending', 'shipped', 'in_transit', 'delivered', 'exception'
+
+  shippedAt: timestamp("shipped_at").defaultNow().notNull(),
+  deliveredAt: timestamp("delivered_at"),
+  estimatedDelivery: timestamp("estimated_delivery"),
+
+  notes: text("notes"),
+
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+
 /* =====================================================
    INSERT SCHEMAS (Zod)
 ===================================================== */
@@ -969,6 +990,12 @@ export const insertPostCommentSchema = createInsertSchema(postComments).omit({
 export const insertProfileCommentSchema = createInsertSchema(profileComments).omit({
   id: true,
   createdAt: true,
+});
+
+export const insertShipmentSchema = createInsertSchema(shipments).omit({
+  id: true,
+  createdAt: true,
+  updatedAt: true,
 });
 
 /* =====================================================
@@ -1139,3 +1166,6 @@ export type InsertPostComment = z.infer<typeof insertPostCommentSchema>;
 
 export type ProfileComment = typeof profileComments.$inferSelect;
 export type InsertProfileComment = z.infer<typeof insertProfileCommentSchema>;
+
+export type Shipment = typeof shipments.$inferSelect;
+export type InsertShipment = z.infer<typeof insertShipmentSchema>;
