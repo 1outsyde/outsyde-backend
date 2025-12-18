@@ -88,7 +88,7 @@ import {
   businessAvailability
 } from "@shared/schema";
 import { db } from "./db";
-import { eq, ilike, or, and, sql, isNull } from "drizzle-orm";
+import { eq, ilike, or, and, sql, isNull, desc, asc } from "drizzle-orm";
 import { randomUUID, createHash } from "crypto";
 
 // Input type for creating a photographer (no need for InsertPhotographer in schema)
@@ -1897,28 +1897,25 @@ export class DatabaseStorage implements IStorage {
   }
 
   async getUserNotifications(userId: string, options?: { limit?: number; unreadOnly?: boolean }): Promise<Notification[]> {
-    let query = db
+    const whereCondition = options?.unreadOnly
+      ? and(eq(notifications.userId, userId), eq(notifications.isRead, false))
+      : eq(notifications.userId, userId);
+    
+    const results = await db
       .select()
       .from(notifications)
-      .where(
-        options?.unreadOnly
-          ? and(eq(notifications.userId, userId), eq(notifications.isRead, false))
-          : eq(notifications.userId, userId)
-      )
-      .orderBy(sql`${notifications.createdAt} DESC`);
+      .where(whereCondition)
+      .orderBy(desc(notifications.createdAt), asc(notifications.id))
+      .limit(options?.limit ?? 100);
 
-    if (options?.limit) {
-      query = query.limit(options.limit) as typeof query;
-    }
-
-    return query;
+    return results;
   }
 
-  async markNotificationRead(id: string): Promise<Notification | undefined> {
+  async markNotificationRead(id: string, userId: string): Promise<Notification | undefined> {
     const [notification] = await db
       .update(notifications)
       .set({ isRead: true, readAt: new Date() })
-      .where(eq(notifications.id, id))
+      .where(and(eq(notifications.id, id), eq(notifications.userId, userId)))
       .returning();
     return notification;
   }

@@ -449,6 +449,78 @@ export async function registerRoutes(
     }
   });
 
+  // ==================== NOTIFICATIONS ====================
+
+  app.get("/api/notifications", async (req, res) => {
+    const userId = req.session?.userId;
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    try {
+      const { limit, unreadOnly } = req.query;
+      const options = {
+        limit: limit ? parseInt(limit as string, 10) : 50,
+        unreadOnly: unreadOnly === 'true',
+      };
+      const notifications = await storage.getUserNotifications(userId, options);
+      const unreadCount = await storage.getUnreadNotificationCount(userId);
+      res.json({ notifications, unreadCount });
+    } catch (error) {
+      console.error("Get notifications error:", error);
+      res.status(500).json({ error: "Failed to get notifications" });
+    }
+  });
+
+  app.get("/api/notifications/unread-count", async (req, res) => {
+    const userId = req.session?.userId;
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    try {
+      const count = await storage.getUnreadNotificationCount(userId);
+      res.json({ count });
+    } catch (error) {
+      console.error("Get unread count error:", error);
+      res.status(500).json({ error: "Failed to get unread count" });
+    }
+  });
+
+  app.patch("/api/notifications/:id/read", async (req, res) => {
+    const userId = req.session?.userId;
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    try {
+      const { id } = req.params;
+      const notification = await storage.markNotificationRead(id, userId);
+      if (!notification) {
+        return res.status(404).json({ error: "Notification not found" });
+      }
+      res.json({ notification });
+    } catch (error) {
+      console.error("Mark notification read error:", error);
+      res.status(500).json({ error: "Failed to mark notification as read" });
+    }
+  });
+
+  app.post("/api/notifications/mark-all-read", async (req, res) => {
+    const userId = req.session?.userId;
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    try {
+      await storage.markAllNotificationsRead(userId);
+      res.json({ success: true });
+    } catch (error) {
+      console.error("Mark all notifications read error:", error);
+      res.status(500).json({ error: "Failed to mark all notifications as read" });
+    }
+  });
+
   // ==================== BILLING ADDRESS ENDPOINTS ====================
 
   // Update user billing address
@@ -2603,9 +2675,9 @@ export async function registerRoutes(
       if (data.status === 'approved') {
         NotificationTriggers.refundIssued({
           userId: request.requesterId,
-          amount: request.amountCents,
-          referenceType: request.referenceType || 'refund_request',
-          referenceId: request.referenceId || id,
+          amount: request.amount,
+          referenceType: request.targetType || 'refund_request',
+          referenceId: request.targetId || id,
           reason: data.adminNotes || undefined,
         }).catch(err => console.error('Notification error:', err));
       }
