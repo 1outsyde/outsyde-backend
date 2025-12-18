@@ -1205,3 +1205,63 @@ export type InsertProfileComment = z.infer<typeof insertProfileCommentSchema>;
 
 export type Shipment = typeof shipments.$inferSelect;
 export type InsertShipment = z.infer<typeof insertShipmentSchema>;
+
+/* =====================================================
+   AUDIT LOGS (Financial Actions)
+===================================================== */
+export const auditLogs = pgTable("audit_logs", {
+  id: varchar("id", { length: 36 }).primaryKey().default(sql`gen_random_uuid()`),
+  
+  actorId: varchar("actor_id", { length: 36 }),
+  actorType: text("actor_type").notNull(),
+  
+  action: text("action").notNull(),
+  
+  targetType: text("target_type").notNull(),
+  targetId: varchar("target_id", { length: 36 }).notNull(),
+  
+  beforeState: jsonb("before_state"),
+  afterState: jsonb("after_state"),
+  
+  metadata: jsonb("metadata").$type<Record<string, any>>(),
+  
+  ipAddress: text("ip_address"),
+  userAgent: text("user_agent"),
+  
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+});
+
+export const insertAuditLogSchema = createInsertSchema(auditLogs).omit({ id: true, createdAt: true });
+export type AuditLog = typeof auditLogs.$inferSelect;
+export type InsertAuditLog = z.infer<typeof insertAuditLogSchema>;
+
+/* =====================================================
+   ORDER STATE MACHINE - Valid Transitions
+===================================================== */
+export const ORDER_STATUS_TRANSITIONS: Record<string, string[]> = {
+  'pending': ['paid', 'cancelled'],
+  'paid': ['shipped', 'refunded', 'cancelled'],
+  'shipped': ['delivered', 'refunded'],
+  'delivered': ['refunded'],
+  'refunded': [],
+  'cancelled': [],
+};
+
+export const BOOKING_STATUS_TRANSITIONS: Record<string, string[]> = {
+  'pending': ['confirmed', 'cancelled'],
+  'confirmed': ['in_progress', 'cancelled', 'refunded'],
+  'in_progress': ['completed', 'cancelled', 'refunded'],
+  'completed': ['refunded'],
+  'cancelled': [],
+  'refunded': [],
+};
+
+export function isValidOrderTransition(currentStatus: string, newStatus: string): boolean {
+  const validTransitions = ORDER_STATUS_TRANSITIONS[currentStatus] || [];
+  return validTransitions.includes(newStatus);
+}
+
+export function isValidBookingTransition(currentStatus: string, newStatus: string): boolean {
+  const validTransitions = BOOKING_STATUS_TRANSITIONS[currentStatus] || [];
+  return validTransitions.includes(newStatus);
+}

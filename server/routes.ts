@@ -2089,6 +2089,7 @@ export async function registerRoutes(
   });
 
   // Send a message (REST fallback - WebSocket preferred)
+  // Note: General API rate limiting (100 req/min authenticated) applies
   app.post("/api/conversations/:id/messages", async (req, res) => {
     const userId = req.session?.userId;
     if (!userId) {
@@ -2106,9 +2107,33 @@ export async function registerRoutes(
       }
 
       const messageSchema = z.object({
-        content: z.string().min(1, "Message content is required"),
+        content: z.string()
+          .min(1, "Message content is required")
+          .max(2000, "Message cannot exceed 2000 characters"),
       });
       const { content } = messageSchema.parse(req.body);
+
+      // Basic content abuse detection
+      const urlPattern = /(https?:\/\/[^\s]+)/gi;
+      const urlCount = (content.match(urlPattern) || []).length;
+      if (urlCount > 5) {
+        return res.status(400).json({ 
+          error: "Message contains too many links",
+          message: "Messages cannot contain more than 5 links."
+        });
+      }
+
+      // Detect repeated message spam (same content sent rapidly)
+      const recentMessages = await storage.getConversationMessages(req.params.id, 5);
+      const duplicateCount = recentMessages.filter(
+        m => m.senderId === userId && m.content === content
+      ).length;
+      if (duplicateCount >= 2) {
+        return res.status(400).json({ 
+          error: "Duplicate message detected",
+          message: "Please avoid sending the same message repeatedly."
+        });
+      }
 
       const message = await storage.createMessage({
         conversationId: req.params.id,
@@ -2794,6 +2819,64 @@ export async function registerRoutes(
       }
 
       if (data.status === 'approved') {
+        // Update order/booking status to refunded with state machine validation
+        if (request.targetType === 'order' && request.targetId) {
+          const orderResult = await storage.updateOrderWithValidation(
+            request.targetId,
+            { status: 'refunded' },
+            adminUser.id
+          );
+          if (!orderResult.success) {
+            console.warn('Failed to update order status to refunded:', orderResult.error);
+          }
+        } else if (request.targetType === 'shoot_booking' && request.targetId) {
+          const bookingResult = await storage.updateBookingWithValidation(
+            request.targetId,
+            { status: 'refunded' },
+            adminUser.id
+          );
+          if (!bookingResult.success) {
+            console.warn('Failed to update booking status to refunded:', bookingResult.error);
+          }
+        }
+
+        // Reverse loyalty points earned from this transaction
+        const pointReversal = await storage.reversePointsForRefund(
+          request.requesterId,
+          request.targetType || 'refund',
+          request.targetId || id
+        );
+        if (pointReversal.reversed) {
+          console.log(`Reversed ${pointReversal.pointsReversed} points for user ${request.requesterId}`);
+        }
+
+        // Revoke reviews associated with the refunded booking/order
+        if (request.targetType && request.targetId) {
+          const revokedCount = await storage.revokeReviewsForRefund(
+            request.targetType,
+            request.targetId
+          );
+          if (revokedCount > 0) {
+            console.log(`Revoked ${revokedCount} reviews for refunded ${request.targetType}: ${request.targetId}`);
+          }
+        }
+
+        // Create audit log for refund approval
+        await storage.createAuditLog({
+          actorId: adminUser.id,
+          actorType: 'admin',
+          action: 'refund_approved',
+          targetType: 'refund_request',
+          targetId: id,
+          metadata: {
+            amount: request.amount,
+            targetType: request.targetType,
+            targetId: request.targetId,
+            pointsReversed: pointReversal.pointsReversed,
+            adminNotes: data.adminNotes
+          }
+        });
+
         NotificationTriggers.refundIssued({
           userId: request.requesterId,
           amount: request.amount,

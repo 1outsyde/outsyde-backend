@@ -42,6 +42,10 @@ The Outsyde platform uses a React frontend, an Express (TypeScript) backend, and
     -   **Role-Aware Navigation:** Navigation components adapt based on user role (customer, vendor, photographer).
     -   **Create Post Page:** Dedicated page for all user types to create feed posts.
     -   **Shipment Tracking:** Comprehensive shipment fulfillment system with carrier integration. Vendors can mark orders as shipped via carrier dropdown (FedEx, UPS, USPS, DHL, Amazon, OnTrac, LaserShip, Other) and tracking number input. Customers see carrier logo, tracking number, and "Track Package" button linking to carrier's tracking site. Order status auto-updates to 'shipped' when shipment created. API endpoints: POST /api/orders/:orderId/shipments, GET /api/orders/:orderId/shipments, PATCH /api/shipments/:shipmentId, GET /api/vendor/shipments, GET /api/my-orders.
+    -   **Order/Booking State Machines:** Server-side enforcement of valid status transitions. Order states: pending → paid → shipped → delivered (refunded/cancelled are terminal). Booking states: pending → confirmed → in_progress → completed (cancelled/refunded are terminal). Uses `updateOrderWithValidation()` and `updateBookingWithValidation()` methods.
+    -   **Audit Logging:** Complete audit trail for financial actions via `audit_logs` table. Captures actorId, actorType, action, targetType, targetId, beforeState, afterState, metadata, IP address, and user agent. Automatically logs order/booking status changes.
+    -   **Refund Cascading Effects:** When refunds are approved: points are automatically reversed via `reversePointsForRefund()`, verified reviews are revoked via `revokeVerifiedReviewsForRefund()`, and target ratings are recalculated.
+    -   **Message Abuse Prevention:** Chat messages validated with 2000 character limit, max 5 links per message, and duplicate message detection. General API rate limiting (100 req/min authenticated, 20 req/min unauthenticated) provides baseline protection.
 
 ## External Dependencies
 -   **PostgreSQL:** Primary database.

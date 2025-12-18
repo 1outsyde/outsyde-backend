@@ -57,6 +57,8 @@ import {
   type InsertPhotographerAvailability,
   type Shipment,
   type InsertShipment,
+  type AuditLog,
+  type InsertAuditLog,
   users,
   businesses,
   cities,
@@ -92,7 +94,10 @@ import {
   profileComments,
   businessAvailability,
   photographerAvailability,
-  shipments
+  shipments,
+  auditLogs,
+  isValidOrderTransition,
+  isValidBookingTransition
 } from "@shared/schema";
 import { db } from "./db";
 import { eq, ilike, or, and, sql, isNull, desc, asc } from "drizzle-orm";
@@ -401,8 +406,10 @@ export interface IStorage {
   getAllConversations(): Promise<Conversation[]>;
   getUserOrders(userId: string): Promise<Order[]>;
   getUserBookings(userId: string): Promise<ShootBooking[]>;
+  getOrder(orderId: string): Promise<Order | undefined>;
   getVendorOrders(businessId: string): Promise<Order[]>;
   updateOrder(orderId: string, updates: Partial<Order>): Promise<Order | undefined>;
+  getShootBooking(id: string): Promise<ShootBooking | undefined>;
   getPhotographerBookings(photographerId: string): Promise<ShootBooking[]>;
   getMessages(conversationId: string): Promise<Message[]>;
 
@@ -412,6 +419,20 @@ export interface IStorage {
   getShipmentsByOrder(orderId: string): Promise<Shipment[]>;
   getShipmentsByBusiness(businessId: string): Promise<Shipment[]>;
   updateShipment(id: string, updates: Partial<Shipment>): Promise<Shipment | undefined>;
+
+  // Audit Logging
+  createAuditLog(data: InsertAuditLog): Promise<AuditLog>;
+  getAuditLogs(targetType: string, targetId: string): Promise<AuditLog[]>;
+
+  // Order State Machine (with validation)
+  updateOrderWithValidation(orderId: string, updates: Partial<Order>, actorId?: string): Promise<{ success: boolean; order?: Order; error?: string }>;
+  updateBookingWithValidation(bookingId: string, updates: Partial<ShootBooking>, actorId?: string): Promise<{ success: boolean; booking?: ShootBooking; error?: string }>;
+
+  // Point Reversal on Refund
+  reversePointsForRefund(userId: string, referenceType: string, referenceId: string): Promise<{ reversed: boolean; pointsReversed: number }>;
+
+  // Review Revocation on Refund
+  revokeReviewsForRefund(bookingType: string, bookingId: string): Promise<number>;
 
   seedInitialData(): Promise<void>;
 }
@@ -1631,8 +1652,18 @@ export class DatabaseStorage implements IStorage {
     return db.select().from(shootBookings).where(eq(shootBookings.customerId, userId));
   }
 
+  async getOrder(orderId: string): Promise<Order | undefined> {
+    const result = await db.select().from(orders).where(eq(orders.id, orderId));
+    return result[0];
+  }
+
   async getVendorOrders(businessId: string): Promise<Order[]> {
     return db.select().from(orders).where(eq(orders.businessId, businessId));
+  }
+
+  async getShootBooking(id: string): Promise<ShootBooking | undefined> {
+    const result = await db.select().from(shootBookings).where(eq(shootBookings.id, id));
+    return result[0];
   }
 
   async updateOrder(orderId: string, updates: Partial<Order>): Promise<Order | undefined> {
@@ -3366,6 +3397,207 @@ export class DatabaseStorage implements IStorage {
       .where(eq(shipments.id, id))
       .returning();
     return result[0];
+  }
+
+  // =========================
+  // AUDIT LOGGING
+  // =========================
+
+  async createAuditLog(data: InsertAuditLog): Promise<AuditLog> {
+    const id = randomUUID();
+    const result = await db.insert(auditLogs).values({
+      id,
+      actorId: data.actorId ?? null,
+      actorType: data.actorType,
+      action: data.action,
+      targetType: data.targetType,
+      targetId: data.targetId,
+      beforeState: data.beforeState ?? null,
+      afterState: data.afterState ?? null,
+      metadata: data.metadata ?? null,
+      ipAddress: data.ipAddress ?? null,
+      userAgent: data.userAgent ?? null,
+    }).returning();
+    return result[0];
+  }
+
+  async getAuditLogs(targetType: string, targetId: string): Promise<AuditLog[]> {
+    return db.select().from(auditLogs)
+      .where(and(
+        eq(auditLogs.targetType, targetType),
+        eq(auditLogs.targetId, targetId)
+      ))
+      .orderBy(desc(auditLogs.createdAt));
+  }
+
+  // =========================
+  // ORDER STATE MACHINE
+  // =========================
+
+  async updateOrderWithValidation(
+    orderId: string, 
+    updates: Partial<Order>, 
+    actorId?: string
+  ): Promise<{ success: boolean; order?: Order; error?: string }> {
+    const currentOrder = await this.getOrder(orderId);
+    if (!currentOrder) {
+      return { success: false, error: 'Order not found' };
+    }
+
+    if (updates.status && updates.status !== currentOrder.status) {
+      if (!isValidOrderTransition(currentOrder.status || 'pending', updates.status)) {
+        return { 
+          success: false, 
+          error: `Invalid status transition from '${currentOrder.status}' to '${updates.status}'` 
+        };
+      }
+    }
+
+    const beforeState = { ...currentOrder };
+    const result = await db.update(orders)
+      .set(updates)
+      .where(eq(orders.id, orderId))
+      .returning();
+    
+    if (!result[0]) {
+      return { success: false, error: 'Failed to update order' };
+    }
+
+    await this.createAuditLog({
+      actorId: actorId ?? null,
+      actorType: actorId ? 'user' : 'system',
+      action: 'order_status_change',
+      targetType: 'order',
+      targetId: orderId,
+      beforeState,
+      afterState: result[0],
+      metadata: { statusChange: { from: currentOrder.status, to: updates.status } }
+    });
+
+    return { success: true, order: result[0] };
+  }
+
+  async updateBookingWithValidation(
+    bookingId: string, 
+    updates: Partial<ShootBooking>, 
+    actorId?: string
+  ): Promise<{ success: boolean; booking?: ShootBooking; error?: string }> {
+    const currentBooking = await this.getShootBooking(bookingId);
+    if (!currentBooking) {
+      return { success: false, error: 'Booking not found' };
+    }
+
+    if (updates.status && updates.status !== currentBooking.status) {
+      if (!isValidBookingTransition(currentBooking.status || 'pending', updates.status)) {
+        return { 
+          success: false, 
+          error: `Invalid status transition from '${currentBooking.status}' to '${updates.status}'` 
+        };
+      }
+    }
+
+    const beforeState = { ...currentBooking };
+    const result = await db.update(shootBookings)
+      .set(updates)
+      .where(eq(shootBookings.id, bookingId))
+      .returning();
+    
+    if (!result[0]) {
+      return { success: false, error: 'Failed to update booking' };
+    }
+
+    await this.createAuditLog({
+      actorId: actorId ?? null,
+      actorType: actorId ? 'user' : 'system',
+      action: 'booking_status_change',
+      targetType: 'shoot_booking',
+      targetId: bookingId,
+      beforeState,
+      afterState: result[0],
+      metadata: { statusChange: { from: currentBooking.status, to: updates.status } }
+    });
+
+    return { success: true, booking: result[0] };
+  }
+
+  // =========================
+  // POINT REVERSAL ON REFUND
+  // =========================
+
+  async reversePointsForRefund(
+    userId: string, 
+    referenceType: string, 
+    referenceId: string
+  ): Promise<{ reversed: boolean; pointsReversed: number }> {
+    const earnedTransactions = await db.select()
+      .from(pointTransactions)
+      .where(and(
+        eq(pointTransactions.userId, userId),
+        eq(pointTransactions.type, 'earn'),
+        eq(pointTransactions.referenceType, referenceType),
+        eq(pointTransactions.referenceId, referenceId)
+      ));
+
+    if (earnedTransactions.length === 0) {
+      return { reversed: false, pointsReversed: 0 };
+    }
+
+    let totalPointsToReverse = 0;
+    for (const tx of earnedTransactions) {
+      totalPointsToReverse += tx.points;
+    }
+
+    const currentBalance = await this.getUserPointsBalance(userId);
+    const newBalance = Math.max(0, currentBalance - totalPointsToReverse);
+
+    await db.update(users)
+      .set({ loyaltyPoints: newBalance })
+      .where(eq(users.id, userId));
+
+    const id = randomUUID();
+    await db.insert(pointTransactions).values({
+      id,
+      userId,
+      type: 'reversal',
+      points: -totalPointsToReverse,
+      dollarAmountCents: 0,
+      referenceType: 'refund_reversal',
+      referenceId,
+      balanceAfter: newBalance,
+      description: `Points reversed due to refund (${referenceType}: ${referenceId})`,
+    });
+
+    return { reversed: true, pointsReversed: totalPointsToReverse };
+  }
+
+  // =========================
+  // REVIEW REVOCATION ON REFUND
+  // =========================
+
+  async revokeReviewsForRefund(bookingType: string, bookingId: string): Promise<number> {
+    const reviewsToRevoke = await db.select()
+      .from(reviews)
+      .where(and(
+        eq(reviews.bookingType, bookingType),
+        eq(reviews.bookingId, bookingId)
+      ));
+
+    if (reviewsToRevoke.length === 0) {
+      return 0;
+    }
+
+    await db.update(reviews)
+      .set({ isVerified: false })
+      .where(and(
+        eq(reviews.bookingType, bookingType),
+        eq(reviews.bookingId, bookingId)
+      ));
+
+    for (const review of reviewsToRevoke) {
+      await this.updateTargetRating(review.targetType, review.targetId);
+    }
+
+    return reviewsToRevoke.length;
   }
 }
 
