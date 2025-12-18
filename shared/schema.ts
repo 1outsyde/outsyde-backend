@@ -207,6 +207,27 @@ export const vendorServices = pgTable("vendor_services", {
 });
 
 /* =====================================================
+   BUSINESS AVAILABILITY (Date-specific time slots)
+===================================================== */
+export const businessAvailability = pgTable("business_availability", {
+  id: varchar("id", { length: 36 }).primaryKey().default(sql`gen_random_uuid()`),
+  businessId: varchar("business_id", { length: 36 }).notNull().references(() => businesses.id),
+
+  date: text("date").notNull(), // Format: YYYY-MM-DD
+  startTime: text("start_time").notNull(), // Format: HH:MM (24hr)
+  endTime: text("end_time").notNull(), // Format: HH:MM (24hr)
+
+  slotType: text("slot_type").default("available"), // 'available' | 'blocked' | 'special'
+  title: text("title"), // Optional title for the slot (e.g., "Holiday Hours", "Closed for Vacation")
+  notes: text("notes"), // Optional notes
+
+  isRecurring: boolean("is_recurring").default(false),
+  recurringDayOfWeek: integer("recurring_day_of_week"), // 0 = Sunday, 6 = Saturday (only if isRecurring)
+
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+});
+
+/* =====================================================
    PHOTOGRAPHERS
 ===================================================== */
 export const photographers = pgTable("photographers", {
@@ -802,6 +823,11 @@ export const insertVendorServiceSchema = createInsertSchema(vendorServices).omit
   createdAt: true,
 });
 
+export const insertBusinessAvailabilitySchema = createInsertSchema(businessAvailability).omit({
+  id: true,
+  createdAt: true,
+});
+
 export const updateBusinessProfileSchema = z.object({
   name: z.string().min(1).optional(),
   description: z.string().optional(),
@@ -1009,6 +1035,9 @@ export type VendorProduct = typeof vendorProducts.$inferSelect;
 
 export type InsertVendorService = z.infer<typeof insertVendorServiceSchema>;
 export type VendorService = typeof vendorServices.$inferSelect;
+
+export type InsertBusinessAvailability = z.infer<typeof insertBusinessAvailabilitySchema>;
+export type BusinessAvailability = typeof businessAvailability.$inferSelect;
 
 export type InsertCity = z.infer<typeof insertCitySchema>;
 export type City = typeof cities.$inferSelect;
