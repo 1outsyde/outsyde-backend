@@ -3582,19 +3582,34 @@ export async function registerRoutes(
 
       const data = schema.parse(req.body);
 
-      // Enforce email-locked admin access
-      // Cannot set isAdmin=true on users whose email is not in ALLOWED_ADMIN_EMAILS
-      if (data.isAdmin === true) {
-        const targetUser = await storage.getUser(id);
-        if (!targetUser) {
-          return res.status(404).json({ error: "User not found" });
-        }
-        if (!isAllowedAdminEmail(targetUser.email)) {
+      // Get target user first for all email-lock checks
+      const targetUser = await storage.getUser(id);
+      if (!targetUser) {
+        return res.status(404).json({ error: "User not found" });
+      }
+
+      // SECURITY: Email-locked admin access enforcement
+      // 1. Cannot change email TO an allowed admin email (prevents hijacking)
+      if (data.email && data.email.toLowerCase() !== targetUser.email?.toLowerCase()) {
+        if (isAllowedAdminEmail(data.email)) {
           return res.status(403).json({ 
-            error: "Cannot grant admin access",
-            message: "This email is not authorized for admin privileges."
+            error: "Cannot use this email",
+            message: "This email address is reserved for admin accounts."
           });
         }
+      }
+
+      // 2. Cannot set isAdmin=true on users whose email is not in ALLOWED_ADMIN_EMAILS
+      if (data.isAdmin === true && !isAllowedAdminEmail(targetUser.email)) {
+        return res.status(403).json({ 
+          error: "Cannot grant admin access",
+          message: "This email is not authorized for admin privileges."
+        });
+      }
+
+      // 3. Auto-revoke admin if changing email away from allowed admin email
+      if (data.email && isAllowedAdminEmail(targetUser.email) && !isAllowedAdminEmail(data.email)) {
+        data.isAdmin = false; // Auto-revoke admin privileges
       }
 
       const user = await storage.updateUser(id, data);
