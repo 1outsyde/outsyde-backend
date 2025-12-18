@@ -13,8 +13,8 @@ import { Badge } from "@/components/ui/badge";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
 import { useToast } from "@/hooks/use-toast";
 import { apiRequest, queryClient } from "@/lib/queryClient";
-import type { Business, VendorProduct, VendorService } from "@shared/schema";
-import BusinessHoursEditor, { type HoursOfOperation } from "./BusinessHoursEditor";
+import type { Business, VendorProduct, VendorService, HoursOfOperation } from "@shared/schema";
+import BusinessHoursEditor from "./BusinessHoursEditor";
 
 interface BusinessResponse {
   business: Business;

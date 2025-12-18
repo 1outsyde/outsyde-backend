@@ -9,7 +9,8 @@ import ServiceCard from "./ServiceCard";
 import BookingCalendar from "./BookingCalendar";
 import VendorChat from "./VendorChat";
 import ProfileComments from "./ProfileComments";
-import BusinessHoursDisplay, { type HoursOfOperation } from "./BusinessHoursDisplay";
+import BusinessHoursDisplay from "./BusinessHoursDisplay";
+import type { HoursOfOperation } from "@shared/schema";
 
 interface Product {
   id: string;

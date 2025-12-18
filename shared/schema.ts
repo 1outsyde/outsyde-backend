@@ -31,6 +31,25 @@ export interface BillingAddress {
 }
 
 /* =====================================================
+   BUSINESS HOURS TYPES
+===================================================== */
+export interface DayHours {
+  open: string;
+  close: string;
+  closed?: boolean;
+}
+
+export interface HoursOfOperation {
+  monday?: DayHours;
+  tuesday?: DayHours;
+  wednesday?: DayHours;
+  thursday?: DayHours;
+  friday?: DayHours;
+  saturday?: DayHours;
+  sunday?: DayHours;
+}
+
+/* =====================================================
    USERS
 ===================================================== */
 export const users = pgTable("users", {

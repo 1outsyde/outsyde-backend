@@ -5,22 +5,7 @@ import { Switch } from "@/components/ui/switch";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Clock, Save  } from "lucide-react";
-
-export interface DayHours {
-  open: string;
-  close: string;
-  closed?: boolean;
-}
-
-export interface HoursOfOperation {
-  monday?: DayHours;
-  tuesday?: DayHours;
-  wednesday?: DayHours;
-  thursday?: DayHours;
-  friday?: DayHours;
-  saturday?: DayHours;
-  sunday?: DayHours;
-}
+import type { DayHours, HoursOfOperation } from "@shared/schema";
 
 interface BusinessHoursEditorProps {
   hours: HoursOfOperation | null | undefined;

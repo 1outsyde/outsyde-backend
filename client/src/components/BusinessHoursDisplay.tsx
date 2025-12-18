@@ -1,22 +1,7 @@
 import { Clock } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
-
-export interface DayHours {
-  open: string;
-  close: string;
-  closed?: boolean;
-}
-
-export interface HoursOfOperation {
-  monday?: DayHours;
-  tuesday?: DayHours;
-  wednesday?: DayHours;
-  thursday?: DayHours;
-  friday?: DayHours;
-  saturday?: DayHours;
-  sunday?: DayHours;
-}
+import type { DayHours, HoursOfOperation } from "@shared/schema";
 
 interface BusinessHoursDisplayProps {
   hours: HoursOfOperation | null | undefined;
