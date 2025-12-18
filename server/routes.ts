@@ -3749,5 +3749,46 @@ export async function registerRoutes(
     }
   });
 
+  // Customer: Get their orders with shipment info
+  app.get("/api/my-orders", async (req, res) => {
+    const userId = req.session?.userId;
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    try {
+      const orders = await storage.getUserOrders(userId);
+      
+      // Enrich orders with business names and shipment info
+      const enrichedOrders = await Promise.all(
+        orders.map(async (order) => {
+          const business = await storage.getBusinessById(order.businessId);
+          const shipments = await storage.getShipmentsByOrder(order.id);
+          
+          return {
+            id: order.id,
+            businessId: order.businessId,
+            businessName: business?.name || "Unknown Business",
+            items: order.items,
+            total: order.total,
+            status: order.status,
+            createdAt: order.createdAt,
+            shipment: shipments.length > 0 ? shipments[0] : null,
+          };
+        })
+      );
+      
+      // Sort by most recent first
+      enrichedOrders.sort((a, b) => 
+        new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
+      );
+      
+      res.json({ orders: enrichedOrders });
+    } catch (error) {
+      console.error("Get customer orders error:", error);
+      res.status(500).json({ error: "Failed to get orders" });
+    }
+  });
+
   return httpServer;
 }

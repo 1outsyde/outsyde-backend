@@ -1,11 +1,13 @@
 import { useState } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
-import { LayoutDashboard, Package, Calendar, MessageCircle, Settings, PlusCircle, Crown, Store, Users, ClipboardList, RotateCcw } from "lucide-react";
+import { LayoutDashboard, Package, Calendar, MessageCircle, Settings, PlusCircle, Crown, Store, Users, ClipboardList, RotateCcw, Truck } from "lucide-react";
 import { queryClient, apiRequest } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
 import { format } from "date-fns";
 import BillingAddressForm from "@/components/BillingAddressForm";
-import type { Business } from "@shared/schema";
+import ShippingFormDialog from "@/components/ShippingFormDialog";
+import type { Business, Shipment } from "@shared/schema";
+import { getCarrierConfig, getTrackingUrl } from "@shared/carriers";
 
 interface OrderRecord {
   recordId: string;
@@ -45,6 +47,8 @@ export default function VendorDashboardPage({ onLogout }: VendorDashboardPagePro
   const [selectedRecord, setSelectedRecord] = useState<OrderRecord | null>(null);
   const [refundReason, setRefundReason] = useState("");
   const [refundAttempted, setRefundAttempted] = useState(false);
+  const [shippingDialogOpen, setShippingDialogOpen] = useState(false);
+  const [selectedOrderForShipping, setSelectedOrderForShipping] = useState<OrderRecord | null>(null);
   const { toast } = useToast();
 
   // Refund request mutation
@@ -171,6 +175,17 @@ export default function VendorDashboardPage({ onLogout }: VendorDashboardPagePro
     enabled: activeSection === "orders",
   });
 
+  // Fetch shipments for the vendor
+  const { data: shipmentsData } = useQuery<{ shipments: Shipment[] }>({
+    queryKey: ["/api/vendor/shipments"],
+    enabled: activeSection === "orders",
+  });
+
+  // Helper to check if an order has been shipped
+  const getOrderShipment = (orderId: string): Shipment | undefined => {
+    return shipmentsData?.shipments?.find((s) => s.orderId === orderId);
+  };
+
   // Fetch business data
   const { data: businessData } = useQuery<{ business: Business }>({
     queryKey: ["/api/vendor/my-business"],
@@ -296,6 +311,7 @@ export default function VendorDashboardPage({ onLogout }: VendorDashboardPagePro
                           <th className="text-right p-3 font-medium text-muted-foreground text-sm">Platform Fee</th>
                           <th className="text-right p-3 font-medium text-muted-foreground text-sm">Your Net</th>
                           <th className="text-left p-3 font-medium text-muted-foreground text-sm">Status</th>
+                          <th className="text-left p-3 font-medium text-muted-foreground text-sm">Shipping</th>
                           <th className="text-center p-3 font-medium text-muted-foreground text-sm">Actions</th>
                         </tr>
                       </thead>
@@ -360,24 +376,78 @@ export default function VendorDashboardPage({ onLogout }: VendorDashboardPagePro
                                   ? 'bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-200'
                                   : record.status === 'pending'
                                   ? 'bg-yellow-100 text-yellow-800 dark:bg-yellow-900 dark:text-yellow-200'
+                                  : record.status === 'shipped'
+                                  ? 'bg-purple-100 text-purple-800 dark:bg-purple-900 dark:text-purple-200'
                                   : 'bg-gray-100 text-gray-800 dark:bg-gray-800 dark:text-gray-200'
                               }`}>
                                 {record.status || 'Unknown'}
                               </span>
                             </td>
-                            <td className="p-3 text-center">
-                              <Button
-                                size="sm"
-                                variant="outline"
-                                onClick={() => {
-                                  setSelectedRecord(record);
-                                  setRefundDialogOpen(true);
-                                }}
-                                data-testid={`button-refund-${record.recordId}`}
-                              >
-                                <RotateCcw className="h-3 w-3 mr-1" />
-                                Request Refund
-                              </Button>
+                            <td className="p-3">
+                              {record.recordType === 'order' ? (() => {
+                                const shipment = getOrderShipment(record.recordId);
+                                if (shipment) {
+                                  const carrier = getCarrierConfig(shipment.carrier);
+                                  const trackingUrl = getTrackingUrl(shipment.carrier, shipment.trackingNumber);
+                                  return (
+                                    <div className="flex flex-col gap-1">
+                                      <div className="flex items-center gap-1.5">
+                                        <Package className="h-3.5 w-3.5" style={{ color: carrier.color }} />
+                                        <span className="text-xs font-medium">{carrier.name}</span>
+                                      </div>
+                                      <span className="text-xs text-muted-foreground font-mono">
+                                        {shipment.trackingNumber.slice(0, 12)}...
+                                      </span>
+                                      {trackingUrl && (
+                                        <a
+                                          href={trackingUrl}
+                                          target="_blank"
+                                          rel="noopener noreferrer"
+                                          className="text-xs text-primary hover:underline"
+                                          data-testid={`link-track-${record.recordId}`}
+                                        >
+                                          Track Package
+                                        </a>
+                                      )}
+                                    </div>
+                                  );
+                                }
+                                return (
+                                  <span className="text-xs text-muted-foreground">Not shipped</span>
+                                );
+                              })() : (
+                                <span className="text-xs text-muted-foreground">N/A</span>
+                              )}
+                            </td>
+                            <td className="p-3">
+                              <div className="flex items-center gap-2 justify-center">
+                                {record.recordType === 'order' && !getOrderShipment(record.recordId) && (
+                                  <Button
+                                    size="sm"
+                                    variant="default"
+                                    onClick={() => {
+                                      setSelectedOrderForShipping(record);
+                                      setShippingDialogOpen(true);
+                                    }}
+                                    data-testid={`button-ship-${record.recordId}`}
+                                  >
+                                    <Truck className="h-3 w-3 mr-1" />
+                                    Ship
+                                  </Button>
+                                )}
+                                <Button
+                                  size="sm"
+                                  variant="outline"
+                                  onClick={() => {
+                                    setSelectedRecord(record);
+                                    setRefundDialogOpen(true);
+                                  }}
+                                  data-testid={`button-refund-${record.recordId}`}
+                                >
+                                  <RotateCcw className="h-3 w-3 mr-1" />
+                                  Refund
+                                </Button>
+                              </div>
                             </td>
                           </tr>
                         ))}
@@ -488,6 +558,14 @@ export default function VendorDashboardPage({ onLogout }: VendorDashboardPagePro
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      {/* Shipping Form Dialog */}
+      <ShippingFormDialog
+        open={shippingDialogOpen}
+        onOpenChange={setShippingDialogOpen}
+        orderId={selectedOrderForShipping?.recordId || ""}
+        orderNumber={selectedOrderForShipping?.recordId.slice(0, 8)}
+      />
     </SidebarProvider>
   );
 }

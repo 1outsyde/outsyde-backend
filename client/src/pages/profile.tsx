@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { User, Settings, Heart, Calendar, ShoppingBag, LogOut, ChevronRight, Coins, ShieldCheck } from "lucide-react";
+import { User, Settings, Heart, Calendar, ShoppingBag, LogOut, ChevronRight, Coins, ShieldCheck, Package } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
@@ -10,6 +10,7 @@ import PointsHistory from "@/components/PointsHistory";
 import ReferralCard from "@/components/ReferralCard";
 import PushNotificationSettings from "@/components/PushNotificationSettings";
 import BillingAddressForm from "@/components/BillingAddressForm";
+import OrderTrackingCard from "@/components/OrderTrackingCard";
 import { useQuery } from "@tanstack/react-query";
 import { Skeleton } from "@/components/ui/skeleton";
 
@@ -20,6 +21,27 @@ interface BillingAddress {
   state: string;
   postalCode: string;
   country: string;
+}
+
+interface CustomerShipment {
+  id: string;
+  carrier: string;
+  trackingNumber: string;
+  status: string;
+  shippedAt: string;
+  deliveredAt: string | null;
+  estimatedDelivery: string | null;
+}
+
+interface CustomerOrder {
+  id: string;
+  businessId: string;
+  businessName: string;
+  items: string;
+  total: number;
+  status: string;
+  createdAt: string;
+  shipment: CustomerShipment | null;
 }
 
 interface ProfileUser {
@@ -81,25 +103,11 @@ export default function ProfilePage({ onLogout, onAdminDashboard }: ProfilePageP
     },
   ];
 
-  // todo: remove mock functionality
-  const recentOrders = [
-    {
-      id: "1",
-      businessName: "Sunrise Coffee Co.",
-      items: "2 items",
-      total: 24.99,
-      status: "delivered",
-      date: "Nov 28, 2024",
-    },
-    {
-      id: "2",
-      businessName: "Artisan Jewelry Co.",
-      items: "1 item",
-      total: 45.99,
-      status: "processing",
-      date: "Nov 27, 2024",
-    },
-  ];
+  // Fetch customer orders with tracking info
+  const { data: ordersData, isLoading: ordersLoading } = useQuery<{ orders: CustomerOrder[] }>({
+    queryKey: ["/api/my-orders"],
+    enabled: activeSection === "orders" || activeSection === "overview",
+  });
 
   const menuItems = [
     { id: "overview", icon: User, label: "Overview" },
@@ -235,26 +243,39 @@ export default function ProfilePage({ onLogout, onAdminDashboard }: ProfilePageP
                 </Button>
               </CardHeader>
               <CardContent>
-                <div className="space-y-3">
-                  {recentOrders.map((order) => (
-                    <div
-                      key={order.id}
-                      className="flex items-center justify-between p-3 rounded-md bg-muted/50"
-                      data-testid={`order-item-${order.id}`}
-                    >
-                      <div>
-                        <p className="font-medium">{order.businessName}</p>
-                        <p className="text-sm text-muted-foreground">
-                          {order.items} - ${order.total.toFixed(2)}
-                        </p>
-                        <p className="text-xs text-muted-foreground">{order.date}</p>
+                {ordersLoading ? (
+                  <div className="space-y-3">
+                    <Skeleton className="h-16 w-full" />
+                    <Skeleton className="h-16 w-full" />
+                  </div>
+                ) : ordersData?.orders && ordersData.orders.length > 0 ? (
+                  <div className="space-y-3">
+                    {ordersData.orders.slice(0, 3).map((order) => (
+                      <div
+                        key={order.id}
+                        className="flex items-center justify-between p-3 rounded-md bg-muted/50"
+                        data-testid={`order-item-${order.id}`}
+                      >
+                        <div>
+                          <p className="font-medium">{order.businessName}</p>
+                          <p className="text-sm text-muted-foreground">
+                            {order.items} - ${(order.total / 100).toFixed(2)}
+                          </p>
+                          <p className="text-xs text-muted-foreground">
+                            {new Date(order.createdAt).toLocaleDateString()}
+                          </p>
+                        </div>
+                        <Badge variant={order.status === "delivered" ? "default" : "secondary"}>
+                          {order.status}
+                        </Badge>
                       </div>
-                      <Badge variant={order.status === "delivered" ? "default" : "secondary"}>
-                        {order.status}
-                      </Badge>
-                    </div>
-                  ))}
-                </div>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="text-sm text-muted-foreground text-center py-4">
+                    No recent orders
+                  </p>
+                )}
               </CardContent>
             </Card>
 
@@ -303,37 +324,52 @@ export default function ProfilePage({ onLogout, onAdminDashboard }: ProfilePageP
         )}
 
         {activeSection === "orders" && (
-          <Card className="overflow-visible">
-            <CardHeader>
-              <CardTitle>My Orders</CardTitle>
-            </CardHeader>
-            <CardContent>
+          <div className="space-y-4">
+            <h2 className="text-2xl font-semibold">My Orders</h2>
+            {ordersLoading ? (
               <div className="space-y-3">
-                {recentOrders.map((order) => (
-                  <div
-                    key={order.id}
-                    className="flex items-center justify-between p-4 rounded-md border"
-                    data-testid={`order-detail-${order.id}`}
-                  >
-                    <div>
-                      <p className="font-medium">{order.businessName}</p>
-                      <p className="text-sm text-muted-foreground">{order.items}</p>
-                      <p className="text-sm font-medium">${order.total.toFixed(2)}</p>
-                      <p className="text-xs text-muted-foreground">{order.date}</p>
-                    </div>
-                    <div className="flex items-center gap-2">
-                      <Badge variant={order.status === "delivered" ? "default" : "secondary"}>
-                        {order.status}
-                      </Badge>
-                      <Button variant="outline" size="sm">
-                        View Details
-                      </Button>
-                    </div>
-                  </div>
+                {[1, 2, 3].map((i) => (
+                  <Card key={i} className="overflow-visible">
+                    <CardContent className="p-4">
+                      <div className="flex justify-between">
+                        <div className="space-y-2">
+                          <Skeleton className="h-5 w-40" />
+                          <Skeleton className="h-4 w-24" />
+                          <Skeleton className="h-4 w-20" />
+                        </div>
+                        <Skeleton className="h-6 w-20" />
+                      </div>
+                    </CardContent>
+                  </Card>
                 ))}
               </div>
-            </CardContent>
-          </Card>
+            ) : ordersData?.orders && ordersData.orders.length > 0 ? (
+              <div className="space-y-3">
+                {ordersData.orders.map((order) => (
+                  <OrderTrackingCard
+                    key={order.id}
+                    orderId={order.id}
+                    businessName={order.businessName}
+                    items={order.items}
+                    total={order.total}
+                    orderStatus={order.status}
+                    orderDate={order.createdAt}
+                    shipment={order.shipment}
+                  />
+                ))}
+              </div>
+            ) : (
+              <Card className="overflow-visible">
+                <CardContent className="p-8 text-center">
+                  <Package className="h-12 w-12 mx-auto text-muted-foreground mb-4" />
+                  <h3 className="font-semibold mb-2">No Orders Yet</h3>
+                  <p className="text-muted-foreground text-sm">
+                    Your order history will appear here when you make a purchase.
+                  </p>
+                </CardContent>
+              </Card>
+            )}
+          </div>
         )}
 
         {activeSection === "points" && isRegularCustomer && (
