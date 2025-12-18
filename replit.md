@@ -8,6 +8,9 @@ Outsyde is a social marketplace platform connecting customers with local small b
 - Modern, social media-inspired UI
 - Inter/DM Sans/Poppins font family
 
+## Admin Access
+- **Admin Email:** info@goutsyde.com
+
 ## User Profile Fields
 - **Username:** Optional unique identifier displayed publicly in comments instead of real name
 - **Date of Birth:** Collected at signup for eligibility and internal analytics
