@@ -52,6 +52,8 @@ import {
   type InsertProfileComment,
   type BusinessAvailability,
   type InsertBusinessAvailability,
+  type Shipment,
+  type InsertShipment,
   users,
   businesses,
   cities,
@@ -85,7 +87,8 @@ import {
   postLikes,
   postComments,
   profileComments,
-  businessAvailability
+  businessAvailability,
+  shipments
 } from "@shared/schema";
 import { db } from "./db";
 import { eq, ilike, or, and, sql, isNull, desc, asc } from "drizzle-orm";
@@ -379,6 +382,13 @@ export interface IStorage {
   getVendorOrders(businessId: string): Promise<Order[]>;
   getPhotographerBookings(photographerId: string): Promise<ShootBooking[]>;
   getMessages(conversationId: string): Promise<Message[]>;
+
+  // Shipment Tracking
+  createShipment(data: InsertShipment): Promise<Shipment>;
+  getShipment(id: string): Promise<Shipment | undefined>;
+  getShipmentsByOrder(orderId: string): Promise<Shipment[]>;
+  getShipmentsByBusiness(businessId: string): Promise<Shipment[]>;
+  updateShipment(id: string, updates: Partial<Shipment>): Promise<Shipment | undefined>;
 
   seedInitialData(): Promise<void>;
 }
@@ -3089,6 +3099,52 @@ export class DatabaseStorage implements IStorage {
       businesses: businessResults,
       photographers: photographerResults
     };
+  }
+
+  // =========================
+  // SHIPMENT TRACKING
+  // =========================
+
+  async createShipment(data: InsertShipment): Promise<Shipment> {
+    const id = randomUUID();
+    const result = await db.insert(shipments).values({
+      id,
+      orderId: data.orderId,
+      businessId: data.businessId,
+      carrier: data.carrier,
+      trackingNumber: data.trackingNumber,
+      status: data.status ?? 'shipped',
+      shippedAt: data.shippedAt ?? new Date(),
+      deliveredAt: data.deliveredAt ?? null,
+      estimatedDelivery: data.estimatedDelivery ?? null,
+      notes: data.notes ?? null,
+    }).returning();
+    return result[0];
+  }
+
+  async getShipment(id: string): Promise<Shipment | undefined> {
+    const result = await db.select().from(shipments).where(eq(shipments.id, id));
+    return result[0];
+  }
+
+  async getShipmentsByOrder(orderId: string): Promise<Shipment[]> {
+    return db.select().from(shipments)
+      .where(eq(shipments.orderId, orderId))
+      .orderBy(desc(shipments.createdAt));
+  }
+
+  async getShipmentsByBusiness(businessId: string): Promise<Shipment[]> {
+    return db.select().from(shipments)
+      .where(eq(shipments.businessId, businessId))
+      .orderBy(desc(shipments.createdAt));
+  }
+
+  async updateShipment(id: string, updates: Partial<Shipment>): Promise<Shipment | undefined> {
+    const result = await db.update(shipments)
+      .set({ ...updates, updatedAt: new Date() })
+      .where(eq(shipments.id, id))
+      .returning();
+    return result[0];
   }
 }
 
