@@ -2036,7 +2036,39 @@ export async function registerRoutes(
       });
 
       const validated = updateSchema.parse(req.body);
-      const updated = await storage.updateVendorProduct(req.params.id, validated);
+      
+      // Handle price changes for live products with Stripe
+      let stripeUpdates: any = {};
+      if (product.status === 'live' && product.stripeProductId) {
+        // Update Stripe Product metadata if name/description changed
+        if (validated.name || validated.description) {
+          await stripeService.updateStripeProduct(product.stripeProductId, {
+            name: validated.name || product.name,
+            description: validated.description !== undefined ? (validated.description || undefined) : (product.description || undefined),
+            images: validated.images || product.images || (product.imageUrl ? [product.imageUrl] : undefined),
+          });
+        }
+        
+        // If price changed and product is live, create new Stripe Price and deactivate old one
+        if (validated.price !== undefined && validated.price !== product.price && product.stripePriceId) {
+          // Create new price
+          const newStripePrice = await stripeService.createStripePrice({
+            productId: product.stripeProductId,
+            unitAmountCents: validated.price,
+            metadata: {
+              vendorProductId: product.id,
+              businessId: business.id,
+            },
+          });
+          
+          // Deactivate old price
+          await stripeService.deactivateStripePrice(product.stripePriceId);
+          
+          stripeUpdates.stripePriceId = newStripePrice.id;
+        }
+      }
+      
+      const updated = await storage.updateVendorProduct(req.params.id, { ...validated, ...stripeUpdates });
       res.json({ product: updated });
     } catch (error) {
       if (error instanceof z.ZodError) {
@@ -2155,9 +2187,15 @@ export async function registerRoutes(
       if (product.stripeProductId) {
         await stripeService.archiveStripeProduct(product.stripeProductId);
       }
+      // Deactivate the price if it exists
+      if (product.stripePriceId) {
+        await stripeService.deactivateStripePrice(product.stripePriceId);
+      }
 
+      // Clear Stripe IDs and set status to archived
       const updated = await storage.updateVendorProduct(product.id, {
         status: 'archived',
+        stripePriceId: null,
       });
 
       res.json({ product: updated, message: "Product archived" });
@@ -2262,7 +2300,39 @@ export async function registerRoutes(
       });
 
       const validated = updateSchema.parse(req.body);
-      const updated = await storage.updateVendorService(req.params.id, validated);
+      
+      // Handle price changes for live services with Stripe
+      let stripeUpdates: any = {};
+      if (service.status === 'live' && service.stripeProductId) {
+        // Update Stripe Product metadata if name/description changed
+        if (validated.name || validated.description) {
+          await stripeService.updateStripeProduct(service.stripeProductId, {
+            name: validated.name || service.name,
+            description: validated.description !== undefined ? (validated.description || undefined) : (service.description || undefined),
+          });
+        }
+        
+        // If price changed and service is live, create new Stripe Price and deactivate old one
+        if (validated.price !== undefined && validated.price !== service.price && service.stripePriceId) {
+          // Create new price
+          const newStripePrice = await stripeService.createStripePrice({
+            productId: service.stripeProductId,
+            unitAmountCents: validated.price,
+            metadata: {
+              vendorServiceId: service.id,
+              businessId: business.id,
+              durationMinutes: String(validated.durationMinutes || service.durationMinutes),
+            },
+          });
+          
+          // Deactivate old price
+          await stripeService.deactivateStripePrice(service.stripePriceId);
+          
+          stripeUpdates.stripePriceId = newStripePrice.id;
+        }
+      }
+      
+      const updated = await storage.updateVendorService(req.params.id, { ...validated, ...stripeUpdates });
       res.json({ service: updated });
     } catch (error) {
       if (error instanceof z.ZodError) {
@@ -2381,9 +2451,15 @@ export async function registerRoutes(
       if (service.stripeProductId) {
         await stripeService.archiveStripeProduct(service.stripeProductId);
       }
+      // Deactivate the price if it exists
+      if (service.stripePriceId) {
+        await stripeService.deactivateStripePrice(service.stripePriceId);
+      }
 
+      // Clear Stripe IDs and set status to archived
       const updated = await storage.updateVendorService(service.id, {
         status: 'archived',
+        stripePriceId: null,
       });
 
       res.json({ service: updated, message: "Service archived" });
@@ -3176,6 +3252,158 @@ export async function registerRoutes(
     } catch (error) {
       console.error("Clear cart error:", error);
       res.status(500).json({ error: "Failed to clear cart" });
+    }
+  });
+
+  // Cart checkout - create Stripe checkout session for cart items
+  app.post("/api/cart/checkout", async (req, res) => {
+    const userId = req.session?.userId;
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    try {
+      const user = await storage.getUser(userId);
+      if (!user) {
+        return res.status(404).json({ error: "User not found" });
+      }
+
+      // Get cart items
+      const cartItems = await storage.getCartItems(userId);
+      if (!cartItems || cartItems.length === 0) {
+        return res.status(400).json({ error: "Cart is empty" });
+      }
+
+      // Get products for each cart item and validate they're live
+      const productMap = new Map<string, any>();
+      const businessIds = new Set<string>();
+      
+      for (const item of cartItems) {
+        const product = await storage.getVendorProduct(item.productId);
+        if (!product) {
+          return res.status(400).json({ error: `Product not found: ${item.productId}` });
+        }
+        if (product.status !== 'live') {
+          return res.status(400).json({ error: `Product is not available: ${product.name}` });
+        }
+        if (!product.stripePriceId) {
+          return res.status(400).json({ error: `Product is not ready for checkout: ${product.name}` });
+        }
+        productMap.set(product.id, product);
+        businessIds.add(product.businessId);
+      }
+
+      // For now, enforce single-vendor cart (Stripe destination charges only support one destination)
+      if (businessIds.size > 1) {
+        return res.status(400).json({ 
+          error: "Cart contains items from multiple vendors. Please checkout items from one vendor at a time." 
+        });
+      }
+
+      const businessId = Array.from(businessIds)[0];
+      const business = await storage.getBusiness(businessId);
+      if (!business) {
+        return res.status(404).json({ error: "Business not found" });
+      }
+
+      // Check vendor subscription is active
+      const subStatus = await storage.isBusinessSubscriptionActive(businessId);
+      if (!subStatus.active) {
+        return res.status(403).json({ error: "This business is currently unavailable for purchases" });
+      }
+
+      // Calculate totals
+      let totalInCents = 0;
+      const lineItems: Array<{ stripePriceId: string; quantity: number }> = [];
+      
+      for (const item of cartItems) {
+        const product = productMap.get(item.productId);
+        totalInCents += product.price * item.quantity;
+        lineItems.push({
+          stripePriceId: product.stripePriceId!,
+          quantity: item.quantity,
+        });
+      }
+
+      // Platform fee is 4% for businesses
+      const platformFeeInCents = Math.round(totalInCents * 0.04);
+
+      // Get or create Stripe customer
+      let customerId: string;
+      if (user.stripeCustomerId) {
+        customerId = user.stripeCustomerId;
+      } else {
+        const customer = await stripeService.createCustomer(user.email!, userId, user.name || user.email!);
+        customerId = customer.id;
+        await storage.updateUser(userId, { stripeCustomerId: customer.id });
+      }
+
+      const baseUrl = `https://${process.env.REPLIT_DOMAINS?.split(',')[0]}`;
+
+      // Calculate vendor net (total minus platform fee)
+      const vendorNet = totalInCents - platformFeeInCents;
+
+      // Create order record first
+      const order = await storage.createOrder({
+        customerId: userId,
+        businessId,
+        totalAmount: totalInCents,
+        platformFee: platformFeeInCents,
+        vendorNet,
+        status: 'pending',
+        items: cartItems.map(item => ({
+          productId: item.productId,
+          name: productMap.get(item.productId).name,
+          quantity: item.quantity,
+          price: productMap.get(item.productId).price,
+        })),
+      });
+
+      // Check if vendor has Stripe Connect account
+      const vendor = await storage.getUserByBusinessOwnerId(businessId);
+      let session;
+      
+      if (vendor?.stripeConnectedAccountId) {
+        // Use destination charges to route payment to vendor
+        session = await stripeService.createCartCheckout({
+          customerId,
+          lineItems,
+          successUrl: `${baseUrl}/order-success?orderId=${order.id}`,
+          cancelUrl: `${baseUrl}/cart?cancelled=true`,
+          connectedAccountId: vendor.stripeConnectedAccountId,
+          platformFeeInCents,
+          metadata: {
+            type: 'cart_checkout',
+            orderId: order.id,
+            userId,
+            businessId,
+          },
+        });
+      } else {
+        // No connected account - platform holds funds (manual payout later)
+        session = await stripeService.createCartCheckoutPlatform({
+          customerId,
+          lineItems,
+          successUrl: `${baseUrl}/order-success?orderId=${order.id}`,
+          cancelUrl: `${baseUrl}/cart?cancelled=true`,
+          metadata: {
+            type: 'cart_checkout',
+            orderId: order.id,
+            userId,
+            businessId,
+          },
+        });
+      }
+
+      // Update order with Stripe payment intent ID
+      await storage.updateOrder(order.id, {
+        stripePaymentIntentId: session.id,
+      });
+
+      res.json({ url: session.url, orderId: order.id });
+    } catch (error) {
+      console.error("Cart checkout error:", error);
+      res.status(500).json({ error: "Failed to create checkout" });
     }
   });
 

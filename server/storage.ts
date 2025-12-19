@@ -17,6 +17,7 @@ import {
   type Appointment,
   type InsertAppointment,
   type Order,
+  type InsertOrder,
   type Conversation,
   type InsertConversation,
   type Message,
@@ -427,7 +428,9 @@ export interface IStorage {
   getUserBookings(userId: string): Promise<ShootBooking[]>;
   getOrder(orderId: string): Promise<Order | undefined>;
   getVendorOrders(businessId: string): Promise<Order[]>;
+  createOrder(data: InsertOrder): Promise<Order>;
   updateOrder(orderId: string, updates: Partial<Order>): Promise<Order | undefined>;
+  getUserByBusinessOwnerId(businessId: string): Promise<User | undefined>;
   getShootBooking(id: string): Promise<ShootBooking | undefined>;
   getPhotographerBookings(photographerId: string): Promise<ShootBooking[]>;
   getMessages(conversationId: string): Promise<Message[]>;
@@ -1847,7 +1850,7 @@ export class DatabaseStorage implements IStorage {
   }
 
   async getUserOrders(userId: string): Promise<Order[]> {
-    return db.select().from(orders).where(eq(orders.userId, userId));
+    return db.select().from(orders).where(eq(orders.customerId, userId));
   }
 
   async getUserBookings(userId: string): Promise<ShootBooking[]> {
@@ -1861,6 +1864,17 @@ export class DatabaseStorage implements IStorage {
 
   async getVendorOrders(businessId: string): Promise<Order[]> {
     return db.select().from(orders).where(eq(orders.businessId, businessId));
+  }
+
+  async createOrder(data: InsertOrder): Promise<Order> {
+    const [order] = await db.insert(orders).values(data).returning();
+    return order;
+  }
+
+  async getUserByBusinessOwnerId(businessId: string): Promise<User | undefined> {
+    const business = await this.getBusiness(businessId);
+    if (!business) return undefined;
+    return this.getUser(business.ownerId);
   }
 
   async getShootBooking(id: string): Promise<ShootBooking | undefined> {

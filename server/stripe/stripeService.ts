@@ -304,6 +304,78 @@ export class StripeService {
       },
     });
   }
+
+  // =========================
+  // CART CHECKOUT (Multi-item, single vendor)
+  // =========================
+
+  /**
+   * Create a checkout session for cart items from a single vendor
+   * Uses destination charges to route payment to vendor minus platform fee
+   */
+  async createCartCheckout(params: {
+    customerId: string;
+    lineItems: Array<{
+      stripePriceId: string;
+      quantity: number;
+    }>;
+    successUrl: string;
+    cancelUrl: string;
+    connectedAccountId: string;
+    platformFeeInCents: number;
+    metadata: Record<string, string>;
+  }) {
+    const stripe = await getUncachableStripeClient();
+
+    return stripe.checkout.sessions.create({
+      customer: params.customerId,
+      mode: "payment",
+      payment_method_types: ["card"],
+      line_items: params.lineItems.map(item => ({
+        price: item.stripePriceId,
+        quantity: item.quantity,
+      })),
+      success_url: params.successUrl,
+      cancel_url: params.cancelUrl,
+      payment_intent_data: {
+        application_fee_amount: params.platformFeeInCents,
+        transfer_data: {
+          destination: params.connectedAccountId,
+        },
+      },
+      metadata: params.metadata,
+    });
+  }
+
+  /**
+   * Create a checkout session for cart without destination charge (for platform-only purchases)
+   * Used when vendor has no connected Stripe account yet
+   */
+  async createCartCheckoutPlatform(params: {
+    customerId: string;
+    lineItems: Array<{
+      stripePriceId: string;
+      quantity: number;
+    }>;
+    successUrl: string;
+    cancelUrl: string;
+    metadata: Record<string, string>;
+  }) {
+    const stripe = await getUncachableStripeClient();
+
+    return stripe.checkout.sessions.create({
+      customer: params.customerId,
+      mode: "payment",
+      payment_method_types: ["card"],
+      line_items: params.lineItems.map(item => ({
+        price: item.stripePriceId,
+        quantity: item.quantity,
+      })),
+      success_url: params.successUrl,
+      cancel_url: params.cancelUrl,
+      metadata: params.metadata,
+    });
+  }
 }
 
 export const stripeService = new StripeService();

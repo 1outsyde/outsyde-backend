@@ -1208,6 +1208,7 @@ export type Appointment = typeof appointments.$inferSelect;
 export type InsertAppointment = typeof appointments.$inferInsert;
 
 export type Order = typeof orders.$inferSelect;
+export type InsertOrder = typeof orders.$inferInsert;
 
 export type InsertReview = z.infer<typeof insertReviewSchema>;
 export type Review = typeof reviews.$inferSelect;

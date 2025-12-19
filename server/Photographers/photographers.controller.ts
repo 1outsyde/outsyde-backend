@@ -414,6 +414,47 @@ export class PhotographerController {
         packageHours
       } = req.body;
 
+      // Handle price changes for live services with Stripe
+      let stripeUpdates: any = {};
+      if (service.status === 'live' && service.stripeProductId) {
+        // Update Stripe Product metadata if name/description changed
+        if (name || description) {
+          await stripeService.updateStripeProduct(service.stripeProductId, {
+            name: name || service.name,
+            description: description !== undefined ? (description || undefined) : (service.description || undefined),
+          });
+        }
+        
+        // Determine current and new price based on pricing model
+        const currentPrice = service.pricingModel === 'hourly' 
+          ? service.hourlyRateCents || 0
+          : service.priceCents || 0;
+        const newPricingModel = pricingModel || service.pricingModel || 'package';
+        const newPrice = newPricingModel === 'hourly'
+          ? (hourlyRateCents !== undefined ? hourlyRateCents : service.hourlyRateCents) || 0
+          : (priceCents !== undefined ? priceCents : service.priceCents) || 0;
+        
+        // If price changed and service is live, create new Stripe Price and deactivate old one
+        const priceChanged = newPrice !== currentPrice || (pricingModel && pricingModel !== service.pricingModel);
+        if (priceChanged && service.stripePriceId && !isContactForPricing && newPrice > 0) {
+          // Create new price
+          const newStripePrice = await stripeService.createStripePrice({
+            productId: service.stripeProductId,
+            unitAmountCents: newPrice,
+            metadata: {
+              photographerServiceId: service.id,
+              photographerId: targetPhotographerId!,
+              pricingModel: newPricingModel,
+            },
+          });
+          
+          // Deactivate old price
+          await stripeService.deactivateStripePrice(service.stripePriceId);
+          
+          stripeUpdates.stripePriceId = newStripePrice.id;
+        }
+      }
+
       const updated = await storage.updatePhotographerService(serviceId, {
         name,
         description,
@@ -425,6 +466,7 @@ export class PhotographerController {
         pricingModel,
         hourlyRateCents,
         packageHours,
+        ...stripeUpdates,
       });
 
       res.json({ service: updated });
