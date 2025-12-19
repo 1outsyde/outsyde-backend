@@ -9,6 +9,7 @@ import type { ReactNode } from "react";
 interface TopNavProps {
   onMenuClick?: () => void;
   onSearchChange?: (value: string) => void;
+  onSearchClick?: () => void;
   onMessagesClick?: () => void;
   onNotificationsClick?: () => void;
   onProfileClick?: () => void;
@@ -20,6 +21,7 @@ interface TopNavProps {
 export default function TopNav({
   onMenuClick,
   onSearchChange,
+  onSearchClick,
   onMessagesClick,
   onNotificationsClick,
   onProfileClick,
@@ -52,10 +54,24 @@ export default function TopNav({
             <Input
               type="search"
               placeholder="Search local businesses..."
-              className="pl-10 rounded-full h-10"
+              className="pl-10 pr-10 rounded-full h-10"
               onChange={(e) => onSearchChange?.(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  onSearchClick?.();
+                }
+              }}
               data-testid="input-search"
             />
+            <Button
+              size="icon"
+              variant="ghost"
+              className="absolute right-1 top-1/2 -translate-y-1/2 h-8 w-8"
+              onClick={onSearchClick}
+              data-testid="button-search-go"
+            >
+              <Search className="h-4 w-4" />
+            </Button>
           </div>
         </div>
 
@@ -64,6 +80,7 @@ export default function TopNav({
             size="icon"
             variant="ghost"
             className="md:hidden"
+            onClick={onSearchClick}
             data-testid="button-search-mobile"
           >
             <Search className="h-5 w-5" />

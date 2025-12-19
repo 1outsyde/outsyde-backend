@@ -267,6 +267,7 @@ function AppContent() {
           unreadNotifications={5}
           onMenuClick={() => console.log("Menu")}
           onSearchChange={(value) => console.log("Search:", value)}
+          onSearchClick={() => handleNavTabChange("search")}
           onMessagesClick={() => handleNavTabChange("messages")}
           onNotificationsClick={() => console.log("Notifications")}
           onProfileClick={() => handleNavTabChange("profile")}
