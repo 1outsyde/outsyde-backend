@@ -1678,9 +1678,9 @@ export async function registerRoutes(
       }
       
       const products = await storage.getVendorProducts(req.params.id);
-      // Only return active products for public view
-      const activeProducts = products.filter(p => p.isActive);
-      res.json({ products: activeProducts });
+      // Only return active AND live products for public view
+      const liveProducts = products.filter(p => p.isActive && p.status === 'live');
+      res.json({ products: liveProducts });
     } catch (error) {
       console.error("Get business products error:", error);
       res.status(500).json({ error: "Failed to get products" });
@@ -1702,9 +1702,9 @@ export async function registerRoutes(
       }
       
       const services = await storage.getVendorServicesByBusiness(req.params.id);
-      // Only return active services for public view
-      const activeServices = services.filter(s => s.isActive);
-      res.json({ services: activeServices });
+      // Only return active AND live services for public view
+      const liveServices = services.filter(s => s.isActive && s.status === 'live');
+      res.json({ services: liveServices });
     } catch (error) {
       console.error("Get business services error:", error);
       res.status(500).json({ error: "Failed to get services" });

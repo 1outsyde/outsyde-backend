@@ -308,7 +308,8 @@ export class PhotographerController {
         targetPhotographerId = photographer.id;
       }
 
-      const services = await storage.getPhotographerServices(targetPhotographerId!);
+      // Owner dashboard: return all services regardless of status (draft, live, archived)
+      const services = await storage.getAllPhotographerServices(targetPhotographerId!);
       res.json({ services });
     } catch (error) {
       console.error("Get photographer services error:", error);
@@ -632,9 +633,15 @@ export class PhotographerController {
       if (service.stripeProductId) {
         await stripeService.archiveStripeProduct(service.stripeProductId);
       }
+      // Deactivate the price if it exists
+      if (service.stripePriceId) {
+        await stripeService.deactivateStripePrice(service.stripePriceId);
+      }
 
+      // Clear Stripe price ID and set status to archived
       const updated = await storage.updatePhotographerService(service.id, {
         status: 'archived',
+        stripePriceId: null,
       });
 
       res.json({ service: updated, message: "Service archived" });

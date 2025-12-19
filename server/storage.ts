@@ -160,7 +160,8 @@ export interface IStorage {
   // Photographer Services CRUD
   createPhotographerService(data: InsertPhotographerService): Promise<PhotographerService>;
   getPhotographerService(id: string): Promise<PhotographerService | undefined>;
-  getPhotographerServices(photographerId: string): Promise<PhotographerService[]>;
+  getPhotographerServices(photographerId: string): Promise<PhotographerService[]>; // Public: only live services
+  getAllPhotographerServices(photographerId: string): Promise<PhotographerService[]>; // Owner dashboard: all statuses
   updatePhotographerService(id: string, updates: Partial<PhotographerService>): Promise<PhotographerService | undefined>;
   deletePhotographerService(id: string): Promise<void>;
 
@@ -806,6 +807,18 @@ export class DatabaseStorage implements IStorage {
   }
 
   async getPhotographerServices(photographerId: string): Promise<PhotographerService[]> {
+    // Public: only return live services
+    return db.select()
+      .from(photographerServices)
+      .where(and(
+        eq(photographerServices.photographerId, photographerId),
+        eq(photographerServices.isActive, true),
+        eq(photographerServices.status, 'live')
+      ));
+  }
+
+  async getAllPhotographerServices(photographerId: string): Promise<PhotographerService[]> {
+    // Owner dashboard: return all services regardless of status
     return db.select()
       .from(photographerServices)
       .where(and(
