@@ -3,6 +3,7 @@ import { useQuery } from "@tanstack/react-query";
 import { CheckCircle2, Package, ArrowRight, Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { apiRequest } from "@/lib/queryClient";
 
 interface OrderSuccessPageProps {
   orderId?: string;
@@ -11,17 +12,34 @@ interface OrderSuccessPageProps {
 }
 
 export default function OrderSuccessPage({ orderId, orderGroupId, onContinueShopping }: OrderSuccessPageProps) {
+  const [hasCleanedUrl, setHasCleanedUrl] = useState(false);
+
   const { data: orderGroup, isLoading: groupLoading } = useQuery({
     queryKey: ["/api/order-groups", orderGroupId],
+    queryFn: async () => {
+      const response = await apiRequest("GET", `/api/order-groups/${orderGroupId}`);
+      return response.json();
+    },
     enabled: !!orderGroupId,
   });
 
   const { data: order, isLoading: orderLoading } = useQuery({
     queryKey: ["/api/orders", orderId],
+    queryFn: async () => {
+      const response = await apiRequest("GET", `/api/orders/${orderId}`);
+      return response.json();
+    },
     enabled: !!orderId && !orderGroupId,
   });
 
   const isLoading = groupLoading || orderLoading;
+
+  useEffect(() => {
+    if (!isLoading && !hasCleanedUrl) {
+      window.history.replaceState({}, "", "/");
+      setHasCleanedUrl(true);
+    }
+  }, [isLoading, hasCleanedUrl]);
 
   const formatCurrency = (cents: number) => {
     return new Intl.NumberFormat('en-US', {
@@ -65,7 +83,7 @@ export default function OrderSuccessPage({ orderId, orderGroupId, onContinueShop
               </CardHeader>
               <CardContent>
                 <div className="space-y-2">
-                  {o.items.map((item: any, idx: number) => (
+                  {o.items?.map((item: any, idx: number) => (
                     <div key={idx} className="flex justify-between text-sm">
                       <span>{item.name} x{item.quantity}</span>
                       <span>{formatCurrency(item.price * item.quantity)}</span>

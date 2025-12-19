@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { useQuery, useMutation } from "@tanstack/react-query";
+import { useQuery } from "@tanstack/react-query";
 import { Loader2, Store, CheckCircle2, ArrowRight } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
@@ -20,22 +20,28 @@ export default function CheckoutContinuePage({
   onOrderSuccess 
 }: CheckoutContinuePageProps) {
   const [isRedirecting, setIsRedirecting] = useState(false);
+  const [hasCleanedUrl, setHasCleanedUrl] = useState(false);
 
   const { data: continueData, isLoading, error, refetch } = useQuery({
     queryKey: ["/api/cart/checkout/continue", orderGroupId, completedOrderId],
     queryFn: async () => {
       const params = new URLSearchParams();
       if (completedOrderId) params.set('completedOrderId', completedOrderId);
-      const response = await fetch(`/api/cart/checkout/continue/${orderGroupId}?${params.toString()}`, {
-        credentials: 'include',
-      });
-      if (!response.ok) throw new Error('Failed to continue checkout');
+      const url = `/api/cart/checkout/continue/${orderGroupId}${params.toString() ? `?${params.toString()}` : ''}`;
+      const response = await apiRequest("GET", url);
       return response.json();
     },
     enabled: !!orderGroupId,
     refetchOnMount: true,
     staleTime: 0,
   });
+
+  useEffect(() => {
+    if (continueData && !hasCleanedUrl) {
+      window.history.replaceState({}, "", "/");
+      setHasCleanedUrl(true);
+    }
+  }, [continueData, hasCleanedUrl]);
 
   useEffect(() => {
     if (continueData?.completed) {
@@ -45,13 +51,6 @@ export default function CheckoutContinuePage({
       window.location.href = continueData.url;
     }
   }, [continueData, orderGroupId, onOrderSuccess, isRedirecting]);
-
-  const formatCurrency = (cents: number) => {
-    return new Intl.NumberFormat('en-US', {
-      style: 'currency',
-      currency: 'USD',
-    }).format(cents / 100);
-  };
 
   if (isLoading || isRedirecting) {
     return (

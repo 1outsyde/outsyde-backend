@@ -55,7 +55,6 @@ function AppContent() {
       setCheckoutOrderId(orderId);
       setCheckoutOrderGroupId(orderGroupId);
       setCurrentPage("order-success");
-      window.history.replaceState({}, "", "/");
     } else if (path === "/checkout/continue" || path.includes("checkout/continue")) {
       const orderGroupId = params.get("orderGroupId");
       const completedId = params.get("completedOrderId");
@@ -63,7 +62,6 @@ function AppContent() {
         setCheckoutOrderGroupId(orderGroupId);
         setCompletedOrderId(completedId);
         setCurrentPage("checkout-continue");
-        window.history.replaceState({}, "", "/");
       }
     }
   }, []);
