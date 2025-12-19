@@ -472,6 +472,136 @@ export class PhotographerController {
     }
   }
 
+  // POST /api/photographers/me/services/:serviceId/go-live - Publish service to Stripe
+  static async goLiveService(req: Request, res: Response) {
+    try {
+      const photographerId = req.session?.photographerId;
+      const userId = req.session?.userId;
+      
+      if (!photographerId && !userId) {
+        return res.status(401).json({ error: "Not authenticated" });
+      }
+
+      const { serviceId } = req.params;
+      const service = await storage.getPhotographerService(serviceId);
+      
+      if (!service) {
+        return res.status(404).json({ error: "Service not found" });
+      }
+
+      let targetPhotographerId = photographerId;
+      if (!targetPhotographerId && userId) {
+        const photographer = await PhotographerService.getByUserId(userId);
+        if (!photographer) {
+          return res.status(404).json({ error: "Photographer not found" });
+        }
+        targetPhotographerId = photographer.id;
+      }
+
+      if (service.photographerId !== targetPhotographerId) {
+        return res.status(403).json({ error: "Not authorized to publish this service" });
+      }
+
+      // Already live? Just return the service
+      if (service.status === 'live' && service.stripeProductId && service.stripePriceId) {
+        return res.json({ service, message: "Service is already live" });
+      }
+
+      // Determine price based on pricing model
+      const priceInCents = service.pricingModel === 'hourly' 
+        ? service.hourlyRateCents || 0
+        : service.priceCents || 0;
+
+      if (priceInCents <= 0 && !service.isContactForPricing) {
+        return res.status(400).json({ error: "Service must have a price or be marked as 'Contact for Pricing'" });
+      }
+
+      // Create Stripe Product
+      const stripeProduct = await stripeService.createStripeProduct({
+        name: service.name,
+        description: service.description || undefined,
+        metadata: {
+          type: 'photographer_service',
+          itemId: service.id,
+          photographerId: targetPhotographerId!,
+        },
+      });
+
+      // Create Stripe Price (skip if contact for pricing)
+      let stripePriceId: string | null = null;
+      if (!service.isContactForPricing && priceInCents > 0) {
+        const stripePrice = await stripeService.createStripePrice({
+          productId: stripeProduct.id,
+          unitAmountCents: priceInCents,
+          metadata: {
+            photographerServiceId: service.id,
+            photographerId: targetPhotographerId!,
+            pricingModel: service.pricingModel || 'package',
+          },
+        });
+        stripePriceId = stripePrice.id;
+      }
+
+      // Update service with Stripe IDs and set status to live
+      const updated = await storage.updatePhotographerService(service.id, {
+        status: 'live',
+        stripeProductId: stripeProduct.id,
+        stripePriceId: stripePriceId,
+      });
+
+      res.json({ service: updated, message: "Service is now live" });
+    } catch (error) {
+      console.error("Go live photographer service error:", error);
+      res.status(500).json({ error: "Failed to publish service" });
+    }
+  }
+
+  // POST /api/photographers/me/services/:serviceId/archive - Archive a service
+  static async archiveService(req: Request, res: Response) {
+    try {
+      const photographerId = req.session?.photographerId;
+      const userId = req.session?.userId;
+      
+      if (!photographerId && !userId) {
+        return res.status(401).json({ error: "Not authenticated" });
+      }
+
+      const { serviceId } = req.params;
+      const service = await storage.getPhotographerService(serviceId);
+      
+      if (!service) {
+        return res.status(404).json({ error: "Service not found" });
+      }
+
+      let targetPhotographerId = photographerId;
+      if (!targetPhotographerId && userId) {
+        const photographer = await PhotographerService.getByUserId(userId);
+        if (!photographer) {
+          return res.status(404).json({ error: "Photographer not found" });
+        }
+        targetPhotographerId = photographer.id;
+      }
+
+      if (service.photographerId !== targetPhotographerId) {
+        return res.status(403).json({ error: "Not authorized to archive this service" });
+      }
+
+      // Archive in Stripe if it exists
+      if (service.stripeProductId) {
+        await stripeService.archiveStripeProduct(service.stripeProductId);
+      }
+
+      const updated = await storage.updatePhotographerService(service.id, {
+        status: 'archived',
+      });
+
+      res.json({ service: updated, message: "Service archived" });
+    } catch (error) {
+      console.error("Archive photographer service error:", error);
+      res.status(500).json({ error: "Failed to archive service" });
+    }
+  }
+
   // GET /api/photographers/:id/services - Get all services for a photographer (public)
   static async getPublicServices(req: Request, res: Response) {
     try {

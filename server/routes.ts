@@ -2074,6 +2074,99 @@ export async function registerRoutes(
     }
   });
 
+  // Go Live - Publish vendor product to Stripe
+  app.post("/api/vendor/products/:id/go-live", async (req, res) => {
+    const userId = req.session?.userId;
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    try {
+      const business = await storage.getBusinessByOwnerId(userId);
+      if (!business) {
+        return res.status(404).json({ error: "No business found" });
+      }
+
+      const product = await storage.getVendorProduct(req.params.id);
+      if (!product || product.businessId !== business.id) {
+        return res.status(404).json({ error: "Product not found" });
+      }
+
+      // Already live? Just return the product
+      if (product.status === 'live' && product.stripeProductId && product.stripePriceId) {
+        return res.json({ product, message: "Product is already live" });
+      }
+
+      // Create Stripe Product
+      const stripeProduct = await stripeService.createStripeProduct({
+        name: product.name,
+        description: product.description || undefined,
+        metadata: {
+          type: 'vendor_product',
+          itemId: product.id,
+          businessId: business.id,
+        },
+        images: product.images || (product.imageUrl ? [product.imageUrl] : undefined),
+      });
+
+      // Create Stripe Price
+      const stripePrice = await stripeService.createStripePrice({
+        productId: stripeProduct.id,
+        unitAmountCents: product.price,
+        metadata: {
+          vendorProductId: product.id,
+          businessId: business.id,
+        },
+      });
+
+      // Update product with Stripe IDs and set status to live
+      const updated = await storage.updateVendorProduct(product.id, {
+        status: 'live',
+        stripeProductId: stripeProduct.id,
+        stripePriceId: stripePrice.id,
+      });
+
+      res.json({ product: updated, message: "Product is now live" });
+    } catch (error) {
+      console.error("Go live vendor product error:", error);
+      res.status(500).json({ error: "Failed to publish product" });
+    }
+  });
+
+  // Archive vendor product (set status to archived)
+  app.post("/api/vendor/products/:id/archive", async (req, res) => {
+    const userId = req.session?.userId;
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    try {
+      const business = await storage.getBusinessByOwnerId(userId);
+      if (!business) {
+        return res.status(404).json({ error: "No business found" });
+      }
+
+      const product = await storage.getVendorProduct(req.params.id);
+      if (!product || product.businessId !== business.id) {
+        return res.status(404).json({ error: "Product not found" });
+      }
+
+      // Archive in Stripe if it exists
+      if (product.stripeProductId) {
+        await stripeService.archiveStripeProduct(product.stripeProductId);
+      }
+
+      const updated = await storage.updateVendorProduct(product.id, {
+        status: 'archived',
+      });
+
+      res.json({ product: updated, message: "Product archived" });
+    } catch (error) {
+      console.error("Archive vendor product error:", error);
+      res.status(500).json({ error: "Failed to archive product" });
+    }
+  });
+
   // Get vendor's services
   app.get("/api/vendor/services", async (req, res) => {
     const userId = req.session?.userId;
@@ -2204,6 +2297,99 @@ export async function registerRoutes(
     } catch (error) {
       console.error("Delete vendor service error:", error);
       res.status(500).json({ error: "Failed to delete service" });
+    }
+  });
+
+  // Go Live - Publish vendor service to Stripe
+  app.post("/api/vendor/services/:id/go-live", async (req, res) => {
+    const userId = req.session?.userId;
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    try {
+      const business = await storage.getBusinessByOwnerId(userId);
+      if (!business) {
+        return res.status(404).json({ error: "No business found" });
+      }
+
+      const service = await storage.getVendorService(req.params.id);
+      if (!service || service.businessId !== business.id) {
+        return res.status(404).json({ error: "Service not found" });
+      }
+
+      // Already live? Just return the service
+      if (service.status === 'live' && service.stripeProductId && service.stripePriceId) {
+        return res.json({ service, message: "Service is already live" });
+      }
+
+      // Create Stripe Product
+      const stripeProduct = await stripeService.createStripeProduct({
+        name: service.name,
+        description: service.description || undefined,
+        metadata: {
+          type: 'vendor_service',
+          itemId: service.id,
+          businessId: business.id,
+        },
+      });
+
+      // Create Stripe Price
+      const stripePrice = await stripeService.createStripePrice({
+        productId: stripeProduct.id,
+        unitAmountCents: service.price,
+        metadata: {
+          vendorServiceId: service.id,
+          businessId: business.id,
+          durationMinutes: String(service.durationMinutes),
+        },
+      });
+
+      // Update service with Stripe IDs and set status to live
+      const updated = await storage.updateVendorService(service.id, {
+        status: 'live',
+        stripeProductId: stripeProduct.id,
+        stripePriceId: stripePrice.id,
+      });
+
+      res.json({ service: updated, message: "Service is now live" });
+    } catch (error) {
+      console.error("Go live vendor service error:", error);
+      res.status(500).json({ error: "Failed to publish service" });
+    }
+  });
+
+  // Archive vendor service
+  app.post("/api/vendor/services/:id/archive", async (req, res) => {
+    const userId = req.session?.userId;
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    try {
+      const business = await storage.getBusinessByOwnerId(userId);
+      if (!business) {
+        return res.status(404).json({ error: "No business found" });
+      }
+
+      const service = await storage.getVendorService(req.params.id);
+      if (!service || service.businessId !== business.id) {
+        return res.status(404).json({ error: "Service not found" });
+      }
+
+      // Archive in Stripe if it exists
+      if (service.stripeProductId) {
+        await stripeService.archiveStripeProduct(service.stripeProductId);
+      }
+
+      const updated = await storage.updateVendorService(service.id, {
+        status: 'archived',
+      });
+
+      res.json({ service: updated, message: "Service archived" });
+    } catch (error) {
+      console.error("Archive vendor service error:", error);
+      res.status(500).json({ error: "Failed to archive service" });
     }
   });
 

@@ -16,6 +16,8 @@ photographersRouter.get("/me/services",          PhotographerController.getMySer
 photographersRouter.post("/me/services",         PhotographerController.createService);
 photographersRouter.patch("/me/services/:serviceId", PhotographerController.updateService);
 photographersRouter.delete("/me/services/:serviceId", PhotographerController.deleteService);
+photographersRouter.post("/me/services/:serviceId/go-live", PhotographerController.goLiveService);
+photographersRouter.post("/me/services/:serviceId/archive", PhotographerController.archiveService);
 
 // Photographer Availability (must come before /:id routes)
 photographersRouter.get("/me/availability",          PhotographerController.getAvailability);

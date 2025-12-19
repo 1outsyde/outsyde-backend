@@ -131,6 +131,98 @@ export class StripeService {
   }
 
   // =========================
+  // CATALOG MANAGEMENT (Products & Prices)
+  // =========================
+
+  /**
+   * Create a Stripe Product for a vendor product, service, or photographer service
+   * Products are owned by the platform, not connected accounts
+   */
+  async createStripeProduct(params: {
+    name: string;
+    description?: string;
+    metadata: {
+      type: 'vendor_product' | 'vendor_service' | 'photographer_service';
+      itemId: string;
+      businessId?: string;
+      photographerId?: string;
+    };
+    images?: string[];
+  }) {
+    const stripe = await getUncachableStripeClient();
+
+    return stripe.products.create({
+      name: params.name,
+      description: params.description || undefined,
+      metadata: params.metadata,
+      images: params.images?.filter(Boolean) || undefined,
+    });
+  }
+
+  /**
+   * Create a Stripe Price for a product
+   * Prices are immutable in Stripe - to change price, create a new one
+   */
+  async createStripePrice(params: {
+    productId: string;
+    unitAmountCents: number;
+    currency?: string;
+    metadata?: Record<string, string>;
+  }) {
+    const stripe = await getUncachableStripeClient();
+
+    return stripe.prices.create({
+      product: params.productId,
+      unit_amount: params.unitAmountCents,
+      currency: params.currency || 'usd',
+      metadata: params.metadata,
+    });
+  }
+
+  /**
+   * Deactivate a Stripe Price (archive it)
+   * Used when a vendor changes their price - old price becomes inactive
+   */
+  async deactivateStripePrice(priceId: string) {
+    const stripe = await getUncachableStripeClient();
+
+    return stripe.prices.update(priceId, {
+      active: false,
+    });
+  }
+
+  /**
+   * Update a Stripe Product's metadata or details (not price)
+   */
+  async updateStripeProduct(productId: string, params: {
+    name?: string;
+    description?: string;
+    images?: string[];
+    active?: boolean;
+  }) {
+    const stripe = await getUncachableStripeClient();
+
+    return stripe.products.update(productId, {
+      name: params.name,
+      description: params.description || undefined,
+      images: params.images?.filter(Boolean) || undefined,
+      active: params.active,
+    });
+  }
+
+  /**
+   * Archive a Stripe Product (set active=false)
+   * Used when vendor archives their product/service
+   */
+  async archiveStripeProduct(productId: string) {
+    const stripe = await getUncachableStripeClient();
+
+    return stripe.products.update(productId, {
+      active: false,
+    });
+  }
+
+  // =========================
   // SUBSCRIPTION PRODUCTS SETUP
   // =========================
 
