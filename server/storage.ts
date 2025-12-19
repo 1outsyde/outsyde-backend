@@ -2179,6 +2179,7 @@ export class DatabaseStorage implements IStorage {
         name: business.name,
         description: business.description || undefined,
         category: business.category,
+        knownFor: (business as any).knownFor || [],
         city: business.city || undefined,
         state: business.state || undefined,
         latitude: business.latitude || undefined,
@@ -2206,6 +2207,7 @@ export class DatabaseStorage implements IStorage {
           description: product.description || undefined,
           category: product.category || undefined,
           tags: product.tags || undefined,
+          knownFor: (business as any).knownFor || [],
           city: business.city || undefined,
           state: business.state || undefined,
           latitude: business.latitude || undefined,
@@ -2234,6 +2236,7 @@ export class DatabaseStorage implements IStorage {
           name: service.name,
           description: service.description || undefined,
           category: service.category || undefined,
+          knownFor: (business as any).knownFor || [],
           city: business.city || undefined,
           state: business.state || undefined,
           latitude: business.latitude || undefined,
@@ -2315,7 +2318,8 @@ export class DatabaseStorage implements IStorage {
         or(
           ilike(searchIndex.name, `%${query}%`),
           ilike(searchIndex.description, `%${query}%`),
-          ilike(searchIndex.category, `%${query}%`)
+          ilike(searchIndex.category, `%${query}%`),
+          sql`${searchIndex.knownFor}::text ILIKE ${'%' + query + '%'}`
         )
       );
     }

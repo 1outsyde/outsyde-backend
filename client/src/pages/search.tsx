@@ -29,9 +29,15 @@ const categoryImageMap: Record<string, string> = {
 
 type SearchTab = "all" | "businesses" | "photographers" | "products" | "services";
 
+const SPECIALTY_FILTERS = [
+  "Taste", "Presentation", "Ambiance", "Speed", "Quality", 
+  "Service", "Value", "Experience", "Expertise", "Family-Friendly"
+];
+
 export default function SearchPage({ onViewBusiness, onViewPhotographer }: SearchPageProps) {
   const [searchValue, setSearchValue] = useState("");
   const [selectedCategories, setSelectedCategories] = useState<string[]>([]);
+  const [selectedSpecialty, setSelectedSpecialty] = useState<string | null>(null);
   const [likedBusinesses, setLikedBusinesses] = useState<Set<string>>(new Set());
   const [likedPhotographers, setLikedPhotographers] = useState<Set<string>>(new Set());
   const [selectedCity, setSelectedCity] = useState<string | null>(null);
@@ -109,10 +115,14 @@ export default function SearchPage({ onViewBusiness, onViewPhotographer }: Searc
       activeTab,
       userLocation?.lat,
       userLocation?.lng,
+      selectedSpecialty,
     ],
     queryFn: async () => {
       const params = new URLSearchParams();
-      if (searchValue) params.append("q", searchValue);
+      const queryParts: string[] = [];
+      if (searchValue) queryParts.push(searchValue);
+      if (selectedSpecialty) queryParts.push(selectedSpecialty);
+      if (queryParts.length > 0) params.append("q", queryParts.join(" "));
       if (selectedCityData) params.append("city", selectedCityData.name);
       if (selectedCategories.length > 0 && !selectedCategories.includes("All")) {
         params.append("category", selectedCategories[0]);
@@ -132,8 +142,15 @@ export default function SearchPage({ onViewBusiness, onViewPhotographer }: Searc
     },
   });
 
-  const results = unifiedSearchData?.results || [];
-  const totalResults = unifiedSearchData?.total || 0;
+  const allResults = unifiedSearchData?.results || [];
+  const results = selectedSpecialty 
+    ? allResults.filter(r => 
+        (r.knownFor as string[] | undefined)?.some(k => 
+          k.toLowerCase().includes(selectedSpecialty.toLowerCase())
+        )
+      )
+    : allResults;
+  const totalResults = results.length;
 
   const businessResults = results.filter(r => r.entityType === "business");
   const photographerResults = results.filter(r => r.entityType === "photographer");
@@ -315,6 +332,30 @@ export default function SearchPage({ onViewBusiness, onViewPhotographer }: Searc
               </TabsTrigger>
             </TabsList>
           </Tabs>
+        </div>
+
+        <div className="mb-4">
+          <p className="text-sm text-muted-foreground mb-2">Filter by what they're known for:</p>
+          <div className="flex flex-wrap gap-2">
+            {SPECIALTY_FILTERS.map((specialty) => (
+              <Badge
+                key={specialty}
+                variant={selectedSpecialty === specialty ? "default" : "outline"}
+                className={`cursor-pointer transition-colors ${
+                  selectedSpecialty === specialty 
+                    ? "bg-primary text-primary-foreground" 
+                    : "hover-elevate"
+                }`}
+                onClick={() => setSelectedSpecialty(
+                  selectedSpecialty === specialty ? null : specialty
+                )}
+                data-testid={`filter-specialty-${specialty.toLowerCase().replace(/\s+/g, '-')}`}
+              >
+                {selectedSpecialty === specialty && <X className="h-3 w-3 mr-1" />}
+                {specialty}
+              </Badge>
+            ))}
+          </div>
         </div>
 
         <div className="mt-6 mb-6">
@@ -500,6 +541,25 @@ export default function SearchPage({ onViewBusiness, onViewPhotographer }: Searc
                       <Badge variant="outline" className="mt-2">
                         {result.category}
                       </Badge>
+                    )}
+                    {result.knownFor && (result.knownFor as string[]).length > 0 && (
+                      <div className="flex flex-wrap gap-1 mt-2">
+                        {(result.knownFor as string[]).slice(0, 3).map((specialty) => (
+                          <Badge 
+                            key={specialty} 
+                            variant="secondary" 
+                            className="text-xs"
+                            data-testid={`badge-known-for-${specialty.toLowerCase().replace(/\s+/g, '-')}`}
+                          >
+                            {specialty}
+                          </Badge>
+                        ))}
+                        {(result.knownFor as string[]).length > 3 && (
+                          <Badge variant="secondary" className="text-xs">
+                            +{(result.knownFor as string[]).length - 3}
+                          </Badge>
+                        )}
+                      </div>
                     )}
                   </CardContent>
                 </Card>

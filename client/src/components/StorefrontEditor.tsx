@@ -362,7 +362,7 @@ function ProfileTab({ business, onUpdate, isPending }: { business: Business; onU
   const [knownFor, setKnownFor] = useState<string[]>((business as any).knownFor || []);
 
   const categorySpecialties = SPECIALTY_OPTIONS[business.category] || SPECIALTY_OPTIONS["default"];
-  const allSpecialties = [...new Set([...categorySpecialties, ...SPECIALTY_OPTIONS["default"]])];
+  const allSpecialties = Array.from(new Set([...categorySpecialties, ...SPECIALTY_OPTIONS["default"]]));
 
   const toggleSpecialty = (specialty: string) => {
     setKnownFor(prev => 

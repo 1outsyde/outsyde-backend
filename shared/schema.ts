@@ -1610,6 +1610,7 @@ export const searchIndex = pgTable("search_index", {
   description: text("description"),
   category: text("category"),
   tags: text("tags").array(),
+  knownFor: jsonb("known_for").$type<string[]>().default([]),
   
   // Location data (from parent business/photographer)
   city: text("city"),
