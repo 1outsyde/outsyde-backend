@@ -2,7 +2,13 @@ import jwt from "jsonwebtoken";
 import bcrypt from "bcrypt";
 import type { Request, Response, NextFunction } from "express";
 
-const JWT_SECRET = process.env.JWT_SECRET || process.env.SESSION_SECRET || "outsyde-jwt-secret-change-in-production";
+const JWT_SECRET: string = (() => {
+  const secret = process.env.JWT_SECRET || process.env.SESSION_SECRET;
+  if (!secret) {
+    throw new Error("JWT_SECRET or SESSION_SECRET environment variable is required");
+  }
+  return secret;
+})();
 const JWT_REFRESH_SECRET = process.env.JWT_REFRESH_SECRET || JWT_SECRET + "-refresh";
 
 const ACCESS_TOKEN_EXPIRY = "1h";
