@@ -455,11 +455,25 @@ export default function SignupForm({ onComplete, isVendor = false }: SignupFormP
   };
 
   const canProceed = () => {
+    // Vendor step 1: Account info
+    if (isVendor && currentStep === 1) {
+      return !!formData.name && !!formData.email && !!formData.password && formData.password.length >= 8;
+    }
+    // Vendor step 2: Business Info (businessName and businessCategory are required)
+    if (isVendor && currentStep === 2) {
+      return !!formData.businessName && !!formData.businessCategory;
+    }
+    // Vendor step 3: What you offer
     if (isVendor && currentStep === 3) {
       return !!formData.offerType;
     }
+    // Vendor step 7: Subscription tier selection
     if (isVendor && currentStep === 7) {
       return !!formData.selectedTierId;
+    }
+    // Customer step 1: Account info
+    if (!isVendor && currentStep === 1) {
+      return !!formData.name && !!formData.email && !!formData.password && formData.password.length >= 8;
     }
     return true;
   };
