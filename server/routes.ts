@@ -1183,71 +1183,6 @@ export async function registerRoutes(
     }
   });
 
-  // Get products from Stripe
-  app.get("/api/stripe/products", async (req, res) => {
-    try {
-      const products = await stripeService.getProductsWithPrices();
-      res.json({ products });
-    } catch (error) {
-      console.error("Get products error:", error);
-      res.status(500).json({ error: "Failed to get products" });
-    }
-  });
-
-  // Create checkout session for vendor subscription
-  // SECURITY: Uses authenticated session to derive user/business - no client-supplied IDs
-  app.post("/api/stripe/checkout/subscription", async (req, res) => {
-    const userId = req.session?.userId;
-    if (!userId) {
-      return res.status(401).json({ error: "Not authenticated" });
-    }
-
-    // Must be a vendor to subscribe
-    if (!req.session?.isVendor) {
-      return res.status(403).json({ error: "Only vendors can subscribe" });
-    }
-
-    try {
-      // Validate request body with Zod
-      const checkoutSchema = z.object({
-        priceId: z.string().min(1, "Price ID is required"),
-      });
-      const { priceId } = checkoutSchema.parse(req.body);
-
-      // Derive user from authenticated session - never from client input
-      const user = await storage.getUser(userId);
-      if (!user) {
-        return res.status(404).json({ error: "User not found" });
-      }
-
-      // Create Stripe customer using authenticated user's info
-      const customer = await stripeService.createCustomer(user.email, userId, user.name);
-
-      // Derive business from authenticated user - never from client input
-      const business = await storage.getBusinessByOwnerId(userId);
-      if (!business) {
-        return res.status(404).json({ error: "Business not found" });
-      }
-
-      const baseUrl = `https://${process.env.REPLIT_DOMAINS?.split(',')[0]}`;
-      const session = await stripeService.createVendorSubscriptionCheckout(
-        customer.id,
-        priceId,
-        `${baseUrl}/vendor/dashboard?subscription=success`,
-        `${baseUrl}/vendor/dashboard?subscription=cancelled`,
-        business.id
-      );
-
-      res.json({ url: session.url });
-    } catch (error) {
-      if (error instanceof z.ZodError) {
-        return res.status(400).json({ error: "Invalid data", details: error.errors });
-      }
-      console.error("Create subscription checkout error:", error);
-      res.status(500).json({ error: "Failed to create checkout session" });
-    }
-  });
-
   // ==================== VENDOR SUBSCRIPTION & BENEFITS ROUTES ====================
 
   // Get vendor's subscription details
@@ -1870,12 +1805,7 @@ export async function registerRoutes(
     }
 
     try {
-      // Check subscription status
-      const subCheck = await requireActiveVendorSubscription(userId);
-      if (!subCheck.allowed) {
-        return res.status(403).json({ error: subCheck.error });
-      }
-
+      // Vendors can create availability before subscribing (content hidden until subscription active)
       const business = await storage.getBusinessByOwnerId(userId);
       if (!business) {
         return res.status(404).json({ error: "No business found" });
@@ -1916,12 +1846,7 @@ export async function registerRoutes(
     }
 
     try {
-      // Check subscription status
-      const subCheck = await requireActiveVendorSubscription(userId);
-      if (!subCheck.allowed) {
-        return res.status(403).json({ error: subCheck.error });
-      }
-
+      // Vendors can update availability before subscribing (content hidden until subscription active)
       const business = await storage.getBusinessByOwnerId(userId);
       if (!business) {
         return res.status(404).json({ error: "No business found" });
@@ -1965,12 +1890,7 @@ export async function registerRoutes(
     }
 
     try {
-      // Check subscription status
-      const subCheck = await requireActiveVendorSubscription(userId);
-      if (!subCheck.allowed) {
-        return res.status(403).json({ error: subCheck.error });
-      }
-
+      // Vendors can delete availability before subscribing (content hidden until subscription active)
       const business = await storage.getBusinessByOwnerId(userId);
       if (!business) {
         return res.status(404).json({ error: "No business found" });
@@ -2040,12 +1960,7 @@ export async function registerRoutes(
     }
 
     try {
-      // Check subscription status
-      const subCheck = await requireActiveVendorSubscription(userId);
-      if (!subCheck.allowed) {
-        return res.status(403).json({ error: subCheck.error });
-      }
-
+      // Vendors can create products before subscribing (content hidden until subscription active)
       const business = await storage.getBusinessByOwnerId(userId);
       if (!business) {
         return res.status(404).json({ error: "No business found" });
@@ -2094,12 +2009,7 @@ export async function registerRoutes(
     }
 
     try {
-      // Check subscription status
-      const subCheck = await requireActiveVendorSubscription(userId);
-      if (!subCheck.allowed) {
-        return res.status(403).json({ error: subCheck.error });
-      }
-
+      // Vendors can update products before subscribing (content hidden until subscription active)
       const business = await storage.getBusinessByOwnerId(userId);
       if (!business) {
         return res.status(404).json({ error: "No business found" });
@@ -2145,12 +2055,7 @@ export async function registerRoutes(
     }
 
     try {
-      // Check subscription status
-      const subCheck = await requireActiveVendorSubscription(userId);
-      if (!subCheck.allowed) {
-        return res.status(403).json({ error: subCheck.error });
-      }
-
+      // Vendors can delete products before subscribing (content hidden until subscription active)
       const business = await storage.getBusinessByOwnerId(userId);
       if (!business) {
         return res.status(404).json({ error: "No business found" });
@@ -2198,12 +2103,7 @@ export async function registerRoutes(
     }
 
     try {
-      // Check subscription status
-      const subCheck = await requireActiveVendorSubscription(userId);
-      if (!subCheck.allowed) {
-        return res.status(403).json({ error: subCheck.error });
-      }
-
+      // Vendors can create services before subscribing (content hidden until subscription active)
       const business = await storage.getBusinessByOwnerId(userId);
       if (!business) {
         return res.status(404).json({ error: "No business found" });
@@ -2247,12 +2147,7 @@ export async function registerRoutes(
     }
 
     try {
-      // Check subscription status
-      const subCheck = await requireActiveVendorSubscription(userId);
-      if (!subCheck.allowed) {
-        return res.status(403).json({ error: subCheck.error });
-      }
-
+      // Vendors can update services before subscribing (content hidden until subscription active)
       const business = await storage.getBusinessByOwnerId(userId);
       if (!business) {
         return res.status(404).json({ error: "No business found" });
@@ -2293,12 +2188,7 @@ export async function registerRoutes(
     }
 
     try {
-      // Check subscription status
-      const subCheck = await requireActiveVendorSubscription(userId);
-      if (!subCheck.allowed) {
-        return res.status(403).json({ error: subCheck.error });
-      }
-
+      // Vendors can delete services before subscribing (content hidden until subscription active)
       const business = await storage.getBusinessByOwnerId(userId);
       if (!business) {
         return res.status(404).json({ error: "No business found" });

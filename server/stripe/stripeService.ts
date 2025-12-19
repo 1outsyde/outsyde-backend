@@ -4,7 +4,7 @@
 import { getUncachableStripeClient } from "./stripeClient";
 import { db } from "../db";
 import { subscriptionTiers } from "@shared/schema";
-import { asc } from "drizzle-orm";
+import { asc, eq } from "drizzle-orm";
 
 export class StripeService {
   // =========================
@@ -155,6 +155,62 @@ export class StripeService {
       .from(subscriptionTiers)
       .orderBy(asc(subscriptionTiers.sortOrder));
     return tiers;
+  }
+
+  // =========================
+  // SUBSCRIPTION CHECKOUT
+  // =========================
+
+  async createTierSubscriptionCheckout(
+    customerId: string,
+    tierId: string,
+    successUrl: string,
+    cancelUrl: string,
+    vendorId: string,
+    businessId: string
+  ) {
+    const stripe = await getUncachableStripeClient();
+
+    // Get the tier to find the Stripe price ID
+    const [tier] = await db.select()
+      .from(subscriptionTiers)
+      .where(eq(subscriptionTiers.id, tierId));
+
+    if (!tier) {
+      throw new Error(`Subscription tier not found: ${tierId}`);
+    }
+
+    if (!tier.stripePriceId) {
+      throw new Error(`Subscription tier ${tierId} has no Stripe price ID configured`);
+    }
+
+    // Create a subscription checkout session (not a one-time payment)
+    return stripe.checkout.sessions.create({
+      customer: customerId,
+      mode: "subscription",
+      payment_method_types: ["card"],
+      line_items: [
+        {
+          price: tier.stripePriceId,
+          quantity: 1,
+        },
+      ],
+      success_url: successUrl,
+      cancel_url: cancelUrl,
+      metadata: {
+        type: "vendor_subscription",
+        vendorId,
+        businessId,
+        tierId,
+      },
+      subscription_data: {
+        metadata: {
+          vendorId,
+          businessId,
+          tierId,
+        },
+      },
+    });
   }
 }
 
