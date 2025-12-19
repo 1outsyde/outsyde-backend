@@ -1823,6 +1823,63 @@ export async function registerRoutes(
     }
   });
 
+  // ==================== UNIFIED SEARCH ====================
+
+  // Unified search across products, services, businesses, photographers
+  app.get("/api/unified-search", async (req, res) => {
+    try {
+      const { 
+        q, 
+        city, 
+        category, 
+        types, 
+        lat, 
+        lng,
+        limit,
+        offset 
+      } = req.query;
+
+      const entityTypes = types ? (types as string).split(',') : undefined;
+
+      const results = await storage.unifiedSearch({
+        query: q as string | undefined,
+        city: city as string | undefined,
+        category: category as string | undefined,
+        entityTypes,
+        userLatitude: lat ? parseFloat(lat as string) : undefined,
+        userLongitude: lng ? parseFloat(lng as string) : undefined,
+        limit: limit ? parseInt(limit as string) : 50,
+        offset: offset ? parseInt(offset as string) : 0,
+      });
+
+      res.json(results);
+    } catch (error) {
+      console.error("Unified search error:", error);
+      res.status(500).json({ error: "Failed to search" });
+    }
+  });
+
+  // Admin: Rebuild search index
+  app.post("/api/admin/rebuild-search-index", async (req, res) => {
+    const userId = req.session?.userId;
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    const user = await storage.getUser(userId);
+    if (!user?.isAdmin) {
+      return res.status(403).json({ error: "Admin access required" });
+    }
+
+    try {
+      await storage.rebuildSearchIndex();
+      res.json({ success: true, message: "Search index rebuilt successfully" });
+    } catch (error) {
+      console.error("Rebuild search index error:", error);
+      res.status(500).json({ error: "Failed to rebuild search index" });
+    }
+  });
+
   // ==================== PROFILE COMMENTS ====================
 
   // Get comments for a business or photographer profile

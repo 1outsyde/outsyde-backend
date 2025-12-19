@@ -81,6 +81,8 @@ import {
   type InsertInfluencerEarningLedger,
   type InfluencerPayout,
   type InsertInfluencerPayout,
+  type SearchIndexEntry,
+  type InsertSearchIndexEntry,
   users,
   businesses,
   cities,
@@ -129,6 +131,7 @@ import {
   influencerReferralEvents,
   influencerEarningLedger,
   influencerPayouts,
+  searchIndex,
   isValidOrderTransition,
   isValidBookingTransition
 } from "@shared/schema";
@@ -554,6 +557,24 @@ export interface IStorage {
   getInfluencerPayout(id: string): Promise<InfluencerPayout | undefined>;
   getInfluencerPayouts(influencerId: string): Promise<InfluencerPayout[]>;
   updateInfluencerPayout(id: string, updates: Partial<InfluencerPayout>): Promise<InfluencerPayout | undefined>;
+
+  // Unified Search Index
+  upsertSearchIndexEntry(entry: InsertSearchIndexEntry): Promise<SearchIndexEntry>;
+  deleteSearchIndexEntry(entityType: string, entityId: string): Promise<void>;
+  rebuildSearchIndex(): Promise<void>;
+  unifiedSearch(params: {
+    query?: string;
+    city?: string;
+    category?: string;
+    entityTypes?: string[];
+    userLatitude?: number;
+    userLongitude?: number;
+    limit?: number;
+    offset?: number;
+  }): Promise<{
+    results: SearchIndexEntry[];
+    total: number;
+  }>;
 
   seedInitialData(): Promise<void>;
 }
@@ -2111,6 +2132,248 @@ export class DatabaseStorage implements IStorage {
   async getMessageReport(id: string): Promise<MessageReport | undefined> {
     const result = await db.select().from(messageReports).where(eq(messageReports.id, id));
     return result[0];
+  }
+
+  // =========================
+  // UNIFIED SEARCH INDEX
+  // =========================
+
+  async upsertSearchIndexEntry(entry: InsertSearchIndexEntry): Promise<SearchIndexEntry> {
+    const existing = await db.select().from(searchIndex)
+      .where(and(
+        eq(searchIndex.entityType, entry.entityType),
+        eq(searchIndex.entityId, entry.entityId)
+      ));
+    
+    if (existing.length > 0) {
+      const [updated] = await db.update(searchIndex)
+        .set({ ...entry, updatedAt: new Date() })
+        .where(eq(searchIndex.id, existing[0].id))
+        .returning();
+      return updated;
+    }
+    
+    const [created] = await db.insert(searchIndex).values({
+      id: randomUUID(),
+      ...entry,
+    }).returning();
+    return created;
+  }
+
+  async deleteSearchIndexEntry(entityType: string, entityId: string): Promise<void> {
+    await db.delete(searchIndex)
+      .where(and(
+        eq(searchIndex.entityType, entityType),
+        eq(searchIndex.entityId, entityId)
+      ));
+  }
+
+  async rebuildSearchIndex(): Promise<void> {
+    await db.delete(searchIndex);
+    
+    const allBusinesses = await db.select().from(businesses);
+    for (const business of allBusinesses) {
+      await this.upsertSearchIndexEntry({
+        entityType: 'business',
+        entityId: business.id,
+        name: business.name,
+        description: business.description || undefined,
+        category: business.category,
+        city: business.city || undefined,
+        state: business.state || undefined,
+        latitude: business.latitude || undefined,
+        longitude: business.longitude || undefined,
+        rating: business.rating || 0,
+        reviewCount: business.reviewCount || 0,
+        imageUrl: business.logoImage || business.coverImage || undefined,
+        isActive: business.subscriptionActive || false,
+        hasActiveSubscription: business.subscriptionActive || false,
+      });
+      
+      const products = await db.select().from(vendorProducts)
+        .where(and(
+          eq(vendorProducts.businessId, business.id),
+          eq(vendorProducts.isActive, true),
+          eq(vendorProducts.status, 'live')
+        ));
+      for (const product of products) {
+        await this.upsertSearchIndexEntry({
+          entityType: 'product',
+          entityId: product.id,
+          parentType: 'business',
+          parentId: business.id,
+          name: product.name,
+          description: product.description || undefined,
+          category: product.category || undefined,
+          tags: product.tags || undefined,
+          city: business.city || undefined,
+          state: business.state || undefined,
+          latitude: business.latitude || undefined,
+          longitude: business.longitude || undefined,
+          rating: business.rating || 0,
+          reviewCount: business.reviewCount || 0,
+          priceCents: product.price,
+          imageUrl: product.imageUrl || undefined,
+          isActive: product.isActive || false,
+          hasActiveSubscription: business.subscriptionActive || false,
+        });
+      }
+      
+      const services = await db.select().from(vendorServices)
+        .where(and(
+          eq(vendorServices.businessId, business.id),
+          eq(vendorServices.isActive, true),
+          eq(vendorServices.status, 'live')
+        ));
+      for (const service of services) {
+        await this.upsertSearchIndexEntry({
+          entityType: 'service',
+          entityId: service.id,
+          parentType: 'business',
+          parentId: business.id,
+          name: service.name,
+          description: service.description || undefined,
+          category: service.category || undefined,
+          city: business.city || undefined,
+          state: business.state || undefined,
+          latitude: business.latitude || undefined,
+          longitude: business.longitude || undefined,
+          rating: business.rating || 0,
+          reviewCount: business.reviewCount || 0,
+          priceCents: service.price,
+          isActive: service.isActive || false,
+          hasActiveSubscription: business.subscriptionActive || false,
+        });
+      }
+    }
+    
+    const allPhotographers = await db.select().from(photographers);
+    for (const photographer of allPhotographers) {
+      await this.upsertSearchIndexEntry({
+        entityType: 'photographer',
+        entityId: photographer.id,
+        name: photographer.displayName,
+        description: photographer.bio || undefined,
+        category: photographer.specialties?.join(', ') || undefined,
+        city: photographer.city || undefined,
+        state: photographer.state || undefined,
+        latitude: photographer.latitude || undefined,
+        longitude: photographer.longitude || undefined,
+        rating: photographer.rating || 0,
+        reviewCount: photographer.reviewCount || 0,
+        priceCents: photographer.hourlyRate * 100,
+        imageUrl: photographer.logoImage || photographer.coverImage || undefined,
+        isActive: photographer.stripeOnboardingComplete || false,
+      });
+      
+      const photoServices = await db.select().from(photographerServices)
+        .where(and(
+          eq(photographerServices.photographerId, photographer.id),
+          eq(photographerServices.isActive, true),
+          eq(photographerServices.status, 'live')
+        ));
+      for (const service of photoServices) {
+        await this.upsertSearchIndexEntry({
+          entityType: 'photographer_service',
+          entityId: service.id,
+          parentType: 'photographer',
+          parentId: photographer.id,
+          name: service.name,
+          description: service.description || undefined,
+          category: service.category || undefined,
+          city: photographer.city || undefined,
+          state: photographer.state || undefined,
+          latitude: photographer.latitude || undefined,
+          longitude: photographer.longitude || undefined,
+          rating: photographer.rating || 0,
+          reviewCount: photographer.reviewCount || 0,
+          priceCents: service.priceCents || (service.hourlyRateCents ? service.hourlyRateCents : undefined),
+          isActive: service.isActive || false,
+        });
+      }
+    }
+    
+    console.log("[search] Rebuilt unified search index");
+  }
+
+  async unifiedSearch(params: {
+    query?: string;
+    city?: string;
+    category?: string;
+    entityTypes?: string[];
+    userLatitude?: number;
+    userLongitude?: number;
+    limit?: number;
+    offset?: number;
+  }): Promise<{ results: SearchIndexEntry[]; total: number }> {
+    const { query, city, category, entityTypes, userLatitude, userLongitude, limit = 50, offset = 0 } = params;
+    
+    let conditions: any[] = [eq(searchIndex.isActive, true)];
+    
+    if (query) {
+      conditions.push(
+        or(
+          ilike(searchIndex.name, `%${query}%`),
+          ilike(searchIndex.description, `%${query}%`),
+          ilike(searchIndex.category, `%${query}%`)
+        )
+      );
+    }
+    
+    if (city) {
+      conditions.push(ilike(searchIndex.city, `%${city}%`));
+    }
+    
+    if (category) {
+      conditions.push(ilike(searchIndex.category, `%${category}%`));
+    }
+    
+    if (entityTypes && entityTypes.length > 0) {
+      conditions.push(
+        or(...entityTypes.map(t => eq(searchIndex.entityType, t)))
+      );
+    }
+    
+    const countResult = await db.select({ count: sql<number>`count(*)` })
+      .from(searchIndex)
+      .where(and(...conditions));
+    const total = Number(countResult[0]?.count || 0);
+    
+    let orderBy: any[];
+    if (userLatitude !== undefined && userLongitude !== undefined) {
+      const distanceExpr = sql`
+        CASE 
+          WHEN ${searchIndex.latitude} IS NOT NULL AND ${searchIndex.longitude} IS NOT NULL 
+          THEN (
+            6371 * acos(
+              cos(radians(${userLatitude})) * cos(radians(${searchIndex.latitude})) *
+              cos(radians(${searchIndex.longitude}) - radians(${userLongitude})) +
+              sin(radians(${userLatitude})) * sin(radians(${searchIndex.latitude}))
+            )
+          )
+          ELSE 99999
+        END
+      `;
+      orderBy = [
+        desc(searchIndex.hasActiveSubscription),
+        desc(searchIndex.rating),
+        asc(distanceExpr)
+      ];
+    } else {
+      orderBy = [
+        desc(searchIndex.hasActiveSubscription),
+        desc(searchIndex.rating),
+        desc(searchIndex.reviewCount)
+      ];
+    }
+    
+    const results = await db.select().from(searchIndex)
+      .where(and(...conditions))
+      .orderBy(...orderBy)
+      .limit(limit)
+      .offset(offset);
+    
+    return { results, total };
   }
 
   // =========================

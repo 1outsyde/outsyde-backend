@@ -1,5 +1,5 @@
 import {
-  pgTable, text, varchar, boolean, integer, jsonb, timestamp, index
+  pgTable, text, varchar, boolean, integer, jsonb, timestamp, index, doublePrecision
 } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
@@ -143,6 +143,8 @@ export const businesses = pgTable("businesses", {
   city: text("city"),
   state: text("state"),
   zipCode: text("zip_code"),
+  latitude: doublePrecision("latitude"),
+  longitude: doublePrecision("longitude"),
 
   websiteUrl: text("website_url"),
   socialMedia: text("social_media"),
@@ -275,6 +277,8 @@ export const photographers = pgTable("photographers", {
   bio: text("bio"),
   city: text("city"),
   state: text("state"),
+  latitude: doublePrecision("latitude"),
+  longitude: doublePrecision("longitude"),
   portfolioUrl: text("portfolio_url"),
 
   hourlyRate: integer("hourly_rate").notNull(),
@@ -1586,6 +1590,54 @@ export function isValidBookingTransition(currentStatus: string, newStatus: strin
   const validTransitions = BOOKING_STATUS_TRANSITIONS[currentStatus] || [];
   return validTransitions.includes(newStatus);
 }
+
+/* =====================================================
+   UNIFIED SEARCH INDEX
+===================================================== */
+export const searchIndex = pgTable("search_index", {
+  id: varchar("id", { length: 36 }).primaryKey().default(sql`gen_random_uuid()`),
+  
+  entityType: text("entity_type").notNull(), // 'product' | 'service' | 'business' | 'photographer' | 'photographer_service'
+  entityId: varchar("entity_id", { length: 36 }).notNull(),
+  
+  // Parent reference for products/services
+  parentType: text("parent_type"), // 'business' | 'photographer'
+  parentId: varchar("parent_id", { length: 36 }),
+  
+  // Searchable text fields
+  name: text("name").notNull(),
+  description: text("description"),
+  category: text("category"),
+  tags: text("tags").array(),
+  
+  // Location data (from parent business/photographer)
+  city: text("city"),
+  state: text("state"),
+  latitude: doublePrecision("latitude"),
+  longitude: doublePrecision("longitude"),
+  
+  // Rating data
+  rating: integer("rating").default(0),
+  reviewCount: integer("review_count").default(0),
+  
+  // Pricing (in cents)
+  priceCents: integer("price_cents"),
+  
+  // Image for display
+  imageUrl: text("image_url"),
+  
+  // Active status
+  isActive: boolean("is_active").default(true),
+  
+  // Subscription boost for businesses
+  hasActiveSubscription: boolean("has_active_subscription").default(false),
+  
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+
+export const insertSearchIndexSchema = createInsertSchema(searchIndex).omit({ id: true, updatedAt: true });
+export type SearchIndexEntry = typeof searchIndex.$inferSelect;
+export type InsertSearchIndexEntry = z.infer<typeof insertSearchIndexSchema>;
 
 /* =====================================================
    AGE RANGE UTILITY - DOB Privacy
