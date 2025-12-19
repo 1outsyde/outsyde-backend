@@ -376,6 +376,81 @@ export class StripeService {
       metadata: params.metadata,
     });
   }
+
+  // =========================
+  // MULTI-VENDOR CART CHECKOUT (Single Payment, Multiple Transfers)
+  // =========================
+
+  /**
+   * Create a single checkout session for all cart items from multiple vendors.
+   * Payment is collected by the platform, then transfers are made to each vendor after payment succeeds.
+   * This provides a single payment experience for multi-vendor carts.
+   */
+  async createMultiVendorCartCheckout(params: {
+    customerId: string;
+    lineItems: Array<{
+      stripePriceId: string;
+      quantity: number;
+    }>;
+    successUrl: string;
+    cancelUrl: string;
+    metadata: Record<string, string>;
+  }) {
+    const stripe = await getUncachableStripeClient();
+
+    // For multi-vendor, we collect payment on the platform and distribute via transfers later
+    return stripe.checkout.sessions.create({
+      customer: params.customerId,
+      mode: "payment",
+      payment_method_types: ["card"],
+      line_items: params.lineItems.map(item => ({
+        price: item.stripePriceId,
+        quantity: item.quantity,
+      })),
+      success_url: params.successUrl,
+      cancel_url: params.cancelUrl,
+      metadata: params.metadata,
+    });
+  }
+
+  /**
+   * Transfer funds to a connected account after payment is received.
+   * Used for multi-vendor checkout to split payment between vendors.
+   * Transfers are made from the platform's available balance (no source_transaction).
+   */
+  async transferToVendor(params: {
+    amountInCents: number;
+    connectedAccountId: string;
+    orderId: string;
+    orderGroupId?: string;
+  }) {
+    const stripe = await getUncachableStripeClient();
+
+    // Use transfer_group to link related transfers together for reporting
+    const transferGroup = params.orderGroupId ? `order_group_${params.orderGroupId}` : `order_${params.orderId}`;
+
+    return stripe.transfers.create({
+      amount: params.amountInCents,
+      currency: "usd",
+      destination: params.connectedAccountId,
+      transfer_group: transferGroup,
+      metadata: {
+        orderId: params.orderId,
+        orderGroupId: params.orderGroupId || '',
+        type: 'multi_vendor_cart_transfer',
+      },
+    });
+  }
+
+  /**
+   * Retrieve a checkout session to get charge details after payment
+   */
+  async getCheckoutSession(sessionId: string) {
+    const stripe = await getUncachableStripeClient();
+    return stripe.checkout.sessions.retrieve(sessionId, {
+      expand: ['payment_intent', 'payment_intent.latest_charge'],
+    });
+  }
 }
 
 export const stripeService = new StripeService();

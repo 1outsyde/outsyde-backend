@@ -3255,7 +3255,8 @@ export async function registerRoutes(
     }
   });
 
-  // Cart checkout - create Stripe checkout sessions for cart items (supports multi-vendor)
+  // Cart checkout - create single Stripe checkout session for all cart items (supports multi-vendor)
+  // For multi-vendor carts, payment is collected once and then split between vendors via transfers
   app.post("/api/cart/checkout", async (req, res) => {
     const userId = req.session?.userId;
     if (!userId) {
@@ -3343,31 +3344,37 @@ export async function registerRoutes(
         orderGroupId = orderGroup.id;
       }
 
-      // Create orders and checkout sessions for each vendor
-      const createdOrders: Array<{ orderId: string; businessId: string; businessName: string; session: any }> = [];
+      // Build all line items for single checkout session
+      const allLineItems: Array<{ stripePriceId: string; quantity: number }> = [];
+      const createdOrders: Array<{ orderId: string; businessId: string; businessName: string; vendorNet: number }> = [];
+      let totalAmountInCents = 0;
+      let totalPlatformFeeInCents = 0;
 
+      // Create order records for each vendor (but single checkout session)
       for (const businessId of businessList) {
         const vendorItems = itemsByVendor.get(businessId)!;
         const business = await storage.getBusiness(businessId);
         
         // Calculate totals for this vendor
         let vendorTotalInCents = 0;
-        const lineItems: Array<{ stripePriceId: string; quantity: number }> = [];
         
         for (const item of vendorItems) {
           const product = productMap.get(item.productId);
           vendorTotalInCents += product.price * item.quantity;
-          lineItems.push({
+          allLineItems.push({
             stripePriceId: product.stripePriceId!,
             quantity: item.quantity,
           });
         }
 
+        totalAmountInCents += vendorTotalInCents;
+
         // Platform fee is 4% for businesses
         const platformFeeInCents = Math.round(vendorTotalInCents * 0.04);
+        totalPlatformFeeInCents += platformFeeInCents;
         const vendorNet = vendorTotalInCents - platformFeeInCents;
 
-        // Create order record
+        // Create order record (pending - will be marked paid after single payment succeeds)
         const order = await storage.createOrder({
           customerId: userId,
           businessId,
@@ -3384,68 +3391,99 @@ export async function registerRoutes(
           })),
         });
 
-        // Determine success URL (for multi-vendor, redirect to continue checkout; for single, go to success page)
-        const successUrl = isMultiVendor
-          ? `${baseUrl}/checkout/continue?orderGroupId=${orderGroupId}&completedOrderId=${order.id}`
-          : `${baseUrl}/order-success?orderId=${order.id}`;
-
-        // Check if vendor has Stripe Connect account
-        const vendor = await storage.getUserByBusinessOwnerId(businessId);
-        let session;
-        
-        if (vendor?.stripeConnectedAccountId) {
-          session = await stripeService.createCartCheckout({
-            customerId: stripeCustomerId,
-            lineItems,
-            successUrl,
-            cancelUrl: `${baseUrl}/cart?cancelled=true`,
-            connectedAccountId: vendor.stripeConnectedAccountId,
-            platformFeeInCents,
-            metadata: {
-              type: 'cart_checkout',
-              orderId: order.id,
-              orderGroupId: orderGroupId || '',
-              userId,
-              businessId,
-              isMultiVendor: isMultiVendor ? 'true' : 'false',
-            },
-          });
-        } else {
-          session = await stripeService.createCartCheckoutPlatform({
-            customerId: stripeCustomerId,
-            lineItems,
-            successUrl,
-            cancelUrl: `${baseUrl}/cart?cancelled=true`,
-            metadata: {
-              type: 'cart_checkout',
-              orderId: order.id,
-              orderGroupId: orderGroupId || '',
-              userId,
-              businessId,
-              isMultiVendor: isMultiVendor ? 'true' : 'false',
-            },
-          });
-        }
-
-        // Update order with Stripe checkout session ID
-        await storage.updateOrder(order.id, {
-          stripePaymentIntentId: session.id,
-          stripeCheckoutSessionId: session.id,
-        });
-
         createdOrders.push({
           orderId: order.id,
           businessId,
           businessName: business?.name || 'Unknown',
-          session,
+          vendorNet,
         });
       }
 
-      // Return the first vendor's checkout URL
-      const firstOrder = createdOrders[0];
+      // Determine success URL - always go to success page (single payment = no continuation flow)
+      const successUrl = orderGroupId
+        ? `${baseUrl}/order-success?orderGroupId=${orderGroupId}`
+        : `${baseUrl}/order-success?orderId=${createdOrders[0].orderId}`;
+
+      // Create single checkout session for all items
+      // For single vendor with connected account, use destination charges
+      // For multi-vendor OR vendors without connected accounts, collect on platform and transfer later
+      let session;
+      
+      if (!isMultiVendor) {
+        // Single vendor - check if they have Stripe Connect
+        const singleBusinessId = businessList[0];
+        const vendor = await storage.getUserByBusinessOwnerId(singleBusinessId);
+        
+        if (vendor?.stripeConnectedAccountId) {
+          // Use destination charges for single vendor with connected account
+          session = await stripeService.createCartCheckout({
+            customerId: stripeCustomerId,
+            lineItems: allLineItems,
+            successUrl,
+            cancelUrl: `${baseUrl}/cart?cancelled=true`,
+            connectedAccountId: vendor.stripeConnectedAccountId,
+            platformFeeInCents: totalPlatformFeeInCents,
+            metadata: {
+              type: 'cart_checkout',
+              orderId: createdOrders[0].orderId,
+              orderGroupId: '',
+              userId,
+              businessId: singleBusinessId,
+              isMultiVendor: 'false',
+            },
+          });
+        } else {
+          // Platform checkout for single vendor without connected account
+          session = await stripeService.createCartCheckoutPlatform({
+            customerId: stripeCustomerId,
+            lineItems: allLineItems,
+            successUrl,
+            cancelUrl: `${baseUrl}/cart?cancelled=true`,
+            metadata: {
+              type: 'cart_checkout',
+              orderId: createdOrders[0].orderId,
+              orderGroupId: '',
+              userId,
+              businessId: singleBusinessId,
+              isMultiVendor: 'false',
+            },
+          });
+        }
+      } else {
+        // Multi-vendor: Single checkout session, platform collects payment
+        // Transfers to vendors happen via webhook after payment succeeds
+        session = await stripeService.createMultiVendorCartCheckout({
+          customerId: stripeCustomerId,
+          lineItems: allLineItems,
+          successUrl,
+          cancelUrl: `${baseUrl}/cart?cancelled=true`,
+          metadata: {
+            type: 'multi_vendor_cart_checkout',
+            orderGroupId: orderGroupId!,
+            userId,
+            orderIds: createdOrders.map(o => o.orderId).join(','),
+            vendorData: JSON.stringify(createdOrders.map(o => ({
+              orderId: o.orderId,
+              businessId: o.businessId,
+              vendorNet: o.vendorNet,
+            }))),
+            isMultiVendor: 'true',
+          },
+        });
+      }
+
+      // Update all orders with Stripe checkout session ID
+      for (const orderData of createdOrders) {
+        await storage.updateOrder(orderData.orderId, {
+          stripePaymentIntentId: session.id,
+          stripeCheckoutSessionId: session.id,
+        });
+      }
+
+      // Return single checkout URL
       res.json({
-        url: firstOrder.session.url,
-        orderId: firstOrder.orderId,
+        url: session.url,
+        orderId: createdOrders[0].orderId,
         orderGroupId,
         isMultiVendor,
         totalVendors: businessList.length,

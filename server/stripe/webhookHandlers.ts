@@ -4,6 +4,7 @@ import { db } from "../db";
 import { fulfillmentTasks, subscriptionTiers } from "@shared/schema";
 import { sql, eq } from "drizzle-orm";
 import { NotificationTriggers } from "../notificationService";
+import { stripeService } from "./stripeService";
 
 export class WebhookHandlers {
   static async processWebhook(
@@ -45,6 +46,16 @@ export class WebhookHandlers {
 
     if (metadata.type === "ala_carte_purchase") {
       await this.handleAlaCartePurchaseCompleted(session);
+      return;
+    }
+
+    if (metadata.type === "cart_checkout") {
+      await this.handleCartCheckoutCompleted(session);
+      return;
+    }
+
+    if (metadata.type === "multi_vendor_cart_checkout") {
+      await this.handleMultiVendorCartCheckoutCompleted(session);
       return;
     }
 
@@ -171,6 +182,154 @@ export class WebhookHandlers {
 
     // Complete referral bonus if this is the vendor's first paid transaction
     await this.tryCompleteReferral(purchase.vendorId, purchaseId, 'ala_carte_purchase');
+  }
+
+  /* =====================================================
+     CART CHECKOUT (Single vendor)
+  ===================================================== */
+  static async handleCartCheckoutCompleted(session: any) {
+    const { orderId, userId, businessId } = session.metadata || {};
+    if (!orderId) return;
+
+    // Update order status to paid
+    const order = await storage.getOrder(orderId);
+    if (!order || order.status === 'paid') return;
+
+    await storage.updateOrder(orderId, {
+      status: 'paid',
+      stripePaymentIntentId: session.payment_intent,
+    });
+
+    // Clear the user's cart
+    if (userId) {
+      await storage.clearCart(userId);
+    }
+
+    // Award points to the customer
+    const user = await this.findUserByStripeCustomer(session.customer);
+    if (user) {
+      await storage.earnPoints({
+        userId: user.id,
+        dollarAmountCents: session.amount_total,
+        referenceType: "cart_order",
+        referenceId: orderId,
+        description: "Points earned from purchase",
+      });
+
+      // Complete referral bonus if this is the user's first transaction
+      await this.tryCompleteReferral(user.id, orderId, 'cart_order');
+    }
+
+    // Notify the business of the new order
+    const business = await storage.getBusiness(businessId);
+    const vendor = await storage.getUserByBusinessOwnerId(businessId);
+    if (vendor && order) {
+      const customer = await storage.getUser(order.customerId);
+      const itemCount = order.items?.length || 1;
+      await NotificationTriggers.newOrderReceived({
+        vendorUserId: vendor.id,
+        orderId,
+        customerName: customer?.name || customer?.email || 'Customer',
+        orderTotal: order.totalAmount,
+        itemCount,
+      });
+    }
+
+    console.log(`Cart checkout completed: Order ${orderId} marked as paid`);
+  }
+
+  /* =====================================================
+     MULTI-VENDOR CART CHECKOUT (Single payment, multiple transfers)
+  ===================================================== */
+  static async handleMultiVendorCartCheckoutCompleted(session: any) {
+    const { orderGroupId, userId, vendorData } = session.metadata || {};
+    if (!orderGroupId) return;
+
+    // Parse the vendor data to get order details
+    let vendorOrders: Array<{ orderId: string; businessId: string; vendorNet: number }> = [];
+    try {
+      vendorOrders = JSON.parse(vendorData || '[]');
+    } catch (e) {
+      console.error('Failed to parse vendor data:', e);
+      return;
+    }
+
+    // Process each order and initiate transfers
+    for (const vendorOrder of vendorOrders) {
+      const { orderId, businessId, vendorNet } = vendorOrder;
+      
+      // Update order status to paid
+      const order = await storage.getOrder(orderId);
+      if (!order || order.status === 'paid') continue;
+
+      await storage.updateOrder(orderId, {
+        status: 'paid',
+        stripePaymentIntentId: session.payment_intent,
+      });
+
+      // Get the vendor's connected account for transfer
+      const vendorUser = await storage.getUserByBusinessOwnerId(businessId);
+      if (vendorUser?.stripeConnectedAccountId && vendorNet > 0) {
+        try {
+          // Transfer the vendor's share to their connected account
+          // Uses platform balance (no source_transaction needed)
+          await stripeService.transferToVendor({
+            amountInCents: vendorNet,
+            connectedAccountId: vendorUser.stripeConnectedAccountId,
+            orderId,
+            orderGroupId,
+          });
+          console.log(`Transferred ${vendorNet} cents to vendor ${vendorUser.id} for order ${orderId}`);
+        } catch (transferError) {
+          console.error(`Failed to transfer to vendor for order ${orderId}:`, transferError);
+          // Mark the order as needing manual transfer review
+          await storage.updateOrder(orderId, {
+            status: 'transfer_failed',
+          });
+        }
+      }
+
+      // Notify the business of the new order
+      if (vendorUser && order) {
+        const customer = await storage.getUser(order.customerId);
+        const itemCount = order.items?.length || 1;
+        await NotificationTriggers.newOrderReceived({
+          vendorUserId: vendorUser.id,
+          orderId,
+          customerName: customer?.name || customer?.email || 'Customer',
+          orderTotal: order.totalAmount,
+          itemCount,
+        });
+      }
+    }
+
+    // Update order group status to completed
+    await storage.updateOrderGroup(orderGroupId, {
+      status: 'completed',
+      completedVendors: vendorOrders.length,
+    });
+
+    // Clear the user's cart
+    if (userId) {
+      await storage.clearCart(userId);
+    }
+
+    // Award points to the customer
+    const user = await this.findUserByStripeCustomer(session.customer);
+    if (user) {
+      await storage.earnPoints({
+        userId: user.id,
+        dollarAmountCents: session.amount_total,
+        referenceType: "multi_vendor_order",
+        referenceId: orderGroupId,
+        description: "Points earned from multi-vendor purchase",
+      });
+
+      // Complete referral bonus if this is the user's first transaction
+      await this.tryCompleteReferral(user.id, orderGroupId, 'multi_vendor_order');
+    }
+
+    console.log(`Multi-vendor checkout completed: Order group ${orderGroupId} with ${vendorOrders.length} orders`);
   }
 
   /* =====================================================
