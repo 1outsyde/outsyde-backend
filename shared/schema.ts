@@ -170,6 +170,7 @@ export const businesses = pgTable("businesses", {
   contactEmail: text("contact_email"),
   contactPhone: text("contact_phone"),
   brandColors: jsonb("brand_colors").$type<{ primary?: string; secondary?: string }>(),
+  knownFor: jsonb("known_for").$type<string[]>().default([]),
 
   hasProducts: boolean("has_products").default(false),
   hasServices: boolean("has_services").default(false),
