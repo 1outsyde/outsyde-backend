@@ -18,6 +18,8 @@ import {
   type InsertAppointment,
   type Order,
   type InsertOrder,
+  type OrderGroup,
+  type InsertOrderGroup,
   type Conversation,
   type InsertConversation,
   type Message,
@@ -75,6 +77,7 @@ import {
   shootBookings,
   appointments,
   orders,
+  orderGroups,
   conversations,
   messages,
   pointTransactions,
@@ -428,9 +431,16 @@ export interface IStorage {
   getUserOrders(userId: string): Promise<Order[]>;
   getUserBookings(userId: string): Promise<ShootBooking[]>;
   getOrder(orderId: string): Promise<Order | undefined>;
+  getOrderByCheckoutSession(sessionId: string): Promise<Order | undefined>;
   getVendorOrders(businessId: string): Promise<Order[]>;
   createOrder(data: InsertOrder): Promise<Order>;
   updateOrder(orderId: string, updates: Partial<Order>): Promise<Order | undefined>;
+  
+  createOrderGroup(data: InsertOrderGroup): Promise<OrderGroup>;
+  getOrderGroup(id: string): Promise<OrderGroup | undefined>;
+  updateOrderGroup(id: string, updates: Partial<OrderGroup>): Promise<OrderGroup | undefined>;
+  getOrderGroupOrders(orderGroupId: string): Promise<Order[]>;
+  getNextPendingOrderInGroup(orderGroupId: string): Promise<Order | undefined>;
   getUserByBusinessOwnerId(businessId: string): Promise<User | undefined>;
   getShootBooking(id: string): Promise<ShootBooking | undefined>;
   getPhotographerBookings(photographerId: string): Promise<ShootBooking[]>;
@@ -1909,6 +1919,48 @@ export class DatabaseStorage implements IStorage {
 
   async getMessages(conversationId: string): Promise<Message[]> {
     return db.select().from(messages).where(eq(messages.conversationId, conversationId));
+  }
+
+  async getOrderByCheckoutSession(sessionId: string): Promise<Order | undefined> {
+    const result = await db.select().from(orders).where(eq(orders.stripeCheckoutSessionId, sessionId));
+    return result[0];
+  }
+
+  // =========================
+  // ORDER GROUPS (Multi-Vendor Cart)
+  // =========================
+
+  async createOrderGroup(data: InsertOrderGroup): Promise<OrderGroup> {
+    const [group] = await db.insert(orderGroups).values(data).returning();
+    return group;
+  }
+
+  async getOrderGroup(id: string): Promise<OrderGroup | undefined> {
+    const result = await db.select().from(orderGroups).where(eq(orderGroups.id, id));
+    return result[0];
+  }
+
+  async updateOrderGroup(id: string, updates: Partial<OrderGroup>): Promise<OrderGroup | undefined> {
+    const result = await db.update(orderGroups)
+      .set(updates)
+      .where(eq(orderGroups.id, id))
+      .returning();
+    return result[0];
+  }
+
+  async getOrderGroupOrders(orderGroupId: string): Promise<Order[]> {
+    return db.select().from(orders).where(eq(orders.orderGroupId, orderGroupId));
+  }
+
+  async getNextPendingOrderInGroup(orderGroupId: string): Promise<Order | undefined> {
+    const result = await db.select()
+      .from(orders)
+      .where(and(
+        eq(orders.orderGroupId, orderGroupId),
+        eq(orders.status, 'pending')
+      ))
+      .limit(1);
+    return result[0];
   }
 
   // =========================

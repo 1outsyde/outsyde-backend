@@ -415,12 +415,29 @@ export const appointments = pgTable("appointments", {
 });
 
 /* =====================================================
+   ORDER GROUPS (Multi-Vendor Cart Purchases)
+===================================================== */
+export const orderGroups = pgTable("order_groups", {
+  id: varchar("id", { length: 36 }).primaryKey().default(sql`gen_random_uuid()`),
+  customerId: varchar("customer_id", { length: 36 }).notNull().references(() => users.id),
+  
+  totalVendors: integer("total_vendors").notNull(),
+  completedVendors: integer("completed_vendors").default(0),
+  
+  status: text("status").default("pending"),
+  
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+});
+
+/* =====================================================
    ORDERS (Product Purchases)
 ===================================================== */
 export const orders = pgTable("orders", {
   id: varchar("id", { length: 36 }).primaryKey().default(sql`gen_random_uuid()`),
   businessId: varchar("business_id", { length: 36 }).notNull().references(() => businesses.id),
   customerId: varchar("customer_id", { length: 36 }).notNull().references(() => users.id),
+  
+  orderGroupId: varchar("order_group_id", { length: 36 }).references(() => orderGroups.id),
 
   items: jsonb("items").$type<{ productId: string; name: string; quantity: number; price: number }[]>().notNull(),
   totalAmount: integer("total_amount").notNull(),
@@ -428,6 +445,7 @@ export const orders = pgTable("orders", {
   vendorNet: integer("vendor_net").default(0),
 
   stripePaymentIntentId: text("stripe_payment_intent_id"),
+  stripeCheckoutSessionId: text("stripe_checkout_session_id"),
   status: text("status").default("pending"),
 
   shippingAddress: text("shipping_address"),
@@ -1209,6 +1227,9 @@ export type InsertAppointment = typeof appointments.$inferInsert;
 
 export type Order = typeof orders.$inferSelect;
 export type InsertOrder = typeof orders.$inferInsert;
+
+export type OrderGroup = typeof orderGroups.$inferSelect;
+export type InsertOrderGroup = typeof orderGroups.$inferInsert;
 
 export type InsertReview = z.infer<typeof insertReviewSchema>;
 export type Review = typeof reviews.$inferSelect;

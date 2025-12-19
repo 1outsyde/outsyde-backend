@@ -3255,7 +3255,7 @@ export async function registerRoutes(
     }
   });
 
-  // Cart checkout - create Stripe checkout session for cart items
+  // Cart checkout - create Stripe checkout sessions for cart items (supports multi-vendor)
   app.post("/api/cart/checkout", async (req, res) => {
     const userId = req.session?.userId;
     if (!userId) {
@@ -3293,117 +3293,339 @@ export async function registerRoutes(
         businessIds.add(product.businessId);
       }
 
-      // For now, enforce single-vendor cart (Stripe destination charges only support one destination)
-      if (businessIds.size > 1) {
-        return res.status(400).json({ 
-          error: "Cart contains items from multiple vendors. Please checkout items from one vendor at a time." 
-        });
+      // Validate all businesses exist and have active subscriptions
+      const businessList = Array.from(businessIds);
+      for (const businessId of businessList) {
+        const business = await storage.getBusiness(businessId);
+        if (!business) {
+          return res.status(404).json({ error: `Business not found: ${businessId}` });
+        }
+        const subStatus = await storage.isBusinessSubscriptionActive(businessId);
+        if (!subStatus.active) {
+          return res.status(403).json({ error: `${business.name} is currently unavailable for purchases` });
+        }
       }
-
-      const businessId = Array.from(businessIds)[0];
-      const business = await storage.getBusiness(businessId);
-      if (!business) {
-        return res.status(404).json({ error: "Business not found" });
-      }
-
-      // Check vendor subscription is active
-      const subStatus = await storage.isBusinessSubscriptionActive(businessId);
-      if (!subStatus.active) {
-        return res.status(403).json({ error: "This business is currently unavailable for purchases" });
-      }
-
-      // Calculate totals
-      let totalInCents = 0;
-      const lineItems: Array<{ stripePriceId: string; quantity: number }> = [];
-      
-      for (const item of cartItems) {
-        const product = productMap.get(item.productId);
-        totalInCents += product.price * item.quantity;
-        lineItems.push({
-          stripePriceId: product.stripePriceId!,
-          quantity: item.quantity,
-        });
-      }
-
-      // Platform fee is 4% for businesses
-      const platformFeeInCents = Math.round(totalInCents * 0.04);
 
       // Get or create Stripe customer
-      let customerId: string;
+      let stripeCustomerId: string;
       if (user.stripeCustomerId) {
-        customerId = user.stripeCustomerId;
+        stripeCustomerId = user.stripeCustomerId;
       } else {
         const customer = await stripeService.createCustomer(user.email!, userId, user.name || user.email!);
-        customerId = customer.id;
+        stripeCustomerId = customer.id;
         await storage.updateUser(userId, { stripeCustomerId: customer.id });
       }
 
       const baseUrl = `https://${process.env.REPLIT_DOMAINS?.split(',')[0]}`;
 
-      // Calculate vendor net (total minus platform fee)
-      const vendorNet = totalInCents - platformFeeInCents;
+      // Group cart items by vendor
+      const itemsByVendor = new Map<string, typeof cartItems>();
+      for (const item of cartItems) {
+        const product = productMap.get(item.productId);
+        const businessId = product.businessId;
+        if (!itemsByVendor.has(businessId)) {
+          itemsByVendor.set(businessId, []);
+        }
+        itemsByVendor.get(businessId)!.push(item);
+      }
 
-      // Create order record first
-      const order = await storage.createOrder({
-        customerId: userId,
-        businessId,
-        totalAmount: totalInCents,
-        platformFee: platformFeeInCents,
-        vendorNet,
-        status: 'pending',
-        items: cartItems.map(item => ({
-          productId: item.productId,
-          name: productMap.get(item.productId).name,
-          quantity: item.quantity,
-          price: productMap.get(item.productId).price,
-        })),
+      const isMultiVendor = businessList.length > 1;
+      let orderGroupId: string | null = null;
+
+      // Create order group if multi-vendor
+      if (isMultiVendor) {
+        const orderGroup = await storage.createOrderGroup({
+          customerId: userId,
+          totalVendors: businessList.length,
+          completedVendors: 0,
+          status: 'pending',
+        });
+        orderGroupId = orderGroup.id;
+      }
+
+      // Create orders and checkout sessions for each vendor
+      const createdOrders: Array<{ orderId: string; businessId: string; businessName: string; session: any }> = [];
+
+      for (const businessId of businessList) {
+        const vendorItems = itemsByVendor.get(businessId)!;
+        const business = await storage.getBusiness(businessId);
+        
+        // Calculate totals for this vendor
+        let vendorTotalInCents = 0;
+        const lineItems: Array<{ stripePriceId: string; quantity: number }> = [];
+        
+        for (const item of vendorItems) {
+          const product = productMap.get(item.productId);
+          vendorTotalInCents += product.price * item.quantity;
+          lineItems.push({
+            stripePriceId: product.stripePriceId!,
+            quantity: item.quantity,
+          });
+        }
+
+        // Platform fee is 4% for businesses
+        const platformFeeInCents = Math.round(vendorTotalInCents * 0.04);
+        const vendorNet = vendorTotalInCents - platformFeeInCents;
+
+        // Create order record
+        const order = await storage.createOrder({
+          customerId: userId,
+          businessId,
+          orderGroupId: orderGroupId || undefined,
+          totalAmount: vendorTotalInCents,
+          platformFee: platformFeeInCents,
+          vendorNet,
+          status: 'pending',
+          items: vendorItems.map(item => ({
+            productId: item.productId,
+            name: productMap.get(item.productId).name,
+            quantity: item.quantity,
+            price: productMap.get(item.productId).price,
+          })),
+        });
+
+        // Determine success URL (for multi-vendor, redirect to continue checkout; for single, go to success page)
+        const successUrl = isMultiVendor
+          ? `${baseUrl}/checkout/continue?orderGroupId=${orderGroupId}&completedOrderId=${order.id}`
+          : `${baseUrl}/order-success?orderId=${order.id}`;
+
+        // Check if vendor has Stripe Connect account
+        const vendor = await storage.getUserByBusinessOwnerId(businessId);
+        let session;
+        
+        if (vendor?.stripeConnectedAccountId) {
+          session = await stripeService.createCartCheckout({
+            customerId: stripeCustomerId,
+            lineItems,
+            successUrl,
+            cancelUrl: `${baseUrl}/cart?cancelled=true`,
+            connectedAccountId: vendor.stripeConnectedAccountId,
+            platformFeeInCents,
+            metadata: {
+              type: 'cart_checkout',
+              orderId: order.id,
+              orderGroupId: orderGroupId || '',
+              userId,
+              businessId,
+              isMultiVendor: isMultiVendor ? 'true' : 'false',
+            },
+          });
+        } else {
+          session = await stripeService.createCartCheckoutPlatform({
+            customerId: stripeCustomerId,
+            lineItems,
+            successUrl,
+            cancelUrl: `${baseUrl}/cart?cancelled=true`,
+            metadata: {
+              type: 'cart_checkout',
+              orderId: order.id,
+              orderGroupId: orderGroupId || '',
+              userId,
+              businessId,
+              isMultiVendor: isMultiVendor ? 'true' : 'false',
+            },
+          });
+        }
+
+        // Update order with Stripe checkout session ID
+        await storage.updateOrder(order.id, {
+          stripePaymentIntentId: session.id,
+          stripeCheckoutSessionId: session.id,
+        });
+
+        createdOrders.push({
+          orderId: order.id,
+          businessId,
+          businessName: business?.name || 'Unknown',
+          session,
+        });
+      }
+
+      // Return the first vendor's checkout URL
+      const firstOrder = createdOrders[0];
+      res.json({
+        url: firstOrder.session.url,
+        orderId: firstOrder.orderId,
+        orderGroupId,
+        isMultiVendor,
+        totalVendors: businessList.length,
+        vendors: createdOrders.map(o => ({ businessId: o.businessId, businessName: o.businessName, orderId: o.orderId })),
       });
+    } catch (error) {
+      console.error("Cart checkout error:", error);
+      res.status(500).json({ error: "Failed to create checkout" });
+    }
+  });
 
-      // Check if vendor has Stripe Connect account
-      const vendor = await storage.getUserByBusinessOwnerId(businessId);
-      let session;
+  // Continue multi-vendor checkout - get next vendor's checkout session
+  app.get("/api/cart/checkout/continue/:orderGroupId", async (req, res) => {
+    const userId = req.session?.userId;
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    try {
+      const { orderGroupId } = req.params;
+      const { completedOrderId } = req.query;
+
+      // Get the order group
+      const orderGroup = await storage.getOrderGroup(orderGroupId);
+      if (!orderGroup) {
+        return res.status(404).json({ error: "Order group not found" });
+      }
       
+      if (orderGroup.customerId !== userId) {
+        return res.status(403).json({ error: "Not authorized" });
+      }
+
+      // If a completed order ID was provided, mark it as paid
+      if (completedOrderId && typeof completedOrderId === 'string') {
+        const completedOrder = await storage.getOrder(completedOrderId);
+        if (completedOrder && completedOrder.customerId === userId && completedOrder.orderGroupId === orderGroupId) {
+          await storage.updateOrder(completedOrderId, { status: 'paid' });
+          
+          // Update the order group completed count
+          const currentCompleted = orderGroup.completedVendors || 0;
+          await storage.updateOrderGroup(orderGroupId, {
+            completedVendors: currentCompleted + 1,
+          });
+        }
+      }
+
+      // Get the next pending order in this group
+      const nextOrder = await storage.getNextPendingOrderInGroup(orderGroupId);
+
+      if (!nextOrder) {
+        // All orders completed - update group status and redirect to success
+        await storage.updateOrderGroup(orderGroupId, { status: 'completed' });
+        
+        // Clear the cart
+        await storage.clearCart(userId);
+
+        return res.json({
+          completed: true,
+          orderGroupId,
+          redirectUrl: `/order-success?orderGroupId=${orderGroupId}`,
+        });
+      }
+
+      // Get the checkout URL for the next order
+      // Since we stored the session ID, we need to get the session URL
+      const user = await storage.getUser(userId);
+      if (!user) {
+        return res.status(404).json({ error: "User not found" });
+      }
+
+      const business = await storage.getBusiness(nextOrder.businessId);
+      const baseUrl = `https://${process.env.REPLIT_DOMAINS?.split(',')[0]}`;
+
+      // We need to create a new session for the next order since sessions expire
+      // Get products from the order items to rebuild the checkout
+      const lineItems: Array<{ stripePriceId: string; quantity: number }> = [];
+      for (const item of nextOrder.items) {
+        const product = await storage.getVendorProduct(item.productId);
+        if (product?.stripePriceId) {
+          lineItems.push({
+            stripePriceId: product.stripePriceId,
+            quantity: item.quantity,
+          });
+        }
+      }
+
+      const successUrl = `${baseUrl}/checkout/continue?orderGroupId=${orderGroupId}&completedOrderId=${nextOrder.id}`;
+
+      const vendor = await storage.getUserByBusinessOwnerId(nextOrder.businessId);
+      let session;
+
       if (vendor?.stripeConnectedAccountId) {
-        // Use destination charges to route payment to vendor
         session = await stripeService.createCartCheckout({
-          customerId,
+          customerId: user.stripeCustomerId!,
           lineItems,
-          successUrl: `${baseUrl}/order-success?orderId=${order.id}`,
+          successUrl,
           cancelUrl: `${baseUrl}/cart?cancelled=true`,
           connectedAccountId: vendor.stripeConnectedAccountId,
-          platformFeeInCents,
+          platformFeeInCents: nextOrder.platformFee || 0,
           metadata: {
             type: 'cart_checkout',
-            orderId: order.id,
+            orderId: nextOrder.id,
+            orderGroupId,
             userId,
-            businessId,
+            businessId: nextOrder.businessId,
+            isMultiVendor: 'true',
           },
         });
       } else {
-        // No connected account - platform holds funds (manual payout later)
         session = await stripeService.createCartCheckoutPlatform({
-          customerId,
+          customerId: user.stripeCustomerId!,
           lineItems,
-          successUrl: `${baseUrl}/order-success?orderId=${order.id}`,
+          successUrl,
           cancelUrl: `${baseUrl}/cart?cancelled=true`,
           metadata: {
             type: 'cart_checkout',
-            orderId: order.id,
+            orderId: nextOrder.id,
+            orderGroupId,
             userId,
-            businessId,
+            businessId: nextOrder.businessId,
+            isMultiVendor: 'true',
           },
         });
       }
 
-      // Update order with Stripe payment intent ID
-      await storage.updateOrder(order.id, {
+      // Update order with new session ID
+      await storage.updateOrder(nextOrder.id, {
         stripePaymentIntentId: session.id,
+        stripeCheckoutSessionId: session.id,
       });
 
-      res.json({ url: session.url, orderId: order.id });
+      res.json({
+        completed: false,
+        url: session.url,
+        orderId: nextOrder.id,
+        businessName: business?.name || 'Unknown',
+        orderGroupId,
+        remainingVendors: (orderGroup.totalVendors || 0) - (orderGroup.completedVendors || 0) - 1,
+      });
     } catch (error) {
-      console.error("Cart checkout error:", error);
-      res.status(500).json({ error: "Failed to create checkout" });
+      console.error("Continue checkout error:", error);
+      res.status(500).json({ error: "Failed to continue checkout" });
+    }
+  });
+
+  // Get order group status
+  app.get("/api/order-groups/:id", async (req, res) => {
+    const userId = req.session?.userId;
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    try {
+      const orderGroup = await storage.getOrderGroup(req.params.id);
+      if (!orderGroup) {
+        return res.status(404).json({ error: "Order group not found" });
+      }
+      
+      if (orderGroup.customerId !== userId) {
+        return res.status(403).json({ error: "Not authorized" });
+      }
+
+      const orders = await storage.getOrderGroupOrders(req.params.id);
+      
+      // Enrich orders with business info
+      const enrichedOrders = await Promise.all(orders.map(async (order) => {
+        const business = await storage.getBusiness(order.businessId);
+        return {
+          ...order,
+          businessName: business?.name || 'Unknown',
+        };
+      }));
+
+      res.json({
+        orderGroup,
+        orders: enrichedOrders,
+      });
+    } catch (error) {
+      console.error("Get order group error:", error);
+      res.status(500).json({ error: "Failed to get order group" });
     }
   });
 

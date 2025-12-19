@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { queryClient, getQueryFn } from "./lib/queryClient";
 import { QueryClientProvider, useQuery } from "@tanstack/react-query";
 import { Toaster } from "@/components/ui/toaster";
@@ -20,11 +20,13 @@ import PhotographerDashboardPage from "@/pages/photographer-dashboard";
 import AdminFulfillmentPage from "@/pages/admin-fulfillment";
 import AdminDashboardPage from "@/pages/admin-dashboard";
 import CreatePostPage from "@/pages/create-post";
+import OrderSuccessPage from "@/pages/order-success";
+import CheckoutContinuePage from "@/pages/checkout-continue";
 
 import jewelryImage from "@assets/generated_images/jewelry_artisan_vendor_image.png";
 import type { User } from "@shared/schema";
 
-type Page = "home" | "search" | "messages" | "profile" | "vendor" | "auth" | "vendor-dashboard" | "photographer-dashboard" | "admin-fulfillment" | "admin-dashboard" | "create-post" | "photographer-page";
+type Page = "home" | "search" | "messages" | "profile" | "vendor" | "auth" | "vendor-dashboard" | "photographer-dashboard" | "admin-fulfillment" | "admin-dashboard" | "create-post" | "photographer-page" | "order-success" | "checkout-continue";
 type NavTab = "home" | "search" | "create" | "messages" | "profile" | "dashboard";
 
 interface MessageTarget {
@@ -38,6 +40,33 @@ function AppContent() {
   const [selectedVendorId, setSelectedVendorId] = useState<string>("1");
   const [selectedVendorType, setSelectedVendorType] = useState<"business" | "photographer">("business");
   const [messageTarget, setMessageTarget] = useState<MessageTarget | null>(null);
+  
+  const [checkoutOrderId, setCheckoutOrderId] = useState<string | null>(null);
+  const [checkoutOrderGroupId, setCheckoutOrderGroupId] = useState<string | null>(null);
+  const [completedOrderId, setCompletedOrderId] = useState<string | null>(null);
+
+  useEffect(() => {
+    const path = window.location.pathname;
+    const params = new URLSearchParams(window.location.search);
+    
+    if (path === "/order-success" || path.includes("order-success")) {
+      const orderId = params.get("orderId");
+      const orderGroupId = params.get("orderGroupId");
+      setCheckoutOrderId(orderId);
+      setCheckoutOrderGroupId(orderGroupId);
+      setCurrentPage("order-success");
+      window.history.replaceState({}, "", "/");
+    } else if (path === "/checkout/continue" || path.includes("checkout/continue")) {
+      const orderGroupId = params.get("orderGroupId");
+      const completedId = params.get("completedOrderId");
+      if (orderGroupId) {
+        setCheckoutOrderGroupId(orderGroupId);
+        setCompletedOrderId(completedId);
+        setCurrentPage("checkout-continue");
+        window.history.replaceState({}, "", "/");
+      }
+    }
+  }, []);
 
   const { data: user, isLoading: authLoading, refetch: refetchUser } = useQuery<User | null>({
     queryKey: ["/api/auth/user"],
@@ -293,6 +322,33 @@ function AppContent() {
               setCurrentPage("home");
               setActiveTab("home");
             }} />
+          )}
+          {currentPage === "order-success" && (
+            <OrderSuccessPage 
+              orderId={checkoutOrderId || undefined}
+              orderGroupId={checkoutOrderGroupId || undefined}
+              onContinueShopping={() => {
+                setCurrentPage("home");
+                setActiveTab("home");
+                setCheckoutOrderId(null);
+                setCheckoutOrderGroupId(null);
+              }}
+            />
+          )}
+          {currentPage === "checkout-continue" && checkoutOrderGroupId && (
+            <CheckoutContinuePage 
+              orderGroupId={checkoutOrderGroupId}
+              completedOrderId={completedOrderId || undefined}
+              onComplete={() => {
+                setCurrentPage("home");
+                setActiveTab("home");
+              }}
+              onOrderSuccess={(groupId) => {
+                setCheckoutOrderGroupId(groupId);
+                setCheckoutOrderId(null);
+                setCurrentPage("order-success");
+              }}
+            />
           )}
         </main>
 
