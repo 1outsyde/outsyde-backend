@@ -176,6 +176,9 @@ export default function VendorPage({ vendorId, vendorType = "business", onBack, 
       ? `${business.city}, ${business.state}` 
       : business.city || "Location not specified";
 
+    // Check if business has completed Stripe onboarding and can accept bookings
+    const canAcceptBookings = !!(business.stripeAccountId && business.stripeOnboardingComplete);
+
     return (
       <div className="pb-20 md:pb-0" data-testid="page-vendor">
         <VendorStorefront
@@ -209,6 +212,7 @@ export default function VendorPage({ vendorId, vendorType = "business", onBack, 
           onCollaborate={onCollaborate ? () => onCollaborate(business.id, business.name) : undefined}
           isAuthenticated={isAuthenticated}
           storefrontType="business"
+          canAcceptBookings={canAcceptBookings}
         />
       </div>
     );
@@ -229,6 +233,9 @@ export default function VendorPage({ vendorId, vendorType = "business", onBack, 
     const location = photographer.city && photographer.state 
       ? `${photographer.city}, ${photographer.state}` 
       : photographer.city || "Location not specified";
+
+    // Check if photographer has completed Stripe onboarding and can accept bookings
+    const canAcceptBookings = !!(photographer.stripeAccountId && photographer.stripeOnboardingComplete);
 
     return (
       <div className="pb-20 md:pb-0" data-testid="page-vendor">
@@ -262,6 +269,7 @@ export default function VendorPage({ vendorId, vendorType = "business", onBack, 
           viewerIsPhotographer={viewerIsPhotographer}
           isAuthenticated={isAuthenticated}
           storefrontType="photographer"
+          canAcceptBookings={canAcceptBookings}
         />
       </div>
     );

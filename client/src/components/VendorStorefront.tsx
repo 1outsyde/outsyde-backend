@@ -65,6 +65,7 @@ interface VendorStorefrontProps {
   onCollaborate?: () => void;
   isAuthenticated?: boolean;
   storefrontType?: "business" | "photographer";
+  canAcceptBookings?: boolean;
 }
 
 export default function VendorStorefront({
@@ -96,6 +97,7 @@ export default function VendorStorefront({
   onCollaborate,
   isAuthenticated = false,
   storefrontType = "business",
+  canAcceptBookings = true,
 }: VendorStorefrontProps) {
   const [activeTab, setActiveTab] = useState("about");
   const [selectedService, setSelectedService] = useState<Service | null>(null);
@@ -329,7 +331,22 @@ export default function VendorStorefront({
           </TabsContent>
 
           <TabsContent value="book" className="pt-6">
-            {selectedService ? (
+            {!canAcceptBookings ? (
+              <div className="text-center py-12">
+                <div className="max-w-md mx-auto">
+                  <div className="h-12 w-12 rounded-full bg-yellow-100 dark:bg-yellow-900 flex items-center justify-center mx-auto mb-4">
+                    <Mail className="h-6 w-6 text-yellow-600 dark:text-yellow-400" />
+                  </div>
+                  <h3 className="text-lg font-semibold mb-2">Bookings Not Available</h3>
+                  <p className="text-muted-foreground mb-4">
+                    This {storefrontType === 'photographer' ? 'photographer' : 'vendor'} is not currently accepting online bookings. Please contact them directly to inquire about their services.
+                  </p>
+                  <Button variant="outline" onClick={() => setActiveTab("chat")}>
+                    Send a Message
+                  </Button>
+                </div>
+              </div>
+            ) : selectedService ? (
               <div className="max-w-md">
                 <BookingCalendar
                   serviceName={selectedService.name}

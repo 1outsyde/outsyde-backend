@@ -681,6 +681,19 @@ export async function registerRoutes(
 
       const data = bookingSchema.parse(req.body);
 
+      // Check if photographer has completed Stripe onboarding before allowing booking
+      const photographer = await storage.getPhotographer(data.photographerId);
+      if (!photographer) {
+        return res.status(404).json({ error: "Photographer not found" });
+      }
+      
+      if (!photographer.stripeAccountId || !photographer.stripeOnboardingComplete) {
+        return res.status(400).json({ 
+          error: "Photographer not accepting bookings",
+          message: "This photographer has not completed their payment setup and cannot accept bookings at this time."
+        });
+      }
+
       // Parse datetime into date and time components
       const dateTime = new Date(data.bookingDateTime);
       const date = dateTime.toISOString().split("T")[0];
@@ -735,8 +748,7 @@ export async function registerRoutes(
         booking.id
       );
 
-      const photographer = await storage.getPhotographer(data.photographerId);
-      const photographerName = photographer?.displayName || 'Photographer';
+      const photographerName = photographer.displayName || 'Photographer';
       
       NotificationTriggers.bookingConfirmed({
         customerId: userId,
