@@ -203,6 +203,12 @@ export const vendorProducts = pgTable("vendor_products", {
   isActive: boolean("is_active").default(true),
   isFeatured: boolean("is_featured").default(false),
 
+  // Publishing status: draft (default) | live | archived
+  status: text("status").default("draft").notNull(),
+  // Stripe catalog IDs - populated when item goes live
+  stripeProductId: text("stripe_product_id"),
+  stripePriceId: text("stripe_price_id"),
+
   createdAt: timestamp("created_at").defaultNow().notNull(),
 });
 
@@ -222,6 +228,12 @@ export const vendorServices = pgTable("vendor_services", {
 
   isActive: boolean("is_active").default(true),
   isFeatured: boolean("is_featured").default(false),
+
+  // Publishing status: draft (default) | live | archived
+  status: text("status").default("draft").notNull(),
+  // Stripe catalog IDs - populated when item goes live
+  stripeProductId: text("stripe_product_id"),
+  stripePriceId: text("stripe_price_id"),
 
   createdAt: timestamp("created_at").defaultNow().notNull(),
 });
@@ -341,6 +353,12 @@ export const photographerServices = pgTable("photographer_services", {
   estimatedDurationMinutes: integer("estimated_duration_minutes"),
 
   isActive: boolean("is_active").default(true),
+
+  // Publishing status: draft (default) | live | archived
+  status: text("status").default("draft").notNull(),
+  // Stripe catalog IDs - populated when item goes live
+  stripeProductId: text("stripe_product_id"),
+  stripePriceId: text("stripe_price_id"),
 
   createdAt: timestamp("created_at").defaultNow().notNull(),
 });
