@@ -95,6 +95,9 @@ export const users = pgTable("users", {
   referralCode: text("referral_code").unique(),
   referredBy: varchar("referred_by", { length: 36 }),
 
+  // Stripe customer ID for checkout (not connected account - that's on business/photographer)
+  stripeCustomerId: text("stripe_customer_id"),
+
   createdAt: timestamp("created_at").defaultNow().notNull(),
 });
 
@@ -577,6 +580,7 @@ export const pushSubscriptions = pgTable("push_subscriptions", {
   auth: text("auth").notNull(),
 
   createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
 });
 
 /* =====================================================
@@ -635,6 +639,8 @@ export const subscriptionTiers = pgTable("subscription_tiers", {
   platformFeeBps: integer("platform_fee_bps").notNull(),
 
   features: jsonb("features").$type<string[]>().default([]),
+  
+  alaCarteDiscountPercent: integer("ala_carte_discount_percent").default(0).notNull(),
 
   stripeProductId: text("stripe_product_id"),
   stripePriceId: text("stripe_price_id"),
@@ -662,6 +668,8 @@ export const tierBenefits = pgTable("tier_benefits", {
 
   cycleType: text("cycle_type").default("monthly"),
   includedQuantity: integer("included_quantity").default(0),
+  
+  requiresAdminFulfillment: boolean("requires_admin_fulfillment").default(false),
 
   createdAt: timestamp("created_at").defaultNow().notNull(),
 });
@@ -709,6 +717,7 @@ export const benefitAllowances = pgTable("benefit_allowances", {
   cycleStart: timestamp("cycle_start"),
   cycleEnd: timestamp("cycle_end"),
   isExpired: boolean("is_expired").default(false),
+  expiredAt: timestamp("expired_at"),
   usedQuantity: integer("used_quantity").default(0),
   remainingQuantity: integer("remaining_quantity").default(0),
 
@@ -724,8 +733,11 @@ export const benefitUsage = pgTable("benefit_usage", {
 
   allowanceId: varchar("allowance_id", { length: 36 }).notNull().references(() => benefitAllowances.id),
   vendorId: varchar("vendor_id", { length: 36 }).notNull().references(() => users.id),
+  
+  benefitType: text("benefit_type"),
+  quantityUsed: integer("quantity_used").default(1),
 
-  usedAt: timestamp("used_at").defaultNow().notNull(),
+  usedAt: timestamp("used_at").defaultNow(),
   notes: text("notes"),
 
   createdAt: timestamp("created_at").defaultNow().notNull(),
@@ -743,9 +755,14 @@ export const fulfillmentTasks = pgTable("fulfillment_tasks", {
   taskType: text("task_type").notNull(),
   taskName: text("task_name").notNull(),
   description: text("description"),
+  
+  sourceType: text("source_type"),
+  sourceId: varchar("source_id", { length: 36 }),
+  vendorNotes: text("vendor_notes"),
 
   status: text("status").default("pending"),
   priority: integer("priority").default(0),
+  isPriority: boolean("is_priority").default(false),
 
   dueDate: timestamp("due_date"),
   completedAt: timestamp("completed_at"),
@@ -1334,7 +1351,11 @@ export const auditLogs = pgTable("audit_logs", {
   createdAt: timestamp("created_at").defaultNow().notNull(),
 });
 
-export const insertAuditLogSchema = createInsertSchema(auditLogs).omit({ id: true, createdAt: true });
+export const insertAuditLogSchema = createInsertSchema(auditLogs).omit({ id: true, createdAt: true }).extend({
+  beforeState: z.record(z.any()).optional().nullable(),
+  afterState: z.record(z.any()).optional().nullable(),
+  metadata: z.record(z.any()).optional().nullable(),
+});
 export type AuditLog = typeof auditLogs.$inferSelect;
 export type InsertAuditLog = z.infer<typeof insertAuditLogSchema>;
 
@@ -1394,6 +1415,7 @@ export const influencerProfiles = pgTable("influencer_profiles", {
   
   stripeAccountId: text("stripe_account_id"),
   stripeOnboardingComplete: boolean("stripe_onboarding_complete").default(false),
+  stripeOnboardingUrl: text("stripe_onboarding_url"),
   
   totalEarnings: integer("total_earnings").default(0),
   pendingEarnings: integer("pending_earnings").default(0),

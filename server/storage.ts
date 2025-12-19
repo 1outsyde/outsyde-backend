@@ -316,7 +316,7 @@ export interface IStorage {
   // Notifications (In-app notifications)
   createNotification(data: InsertNotification): Promise<Notification>;
   getUserNotifications(userId: string, options?: { limit?: number; unreadOnly?: boolean }): Promise<Notification[]>;
-  markNotificationRead(id: string): Promise<Notification | undefined>;
+  markNotificationRead(id: string, userId: string): Promise<Notification | undefined>;
   markAllNotificationsRead(userId: string): Promise<void>;
   getUnreadNotificationCount(userId: string): Promise<number>;
 
@@ -1406,9 +1406,9 @@ export class DatabaseStorage implements IStorage {
       action: 'appointment_status_change',
       targetType: 'appointment',
       targetId: appointmentId,
-      beforeState,
-      afterState: result[0],
-      metadata: { statusChange: { from: currentAppointment.status, to: updates.status } }
+      beforeState: beforeState as unknown as Record<string, any>,
+      afterState: result[0] as unknown as Record<string, any>,
+      metadata: { statusChange: { from: currentAppointment.status, to: updates.status } } as Record<string, any>
     });
 
     return { success: true, appointment: result[0] };
@@ -1965,7 +1965,7 @@ export class DatabaseStorage implements IStorage {
   }
 
   async getUserBookings(userId: string): Promise<ShootBooking[]> {
-    return db.select().from(shootBookings).where(eq(shootBookings.customerId, userId));
+    return db.select().from(shootBookings).where(eq(shootBookings.clientId, userId));
   }
 
   async getOrder(orderId: string): Promise<Order | undefined> {
@@ -2147,7 +2147,26 @@ export class DatabaseStorage implements IStorage {
     
     if (existing.length > 0) {
       const [updated] = await db.update(searchIndex)
-        .set({ ...entry, updatedAt: new Date() })
+        .set({
+          name: entry.name,
+          description: entry.description,
+          category: entry.category,
+          tags: entry.tags ? [...entry.tags] : null,
+          knownFor: entry.knownFor ? [...entry.knownFor] : null,
+          city: entry.city,
+          state: entry.state,
+          latitude: entry.latitude,
+          longitude: entry.longitude,
+          rating: entry.rating,
+          reviewCount: entry.reviewCount,
+          priceCents: entry.priceCents,
+          imageUrl: entry.imageUrl,
+          isActive: entry.isActive,
+          parentType: entry.parentType,
+          parentId: entry.parentId,
+          hasActiveSubscription: entry.hasActiveSubscription,
+          updatedAt: new Date(),
+        })
         .where(eq(searchIndex.id, existing[0].id))
         .returning();
       return updated;
@@ -2155,7 +2174,25 @@ export class DatabaseStorage implements IStorage {
     
     const [created] = await db.insert(searchIndex).values({
       id: randomUUID(),
-      ...entry,
+      entityType: entry.entityType,
+      entityId: entry.entityId,
+      name: entry.name,
+      description: entry.description,
+      category: entry.category,
+      tags: entry.tags ? [...entry.tags] : null,
+      knownFor: entry.knownFor ? [...entry.knownFor] : null,
+      city: entry.city,
+      state: entry.state,
+      latitude: entry.latitude,
+      longitude: entry.longitude,
+      rating: entry.rating,
+      reviewCount: entry.reviewCount,
+      priceCents: entry.priceCents,
+      imageUrl: entry.imageUrl,
+      isActive: entry.isActive,
+      parentType: entry.parentType,
+      parentId: entry.parentId,
+      hasActiveSubscription: entry.hasActiveSubscription,
     }).returning();
     return created;
   }
@@ -2634,7 +2671,22 @@ export class DatabaseStorage implements IStorage {
     for (const business of sampleBusinesses) {
       await db.insert(businesses).values({
         id: randomUUID(),
-        ...business,
+        ownerId: business.ownerId,
+        name: business.name,
+        category: business.category,
+        description: business.description,
+        isStartup: business.isStartup,
+        yearsInBusiness: business.yearsInBusiness,
+        employeeCount: business.employeeCount,
+        businessType: business.businessType,
+        hasPhysicalLocation: business.hasPhysicalLocation,
+        address: business.address,
+        city: business.city,
+        state: business.state,
+        zipCode: business.zipCode,
+        websiteUrl: business.websiteUrl,
+        socialMedia: business.socialMedia,
+        subscriptionActive: business.subscriptionActive,
         coverImage: null,
         logoImage: null,
         rating: Math.floor(Math.random() * 5 + 45),
@@ -2906,7 +2958,7 @@ export class DatabaseStorage implements IStorage {
   }
 
   private checkSubscriptionActiveStatus(subscription: VendorSubscription, gracePeriodDays: number): { active: boolean; status?: string; reason?: string } {
-    const status = subscription.status;
+    const status = subscription.status ?? undefined;
     
     // Active subscription
     if (status === 'active') {
@@ -3025,12 +3077,14 @@ export class DatabaseStorage implements IStorage {
       const [allowance] = await db.insert(benefitAllowances).values({
         subscriptionId,
         benefitId: benefit.id,
-        cycleType: benefit.cycleType,
+        monthlyAllowance: benefit.includedQuantity ?? 0,
+        periodStart: cycleStart,
+        periodEnd: cycleEnd,
         cycleStart,
         cycleEnd,
-        totalQuantity: benefit.includedQuantity,
         usedQuantity: 0,
-        remainingQuantity: benefit.includedQuantity,
+        remainingQuantity: benefit.includedQuantity ?? 0,
+        isUnlimited: benefit.isUnlimited ?? false,
       }).returning();
       
       allowances.push(allowance);
@@ -3095,12 +3149,14 @@ export class DatabaseStorage implements IStorage {
           await db.insert(benefitAllowances).values({
             subscriptionId: subscription.id,
             benefitId: benefit.id,
-            cycleType: benefit.cycleType,
+            monthlyAllowance: benefit.includedQuantity ?? 0,
+            periodStart: cycleStart,
+            periodEnd: cycleEnd,
             cycleStart,
             cycleEnd,
-            totalQuantity: benefit.includedQuantity,
             usedQuantity: 0,
-            remainingQuantity: benefit.includedQuantity,
+            remainingQuantity: benefit.includedQuantity ?? 0,
+            isUnlimited: benefit.isUnlimited ?? false,
           });
           createdCount++;
         }
@@ -3154,12 +3210,12 @@ export class DatabaseStorage implements IStorage {
       return { success: false, error: 'Benefit has expired' };
     }
 
-    if (allowance.remainingQuantity <= 0) {
+    if ((allowance.remainingQuantity ?? 0) <= 0) {
       return { success: false, error: 'No remaining uses for this benefit' };
     }
 
     const now = new Date();
-    if (now > allowance.cycleEnd) {
+    if (allowance.cycleEnd && now > allowance.cycleEnd) {
       return { success: false, error: 'Benefit cycle has ended' };
     }
 
@@ -3173,14 +3229,15 @@ export class DatabaseStorage implements IStorage {
 
     const [updatedAllowance] = await db.update(benefitAllowances)
       .set({
-        usedQuantity: allowance.usedQuantity + 1,
-        remainingQuantity: allowance.remainingQuantity - 1,
+        usedQuantity: (allowance.usedQuantity ?? 0) + 1,
+        remainingQuantity: (allowance.remainingQuantity ?? 0) - 1,
       })
       .where(eq(benefitAllowances.id, allowanceId))
       .returning();
 
     await db.insert(benefitUsage).values({
       allowanceId,
+      vendorId,
       benefitType: benefit.benefitType,
       quantityUsed: 1,
       notes,
@@ -3192,6 +3249,7 @@ export class DatabaseStorage implements IStorage {
         vendorId,
         businessId,
         taskType: benefit.benefitType,
+        taskName: benefit.benefitName,
         sourceType: 'benefit',
         sourceId: allowanceId,
         status: 'pending',
@@ -3321,24 +3379,20 @@ export class DatabaseStorage implements IStorage {
     vendorId: string;
     businessId: string;
     serviceId: string;
-    tierIdAtPurchase: string | null;
-    basePriceInCents: number;
-    discountPercent: number;
-    finalPriceInCents: number;
+    priceInCents: number;
     platformFeeInCents: number;
     stripeCheckoutSessionId?: string;
+    notes?: string;
   }): Promise<AlaCartePurchase> {
     const [purchase] = await db.insert(alaCartePurchases).values({
       vendorId: data.vendorId,
       businessId: data.businessId,
       serviceId: data.serviceId,
-      tierIdAtPurchase: data.tierIdAtPurchase,
-      basePriceInCents: data.basePriceInCents,
-      discountPercent: data.discountPercent,
-      finalPriceInCents: data.finalPriceInCents,
+      priceInCents: data.priceInCents,
       platformFeeInCents: data.platformFeeInCents,
       stripeCheckoutSessionId: data.stripeCheckoutSessionId,
-      paymentStatus: 'pending',
+      notes: data.notes,
+      status: 'pending',
     }).returning();
     return purchase;
   }
@@ -3476,7 +3530,25 @@ export class DatabaseStorage implements IStorage {
   async createVendorProduct(data: InsertVendorProduct): Promise<VendorProduct> {
     const id = randomUUID();
     const [product] = await db.insert(vendorProducts)
-      .values({ id, ...data })
+      .values({
+        id,
+        businessId: data.businessId,
+        name: data.name,
+        description: data.description,
+        price: data.price,
+        compareAtPrice: data.compareAtPrice,
+        category: data.category,
+        imageUrl: data.imageUrl,
+        images: data.images,
+        isActive: data.isActive,
+        isFeatured: data.isFeatured,
+        status: data.status,
+        inventory: data.inventory,
+        trackInventory: data.trackInventory,
+        tags: data.tags ? [...data.tags] : null,
+        stripeProductId: data.stripeProductId,
+        stripePriceId: data.stripePriceId,
+      })
       .returning();
     return product;
   }
@@ -4086,7 +4158,7 @@ export class DatabaseStorage implements IStorage {
     const [appointmentExists] = await db.select({ id: appointments.id })
       .from(appointments)
       .where(and(
-        eq(appointments.customerId, customerId),
+        eq(appointments.clientId, customerId),
         eq(appointments.businessId, businessId),
         eq(appointments.status, 'completed')
       ))
@@ -4336,9 +4408,9 @@ export class DatabaseStorage implements IStorage {
       action: 'order_status_change',
       targetType: 'order',
       targetId: orderId,
-      beforeState,
-      afterState: result[0],
-      metadata: { statusChange: { from: currentOrder.status, to: updates.status } }
+      beforeState: beforeState as unknown as Record<string, any>,
+      afterState: result[0] as unknown as Record<string, any>,
+      metadata: { statusChange: { from: currentOrder.status, to: updates.status } } as Record<string, any>
     });
 
     return { success: true, order: result[0] };
@@ -4384,9 +4456,9 @@ export class DatabaseStorage implements IStorage {
       action: 'booking_status_change',
       targetType: 'shoot_booking',
       targetId: bookingId,
-      beforeState,
-      afterState: result[0],
-      metadata: { statusChange: { from: currentBooking.status, to: updates.status } }
+      beforeState: beforeState as unknown as Record<string, any>,
+      afterState: result[0] as unknown as Record<string, any>,
+      metadata: { statusChange: { from: currentBooking.status, to: updates.status } } as Record<string, any>
     });
 
     return { success: true, booking: result[0] };
@@ -4563,7 +4635,18 @@ export class DatabaseStorage implements IStorage {
     const id = randomUUID();
     const result = await db.insert(influencerCampaigns).values({
       id,
-      ...data,
+      name: data.name,
+      description: data.description,
+      createdByVendorId: data.createdByVendorId,
+      createdByAdminId: data.createdByAdminId,
+      payoutType: data.payoutType,
+      flatAmountCents: data.flatAmountCents,
+      commissionBps: data.commissionBps,
+      targetProductIds: data.targetProductIds ? [...data.targetProductIds] : [],
+      targetServiceIds: data.targetServiceIds ? [...data.targetServiceIds] : [],
+      startDate: data.startDate,
+      endDate: data.endDate,
+      status: data.status,
     }).returning();
     return result[0];
   }
@@ -4749,7 +4832,11 @@ export class DatabaseStorage implements IStorage {
     const id = randomUUID();
     const result = await db.insert(influencerPayouts).values({
       id,
-      ...data,
+      influencerId: data.influencerId,
+      amountCents: data.amountCents,
+      ledgerIds: data.ledgerIds ? [...data.ledgerIds] : [],
+      stripeTransferId: data.stripeTransferId,
+      status: data.status,
     }).returning();
     return result[0];
   }

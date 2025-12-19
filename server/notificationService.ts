@@ -11,6 +11,7 @@ export type NotificationType =
   | 'addon_charged'
   | 'refund_issued'
   | 'new_order'
+  | 'order_shipped'
   | 'photographer_assigned'
   | 'subscription_tier_changed'
   | 'stripe_onboarding_complete';

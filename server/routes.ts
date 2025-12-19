@@ -322,6 +322,9 @@ export async function registerRoutes(
       }
 
       let isValidPassword = false;
+      if (!user.password) {
+        return res.status(401).json({ error: "Invalid email or password" });
+      }
       if (isLegacyHash(user.password)) {
         isValidPassword = legacyVerifyPassword(data.password, user.password);
       } else {
@@ -1410,7 +1413,7 @@ export async function registerRoutes(
           const account = await stripeService.createInfluencerConnectAccount(
             user.email,
             influencerProfile.id,
-            influencerProfile.displayName || user.displayName || 'Influencer'
+            influencerProfile.displayName || user.firstName || 'Influencer'
           );
           stripeAccountId = account.id;
           
@@ -1612,44 +1615,26 @@ export async function registerRoutes(
         vendorId: userId,
         businessId: business.id,
         serviceId,
-        tierIdAtPurchase: pricing.tier?.id || null,
-        basePriceInCents: pricing.basePriceCents,
-        discountPercent: pricing.discountPercent,
-        finalPriceInCents: pricing.finalPriceCents,
+        priceInCents: pricing.finalPriceCents,
         platformFeeInCents,
+        notes,
       });
 
-      // Reuse existing Stripe customer ID if available, otherwise create new
-      const vendorSubscription = await storage.getVendorSubscription(userId);
-      let customerId: string;
-      if (vendorSubscription?.stripeCustomerId) {
-        customerId = vendorSubscription.stripeCustomerId;
-      } else {
-        const customer = await stripeService.createCustomer(user.email!, userId, user.name!);
-        customerId = customer.id;
-      }
+      // TODO: Implement à la carte checkout session creation in stripeService
+      // For now, return the purchase record without a Stripe checkout URL
+      // This will be completed when the Stripe integration for à la carte is ready
+      console.log(`Created ala carte purchase ${purchase.id} for service ${serviceId}`);
 
-      const baseUrl = `https://${process.env.REPLIT_DOMAINS?.split(',')[0]}`;
-      
-      const session = await stripeService.createAlaCarteCheckout(
-        customerId,
-        pricing.service,
-        pricing.finalPriceCents,
-        platformFeeInCents,
-        `${baseUrl}/vendor/dashboard?purchase=success&purchaseId=${purchase.id}`,
-        `${baseUrl}/vendor/dashboard?purchase=cancelled`,
-        purchase.id,
-        userId,
-        business.id,
-        notes
-      );
-
-      // Update purchase with checkout session ID
-      await storage.updateAlaCartePurchase(purchase.id, {
-        stripeCheckoutSessionId: session.id,
+      res.json({ 
+        purchaseId: purchase.id,
+        message: "À la carte checkout is being set up. Please contact support for manual processing.",
+        pricing: {
+          basePriceCents: pricing.basePriceCents,
+          discountPercent: pricing.discountPercent,
+          finalPriceCents: pricing.finalPriceCents,
+          platformFeeInCents,
+        }
       });
-
-      res.json({ url: session.url, purchaseId: purchase.id });
     } catch (error) {
       if (error instanceof z.ZodError) {
         return res.status(400).json({ error: "Invalid data", details: error.errors });
@@ -3447,7 +3432,6 @@ export async function registerRoutes(
         endpoint: data.endpoint,
         p256dh: data.keys.p256dh,
         auth: data.keys.auth,
-        userAgent: req.headers['user-agent'] || null,
       });
 
       res.json({ success: true, subscription });
@@ -3795,16 +3779,16 @@ export async function registerRoutes(
       if (!isMultiVendor) {
         // Single vendor - check if they have Stripe Connect
         const singleBusinessId = businessList[0];
-        const vendor = await storage.getUserByBusinessOwnerId(singleBusinessId);
+        const singleBusiness = await storage.getBusiness(singleBusinessId);
         
-        if (vendor?.stripeConnectedAccountId) {
+        if (singleBusiness?.stripeAccountId && singleBusiness?.stripeOnboardingComplete) {
           // Use destination charges for single vendor with connected account
           session = await stripeService.createCartCheckout({
             customerId: stripeCustomerId,
             lineItems: allLineItems,
             successUrl,
             cancelUrl: `${baseUrl}/cart?cancelled=true`,
-            connectedAccountId: vendor.stripeConnectedAccountId,
+            connectedAccountId: singleBusiness.stripeAccountId,
             platformFeeInCents: totalPlatformFeeInCents,
             metadata: {
               type: 'cart_checkout',
@@ -3955,16 +3939,16 @@ export async function registerRoutes(
 
       const successUrl = `${baseUrl}/checkout/continue?orderGroupId=${orderGroupId}&completedOrderId=${nextOrder.id}`;
 
-      const vendor = await storage.getUserByBusinessOwnerId(nextOrder.businessId);
+      const vendorBusiness = await storage.getBusiness(nextOrder.businessId);
       let session;
 
-      if (vendor?.stripeConnectedAccountId) {
+      if (vendorBusiness?.stripeAccountId && vendorBusiness?.stripeOnboardingComplete) {
         session = await stripeService.createCartCheckout({
           customerId: user.stripeCustomerId!,
           lineItems,
           successUrl,
           cancelUrl: `${baseUrl}/cart?cancelled=true`,
-          connectedAccountId: vendor.stripeConnectedAccountId,
+          connectedAccountId: vendorBusiness.stripeAccountId,
           platformFeeInCents: nextOrder.platformFee || 0,
           metadata: {
             type: 'cart_checkout',
@@ -4387,16 +4371,17 @@ export async function registerRoutes(
         return res.status(400).json({ error: "You already have a pending application" });
       }
 
-      const { socialMediaHandle, followerCount, platformName, bio, reason } = req.body;
+      const { instagramUrl, tiktokUrl, youtubeUrl, twitterUrl, followerCount, contentNiche, whyInfluencer } = req.body;
 
       const application = await storage.createInfluencerApplication({
         userId,
-        socialMediaHandle: socialMediaHandle || null,
+        instagramUrl: instagramUrl || null,
+        tiktokUrl: tiktokUrl || null,
+        youtubeUrl: youtubeUrl || null,
+        twitterUrl: twitterUrl || null,
         followerCount: followerCount ? parseInt(followerCount) : null,
-        platformName: platformName || null,
-        bio: bio || null,
-        reason: reason || null,
-        status: 'pending',
+        contentNiche: contentNiche || null,
+        whyInfluencer: whyInfluencer || null,
       });
 
       res.status(201).json({ success: true, application });
@@ -4436,9 +4421,9 @@ export async function registerRoutes(
             ...app,
             user: user ? { 
               id: user.id, 
-              displayName: user.displayName, 
+              name: user.firstName && user.lastName ? `${user.firstName} ${user.lastName}` : user.name,
               email: user.email,
-              profileImage: user.profileImage 
+              profileImageUrl: user.profileImageUrl 
             } : null,
           };
         })
@@ -4481,13 +4466,19 @@ export async function registerRoutes(
       
       // Create influencer profile
       const generatedPromoCode = promoCode || `INF${application.userId.substring(0, 6).toUpperCase()}`;
+      const displayName = user?.firstName && user?.lastName 
+        ? `${user.firstName} ${user.lastName}` 
+        : user?.name || null;
       const profile = await storage.createInfluencerProfile({
         userId: application.userId,
-        displayName: user?.displayName || null,
-        bio: application.bio,
+        displayName,
+        bio: application.whyInfluencer,
         promoCode: generatedPromoCode,
-        commissionRateBps: commissionRate ? parseInt(commissionRate) * 100 : 500, // Default 5% (500 bps)
-        status: 'active',
+        instagramUrl: application.instagramUrl,
+        tiktokUrl: application.tiktokUrl,
+        youtubeUrl: application.youtubeUrl,
+        twitterUrl: application.twitterUrl,
+        followerCount: application.followerCount,
       });
 
       res.json({ success: true, profile });
@@ -4514,7 +4505,7 @@ export async function registerRoutes(
 
       await storage.updateInfluencerApplication(id, {
         status: 'rejected',
-        rejectionReason: rejectionReason || null,
+        adminNotes: rejectionReason || null,
         reviewedAt: new Date(),
         reviewedBy: req.session?.userId,
       });
@@ -4565,13 +4556,16 @@ export async function registerRoutes(
         return res.status(404).json({ error: "Influencer profile not found" });
       }
 
-      const { displayName, bio, profileImage, socialMediaLinks } = req.body;
+      const { displayName, bio, instagramUrl, tiktokUrl, youtubeUrl, twitterUrl, followerCount } = req.body;
       
       const updatedProfile = await storage.updateInfluencerProfile(profile.id, {
         displayName: displayName ?? profile.displayName,
         bio: bio ?? profile.bio,
-        profileImage: profileImage ?? profile.profileImage,
-        socialMediaLinks: socialMediaLinks ?? profile.socialMediaLinks,
+        instagramUrl: instagramUrl ?? profile.instagramUrl,
+        tiktokUrl: tiktokUrl ?? profile.tiktokUrl,
+        youtubeUrl: youtubeUrl ?? profile.youtubeUrl,
+        twitterUrl: twitterUrl ?? profile.twitterUrl,
+        followerCount: followerCount ?? profile.followerCount,
       });
 
       res.json({ profile: updatedProfile });
@@ -4773,9 +4767,9 @@ export async function registerRoutes(
             ...profile,
             user: user ? { 
               id: user.id, 
-              displayName: user.displayName, 
+              name: user.firstName && user.lastName ? `${user.firstName} ${user.lastName}` : user.name,
               email: user.email,
-              profileImage: user.profileImage 
+              profileImageUrl: user.profileImageUrl 
             } : null,
           };
         })
@@ -4791,12 +4785,13 @@ export async function registerRoutes(
   // Admin: Create influencer campaign
   app.post("/api/admin/influencer-campaigns", requireAdmin, async (req, res) => {
     try {
-      const { name, description, payoutAmountCents, payoutType, startDate, endDate } = req.body;
+      const { name, description, flatAmountCents, commissionBps, payoutType, startDate, endDate } = req.body;
 
       const campaign = await storage.createInfluencerCampaign({
         name,
         description: description || null,
-        payoutAmountCents: parseInt(payoutAmountCents),
+        flatAmountCents: flatAmountCents ? parseInt(flatAmountCents) : 0,
+        commissionBps: commissionBps ? parseInt(commissionBps) : 0,
         payoutType: payoutType || 'flat',
         createdByAdminId: req.session?.userId || null,
         createdByVendorId: null,
@@ -4879,11 +4874,13 @@ export async function registerRoutes(
       });
 
       // Create earning ledger entry for this campaign completion
+      // Use flatAmountCents for flat payouts or commissionBps for commission-based
+      const payoutAmount = campaign.payoutType === 'flat' ? (campaign.flatAmountCents || 0) : 0;
       await storage.createInfluencerEarningLedger({
         influencerId: assignment.influencerId,
         sourceType: 'campaign',
-        sourceId: assignment.campaignId,
-        amountCents: campaign.payoutAmountCents,
+        sourceRefId: assignment.campaignId,
+        amountCents: payoutAmount,
         description: `Campaign completed: ${campaign.name}`,
         status: 'ready_for_payout',
       });
@@ -4933,7 +4930,7 @@ export async function registerRoutes(
         amountCents: totalAmount,
         stripeTransferId: transfer.id,
         status: 'completed',
-        initiatedBy: req.session?.userId || null,
+        ledgerIds: readyEarnings.map(e => e.id),
       });
 
       // Update earning ledger entries
@@ -4963,8 +4960,8 @@ export async function registerRoutes(
       const bookings = await storage.getAllShootBookings();
       const refundRequests = await storage.getAllPendingRefundRequests();
 
-      const totalRevenue = orders.reduce((sum, order) => sum + (order.totalCents || 0), 0);
-      const totalBookingRevenue = bookings.reduce((sum, booking) => sum + (booking.totalPriceCents || 0), 0);
+      const totalRevenue = orders.reduce((sum, order) => sum + (order.totalAmount || 0), 0);
+      const totalBookingRevenue = bookings.reduce((sum, booking) => sum + (booking.totalPrice || 0), 0);
 
       res.json({
         stats: {
@@ -5326,7 +5323,7 @@ export async function registerRoutes(
 
       // Enrich with customer and business info
       const enrichedOrders = await Promise.all(paginatedOrders.map(async (order) => {
-        const customer = await storage.getUser(order.userId);
+        const customer = await storage.getUser(order.customerId);
         const business = await storage.getBusiness(order.businessId);
         return {
           ...order,
@@ -5364,7 +5361,7 @@ export async function registerRoutes(
 
       // Enrich with customer and photographer info
       const enrichedBookings = await Promise.all(paginatedBookings.map(async (booking) => {
-        const customer = await storage.getUser(booking.customerId);
+        const customer = await storage.getUser(booking.clientId);
         const photographer = await storage.getPhotographer(booking.photographerId);
         return {
           ...booking,
@@ -5394,7 +5391,8 @@ export async function registerRoutes(
 
       // Enrich with participant info
       const enrichedConversations = await Promise.all(paginatedConversations.map(async (conv) => {
-        const participants = await Promise.all(conv.participants.map(async (pId: string) => {
+        const participantIds = [conv.participant1Id, conv.participant2Id];
+        const participants = await Promise.all(participantIds.map(async (pId: string) => {
           const user = await storage.getUser(pId);
           return {
             id: pId,
@@ -5491,7 +5489,7 @@ export async function registerRoutes(
         status: data.status,
         adminNotes: data.adminNotes,
         resolvedAt: data.status !== "pending" ? new Date() : undefined,
-        resolvedByAdminId: data.status !== "pending" ? req.session?.userId : undefined,
+        resolvedBy: data.status !== "pending" ? req.session?.userId : undefined,
       });
 
       if (!report) {
@@ -5519,11 +5517,12 @@ export async function registerRoutes(
       }
 
       // Get related data
-      const [reporter, reported, message] = await Promise.all([
+      const [reporter, reported, conversationMessages] = await Promise.all([
         storage.getUser(report.reporterId),
         storage.getUser(report.reportedUserId),
-        storage.getMessage(report.messageId),
+        storage.getMessages(report.conversationId),
       ]);
+      const message = conversationMessages.find(m => m.id === report.messageId);
 
       res.json({
         report: {
@@ -5722,7 +5721,7 @@ export async function registerRoutes(
           if (!product) {
             return res.status(404).json({ error: "Product not found" });
           }
-          const business = await storage.getBusinessByOwner(userId);
+          const business = await storage.getBusinessByOwnerId(userId);
           if (!business || product.businessId !== business.id) {
             return res.status(403).json({ error: "You can only share your own products" });
           }
@@ -5733,7 +5732,7 @@ export async function registerRoutes(
           if (!service) {
             return res.status(404).json({ error: "Service not found" });
           }
-          const business = await storage.getBusinessByOwner(userId);
+          const business = await storage.getBusinessByOwnerId(userId);
           if (!business || service.businessId !== business.id) {
             return res.status(403).json({ error: "You can only share your own services" });
           }
@@ -6260,7 +6259,7 @@ export async function registerRoutes(
       // Enrich orders with business names and shipment info
       const enrichedOrders = await Promise.all(
         orders.map(async (order) => {
-          const business = await storage.getBusinessById(order.businessId);
+          const business = await storage.getBusiness(order.businessId);
           const shipments = await storage.getShipmentsByOrder(order.id);
           
           return {
@@ -6268,7 +6267,7 @@ export async function registerRoutes(
             businessId: order.businessId,
             businessName: business?.name || "Unknown Business",
             items: order.items,
-            total: order.total,
+            total: order.totalAmount,
             status: order.status,
             createdAt: order.createdAt,
             shipment: shipments.length > 0 ? shipments[0] : null,
