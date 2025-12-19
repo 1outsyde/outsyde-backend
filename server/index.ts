@@ -203,6 +203,14 @@ async function initStripe() {
     console.error("Initial benefit maintenance error:", error);
   }
 
+  // Rebuild unified search index on startup
+  try {
+    await storage.rebuildSearchIndex();
+    log("Unified search index rebuilt", "search");
+  } catch (error) {
+    console.error("Search index rebuild error:", error);
+  }
+
   await registerRoutes(httpServer, app);
 
   // Set up WebSocket server for real-time chat
