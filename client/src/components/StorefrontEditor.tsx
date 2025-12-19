@@ -338,6 +338,16 @@ function BrandingTab({ business, onUpdate, isPending }: { business: Business; on
   );
 }
 
+const SPECIALTY_OPTIONS: Record<string, string[]> = {
+  "Restaurant": ["Taste", "Presentation", "Ambiance", "Speed", "Portions", "Fresh Ingredients", "Family-Friendly", "Late Night"],
+  "Retail": ["Quality", "Variety", "Price", "Customer Service", "Unique Items", "Local Products", "Eco-Friendly"],
+  "Services": ["Reliability", "Expertise", "Affordability", "Quick Turnaround", "Personalized Service", "Professionalism"],
+  "Beauty": ["Relaxation", "Expertise", "Hygiene", "Latest Trends", "Natural Products", "Personalized Care"],
+  "Health": ["Results", "Safety", "Expertise", "Modern Equipment", "Holistic Approach", "Personalized Plans"],
+  "Entertainment": ["Fun", "Variety", "Value", "Family-Friendly", "Unique Experiences", "Great Atmosphere"],
+  "default": ["Quality", "Service", "Value", "Experience", "Expertise", "Reliability", "Innovation", "Customer Care"]
+};
+
 function ProfileTab({ business, onUpdate, isPending }: { business: Business; onUpdate: (data: Partial<Business>) => void; isPending: boolean }) {
   const [name, setName] = useState(business.name || "");
   const [description, setDescription] = useState(business.description || "");
@@ -349,6 +359,18 @@ function ProfileTab({ business, onUpdate, isPending }: { business: Business; onU
   const [city, setCity] = useState(business.city || "");
   const [state, setState] = useState(business.state || "");
   const [zipCode, setZipCode] = useState(business.zipCode || "");
+  const [knownFor, setKnownFor] = useState<string[]>((business as any).knownFor || []);
+
+  const categorySpecialties = SPECIALTY_OPTIONS[business.category] || SPECIALTY_OPTIONS["default"];
+  const allSpecialties = [...new Set([...categorySpecialties, ...SPECIALTY_OPTIONS["default"]])];
+
+  const toggleSpecialty = (specialty: string) => {
+    setKnownFor(prev => 
+      prev.includes(specialty) 
+        ? prev.filter(s => s !== specialty)
+        : [...prev, specialty]
+    );
+  };
 
   const handleSave = () => {
     onUpdate({
@@ -362,6 +384,7 @@ function ProfileTab({ business, onUpdate, isPending }: { business: Business; onU
       city,
       state,
       zipCode,
+      knownFor,
     } as Partial<Business>);
   };
 
@@ -405,6 +428,45 @@ function ProfileTab({ business, onUpdate, isPending }: { business: Business; onU
               data-testid="input-description"
             />
           </div>
+        </CardContent>
+      </Card>
+
+      <Card className="overflow-visible">
+        <CardHeader>
+          <CardTitle className="text-lg flex items-center gap-2">
+            <span>Known For</span>
+            <Badge variant="secondary" className="text-xs">{knownFor.length} selected</Badge>
+          </CardTitle>
+          <CardDescription>
+            Select what your business is best known for. This helps customers find you when searching for specific qualities.
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          <div className="flex flex-wrap gap-2">
+            {allSpecialties.map((specialty) => (
+              <Badge
+                key={specialty}
+                variant={knownFor.includes(specialty) ? "default" : "outline"}
+                className={`cursor-pointer transition-colors ${
+                  knownFor.includes(specialty) 
+                    ? "bg-primary text-primary-foreground" 
+                    : "hover-elevate"
+                }`}
+                onClick={() => toggleSpecialty(specialty)}
+                data-testid={`badge-specialty-${specialty.toLowerCase().replace(/\s+/g, '-')}`}
+              >
+                {knownFor.includes(specialty) && <span className="mr-1">✓</span>}
+                {specialty}
+              </Badge>
+            ))}
+          </div>
+          {knownFor.length > 0 && (
+            <div className="mt-4 p-3 bg-muted rounded-md">
+              <p className="text-sm text-muted-foreground">
+                Your business will appear as: <span className="font-medium text-foreground">Known for {knownFor.join(", ")}</span>
+              </p>
+            </div>
+          )}
         </CardContent>
       </Card>
 
