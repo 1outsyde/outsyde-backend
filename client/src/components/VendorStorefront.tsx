@@ -215,7 +215,7 @@ export default function VendorStorefront({
                 Services
               </TabsTrigger>
             )}
-            {services.length > 0 && (
+            {services.length > 0 && canAcceptBookings && (
               <TabsTrigger
                 value="book"
                 className="rounded-none border-b-2 data-[state=active]:bg-transparent px-6 py-3"
@@ -313,62 +313,72 @@ export default function VendorStorefront({
           </TabsContent>
 
           <TabsContent value="services" className="pt-6">
+            {!canAcceptBookings && (
+              <div className="mb-6 p-4 rounded-md bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-200 dark:border-yellow-800">
+                <div className="flex items-start gap-3">
+                  <Mail className="h-5 w-5 text-yellow-600 dark:text-yellow-400 mt-0.5 flex-shrink-0" />
+                  <div>
+                    <h4 className="font-medium text-yellow-800 dark:text-yellow-200">Online Booking Unavailable</h4>
+                    <p className="text-sm text-yellow-700 dark:text-yellow-300 mt-1">
+                      This {storefrontType === 'photographer' ? 'photographer' : 'vendor'} is not currently accepting online bookings. 
+                      <Button 
+                        variant="link" 
+                        className="px-1 py-0 h-auto text-yellow-800 dark:text-yellow-200 underline"
+                        onClick={() => setActiveTab("chat")}
+                        data-testid="link-contact-for-booking"
+                      >
+                        Contact them directly
+                      </Button>
+                      to inquire about their services.
+                    </p>
+                  </div>
+                </div>
+              </div>
+            )}
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
               {services.map((service) => (
                 <ServiceCard
                   key={service.id}
                   {...service}
-                  onBook={(id) => {
+                  available={canAcceptBookings}
+                  onBook={canAcceptBookings ? (id) => {
                     const svc = services.find((s) => s.id === id);
                     if (svc) {
                       setSelectedService(svc);
                       setActiveTab("book");
                     }
-                  }}
+                  } : undefined}
                 />
               ))}
             </div>
           </TabsContent>
 
-          <TabsContent value="book" className="pt-6">
-            {!canAcceptBookings ? (
-              <div className="text-center py-12">
-                <div className="max-w-md mx-auto">
-                  <div className="h-12 w-12 rounded-full bg-yellow-100 dark:bg-yellow-900 flex items-center justify-center mx-auto mb-4">
-                    <Mail className="h-6 w-6 text-yellow-600 dark:text-yellow-400" />
-                  </div>
-                  <h3 className="text-lg font-semibold mb-2">Bookings Not Available</h3>
+          {canAcceptBookings && (
+            <TabsContent value="book" className="pt-6">
+              {selectedService ? (
+                <div className="max-w-md">
+                  <BookingCalendar
+                    serviceName={selectedService.name}
+                    servicePrice={selectedService.price}
+                    serviceDuration={selectedService.duration}
+                    availableSlots={availableSlots}
+                    onBook={(date, time) =>
+                      onBookService?.(selectedService.id, date, time)
+                    }
+                  />
+                </div>
+              ) : (
+                <div className="text-center py-12">
                   <p className="text-muted-foreground mb-4">
-                    This {storefrontType === 'photographer' ? 'photographer' : 'vendor'} is not currently accepting online bookings. Please contact them directly to inquire about their services.
+                    Select a service to book an appointment
                   </p>
-                  <Button variant="outline" onClick={() => setActiveTab("chat")}>
-                    Send a Message
+                  <Button variant="outline" onClick={() => setActiveTab("services")}>
+                    View Services
                   </Button>
                 </div>
-              </div>
-            ) : selectedService ? (
-              <div className="max-w-md">
-                <BookingCalendar
-                  serviceName={selectedService.name}
-                  servicePrice={selectedService.price}
-                  serviceDuration={selectedService.duration}
-                  availableSlots={availableSlots}
-                  onBook={(date, time) =>
-                    onBookService?.(selectedService.id, date, time)
-                  }
-                />
-              </div>
-            ) : (
-              <div className="text-center py-12">
-                <p className="text-muted-foreground mb-4">
-                  Select a service to book an appointment
-                </p>
-                <Button variant="outline" onClick={() => setActiveTab("services")}>
-                  View Services
-                </Button>
-              </div>
-            )}
-          </TabsContent>
+              )}
+            </TabsContent>
+          )}
 
           <TabsContent value="chat" className="pt-6">
             <div className="max-w-2xl">
