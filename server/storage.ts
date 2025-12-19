@@ -67,6 +67,20 @@ import {
   type InsertUserBlock,
   type MessageReport,
   type InsertMessageReport,
+  type InfluencerProfile,
+  type InsertInfluencerProfile,
+  type InfluencerApplication,
+  type InsertInfluencerApplication,
+  type InfluencerCampaign,
+  type InsertInfluencerCampaign,
+  type InfluencerCampaignAssignment,
+  type InsertInfluencerCampaignAssignment,
+  type InfluencerReferralEvent,
+  type InsertInfluencerReferralEvent,
+  type InfluencerEarningLedger,
+  type InsertInfluencerEarningLedger,
+  type InfluencerPayout,
+  type InsertInfluencerPayout,
   users,
   businesses,
   cities,
@@ -108,6 +122,13 @@ import {
   auditLogs,
   userBlocks,
   messageReports,
+  influencerProfiles,
+  influencerApplications,
+  influencerCampaigns,
+  influencerCampaignAssignments,
+  influencerReferralEvents,
+  influencerEarningLedger,
+  influencerPayouts,
   isValidOrderTransition,
   isValidBookingTransition
 } from "@shared/schema";
@@ -487,6 +508,49 @@ export interface IStorage {
   getMessageReports(filters?: { status?: string; reporterId?: string; reportedUserId?: string }): Promise<MessageReport[]>;
   updateMessageReport(id: string, updates: Partial<MessageReport>): Promise<MessageReport | undefined>;
   getMessageReport(id: string): Promise<MessageReport | undefined>;
+
+  // Influencer Profiles
+  createInfluencerProfile(data: InsertInfluencerProfile): Promise<InfluencerProfile>;
+  getInfluencerProfile(id: string): Promise<InfluencerProfile | undefined>;
+  getInfluencerProfileByUserId(userId: string): Promise<InfluencerProfile | undefined>;
+  getInfluencerProfileByPromoCode(promoCode: string): Promise<InfluencerProfile | undefined>;
+  updateInfluencerProfile(id: string, updates: Partial<InfluencerProfile>): Promise<InfluencerProfile | undefined>;
+  listInfluencerProfiles(): Promise<InfluencerProfile[]>;
+
+  // Influencer Applications
+  createInfluencerApplication(data: InsertInfluencerApplication): Promise<InfluencerApplication>;
+  getInfluencerApplication(id: string): Promise<InfluencerApplication | undefined>;
+  getInfluencerApplicationByUserId(userId: string): Promise<InfluencerApplication | undefined>;
+  getInfluencerApplications(status?: string): Promise<InfluencerApplication[]>;
+  updateInfluencerApplication(id: string, updates: Partial<InfluencerApplication>): Promise<InfluencerApplication | undefined>;
+
+  // Influencer Campaigns
+  createInfluencerCampaign(data: InsertInfluencerCampaign): Promise<InfluencerCampaign>;
+  getInfluencerCampaign(id: string): Promise<InfluencerCampaign | undefined>;
+  getInfluencerCampaigns(filters?: { vendorId?: string; adminId?: string; status?: string }): Promise<InfluencerCampaign[]>;
+  updateInfluencerCampaign(id: string, updates: Partial<InfluencerCampaign>): Promise<InfluencerCampaign | undefined>;
+
+  // Influencer Campaign Assignments
+  createInfluencerCampaignAssignment(data: InsertInfluencerCampaignAssignment): Promise<InfluencerCampaignAssignment>;
+  getInfluencerCampaignAssignment(id: string): Promise<InfluencerCampaignAssignment | undefined>;
+  getInfluencerCampaignAssignments(filters?: { campaignId?: string; influencerId?: string; status?: string }): Promise<InfluencerCampaignAssignment[]>;
+  updateInfluencerCampaignAssignment(id: string, updates: Partial<InfluencerCampaignAssignment>): Promise<InfluencerCampaignAssignment | undefined>;
+
+  // Influencer Referral Events
+  createInfluencerReferralEvent(data: InsertInfluencerReferralEvent): Promise<InfluencerReferralEvent>;
+  getInfluencerReferralEvents(influencerId: string): Promise<InfluencerReferralEvent[]>;
+
+  // Influencer Earning Ledger
+  createInfluencerEarningLedger(data: InsertInfluencerEarningLedger): Promise<InfluencerEarningLedger>;
+  getInfluencerEarningLedger(influencerId: string, status?: string): Promise<InfluencerEarningLedger[]>;
+  updateInfluencerEarningLedger(id: string, updates: Partial<InfluencerEarningLedger>): Promise<InfluencerEarningLedger | undefined>;
+  getReadyForPayoutLedgerEntries(influencerId: string): Promise<InfluencerEarningLedger[]>;
+
+  // Influencer Payouts
+  createInfluencerPayout(data: InsertInfluencerPayout): Promise<InfluencerPayout>;
+  getInfluencerPayout(id: string): Promise<InfluencerPayout | undefined>;
+  getInfluencerPayouts(influencerId: string): Promise<InfluencerPayout[]>;
+  updateInfluencerPayout(id: string, updates: Partial<InfluencerPayout>): Promise<InfluencerPayout | undefined>;
 
   seedInitialData(): Promise<void>;
 }
@@ -4136,6 +4200,279 @@ export class DatabaseStorage implements IStorage {
     }
 
     return reviewsToRevoke.length;
+  }
+
+  // =========================
+  // INFLUENCER PROFILES
+  // =========================
+
+  async createInfluencerProfile(data: InsertInfluencerProfile): Promise<InfluencerProfile> {
+    const id = randomUUID();
+    const result = await db.insert(influencerProfiles).values({
+      id,
+      ...data,
+    }).returning();
+    return result[0];
+  }
+
+  async getInfluencerProfile(id: string): Promise<InfluencerProfile | undefined> {
+    const result = await db.select().from(influencerProfiles).where(eq(influencerProfiles.id, id));
+    return result[0];
+  }
+
+  async getInfluencerProfileByUserId(userId: string): Promise<InfluencerProfile | undefined> {
+    const result = await db.select().from(influencerProfiles).where(eq(influencerProfiles.userId, userId));
+    return result[0];
+  }
+
+  async getInfluencerProfileByPromoCode(promoCode: string): Promise<InfluencerProfile | undefined> {
+    const result = await db.select().from(influencerProfiles).where(eq(influencerProfiles.promoCode, promoCode));
+    return result[0];
+  }
+
+  async updateInfluencerProfile(id: string, updates: Partial<InfluencerProfile>): Promise<InfluencerProfile | undefined> {
+    const result = await db.update(influencerProfiles)
+      .set({ ...updates, updatedAt: new Date() })
+      .where(eq(influencerProfiles.id, id))
+      .returning();
+    return result[0];
+  }
+
+  async listInfluencerProfiles(): Promise<InfluencerProfile[]> {
+    return db.select().from(influencerProfiles).orderBy(desc(influencerProfiles.createdAt));
+  }
+
+  // =========================
+  // INFLUENCER APPLICATIONS
+  // =========================
+
+  async createInfluencerApplication(data: InsertInfluencerApplication): Promise<InfluencerApplication> {
+    const id = randomUUID();
+    const result = await db.insert(influencerApplications).values({
+      id,
+      ...data,
+    }).returning();
+    return result[0];
+  }
+
+  async getInfluencerApplication(id: string): Promise<InfluencerApplication | undefined> {
+    const result = await db.select().from(influencerApplications).where(eq(influencerApplications.id, id));
+    return result[0];
+  }
+
+  async getInfluencerApplicationByUserId(userId: string): Promise<InfluencerApplication | undefined> {
+    const result = await db.select()
+      .from(influencerApplications)
+      .where(eq(influencerApplications.userId, userId))
+      .orderBy(desc(influencerApplications.createdAt));
+    return result[0];
+  }
+
+  async getInfluencerApplications(status?: string): Promise<InfluencerApplication[]> {
+    if (status) {
+      return db.select().from(influencerApplications)
+        .where(eq(influencerApplications.status, status))
+        .orderBy(desc(influencerApplications.createdAt));
+    }
+    return db.select().from(influencerApplications).orderBy(desc(influencerApplications.createdAt));
+  }
+
+  async updateInfluencerApplication(id: string, updates: Partial<InfluencerApplication>): Promise<InfluencerApplication | undefined> {
+    const result = await db.update(influencerApplications)
+      .set(updates)
+      .where(eq(influencerApplications.id, id))
+      .returning();
+    return result[0];
+  }
+
+  // =========================
+  // INFLUENCER CAMPAIGNS
+  // =========================
+
+  async createInfluencerCampaign(data: InsertInfluencerCampaign): Promise<InfluencerCampaign> {
+    const id = randomUUID();
+    const result = await db.insert(influencerCampaigns).values({
+      id,
+      ...data,
+    }).returning();
+    return result[0];
+  }
+
+  async getInfluencerCampaign(id: string): Promise<InfluencerCampaign | undefined> {
+    const result = await db.select().from(influencerCampaigns).where(eq(influencerCampaigns.id, id));
+    return result[0];
+  }
+
+  async getInfluencerCampaigns(filters?: { vendorId?: string; adminId?: string; status?: string }): Promise<InfluencerCampaign[]> {
+    let query = db.select().from(influencerCampaigns);
+    const conditions: any[] = [];
+    
+    if (filters?.vendorId) {
+      conditions.push(eq(influencerCampaigns.createdByVendorId, filters.vendorId));
+    }
+    if (filters?.adminId) {
+      conditions.push(eq(influencerCampaigns.createdByAdminId, filters.adminId));
+    }
+    if (filters?.status) {
+      conditions.push(eq(influencerCampaigns.status, filters.status));
+    }
+
+    if (conditions.length > 0) {
+      return db.select().from(influencerCampaigns)
+        .where(and(...conditions))
+        .orderBy(desc(influencerCampaigns.createdAt));
+    }
+    return db.select().from(influencerCampaigns).orderBy(desc(influencerCampaigns.createdAt));
+  }
+
+  async updateInfluencerCampaign(id: string, updates: Partial<InfluencerCampaign>): Promise<InfluencerCampaign | undefined> {
+    const result = await db.update(influencerCampaigns)
+      .set({ ...updates, updatedAt: new Date() })
+      .where(eq(influencerCampaigns.id, id))
+      .returning();
+    return result[0];
+  }
+
+  // =========================
+  // INFLUENCER CAMPAIGN ASSIGNMENTS
+  // =========================
+
+  async createInfluencerCampaignAssignment(data: InsertInfluencerCampaignAssignment): Promise<InfluencerCampaignAssignment> {
+    const id = randomUUID();
+    const result = await db.insert(influencerCampaignAssignments).values({
+      id,
+      ...data,
+    }).returning();
+    return result[0];
+  }
+
+  async getInfluencerCampaignAssignment(id: string): Promise<InfluencerCampaignAssignment | undefined> {
+    const result = await db.select().from(influencerCampaignAssignments).where(eq(influencerCampaignAssignments.id, id));
+    return result[0];
+  }
+
+  async getInfluencerCampaignAssignments(filters?: { campaignId?: string; influencerId?: string; status?: string }): Promise<InfluencerCampaignAssignment[]> {
+    const conditions: any[] = [];
+    
+    if (filters?.campaignId) {
+      conditions.push(eq(influencerCampaignAssignments.campaignId, filters.campaignId));
+    }
+    if (filters?.influencerId) {
+      conditions.push(eq(influencerCampaignAssignments.influencerId, filters.influencerId));
+    }
+    if (filters?.status) {
+      conditions.push(eq(influencerCampaignAssignments.status, filters.status));
+    }
+
+    if (conditions.length > 0) {
+      return db.select().from(influencerCampaignAssignments)
+        .where(and(...conditions))
+        .orderBy(desc(influencerCampaignAssignments.createdAt));
+    }
+    return db.select().from(influencerCampaignAssignments).orderBy(desc(influencerCampaignAssignments.createdAt));
+  }
+
+  async updateInfluencerCampaignAssignment(id: string, updates: Partial<InfluencerCampaignAssignment>): Promise<InfluencerCampaignAssignment | undefined> {
+    const result = await db.update(influencerCampaignAssignments)
+      .set(updates)
+      .where(eq(influencerCampaignAssignments.id, id))
+      .returning();
+    return result[0];
+  }
+
+  // =========================
+  // INFLUENCER REFERRAL EVENTS
+  // =========================
+
+  async createInfluencerReferralEvent(data: InsertInfluencerReferralEvent): Promise<InfluencerReferralEvent> {
+    const id = randomUUID();
+    const result = await db.insert(influencerReferralEvents).values({
+      id,
+      ...data,
+    }).returning();
+    return result[0];
+  }
+
+  async getInfluencerReferralEvents(influencerId: string): Promise<InfluencerReferralEvent[]> {
+    return db.select().from(influencerReferralEvents)
+      .where(eq(influencerReferralEvents.influencerId, influencerId))
+      .orderBy(desc(influencerReferralEvents.createdAt));
+  }
+
+  // =========================
+  // INFLUENCER EARNING LEDGER
+  // =========================
+
+  async createInfluencerEarningLedger(data: InsertInfluencerEarningLedger): Promise<InfluencerEarningLedger> {
+    const id = randomUUID();
+    const result = await db.insert(influencerEarningLedger).values({
+      id,
+      ...data,
+    }).returning();
+    return result[0];
+  }
+
+  async getInfluencerEarningLedger(influencerId: string, status?: string): Promise<InfluencerEarningLedger[]> {
+    if (status) {
+      return db.select().from(influencerEarningLedger)
+        .where(and(
+          eq(influencerEarningLedger.influencerId, influencerId),
+          eq(influencerEarningLedger.status, status)
+        ))
+        .orderBy(desc(influencerEarningLedger.createdAt));
+    }
+    return db.select().from(influencerEarningLedger)
+      .where(eq(influencerEarningLedger.influencerId, influencerId))
+      .orderBy(desc(influencerEarningLedger.createdAt));
+  }
+
+  async updateInfluencerEarningLedger(id: string, updates: Partial<InfluencerEarningLedger>): Promise<InfluencerEarningLedger | undefined> {
+    const result = await db.update(influencerEarningLedger)
+      .set(updates)
+      .where(eq(influencerEarningLedger.id, id))
+      .returning();
+    return result[0];
+  }
+
+  async getReadyForPayoutLedgerEntries(influencerId: string): Promise<InfluencerEarningLedger[]> {
+    return db.select().from(influencerEarningLedger)
+      .where(and(
+        eq(influencerEarningLedger.influencerId, influencerId),
+        eq(influencerEarningLedger.status, 'ready_for_payout')
+      ))
+      .orderBy(asc(influencerEarningLedger.createdAt));
+  }
+
+  // =========================
+  // INFLUENCER PAYOUTS
+  // =========================
+
+  async createInfluencerPayout(data: InsertInfluencerPayout): Promise<InfluencerPayout> {
+    const id = randomUUID();
+    const result = await db.insert(influencerPayouts).values({
+      id,
+      ...data,
+    }).returning();
+    return result[0];
+  }
+
+  async getInfluencerPayout(id: string): Promise<InfluencerPayout | undefined> {
+    const result = await db.select().from(influencerPayouts).where(eq(influencerPayouts.id, id));
+    return result[0];
+  }
+
+  async getInfluencerPayouts(influencerId: string): Promise<InfluencerPayout[]> {
+    return db.select().from(influencerPayouts)
+      .where(eq(influencerPayouts.influencerId, influencerId))
+      .orderBy(desc(influencerPayouts.initiatedAt));
+  }
+
+  async updateInfluencerPayout(id: string, updates: Partial<InfluencerPayout>): Promise<InfluencerPayout | undefined> {
+    const result = await db.update(influencerPayouts)
+      .set(updates)
+      .where(eq(influencerPayouts.id, id))
+      .returning();
+    return result[0];
   }
 }
 
