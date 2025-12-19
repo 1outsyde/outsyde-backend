@@ -1,18 +1,24 @@
 import { useState } from "react";
-import { User, Settings, Heart, Calendar, ShoppingBag, LogOut, ChevronRight, Coins, ShieldCheck, Package } from "lucide-react";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { User, Settings, Heart, Calendar, ShoppingBag, LogOut, ChevronRight, Coins, ShieldCheck, Package, TrendingUp, Loader2, CheckCircle2, Clock, XCircle } from "lucide-react";
+import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/separator";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Textarea } from "@/components/ui/textarea";
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogDescription } from "@/components/ui/dialog";
 import LoyaltyPointsCard from "@/components/LoyaltyPointsCard";
 import PointsHistory from "@/components/PointsHistory";
 import ReferralCard from "@/components/ReferralCard";
 import PushNotificationSettings from "@/components/PushNotificationSettings";
 import BillingAddressForm from "@/components/BillingAddressForm";
 import OrderTrackingCard from "@/components/OrderTrackingCard";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useMutation } from "@tanstack/react-query";
 import { Skeleton } from "@/components/ui/skeleton";
+import { apiRequest, queryClient } from "@/lib/queryClient";
+import { useToast } from "@/hooks/use-toast";
 
 interface BillingAddress {
   line1: string;
@@ -52,9 +58,24 @@ interface ProfileUser {
   state?: string;
   isVendor: boolean;
   isPhotographer?: boolean;
+  isInfluencer?: boolean;
   isAdmin?: boolean;
   createdAt?: string;
   billingAddress?: BillingAddress | null;
+}
+
+interface InfluencerApplication {
+  id: string;
+  userId: string;
+  status: "pending" | "approved" | "rejected";
+  socialMediaLinks: string;
+  followerCount: string;
+  bio: string;
+  niche: string;
+  whyJoin: string;
+  submittedAt: string;
+  reviewedAt: string | null;
+  adminNotes: string | null;
 }
 
 interface ProfilePageProps {
@@ -71,10 +92,53 @@ export default function ProfilePage({ onLogout, onAdminDashboard }: ProfilePageP
 
   const isPhotographer = userData?.isPhotographer ?? false;
   const isVendor = userData?.isVendor ?? false;
+  const isInfluencer = userData?.isInfluencer ?? false;
   const isAdmin = userData?.isAdmin ?? false;
   
   // Only regular customers (not photographers or business owners) can see/earn points
   const isRegularCustomer = !isPhotographer && !isVendor;
+  
+  // Influencer application state
+  const [showInfluencerForm, setShowInfluencerForm] = useState(false);
+  const [influencerFormData, setInfluencerFormData] = useState({
+    socialMediaLinks: "",
+    followerCount: "",
+    bio: "",
+    niche: "",
+    whyJoin: "",
+  });
+  const { toast } = useToast();
+  
+  // Fetch existing influencer application
+  const { data: existingApplication, isLoading: applicationLoading } = useQuery<{ application: InfluencerApplication | null }>({
+    queryKey: ["/api/influencer/application"],
+    enabled: !isInfluencer,
+  });
+  
+  // Submit influencer application mutation
+  const submitApplicationMutation = useMutation({
+    mutationFn: async (data: typeof influencerFormData) => {
+      return apiRequest("/api/influencer/apply", {
+        method: "POST",
+        body: JSON.stringify(data),
+      });
+    },
+    onSuccess: () => {
+      toast({
+        title: "Application Submitted",
+        description: "Your influencer application has been submitted for review. We'll notify you once it's reviewed.",
+      });
+      setShowInfluencerForm(false);
+      queryClient.invalidateQueries({ queryKey: ["/api/influencer/application"] });
+    },
+    onError: (error: Error) => {
+      toast({
+        title: "Error",
+        description: error.message || "Failed to submit application. Please try again.",
+        variant: "destructive",
+      });
+    },
+  });
 
   const user = userData ? {
     name: userData.name || "User",
@@ -287,6 +351,112 @@ export default function ProfilePage({ onLogout, onAdminDashboard }: ProfilePageP
               queryKeyToInvalidate={["/api/auth/user"]}
               title="Billing Address"
             />
+            
+            {/* Influencer Application Section - only show if not already an influencer */}
+            {!isInfluencer && (
+              <Card className="overflow-visible">
+                <CardHeader>
+                  <div className="flex items-center gap-2">
+                    <TrendingUp className="h-5 w-5 text-primary" />
+                    <CardTitle className="text-lg">Become an Influencer</CardTitle>
+                  </div>
+                  <CardDescription>
+                    Earn money by promoting Outsyde businesses and attracting new customers through your referral links.
+                  </CardDescription>
+                </CardHeader>
+                <CardContent>
+                  {applicationLoading ? (
+                    <div className="flex items-center gap-2">
+                      <Loader2 className="h-4 w-4 animate-spin" />
+                      <span className="text-sm text-muted-foreground">Checking application status...</span>
+                    </div>
+                  ) : existingApplication?.application ? (
+                    <div className="space-y-4">
+                      {existingApplication.application.status === "pending" && (
+                        <div className="flex items-start gap-3 p-4 rounded-md bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800">
+                          <Clock className="h-5 w-5 text-amber-600 mt-0.5" />
+                          <div>
+                            <p className="font-medium text-amber-800 dark:text-amber-200">Application Under Review</p>
+                            <p className="text-sm text-amber-700 dark:text-amber-300 mt-1">
+                              Your influencer application was submitted on {new Date(existingApplication.application.submittedAt).toLocaleDateString()}. 
+                              We'll notify you once it's reviewed.
+                            </p>
+                          </div>
+                        </div>
+                      )}
+                      {existingApplication.application.status === "rejected" && (
+                        <div className="flex items-start gap-3 p-4 rounded-md bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800">
+                          <XCircle className="h-5 w-5 text-red-600 mt-0.5" />
+                          <div>
+                            <p className="font-medium text-red-800 dark:text-red-200">Application Not Approved</p>
+                            <p className="text-sm text-red-700 dark:text-red-300 mt-1">
+                              Unfortunately, your application was not approved at this time.
+                              {existingApplication.application.adminNotes && (
+                                <span className="block mt-2">Feedback: {existingApplication.application.adminNotes}</span>
+                              )}
+                            </p>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  ) : (
+                    <div className="space-y-4">
+                      <div className="grid grid-cols-1 md:grid-cols-3 gap-4 text-center">
+                        <div className="p-4 rounded-md bg-muted/50">
+                          <p className="text-2xl font-bold text-primary">10%</p>
+                          <p className="text-sm text-muted-foreground">Commission on referral sales</p>
+                        </div>
+                        <div className="p-4 rounded-md bg-muted/50">
+                          <p className="text-2xl font-bold text-primary">$$$</p>
+                          <p className="text-sm text-muted-foreground">Paid campaign opportunities</p>
+                        </div>
+                        <div className="p-4 rounded-md bg-muted/50">
+                          <p className="text-2xl font-bold text-primary">Fast</p>
+                          <p className="text-sm text-muted-foreground">Direct payouts via Stripe</p>
+                        </div>
+                      </div>
+                      <Button 
+                        onClick={() => setShowInfluencerForm(true)}
+                        className="w-full"
+                        data-testid="button-apply-influencer"
+                      >
+                        <TrendingUp className="h-4 w-4 mr-2" />
+                        Apply to Become an Influencer
+                      </Button>
+                    </div>
+                  )}
+                </CardContent>
+              </Card>
+            )}
+            
+            {/* Influencer status badge for approved influencers */}
+            {isInfluencer && (
+              <Card className="overflow-visible">
+                <CardHeader>
+                  <div className="flex items-center justify-between gap-4">
+                    <div className="flex items-center gap-2">
+                      <TrendingUp className="h-5 w-5 text-primary" />
+                      <CardTitle className="text-lg">Influencer Status</CardTitle>
+                    </div>
+                    <Badge variant="default" className="bg-green-600">
+                      <CheckCircle2 className="h-3 w-3 mr-1" />
+                      Active Influencer
+                    </Badge>
+                  </div>
+                </CardHeader>
+                <CardContent>
+                  <p className="text-sm text-muted-foreground mb-4">
+                    You're an approved Outsyde influencer! Access your dashboard to view campaigns, track referrals, and manage payouts.
+                  </p>
+                  <Button 
+                    onClick={() => window.location.href = "/influencer/dashboard"}
+                    data-testid="button-influencer-dashboard"
+                  >
+                    Go to Influencer Dashboard
+                  </Button>
+                </CardContent>
+              </Card>
+            )}
           </div>
         )}
 
@@ -432,6 +602,113 @@ export default function ProfilePage({ onLogout, onAdminDashboard }: ProfilePageP
           Sign Out
         </Button>
       </div>
+      
+      {/* Influencer Application Form Dialog */}
+      <Dialog open={showInfluencerForm} onOpenChange={setShowInfluencerForm}>
+        <DialogContent className="max-w-lg max-h-[90vh] overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <TrendingUp className="h-5 w-5 text-primary" />
+              Apply to Become an Influencer
+            </DialogTitle>
+            <DialogDescription>
+              Share your social media presence and tell us why you'd be a great Outsyde influencer.
+            </DialogDescription>
+          </DialogHeader>
+          
+          <div className="space-y-4 py-4">
+            <div className="space-y-2">
+              <Label htmlFor="socialMediaLinks">Social Media Links *</Label>
+              <Textarea
+                id="socialMediaLinks"
+                placeholder="Instagram: @yourhandle&#10;TikTok: @yourhandle&#10;YouTube: youtube.com/c/yourchannel"
+                value={influencerFormData.socialMediaLinks}
+                onChange={(e) => setInfluencerFormData(prev => ({ ...prev, socialMediaLinks: e.target.value }))}
+                className="min-h-[80px]"
+                data-testid="input-social-links"
+              />
+              <p className="text-xs text-muted-foreground">List your active social media profiles (one per line)</p>
+            </div>
+            
+            <div className="space-y-2">
+              <Label htmlFor="followerCount">Total Follower Count *</Label>
+              <Input
+                id="followerCount"
+                placeholder="e.g., 10,000 across all platforms"
+                value={influencerFormData.followerCount}
+                onChange={(e) => setInfluencerFormData(prev => ({ ...prev, followerCount: e.target.value }))}
+                data-testid="input-follower-count"
+              />
+            </div>
+            
+            <div className="space-y-2">
+              <Label htmlFor="niche">Content Niche *</Label>
+              <Input
+                id="niche"
+                placeholder="e.g., Local food, lifestyle, small business advocacy"
+                value={influencerFormData.niche}
+                onChange={(e) => setInfluencerFormData(prev => ({ ...prev, niche: e.target.value }))}
+                data-testid="input-niche"
+              />
+            </div>
+            
+            <div className="space-y-2">
+              <Label htmlFor="bio">About You *</Label>
+              <Textarea
+                id="bio"
+                placeholder="Tell us about yourself, your content style, and your audience..."
+                value={influencerFormData.bio}
+                onChange={(e) => setInfluencerFormData(prev => ({ ...prev, bio: e.target.value }))}
+                className="min-h-[80px]"
+                data-testid="input-bio"
+              />
+            </div>
+            
+            <div className="space-y-2">
+              <Label htmlFor="whyJoin">Why do you want to join Outsyde? *</Label>
+              <Textarea
+                id="whyJoin"
+                placeholder="What excites you about promoting local businesses? How would you help them grow?"
+                value={influencerFormData.whyJoin}
+                onChange={(e) => setInfluencerFormData(prev => ({ ...prev, whyJoin: e.target.value }))}
+                className="min-h-[80px]"
+                data-testid="input-why-join"
+              />
+            </div>
+          </div>
+          
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => setShowInfluencerForm(false)}
+              data-testid="button-cancel-application"
+            >
+              Cancel
+            </Button>
+            <Button
+              onClick={() => submitApplicationMutation.mutate(influencerFormData)}
+              disabled={
+                submitApplicationMutation.isPending ||
+                !influencerFormData.socialMediaLinks.trim() ||
+                !influencerFormData.followerCount.trim() ||
+                !influencerFormData.niche.trim() ||
+                !influencerFormData.bio.trim() ||
+                !influencerFormData.whyJoin.trim()
+              }
+              data-testid="button-submit-application"
+            >
+              {submitApplicationMutation.isPending ? (
+                <>
+                  <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                  Submitting...
+                </>
+              ) : (
+                "Submit Application"
+              )}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

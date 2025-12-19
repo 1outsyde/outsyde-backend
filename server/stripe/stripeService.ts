@@ -100,6 +100,54 @@ export class StripeService {
   }
 
   /**
+   * Create a Stripe Express account for an influencer
+   * Influencers only receive transfers (payouts), never process payments
+   */
+  async createInfluencerConnectAccount(
+    email: string,
+    influencerId: string,
+    displayName: string
+  ) {
+    const stripe = await getUncachableStripeClient();
+
+    return stripe.accounts.create({
+      type: "express",
+      email,
+      business_type: "individual",
+      capabilities: {
+        transfers: { requested: true },
+      },
+      business_profile: {
+        name: displayName,
+        mcc: "7311", // Advertising services
+      },
+      metadata: {
+        influencerId,
+        role: "influencer",
+      },
+    });
+  }
+
+  /**
+   * Create a transfer to an influencer's connected account
+   * This is how influencers get paid - via direct transfers, not through checkout sessions
+   */
+  async createInfluencerPayout(
+    destinationAccountId: string,
+    amountInCents: number,
+    metadata: Record<string, string>
+  ) {
+    const stripe = await getUncachableStripeClient();
+
+    return stripe.transfers.create({
+      amount: amountInCents,
+      currency: "usd",
+      destination: destinationAccountId,
+      metadata,
+    });
+  }
+
+  /**
    * Create onboarding link for any Connect account (business or photographer)
    */
   async createConnectOnboardingLink(

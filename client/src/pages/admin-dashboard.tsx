@@ -36,8 +36,14 @@ import {
   ShieldAlert,
   Store,
   Package,
-  Settings
+  Settings,
+  Loader2,
+  CheckCircle2,
+  XCircle,
+  Clock,
+  ExternalLink
 } from "lucide-react";
+import { Textarea } from "@/components/ui/textarea";
 import type { User, Business, Photographer, Order, ShootBooking, Conversation, RefundRequest } from "@shared/schema";
 
 interface AdminStats {
@@ -610,6 +616,341 @@ function MessagesTab() {
   );
 }
 
+interface InfluencerApplication {
+  id: string;
+  userId: string;
+  status: "pending" | "approved" | "rejected";
+  socialMediaLinks: string;
+  followerCount: string;
+  bio: string;
+  niche: string;
+  whyJoin: string;
+  submittedAt: string;
+  reviewedAt: string | null;
+  adminNotes: string | null;
+  user?: {
+    id: string;
+    name: string | null;
+    email: string | null;
+    profileImageUrl: string | null;
+  };
+}
+
+function InfluencerApplicationsTab() {
+  const [selectedApplication, setSelectedApplication] = useState<InfluencerApplication | null>(null);
+  const [reviewDialogOpen, setReviewDialogOpen] = useState(false);
+  const [adminNotes, setAdminNotes] = useState("");
+  const [statusFilter, setStatusFilter] = useState<"all" | "pending" | "approved" | "rejected">("pending");
+  const { toast } = useToast();
+
+  const { data: applicationsData, isLoading } = useQuery<{ applications: InfluencerApplication[] }>({
+    queryKey: ["/api/admin/influencer/applications"],
+  });
+
+  const applications = applicationsData?.applications || [];
+
+  const approveMutation = useMutation({
+    mutationFn: async (data: { applicationId: string; notes: string }) => {
+      return apiRequest("POST", "/api/admin/influencer/applications/approve", { 
+        applicationId: data.applicationId, 
+        adminNotes: data.notes 
+      });
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/admin/influencer/applications"] });
+      setReviewDialogOpen(false);
+      setSelectedApplication(null);
+      setAdminNotes("");
+      toast({ title: "Application approved", description: "The user is now an influencer." });
+    },
+    onError: () => {
+      toast({ title: "Failed to approve application", variant: "destructive" });
+    },
+  });
+
+  const rejectMutation = useMutation({
+    mutationFn: async (data: { applicationId: string; notes: string }) => {
+      return apiRequest("POST", "/api/admin/influencer/applications/reject", { 
+        applicationId: data.applicationId, 
+        adminNotes: data.notes 
+      });
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/admin/influencer/applications"] });
+      setReviewDialogOpen(false);
+      setSelectedApplication(null);
+      setAdminNotes("");
+      toast({ title: "Application rejected" });
+    },
+    onError: () => {
+      toast({ title: "Failed to reject application", variant: "destructive" });
+    },
+  });
+
+  const filteredApplications = applications.filter(app => 
+    statusFilter === "all" ? true : app.status === statusFilter
+  );
+
+  const pendingCount = applications.filter(a => a.status === "pending").length;
+
+  const handleReview = (app: InfluencerApplication) => {
+    setSelectedApplication(app);
+    setAdminNotes(app.adminNotes || "");
+    setReviewDialogOpen(true);
+  };
+
+  const getStatusIcon = (status: string) => {
+    switch (status) {
+      case "pending":
+        return <Clock className="w-4 h-4 text-amber-500" />;
+      case "approved":
+        return <CheckCircle2 className="w-4 h-4 text-green-500" />;
+      case "rejected":
+        return <XCircle className="w-4 h-4 text-red-500" />;
+      default:
+        return null;
+    }
+  };
+
+  const getStatusBadge = (status: string) => {
+    switch (status) {
+      case "pending":
+        return <Badge variant="secondary" className="bg-amber-100 text-amber-800">Pending</Badge>;
+      case "approved":
+        return <Badge variant="secondary" className="bg-green-100 text-green-800">Approved</Badge>;
+      case "rejected":
+        return <Badge variant="secondary" className="bg-red-100 text-red-800">Rejected</Badge>;
+      default:
+        return <Badge variant="outline">{status}</Badge>;
+    }
+  };
+
+  if (isLoading) {
+    return (
+      <div className="flex items-center justify-center p-8 text-muted-foreground">
+        <Loader2 className="w-5 h-5 mr-2 animate-spin" />
+        Loading applications...
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center justify-between gap-4 flex-wrap">
+        <div className="flex items-center gap-2">
+          <Button
+            variant={statusFilter === "pending" ? "default" : "outline"}
+            size="sm"
+            onClick={() => setStatusFilter("pending")}
+            data-testid="filter-pending"
+          >
+            Pending ({pendingCount})
+          </Button>
+          <Button
+            variant={statusFilter === "approved" ? "default" : "outline"}
+            size="sm"
+            onClick={() => setStatusFilter("approved")}
+            data-testid="filter-approved"
+          >
+            Approved
+          </Button>
+          <Button
+            variant={statusFilter === "rejected" ? "default" : "outline"}
+            size="sm"
+            onClick={() => setStatusFilter("rejected")}
+            data-testid="filter-rejected"
+          >
+            Rejected
+          </Button>
+          <Button
+            variant={statusFilter === "all" ? "default" : "outline"}
+            size="sm"
+            onClick={() => setStatusFilter("all")}
+            data-testid="filter-all"
+          >
+            All
+          </Button>
+        </div>
+        <Badge variant="outline">{filteredApplications.length} applications</Badge>
+      </div>
+
+      {filteredApplications.length === 0 ? (
+        <Card>
+          <CardContent className="p-8 text-center">
+            <TrendingUp className="w-12 h-12 mx-auto text-muted-foreground mb-4" />
+            <h3 className="font-semibold mb-2">No {statusFilter !== "all" ? statusFilter : ""} Applications</h3>
+            <p className="text-muted-foreground text-sm">
+              {statusFilter === "pending" 
+                ? "No pending influencer applications to review."
+                : `No ${statusFilter} influencer applications found.`}
+            </p>
+          </CardContent>
+        </Card>
+      ) : (
+        <ScrollArea className="h-[500px]">
+          <div className="space-y-2">
+            {filteredApplications.map(app => (
+              <Card key={app.id} className="hover-elevate" data-testid={`card-application-${app.id}`}>
+                <CardContent className="p-4">
+                  <div className="flex items-start justify-between gap-4">
+                    <div className="flex items-start gap-3 flex-1">
+                      <div className="w-10 h-10 rounded-full bg-muted flex items-center justify-center shrink-0">
+                        {app.user?.profileImageUrl ? (
+                          <img src={app.user.profileImageUrl} alt="" className="w-full h-full rounded-full object-cover" />
+                        ) : (
+                          <Users className="w-5 h-5 text-muted-foreground" />
+                        )}
+                      </div>
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <p className="font-medium">{app.user?.name || "Unknown User"}</p>
+                          {getStatusBadge(app.status)}
+                        </div>
+                        <p className="text-sm text-muted-foreground">{app.user?.email}</p>
+                        <div className="mt-2 space-y-1">
+                          <p className="text-sm"><strong>Niche:</strong> {app.niche}</p>
+                          <p className="text-sm"><strong>Followers:</strong> {app.followerCount}</p>
+                          <p className="text-xs text-muted-foreground">
+                            Submitted {format(new Date(app.submittedAt), "MMM d, yyyy 'at' h:mm a")}
+                          </p>
+                        </div>
+                      </div>
+                    </div>
+                    <Button
+                      variant={app.status === "pending" ? "default" : "outline"}
+                      size="sm"
+                      onClick={() => handleReview(app)}
+                      data-testid={`button-review-${app.id}`}
+                    >
+                      {app.status === "pending" ? "Review" : "View"}
+                    </Button>
+                  </div>
+                </CardContent>
+              </Card>
+            ))}
+          </div>
+        </ScrollArea>
+      )}
+
+      <Dialog open={reviewDialogOpen} onOpenChange={setReviewDialogOpen}>
+        <DialogContent className="max-w-lg max-h-[90vh] overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              {getStatusIcon(selectedApplication?.status || "")}
+              Review Influencer Application
+            </DialogTitle>
+          </DialogHeader>
+          
+          {selectedApplication && (
+            <div className="space-y-4 py-4">
+              <div className="flex items-center gap-3">
+                <div className="w-12 h-12 rounded-full bg-muted flex items-center justify-center">
+                  {selectedApplication.user?.profileImageUrl ? (
+                    <img src={selectedApplication.user.profileImageUrl} alt="" className="w-full h-full rounded-full object-cover" />
+                  ) : (
+                    <Users className="w-6 h-6 text-muted-foreground" />
+                  )}
+                </div>
+                <div>
+                  <p className="font-semibold">{selectedApplication.user?.name || "Unknown User"}</p>
+                  <p className="text-sm text-muted-foreground">{selectedApplication.user?.email}</p>
+                </div>
+              </div>
+
+              <Separator />
+
+              <div className="space-y-3">
+                <div>
+                  <Label className="text-xs text-muted-foreground uppercase">Content Niche</Label>
+                  <p className="text-sm">{selectedApplication.niche}</p>
+                </div>
+                
+                <div>
+                  <Label className="text-xs text-muted-foreground uppercase">Follower Count</Label>
+                  <p className="text-sm">{selectedApplication.followerCount}</p>
+                </div>
+
+                <div>
+                  <Label className="text-xs text-muted-foreground uppercase">Social Media Links</Label>
+                  <pre className="text-sm whitespace-pre-wrap bg-muted p-2 rounded-md">
+                    {selectedApplication.socialMediaLinks}
+                  </pre>
+                </div>
+
+                <div>
+                  <Label className="text-xs text-muted-foreground uppercase">About</Label>
+                  <p className="text-sm">{selectedApplication.bio}</p>
+                </div>
+
+                <div>
+                  <Label className="text-xs text-muted-foreground uppercase">Why They Want to Join</Label>
+                  <p className="text-sm">{selectedApplication.whyJoin}</p>
+                </div>
+              </div>
+
+              <Separator />
+
+              <div className="space-y-2">
+                <Label htmlFor="adminNotes">Admin Notes</Label>
+                <Textarea
+                  id="adminNotes"
+                  placeholder="Add any notes about this application..."
+                  value={adminNotes}
+                  onChange={(e) => setAdminNotes(e.target.value)}
+                  disabled={selectedApplication.status !== "pending"}
+                  data-testid="input-admin-notes"
+                />
+              </div>
+            </div>
+          )}
+          
+          <DialogFooter>
+            {selectedApplication?.status === "pending" ? (
+              <>
+                <Button
+                  variant="outline"
+                  onClick={() => rejectMutation.mutate({ 
+                    applicationId: selectedApplication.id, 
+                    notes: adminNotes 
+                  })}
+                  disabled={rejectMutation.isPending || approveMutation.isPending}
+                  data-testid="button-reject-application"
+                >
+                  {rejectMutation.isPending ? (
+                    <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                  ) : (
+                    <XCircle className="w-4 h-4 mr-2" />
+                  )}
+                  Reject
+                </Button>
+                <Button
+                  onClick={() => approveMutation.mutate({ 
+                    applicationId: selectedApplication.id, 
+                    notes: adminNotes 
+                  })}
+                  disabled={approveMutation.isPending || rejectMutation.isPending}
+                  data-testid="button-approve-application"
+                >
+                  {approveMutation.isPending ? (
+                    <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                  ) : (
+                    <CheckCircle2 className="w-4 h-4 mr-2" />
+                  )}
+                  Approve
+                </Button>
+              </>
+            ) : (
+              <Button variant="outline" onClick={() => setReviewDialogOpen(false)}>
+                Close
+              </Button>
+            )}
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </div>
+  );
+}
+
 interface AdminDashboardProps {
   onBack?: () => void;
 }
@@ -666,6 +1007,10 @@ export default function AdminDashboard({ onBack }: AdminDashboardProps) {
               <MessageSquare className="w-4 h-4" />
               Messages
             </TabsTrigger>
+            <TabsTrigger value="influencers" className="gap-2" data-testid="tab-influencers">
+              <TrendingUp className="w-4 h-4" />
+              Influencers
+            </TabsTrigger>
           </TabsList>
 
           <TabsContent value="users">
@@ -686,6 +1031,10 @@ export default function AdminDashboard({ onBack }: AdminDashboardProps) {
 
           <TabsContent value="messages">
             <MessagesTab />
+          </TabsContent>
+
+          <TabsContent value="influencers">
+            <InfluencerApplicationsTab />
           </TabsContent>
         </Tabs>
       </div>

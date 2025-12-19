@@ -17,6 +17,7 @@ import VendorPage from "@/pages/vendor";
 import AuthPage from "@/pages/auth";
 import VendorDashboardPage from "@/pages/vendor-dashboard";
 import PhotographerDashboardPage from "@/pages/photographer-dashboard";
+import InfluencerDashboardPage from "@/pages/influencer-dashboard";
 import AdminFulfillmentPage from "@/pages/admin-fulfillment";
 import AdminDashboardPage from "@/pages/admin-dashboard";
 import CreatePostPage from "@/pages/create-post";
@@ -27,7 +28,7 @@ import VendorOnboardingPage from "@/pages/vendor-onboarding";
 import jewelryImage from "@assets/generated_images/jewelry_artisan_vendor_image.png";
 import type { User } from "@shared/schema";
 
-type Page = "home" | "search" | "messages" | "profile" | "vendor" | "auth" | "vendor-dashboard" | "photographer-dashboard" | "admin-fulfillment" | "admin-dashboard" | "create-post" | "photographer-page" | "order-success" | "checkout-continue" | "vendor-onboarding";
+type Page = "home" | "search" | "messages" | "profile" | "vendor" | "auth" | "vendor-dashboard" | "photographer-dashboard" | "influencer-dashboard" | "admin-fulfillment" | "admin-dashboard" | "create-post" | "photographer-page" | "order-success" | "checkout-continue" | "vendor-onboarding" | "influencer-onboarding";
 type NavTab = "home" | "search" | "create" | "messages" | "profile" | "dashboard";
 
 interface MessageTarget {
@@ -66,6 +67,10 @@ function AppContent() {
       }
     } else if (path === "/vendor/onboarding" || path.includes("vendor/onboarding")) {
       setCurrentPage("vendor-onboarding");
+    } else if (path === "/influencer/onboarding" || path.includes("influencer/onboarding")) {
+      setCurrentPage("influencer-dashboard");
+    } else if (path === "/influencer/dashboard" || path.includes("influencer-dashboard")) {
+      setCurrentPage("influencer-dashboard");
     }
   }, []);
 
@@ -79,6 +84,7 @@ function AppContent() {
   const isAuthenticated = !!user;
   const isVendor = user?.isVendor ?? false;
   const isPhotographer = user?.isPhotographer ?? false;
+  const isInfluencer = user?.isInfluencer ?? false;
 
   const { 
     items: dbCartItems, 
@@ -317,6 +323,9 @@ function AppContent() {
           )}
           {currentPage === "photographer-dashboard" && isPhotographer && (
             <PhotographerDashboardPage onLogout={handleLogout} />
+          )}
+          {currentPage === "influencer-dashboard" && isInfluencer && (
+            <InfluencerDashboardPage onLogout={handleLogout} />
           )}
           {currentPage === "create-post" && (
             <CreatePostPage onBack={() => {

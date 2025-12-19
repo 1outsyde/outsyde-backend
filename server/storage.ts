@@ -539,6 +539,9 @@ export interface IStorage {
   // Influencer Referral Events
   createInfluencerReferralEvent(data: InsertInfluencerReferralEvent): Promise<InfluencerReferralEvent>;
   getInfluencerReferralEvents(influencerId: string): Promise<InfluencerReferralEvent[]>;
+  getInfluencerReferralEventsByOrder(orderId: string): Promise<InfluencerReferralEvent[]>;
+  updateInfluencerReferralEvent(id: string, updates: Partial<InfluencerReferralEvent>): Promise<InfluencerReferralEvent | undefined>;
+  markInfluencerReferralEventCredited(eventId: string, ledgerEntryId: string): Promise<boolean>;
 
   // Influencer Earning Ledger
   createInfluencerEarningLedger(data: InsertInfluencerEarningLedger): Promise<InfluencerEarningLedger>;
@@ -4397,6 +4400,34 @@ export class DatabaseStorage implements IStorage {
     return db.select().from(influencerReferralEvents)
       .where(eq(influencerReferralEvents.influencerId, influencerId))
       .orderBy(desc(influencerReferralEvents.createdAt));
+  }
+
+  async getInfluencerReferralEventsByOrder(orderId: string): Promise<InfluencerReferralEvent[]> {
+    return db.select().from(influencerReferralEvents)
+      .where(eq(influencerReferralEvents.orderId, orderId))
+      .orderBy(desc(influencerReferralEvents.createdAt));
+  }
+
+  async updateInfluencerReferralEvent(id: string, updates: Partial<InfluencerReferralEvent>): Promise<InfluencerReferralEvent | undefined> {
+    const result = await db.update(influencerReferralEvents)
+      .set(updates)
+      .where(eq(influencerReferralEvents.id, id))
+      .returning();
+    return result[0];
+  }
+
+  async markInfluencerReferralEventCredited(eventId: string, ledgerEntryId: string): Promise<boolean> {
+    const result = await db.update(influencerReferralEvents)
+      .set({
+        creditedAt: new Date(),
+        ledgerEntryId: ledgerEntryId,
+      })
+      .where(and(
+        eq(influencerReferralEvents.id, eventId),
+        isNull(influencerReferralEvents.creditedAt)
+      ))
+      .returning();
+    return result.length > 0;
   }
 
   // =========================

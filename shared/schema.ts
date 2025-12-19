@@ -1495,6 +1495,9 @@ export const influencerReferralEvents = pgTable("influencer_referral_events", {
   
   promoCodeUsed: text("promo_code_used"),
   
+  creditedAt: timestamp("credited_at"),
+  ledgerEntryId: varchar("ledger_entry_id", { length: 36 }),
+  
   createdAt: timestamp("created_at").defaultNow().notNull(),
 });
 

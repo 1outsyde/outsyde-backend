@@ -1186,15 +1186,18 @@ export async function registerRoutes(
 
   // ==================== STRIPE EXPRESS ONBOARDING ====================
 
-  // Get vendor's Stripe onboarding status
+  // Get vendor's Stripe onboarding status (supports vendors, photographers, and influencers)
   app.get("/api/vendor/stripe-onboarding/status", async (req, res) => {
     const userId = req.session?.userId;
     if (!userId) {
       return res.status(401).json({ error: "Not authenticated" });
     }
 
-    if (!req.session?.isVendor && !req.session?.isPhotographer) {
-      return res.status(403).json({ error: "Only vendors or photographers can access this" });
+    const user = await storage.getUser(userId);
+    const isInfluencer = user?.isInfluencer;
+
+    if (!req.session?.isVendor && !req.session?.isPhotographer && !isInfluencer) {
+      return res.status(403).json({ error: "Only vendors, photographers, or influencers can access this" });
     }
 
     try {
@@ -1256,25 +1259,56 @@ export async function registerRoutes(
           onboardingComplete: false,
         });
       }
+
+      // Handle influencer onboarding status
+      if (isInfluencer) {
+        const influencerProfile = await storage.getInfluencerProfileByUserId(userId);
+        if (!influencerProfile) {
+          return res.status(404).json({ error: "Influencer profile not found" });
+        }
+
+        if (influencerProfile.stripeAccountId) {
+          const status = await stripeService.getConnectAccountStatus(influencerProfile.stripeAccountId);
+          return res.json({
+            accountType: 'influencer',
+            hasStripeAccount: true,
+            stripeAccountId: influencerProfile.stripeAccountId,
+            onboardingComplete: status.payoutsEnabled,
+            chargesEnabled: status.chargesEnabled,
+            payoutsEnabled: status.payoutsEnabled,
+            detailsSubmitted: status.detailsSubmitted,
+            requirements: status.requirements,
+            onboardingUrl: influencerProfile.stripeOnboardingUrl,
+          });
+        }
+
+        return res.json({
+          accountType: 'influencer',
+          hasStripeAccount: false,
+          onboardingComplete: false,
+        });
+      }
     } catch (error) {
       console.error("Get Stripe onboarding status error:", error);
       res.status(500).json({ error: "Failed to get onboarding status" });
     }
   });
 
-  // Create or refresh Stripe Express onboarding link
+  // Create or refresh Stripe Express onboarding link (supports vendors, photographers, and influencers)
   app.post("/api/vendor/stripe-onboarding/create-link", async (req, res) => {
     const userId = req.session?.userId;
     if (!userId) {
       return res.status(401).json({ error: "Not authenticated" });
     }
 
-    if (!req.session?.isVendor && !req.session?.isPhotographer) {
-      return res.status(403).json({ error: "Only vendors or photographers can access this" });
+    const user = await storage.getUser(userId);
+    const isInfluencer = user?.isInfluencer;
+
+    if (!req.session?.isVendor && !req.session?.isPhotographer && !isInfluencer) {
+      return res.status(403).json({ error: "Only vendors, photographers, or influencers can access this" });
     }
 
     try {
-      const user = await storage.getUser(userId);
       if (!user?.email) {
         return res.status(400).json({ error: "User email required for Stripe onboarding" });
       }
@@ -1353,6 +1387,47 @@ export async function registerRoutes(
 
         // Store the URL for reference
         await storage.updatePhotographer(photographer.id, {
+          stripeOnboardingUrl: onboardingLink.url,
+        });
+
+        return res.json({
+          url: onboardingLink.url,
+          stripeAccountId,
+        });
+      }
+
+      // Handle influencer onboarding
+      if (isInfluencer) {
+        const influencerProfile = await storage.getInfluencerProfileByUserId(userId);
+        if (!influencerProfile) {
+          return res.status(404).json({ error: "Influencer profile not found" });
+        }
+
+        let stripeAccountId = influencerProfile.stripeAccountId;
+
+        // Create Express account if doesn't exist
+        if (!stripeAccountId) {
+          const account = await stripeService.createInfluencerConnectAccount(
+            user.email,
+            influencerProfile.id,
+            influencerProfile.displayName || user.displayName || 'Influencer'
+          );
+          stripeAccountId = account.id;
+          
+          await storage.updateInfluencerProfile(influencerProfile.id, {
+            stripeAccountId: account.id,
+          });
+        }
+
+        // Generate onboarding link
+        const onboardingLink = await stripeService.createConnectOnboardingLink(
+          stripeAccountId,
+          `${baseUrl}/influencer/onboarding?refresh=true`,
+          `${baseUrl}/influencer/onboarding?complete=true`
+        );
+
+        // Store the URL for reference
+        await storage.updateInfluencerProfile(influencerProfile.id, {
           stripeOnboardingUrl: onboardingLink.url,
         });
 
@@ -4195,6 +4270,596 @@ export async function registerRoutes(
     }
   });
 
+  // ==================== INFLUENCER ROUTES ====================
+
+  // User: Submit influencer application
+  app.post("/api/influencer/apply", async (req, res) => {
+    const userId = req.session?.userId;
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    try {
+      const user = await storage.getUser(userId);
+      if (!user) {
+        return res.status(404).json({ error: "User not found" });
+      }
+
+      // Check if already an influencer
+      if (user.isInfluencer) {
+        return res.status(400).json({ error: "You are already an influencer" });
+      }
+
+      // Check for existing pending application
+      const existingApplication = await storage.getInfluencerApplicationByUserId(userId);
+      if (existingApplication && existingApplication.status === 'pending') {
+        return res.status(400).json({ error: "You already have a pending application" });
+      }
+
+      const { socialMediaHandle, followerCount, platformName, bio, reason } = req.body;
+
+      const application = await storage.createInfluencerApplication({
+        userId,
+        socialMediaHandle: socialMediaHandle || null,
+        followerCount: followerCount ? parseInt(followerCount) : null,
+        platformName: platformName || null,
+        bio: bio || null,
+        reason: reason || null,
+        status: 'pending',
+      });
+
+      res.status(201).json({ success: true, application });
+    } catch (error) {
+      console.error("Create influencer application error:", error);
+      res.status(500).json({ error: "Failed to submit application" });
+    }
+  });
+
+  // User: Get own influencer application status
+  app.get("/api/influencer/application", async (req, res) => {
+    const userId = req.session?.userId;
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    try {
+      const application = await storage.getInfluencerApplicationByUserId(userId);
+      res.json({ application: application || null });
+    } catch (error) {
+      console.error("Get influencer application error:", error);
+      res.status(500).json({ error: "Failed to get application" });
+    }
+  });
+
+  // Admin: Get all influencer applications
+  app.get("/api/admin/influencer-applications", requireAdmin, async (req, res) => {
+    try {
+      const { status } = req.query;
+      const applications = await storage.getInfluencerApplications(status as string | undefined);
+      
+      // Enrich with user data
+      const enrichedApplications = await Promise.all(
+        applications.map(async (app) => {
+          const user = await storage.getUser(app.userId);
+          return {
+            ...app,
+            user: user ? { 
+              id: user.id, 
+              displayName: user.displayName, 
+              email: user.email,
+              profileImage: user.profileImage 
+            } : null,
+          };
+        })
+      );
+      
+      res.json({ applications: enrichedApplications });
+    } catch (error) {
+      console.error("Get influencer applications error:", error);
+      res.status(500).json({ error: "Failed to get applications" });
+    }
+  });
+
+  // Admin: Approve influencer application
+  app.post("/api/admin/influencer-applications/:id/approve", requireAdmin, async (req, res) => {
+    const { id } = req.params;
+    const { commissionRate, promoCode } = req.body;
+
+    try {
+      const application = await storage.getInfluencerApplication(id);
+      if (!application) {
+        return res.status(404).json({ error: "Application not found" });
+      }
+
+      if (application.status !== 'pending') {
+        return res.status(400).json({ error: "Application is not pending" });
+      }
+
+      // Update application status
+      await storage.updateInfluencerApplication(id, {
+        status: 'approved',
+        reviewedAt: new Date(),
+        reviewedBy: req.session?.userId,
+      });
+
+      // Update user's isInfluencer flag
+      await storage.updateUser(application.userId, { isInfluencer: true });
+
+      // Get user for display name
+      const user = await storage.getUser(application.userId);
+      
+      // Create influencer profile
+      const generatedPromoCode = promoCode || `INF${application.userId.substring(0, 6).toUpperCase()}`;
+      const profile = await storage.createInfluencerProfile({
+        userId: application.userId,
+        displayName: user?.displayName || null,
+        bio: application.bio,
+        promoCode: generatedPromoCode,
+        commissionRateBps: commissionRate ? parseInt(commissionRate) * 100 : 500, // Default 5% (500 bps)
+        status: 'active',
+      });
+
+      res.json({ success: true, profile });
+    } catch (error) {
+      console.error("Approve influencer application error:", error);
+      res.status(500).json({ error: "Failed to approve application" });
+    }
+  });
+
+  // Admin: Reject influencer application
+  app.post("/api/admin/influencer-applications/:id/reject", requireAdmin, async (req, res) => {
+    const { id } = req.params;
+    const { rejectionReason } = req.body;
+
+    try {
+      const application = await storage.getInfluencerApplication(id);
+      if (!application) {
+        return res.status(404).json({ error: "Application not found" });
+      }
+
+      if (application.status !== 'pending') {
+        return res.status(400).json({ error: "Application is not pending" });
+      }
+
+      await storage.updateInfluencerApplication(id, {
+        status: 'rejected',
+        rejectionReason: rejectionReason || null,
+        reviewedAt: new Date(),
+        reviewedBy: req.session?.userId,
+      });
+
+      res.json({ success: true });
+    } catch (error) {
+      console.error("Reject influencer application error:", error);
+      res.status(500).json({ error: "Failed to reject application" });
+    }
+  });
+
+  // Influencer: Get own profile
+  app.get("/api/influencer/profile", async (req, res) => {
+    const userId = req.session?.userId;
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    try {
+      const user = await storage.getUser(userId);
+      if (!user?.isInfluencer) {
+        return res.status(403).json({ error: "Not an influencer" });
+      }
+
+      const profile = await storage.getInfluencerProfileByUserId(userId);
+      res.json({ profile: profile || null });
+    } catch (error) {
+      console.error("Get influencer profile error:", error);
+      res.status(500).json({ error: "Failed to get profile" });
+    }
+  });
+
+  // Influencer: Update own profile
+  app.patch("/api/influencer/profile", async (req, res) => {
+    const userId = req.session?.userId;
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    try {
+      const user = await storage.getUser(userId);
+      if (!user?.isInfluencer) {
+        return res.status(403).json({ error: "Not an influencer" });
+      }
+
+      const profile = await storage.getInfluencerProfileByUserId(userId);
+      if (!profile) {
+        return res.status(404).json({ error: "Influencer profile not found" });
+      }
+
+      const { displayName, bio, profileImage, socialMediaLinks } = req.body;
+      
+      const updatedProfile = await storage.updateInfluencerProfile(profile.id, {
+        displayName: displayName ?? profile.displayName,
+        bio: bio ?? profile.bio,
+        profileImage: profileImage ?? profile.profileImage,
+        socialMediaLinks: socialMediaLinks ?? profile.socialMediaLinks,
+      });
+
+      res.json({ profile: updatedProfile });
+    } catch (error) {
+      console.error("Update influencer profile error:", error);
+      res.status(500).json({ error: "Failed to update profile" });
+    }
+  });
+
+  // Influencer: Get dashboard summary
+  app.get("/api/influencer/dashboard", async (req, res) => {
+    const userId = req.session?.userId;
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    try {
+      const user = await storage.getUser(userId);
+      if (!user?.isInfluencer) {
+        return res.status(403).json({ error: "Not an influencer" });
+      }
+
+      const profile = await storage.getInfluencerProfileByUserId(userId);
+      if (!profile) {
+        return res.status(404).json({ error: "Influencer profile not found" });
+      }
+
+      // Get earnings summary
+      const allEarnings = await storage.getInfluencerEarningLedger(profile.id);
+      const pendingEarnings = allEarnings.filter(e => e.status === 'pending');
+      const readyEarnings = allEarnings.filter(e => e.status === 'ready_for_payout');
+      const paidEarnings = allEarnings.filter(e => e.status === 'paid');
+
+      const pendingAmount = pendingEarnings.reduce((sum, e) => sum + e.amountCents, 0);
+      const readyAmount = readyEarnings.reduce((sum, e) => sum + e.amountCents, 0);
+      const paidAmount = paidEarnings.reduce((sum, e) => sum + e.amountCents, 0);
+
+      // Get referral events
+      const referralEvents = await storage.getInfluencerReferralEvents(profile.id);
+
+      // Get active campaign assignments
+      const campaignAssignments = await storage.getInfluencerCampaignAssignments({ influencerId: profile.id });
+      const activeCampaigns = campaignAssignments.filter(a => a.status === 'active');
+
+      // Get payouts
+      const payouts = await storage.getInfluencerPayouts(profile.id);
+
+      res.json({
+        profile,
+        earnings: {
+          pendingCents: pendingAmount,
+          readyForPayoutCents: readyAmount,
+          totalPaidCents: paidAmount,
+          totalEarnedCents: pendingAmount + readyAmount + paidAmount,
+        },
+        referrals: {
+          total: referralEvents.length,
+          recent: referralEvents.slice(0, 10),
+        },
+        campaigns: {
+          active: activeCampaigns.length,
+          total: campaignAssignments.length,
+        },
+        payouts: {
+          total: payouts.length,
+          recent: payouts.slice(0, 5),
+        },
+      });
+    } catch (error) {
+      console.error("Get influencer dashboard error:", error);
+      res.status(500).json({ error: "Failed to get dashboard" });
+    }
+  });
+
+  // Influencer: Get referral events
+  app.get("/api/influencer/referrals", async (req, res) => {
+    const userId = req.session?.userId;
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    try {
+      const user = await storage.getUser(userId);
+      if (!user?.isInfluencer) {
+        return res.status(403).json({ error: "Not an influencer" });
+      }
+
+      const profile = await storage.getInfluencerProfileByUserId(userId);
+      if (!profile) {
+        return res.status(404).json({ error: "Influencer profile not found" });
+      }
+
+      const referralEvents = await storage.getInfluencerReferralEvents(profile.id);
+      res.json({ referrals: referralEvents });
+    } catch (error) {
+      console.error("Get influencer referrals error:", error);
+      res.status(500).json({ error: "Failed to get referrals" });
+    }
+  });
+
+  // Influencer: Get campaigns
+  app.get("/api/influencer/campaigns", async (req, res) => {
+    const userId = req.session?.userId;
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    try {
+      const user = await storage.getUser(userId);
+      if (!user?.isInfluencer) {
+        return res.status(403).json({ error: "Not an influencer" });
+      }
+
+      const profile = await storage.getInfluencerProfileByUserId(userId);
+      if (!profile) {
+        return res.status(404).json({ error: "Influencer profile not found" });
+      }
+
+      const assignments = await storage.getInfluencerCampaignAssignments({ influencerId: profile.id });
+      
+      // Enrich with campaign details
+      const enrichedAssignments = await Promise.all(
+        assignments.map(async (a) => {
+          const campaign = await storage.getInfluencerCampaign(a.campaignId);
+          return { ...a, campaign };
+        })
+      );
+
+      res.json({ campaigns: enrichedAssignments });
+    } catch (error) {
+      console.error("Get influencer campaigns error:", error);
+      res.status(500).json({ error: "Failed to get campaigns" });
+    }
+  });
+
+  // Influencer: Get earnings ledger
+  app.get("/api/influencer/earnings", async (req, res) => {
+    const userId = req.session?.userId;
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    try {
+      const user = await storage.getUser(userId);
+      if (!user?.isInfluencer) {
+        return res.status(403).json({ error: "Not an influencer" });
+      }
+
+      const profile = await storage.getInfluencerProfileByUserId(userId);
+      if (!profile) {
+        return res.status(404).json({ error: "Influencer profile not found" });
+      }
+
+      const { status } = req.query;
+      const earnings = await storage.getInfluencerEarningLedger(profile.id, status as string | undefined);
+      res.json({ earnings });
+    } catch (error) {
+      console.error("Get influencer earnings error:", error);
+      res.status(500).json({ error: "Failed to get earnings" });
+    }
+  });
+
+  // Influencer: Get payouts
+  app.get("/api/influencer/payouts", async (req, res) => {
+    const userId = req.session?.userId;
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    try {
+      const user = await storage.getUser(userId);
+      if (!user?.isInfluencer) {
+        return res.status(403).json({ error: "Not an influencer" });
+      }
+
+      const profile = await storage.getInfluencerProfileByUserId(userId);
+      if (!profile) {
+        return res.status(404).json({ error: "Influencer profile not found" });
+      }
+
+      const payouts = await storage.getInfluencerPayouts(profile.id);
+      res.json({ payouts });
+    } catch (error) {
+      console.error("Get influencer payouts error:", error);
+      res.status(500).json({ error: "Failed to get payouts" });
+    }
+  });
+
+  // Admin: Get all influencer profiles
+  app.get("/api/admin/influencers", requireAdmin, async (req, res) => {
+    try {
+      const profiles = await storage.listInfluencerProfiles();
+      
+      // Enrich with user data
+      const enrichedProfiles = await Promise.all(
+        profiles.map(async (profile) => {
+          const user = await storage.getUser(profile.userId);
+          return {
+            ...profile,
+            user: user ? { 
+              id: user.id, 
+              displayName: user.displayName, 
+              email: user.email,
+              profileImage: user.profileImage 
+            } : null,
+          };
+        })
+      );
+      
+      res.json({ influencers: enrichedProfiles });
+    } catch (error) {
+      console.error("Get influencers error:", error);
+      res.status(500).json({ error: "Failed to get influencers" });
+    }
+  });
+
+  // Admin: Create influencer campaign
+  app.post("/api/admin/influencer-campaigns", requireAdmin, async (req, res) => {
+    try {
+      const { name, description, payoutAmountCents, payoutType, startDate, endDate } = req.body;
+
+      const campaign = await storage.createInfluencerCampaign({
+        name,
+        description: description || null,
+        payoutAmountCents: parseInt(payoutAmountCents),
+        payoutType: payoutType || 'flat',
+        createdByAdminId: req.session?.userId || null,
+        createdByVendorId: null,
+        startDate: startDate ? new Date(startDate) : null,
+        endDate: endDate ? new Date(endDate) : null,
+        status: 'active',
+      });
+
+      res.status(201).json({ success: true, campaign });
+    } catch (error) {
+      console.error("Create influencer campaign error:", error);
+      res.status(500).json({ error: "Failed to create campaign" });
+    }
+  });
+
+  // Admin: Get all campaigns
+  app.get("/api/admin/influencer-campaigns", requireAdmin, async (req, res) => {
+    try {
+      const { status } = req.query;
+      const campaigns = await storage.getInfluencerCampaigns({ status: status as string | undefined });
+      res.json({ campaigns });
+    } catch (error) {
+      console.error("Get influencer campaigns error:", error);
+      res.status(500).json({ error: "Failed to get campaigns" });
+    }
+  });
+
+  // Admin: Assign influencer to campaign
+  app.post("/api/admin/influencer-campaigns/:campaignId/assign", requireAdmin, async (req, res) => {
+    const { campaignId } = req.params;
+    const { influencerId } = req.body;
+
+    try {
+      const campaign = await storage.getInfluencerCampaign(campaignId);
+      if (!campaign) {
+        return res.status(404).json({ error: "Campaign not found" });
+      }
+
+      const profile = await storage.getInfluencerProfile(influencerId);
+      if (!profile) {
+        return res.status(404).json({ error: "Influencer not found" });
+      }
+
+      const assignment = await storage.createInfluencerCampaignAssignment({
+        campaignId,
+        influencerId,
+        status: 'active',
+      });
+
+      res.status(201).json({ success: true, assignment });
+    } catch (error) {
+      console.error("Assign influencer to campaign error:", error);
+      res.status(500).json({ error: "Failed to assign influencer" });
+    }
+  });
+
+  // Admin: Complete campaign assignment and trigger payout
+  app.post("/api/admin/influencer-campaign-assignments/:id/complete", requireAdmin, async (req, res) => {
+    const { id } = req.params;
+
+    try {
+      const assignment = await storage.getInfluencerCampaignAssignment(id);
+      if (!assignment) {
+        return res.status(404).json({ error: "Assignment not found" });
+      }
+
+      if (assignment.status !== 'active') {
+        return res.status(400).json({ error: "Assignment is not active" });
+      }
+
+      const campaign = await storage.getInfluencerCampaign(assignment.campaignId);
+      if (!campaign) {
+        return res.status(404).json({ error: "Campaign not found" });
+      }
+
+      // Mark assignment as completed
+      await storage.updateInfluencerCampaignAssignment(id, {
+        status: 'completed',
+        completedAt: new Date(),
+      });
+
+      // Create earning ledger entry for this campaign completion
+      await storage.createInfluencerEarningLedger({
+        influencerId: assignment.influencerId,
+        sourceType: 'campaign',
+        sourceId: assignment.campaignId,
+        amountCents: campaign.payoutAmountCents,
+        description: `Campaign completed: ${campaign.name}`,
+        status: 'ready_for_payout',
+      });
+
+      res.json({ success: true });
+    } catch (error) {
+      console.error("Complete campaign assignment error:", error);
+      res.status(500).json({ error: "Failed to complete assignment" });
+    }
+  });
+
+  // Admin: Initiate influencer payout
+  app.post("/api/admin/influencer-payouts", requireAdmin, async (req, res) => {
+    const { influencerId } = req.body;
+
+    try {
+      const profile = await storage.getInfluencerProfile(influencerId);
+      if (!profile) {
+        return res.status(404).json({ error: "Influencer not found" });
+      }
+
+      if (!profile.stripeAccountId || !profile.stripeOnboardingComplete) {
+        return res.status(400).json({ error: "Influencer has not completed Stripe onboarding" });
+      }
+
+      // Get all ready for payout earnings
+      const readyEarnings = await storage.getReadyForPayoutLedgerEntries(influencerId);
+      if (readyEarnings.length === 0) {
+        return res.status(400).json({ error: "No earnings ready for payout" });
+      }
+
+      const totalAmount = readyEarnings.reduce((sum, e) => sum + e.amountCents, 0);
+
+      // Create Stripe transfer
+      const transfer = await stripeService.createInfluencerPayout(
+        profile.stripeAccountId,
+        totalAmount,
+        {
+          influencerId,
+          earningIds: readyEarnings.map(e => e.id).join(','),
+        }
+      );
+
+      // Create payout record
+      const payout = await storage.createInfluencerPayout({
+        influencerId,
+        amountCents: totalAmount,
+        stripeTransferId: transfer.id,
+        status: 'completed',
+        initiatedBy: req.session?.userId || null,
+      });
+
+      // Update earning ledger entries
+      for (const earning of readyEarnings) {
+        await storage.updateInfluencerEarningLedger(earning.id, {
+          status: 'paid',
+          payoutId: payout.id,
+        });
+      }
+
+      res.json({ success: true, payout, transfer });
+    } catch (error) {
+      console.error("Initiate influencer payout error:", error);
+      res.status(500).json({ error: "Failed to initiate payout" });
+    }
+  });
+
   // ==================== ADMIN DASHBOARD ROUTES ====================
 
   // Admin: Get dashboard overview stats
@@ -5403,6 +6068,57 @@ export async function registerRoutes(
       // If status changed to delivered, update order status
       if (data.status === 'delivered') {
         await storage.updateOrder(shipment.orderId, { status: 'delivered' });
+        
+        // Credit influencer earnings if this order has a referral event (atomic/idempotent)
+        try {
+          const order = await storage.getOrder(shipment.orderId);
+          if (order) {
+            const referralEvents = await storage.getInfluencerReferralEventsByOrder(shipment.orderId);
+            for (const event of referralEvents) {
+              // Skip if already credited (fast check before DB operations)
+              if (event.creditedAt) {
+                console.log(`[influencer] Skipping already credited referral event ${event.id} for order ${shipment.orderId}`);
+                continue;
+              }
+              
+              // Only process if there's commission to credit
+              if (event.commissionEarnedCents && event.commissionEarnedCents > 0) {
+                // Create earning ledger entry linked to this referral event
+                const ledgerEntry = await storage.createInfluencerEarningLedger({
+                  influencerId: event.influencerId,
+                  sourceType: "referral_commission",
+                  sourceRefId: event.id,
+                  amountCents: event.commissionEarnedCents,
+                  description: `Commission from order #${shipment.orderId.slice(0, 8)}`,
+                  status: "pending",
+                });
+                
+                // Atomically mark the referral event as credited (only succeeds if creditedAt is NULL)
+                const wasCredited = await storage.markInfluencerReferralEventCredited(event.id, ledgerEntry.id);
+                
+                if (!wasCredited) {
+                  // Another concurrent request already credited this event - delete the duplicate ledger entry
+                  console.log(`[influencer] Concurrent credit detected for event ${event.id}, rolling back duplicate ledger entry ${ledgerEntry.id}`);
+                  await storage.updateInfluencerEarningLedger(ledgerEntry.id, { status: "cancelled" });
+                  continue;
+                }
+                
+                // Update influencer profile pending earnings
+                const profile = await storage.getInfluencerProfile(event.influencerId);
+                if (profile) {
+                  await storage.updateInfluencerProfile(event.influencerId, {
+                    pendingEarnings: (profile.pendingEarnings || 0) + event.commissionEarnedCents,
+                  });
+                }
+                
+                console.log(`[influencer] Credited ${event.commissionEarnedCents} cents to influencer ${event.influencerId} for order ${shipment.orderId} (ledger entry ${ledgerEntry.id})`);
+              }
+            }
+          }
+        } catch (influencerError) {
+          console.error("Error processing influencer referral:", influencerError);
+          // Don't fail the shipment update if influencer crediting fails
+        }
       }
 
       res.json({ shipment: updatedShipment });

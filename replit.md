@@ -36,7 +36,7 @@ The Outsyde platform uses a React frontend, an Express (TypeScript) backend, and
     -   **Business Hours Management:** Reusable hours editor with day-by-day selection and live status display.
     -   **Role-Aware Navigation:** Adapts based on user role.
     -   **Create Post Page:** Dedicated page for all user types to create feed posts.
-    -   **Shipment Tracking:** Comprehensive fulfillment system with carrier integration for vendors, visible to customers.
+    -   **Shipment Tracking:** Comprehensive fulfillment system with carrier integration for vendors, visible to customers. When shipments are delivered, influencer referral commissions are credited atomically using a conditional UPDATE with WHERE `credited_at IS NULL` guard to prevent double-crediting from concurrent requests.
     -   **State Machines:** Server-side enforcement of valid status transitions for orders and bookings.
     -   **Audit Logging:** Comprehensive audit trail for financial actions, including order/booking status changes, subscription changes, and refund approvals.
     -   **Message Abuse Prevention:** Chat messages validated (character limit, link limit, duplicate detection). API rate limiting.
