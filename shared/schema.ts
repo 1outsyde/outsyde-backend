@@ -64,6 +64,7 @@ export const users = pgTable("users", {
 
   isVendor: boolean("is_vendor").default(false).notNull(),
   isPhotographer: boolean("is_photographer").default(false).notNull(),
+  isInfluencer: boolean("is_influencer").default(false).notNull(),
   isAdmin: boolean("is_admin").default(false).notNull(),
   isOAuthUser: boolean("is_oauth_user").default(false),
 
@@ -1358,6 +1359,199 @@ export const messageReports = pgTable("message_reports", {
 export const insertMessageReportSchema = createInsertSchema(messageReports).omit({ id: true, createdAt: true, resolvedAt: true, resolvedBy: true, status: true, adminNotes: true });
 export type MessageReport = typeof messageReports.$inferSelect;
 export type InsertMessageReport = z.infer<typeof insertMessageReportSchema>;
+
+/* =====================================================
+   INFLUENCER PROFILES
+===================================================== */
+export const influencerProfiles = pgTable("influencer_profiles", {
+  id: varchar("id", { length: 36 }).primaryKey().default(sql`gen_random_uuid()`),
+  userId: varchar("user_id", { length: 36 }).notNull().unique().references(() => users.id),
+  
+  displayName: text("display_name"),
+  bio: text("bio"),
+  promoCode: text("promo_code").unique(),
+  
+  instagramUrl: text("instagram_url"),
+  tiktokUrl: text("tiktok_url"),
+  youtubeUrl: text("youtube_url"),
+  twitterUrl: text("twitter_url"),
+  
+  followerCount: integer("follower_count").default(0),
+  
+  stripeAccountId: text("stripe_account_id"),
+  stripeOnboardingComplete: boolean("stripe_onboarding_complete").default(false),
+  
+  totalEarnings: integer("total_earnings").default(0),
+  pendingEarnings: integer("pending_earnings").default(0),
+  
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+
+export const insertInfluencerProfileSchema = createInsertSchema(influencerProfiles).omit({ id: true, createdAt: true, updatedAt: true, totalEarnings: true, pendingEarnings: true });
+export type InfluencerProfile = typeof influencerProfiles.$inferSelect;
+export type InsertInfluencerProfile = z.infer<typeof insertInfluencerProfileSchema>;
+
+/* =====================================================
+   INFLUENCER APPLICATIONS - User Requests to Become Influencer
+===================================================== */
+export const influencerApplications = pgTable("influencer_applications", {
+  id: varchar("id", { length: 36 }).primaryKey().default(sql`gen_random_uuid()`),
+  userId: varchar("user_id", { length: 36 }).notNull().references(() => users.id),
+  
+  instagramUrl: text("instagram_url"),
+  tiktokUrl: text("tiktok_url"),
+  youtubeUrl: text("youtube_url"),
+  twitterUrl: text("twitter_url"),
+  
+  followerCount: integer("follower_count"),
+  contentNiche: text("content_niche"),
+  whyInfluencer: text("why_influencer"),
+  
+  status: text("status").default("pending").notNull(),
+  adminNotes: text("admin_notes"),
+  reviewedBy: varchar("reviewed_by", { length: 36 }),
+  reviewedAt: timestamp("reviewed_at"),
+  
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+});
+
+export const insertInfluencerApplicationSchema = createInsertSchema(influencerApplications).omit({ id: true, createdAt: true, status: true, adminNotes: true, reviewedBy: true, reviewedAt: true });
+export type InfluencerApplication = typeof influencerApplications.$inferSelect;
+export type InsertInfluencerApplication = z.infer<typeof insertInfluencerApplicationSchema>;
+
+/* =====================================================
+   INFLUENCER CAMPAIGNS - Vendor/Admin Created Campaigns
+===================================================== */
+export const influencerCampaigns = pgTable("influencer_campaigns", {
+  id: varchar("id", { length: 36 }).primaryKey().default(sql`gen_random_uuid()`),
+  
+  name: text("name").notNull(),
+  description: text("description"),
+  
+  createdByVendorId: varchar("created_by_vendor_id", { length: 36 }),
+  createdByAdminId: varchar("created_by_admin_id", { length: 36 }),
+  
+  payoutType: text("payout_type").notNull(),
+  flatAmountCents: integer("flat_amount_cents").default(0),
+  commissionBps: integer("commission_bps").default(0),
+  
+  targetProductIds: jsonb("target_product_ids").$type<string[]>().default([]),
+  targetServiceIds: jsonb("target_service_ids").$type<string[]>().default([]),
+  
+  startDate: timestamp("start_date"),
+  endDate: timestamp("end_date"),
+  
+  status: text("status").default("draft").notNull(),
+  
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+
+export const insertInfluencerCampaignSchema = createInsertSchema(influencerCampaigns).omit({ id: true, createdAt: true, updatedAt: true });
+export type InfluencerCampaign = typeof influencerCampaigns.$inferSelect;
+export type InsertInfluencerCampaign = z.infer<typeof insertInfluencerCampaignSchema>;
+
+/* =====================================================
+   INFLUENCER CAMPAIGN ASSIGNMENTS - Link Influencers to Campaigns
+===================================================== */
+export const influencerCampaignAssignments = pgTable("influencer_campaign_assignments", {
+  id: varchar("id", { length: 36 }).primaryKey().default(sql`gen_random_uuid()`),
+  
+  campaignId: varchar("campaign_id", { length: 36 }).notNull().references(() => influencerCampaigns.id),
+  influencerId: varchar("influencer_id", { length: 36 }).notNull().references(() => influencerProfiles.id),
+  
+  negotiatedFlatAmountCents: integer("negotiated_flat_amount_cents"),
+  negotiatedCommissionBps: integer("negotiated_commission_bps"),
+  
+  goals: text("goals"),
+  status: text("status").default("assigned").notNull(),
+  
+  completedAt: timestamp("completed_at"),
+  
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+});
+
+export const insertInfluencerCampaignAssignmentSchema = createInsertSchema(influencerCampaignAssignments).omit({ id: true, createdAt: true, completedAt: true });
+export type InfluencerCampaignAssignment = typeof influencerCampaignAssignments.$inferSelect;
+export type InsertInfluencerCampaignAssignment = z.infer<typeof insertInfluencerCampaignAssignmentSchema>;
+
+/* =====================================================
+   INFLUENCER REFERRAL EVENTS - Track Sales from Influencer Promos
+===================================================== */
+export const influencerReferralEvents = pgTable("influencer_referral_events", {
+  id: varchar("id", { length: 36 }).primaryKey().default(sql`gen_random_uuid()`),
+  
+  influencerId: varchar("influencer_id", { length: 36 }).notNull().references(() => influencerProfiles.id),
+  campaignId: varchar("campaign_id", { length: 36 }),
+  
+  orderId: varchar("order_id", { length: 36 }),
+  orderGroupId: varchar("order_group_id", { length: 36 }),
+  bookingId: varchar("booking_id", { length: 36 }),
+  
+  orderTotalCents: integer("order_total_cents").default(0),
+  commissionBps: integer("commission_bps").default(0),
+  commissionEarnedCents: integer("commission_earned_cents").default(0),
+  
+  promoCodeUsed: text("promo_code_used"),
+  
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+});
+
+export const insertInfluencerReferralEventSchema = createInsertSchema(influencerReferralEvents).omit({ id: true, createdAt: true });
+export type InfluencerReferralEvent = typeof influencerReferralEvents.$inferSelect;
+export type InsertInfluencerReferralEvent = z.infer<typeof insertInfluencerReferralEventSchema>;
+
+/* =====================================================
+   INFLUENCER EARNING LEDGER - Central Ledger for All Earnings
+===================================================== */
+export const influencerEarningLedger = pgTable("influencer_earning_ledger", {
+  id: varchar("id", { length: 36 }).primaryKey().default(sql`gen_random_uuid()`),
+  
+  influencerId: varchar("influencer_id", { length: 36 }).notNull().references(() => influencerProfiles.id),
+  
+  sourceType: text("source_type").notNull(),
+  sourceRefId: varchar("source_ref_id", { length: 36 }),
+  
+  amountCents: integer("amount_cents").notNull(),
+  description: text("description"),
+  
+  status: text("status").default("pending").notNull(),
+  
+  stripeTransferId: text("stripe_transfer_id"),
+  payoutId: varchar("payout_id", { length: 36 }),
+  
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  paidAt: timestamp("paid_at"),
+});
+
+export const insertInfluencerEarningLedgerSchema = createInsertSchema(influencerEarningLedger).omit({ id: true, createdAt: true, paidAt: true, stripeTransferId: true, payoutId: true });
+export type InfluencerEarningLedger = typeof influencerEarningLedger.$inferSelect;
+export type InsertInfluencerEarningLedger = z.infer<typeof insertInfluencerEarningLedgerSchema>;
+
+/* =====================================================
+   INFLUENCER PAYOUTS - Track Actual Stripe Transfers
+===================================================== */
+export const influencerPayouts = pgTable("influencer_payouts", {
+  id: varchar("id", { length: 36 }).primaryKey().default(sql`gen_random_uuid()`),
+  
+  influencerId: varchar("influencer_id", { length: 36 }).notNull().references(() => influencerProfiles.id),
+  
+  amountCents: integer("amount_cents").notNull(),
+  ledgerIds: jsonb("ledger_ids").$type<string[]>().default([]),
+  
+  stripeTransferId: text("stripe_transfer_id"),
+  status: text("status").default("pending").notNull(),
+  
+  initiatedAt: timestamp("initiated_at").defaultNow().notNull(),
+  completedAt: timestamp("completed_at"),
+  failedAt: timestamp("failed_at"),
+  failureReason: text("failure_reason"),
+});
+
+export const insertInfluencerPayoutSchema = createInsertSchema(influencerPayouts).omit({ id: true, initiatedAt: true, completedAt: true, failedAt: true, failureReason: true });
+export type InfluencerPayout = typeof influencerPayouts.$inferSelect;
+export type InsertInfluencerPayout = z.infer<typeof insertInfluencerPayoutSchema>;
 
 /* =====================================================
    ORDER STATE MACHINE - Valid Transitions
