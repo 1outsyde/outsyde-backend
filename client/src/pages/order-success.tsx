@@ -14,7 +14,7 @@ interface OrderSuccessPageProps {
 export default function OrderSuccessPage({ orderId, orderGroupId, onContinueShopping }: OrderSuccessPageProps) {
   const [hasCleanedUrl, setHasCleanedUrl] = useState(false);
 
-  const { data: orderGroup, isLoading: groupLoading } = useQuery({
+  const { data: orderGroup, isLoading: groupLoading, error: groupError } = useQuery({
     queryKey: ["/api/order-groups", orderGroupId],
     queryFn: async () => {
       const response = await apiRequest("GET", `/api/order-groups/${orderGroupId}`);
@@ -23,7 +23,7 @@ export default function OrderSuccessPage({ orderId, orderGroupId, onContinueShop
     enabled: !!orderGroupId,
   });
 
-  const { data: order, isLoading: orderLoading } = useQuery({
+  const { data: order, isLoading: orderLoading, error: orderError } = useQuery({
     queryKey: ["/api/orders", orderId],
     queryFn: async () => {
       const response = await apiRequest("GET", `/api/orders/${orderId}`);
@@ -33,6 +33,7 @@ export default function OrderSuccessPage({ orderId, orderGroupId, onContinueShop
   });
 
   const isLoading = groupLoading || orderLoading;
+  const hasError = groupError || orderError;
 
   useEffect(() => {
     if (!isLoading && !hasCleanedUrl) {
@@ -52,6 +53,36 @@ export default function OrderSuccessPage({ orderId, orderGroupId, onContinueShop
     return (
       <div className="flex items-center justify-center min-h-[60vh]">
         <Loader2 className="w-8 h-8 animate-spin text-primary" />
+      </div>
+    );
+  }
+
+  if (hasError) {
+    return (
+      <div className="container max-w-2xl mx-auto px-4 py-8" data-testid="page-order-success-error">
+        <div className="text-center mb-8">
+          <div className="w-20 h-20 mx-auto mb-4 rounded-full bg-green-100 flex items-center justify-center">
+            <CheckCircle2 className="w-12 h-12 text-green-600" />
+          </div>
+          <h1 className="text-3xl font-bold text-foreground mb-2" data-testid="text-order-success-title">
+            Order Confirmed!
+          </h1>
+          <p className="text-muted-foreground mb-4">
+            Your order has been processed successfully.
+          </p>
+          <p className="text-sm text-muted-foreground mb-4">
+            We couldn't load the full order details, but don't worry - your order was received.
+            You'll receive an email confirmation shortly.
+          </p>
+          <Button 
+            onClick={onContinueShopping}
+            className="gap-2"
+            data-testid="button-continue-shopping"
+          >
+            Continue Shopping
+            <ArrowRight className="w-4 h-4" />
+          </Button>
+        </div>
       </div>
     );
   }

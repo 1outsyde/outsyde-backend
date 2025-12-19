@@ -340,10 +340,13 @@ function AppContent() {
               onComplete={() => {
                 setCurrentPage("home");
                 setActiveTab("home");
+                setCheckoutOrderGroupId(null);
+                setCompletedOrderId(null);
               }}
               onOrderSuccess={(groupId) => {
                 setCheckoutOrderGroupId(groupId);
                 setCheckoutOrderId(null);
+                setCompletedOrderId(null);
                 setCurrentPage("order-success");
               }}
             />
