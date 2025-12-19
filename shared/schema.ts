@@ -398,6 +398,7 @@ export const shootBookings = pgTable("shoot_bookings", {
   status: text("status").default("pending"),
 
   createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
 });
 
 /* =====================================================
@@ -420,6 +421,7 @@ export const appointments = pgTable("appointments", {
   status: text("status").default("pending"),
 
   createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
 });
 
 /* =====================================================
@@ -459,6 +461,7 @@ export const orders = pgTable("orders", {
   shippingAddress: text("shipping_address"),
 
   createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
 });
 
 /* =====================================================
