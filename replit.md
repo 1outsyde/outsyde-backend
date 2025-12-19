@@ -44,6 +44,7 @@ The Outsyde platform uses a React frontend, an Express (TypeScript) backend, and
     -   **Message Reporting System:** Users can report inappropriate messages for admin review.
     -   **Subscription Tier Changes:** Full upgrade/downgrade flow for business subscriptions, including proration, benefit migration, and notifications.
     -   **Subscription Enforcement (Server-Side):** Comprehensive enforcement of vendor subscriptions, blocking operations, hiding storefronts, and preventing transactions for inactive subscriptions, with a 3-day grace period for `past_due` statuses. Data remains readable for inactive vendors.
+    -   **Stripe Express Onboarding:** Vendors and photographers must complete Stripe Express onboarding before accepting payments. Onboarding status tracked via `stripeAccountId` and `stripeOnboardingComplete` fields on Business/Photographer models. Unified API endpoints (`/api/vendor/stripe-onboarding/status` and `/api/vendor/stripe-onboarding/create-link`) handle both account types based on session. "Go Live" functionality blocked until onboarding complete. `account.updated` webhook updates completion status.
 -   **Data Privacy:**
     -   **DOB:** Collected for eligibility, full DOB visible to user/admin only; vendors see age ranges. `sanitizeUserForResponse()` removes DOB from non-admin API responses.
     -   **Race/Ethnicity:** Optional, never exposed individually; only for aggregated analytics (future). `sanitizeUserForResponse()` removes ethnicity from all responses.
