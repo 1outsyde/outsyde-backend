@@ -22,11 +22,12 @@ import AdminDashboardPage from "@/pages/admin-dashboard";
 import CreatePostPage from "@/pages/create-post";
 import OrderSuccessPage from "@/pages/order-success";
 import CheckoutContinuePage from "@/pages/checkout-continue";
+import VendorOnboardingPage from "@/pages/vendor-onboarding";
 
 import jewelryImage from "@assets/generated_images/jewelry_artisan_vendor_image.png";
 import type { User } from "@shared/schema";
 
-type Page = "home" | "search" | "messages" | "profile" | "vendor" | "auth" | "vendor-dashboard" | "photographer-dashboard" | "admin-fulfillment" | "admin-dashboard" | "create-post" | "photographer-page" | "order-success" | "checkout-continue";
+type Page = "home" | "search" | "messages" | "profile" | "vendor" | "auth" | "vendor-dashboard" | "photographer-dashboard" | "admin-fulfillment" | "admin-dashboard" | "create-post" | "photographer-page" | "order-success" | "checkout-continue" | "vendor-onboarding";
 type NavTab = "home" | "search" | "create" | "messages" | "profile" | "dashboard";
 
 interface MessageTarget {
@@ -63,6 +64,8 @@ function AppContent() {
         setCompletedOrderId(completedId);
         setCurrentPage("checkout-continue");
       }
+    } else if (path === "/vendor/onboarding" || path.includes("vendor/onboarding")) {
+      setCurrentPage("vendor-onboarding");
     }
   }, []);
 
@@ -350,6 +353,9 @@ function AppContent() {
                 setCurrentPage("order-success");
               }}
             />
+          )}
+          {currentPage === "vendor-onboarding" && (
+            <VendorOnboardingPage />
           )}
         </main>
 

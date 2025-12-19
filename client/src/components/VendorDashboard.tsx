@@ -3,6 +3,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
+import StripeOnboardingBanner from "@/components/StripeOnboardingBanner";
 
 interface DashboardStats {
   revenue: number;
@@ -81,6 +82,8 @@ export default function VendorDashboard({
 
   return (
     <div className="space-y-6" data-testid="vendor-dashboard">
+      <StripeOnboardingBanner vendorType="business" />
+      
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
         {statCards.map((stat) => (
           <Card key={stat.title} className="overflow-visible">
