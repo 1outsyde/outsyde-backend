@@ -2455,6 +2455,16 @@ export async function registerRoutes(
         });
       }
 
+      // Check subscription is active before allowing Go Live
+      const subStatus = await storage.isBusinessSubscriptionActive(business.id);
+      if (!subStatus.active) {
+        return res.status(403).json({
+          error: "Subscription required",
+          message: "You must have an active subscription to publish products. Please subscribe to a plan first.",
+          requiresSubscription: true,
+        });
+      }
+
       const product = await storage.getVendorProduct(req.params.id);
       if (!product || product.businessId !== business.id) {
         return res.status(404).json({ error: "Product not found" });
@@ -2725,6 +2735,16 @@ export async function registerRoutes(
           error: "Payments not enabled",
           message: "You must complete Stripe payment setup before publishing services. Please complete your payment onboarding first.",
           requiresOnboarding: true,
+        });
+      }
+
+      // Check subscription is active before allowing Go Live
+      const subStatus = await storage.isBusinessSubscriptionActive(business.id);
+      if (!subStatus.active) {
+        return res.status(403).json({
+          error: "Subscription required",
+          message: "You must have an active subscription to publish services. Please subscribe to a plan first.",
+          requiresSubscription: true,
         });
       }
 
@@ -3653,6 +3673,20 @@ export async function registerRoutes(
         // Ensure vendor has completed Stripe onboarding
         if (!business.stripeAccountId || !business.stripeOnboardingComplete) {
           return res.status(403).json({ error: `${business.name} has not enabled payments yet` });
+        }
+        
+        // Verify Stripe account is enabled for charges and payouts via Stripe API
+        try {
+          const accountStatus = await stripeService.getConnectAccountStatus(business.stripeAccountId);
+          if (!accountStatus.chargesEnabled) {
+            return res.status(403).json({ error: `${business.name} is not yet able to accept payments. Please contact the vendor.` });
+          }
+          if (!accountStatus.payoutsEnabled) {
+            return res.status(403).json({ error: `${business.name} has not completed payment setup. Please contact the vendor.` });
+          }
+        } catch (stripeError) {
+          console.error(`Stripe account verification failed for ${businessId}:`, stripeError);
+          return res.status(403).json({ error: `Unable to verify payment status for ${business.name}. Please try again later.` });
         }
       }
 

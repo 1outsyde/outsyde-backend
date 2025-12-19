@@ -39,12 +39,14 @@ The Outsyde platform uses a React frontend, an Express (TypeScript) backend, and
     -   **Shipment Tracking:** Comprehensive fulfillment system with carrier integration for vendors, visible to customers. When shipments are delivered, influencer referral commissions are credited atomically using a conditional UPDATE with WHERE `credited_at IS NULL` guard to prevent double-crediting from concurrent requests.
     -   **State Machines:** Server-side enforcement of valid status transitions for orders and bookings.
     -   **Audit Logging:** Comprehensive audit trail for financial actions, including order/booking status changes, subscription changes, and refund approvals.
-    -   **Message Abuse Prevention:** Chat messages validated (character limit, link limit, duplicate detection). API rate limiting.
+    -   **Message Abuse Prevention:** Chat messages validated (character limit, link limit, duplicate detection). Note: API rate limiting for chat endpoints is deferred for post-launch implementation once usage patterns are established.
     -   **User Blocking System:** Bidirectional blocking to prevent messaging.
     -   **Message Reporting System:** Users can report inappropriate messages for admin review.
     -   **Subscription Tier Changes:** Full upgrade/downgrade flow for business subscriptions, including proration, benefit migration, and notifications.
     -   **Subscription Enforcement (Server-Side):** Comprehensive enforcement of vendor subscriptions, blocking operations, hiding storefronts, and preventing transactions for inactive subscriptions, with a 3-day grace period for `past_due` statuses. Data remains readable for inactive vendors.
     -   **Stripe Express Onboarding:** Vendors and photographers must complete Stripe Express onboarding before accepting payments. Onboarding status tracked via `stripeAccountId` and `stripeOnboardingComplete` fields on Business/Photographer models. Unified API endpoints (`/api/vendor/stripe-onboarding/status` and `/api/vendor/stripe-onboarding/create-link`) handle both account types based on session. "Go Live" functionality blocked until onboarding complete. `account.updated` webhook updates completion status.
+    -   **Publishing Enforcement:** Vendors can create draft products/services without subscription, but publishing to "live" status requires both active Stripe subscription AND completed Stripe Connect onboarding.
+    -   **Checkout Verification:** At checkout, system verifies vendor Stripe account status via Stripe API (`chargesEnabled` and `payoutsEnabled`) before processing payment.
 -   **Data Privacy:**
     -   **DOB:** Collected for eligibility, full DOB visible to user/admin only; vendors see age ranges. `sanitizeUserForResponse()` removes DOB from non-admin API responses.
     -   **Race/Ethnicity:** Optional, never exposed individually; only for aggregated analytics (future). `sanitizeUserForResponse()` removes ethnicity from all responses.
