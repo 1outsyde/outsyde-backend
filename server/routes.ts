@@ -1172,6 +1172,189 @@ export async function registerRoutes(
     }
   });
 
+  // ==================== STRIPE EXPRESS ONBOARDING ====================
+
+  // Get vendor's Stripe onboarding status
+  app.get("/api/vendor/stripe-onboarding/status", async (req, res) => {
+    const userId = req.session?.userId;
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    if (!req.session?.isVendor && !req.session?.isPhotographer) {
+      return res.status(403).json({ error: "Only vendors or photographers can access this" });
+    }
+
+    try {
+      const baseUrl = `https://${process.env.REPLIT_DOMAINS?.split(',')[0]}`;
+      
+      if (req.session?.isVendor) {
+        const business = await storage.getBusinessByOwnerId(userId);
+        if (!business) {
+          return res.status(404).json({ error: "Business not found" });
+        }
+
+        // If already has account, get fresh status from Stripe
+        if (business.stripeAccountId) {
+          const status = await stripeService.getConnectAccountStatus(business.stripeAccountId);
+          return res.json({
+            accountType: 'business',
+            hasStripeAccount: true,
+            stripeAccountId: business.stripeAccountId,
+            onboardingComplete: status.chargesEnabled && status.payoutsEnabled,
+            chargesEnabled: status.chargesEnabled,
+            payoutsEnabled: status.payoutsEnabled,
+            detailsSubmitted: status.detailsSubmitted,
+            requirements: status.requirements,
+            onboardingUrl: business.stripeOnboardingUrl,
+          });
+        }
+
+        return res.json({
+          accountType: 'business',
+          hasStripeAccount: false,
+          onboardingComplete: false,
+        });
+      }
+
+      if (req.session?.isPhotographer) {
+        const photographer = await storage.getPhotographerByUserId(userId);
+        if (!photographer) {
+          return res.status(404).json({ error: "Photographer profile not found" });
+        }
+
+        if (photographer.stripeAccountId) {
+          const status = await stripeService.getConnectAccountStatus(photographer.stripeAccountId);
+          return res.json({
+            accountType: 'photographer',
+            hasStripeAccount: true,
+            stripeAccountId: photographer.stripeAccountId,
+            onboardingComplete: status.chargesEnabled && status.payoutsEnabled,
+            chargesEnabled: status.chargesEnabled,
+            payoutsEnabled: status.payoutsEnabled,
+            detailsSubmitted: status.detailsSubmitted,
+            requirements: status.requirements,
+            onboardingUrl: photographer.stripeOnboardingUrl,
+          });
+        }
+
+        return res.json({
+          accountType: 'photographer',
+          hasStripeAccount: false,
+          onboardingComplete: false,
+        });
+      }
+    } catch (error) {
+      console.error("Get Stripe onboarding status error:", error);
+      res.status(500).json({ error: "Failed to get onboarding status" });
+    }
+  });
+
+  // Create or refresh Stripe Express onboarding link
+  app.post("/api/vendor/stripe-onboarding/create-link", async (req, res) => {
+    const userId = req.session?.userId;
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    if (!req.session?.isVendor && !req.session?.isPhotographer) {
+      return res.status(403).json({ error: "Only vendors or photographers can access this" });
+    }
+
+    try {
+      const user = await storage.getUser(userId);
+      if (!user?.email) {
+        return res.status(400).json({ error: "User email required for Stripe onboarding" });
+      }
+
+      const baseUrl = `https://${process.env.REPLIT_DOMAINS?.split(',')[0]}`;
+      
+      if (req.session?.isVendor) {
+        const business = await storage.getBusinessByOwnerId(userId);
+        if (!business) {
+          return res.status(404).json({ error: "Business not found" });
+        }
+
+        let stripeAccountId = business.stripeAccountId;
+
+        // Create Express account if doesn't exist
+        if (!stripeAccountId) {
+          const account = await stripeService.createBusinessConnectAccount(
+            user.email,
+            business.id,
+            business.name,
+            business.category
+          );
+          stripeAccountId = account.id;
+          
+          await storage.updateBusiness(business.id, {
+            stripeAccountId: account.id,
+          });
+        }
+
+        // Generate onboarding link
+        const onboardingLink = await stripeService.createConnectOnboardingLink(
+          stripeAccountId,
+          `${baseUrl}/vendor/onboarding?refresh=true`,
+          `${baseUrl}/vendor/onboarding?complete=true`
+        );
+
+        // Store the URL for reference
+        await storage.updateBusiness(business.id, {
+          stripeOnboardingUrl: onboardingLink.url,
+        });
+
+        return res.json({
+          url: onboardingLink.url,
+          stripeAccountId,
+        });
+      }
+
+      if (req.session?.isPhotographer) {
+        const photographer = await storage.getPhotographerByUserId(userId);
+        if (!photographer) {
+          return res.status(404).json({ error: "Photographer profile not found" });
+        }
+
+        let stripeAccountId = photographer.stripeAccountId;
+
+        // Create Express account if doesn't exist
+        if (!stripeAccountId) {
+          const account = await stripeService.createPhotographerConnectAccount(
+            user.email,
+            photographer.id,
+            photographer.displayName
+          );
+          stripeAccountId = account.id;
+          
+          await storage.updatePhotographer(photographer.id, {
+            stripeAccountId: account.id,
+          });
+        }
+
+        // Generate onboarding link
+        const onboardingLink = await stripeService.createConnectOnboardingLink(
+          stripeAccountId,
+          `${baseUrl}/photographer/onboarding?refresh=true`,
+          `${baseUrl}/photographer/onboarding?complete=true`
+        );
+
+        // Store the URL for reference
+        await storage.updatePhotographer(photographer.id, {
+          stripeOnboardingUrl: onboardingLink.url,
+        });
+
+        return res.json({
+          url: onboardingLink.url,
+          stripeAccountId,
+        });
+      }
+    } catch (error) {
+      console.error("Create Stripe onboarding link error:", error);
+      res.status(500).json({ error: "Failed to create onboarding link" });
+    }
+  });
+
   // Get Stripe publishable key for frontend
   app.get("/api/stripe/config", async (req, res) => {
     try {
@@ -2119,6 +2302,15 @@ export async function registerRoutes(
         return res.status(404).json({ error: "No business found" });
       }
 
+      // Check Stripe onboarding is complete before allowing Go Live
+      if (!business.stripeAccountId || !business.stripeOnboardingComplete) {
+        return res.status(403).json({ 
+          error: "Payments not enabled",
+          message: "You must complete Stripe payment setup before publishing products. Please complete your payment onboarding first.",
+          requiresOnboarding: true,
+        });
+      }
+
       const product = await storage.getVendorProduct(req.params.id);
       if (!product || product.businessId !== business.id) {
         return res.status(404).json({ error: "Product not found" });
@@ -2381,6 +2573,15 @@ export async function registerRoutes(
       const business = await storage.getBusinessByOwnerId(userId);
       if (!business) {
         return res.status(404).json({ error: "No business found" });
+      }
+
+      // Check Stripe onboarding is complete before allowing Go Live
+      if (!business.stripeAccountId || !business.stripeOnboardingComplete) {
+        return res.status(403).json({ 
+          error: "Payments not enabled",
+          message: "You must complete Stripe payment setup before publishing services. Please complete your payment onboarding first.",
+          requiresOnboarding: true,
+        });
       }
 
       const service = await storage.getVendorService(req.params.id);
@@ -3294,7 +3495,7 @@ export async function registerRoutes(
         businessIds.add(product.businessId);
       }
 
-      // Validate all businesses exist and have active subscriptions
+      // Validate all businesses exist, have active subscriptions, and completed Stripe onboarding
       const businessList = Array.from(businessIds);
       for (const businessId of businessList) {
         const business = await storage.getBusiness(businessId);
@@ -3304,6 +3505,10 @@ export async function registerRoutes(
         const subStatus = await storage.isBusinessSubscriptionActive(businessId);
         if (!subStatus.active) {
           return res.status(403).json({ error: `${business.name} is currently unavailable for purchases` });
+        }
+        // Ensure vendor has completed Stripe onboarding
+        if (!business.stripeAccountId || !business.stripeOnboardingComplete) {
+          return res.status(403).json({ error: `${business.name} has not enabled payments yet` });
         }
       }
 

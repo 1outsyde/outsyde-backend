@@ -11,7 +11,9 @@ export type NotificationType =
   | 'addon_charged'
   | 'refund_issued'
   | 'new_order'
-  | 'photographer_assigned';
+  | 'photographer_assigned'
+  | 'subscription_tier_changed'
+  | 'stripe_onboarding_complete';
 
 interface NotificationData {
   userId: string;
@@ -327,6 +329,24 @@ export const NotificationTriggers = {
         newTierName: params.newTierName,
         isUpgrade: params.isUpgrade,
         effectiveDate: params.effectiveDate,
+      },
+    });
+  },
+
+  async stripeOnboardingComplete(params: {
+    userId: string;
+    accountType: 'business' | 'photographer';
+    businessName: string;
+  }): Promise<void> {
+    await sendNotification({
+      userId: params.userId,
+      type: 'stripe_onboarding_complete',
+      title: 'Payments Enabled',
+      message: `Congratulations! Payment processing is now enabled for ${params.businessName}. You can now go live with your products and services.`,
+      referenceType: params.accountType,
+      metadata: {
+        accountType: params.accountType,
+        businessName: params.businessName,
       },
     });
   },

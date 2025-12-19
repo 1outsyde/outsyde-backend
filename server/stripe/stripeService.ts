@@ -21,10 +21,13 @@ export class StripeService {
   }
 
   // =========================
-  // STRIPE CONNECT (PHOTOGRAPHERS)
+  // STRIPE CONNECT (VENDORS)
   // =========================
 
-  async createConnectAccount(
+  /**
+   * Create a Stripe Express account for a photographer
+   */
+  async createPhotographerConnectAccount(
     email: string,
     photographerId: string,
     displayName: string
@@ -50,6 +53,55 @@ export class StripeService {
     });
   }
 
+  /**
+   * Create a Stripe Express account for a business vendor
+   */
+  async createBusinessConnectAccount(
+    email: string,
+    businessId: string,
+    businessName: string,
+    category?: string
+  ) {
+    const stripe = await getUncachableStripeClient();
+
+    // Map category to MCC code (default to general retail)
+    const mccCodes: Record<string, string> = {
+      'food': '5812', // Eating places and restaurants
+      'restaurant': '5812',
+      'retail': '5999', // Miscellaneous retail stores
+      'clothing': '5651', // Family clothing stores
+      'beauty': '7230', // Beauty shops
+      'health': '8099', // Health and allied services
+      'fitness': '7997', // Membership clubs (sports/recreation)
+      'services': '7299', // Miscellaneous personal services
+      'home': '5722', // Household appliance stores
+      'art': '5971', // Art dealers and galleries
+      'automotive': '5533', // Automotive parts
+    };
+    const mcc = category ? (mccCodes[category.toLowerCase()] || '5999') : '5999';
+
+    return stripe.accounts.create({
+      type: "express",
+      email,
+      business_type: "company",
+      capabilities: {
+        card_payments: { requested: true },
+        transfers: { requested: true },
+      },
+      business_profile: {
+        name: businessName,
+        mcc,
+      },
+      metadata: {
+        businessId,
+        role: "business",
+      },
+    });
+  }
+
+  /**
+   * Create onboarding link for any Connect account (business or photographer)
+   */
   async createConnectOnboardingLink(
     accountId: string,
     refreshUrl: string,
@@ -65,6 +117,9 @@ export class StripeService {
     });
   }
 
+  /**
+   * Get the status of a Connect account
+   */
   async getConnectAccountStatus(accountId: string) {
     const stripe = await getUncachableStripeClient();
     const account = await stripe.accounts.retrieve(accountId);
@@ -75,6 +130,17 @@ export class StripeService {
       detailsSubmitted: account.details_submitted,
       requirements: account.requirements,
     };
+  }
+
+  /**
+   * Legacy alias for createPhotographerConnectAccount
+   */
+  async createConnectAccount(
+    email: string,
+    photographerId: string,
+    displayName: string
+  ) {
+    return this.createPhotographerConnectAccount(email, photographerId, displayName);
   }
 
   // =========================

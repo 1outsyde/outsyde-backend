@@ -173,6 +173,7 @@ export const businesses = pgTable("businesses", {
 
   stripeAccountId: text("stripe_account_id"),
   stripeOnboardingComplete: boolean("stripe_onboarding_complete").default(false),
+  stripeOnboardingUrl: text("stripe_onboarding_url"),
 
   billingAddress: jsonb("billing_address").$type<BillingAddress>(),
 
@@ -282,6 +283,7 @@ export const photographers = pgTable("photographers", {
 
   stripeAccountId: text("stripe_account_id"),
   stripeOnboardingComplete: boolean("stripe_onboarding_complete").default(false),
+  stripeOnboardingUrl: text("stripe_onboarding_url"),
   specialties: text("specialties").array(),
 
   // Storefront customization

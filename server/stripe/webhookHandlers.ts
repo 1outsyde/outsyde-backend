@@ -30,6 +30,10 @@ export class WebhookHandlers {
       case "invoice.paid":
         await this.handleInvoicePaid(event.data.object);
         break;
+
+      case "account.updated":
+        await this.handleConnectAccountUpdated(event.data.object);
+        break;
     }
   }
 
@@ -267,19 +271,19 @@ export class WebhookHandlers {
         stripePaymentIntentId: session.payment_intent,
       });
 
-      // Get the vendor's connected account for transfer
-      const vendorUser = await storage.getUserByBusinessOwnerId(businessId);
-      if (vendorUser?.stripeConnectedAccountId && vendorNet > 0) {
+      // Get the vendor's connected account for transfer (from business, not user)
+      const business = await storage.getBusiness(businessId);
+      if (business?.stripeAccountId && vendorNet > 0) {
         try {
           // Transfer the vendor's share to their connected account
           // Uses platform balance (no source_transaction needed)
           await stripeService.transferToVendor({
             amountInCents: vendorNet,
-            connectedAccountId: vendorUser.stripeConnectedAccountId,
+            connectedAccountId: business.stripeAccountId,
             orderId,
             orderGroupId,
           });
-          console.log(`Transferred ${vendorNet} cents to vendor ${vendorUser.id} for order ${orderId}`);
+          console.log(`Transferred ${vendorNet} cents to business ${business.name} for order ${orderId}`);
         } catch (transferError) {
           console.error(`Failed to transfer to vendor for order ${orderId}:`, transferError);
           // Mark the order as needing manual transfer review
@@ -289,7 +293,8 @@ export class WebhookHandlers {
         }
       }
 
-      // Notify the business of the new order
+      // Notify the business owner of the new order
+      const vendorUser = await storage.getUserByBusinessOwnerId(businessId);
       if (vendorUser && order) {
         const customer = await storage.getUser(order.customerId);
         const itemCount = order.items?.length || 1;
@@ -487,5 +492,62 @@ export class WebhookHandlers {
     if (!result.rows?.[0]?.user_id) return null;
 
     return storage.getUser(result.rows[0].user_id);
+  }
+
+  /* =====================================================
+     CONNECT ACCOUNT UPDATED (ONBOARDING STATUS)
+  ===================================================== */
+  static async handleConnectAccountUpdated(account: any) {
+    const metadata = account.metadata || {};
+    const accountId = account.id;
+    
+    // Check if onboarding is complete
+    const isOnboardingComplete = account.charges_enabled && account.payouts_enabled && account.details_submitted;
+    
+    if (metadata.role === 'business' && metadata.businessId) {
+      // Update business onboarding status
+      const business = await storage.getBusiness(metadata.businessId);
+      if (business && business.stripeAccountId === accountId) {
+        await storage.updateBusiness(metadata.businessId, {
+          stripeOnboardingComplete: isOnboardingComplete,
+        });
+        
+        if (isOnboardingComplete) {
+          console.log(`Business ${metadata.businessId} completed Stripe onboarding`);
+          
+          // Get vendor user and send notification
+          const vendorUser = await storage.getUserByBusinessOwnerId(metadata.businessId);
+          if (vendorUser) {
+            await NotificationTriggers.stripeOnboardingComplete({
+              userId: vendorUser.id,
+              accountType: 'business',
+              businessName: business.name,
+            });
+          }
+        }
+      }
+    } else if (metadata.role === 'photographer' && metadata.photographerId) {
+      // Update photographer onboarding status
+      const photographer = await storage.getPhotographer(metadata.photographerId);
+      if (photographer && photographer.stripeAccountId === accountId) {
+        await storage.updatePhotographer(metadata.photographerId, {
+          stripeOnboardingComplete: isOnboardingComplete,
+        });
+        
+        if (isOnboardingComplete) {
+          console.log(`Photographer ${metadata.photographerId} completed Stripe onboarding`);
+          
+          // Get photographer user and send notification
+          const photographerUser = await storage.getUser(photographer.userId);
+          if (photographerUser) {
+            await NotificationTriggers.stripeOnboardingComplete({
+              userId: photographerUser.id,
+              accountType: 'photographer',
+              businessName: photographer.displayName,
+            });
+          }
+        }
+      }
+    }
   }
 }
