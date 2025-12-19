@@ -71,6 +71,9 @@ function AppContent() {
       setCurrentPage("influencer-dashboard");
     } else if (path === "/influencer/dashboard" || path.includes("influencer-dashboard")) {
       setCurrentPage("influencer-dashboard");
+    } else if (path === "/search") {
+      setCurrentPage("search");
+      setActiveTab("search");
     }
   }, []);
 
