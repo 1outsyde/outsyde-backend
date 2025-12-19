@@ -606,7 +606,13 @@ export const cartItems = pgTable("cart_items", {
   userId: varchar("user_id", { length: 36 }).notNull().references(() => users.id),
 
   productId: varchar("product_id", { length: 36 }).notNull().references(() => vendorProducts.id),
+  productName: text("product_name").notNull(),
+  productImage: text("product_image"),
+  priceInCents: integer("price_in_cents").notNull(),
   quantity: integer("quantity").notNull().default(1),
+
+  businessId: varchar("business_id", { length: 36 }).references(() => businesses.id),
+  businessName: text("business_name"),
 
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
