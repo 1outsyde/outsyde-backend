@@ -3379,19 +3379,20 @@ export class DatabaseStorage implements IStorage {
     vendorId: string;
     businessId: string;
     serviceId: string;
-    priceInCents: number;
+    tierIdAtPurchase: string | null;
+    basePriceInCents: number;
+    discountPercent: number;
+    finalPriceInCents: number;
     platformFeeInCents: number;
     stripeCheckoutSessionId?: string;
-    notes?: string;
   }): Promise<AlaCartePurchase> {
     const [purchase] = await db.insert(alaCartePurchases).values({
       vendorId: data.vendorId,
       businessId: data.businessId,
       serviceId: data.serviceId,
-      priceInCents: data.priceInCents,
+      priceInCents: data.finalPriceInCents,
       platformFeeInCents: data.platformFeeInCents,
       stripeCheckoutSessionId: data.stripeCheckoutSessionId,
-      notes: data.notes,
       status: 'pending',
     }).returning();
     return purchase;
@@ -3528,28 +3529,25 @@ export class DatabaseStorage implements IStorage {
   }
 
   async createVendorProduct(data: InsertVendorProduct): Promise<VendorProduct> {
-    const id = randomUUID();
-    const [product] = await db.insert(vendorProducts)
-      .values({
-        id,
-        businessId: data.businessId,
-        name: data.name,
-        description: data.description,
-        price: data.price,
-        compareAtPrice: data.compareAtPrice,
-        category: data.category,
-        imageUrl: data.imageUrl,
-        images: data.images,
-        isActive: data.isActive,
-        isFeatured: data.isFeatured,
-        status: data.status,
-        inventory: data.inventory,
-        trackInventory: data.trackInventory,
-        tags: data.tags ? [...data.tags] : null,
-        stripeProductId: data.stripeProductId,
-        stripePriceId: data.stripePriceId,
-      })
-      .returning();
+    const insertData: Parameters<typeof db.insert<typeof vendorProducts>>["0"]["$inferInsert"] = {
+      businessId: data.businessId,
+      name: data.name,
+      description: data.description ?? undefined,
+      price: data.price,
+      compareAtPrice: data.compareAtPrice ?? undefined,
+      category: data.category ?? undefined,
+      imageUrl: data.imageUrl ?? undefined,
+      images: data.images ?? undefined,
+      isActive: data.isActive ?? undefined,
+      isFeatured: data.isFeatured ?? undefined,
+      status: data.status ?? undefined,
+      inventory: data.inventory ?? undefined,
+      trackInventory: data.trackInventory ?? undefined,
+      tags: data.tags ?? undefined,
+      stripeProductId: data.stripeProductId ?? undefined,
+      stripePriceId: data.stripePriceId ?? undefined,
+    };
+    const [product] = await db.insert(vendorProducts).values(insertData).returning();
     return product;
   }
 

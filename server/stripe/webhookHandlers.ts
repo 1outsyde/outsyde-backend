@@ -185,7 +185,7 @@ export class WebhookHandlers {
     await NotificationTriggers.addonCharged({
       userId: purchase.vendorId,
       serviceName,
-      amount: purchase.finalPriceInCents,
+      amount: purchase.priceInCents,
       purchaseId,
     });
 
@@ -474,7 +474,8 @@ export class WebhookHandlers {
     if (!vendorSub || vendorSub.status !== "active") return;
 
     const stripe = await getUncachableStripeClient();
-    const sub = await stripe.subscriptions.retrieve(invoice.subscription);
+    const subResponse = await stripe.subscriptions.retrieve(invoice.subscription);
+    const sub = subResponse as unknown as { current_period_start: number; current_period_end: number };
 
     await storage.updateVendorSubscription(vendorSub.id, {
       currentPeriodStart: new Date(sub.current_period_start * 1000),
@@ -494,9 +495,10 @@ export class WebhookHandlers {
       sql`SELECT metadata->>'userId' AS user_id FROM stripe.customers WHERE id = ${customerId}`
     );
 
-    if (!result.rows?.[0]?.user_id) return null;
+    const userId = result.rows?.[0]?.user_id;
+    if (!userId || typeof userId !== 'string') return null;
 
-    return storage.getUser(result.rows[0].user_id);
+    return storage.getUser(userId);
   }
 
   /* =====================================================

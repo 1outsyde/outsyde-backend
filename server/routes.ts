@@ -1615,9 +1615,11 @@ export async function registerRoutes(
         vendorId: userId,
         businessId: business.id,
         serviceId,
-        priceInCents: pricing.finalPriceCents,
+        tierIdAtPurchase: pricing.tier?.id ?? null,
+        basePriceInCents: pricing.basePriceCents,
+        discountPercent: pricing.discountPercent,
+        finalPriceInCents: pricing.finalPriceCents,
         platformFeeInCents,
-        notes,
       });
 
       // TODO: Implement à la carte checkout session creation in stripeService
