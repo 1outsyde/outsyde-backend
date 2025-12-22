@@ -26,9 +26,10 @@ export default function StripeOnboardingBanner({ vendorType }: StripeOnboardingB
   const endpoint = "/api/vendor/stripe-onboarding/status";
   const createLinkEndpoint = "/api/vendor/stripe-onboarding/create-link";
 
-  const { data: status, isLoading } = useQuery<OnboardingStatus>({
+  const { data: status, isLoading, isError } = useQuery<OnboardingStatus>({
     queryKey: [endpoint],
     refetchInterval: 30000,
+    retry: 1,
   });
 
   const createOnboardingLinkMutation = useMutation({
@@ -59,7 +60,8 @@ export default function StripeOnboardingBanner({ vendorType }: StripeOnboardingB
     return null;
   }
 
-  if (!status || status.onboardingComplete) {
+  // Don't show banner if query failed (user may not be a vendor) or if onboarding is complete
+  if (isError || !status || status.onboardingComplete) {
     return null;
   }
 

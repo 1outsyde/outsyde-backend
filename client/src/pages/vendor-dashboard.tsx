@@ -249,7 +249,9 @@ export default function VendorDashboardPage({ onLogout }: VendorDashboardPagePro
           </header>
 
           <main className="flex-1 overflow-auto p-6">
-            <StripeOnboardingBanner vendorType="business" />
+            <div className="mb-4">
+              <StripeOnboardingBanner vendorType="business" />
+            </div>
             
             {activeSection === "dashboard" && (
               <VendorDashboard
