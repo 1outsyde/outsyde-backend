@@ -6,6 +6,7 @@ import { useToast } from "@/hooks/use-toast";
 import { format } from "date-fns";
 import BillingAddressForm from "@/components/BillingAddressForm";
 import ShippingFormDialog from "@/components/ShippingFormDialog";
+import StripeOnboardingBanner from "@/components/StripeOnboardingBanner";
 import type { Business, Shipment } from "@shared/schema";
 import { getCarrierConfig, getTrackingUrl } from "@shared/carriers";
 
@@ -248,6 +249,8 @@ export default function VendorDashboardPage({ onLogout }: VendorDashboardPagePro
           </header>
 
           <main className="flex-1 overflow-auto p-6">
+            <StripeOnboardingBanner vendorType="business" />
+            
             {activeSection === "dashboard" && (
               <VendorDashboard
                 stats={stats}

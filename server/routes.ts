@@ -405,20 +405,28 @@ export async function registerRoutes(
         if (user) {
           // Use sanitizeUserForResponse with includeOwnData for user's own profile
           const safeUser = sanitizeUserForResponse(user, { includeOwnData: true });
-          // Check if user has a business record (in case isVendor wasn't set properly)
-          if (!safeUser.isVendor) {
-            const business = await storage.getBusinessByOwnerId(user.id);
-            if (business) {
-              (safeUser as any).isVendor = true;
+          
+          // Always check for business record and update session flags
+          // This ensures session is rehydrated even if user.isVendor is true but session was lost
+          const business = await storage.getBusinessByOwnerId(user.id);
+          if (business) {
+            (safeUser as any).isVendor = true;
+            if (req.session) {
+              req.session.isVendor = true;
+              req.session.businessId = business.id;
             }
           }
-          // Check if user has a photographer record (in case isPhotographer wasn't set properly)
-          if (!safeUser.isPhotographer) {
-            const photographer = await storage.getPhotographerByUserId(user.id);
-            if (photographer) {
-              (safeUser as any).isPhotographer = true;
+          
+          // Always check for photographer record and update session flags
+          const photographer = await storage.getPhotographerByUserId(user.id);
+          if (photographer) {
+            (safeUser as any).isPhotographer = true;
+            if (req.session) {
+              req.session.isPhotographer = true;
+              req.session.photographerId = photographer.id;
             }
           }
+          
           return res.json(safeUser);
         }
       }
@@ -436,20 +444,28 @@ export async function registerRoutes(
 
       // Use sanitizeUserForResponse with includeOwnData for user's own profile
       const safeUser = sanitizeUserForResponse(user, { includeOwnData: true });
-      // Check if user has a business record (in case isVendor wasn't set properly)
-      if (!safeUser.isVendor) {
-        const business = await storage.getBusinessByOwnerId(userId);
-        if (business) {
-          (safeUser as any).isVendor = true;
+      
+      // Always check for business record and update session flags
+      // This ensures session is rehydrated even if user.isVendor is true but session was lost
+      const business = await storage.getBusinessByOwnerId(userId);
+      if (business) {
+        (safeUser as any).isVendor = true;
+        if (req.session) {
+          req.session.isVendor = true;
+          req.session.businessId = business.id;
         }
       }
-      // Check if user has a photographer record (in case isPhotographer wasn't set properly)
-      if (!safeUser.isPhotographer) {
-        const photographer = await storage.getPhotographerByUserId(userId);
-        if (photographer) {
-          (safeUser as any).isPhotographer = true;
+      
+      // Always check for photographer record and update session flags
+      const photographer = await storage.getPhotographerByUserId(userId);
+      if (photographer) {
+        (safeUser as any).isPhotographer = true;
+        if (req.session) {
+          req.session.isPhotographer = true;
+          req.session.photographerId = photographer.id;
         }
       }
+      
       res.json(safeUser);
     } catch (error) {
       console.error("Get user error:", error);
