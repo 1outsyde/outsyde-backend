@@ -2,7 +2,7 @@ import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Loader2 } from "lucide-react";
 import VendorStorefront from "@/components/VendorStorefront";
-import type { Business, VendorProduct, VendorService, Photographer, PhotographerService } from "@shared/schema";
+import type { Business, VendorProduct, VendorService, Photographer, PhotographerService, StaffMember } from "@shared/schema";
 
 import hairSalonImage from "@assets/generated_images/hair_salon_vendor_storefront.png";
 import jewelryImage from "@assets/generated_images/jewelry_artisan_vendor_image.png";
@@ -81,6 +81,17 @@ export default function VendorPage({ vendorId, vendorType = "business", onBack, 
     queryFn: async () => {
       const res = await fetch(`/api/businesses/${vendorId}/services`);
       if (!res.ok) return { services: [] };
+      return res.json();
+    },
+    enabled: vendorType === "business" && !!businessData?.business,
+  });
+
+  // Fetch staff members for the business
+  const { data: staffData } = useQuery<{ staff: StaffMember[] }>({
+    queryKey: ["/api/businesses", vendorId, "staff"],
+    queryFn: async () => {
+      const res = await fetch(`/api/businesses/${vendorId}/staff`);
+      if (!res.ok) return { staff: [] };
       return res.json();
     },
     enabled: vendorType === "business" && !!businessData?.business,
@@ -201,12 +212,13 @@ export default function VendorPage({ vendorId, vendorType = "business", onBack, 
           contactPhone={business.contactPhone || undefined}
           websiteUrl={business.websiteUrl || undefined}
           availableSlots={availableSlots}
+          staff={staffData?.staff || []}
           isFollowing={isFollowing}
           onFollow={() => setIsFollowing(!isFollowing)}
           onShare={() => console.log("Share vendor")}
           onLoginRequired={onLoginRequired}
-          onBookService={(serviceId, date, time) =>
-            console.log("Book:", serviceId, date, time)
+          onBookService={(serviceId, date, time, staffId) =>
+            console.log("Book:", serviceId, date, time, "staffId:", staffId)
           }
           viewerIsPhotographer={viewerIsPhotographer}
           onCollaborate={onCollaborate ? () => onCollaborate(business.id, business.name) : undefined}

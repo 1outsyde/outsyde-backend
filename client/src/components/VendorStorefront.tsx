@@ -1,16 +1,17 @@
 import { useState } from "react";
-import { MapPin, Star, Share2, Heart, Mail, Phone, Globe, Handshake, MessageSquare } from "lucide-react";
+import { MapPin, Star, Share2, Heart, Mail, Phone, Globe, Handshake, MessageSquare, User } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Card, CardContent } from "@/components/ui/card";
 import ProductCard from "./ProductCard";
 import ServiceCard from "./ServiceCard";
 import BookingCalendar from "./BookingCalendar";
 import VendorChat from "./VendorChat";
 import ProfileComments from "./ProfileComments";
 import BusinessHoursDisplay from "./BusinessHoursDisplay";
-import type { HoursOfOperation } from "@shared/schema";
+import type { HoursOfOperation, StaffMember } from "@shared/schema";
 
 interface Product {
   id: string;
@@ -56,11 +57,12 @@ interface VendorStorefrontProps {
   contactPhone?: string;
   websiteUrl?: string;
   availableSlots?: Record<string, { time: string; available: boolean }[]>;
+  staff?: StaffMember[];
   isFollowing?: boolean;
   onFollow?: () => void;
   onShare?: () => void;
   onLoginRequired?: () => void;
-  onBookService?: (serviceId: string, date: string, time: string) => void;
+  onBookService?: (serviceId: string, date: string, time: string, staffId?: string) => void;
   viewerIsPhotographer?: boolean;
   onCollaborate?: () => void;
   isAuthenticated?: boolean;
@@ -88,6 +90,7 @@ export default function VendorStorefront({
   contactPhone,
   websiteUrl,
   availableSlots = {},
+  staff = [],
   isFollowing = false,
   onFollow,
   onShare,
@@ -101,6 +104,9 @@ export default function VendorStorefront({
 }: VendorStorefrontProps) {
   const [activeTab, setActiveTab] = useState("about");
   const [selectedService, setSelectedService] = useState<Service | null>(null);
+  const [selectedStaff, setSelectedStaff] = useState<string | null>(null);
+  
+  const activeStaff = staff.filter(s => s.status === "active" && s.stripeOnboardingComplete);
 
   const hasBrandColor = !!brandColors?.primary;
   const customStyles = hasBrandColor ? {
@@ -356,14 +362,60 @@ export default function VendorStorefront({
           {canAcceptBookings && (
             <TabsContent value="book" className="pt-6">
               {selectedService ? (
-                <div className="max-w-md">
+                <div className="max-w-lg space-y-4">
+                  {/* Staff Selection (only for businesses with staff) */}
+                  {storefrontType === "business" && activeStaff.length > 0 && (
+                    <div className="space-y-3">
+                      <h4 className="font-medium text-sm">Select a Stylist/Staff Member (optional)</h4>
+                      <div className="grid grid-cols-2 gap-2">
+                        <Card 
+                          className={`cursor-pointer transition-colors ${!selectedStaff ? 'ring-2 ring-primary' : 'hover:bg-accent/50'}`}
+                          onClick={() => setSelectedStaff(null)}
+                          data-testid="staff-any"
+                        >
+                          <CardContent className="p-3 flex items-center gap-3">
+                            <Avatar className="h-10 w-10">
+                              <AvatarFallback>
+                                <User className="h-5 w-5" />
+                              </AvatarFallback>
+                            </Avatar>
+                            <div>
+                              <p className="font-medium text-sm">Any Available</p>
+                              <p className="text-xs text-muted-foreground">First available staff</p>
+                            </div>
+                          </CardContent>
+                        </Card>
+                        {activeStaff.map((member) => (
+                          <Card 
+                            key={member.id}
+                            className={`cursor-pointer transition-colors ${selectedStaff === member.id ? 'ring-2 ring-primary' : 'hover:bg-accent/50'}`}
+                            onClick={() => setSelectedStaff(member.id)}
+                            data-testid={`staff-${member.id}`}
+                          >
+                            <CardContent className="p-3 flex items-center gap-3">
+                              <Avatar className="h-10 w-10">
+                                <AvatarImage src={member.profileImageUrl || ""} />
+                                <AvatarFallback>
+                                  {member.displayName?.split(" ").map(n => n[0]).join("").toUpperCase() || "ST"}
+                                </AvatarFallback>
+                              </Avatar>
+                              <div>
+                                <p className="font-medium text-sm">{member.displayName}</p>
+                                <p className="text-xs text-muted-foreground capitalize">{member.role || "Staff"}</p>
+                              </div>
+                            </CardContent>
+                          </Card>
+                        ))}
+                      </div>
+                    </div>
+                  )}
                   <BookingCalendar
                     serviceName={selectedService.name}
                     servicePrice={selectedService.price}
-                    serviceDuration={selectedService.duration}
+                    serviceDuration={selectedService.duration || 60}
                     availableSlots={availableSlots}
                     onBook={(date, time) =>
-                      onBookService?.(selectedService.id, date, time)
+                      onBookService?.(selectedService.id, date, time, selectedStaff || undefined)
                     }
                   />
                 </div>
