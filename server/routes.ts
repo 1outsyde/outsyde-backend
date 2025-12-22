@@ -3573,6 +3573,233 @@ export async function registerRoutes(
     }
   });
 
+  // ==================== STAFF DASHBOARD ROUTES (Staff-facing) ====================
+
+  // Get current user's staff profile
+  app.get("/api/staff/me", async (req, res) => {
+    const userId = req.session?.userId;
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    try {
+      const staff = await storage.getStaffMemberByUserId(userId);
+      if (!staff) {
+        return res.status(404).json({ error: "No staff profile found" });
+      }
+
+      res.json({ staff });
+    } catch (error) {
+      console.error("Get staff profile error:", error);
+      res.status(500).json({ error: "Failed to get staff profile" });
+    }
+  });
+
+  // Get staff member's own bookings
+  app.get("/api/staff/my-bookings", async (req, res) => {
+    const userId = req.session?.userId;
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    try {
+      const staff = await storage.getStaffMemberByUserId(userId);
+      if (!staff) {
+        return res.status(404).json({ error: "No staff profile found" });
+      }
+
+      const bookings = await storage.getAppointmentsByStaffMember(staff.id);
+      res.json({ bookings });
+    } catch (error) {
+      console.error("Get staff bookings error:", error);
+      res.status(500).json({ error: "Failed to get bookings" });
+    }
+  });
+
+  // Get staff member's own availability
+  app.get("/api/staff/my-availability", async (req, res) => {
+    const userId = req.session?.userId;
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    try {
+      const staff = await storage.getStaffMemberByUserId(userId);
+      if (!staff) {
+        return res.status(404).json({ error: "No staff profile found" });
+      }
+
+      const { startDate, endDate } = req.query;
+      const availability = await storage.getStaffAvailability(
+        staff.id,
+        startDate as string | undefined,
+        endDate as string | undefined
+      );
+
+      res.json({ availability });
+    } catch (error) {
+      console.error("Get staff availability error:", error);
+      res.status(500).json({ error: "Failed to get availability" });
+    }
+  });
+
+  // Add staff member's own availability
+  app.post("/api/staff/my-availability", async (req, res) => {
+    const userId = req.session?.userId;
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    try {
+      const staff = await storage.getStaffMemberByUserId(userId);
+      if (!staff) {
+        return res.status(404).json({ error: "No staff profile found" });
+      }
+
+      const availabilitySchema = z.object({
+        date: z.string().min(1, "Date is required"),
+        startTime: z.string().min(1, "Start time is required"),
+        endTime: z.string().min(1, "End time is required"),
+      });
+
+      const data = availabilitySchema.parse(req.body);
+
+      const availability = await storage.createStaffAvailability({
+        staffMemberId: staff.id,
+        businessId: staff.businessId,
+        date: data.date,
+        startTime: data.startTime,
+        endTime: data.endTime,
+        slotType: "available",
+      });
+
+      res.status(201).json({ availability });
+    } catch (error) {
+      if (error instanceof z.ZodError) {
+        return res.status(400).json({ error: "Invalid data", details: error.errors });
+      }
+      console.error("Create staff availability error:", error);
+      res.status(500).json({ error: "Failed to create availability" });
+    }
+  });
+
+  // Delete staff member's own availability
+  app.delete("/api/staff/my-availability/:id", async (req, res) => {
+    const userId = req.session?.userId;
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    try {
+      const staff = await storage.getStaffMemberByUserId(userId);
+      if (!staff) {
+        return res.status(404).json({ error: "No staff profile found" });
+      }
+
+      // Get the availability slot to verify ownership
+      const availabilitySlots = await storage.getStaffAvailability(staff.id);
+      const slot = availabilitySlots.find(s => s.id === req.params.id);
+      
+      if (!slot) {
+        return res.status(404).json({ error: "Availability slot not found" });
+      }
+
+      await storage.deleteStaffAvailability(req.params.id);
+      res.json({ success: true });
+    } catch (error) {
+      console.error("Delete staff availability error:", error);
+      res.status(500).json({ error: "Failed to delete availability" });
+    }
+  });
+
+  // Get staff member's earnings
+  app.get("/api/staff/my-earnings", async (req, res) => {
+    const userId = req.session?.userId;
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    try {
+      const staff = await storage.getStaffMemberByUserId(userId);
+      if (!staff) {
+        return res.status(404).json({ error: "No staff profile found" });
+      }
+
+      const bookings = await storage.getAppointmentsByStaffMember(staff.id);
+      
+      // Calculate earnings from completed bookings
+      const now = new Date();
+      const thisMonthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+
+      let total = 0;
+      let thisMonth = 0;
+      let pending = 0;
+
+      for (const booking of bookings) {
+        const payout = booking.staffPayout || 0;
+        const bookingDate = new Date(booking.appointmentDate);
+
+        if (booking.status === "completed") {
+          total += payout;
+          if (bookingDate >= thisMonthStart) {
+            thisMonth += payout;
+          }
+        } else if (booking.status === "confirmed" || booking.status === "pending") {
+          pending += payout;
+        }
+      }
+
+      res.json({ total, thisMonth, pending });
+    } catch (error) {
+      console.error("Get staff earnings error:", error);
+      res.status(500).json({ error: "Failed to get earnings" });
+    }
+  });
+
+  // Staff member initiates their own Stripe onboarding
+  app.post("/api/staff/stripe-onboarding/create-link", async (req, res) => {
+    const userId = req.session?.userId;
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    try {
+      const staff = await storage.getStaffMemberByUserId(userId);
+      if (!staff) {
+        return res.status(404).json({ error: "No staff profile found" });
+      }
+
+      let accountId = staff.stripeAccountId;
+
+      // Create Stripe account if doesn't exist
+      if (!accountId) {
+        const account = await stripeService.createConnectAccount(
+          staff.email || `staff-${staff.id}@outsyde.app`,
+          staff.id,
+          staff.displayName
+        );
+        accountId = account.id;
+
+        await storage.updateStaffMember(staff.id, {
+          stripeAccountId: accountId,
+          stripeOnboardingComplete: false,
+        });
+      }
+
+      // Generate onboarding link
+      const accountLink = await stripeService.createConnectOnboardingLink(
+        accountId,
+        `${req.protocol}://${req.get('host')}/staff-dashboard?stripe=refresh`,
+        `${req.protocol}://${req.get('host')}/staff-dashboard?stripe=complete`
+      );
+
+      res.json({ url: accountLink.url });
+    } catch (error) {
+      console.error("Staff Stripe onboarding error:", error);
+      res.status(500).json({ error: "Failed to create onboarding link" });
+    }
+  });
+
   // ==================== CHAT ROUTES ====================
 
   // Get user's conversations

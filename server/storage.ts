@@ -215,6 +215,7 @@ export interface IStorage {
   getAppointment(id: string): Promise<Appointment | undefined>;
   getAppointmentsByBusiness(businessId: string): Promise<Appointment[]>;
   getAppointmentsByClient(clientId: string): Promise<Appointment[]>;
+  getAppointmentsByStaffMember(staffMemberId: string): Promise<Appointment[]>;
   updateAppointment(id: string, updates: Partial<Appointment>): Promise<Appointment | undefined>;
   updateAppointmentWithValidation(appointmentId: string, updates: Partial<Appointment>, actorId?: string): Promise<{ success: boolean; appointment?: Appointment; error?: string }>;
   updateTargetRating(targetType: string, targetId: string): Promise<void>;
@@ -1390,6 +1391,13 @@ export class DatabaseStorage implements IStorage {
     return db.select()
       .from(appointments)
       .where(eq(appointments.clientId, clientId))
+      .orderBy(desc(appointments.createdAt));
+  }
+
+  async getAppointmentsByStaffMember(staffMemberId: string): Promise<Appointment[]> {
+    return db.select()
+      .from(appointments)
+      .where(eq(appointments.staffMemberId, staffMemberId))
       .orderBy(desc(appointments.createdAt));
   }
 

@@ -18,6 +18,7 @@ import AuthPage from "@/pages/auth";
 import VendorDashboardPage from "@/pages/vendor-dashboard";
 import PhotographerDashboardPage from "@/pages/photographer-dashboard";
 import InfluencerDashboardPage from "@/pages/influencer-dashboard";
+import StaffDashboardPage from "@/pages/staff-dashboard";
 import AdminFulfillmentPage from "@/pages/admin-fulfillment";
 import AdminDashboardPage from "@/pages/admin-dashboard";
 import CreatePostPage from "@/pages/create-post";
@@ -28,7 +29,7 @@ import VendorOnboardingPage from "@/pages/vendor-onboarding";
 import jewelryImage from "@assets/generated_images/jewelry_artisan_vendor_image.png";
 import type { User } from "@shared/schema";
 
-type Page = "home" | "search" | "messages" | "profile" | "vendor" | "auth" | "vendor-dashboard" | "photographer-dashboard" | "influencer-dashboard" | "admin-fulfillment" | "admin-dashboard" | "create-post" | "photographer-page" | "order-success" | "checkout-continue" | "vendor-onboarding" | "influencer-onboarding";
+type Page = "home" | "search" | "messages" | "profile" | "vendor" | "auth" | "vendor-dashboard" | "photographer-dashboard" | "influencer-dashboard" | "staff-dashboard" | "admin-fulfillment" | "admin-dashboard" | "create-post" | "photographer-page" | "order-success" | "checkout-continue" | "vendor-onboarding" | "influencer-onboarding";
 type NavTab = "home" | "search" | "create" | "messages" | "profile" | "dashboard";
 
 interface MessageTarget {
@@ -71,6 +72,8 @@ function AppContent() {
       setCurrentPage("influencer-dashboard");
     } else if (path === "/influencer/dashboard" || path.includes("influencer-dashboard")) {
       setCurrentPage("influencer-dashboard");
+    } else if (path === "/staff-dashboard" || path.includes("staff-dashboard")) {
+      setCurrentPage("staff-dashboard");
     } else if (path === "/search") {
       setCurrentPage("search");
       setActiveTab("search");
@@ -330,6 +333,9 @@ function AppContent() {
           )}
           {currentPage === "influencer-dashboard" && isInfluencer && (
             <InfluencerDashboardPage onLogout={handleLogout} />
+          )}
+          {currentPage === "staff-dashboard" && (
+            <StaffDashboardPage onLogout={handleLogout} />
           )}
           {currentPage === "create-post" && (
             <CreatePostPage onBack={() => {
