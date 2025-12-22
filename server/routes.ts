@@ -821,9 +821,22 @@ export async function registerRoutes(
         appointmentDate: z.string().min(1, "Date is required"),
         appointmentTime: z.string().min(1, "Time is required"),
         totalPriceCents: z.number().default(0),
+        staffMemberId: z.string().optional(),
       });
 
       const data = appointmentSchema.parse(req.body);
+
+      // Validate staff member if provided
+      let staffMember = null;
+      if (data.staffMemberId) {
+        staffMember = await storage.getStaffMember(data.staffMemberId);
+        if (!staffMember || staffMember.businessId !== data.businessId) {
+          return res.status(400).json({ error: "Invalid staff member" });
+        }
+        if (staffMember.status !== "active") {
+          return res.status(400).json({ error: "Staff member is not available" });
+        }
+      }
 
       // Get service to determine duration
       const service = await storage.getVendorService(data.serviceId);
@@ -851,9 +864,13 @@ export async function registerRoutes(
         });
       }
 
-      // Calculate fees (4% Outsyde platform fee for businesses)
+      // Calculate fees (4% Outsyde platform fee for businesses and staff)
       const platformFee = Math.round(data.totalPriceCents * 0.04);
       const vendorNet = data.totalPriceCents - platformFee;
+      
+      // If staff member is assigned, they get 100% of vendorNet (minus platform fee)
+      // Shop owner-staff financial arrangements are handled outside Outsyde
+      const staffPayout = staffMember ? vendorNet : null;
 
       const appointment = await storage.createAppointment({
         businessId: data.businessId,
@@ -864,6 +881,8 @@ export async function registerRoutes(
         totalPrice: data.totalPriceCents,
         platformFee,
         vendorNet,
+        staffMemberId: data.staffMemberId || null,
+        staffPayout,
         status: "pending",
       });
 
