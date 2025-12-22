@@ -12,6 +12,8 @@ import {
   subscriptionTiers,
   calculateAgeRange,
   type User,
+  type StaffMember,
+  type StaffInvite,
 } from "@shared/schema";
 
 // Helper to sanitize user data for non-admin responses (removes sensitive fields)
@@ -2889,6 +2891,666 @@ export async function registerRoutes(
     } catch (error) {
       console.error("Archive vendor service error:", error);
       res.status(500).json({ error: "Failed to archive service" });
+    }
+  });
+
+  // ==================== STAFF MANAGEMENT ROUTES ====================
+
+  // Get all staff members for a business (owner/manager only)
+  app.get("/api/vendor/staff", async (req, res) => {
+    const userId = req.session?.userId;
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    try {
+      const business = await storage.getBusinessByOwnerId(userId);
+      if (!business) {
+        return res.status(404).json({ error: "No business found for this account" });
+      }
+
+      const staff = await storage.getStaffMembersByBusiness(business.id);
+      res.json({ staff });
+    } catch (error) {
+      console.error("Get staff error:", error);
+      res.status(500).json({ error: "Failed to get staff members" });
+    }
+  });
+
+  // Get single staff member details
+  app.get("/api/vendor/staff/:staffId", async (req, res) => {
+    const userId = req.session?.userId;
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    try {
+      const business = await storage.getBusinessByOwnerId(userId);
+      if (!business) {
+        return res.status(404).json({ error: "No business found for this account" });
+      }
+
+      const staff = await storage.getStaffMember(req.params.staffId);
+      if (!staff || staff.businessId !== business.id) {
+        return res.status(404).json({ error: "Staff member not found" });
+      }
+
+      res.json({ staff });
+    } catch (error) {
+      console.error("Get staff member error:", error);
+      res.status(500).json({ error: "Failed to get staff member" });
+    }
+  });
+
+  // Create a new staff member (owner only)
+  app.post("/api/vendor/staff", async (req, res) => {
+    const userId = req.session?.userId;
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    try {
+      const business = await storage.getBusinessByOwnerId(userId);
+      if (!business) {
+        return res.status(404).json({ error: "No business found for this account" });
+      }
+
+      const staffSchema = z.object({
+        displayName: z.string().min(1, "Name is required"),
+        email: z.string().email().optional(),
+        phone: z.string().optional(),
+        bio: z.string().optional(),
+        profileImageUrl: z.string().optional(),
+        serviceIds: z.array(z.string()).optional(),
+        specialties: z.array(z.string()).optional(),
+        role: z.enum(["staff", "manager", "owner"]).optional(),
+        hoursOfOperation: z.any().optional(),
+      });
+
+      const validated = staffSchema.parse(req.body);
+
+      const staff = await storage.createStaffMember({
+        businessId: business.id,
+        displayName: validated.displayName,
+        email: validated.email,
+        phone: validated.phone,
+        bio: validated.bio,
+        profileImageUrl: validated.profileImageUrl,
+        serviceIds: validated.serviceIds,
+        specialties: validated.specialties,
+        role: validated.role || "staff",
+        status: "active",
+        hoursOfOperation: validated.hoursOfOperation,
+      });
+
+      res.status(201).json({ staff });
+    } catch (error) {
+      console.error("Create staff error:", error);
+      if (error instanceof z.ZodError) {
+        return res.status(400).json({ error: "Invalid data", details: error.errors });
+      }
+      res.status(500).json({ error: "Failed to create staff member" });
+    }
+  });
+
+  // Update a staff member
+  app.patch("/api/vendor/staff/:staffId", async (req, res) => {
+    const userId = req.session?.userId;
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    try {
+      const business = await storage.getBusinessByOwnerId(userId);
+      if (!business) {
+        return res.status(404).json({ error: "No business found for this account" });
+      }
+
+      const staff = await storage.getStaffMember(req.params.staffId);
+      if (!staff || staff.businessId !== business.id) {
+        return res.status(404).json({ error: "Staff member not found" });
+      }
+
+      const updateSchema = z.object({
+        displayName: z.string().optional(),
+        email: z.string().email().optional().nullable(),
+        phone: z.string().optional().nullable(),
+        bio: z.string().optional().nullable(),
+        profileImageUrl: z.string().optional().nullable(),
+        serviceIds: z.array(z.string()).optional(),
+        specialties: z.array(z.string()).optional(),
+        role: z.enum(["staff", "manager", "owner"]).optional(),
+        status: z.enum(["active", "inactive", "pending"]).optional(),
+        hoursOfOperation: z.any().optional(),
+      });
+
+      const validated = updateSchema.parse(req.body);
+      const updated = await storage.updateStaffMember(staff.id, validated);
+
+      res.json({ staff: updated });
+    } catch (error) {
+      console.error("Update staff error:", error);
+      if (error instanceof z.ZodError) {
+        return res.status(400).json({ error: "Invalid data", details: error.errors });
+      }
+      res.status(500).json({ error: "Failed to update staff member" });
+    }
+  });
+
+  // Delete a staff member
+  app.delete("/api/vendor/staff/:staffId", async (req, res) => {
+    const userId = req.session?.userId;
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    try {
+      const business = await storage.getBusinessByOwnerId(userId);
+      if (!business) {
+        return res.status(404).json({ error: "No business found for this account" });
+      }
+
+      const staff = await storage.getStaffMember(req.params.staffId);
+      if (!staff || staff.businessId !== business.id) {
+        return res.status(404).json({ error: "Staff member not found" });
+      }
+
+      await storage.deleteStaffMember(staff.id);
+      res.json({ message: "Staff member deleted" });
+    } catch (error) {
+      console.error("Delete staff error:", error);
+      res.status(500).json({ error: "Failed to delete staff member" });
+    }
+  });
+
+  // ==================== STAFF AVAILABILITY ROUTES ====================
+
+  // Get staff member's availability
+  app.get("/api/vendor/staff/:staffId/availability", async (req, res) => {
+    const userId = req.session?.userId;
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    try {
+      const business = await storage.getBusinessByOwnerId(userId);
+      if (!business) {
+        return res.status(404).json({ error: "No business found" });
+      }
+
+      const staff = await storage.getStaffMember(req.params.staffId);
+      if (!staff || staff.businessId !== business.id) {
+        return res.status(404).json({ error: "Staff member not found" });
+      }
+
+      const { startDate, endDate } = req.query;
+      const availability = await storage.getStaffAvailability(
+        staff.id,
+        startDate as string | undefined,
+        endDate as string | undefined
+      );
+
+      res.json({ availability });
+    } catch (error) {
+      console.error("Get staff availability error:", error);
+      res.status(500).json({ error: "Failed to get availability" });
+    }
+  });
+
+  // Create staff availability slot
+  app.post("/api/vendor/staff/:staffId/availability", async (req, res) => {
+    const userId = req.session?.userId;
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    try {
+      const business = await storage.getBusinessByOwnerId(userId);
+      if (!business) {
+        return res.status(404).json({ error: "No business found" });
+      }
+
+      const staff = await storage.getStaffMember(req.params.staffId);
+      if (!staff || staff.businessId !== business.id) {
+        return res.status(404).json({ error: "Staff member not found" });
+      }
+
+      const slotSchema = z.object({
+        date: z.string().min(1),
+        startTime: z.string().min(1),
+        endTime: z.string().min(1),
+        slotType: z.enum(["available", "blocked", "special"]).optional(),
+        title: z.string().optional(),
+        notes: z.string().optional(),
+        isRecurring: z.boolean().optional(),
+        recurringDayOfWeek: z.number().min(0).max(6).optional(),
+      });
+
+      const validated = slotSchema.parse(req.body);
+
+      const slot = await storage.createStaffAvailability({
+        staffMemberId: staff.id,
+        businessId: business.id,
+        ...validated,
+      });
+
+      res.status(201).json({ slot });
+    } catch (error) {
+      console.error("Create staff availability error:", error);
+      if (error instanceof z.ZodError) {
+        return res.status(400).json({ error: "Invalid data", details: error.errors });
+      }
+      res.status(500).json({ error: "Failed to create availability slot" });
+    }
+  });
+
+  // Update staff availability slot
+  app.patch("/api/vendor/staff/:staffId/availability/:slotId", async (req, res) => {
+    const userId = req.session?.userId;
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    try {
+      const business = await storage.getBusinessByOwnerId(userId);
+      if (!business) {
+        return res.status(404).json({ error: "No business found" });
+      }
+
+      const staff = await storage.getStaffMember(req.params.staffId);
+      if (!staff || staff.businessId !== business.id) {
+        return res.status(404).json({ error: "Staff member not found" });
+      }
+
+      const slot = await storage.getStaffAvailabilitySlot(req.params.slotId);
+      if (!slot || slot.staffMemberId !== staff.id) {
+        return res.status(404).json({ error: "Availability slot not found" });
+      }
+
+      const updateSchema = z.object({
+        date: z.string().optional(),
+        startTime: z.string().optional(),
+        endTime: z.string().optional(),
+        slotType: z.enum(["available", "blocked", "special"]).optional(),
+        title: z.string().nullable().optional(),
+        notes: z.string().nullable().optional(),
+        isRecurring: z.boolean().optional(),
+        recurringDayOfWeek: z.number().min(0).max(6).nullable().optional(),
+      });
+
+      const validated = updateSchema.parse(req.body);
+      const updated = await storage.updateStaffAvailability(slot.id, validated);
+
+      res.json({ slot: updated });
+    } catch (error) {
+      console.error("Update staff availability error:", error);
+      if (error instanceof z.ZodError) {
+        return res.status(400).json({ error: "Invalid data", details: error.errors });
+      }
+      res.status(500).json({ error: "Failed to update availability" });
+    }
+  });
+
+  // Delete staff availability slot
+  app.delete("/api/vendor/staff/:staffId/availability/:slotId", async (req, res) => {
+    const userId = req.session?.userId;
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    try {
+      const business = await storage.getBusinessByOwnerId(userId);
+      if (!business) {
+        return res.status(404).json({ error: "No business found" });
+      }
+
+      const staff = await storage.getStaffMember(req.params.staffId);
+      if (!staff || staff.businessId !== business.id) {
+        return res.status(404).json({ error: "Staff member not found" });
+      }
+
+      const slot = await storage.getStaffAvailabilitySlot(req.params.slotId);
+      if (!slot || slot.staffMemberId !== staff.id) {
+        return res.status(404).json({ error: "Availability slot not found" });
+      }
+
+      await storage.deleteStaffAvailability(slot.id);
+      res.json({ message: "Availability slot deleted" });
+    } catch (error) {
+      console.error("Delete staff availability error:", error);
+      res.status(500).json({ error: "Failed to delete availability" });
+    }
+  });
+
+  // ==================== STAFF INVITE ROUTES ====================
+
+  // Get pending invites for a business
+  app.get("/api/vendor/staff/invites", async (req, res) => {
+    const userId = req.session?.userId;
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    try {
+      const business = await storage.getBusinessByOwnerId(userId);
+      if (!business) {
+        return res.status(404).json({ error: "No business found" });
+      }
+
+      const invites = await storage.getStaffInvitesByBusiness(business.id);
+      res.json({ invites });
+    } catch (error) {
+      console.error("Get staff invites error:", error);
+      res.status(500).json({ error: "Failed to get invites" });
+    }
+  });
+
+  // Create a staff invite
+  app.post("/api/vendor/staff/invites", async (req, res) => {
+    const userId = req.session?.userId;
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    try {
+      const business = await storage.getBusinessByOwnerId(userId);
+      if (!business) {
+        return res.status(404).json({ error: "No business found" });
+      }
+
+      const inviteSchema = z.object({
+        email: z.string().email("Valid email is required"),
+        role: z.enum(["staff", "manager"]).optional(),
+      });
+
+      const validated = inviteSchema.parse(req.body);
+
+      // Check if there's already a pending invite for this email
+      const existingInvites = await storage.getStaffInvitesByBusiness(business.id);
+      const pendingInvite = existingInvites.find(
+        (inv: StaffInvite) => inv.email === validated.email && inv.status === "pending"
+      );
+      if (pendingInvite) {
+        return res.status(400).json({ error: "An invite is already pending for this email" });
+      }
+
+      const invite = await storage.createStaffInvite({
+        businessId: business.id,
+        email: validated.email,
+        role: validated.role || "staff",
+        invitedByUserId: userId,
+      });
+
+      // TODO: Send invite email with the invite code
+
+      res.status(201).json({ invite });
+    } catch (error) {
+      console.error("Create staff invite error:", error);
+      if (error instanceof z.ZodError) {
+        return res.status(400).json({ error: "Invalid data", details: error.errors });
+      }
+      res.status(500).json({ error: "Failed to create invite" });
+    }
+  });
+
+  // Revoke a staff invite
+  app.delete("/api/vendor/staff/invites/:inviteId", async (req, res) => {
+    const userId = req.session?.userId;
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    try {
+      const business = await storage.getBusinessByOwnerId(userId);
+      if (!business) {
+        return res.status(404).json({ error: "No business found" });
+      }
+
+      const invite = await storage.getStaffInvite(req.params.inviteId);
+      if (!invite || invite.businessId !== business.id) {
+        return res.status(404).json({ error: "Invite not found" });
+      }
+
+      await storage.updateStaffInvite(invite.id, { status: "revoked" });
+      res.json({ message: "Invite revoked" });
+    } catch (error) {
+      console.error("Revoke staff invite error:", error);
+      res.status(500).json({ error: "Failed to revoke invite" });
+    }
+  });
+
+  // Accept a staff invite (public endpoint for invited users)
+  app.post("/api/staff/accept-invite", async (req, res) => {
+    const userId = req.session?.userId;
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    try {
+      const acceptSchema = z.object({
+        inviteCode: z.string().min(1, "Invite code is required"),
+      });
+
+      const { inviteCode } = acceptSchema.parse(req.body);
+
+      const invite = await storage.getStaffInviteByCode(inviteCode);
+      if (!invite) {
+        return res.status(404).json({ error: "Invalid invite code" });
+      }
+
+      if (invite.status !== "pending") {
+        return res.status(400).json({ error: "This invite is no longer valid" });
+      }
+
+      if (invite.expiresAt && new Date(invite.expiresAt) < new Date()) {
+        return res.status(400).json({ error: "This invite has expired" });
+      }
+
+      // Get the user's email to verify it matches
+      const user = await storage.getUser(userId);
+      if (!user || user.email !== invite.email) {
+        return res.status(403).json({ error: "This invite was sent to a different email address" });
+      }
+
+      // Create the staff member record linked to this user
+      const displayName = user.firstName && user.lastName 
+        ? `${user.firstName} ${user.lastName}`
+        : user.name || user.email || "Staff Member";
+      const staff = await storage.createStaffMember({
+        businessId: invite.businessId,
+        userId: userId,
+        displayName: displayName,
+        email: user.email,
+        role: invite.role || "staff",
+        status: "active",
+      });
+
+      // Mark the invite as accepted
+      await storage.updateStaffInvite(invite.id, {
+        status: "accepted",
+        acceptedAt: new Date(),
+      });
+
+      res.json({ message: "Invite accepted", staff });
+    } catch (error) {
+      console.error("Accept staff invite error:", error);
+      if (error instanceof z.ZodError) {
+        return res.status(400).json({ error: "Invalid data", details: error.errors });
+      }
+      res.status(500).json({ error: "Failed to accept invite" });
+    }
+  });
+
+  // ==================== STAFF STRIPE CONNECT ROUTES ====================
+
+  // Get staff member's Stripe onboarding status
+  app.get("/api/vendor/staff/:staffId/stripe-status", async (req, res) => {
+    const userId = req.session?.userId;
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    try {
+      const business = await storage.getBusinessByOwnerId(userId);
+      if (!business) {
+        return res.status(404).json({ error: "No business found" });
+      }
+
+      const staff = await storage.getStaffMember(req.params.staffId);
+      if (!staff || staff.businessId !== business.id) {
+        return res.status(404).json({ error: "Staff member not found" });
+      }
+
+      res.json({
+        hasStripeAccount: !!staff.stripeAccountId,
+        stripeOnboardingComplete: staff.stripeOnboardingComplete || false,
+      });
+    } catch (error) {
+      console.error("Get staff Stripe status error:", error);
+      res.status(500).json({ error: "Failed to get Stripe status" });
+    }
+  });
+
+  // Create Stripe Connect account for staff member
+  app.post("/api/vendor/staff/:staffId/stripe-connect", async (req, res) => {
+    const userId = req.session?.userId;
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    try {
+      const business = await storage.getBusinessByOwnerId(userId);
+      if (!business) {
+        return res.status(404).json({ error: "No business found" });
+      }
+
+      const staff = await storage.getStaffMember(req.params.staffId);
+      if (!staff || staff.businessId !== business.id) {
+        return res.status(404).json({ error: "Staff member not found" });
+      }
+
+      if (staff.stripeAccountId) {
+        return res.status(400).json({ error: "Staff member already has a Stripe account" });
+      }
+
+      // Create Stripe Express account for the staff member
+      const account = await stripeService.createConnectAccount(
+        staff.email || `staff-${staff.id}@outsyde.app`,
+        staff.id,
+        staff.displayName
+      );
+
+      // Generate onboarding link
+      const accountLink = await stripeService.createConnectOnboardingLink(
+        account.id,
+        `${req.protocol}://${req.get('host')}/staff/onboarding/refresh?staffId=${staff.id}`,
+        `${req.protocol}://${req.get('host')}/staff/onboarding/complete?staffId=${staff.id}`
+      );
+
+      // Update staff record with Stripe account ID
+      await storage.updateStaffMember(staff.id, {
+        stripeAccountId: account.id,
+        stripeOnboardingComplete: false,
+        stripeOnboardingUrl: accountLink.url,
+      });
+
+      res.json({ onboardingUrl: accountLink.url });
+    } catch (error) {
+      console.error("Create staff Stripe account error:", error);
+      res.status(500).json({ error: "Failed to create Stripe account" });
+    }
+  });
+
+  // Get fresh onboarding link for staff member
+  app.get("/api/vendor/staff/:staffId/stripe-onboarding-link", async (req, res) => {
+    const userId = req.session?.userId;
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    try {
+      const business = await storage.getBusinessByOwnerId(userId);
+      if (!business) {
+        return res.status(404).json({ error: "No business found" });
+      }
+
+      const staff = await storage.getStaffMember(req.params.staffId);
+      if (!staff || staff.businessId !== business.id) {
+        return res.status(404).json({ error: "Staff member not found" });
+      }
+
+      if (!staff.stripeAccountId) {
+        return res.status(400).json({ error: "Staff member does not have a Stripe account" });
+      }
+
+      // Generate fresh onboarding link
+      const accountLink = await stripeService.createConnectOnboardingLink(
+        staff.stripeAccountId,
+        `${req.protocol}://${req.get('host')}/staff/onboarding/refresh?staffId=${staff.id}`,
+        `${req.protocol}://${req.get('host')}/staff/onboarding/complete?staffId=${staff.id}`
+      );
+
+      await storage.updateStaffMember(staff.id, {
+        stripeOnboardingUrl: accountLink.url,
+      });
+
+      res.json({ onboardingUrl: accountLink.url });
+    } catch (error) {
+      console.error("Get staff Stripe onboarding link error:", error);
+      res.status(500).json({ error: "Failed to get onboarding link" });
+    }
+  });
+
+  // Public endpoint: Get staff members for a business (for customer booking)
+  app.get("/api/businesses/:businessId/staff", async (req, res) => {
+    try {
+      const staff = await storage.getStaffMembersByBusiness(req.params.businessId);
+      
+      // Only return active staff with completed Stripe onboarding
+      const activeStaff = staff.filter((s: StaffMember) => 
+        s.status === "active" && s.stripeOnboardingComplete
+      );
+
+      // Return sanitized staff info for public viewing
+      const publicStaff = activeStaff.map((s: StaffMember) => ({
+        id: s.id,
+        displayName: s.displayName,
+        bio: s.bio,
+        profileImageUrl: s.profileImageUrl,
+        specialties: s.specialties,
+        serviceIds: s.serviceIds,
+      }));
+
+      res.json({ staff: publicStaff });
+    } catch (error) {
+      console.error("Get public staff error:", error);
+      res.status(500).json({ error: "Failed to get staff members" });
+    }
+  });
+
+  // Public endpoint: Get staff member availability (for customer booking)
+  app.get("/api/businesses/:businessId/staff/:staffId/availability", async (req, res) => {
+    try {
+      const staff = await storage.getStaffMember(req.params.staffId);
+      if (!staff || staff.businessId !== req.params.businessId) {
+        return res.status(404).json({ error: "Staff member not found" });
+      }
+
+      if (staff.status !== "active") {
+        return res.status(404).json({ error: "Staff member is not available" });
+      }
+
+      const { startDate, endDate } = req.query;
+      const availability = await storage.getStaffAvailability(
+        staff.id,
+        startDate as string | undefined,
+        endDate as string | undefined
+      );
+
+      res.json({ availability });
+    } catch (error) {
+      console.error("Get public staff availability error:", error);
+      res.status(500).json({ error: "Failed to get availability" });
     }
   });
 
