@@ -118,10 +118,7 @@ export default function ProfilePage({ onLogout, onAdminDashboard }: ProfilePageP
   // Submit influencer application mutation
   const submitApplicationMutation = useMutation({
     mutationFn: async (data: typeof influencerFormData) => {
-      return apiRequest("/api/influencer/apply", {
-        method: "POST",
-        body: JSON.stringify(data),
-      });
+      return apiRequest("POST", "/api/influencer/apply", data);
     },
     onSuccess: () => {
       toast({
@@ -352,8 +349,8 @@ export default function ProfilePage({ onLogout, onAdminDashboard }: ProfilePageP
               title="Billing Address"
             />
             
-            {/* Influencer Application Section - only show if not already an influencer */}
-            {!isInfluencer && (
+            {/* Influencer Application Section - only show to regular customers who aren't already influencers */}
+            {!isInfluencer && isRegularCustomer && (
               <Card className="overflow-visible">
                 <CardHeader>
                   <div className="flex items-center gap-2">

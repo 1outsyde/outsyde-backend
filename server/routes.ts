@@ -405,6 +405,13 @@ export async function registerRoutes(
         if (user) {
           // Use sanitizeUserForResponse with includeOwnData for user's own profile
           const safeUser = sanitizeUserForResponse(user, { includeOwnData: true });
+          // Check if user has a business record (in case isVendor wasn't set properly)
+          if (!safeUser.isVendor) {
+            const business = await storage.getBusinessByOwnerId(user.id);
+            if (business) {
+              (safeUser as any).isVendor = true;
+            }
+          }
           // Check if user has a photographer record (in case isPhotographer wasn't set properly)
           if (!safeUser.isPhotographer) {
             const photographer = await storage.getPhotographerByUserId(user.id);
@@ -429,6 +436,13 @@ export async function registerRoutes(
 
       // Use sanitizeUserForResponse with includeOwnData for user's own profile
       const safeUser = sanitizeUserForResponse(user, { includeOwnData: true });
+      // Check if user has a business record (in case isVendor wasn't set properly)
+      if (!safeUser.isVendor) {
+        const business = await storage.getBusinessByOwnerId(userId);
+        if (business) {
+          (safeUser as any).isVendor = true;
+        }
+      }
       // Check if user has a photographer record (in case isPhotographer wasn't set properly)
       if (!safeUser.isPhotographer) {
         const photographer = await storage.getPhotographerByUserId(userId);
@@ -4365,6 +4379,11 @@ export async function registerRoutes(
       // Check if already an influencer
       if (user.isInfluencer) {
         return res.status(400).json({ error: "You are already an influencer" });
+      }
+
+      // Only customers can apply - vendors and photographers cannot become influencers
+      if (user.isVendor || user.isPhotographer) {
+        return res.status(403).json({ error: "Business owners and photographers cannot apply as influencers. The influencer program is only for customers." });
       }
 
       // Check for existing pending application
