@@ -58,6 +58,13 @@ import {
   type InsertBusinessAvailability,
   type PhotographerAvailability,
   type InsertPhotographerAvailability,
+  type StaffMember,
+  type InsertStaffMember,
+  type UpdateStaffMember,
+  type StaffAvailability,
+  type InsertStaffAvailability,
+  type StaffInvite,
+  type InsertStaffInvite,
   type Shipment,
   type InsertShipment,
   type AuditLog,
@@ -120,6 +127,9 @@ import {
   profileComments,
   businessAvailability,
   photographerAvailability,
+  staffMembers,
+  staffAvailability,
+  staffInvites,
   shipments,
   auditLogs,
   userBlocks,
@@ -136,7 +146,7 @@ import {
   isValidBookingTransition
 } from "@shared/schema";
 import { db } from "./db";
-import { eq, ilike, or, and, sql, isNull, desc, asc } from "drizzle-orm";
+import { eq, ilike, or, and, sql, isNull, desc, asc, gte, lte, ne } from "drizzle-orm";
 import { randomUUID, createHash } from "crypto";
 
 // Input type for creating a photographer (no need for InsertPhotographer in schema)
@@ -397,6 +407,33 @@ export interface IStorage {
   checkPhotographerSlotAvailable(photographerId: string, date: string, startTime: string, endTime: string, excludeSlotId?: string): Promise<boolean>;
   reservePhotographerSlot(photographerId: string, date: string, startTime: string, endTime: string, shootBookingId: string): Promise<PhotographerAvailability>;
   releasePhotographerSlot(shootBookingId: string): Promise<boolean>;
+
+  // Staff Members
+  createStaffMember(data: InsertStaffMember): Promise<StaffMember>;
+  getStaffMember(id: string): Promise<StaffMember | undefined>;
+  getStaffMemberByUserId(userId: string): Promise<StaffMember | undefined>;
+  getStaffMembersByBusiness(businessId: string): Promise<StaffMember[]>;
+  updateStaffMember(id: string, updates: Partial<StaffMember>): Promise<StaffMember | undefined>;
+  deleteStaffMember(id: string): Promise<void>;
+  
+  // Staff Availability
+  getStaffAvailability(staffMemberId: string, startDate?: string, endDate?: string): Promise<StaffAvailability[]>;
+  getStaffAvailabilitySlot(id: string): Promise<StaffAvailability | undefined>;
+  createStaffAvailability(data: InsertStaffAvailability): Promise<StaffAvailability>;
+  updateStaffAvailability(id: string, updates: Partial<StaffAvailability>): Promise<StaffAvailability | undefined>;
+  deleteStaffAvailability(id: string): Promise<void>;
+  checkStaffSlotAvailable(staffMemberId: string, date: string, startTime: string, endTime: string, excludeSlotId?: string): Promise<boolean>;
+  reserveStaffSlot(staffMemberId: string, businessId: string, date: string, startTime: string, endTime: string, appointmentId: string): Promise<StaffAvailability>;
+  releaseStaffSlot(appointmentId: string): Promise<boolean>;
+  
+  // Staff Invites
+  createStaffInvite(data: InsertStaffInvite): Promise<StaffInvite>;
+  getStaffInvite(id: string): Promise<StaffInvite | undefined>;
+  getStaffInviteByCode(code: string): Promise<StaffInvite | undefined>;
+  getStaffInvitesByBusiness(businessId: string): Promise<StaffInvite[]>;
+  getStaffInvitesByEmail(email: string): Promise<StaffInvite[]>;
+  updateStaffInvite(id: string, updates: Partial<StaffInvite>): Promise<StaffInvite | undefined>;
+  deleteStaffInvite(id: string): Promise<void>;
 
   // Refund Requests
   createRefundRequest(data: InsertRefundRequest): Promise<RefundRequest>;
@@ -3812,6 +3849,204 @@ export class DatabaseStorage implements IStorage {
       .where(eq(photographerAvailability.shootBookingId, shootBookingId))
       .returning();
     return result.length > 0;
+  }
+
+  // =========================
+  // STAFF MEMBERS
+  // =========================
+
+  async createStaffMember(data: InsertStaffMember): Promise<StaffMember> {
+    const [staff] = await db.insert(staffMembers)
+      .values({
+        businessId: data.businessId,
+        userId: data.userId ?? undefined,
+        displayName: data.displayName,
+        bio: data.bio ?? undefined,
+        profileImageUrl: data.profileImageUrl ?? undefined,
+        phone: data.phone ?? undefined,
+        email: data.email ?? undefined,
+        serviceIds: data.serviceIds ?? undefined,
+        specialties: data.specialties ?? undefined,
+        role: data.role ?? undefined,
+        status: data.status ?? undefined,
+        stripeAccountId: data.stripeAccountId ?? undefined,
+        stripeOnboardingComplete: data.stripeOnboardingComplete ?? undefined,
+        stripeOnboardingUrl: data.stripeOnboardingUrl ?? undefined,
+        hoursOfOperation: data.hoursOfOperation ?? undefined,
+      })
+      .returning();
+    return staff;
+  }
+
+  async getStaffMember(id: string): Promise<StaffMember | undefined> {
+    const result = await db.select().from(staffMembers).where(eq(staffMembers.id, id));
+    return result[0];
+  }
+
+  async getStaffMemberByUserId(userId: string): Promise<StaffMember | undefined> {
+    const result = await db.select().from(staffMembers).where(eq(staffMembers.userId, userId));
+    return result[0];
+  }
+
+  async getStaffMembersByBusiness(businessId: string): Promise<StaffMember[]> {
+    return db.select().from(staffMembers)
+      .where(eq(staffMembers.businessId, businessId))
+      .orderBy(staffMembers.displayName);
+  }
+
+  async updateStaffMember(id: string, updates: Partial<StaffMember>): Promise<StaffMember | undefined> {
+    const [updated] = await db.update(staffMembers)
+      .set(updates)
+      .where(eq(staffMembers.id, id))
+      .returning();
+    return updated;
+  }
+
+  async deleteStaffMember(id: string): Promise<void> {
+    await db.delete(staffMembers).where(eq(staffMembers.id, id));
+  }
+
+  // =========================
+  // STAFF AVAILABILITY
+  // =========================
+
+  async getStaffAvailability(staffMemberId: string, startDate?: string, endDate?: string): Promise<StaffAvailability[]> {
+    if (startDate && endDate) {
+      return db.select()
+        .from(staffAvailability)
+        .where(
+          and(
+            eq(staffAvailability.staffMemberId, staffMemberId),
+            gte(staffAvailability.date, startDate),
+            lte(staffAvailability.date, endDate)
+          )
+        )
+        .orderBy(staffAvailability.date, staffAvailability.startTime);
+    }
+    
+    return db.select()
+      .from(staffAvailability)
+      .where(eq(staffAvailability.staffMemberId, staffMemberId))
+      .orderBy(staffAvailability.date, staffAvailability.startTime);
+  }
+
+  async getStaffAvailabilitySlot(id: string): Promise<StaffAvailability | undefined> {
+    const result = await db.select().from(staffAvailability).where(eq(staffAvailability.id, id));
+    return result[0];
+  }
+
+  async createStaffAvailability(data: InsertStaffAvailability): Promise<StaffAvailability> {
+    const id = randomUUID();
+    const [slot] = await db.insert(staffAvailability)
+      .values({ id, ...data })
+      .returning();
+    return slot;
+  }
+
+  async updateStaffAvailability(id: string, updates: Partial<StaffAvailability>): Promise<StaffAvailability | undefined> {
+    const [updated] = await db.update(staffAvailability)
+      .set(updates)
+      .where(eq(staffAvailability.id, id))
+      .returning();
+    return updated;
+  }
+
+  async deleteStaffAvailability(id: string): Promise<void> {
+    await db.delete(staffAvailability).where(eq(staffAvailability.id, id));
+  }
+
+  async checkStaffSlotAvailable(staffMemberId: string, date: string, startTime: string, endTime: string, excludeSlotId?: string): Promise<boolean> {
+    let conditions = [
+      eq(staffAvailability.staffMemberId, staffMemberId),
+      eq(staffAvailability.date, date),
+      eq(staffAvailability.slotType, 'booked'),
+    ];
+    
+    if (excludeSlotId) {
+      conditions.push(ne(staffAvailability.id, excludeSlotId));
+    }
+    
+    const overlapping = await db.select()
+      .from(staffAvailability)
+      .where(and(...conditions));
+    
+    for (const slot of overlapping) {
+      if (slot.startTime < endTime && slot.endTime > startTime) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  async reserveStaffSlot(staffMemberId: string, businessId: string, date: string, startTime: string, endTime: string, appointmentId: string): Promise<StaffAvailability> {
+    const id = randomUUID();
+    const [slot] = await db.insert(staffAvailability)
+      .values({
+        id,
+        staffMemberId,
+        businessId,
+        date,
+        startTime,
+        endTime,
+        slotType: 'booked',
+        appointmentId,
+      })
+      .returning();
+    return slot;
+  }
+
+  async releaseStaffSlot(appointmentId: string): Promise<boolean> {
+    const result = await db.delete(staffAvailability)
+      .where(eq(staffAvailability.appointmentId, appointmentId))
+      .returning();
+    return result.length > 0;
+  }
+
+  // =========================
+  // STAFF INVITES
+  // =========================
+
+  async createStaffInvite(data: InsertStaffInvite): Promise<StaffInvite> {
+    const id = randomUUID();
+    const inviteCode = data.inviteCode || randomUUID().substring(0, 8).toUpperCase();
+    const [invite] = await db.insert(staffInvites)
+      .values({ id, ...data, inviteCode })
+      .returning();
+    return invite;
+  }
+
+  async getStaffInvite(id: string): Promise<StaffInvite | undefined> {
+    const result = await db.select().from(staffInvites).where(eq(staffInvites.id, id));
+    return result[0];
+  }
+
+  async getStaffInviteByCode(code: string): Promise<StaffInvite | undefined> {
+    const result = await db.select().from(staffInvites).where(eq(staffInvites.inviteCode, code));
+    return result[0];
+  }
+
+  async getStaffInvitesByBusiness(businessId: string): Promise<StaffInvite[]> {
+    return db.select().from(staffInvites)
+      .where(eq(staffInvites.businessId, businessId))
+      .orderBy(desc(staffInvites.createdAt));
+  }
+
+  async getStaffInvitesByEmail(email: string): Promise<StaffInvite[]> {
+    return db.select().from(staffInvites)
+      .where(eq(staffInvites.email, email))
+      .orderBy(desc(staffInvites.createdAt));
+  }
+
+  async updateStaffInvite(id: string, updates: Partial<StaffInvite>): Promise<StaffInvite | undefined> {
+    const [updated] = await db.update(staffInvites)
+      .set(updates)
+      .where(eq(staffInvites.id, id))
+      .returning();
+    return updated;
+  }
+
+  async deleteStaffInvite(id: string): Promise<void> {
+    await db.delete(staffInvites).where(eq(staffInvites.id, id));
   }
 
   // =========================

@@ -271,6 +271,100 @@ export const businessAvailability = pgTable("business_availability", {
 });
 
 /* =====================================================
+   STAFF MEMBERS (Team Members for Businesses)
+===================================================== */
+export const staffMembers = pgTable("staff_members", {
+  id: varchar("id", { length: 36 }).primaryKey().default(sql`gen_random_uuid()`),
+  businessId: varchar("business_id", { length: 36 }).notNull().references(() => businesses.id),
+  userId: varchar("user_id", { length: 36 }).references(() => users.id), // Optional - linked if staff has their own account
+  
+  // Staff profile info (can be set by owner even without linked user)
+  displayName: text("display_name").notNull(),
+  bio: text("bio"),
+  profileImageUrl: text("profile_image_url"),
+  phone: text("phone"),
+  email: text("email"),
+  
+  // Services this staff member can perform (references vendorServices ids)
+  serviceIds: jsonb("service_ids").$type<string[]>().default([]),
+  
+  // Specialties/skills (e.g., "Fades", "Color", "Braids")
+  specialties: text("specialties").array(),
+  
+  // Staff role: 'staff' (regular) | 'manager' (can see team stats) | 'owner' (full access)
+  role: text("role").default("staff").notNull(),
+  
+  // Status: 'active' | 'inactive' | 'pending' (invited but not accepted)
+  status: text("status").default("active").notNull(),
+  
+  // Rating/reviews for this staff member
+  rating: integer("rating").default(0),
+  reviewCount: integer("review_count").default(0),
+  
+  // Stripe Connect for direct payouts
+  stripeAccountId: text("stripe_account_id"),
+  stripeOnboardingComplete: boolean("stripe_onboarding_complete").default(false),
+  stripeOnboardingUrl: text("stripe_onboarding_url"),
+  
+  // Staff hours (can be different from business hours)
+  hoursOfOperation: jsonb("hours_of_operation").$type<HoursOfOperation>(),
+  
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+});
+
+/* =====================================================
+   STAFF AVAILABILITY (Per-Staff Time Slots)
+===================================================== */
+export const staffAvailability = pgTable("staff_availability", {
+  id: varchar("id", { length: 36 }).primaryKey().default(sql`gen_random_uuid()`),
+  staffMemberId: varchar("staff_member_id", { length: 36 }).notNull().references(() => staffMembers.id),
+  businessId: varchar("business_id", { length: 36 }).notNull().references(() => businesses.id),
+  
+  date: text("date").notNull(), // Format: YYYY-MM-DD
+  startTime: text("start_time").notNull(), // Format: HH:MM (24hr)
+  endTime: text("end_time").notNull(), // Format: HH:MM (24hr)
+  
+  slotType: text("slot_type").default("available"), // 'available' | 'blocked' | 'booked' | 'break'
+  title: text("title"), // Optional title
+  notes: text("notes"), // Optional notes
+  
+  // Booking reference - when a slot is booked, this links to the appointment
+  appointmentId: varchar("appointment_id", { length: 36 }),
+  
+  isRecurring: boolean("is_recurring").default(false),
+  recurringDayOfWeek: integer("recurring_day_of_week"), // 0 = Sunday, 6 = Saturday
+  
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+});
+
+/* =====================================================
+   STAFF INVITES (Invitation System)
+===================================================== */
+export const staffInvites = pgTable("staff_invites", {
+  id: varchar("id", { length: 36 }).primaryKey().default(sql`gen_random_uuid()`),
+  businessId: varchar("business_id", { length: 36 }).notNull().references(() => businesses.id),
+  
+  // Either email-based invite or invite code
+  email: text("email"),
+  inviteCode: text("invite_code").unique(),
+  
+  // Pre-filled staff info
+  displayName: text("display_name"),
+  role: text("role").default("staff"),
+  
+  // Status: 'pending' | 'accepted' | 'expired' | 'cancelled'
+  status: text("status").default("pending").notNull(),
+  
+  invitedByUserId: varchar("invited_by_user_id", { length: 36 }).references(() => users.id),
+  acceptedByUserId: varchar("accepted_by_user_id", { length: 36 }).references(() => users.id),
+  
+  expiresAt: timestamp("expires_at"),
+  acceptedAt: timestamp("accepted_at"),
+  
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+});
+
+/* =====================================================
    PHOTOGRAPHERS
 ===================================================== */
 export const photographers = pgTable("photographers", {
@@ -412,6 +506,9 @@ export const appointments = pgTable("appointments", {
   businessId: varchar("business_id", { length: 36 }).notNull().references(() => businesses.id),
   clientId: varchar("client_id", { length: 36 }).notNull().references(() => users.id),
   serviceId: varchar("service_id", { length: 36 }).notNull().references(() => vendorServices.id),
+  
+  // Optional staff member assignment - if set, staff gets direct payout
+  staffMemberId: varchar("staff_member_id", { length: 36 }).references(() => staffMembers.id),
 
   appointmentDate: text("appointment_date").notNull(),
   appointmentTime: text("appointment_time").notNull(),
@@ -419,6 +516,9 @@ export const appointments = pgTable("appointments", {
   totalPrice: integer("total_price").notNull(),
   platformFee: integer("platform_fee").default(0),
   vendorNet: integer("vendor_net").default(0),
+  
+  // Staff payout tracking (when staffMemberId is set)
+  staffPayout: integer("staff_payout").default(0), // Amount going to staff Stripe account
 
   stripePaymentIntentId: text("stripe_payment_intent_id"),
   status: text("status").default("pending"),
@@ -1016,6 +1116,41 @@ export const insertPhotographerAvailabilitySchema = createInsertSchema(photograp
   createdAt: true,
 });
 
+export const insertStaffMemberSchema = createInsertSchema(staffMembers).omit({
+  id: true,
+  rating: true,
+  reviewCount: true,
+  createdAt: true,
+});
+
+export const insertStaffAvailabilitySchema = createInsertSchema(staffAvailability).omit({
+  id: true,
+  createdAt: true,
+});
+
+export const insertStaffInviteSchema = createInsertSchema(staffInvites).omit({
+  id: true,
+  createdAt: true,
+  acceptedAt: true,
+});
+
+export const updateStaffMemberSchema = z.object({
+  displayName: z.string().min(1).optional(),
+  bio: z.string().optional(),
+  profileImageUrl: z.string().optional(),
+  phone: z.string().optional(),
+  email: z.string().email().optional().nullable(),
+  serviceIds: z.array(z.string()).optional(),
+  specialties: z.array(z.string()).optional(),
+  role: z.enum(['staff', 'manager', 'owner']).optional(),
+  status: z.enum(['active', 'inactive', 'pending']).optional(),
+  hoursOfOperation: z.record(z.string(), z.object({
+    open: z.string(),
+    close: z.string(),
+    closed: z.boolean().optional(),
+  })).optional(),
+});
+
 export const updateBusinessProfileSchema = z.object({
   name: z.string().min(1).optional(),
   description: z.string().optional(),
@@ -1243,6 +1378,16 @@ export type BusinessAvailability = typeof businessAvailability.$inferSelect;
 
 export type InsertPhotographerAvailability = z.infer<typeof insertPhotographerAvailabilitySchema>;
 export type PhotographerAvailability = typeof photographerAvailability.$inferSelect;
+
+export type InsertStaffMember = z.infer<typeof insertStaffMemberSchema>;
+export type StaffMember = typeof staffMembers.$inferSelect;
+export type UpdateStaffMember = z.infer<typeof updateStaffMemberSchema>;
+
+export type InsertStaffAvailability = z.infer<typeof insertStaffAvailabilitySchema>;
+export type StaffAvailability = typeof staffAvailability.$inferSelect;
+
+export type InsertStaffInvite = z.infer<typeof insertStaffInviteSchema>;
+export type StaffInvite = typeof staffInvites.$inferSelect;
 
 export type InsertCity = z.infer<typeof insertCitySchema>;
 export type City = typeof cities.$inferSelect;
