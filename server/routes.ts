@@ -2097,9 +2097,9 @@ export async function registerRoutes(
     }
   });
 
-  // ==================== BUSINESS AVAILABILITY CALENDAR ROUTES ====================
+  // ==================== VENDOR AVAILABILITY CALENDAR ROUTES (Business & Photographer) ====================
 
-  // Get business availability (for the current vendor)
+  // Get vendor availability (for the current vendor - business or photographer)
   app.get("/api/vendor/availability", async (req, res) => {
     const userId = req.session?.userId;
     if (!userId) {
@@ -2107,18 +2107,31 @@ export async function registerRoutes(
     }
 
     try {
-      const business = await storage.getBusinessByOwnerId(userId);
-      if (!business) {
-        return res.status(404).json({ error: "No business found" });
-      }
-
       const { startDate, endDate } = req.query;
-      const availability = await storage.getBusinessAvailability(
-        business.id,
-        startDate as string | undefined,
-        endDate as string | undefined
-      );
-      res.json({ availability });
+      
+      // Check for business first
+      const business = await storage.getBusinessByOwnerId(userId);
+      if (business) {
+        const availability = await storage.getBusinessAvailability(
+          business.id,
+          startDate as string | undefined,
+          endDate as string | undefined
+        );
+        return res.json({ availability, vendorType: "business" });
+      }
+      
+      // Check for photographer
+      const photographer = await storage.getPhotographerByUserId(userId);
+      if (photographer) {
+        const availability = await storage.getPhotographerAvailability(
+          photographer.id,
+          startDate as string | undefined,
+          endDate as string | undefined
+        );
+        return res.json({ availability, vendorType: "photographer" });
+      }
+      
+      return res.status(404).json({ error: "No business or photographer profile found" });
     } catch (error) {
       console.error("Get vendor availability error:", error);
       res.status(500).json({ error: "Failed to get availability" });
@@ -2141,7 +2154,7 @@ export async function registerRoutes(
     }
   });
 
-  // Create availability slot
+  // Create availability slot (for business or photographer)
   app.post("/api/vendor/availability", async (req, res) => {
     const userId = req.session?.userId;
     if (!userId) {
@@ -2149,12 +2162,6 @@ export async function registerRoutes(
     }
 
     try {
-      // Vendors can create availability before subscribing (content hidden until subscription active)
-      const business = await storage.getBusinessByOwnerId(userId);
-      if (!business) {
-        return res.status(404).json({ error: "No business found" });
-      }
-
       const slotSchema = z.object({
         date: z.string().min(1),
         startTime: z.string().min(1),
@@ -2167,12 +2174,28 @@ export async function registerRoutes(
       });
 
       const validated = slotSchema.parse(req.body);
-      const slot = await storage.createBusinessAvailability({
-        businessId: business.id,
-        ...validated,
-      });
 
-      res.status(201).json({ slot });
+      // Check for business first
+      const business = await storage.getBusinessByOwnerId(userId);
+      if (business) {
+        const slot = await storage.createBusinessAvailability({
+          businessId: business.id,
+          ...validated,
+        });
+        return res.status(201).json({ slot, vendorType: "business" });
+      }
+      
+      // Check for photographer
+      const photographer = await storage.getPhotographerByUserId(userId);
+      if (photographer) {
+        const slot = await storage.createPhotographerAvailability({
+          photographerId: photographer.id,
+          ...validated,
+        });
+        return res.status(201).json({ slot, vendorType: "photographer" });
+      }
+
+      return res.status(404).json({ error: "No business or photographer profile found" });
     } catch (error) {
       console.error("Create availability slot error:", error);
       if (error instanceof z.ZodError) {
@@ -2182,7 +2205,7 @@ export async function registerRoutes(
     }
   });
 
-  // Update availability slot
+  // Update availability slot (for business or photographer)
   app.patch("/api/vendor/availability/:slotId", async (req, res) => {
     const userId = req.session?.userId;
     if (!userId) {
@@ -2190,18 +2213,6 @@ export async function registerRoutes(
     }
 
     try {
-      // Vendors can update availability before subscribing (content hidden until subscription active)
-      const business = await storage.getBusinessByOwnerId(userId);
-      if (!business) {
-        return res.status(404).json({ error: "No business found" });
-      }
-
-      // Verify the slot belongs to this business
-      const existingSlot = await storage.getBusinessAvailabilitySlot(req.params.slotId);
-      if (!existingSlot || existingSlot.businessId !== business.id) {
-        return res.status(404).json({ error: "Slot not found" });
-      }
-
       const updateSchema = z.object({
         date: z.string().optional(),
         startTime: z.string().optional(),
@@ -2214,9 +2225,30 @@ export async function registerRoutes(
       });
 
       const validated = updateSchema.parse(req.body);
-      const updated = await storage.updateBusinessAvailability(req.params.slotId, validated);
 
-      res.json({ slot: updated });
+      // Check for business first
+      const business = await storage.getBusinessByOwnerId(userId);
+      if (business) {
+        const existingSlot = await storage.getBusinessAvailabilitySlot(req.params.slotId);
+        if (!existingSlot || existingSlot.businessId !== business.id) {
+          return res.status(404).json({ error: "Slot not found" });
+        }
+        const updated = await storage.updateBusinessAvailability(req.params.slotId, validated);
+        return res.json({ slot: updated, vendorType: "business" });
+      }
+      
+      // Check for photographer
+      const photographer = await storage.getPhotographerByUserId(userId);
+      if (photographer) {
+        const existingSlot = await storage.getPhotographerAvailabilitySlot(req.params.slotId);
+        if (!existingSlot || existingSlot.photographerId !== photographer.id) {
+          return res.status(404).json({ error: "Slot not found" });
+        }
+        const updated = await storage.updatePhotographerAvailability(req.params.slotId, validated);
+        return res.json({ slot: updated, vendorType: "photographer" });
+      }
+
+      return res.status(404).json({ error: "No business or photographer profile found" });
     } catch (error) {
       console.error("Update availability slot error:", error);
       if (error instanceof z.ZodError) {
@@ -2226,7 +2258,7 @@ export async function registerRoutes(
     }
   });
 
-  // Delete availability slot
+  // Delete availability slot (for business or photographer)
   app.delete("/api/vendor/availability/:slotId", async (req, res) => {
     const userId = req.session?.userId;
     if (!userId) {
@@ -2234,20 +2266,29 @@ export async function registerRoutes(
     }
 
     try {
-      // Vendors can delete availability before subscribing (content hidden until subscription active)
+      // Check for business first
       const business = await storage.getBusinessByOwnerId(userId);
-      if (!business) {
-        return res.status(404).json({ error: "No business found" });
+      if (business) {
+        const existingSlot = await storage.getBusinessAvailabilitySlot(req.params.slotId);
+        if (!existingSlot || existingSlot.businessId !== business.id) {
+          return res.status(404).json({ error: "Slot not found" });
+        }
+        await storage.deleteBusinessAvailability(req.params.slotId);
+        return res.json({ success: true, vendorType: "business" });
+      }
+      
+      // Check for photographer
+      const photographer = await storage.getPhotographerByUserId(userId);
+      if (photographer) {
+        const existingSlot = await storage.getPhotographerAvailabilitySlot(req.params.slotId);
+        if (!existingSlot || existingSlot.photographerId !== photographer.id) {
+          return res.status(404).json({ error: "Slot not found" });
+        }
+        await storage.deletePhotographerAvailability(req.params.slotId);
+        return res.json({ success: true, vendorType: "photographer" });
       }
 
-      // Verify the slot belongs to this business
-      const existingSlot = await storage.getBusinessAvailabilitySlot(req.params.slotId);
-      if (!existingSlot || existingSlot.businessId !== business.id) {
-        return res.status(404).json({ error: "Slot not found" });
-      }
-
-      await storage.deleteBusinessAvailability(req.params.slotId);
-      res.json({ success: true });
+      return res.status(404).json({ error: "No business or photographer profile found" });
     } catch (error) {
       console.error("Delete availability slot error:", error);
       res.status(500).json({ error: "Failed to delete availability slot" });
