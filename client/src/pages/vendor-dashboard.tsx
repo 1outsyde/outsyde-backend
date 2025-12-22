@@ -1,13 +1,13 @@
 import { useState } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
-import { LayoutDashboard, Package, Calendar, MessageCircle, Settings, PlusCircle, Crown, Store, Users, ClipboardList, RotateCcw, Truck } from "lucide-react";
+import { LayoutDashboard, Package, Calendar, MessageCircle, Settings, PlusCircle, Crown, Store, Users, ClipboardList, RotateCcw, Truck, UserPlus, Trash2, ExternalLink, CheckCircle, XCircle } from "lucide-react";
 import { queryClient, apiRequest } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
 import { format } from "date-fns";
 import BillingAddressForm from "@/components/BillingAddressForm";
 import ShippingFormDialog from "@/components/ShippingFormDialog";
 import StripeOnboardingBanner from "@/components/StripeOnboardingBanner";
-import type { Business, Shipment } from "@shared/schema";
+import type { Business, Shipment, StaffMember, StaffInvite } from "@shared/schema";
 import { getCarrierConfig, getTrackingUrl } from "@shared/carriers";
 
 interface OrderRecord {
@@ -37,6 +37,10 @@ import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogDescription } from "@/components/ui/dialog";
 import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
+import { Input } from "@/components/ui/input";
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { Badge } from "@/components/ui/badge";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 
 interface VendorDashboardPageProps {
   onLogout: () => void;
@@ -162,11 +166,107 @@ export default function VendorDashboardPage({ onLogout }: VendorDashboardPagePro
     { id: "dashboard", icon: LayoutDashboard, label: "Dashboard" },
     { id: "storefront", icon: Store, label: "Storefront" },
     { id: "availability", icon: Calendar, label: "Availability" },
+    { id: "team", icon: Users, label: "Team" },
     { id: "orders", icon: ClipboardList, label: "Orders & Bookings" },
     { id: "subscription", icon: Crown, label: "Subscription" },
     { id: "messages", icon: MessageCircle, label: "Messages" },
     { id: "settings", icon: Settings, label: "Settings" },
   ];
+
+  // Team management state
+  const [addStaffDialogOpen, setAddStaffDialogOpen] = useState(false);
+  const [newStaffName, setNewStaffName] = useState("");
+  const [newStaffEmail, setNewStaffEmail] = useState("");
+  const [newStaffRole, setNewStaffRole] = useState<"staff" | "manager">("staff");
+
+  // Fetch staff members
+  const { data: staffData, isLoading: staffLoading } = useQuery<{ staff: StaffMember[] }>({
+    queryKey: ["/api/vendor/staff"],
+    enabled: activeSection === "team",
+  });
+
+  // Fetch staff invites
+  const { data: invitesData, isLoading: invitesLoading } = useQuery<{ invites: StaffInvite[] }>({
+    queryKey: ["/api/vendor/staff/invites"],
+    enabled: activeSection === "team",
+  });
+
+  // Create staff member mutation
+  const createStaffMutation = useMutation({
+    mutationFn: async (data: { displayName: string; email?: string; role: string }) => {
+      const response = await apiRequest("POST", "/api/vendor/staff", data);
+      return response.json();
+    },
+    onSuccess: () => {
+      toast({ title: "Staff member added successfully" });
+      setAddStaffDialogOpen(false);
+      setNewStaffName("");
+      setNewStaffEmail("");
+      setNewStaffRole("staff");
+      queryClient.invalidateQueries({ queryKey: ["/api/vendor/staff"] });
+    },
+    onError: () => {
+      toast({ title: "Failed to add staff member", variant: "destructive" });
+    },
+  });
+
+  // Delete staff member mutation
+  const deleteStaffMutation = useMutation({
+    mutationFn: async (staffId: string) => {
+      const response = await apiRequest("DELETE", `/api/vendor/staff/${staffId}`);
+      return response.json();
+    },
+    onSuccess: () => {
+      toast({ title: "Staff member removed" });
+      queryClient.invalidateQueries({ queryKey: ["/api/vendor/staff"] });
+    },
+    onError: () => {
+      toast({ title: "Failed to remove staff member", variant: "destructive" });
+    },
+  });
+
+  // Create Stripe Connect for staff
+  const createStaffStripeMutation = useMutation({
+    mutationFn: async (staffId: string) => {
+      const response = await apiRequest("POST", `/api/vendor/staff/${staffId}/stripe-connect`);
+      return response.json();
+    },
+    onSuccess: (data) => {
+      if (data.onboardingUrl) {
+        window.open(data.onboardingUrl, "_blank");
+      }
+      queryClient.invalidateQueries({ queryKey: ["/api/vendor/staff"] });
+      toast({ title: "Stripe onboarding started" });
+    },
+    onError: () => {
+      toast({ title: "Failed to create Stripe account", variant: "destructive" });
+    },
+  });
+
+  // Get fresh onboarding link for staff
+  const getStaffOnboardingLinkMutation = useMutation({
+    mutationFn: async (staffId: string) => {
+      const response = await apiRequest("GET", `/api/vendor/staff/${staffId}/stripe-onboarding-link`);
+      return response.json();
+    },
+    onSuccess: (data) => {
+      if (data.onboardingUrl) {
+        window.open(data.onboardingUrl, "_blank");
+      }
+    },
+    onError: () => {
+      toast({ title: "Failed to get onboarding link", variant: "destructive" });
+    },
+  });
+
+  const handleAddStaff = () => {
+    if (!newStaffName.trim()) return;
+    createStaffMutation.mutate({
+      displayName: newStaffName,
+      email: newStaffEmail || undefined,
+      role: newStaffRole,
+    });
+  };
 
   // Fetch order/booking records for the business
   const { data: recordsData, isLoading: recordsLoading, error: recordsError } = useQuery<{
@@ -269,6 +369,161 @@ export default function VendorDashboardPage({ onLogout }: VendorDashboardPagePro
 
             {activeSection === "availability" && (
               <AvailabilityCalendar />
+            )}
+
+            {activeSection === "team" && (
+              <div className="space-y-6">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <h2 className="text-2xl font-semibold" data-testid="heading-team">Team Management</h2>
+                    <p className="text-muted-foreground">Manage your staff members and their availability</p>
+                  </div>
+                  <Button onClick={() => setAddStaffDialogOpen(true)} data-testid="button-add-staff">
+                    <UserPlus className="h-4 w-4 mr-2" />
+                    Add Staff
+                  </Button>
+                </div>
+
+                {/* Staff Overview Cards */}
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                  <Card>
+                    <CardHeader className="pb-2">
+                      <CardTitle className="text-sm font-medium text-muted-foreground">Total Staff</CardTitle>
+                    </CardHeader>
+                    <CardContent>
+                      <div className="text-2xl font-bold" data-testid="text-staff-count">
+                        {staffData?.staff?.length || 0}
+                      </div>
+                    </CardContent>
+                  </Card>
+                  <Card>
+                    <CardHeader className="pb-2">
+                      <CardTitle className="text-sm font-medium text-muted-foreground">Active</CardTitle>
+                    </CardHeader>
+                    <CardContent>
+                      <div className="text-2xl font-bold text-green-600">
+                        {staffData?.staff?.filter(s => s.status === "active").length || 0}
+                      </div>
+                    </CardContent>
+                  </Card>
+                  <Card>
+                    <CardHeader className="pb-2">
+                      <CardTitle className="text-sm font-medium text-muted-foreground">Pending Onboarding</CardTitle>
+                    </CardHeader>
+                    <CardContent>
+                      <div className="text-2xl font-bold text-amber-600">
+                        {staffData?.staff?.filter(s => !s.stripeOnboardingComplete).length || 0}
+                      </div>
+                    </CardContent>
+                  </Card>
+                </div>
+
+                {/* Staff List */}
+                <Card>
+                  <CardHeader>
+                    <CardTitle>Staff Members</CardTitle>
+                    <CardDescription>
+                      Staff can receive direct payouts for bookings. Each staff member needs to complete Stripe onboarding.
+                    </CardDescription>
+                  </CardHeader>
+                  <CardContent>
+                    {staffLoading ? (
+                      <div className="text-center py-8">
+                        <p className="text-muted-foreground">Loading staff members...</p>
+                      </div>
+                    ) : staffData?.staff && staffData.staff.length > 0 ? (
+                      <div className="divide-y">
+                        {staffData.staff.map((staff) => (
+                          <div key={staff.id} className="flex items-center justify-between py-4" data-testid={`staff-row-${staff.id}`}>
+                            <div className="flex items-center gap-4">
+                              <Avatar className="h-10 w-10">
+                                <AvatarImage src={staff.profileImageUrl || ""} />
+                                <AvatarFallback>
+                                  {staff.displayName?.split(" ").map(n => n[0]).join("").toUpperCase() || "ST"}
+                                </AvatarFallback>
+                              </Avatar>
+                              <div>
+                                <div className="flex items-center gap-2">
+                                  <span className="font-medium" data-testid={`text-staff-name-${staff.id}`}>
+                                    {staff.displayName}
+                                  </span>
+                                  <Badge variant={staff.role === "manager" ? "default" : "secondary"}>
+                                    {staff.role || "staff"}
+                                  </Badge>
+                                  {staff.status === "active" ? (
+                                    <Badge variant="outline" className="bg-green-50 text-green-700 border-green-200">
+                                      Active
+                                    </Badge>
+                                  ) : (
+                                    <Badge variant="outline" className="bg-gray-50 text-gray-600">
+                                      {staff.status}
+                                    </Badge>
+                                  )}
+                                </div>
+                                <p className="text-sm text-muted-foreground">{staff.email || "No email"}</p>
+                              </div>
+                            </div>
+                            <div className="flex items-center gap-2">
+                              {/* Stripe Status */}
+                              {staff.stripeOnboardingComplete ? (
+                                <Badge variant="outline" className="bg-green-50 text-green-700 border-green-200">
+                                  <CheckCircle className="h-3 w-3 mr-1" />
+                                  Payments Ready
+                                </Badge>
+                              ) : staff.stripeAccountId ? (
+                                <Button 
+                                  size="sm" 
+                                  variant="outline"
+                                  onClick={() => getStaffOnboardingLinkMutation.mutate(staff.id)}
+                                  data-testid={`button-continue-onboarding-${staff.id}`}
+                                >
+                                  <ExternalLink className="h-3 w-3 mr-1" />
+                                  Continue Onboarding
+                                </Button>
+                              ) : (
+                                <Button 
+                                  size="sm" 
+                                  variant="outline"
+                                  onClick={() => createStaffStripeMutation.mutate(staff.id)}
+                                  data-testid={`button-start-onboarding-${staff.id}`}
+                                >
+                                  <ExternalLink className="h-3 w-3 mr-1" />
+                                  Start Stripe Onboarding
+                                </Button>
+                              )}
+                              <Button 
+                                size="icon" 
+                                variant="ghost" 
+                                className="text-destructive hover:text-destructive"
+                                onClick={() => {
+                                  if (confirm("Are you sure you want to remove this staff member?")) {
+                                    deleteStaffMutation.mutate(staff.id);
+                                  }
+                                }}
+                                data-testid={`button-delete-staff-${staff.id}`}
+                              >
+                                <Trash2 className="h-4 w-4" />
+                              </Button>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    ) : (
+                      <div className="text-center py-12">
+                        <Users className="h-16 w-16 mx-auto text-muted-foreground mb-4" />
+                        <h3 className="text-lg font-semibold mb-2">No Staff Members Yet</h3>
+                        <p className="text-muted-foreground mb-4">
+                          Add staff members to let them receive direct payouts for bookings.
+                        </p>
+                        <Button onClick={() => setAddStaffDialogOpen(true)} data-testid="button-add-first-staff">
+                          <UserPlus className="h-4 w-4 mr-2" />
+                          Add Your First Staff Member
+                        </Button>
+                      </div>
+                    )}
+                  </CardContent>
+                </Card>
+              </div>
             )}
 
             {activeSection === "subscription" && (
@@ -559,6 +814,72 @@ export default function VendorDashboardPage({ onLogout }: VendorDashboardPagePro
               data-testid="button-submit-refund"
             >
               {refundMutation.isPending ? "Submitting..." : "Submit Request"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Add Staff Dialog */}
+      <Dialog open={addStaffDialogOpen} onOpenChange={setAddStaffDialogOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Add Staff Member</DialogTitle>
+            <DialogDescription>
+              Add a new team member. They'll be able to receive direct payouts for their bookings after completing Stripe onboarding.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4 py-4">
+            <div className="space-y-2">
+              <Label htmlFor="staff-name">Name <span className="text-destructive">*</span></Label>
+              <Input
+                id="staff-name"
+                placeholder="Enter staff member's name"
+                value={newStaffName}
+                onChange={(e) => setNewStaffName(e.target.value)}
+                data-testid="input-staff-name"
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="staff-email">Email (optional)</Label>
+              <Input
+                id="staff-email"
+                type="email"
+                placeholder="staff@example.com"
+                value={newStaffEmail}
+                onChange={(e) => setNewStaffEmail(e.target.value)}
+                data-testid="input-staff-email"
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="staff-role">Role</Label>
+              <Select value={newStaffRole} onValueChange={(v: "staff" | "manager") => setNewStaffRole(v)}>
+                <SelectTrigger data-testid="select-staff-role">
+                  <SelectValue placeholder="Select role" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="staff">Staff</SelectItem>
+                  <SelectItem value="manager">Manager</SelectItem>
+                </SelectContent>
+              </Select>
+              <p className="text-xs text-muted-foreground">
+                Managers can view team stats. Both roles receive direct payouts.
+              </p>
+            </div>
+          </div>
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => setAddStaffDialogOpen(false)}
+              data-testid="button-cancel-add-staff"
+            >
+              Cancel
+            </Button>
+            <Button
+              onClick={handleAddStaff}
+              disabled={!newStaffName.trim() || createStaffMutation.isPending}
+              data-testid="button-submit-add-staff"
+            >
+              {createStaffMutation.isPending ? "Adding..." : "Add Staff Member"}
             </Button>
           </DialogFooter>
         </DialogContent>
