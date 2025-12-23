@@ -276,7 +276,9 @@ function AppContent() {
           onSearchClick={() => handleNavTabChange("search")}
           onMessagesClick={() => handleNavTabChange("messages")}
           onNotificationsClick={() => console.log("Notifications")}
-          onProfileClick={() => handleNavTabChange("profile")}
+          onProfileClick={() => handleNavTabChange((isVendor || isPhotographer) ? "dashboard" : "profile")}
+          isVendor={isVendor && isAuthenticated}
+          isPhotographer={isPhotographer && isAuthenticated}
           cartDrawer={
             <CartDrawer
               items={cartItems}

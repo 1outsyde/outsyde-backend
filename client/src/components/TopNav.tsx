@@ -1,4 +1,4 @@
-import { Search, MessageCircle, Bell, User, Menu } from "lucide-react";
+import { Search, MessageCircle, Bell, User, Menu, LayoutDashboard, Camera } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
@@ -16,6 +16,8 @@ interface TopNavProps {
   unreadMessages?: number;
   unreadNotifications?: number;
   cartDrawer?: ReactNode;
+  isVendor?: boolean;
+  isPhotographer?: boolean;
 }
 
 export default function TopNav({
@@ -28,7 +30,12 @@ export default function TopNav({
   unreadMessages = 0,
   unreadNotifications = 0,
   cartDrawer,
+  isVendor = false,
+  isPhotographer = false,
 }: TopNavProps) {
+  // Determine which icon to show for the profile/dashboard button
+  const ProfileIcon = isPhotographer ? Camera : isVendor ? LayoutDashboard : User;
+  const profileLabel = isPhotographer ? "Studio" : isVendor ? "Dashboard" : "Profile";
   return (
     <header className="sticky top-0 z-50 h-16 border-b bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60">
       <div className="flex h-full items-center justify-between gap-4 px-4 max-w-7xl mx-auto">
@@ -133,8 +140,9 @@ export default function TopNav({
             variant="ghost"
             onClick={onProfileClick}
             data-testid="button-profile"
+            title={profileLabel}
           >
-            <User className="h-5 w-5" />
+            <ProfileIcon className="h-5 w-5" />
           </Button>
         </div>
       </div>
