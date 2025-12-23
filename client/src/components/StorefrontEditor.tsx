@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
-import { Loader2, Store, Palette, Package, Clock, Plus, Pencil, Trash2, Image, DollarSign, Share2, Camera, X, CalendarClock } from "lucide-react";
+import { Loader2, Store, Palette, Package, Clock, Plus, Pencil, Trash2, Image, DollarSign, Share2, Camera, X, CalendarClock, Rocket, CheckCircle } from "lucide-react";
 import { ImageUploader } from "@/components/ImageUploader";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -632,6 +632,24 @@ function ProductsTab({ products, isLoading, businessId }: { products: VendorProd
     },
   });
 
+  const goLiveMutation = useMutation({
+    mutationFn: async (productId: string) => {
+      const res = await apiRequest("POST", `/api/vendor/products/${productId}/go-live`);
+      if (!res.ok) {
+        const error = await res.json();
+        throw new Error(error.message || error.error || "Failed to publish product");
+      }
+      return res.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/vendor/products"] });
+      toast({ title: "Product is live!", description: "Your product is now visible to customers and available for purchase." });
+    },
+    onError: (error: Error) => {
+      toast({ title: "Cannot publish", description: error.message, variant: "destructive" });
+    },
+  });
+
   if (isLoading) {
     return (
       <div className="flex items-center justify-center py-12">
@@ -699,6 +717,18 @@ function ProductsTab({ products, isLoading, businessId }: { products: VendorProd
                     </div>
                   )}
                 </div>
+                <div className="flex items-center gap-2 mb-2">
+                  {product.status === 'live' ? (
+                    <Badge variant="default" className="bg-green-600">
+                      <CheckCircle className="h-3 w-3 mr-1" />
+                      Live
+                    </Badge>
+                  ) : product.status === 'archived' ? (
+                    <Badge variant="secondary">Archived</Badge>
+                  ) : (
+                    <Badge variant="outline">Draft</Badge>
+                  )}
+                </div>
                 <div className="flex items-start justify-between gap-2">
                   <div className="flex-1 min-w-0">
                     <h4 className="font-medium truncate">{product.name}</h4>
@@ -743,6 +773,21 @@ function ProductsTab({ products, isLoading, businessId }: { products: VendorProd
                     </Button>
                   </div>
                 </div>
+                {product.status !== 'live' && (
+                  <Button
+                    className="w-full mt-3"
+                    onClick={() => goLiveMutation.mutate(product.id)}
+                    disabled={goLiveMutation.isPending}
+                    data-testid={`button-go-live-product-${product.id}`}
+                  >
+                    {goLiveMutation.isPending ? (
+                      <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                    ) : (
+                      <Rocket className="h-4 w-4 mr-2" />
+                    )}
+                    Publish to Stripe
+                  </Button>
+                )}
               </CardContent>
             </Card>
           ))}
@@ -938,6 +983,24 @@ function ServicesTab({ services, isLoading, businessId }: { services: VendorServ
     },
   });
 
+  const goLiveMutation = useMutation({
+    mutationFn: async (serviceId: string) => {
+      const res = await apiRequest("POST", `/api/vendor/services/${serviceId}/go-live`);
+      if (!res.ok) {
+        const error = await res.json();
+        throw new Error(error.message || error.error || "Failed to publish service");
+      }
+      return res.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/vendor/services"] });
+      toast({ title: "Service is live!", description: "Your service is now visible to customers and available for booking." });
+    },
+    onError: (error: Error) => {
+      toast({ title: "Cannot publish", description: error.message, variant: "destructive" });
+    },
+  });
+
   if (isLoading) {
     return (
       <div className="flex items-center justify-center py-12">
@@ -998,8 +1061,18 @@ function ServicesTab({ services, isLoading, businessId }: { services: VendorServ
               <CardContent className="p-4">
                 <div className="flex items-center justify-between gap-4">
                   <div className="flex-1 min-w-0">
-                    <div className="flex items-center gap-2">
+                    <div className="flex items-center gap-2 flex-wrap">
                       <h4 className="font-medium">{service.name}</h4>
+                      {service.status === 'live' ? (
+                        <Badge variant="default" className="bg-green-600">
+                          <CheckCircle className="h-3 w-3 mr-1" />
+                          Live
+                        </Badge>
+                      ) : service.status === 'archived' ? (
+                        <Badge variant="secondary">Archived</Badge>
+                      ) : (
+                        <Badge variant="outline">Draft</Badge>
+                      )}
                       {!service.isActive && (
                         <Badge variant="secondary">Inactive</Badge>
                       )}
@@ -1018,7 +1091,22 @@ function ServicesTab({ services, isLoading, businessId }: { services: VendorServ
                       </span>
                     </div>
                   </div>
-                  <div className="flex gap-1">
+                  <div className="flex gap-1 items-start">
+                    {service.status !== 'live' && (
+                      <Button
+                        size="sm"
+                        onClick={() => goLiveMutation.mutate(service.id)}
+                        disabled={goLiveMutation.isPending}
+                        data-testid={`button-go-live-service-${service.id}`}
+                      >
+                        {goLiveMutation.isPending ? (
+                          <Loader2 className="h-4 w-4 mr-1 animate-spin" />
+                        ) : (
+                          <Rocket className="h-4 w-4 mr-1" />
+                        )}
+                        Publish
+                      </Button>
+                    )}
                     <Button
                       size="icon"
                       variant="ghost"
