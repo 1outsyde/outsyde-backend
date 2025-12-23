@@ -511,50 +511,71 @@ export class WebhookHandlers {
     // Check if onboarding is complete
     const isOnboardingComplete = account.charges_enabled && account.payouts_enabled && account.details_submitted;
     
+    console.log(`[Stripe] account.updated for ${accountId}: charges_enabled=${account.charges_enabled}, payouts_enabled=${account.payouts_enabled}, details_submitted=${account.details_submitted}, isComplete=${isOnboardingComplete}`);
+    
+    // Try to find the entity by metadata first, then fallback to account ID lookup
+    let business = null;
+    let photographer = null;
+    
     if (metadata.role === 'business' && metadata.businessId) {
-      // Update business onboarding status
-      const business = await storage.getBusiness(metadata.businessId);
-      if (business && business.stripeAccountId === accountId) {
-        await storage.updateBusiness(metadata.businessId, {
-          stripeOnboardingComplete: isOnboardingComplete,
-        });
-        
-        if (isOnboardingComplete) {
-          console.log(`Business ${metadata.businessId} completed Stripe onboarding`);
-          
-          // Get vendor user and send notification
-          const vendorUser = await storage.getUserByBusinessOwnerId(metadata.businessId);
-          if (vendorUser) {
-            await NotificationTriggers.stripeOnboardingComplete({
-              userId: vendorUser.id,
-              accountType: 'business',
-              businessName: business.name,
-            });
-          }
-        }
-      }
+      business = await storage.getBusiness(metadata.businessId);
     } else if (metadata.role === 'photographer' && metadata.photographerId) {
-      // Update photographer onboarding status
-      const photographer = await storage.getPhotographer(metadata.photographerId);
-      if (photographer && photographer.stripeAccountId === accountId) {
-        await storage.updatePhotographer(metadata.photographerId, {
-          stripeOnboardingComplete: isOnboardingComplete,
-        });
+      photographer = await storage.getPhotographer(metadata.photographerId);
+    }
+    
+    // Fallback: Look up by stripeAccountId directly if metadata didn't match
+    if (!business && !photographer) {
+      console.log(`[Stripe] No metadata match for ${accountId}, searching by account ID...`);
+      business = await storage.getBusinessByStripeAccountId(accountId);
+      if (!business) {
+        photographer = await storage.getPhotographerByStripeAccountId(accountId);
+      }
+    }
+    
+    // Update business onboarding status
+    if (business && business.stripeAccountId === accountId) {
+      await storage.updateBusiness(business.id, {
+        stripeOnboardingComplete: isOnboardingComplete,
+      });
+      
+      if (isOnboardingComplete) {
+        console.log(`[Stripe] Business ${business.id} (${business.name}) completed Stripe onboarding`);
         
-        if (isOnboardingComplete) {
-          console.log(`Photographer ${metadata.photographerId} completed Stripe onboarding`);
-          
-          // Get photographer user and send notification
-          const photographerUser = await storage.getUser(photographer.userId);
-          if (photographerUser) {
-            await NotificationTriggers.stripeOnboardingComplete({
-              userId: photographerUser.id,
-              accountType: 'photographer',
-              businessName: photographer.displayName,
-            });
-          }
+        // Get vendor user and send notification
+        const vendorUser = await storage.getUserByBusinessOwnerId(business.id);
+        if (vendorUser) {
+          await NotificationTriggers.stripeOnboardingComplete({
+            userId: vendorUser.id,
+            accountType: 'business',
+            businessName: business.name,
+          });
         }
       }
+    }
+    
+    // Update photographer onboarding status
+    if (photographer && photographer.stripeAccountId === accountId) {
+      await storage.updatePhotographer(photographer.id, {
+        stripeOnboardingComplete: isOnboardingComplete,
+      });
+      
+      if (isOnboardingComplete) {
+        console.log(`[Stripe] Photographer ${photographer.id} (${photographer.displayName}) completed Stripe onboarding`);
+        
+        // Get photographer user and send notification
+        const photographerUser = await storage.getUser(photographer.userId);
+        if (photographerUser) {
+          await NotificationTriggers.stripeOnboardingComplete({
+            userId: photographerUser.id,
+            accountType: 'photographer',
+            businessName: photographer.displayName,
+          });
+        }
+      }
+    }
+    
+    if (!business && !photographer) {
+      console.log(`[Stripe] No business or photographer found for account ${accountId}`);
     }
   }
 }

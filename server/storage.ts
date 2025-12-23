@@ -171,6 +171,7 @@ export interface IStorage {
 
   getBusiness(id: string): Promise<Business | undefined>;
   getBusinessByOwnerId(ownerId: string): Promise<Business | undefined>;
+  getBusinessByStripeAccountId(stripeAccountId: string): Promise<Business | undefined>;
   getBusinesses(filters?: { city?: string; category?: string; search?: string }): Promise<Business[]>;
   createBusiness(business: InsertBusiness): Promise<Business>;
   updateBusiness(id: string, updates: Partial<Business>): Promise<Business | undefined>;
@@ -190,6 +191,7 @@ export interface IStorage {
   createPhotographer(data: NewPhotographerInput): Promise<Photographer>;
   getPhotographer(id: string): Promise<Photographer | undefined>;
   getPhotographerByUserId(userId: string): Promise<Photographer | undefined>;
+  getPhotographerByStripeAccountId(stripeAccountId: string): Promise<Photographer | undefined>;
   listPhotographers(): Promise<Photographer[]>;
   updatePhotographer(id: string, updates: Partial<Photographer>): Promise<Photographer | undefined>;
   deletePhotographer(id: string): Promise<void>;
@@ -718,6 +720,11 @@ export class DatabaseStorage implements IStorage {
     return result[0];
   }
 
+  async getBusinessByStripeAccountId(stripeAccountId: string): Promise<Business | undefined> {
+    const result = await db.select().from(businesses).where(eq(businesses.stripeAccountId, stripeAccountId));
+    return result[0];
+  }
+
   async getBusinesses(filters?: { city?: string; category?: string; search?: string }): Promise<Business[]> {
     const conditions: any[] = [];
 
@@ -922,6 +929,11 @@ export class DatabaseStorage implements IStorage {
 
   async getPhotographerByUserId(userId: string): Promise<Photographer | undefined> {
     const result = await db.select().from(photographers).where(eq(photographers.userId, userId));
+    return result[0];
+  }
+
+  async getPhotographerByStripeAccountId(stripeAccountId: string): Promise<Photographer | undefined> {
+    const result = await db.select().from(photographers).where(eq(photographers.stripeAccountId, stripeAccountId));
     return result[0];
   }
 
