@@ -15,11 +15,12 @@ export class WebhookHandlers {
     const sync = await getStripeSync();
     await sync.processWebhook(payload, signature, uuid);
 
-    const event = stripeService.stripe.webhooks.constructEvent(
-  payload,
-  signature,
-  process.env.STRIPE_WEBHOOK_SECRET as string
-);
+    const stripe = await getUncachableStripeClient();
+    const event = stripe.webhooks.constructEvent(
+      payload,
+      signature,
+      process.env.STRIPE_WEBHOOK_SECRET as string
+    );
 
 
     switch (event.type) {
