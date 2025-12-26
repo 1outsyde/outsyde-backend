@@ -1,0 +1,107 @@
+
+Search
+Search
+
+Live tail
+EST
+
+
+
+==> Cloning from https://github.com/1outsyde/outsyde-backend
+==> Checking out commit 6c27799f896f516eb211bdfc0c8a2b0d5523ff9f in branch main
+==> Using Node.js version 22.16.0 (default)
+==> Docs on specifying a Node.js version: https://render.com/docs/node-version
+==> Running build command 'npm install --include=dev && npm run db:push'...
+added 643 packages, and audited 644 packages in 9s
+87 packages are looking for funding
+  run `npm fund` for details
+10 vulnerabilities (3 low, 5 moderate, 2 high)
+To address issues that do not require attention, run:
+  npm audit fix
+To address all issues (including breaking changes), run:
+  npm audit fix --force
+Run `npm audit` for details.
+> rest-express@1.0.0 db:push
+> drizzle-kit push
+No config path provided, using default 'drizzle.config.ts'
+Reading config file '/opt/render/project/src/drizzle.config.ts'
+Using 'pg' driver for database querying
+[⣷] Pulling schema from database...
+[⣯] Pulling schema from database...
+[⣟] Pulling schema from database...
+[⡿] Pulling schema from database...
+[⢿] Pulling schema from database...
+[⣻] Pulling schema from database...
+[⣽] Pulling schema from database...
+[⣷] Pulling schema from database...
+[⣯] Pulling schema from database...
+[⣟] Pulling schema from database...
+[⡿] Pulling schema from database...
+[✓] Pulling schema from database...
+[✓] Changes applied
+==> Uploading build...
+==> Uploaded in 6.6s. Compression took 4.4s
+==> Build successful 🎉
+==> Setting WEB_CONCURRENCY=1 by default, based on available CPUs in the instance
+==> Deploying...
+==> Running 'npm run start'
+> rest-express@1.0.0 start
+> NODE_ENV=production npx tsx server/index.ts
+==> No open ports detected, continuing to scan...
+==> Docs on specifying a port: https://render.com/docs/web-services#port-binding
+Seeding database with initial data...
+Database seeded successfully!
+11:03:43 PM [stripe] Initializing Stripe schema...
+==> Exited with status 1
+==> Common ways to troubleshoot your deploy: https://render.com/docs/troubleshooting-deploys
+11:04:05 PM [stripe] Stripe schema ready
+Stripe initialization failed: Error: X_REPLIT_TOKEN not found for repl/depl
+    at getCredentials (/opt/render/project/src/server/stripe/stripeClient.ts:17:11)
+    at getStripeSecretKey (/opt/render/project/src/server/stripe/stripeClient.ts:62:31)
+    at getStripeSync (/opt/render/project/src/server/stripe/stripeClient.ts:71:29)
+    at async initStripe (/opt/render/project/src/server/index.ts:110:24)
+    at async <anonymous> (/opt/render/project/src/server/index.ts:136:3)
+Fri, 26 Dec 2025 23:04:05 GMT express-session deprecated req.secret; provide secret option at file:/opt/render/project/src/server/replitAuth.ts:1:761
+file:///opt/render/project/src/node_modules/openid-client/build/index.js:89
+    const err = new TypeError(message, { cause });
+                ^
+TypeError: "clientId" must be a non-empty string
+    at CodedTypeError (/opt/render/project/src/node_modules/openid-client/src/index.ts:839:15)
+    at new Configuration (/opt/render/project/src/node_modules/openid-client/src/index.ts:1849:13)
+    at Module.discovery (/opt/render/project/src/node_modules/openid-client/src/index.ts:1281:20)
+    at process.processTicksAndRejections (node:internal/process/task_queues:105:5)
+    at async memoize.maxAge (/opt/render/project/src/server/replitAuth.ts:13:12)
+    at async setupAuth (/opt/render/project/src/server/replitAuth.ts:71:18)
+    at async <anonymous> (/opt/render/project/src/server/index.ts:138:3) {
+  code: 'ERR_INVALID_ARG_TYPE',
+  [cause]: undefined
+}
+Node.js v22.16.0
+==> Running 'npm run start'
+> rest-express@1.0.0 start
+> NODE_ENV=production npx tsx server/index.ts
+Database already seeded, skipping...
+11:04:43 PM [stripe] Initializing Stripe schema...
+11:04:44 PM [stripe] Stripe schema ready
+Stripe initialization failed: Error: X_REPLIT_TOKEN not found for repl/depl
+    at getCredentials (/opt/render/project/src/server/stripe/stripeClient.ts:17:11)
+    at getStripeSecretKey (/opt/render/project/src/server/stripe/stripeClient.ts:62:31)
+    at getStripeSync (/opt/render/project/src/server/stripe/stripeClient.ts:71:29)
+    at async initStripe (/opt/render/project/src/server/index.ts:110:24)
+    at async <anonymous> (/opt/render/project/src/server/index.ts:136:3)
+Fri, 26 Dec 2025 23:04:44 GMT express-session deprecated req.secret; provide secret option at file:/opt/render/project/src/server/replitAuth.ts:1:761
+file:///opt/render/project/src/node_modules/openid-client/build/index.js:89
+    const err = new TypeError(message, { cause });
+                ^
+TypeError: "clientId" must be a non-empty string
+    at CodedTypeError (/opt/render/project/src/node_modules/openid-client/src/index.ts:839:15)
+    at new Configuration (/opt/render/project/src/node_modules/openid-client/src/index.ts:1849:13)
+    at Module.discovery (/opt/render/project/src/node_modules/openid-client/src/index.ts:1281:20)
+    at process.processTicksAndRejections (node:internal/process/task_queues:105:5)
+    at async memoize.maxAge (/opt/render/project/src/server/replitAuth.ts:13:12)
+    at async setupAuth (/opt/render/project/src/server/replitAuth.ts:71:18)
+    at async <anonymous> (/opt/render/project/src/server/index.ts:138:3) {
+  code: 'ERR_INVALID_ARG_TYPE',
+  [cause]: undefined
+}
+Node.js v22.16.0

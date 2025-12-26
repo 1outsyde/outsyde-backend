@@ -8,8 +8,13 @@ import { getStripeSync } from "./stripe/stripeClient";
 import { WebhookHandlers } from "./stripe/webhookHandlers";
 import { stripeService } from "./stripe/stripeService";
 import { setupWebSocket } from "./websocket";
-import { setupAuth } from "./replitAuth";
+import { setupAuth, getSession } from "./replitAuth";
 import { initializePushService, sendCartReminderNotifications, isPushConfigured } from "./pushService";
+import passport from "passport";
+
+function isOnReplit(): boolean {
+  return !!(process.env.REPL_IDENTITY || process.env.WEB_REPL_RENEWAL || process.env.REPL_ID);
+}
 
 const app = express();
 const httpServer = createServer(app);
@@ -19,33 +24,44 @@ app.use(cors());
 // =======================
 // Stripe Webhook (RAW BODY)
 // =======================
+// Handler function for both routes
+const handleStripeWebhook = async (req: any, res: any) => {
+  const signature = req.headers["stripe-signature"];
+
+  if (!signature) {
+    return res.status(400).json({ error: "Missing stripe-signature" });
+  }
+
+  try {
+    const sig = Array.isArray(signature) ? signature[0] : signature;
+
+    if (!Buffer.isBuffer(req.body)) {
+      console.error("STRIPE WEBHOOK ERROR: req.body is not a Buffer");
+      return res.status(500).json({ error: "Webhook processing error" });
+    }
+
+    const uuid = req.params.uuid || "external";
+    await WebhookHandlers.processWebhook(req.body as Buffer, sig, uuid);
+
+    res.status(200).json({ received: true });
+  } catch (error: any) {
+    console.error("Webhook error:", error.message);
+    res.status(400).json({ error: "Webhook processing error" });
+  }
+};
+
+// Route with UUID (Replit managed webhooks)
 app.post(
   "/api/stripe/webhook/:uuid",
   express.raw({ type: "application/json" }),
-  async (req, res) => {
-    const signature = req.headers["stripe-signature"];
+  handleStripeWebhook
+);
 
-    if (!signature) {
-      return res.status(400).json({ error: "Missing stripe-signature" });
-    }
-
-    try {
-      const sig = Array.isArray(signature) ? signature[0] : signature;
-
-      if (!Buffer.isBuffer(req.body)) {
-        console.error("STRIPE WEBHOOK ERROR: req.body is not a Buffer");
-        return res.status(500).json({ error: "Webhook processing error" });
-      }
-
-      const { uuid } = req.params;
-      await WebhookHandlers.processWebhook(req.body as Buffer, sig, uuid);
-
-      res.status(200).json({ received: true });
-    } catch (error: any) {
-      console.error("Webhook error:", error.message);
-      res.status(400).json({ error: "Webhook processing error" });
-    }
-  }
+// Route without UUID (external hosting like Render)
+app.post(
+  "/api/stripe/webhook",
+  express.raw({ type: "application/json" }),
+  handleStripeWebhook
 );
 
 // =======================
@@ -109,19 +125,33 @@ async function initStripe() {
 
     const stripeSync = await getStripeSync();
 
-    log("Setting up managed webhook...", "stripe");
-    const webhookBaseUrl = process.env.RENDER_EXTERNAL_URL || "";
-    await stripeSync.findOrCreateManagedWebhook(
-      `${webhookBaseUrl}/api/stripe/webhook`,
-      {
-        enabled_events: ["*"],
-        description: "Managed webhook for Outsyde marketplace",
+    // Only setup managed webhook on Replit - external hosting uses STRIPE_WEBHOOK_SECRET
+    if (isOnReplit()) {
+      log("Setting up managed webhook...", "stripe");
+      // Get the domain from Replit environment
+      const replitDomains = process.env.REPLIT_DOMAINS;
+      if (replitDomains) {
+        const primaryDomain = replitDomains.split(",")[0];
+        const webhookUrl = `https://${primaryDomain}/api/stripe/webhook`;
+        log(`Webhook configured: ${webhookUrl}`, "stripe");
+        await stripeSync.findOrCreateManagedWebhook(
+          webhookUrl,
+          {
+            enabled_events: ["*"],
+            description: "Managed webhook for Outsyde marketplace",
+          }
+        );
+      } else {
+        log("REPLIT_DOMAINS not set - skipping managed webhook setup", "stripe");
       }
-    );
+    } else {
+      log("Using STRIPE_WEBHOOK_SECRET for webhook verification (external hosting)", "stripe");
+    }
 
-    log("Setting up Stripe products...", "stripe");
+    log("Setting up subscription tier products...", "stripe");
     await stripeService.setupSubscriptionProducts();
     await stripeService.setupAlaCarteProducts();
+    log("Subscription products ready", "stripe");
   } catch (error) {
     console.error("Stripe initialization failed:", error);
   }
@@ -135,8 +165,36 @@ async function initStripe() {
   await storage.cleanupExpiredTokens();
   await initStripe();
 
-  await setupAuth(app);
-  log("Auth configured", "auth");
+  // Conditionally setup auth based on platform
+  if (isOnReplit()) {
+    await setupAuth(app);
+    log("Replit Auth configured (Google OAuth enabled)", "auth");
+  } else {
+    // For external hosting (Render, etc.) - setup basic session without Replit OIDC
+    app.set("trust proxy", 1);
+    app.use(getSession());
+    app.use(passport.initialize());
+    app.use(passport.session());
+    passport.serializeUser((user: Express.User, cb) => cb(null, user));
+    passport.deserializeUser((user: Express.User, cb) => cb(null, user));
+    
+    // Stub login/logout routes for external hosting
+    // TODO: Implement your own auth strategy (e.g., Passport Local, Google OAuth, etc.)
+    app.get("/api/login", (_req, res) => {
+      res.status(501).json({ 
+        error: "Authentication not configured", 
+        message: "Please configure an auth strategy for external hosting (e.g., Passport Local, Google OAuth)" 
+      });
+    });
+    
+    app.get("/api/logout", (req, res) => {
+      req.logout(() => {
+        res.redirect("/");
+      });
+    });
+    
+    log("Session-based auth configured (external hosting mode - implement your own auth strategy)", "auth");
+  }
 
   setInterval(() => storage.cleanupExpiredTokens(), 60 * 60 * 1000);
 

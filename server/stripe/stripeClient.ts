@@ -1,11 +1,35 @@
 // Stripe client integration for Outsyde marketplace
-// Uses Replit connector for automatic credential management
+// Supports both direct env vars (for external hosting) and Replit connector
 
 import Stripe from 'stripe';
 
 let connectionSettings: any;
+let cachedCredentials: { publishableKey: string; secretKey: string } | null = null;
+
+function isOnReplit(): boolean {
+  return !!(process.env.REPL_IDENTITY || process.env.WEB_REPL_RENEWAL || process.env.REPLIT_CONNECTORS_HOSTNAME);
+}
 
 async function getCredentials() {
+  // Return cached credentials if available
+  if (cachedCredentials) {
+    return cachedCredentials;
+  }
+
+  // Check for direct environment variables first (for external hosting like Render)
+  if (process.env.STRIPE_SECRET_KEY) {
+    cachedCredentials = {
+      publishableKey: process.env.STRIPE_PUBLISHABLE_KEY || '',
+      secretKey: process.env.STRIPE_SECRET_KEY,
+    };
+    return cachedCredentials;
+  }
+
+  // Fall back to Replit connector for Replit hosting
+  if (!isOnReplit()) {
+    throw new Error('STRIPE_SECRET_KEY environment variable is required when not running on Replit');
+  }
+
   const hostname = process.env.REPLIT_CONNECTORS_HOSTNAME;
   const xReplitToken = process.env.REPL_IDENTITY
     ? 'repl ' + process.env.REPL_IDENTITY
@@ -41,10 +65,12 @@ async function getCredentials() {
     throw new Error(`Stripe ${targetEnvironment} connection not found`);
   }
 
-  return {
+  cachedCredentials = {
     publishableKey: connectionSettings.settings.publishable,
     secretKey: connectionSettings.settings.secret,
   };
+
+  return cachedCredentials;
 }
 
 export async function getUncachableStripeClient() {

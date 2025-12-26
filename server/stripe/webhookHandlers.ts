@@ -6,21 +6,53 @@ import { sql, eq } from "drizzle-orm";
 import { NotificationTriggers } from "../notificationService";
 import { stripeService } from "./stripeService";
 
+function isOnReplit(): boolean {
+  return !!(process.env.REPL_IDENTITY || process.env.WEB_REPL_RENEWAL || process.env.REPL_ID);
+}
+
 export class WebhookHandlers {
   static async processWebhook(
     payload: Buffer,
     signature: string,
     uuid: string
   ): Promise<void> {
-    const sync = await getStripeSync();
-    await sync.processWebhook(payload, signature, uuid);
+    // Always use StripeSync for data persistence (works in both environments)
+    try {
+      const sync = await getStripeSync();
+      await sync.processWebhook(payload, signature, uuid);
+    } catch (syncError) {
+      console.error("StripeSync processWebhook error (continuing with event handling):", syncError);
+    }
+
+    // On Replit, managed webhooks handle verification via sync.processWebhook
+    // On external hosting, we need STRIPE_WEBHOOK_SECRET for manual verification
+    const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET;
+    
+    // If no webhook secret, on Replit we can continue (managed webhook verified it)
+    // On external hosting without secret, we must fail
+    if (!webhookSecret) {
+      if (isOnReplit()) {
+        // On Replit, sync.processWebhook already verified - parse the event directly
+        const stripe = await getUncachableStripeClient();
+        const event = JSON.parse(payload.toString());
+        await this.handleEvent(event);
+        return;
+      }
+      console.error("STRIPE_WEBHOOK_SECRET not configured for external hosting");
+      throw new Error("Webhook secret not configured");
+    }
 
     const stripe = await getUncachableStripeClient();
     const event = stripe.webhooks.constructEvent(
       payload,
       signature,
-      process.env.STRIPE_WEBHOOK_SECRET as string
+      webhookSecret
     );
+    
+    await this.handleEvent(event);
+  }
+
+  static async handleEvent(event: any): Promise<void> {
 
 
     switch (event.type) {

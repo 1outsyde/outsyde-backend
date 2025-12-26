@@ -1,0 +1,86 @@
+==> Uploaded in 5.1s. Compression took 2.9s
+==> Build successful 🎉
+==> Running 'npm run start'
+> rest-express@1.0.0 start
+> NODE_ENV=production npx tsx server/index.ts
+==> Cloning from https://github.com/1outsyde/outsyde-backend
+==> Checking out commit 6c27799f896f516eb211bdfc0c8a2b0d5523ff9f in branch main
+==> Using Node.js version 22.16.0 (default)
+==> Docs on specifying a Node.js version: https://render.com/docs/node-version
+==> Running build command 'npm install'...
+added 537 packages, and audited 538 packages in 6s
+75 packages are looking for funding
+  run `npm fund` for details
+5 vulnerabilities (3 low, 2 high)
+To address all issues, run:
+  npm audit fix
+Run `npm audit` for details.
+==> Uploading build...
+==> Uploaded in 5.1s. Compression took 2.9s
+==> Build successful 🎉
+==> Setting WEB_CONCURRENCY=1 by default, based on available CPUs in the instance
+==> Deploying...
+==> Running 'npm run start'
+> rest-express@1.0.0 start
+> NODE_ENV=production npx tsx server/index.ts
+file:///opt/render/project/src/node_modules/@neondatabase/serverless/index.mjs:1556
+let{status:W}=te;if(W===400){let H=await te.json(),Ae=new pe(H.message);for(let xe of Wc)
+                                                      ^
+NeonDbError: relation "cities" does not exist
+    at execute (file:///opt/render/project/src/node_modules/@neondatabase/serverless/index.mjs:1556:55)
+    at process.processTicksAndRejections (node:internal/process/task_queues:105:5)
+    at async NeonHttpPreparedQuery.execute (/opt/render/project/src/node_modules/src/neon-http/session.ts:68:18)
+    at async DatabaseStorage.seedInitialData (/opt/render/project/src/server/storage.ts:2482:28)
+    at async <anonymous> (/opt/render/project/src/server/index.ts:134:3) {
+  severity: 'ERROR',
+  code: '42P01',
+  detail: undefined,
+  hint: undefined,
+  position: '78',
+  internalPosition: undefined,
+  internalQuery: undefined,
+  where: undefined,
+  schema: undefined,
+  table: undefined,
+  column: undefined,
+  dataType: undefined,
+  constraint: undefined,
+  file: 'parse_relation.c',
+  line: '1449',
+  routine: 'parserOpenTable',
+  sourceError: undefined
+}
+Node.js v22.16.0
+==> Exited with status 1
+==> Common ways to troubleshoot your deploy: https://render.com/docs/troubleshooting-deploys
+==> Running 'npm run start'
+> rest-express@1.0.0 start
+> NODE_ENV=production npx tsx server/index.ts
+file:///opt/render/project/src/node_modules/@neondatabase/serverless/index.mjs:1556
+let{status:W}=te;if(W===400){let H=await te.json(),Ae=new pe(H.message);for(let xe of Wc)
+                                                      ^
+NeonDbError: relation "cities" does not exist
+    at execute (file:///opt/render/project/src/node_modules/@neondatabase/serverless/index.mjs:1556:55)
+    at process.processTicksAndRejections (node:internal/process/task_queues:105:5)
+    at async NeonHttpPreparedQuery.execute (/opt/render/project/src/node_modules/src/neon-http/session.ts:68:18)
+    at async DatabaseStorage.seedInitialData (/opt/render/project/src/server/storage.ts:2482:28)
+    at async <anonymous> (/opt/render/project/src/server/index.ts:134:3) {
+  severity: 'ERROR',
+  code: '42P01',
+  detail: undefined,
+  hint: undefined,
+  position: '78',
+  internalPosition: undefined,
+  internalQuery: undefined,
+  where: undefined,
+  schema: undefined,
+  table: undefined,
+  column: undefined,
+  dataType: undefined,
+  constraint: undefined,
+  file: 'parse_relation.c',
+  line: '1449',
+  routine: 'parserOpenTable',
+  sourceError: undefined
+}
+Node.js v22.16.0
