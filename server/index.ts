@@ -3,7 +3,6 @@ import { createServer } from "http";
 import cors from "cors";
 import { storage } from "./storage";
 import { registerRoutes } from "./routes";
-import { setupVite } from "./vite";
 import { runMigrations } from "stripe-replit-sync";
 import { getStripeSync } from "./stripe/stripeClient";
 import { WebhookHandlers } from "./stripe/webhookHandlers";
@@ -17,24 +16,25 @@ const httpServer = createServer(app);
 
 app.use(cors());
 
-// CRITICAL: Stripe webhook route MUST be registered BEFORE express.json()
-// The webhook needs the raw Buffer body, not parsed JSON
+// =======================
+// Stripe Webhook (RAW BODY)
+// =======================
 app.post(
-  '/api/stripe/webhook/:uuid',
-  express.raw({ type: 'application/json' }),
+  "/api/stripe/webhook/:uuid",
+  express.raw({ type: "application/json" }),
   async (req, res) => {
-    const signature = req.headers['stripe-signature'];
+    const signature = req.headers["stripe-signature"];
 
     if (!signature) {
-      return res.status(400).json({ error: 'Missing stripe-signature' });
+      return res.status(400).json({ error: "Missing stripe-signature" });
     }
 
     try {
       const sig = Array.isArray(signature) ? signature[0] : signature;
 
       if (!Buffer.isBuffer(req.body)) {
-        console.error('STRIPE WEBHOOK ERROR: req.body is not a Buffer');
-        return res.status(500).json({ error: 'Webhook processing error' });
+        console.error("STRIPE WEBHOOK ERROR: req.body is not a Buffer");
+        return res.status(500).json({ error: "Webhook processing error" });
       }
 
       const { uuid } = req.params;
@@ -42,20 +42,22 @@ app.post(
 
       res.status(200).json({ received: true });
     } catch (error: any) {
-      console.error('Webhook error:', error.message);
-      res.status(400).json({ error: 'Webhook processing error' });
+      console.error("Webhook error:", error.message);
+      res.status(400).json({ error: "Webhook processing error" });
     }
   }
 );
 
-// Now apply JSON middleware for all other routes
+// =======================
+// Standard Middleware
+// =======================
 app.use(express.json());
 app.use(express.urlencoded({ extended: false }));
 
 app.use((req, res, next) => {
   const start = Date.now();
   const path = req.path;
-  let capturedJsonResponse: Record<string, any> | undefined = undefined;
+  let capturedJsonResponse: Record<string, any> | undefined;
 
   const originalResJson = res.json;
   res.json = function (bodyJson, ...args) {
@@ -70,11 +72,7 @@ app.use((req, res, next) => {
       if (capturedJsonResponse) {
         logLine += ` :: ${JSON.stringify(capturedJsonResponse)}`;
       }
-
-      if (logLine.length > 80) {
-        logLine = logLine.slice(0, 79) + "…";
-      }
-
+      if (logLine.length > 80) logLine = logLine.slice(0, 79) + "…";
       log(logLine);
     }
   });
@@ -93,147 +91,82 @@ function log(message: string, source = "express") {
   console.log(`${formattedTime} [${source}] ${message}`);
 }
 
-// Initialize Stripe schema and sync data on startup
+// =======================
+// Stripe Initialization
+// =======================
 async function initStripe() {
   const databaseUrl = process.env.DATABASE_URL;
 
   if (!databaseUrl) {
-    log('DATABASE_URL not set - skipping Stripe initialization', 'stripe');
+    log("DATABASE_URL not set - skipping Stripe initialization", "stripe");
     return;
   }
 
   try {
-    log('Initializing Stripe schema...', 'stripe');
+    log("Initializing Stripe schema...", "stripe");
     await runMigrations({ databaseUrl });
-    log('Stripe schema ready', 'stripe');
+    log("Stripe schema ready", "stripe");
 
     const stripeSync = await getStripeSync();
 
-    log('Setting up managed webhook...', 'stripe');
-    const webhookBaseUrl = `https://${process.env.REPLIT_DOMAINS?.split(',')[0]}`;
-    const { webhook, uuid } = await stripeSync.findOrCreateManagedWebhook(
+    log("Setting up managed webhook...", "stripe");
+    const webhookBaseUrl = process.env.RENDER_EXTERNAL_URL || "";
+    await stripeSync.findOrCreateManagedWebhook(
       `${webhookBaseUrl}/api/stripe/webhook`,
       {
-        enabled_events: ['*'],
-        description: 'Managed webhook for Outsyde marketplace',
+        enabled_events: ["*"],
+        description: "Managed webhook for Outsyde marketplace",
       }
     );
-    log(`Webhook configured: ${webhook.url}`, 'stripe');
 
-    // Sync all existing Stripe data in background
-    stripeSync.syncBackfill()
-      .then(() => log('Stripe data synced', 'stripe'))
-      .catch((err: any) => console.error('Error syncing Stripe data:', err));
-
-    // Setup subscription tier products in Stripe (creates if not exist)
-    log('Setting up subscription tier products...', 'stripe');
+    log("Setting up Stripe products...", "stripe");
     await stripeService.setupSubscriptionProducts();
     await stripeService.setupAlaCarteProducts();
-    log('Subscription products ready', 'stripe');
   } catch (error) {
-    console.error('Failed to initialize Stripe:', error);
+    console.error("Stripe initialization failed:", error);
   }
 }
 
+// =======================
+// App Bootstrap
+// =======================
 (async () => {
   await storage.seedInitialData();
   await storage.cleanupExpiredTokens();
   await initStripe();
 
-  // Set up Replit Auth (Google OAuth)
   await setupAuth(app);
-  log("Replit Auth configured (Google OAuth enabled)", "auth");
+  log("Auth configured", "auth");
 
-  setInterval(async () => {
-    try {
-      await storage.cleanupExpiredTokens();
-      log("Expired tokens cleaned up", "auth");
-    } catch (error) {
-      console.error("Token cleanup error:", error);
-    }
-  }, 60 * 60 * 1000);
+  setInterval(() => storage.cleanupExpiredTokens(), 60 * 60 * 1000);
 
   initializePushService();
-  
+
   if (isPushConfigured()) {
-    setInterval(async () => {
-      try {
-        const sentCount = await sendCartReminderNotifications();
-        if (sentCount > 0) {
-          log(`Sent ${sentCount} cart reminder notifications`, "push");
-        }
-      } catch (error) {
-        console.error("Cart reminder error:", error);
-      }
-    }, 30 * 60 * 1000);
-    log("Cart reminder notifications scheduled (every 30 min)", "push");
-  }
-
-  // Schedule benefit expiration and renewal checks (hourly)
-  setInterval(async () => {
-    try {
-      // Expire old allowances
-      const expiredCount = await storage.expireOldAllowances();
-      if (expiredCount > 0) {
-        log(`Expired ${expiredCount} benefit allowances`, "benefits");
-      }
-      
-      // Renew allowances for new cycles (monthly/quarterly)
-      const renewedCount = await storage.renewBenefitAllowancesForNewCycle();
-      if (renewedCount > 0) {
-        log(`Created ${renewedCount} new benefit allowances for new cycle`, "benefits");
-      }
-    } catch (error) {
-      console.error("Benefit maintenance error:", error);
-    }
-  }, 60 * 60 * 1000);
-  log("Benefit expiration and renewal scheduled (hourly)", "benefits");
-  
-  // Run initial maintenance on startup
-  try {
-    const expiredCount = await storage.expireOldAllowances();
-    if (expiredCount > 0) {
-      log(`Initial cleanup: expired ${expiredCount} benefit allowances`, "benefits");
-    }
-    const renewedCount = await storage.renewBenefitAllowancesForNewCycle();
-    if (renewedCount > 0) {
-      log(`Initial renewal: created ${renewedCount} new benefit allowances`, "benefits");
-    }
-  } catch (error) {
-    console.error("Initial benefit maintenance error:", error);
-  }
-
-  // Rebuild unified search index on startup
-  try {
-    await storage.rebuildSearchIndex();
-    log("Unified search index rebuilt", "search");
-  } catch (error) {
-    console.error("Search index rebuild error:", error);
+    setInterval(sendCartReminderNotifications, 30 * 60 * 1000);
   }
 
   await registerRoutes(httpServer, app);
-
-  // Set up WebSocket server for real-time chat
   setupWebSocket(httpServer);
 
   app.use((err: any, _req: Request, res: Response, _next: NextFunction) => {
     const status = err.status || err.statusCode || 500;
-    const message = err.message || "Internal Server Error";
-
-    res.status(status).json({ message });
-    throw err;
+    res.status(status).json({ message: err.message || "Internal Server Error" });
   });
 
-  await setupVite(httpServer, app);
+  // =======================
+  // DEV ONLY: Vite
+  // =======================
+  if (process.env.NODE_ENV !== "production") {
+    const { setupVite } = await import("./vite");
+    await setupVite(httpServer, app);
+  }
 
-  const port = 5000;
-  httpServer.listen(
-    {
-      port,
-      host: "0.0.0.0",
-    },
-    () => {
-      log(`serving on port ${port}`);
-    }
-  );
+  // =======================
+  // Start Server
+  // =======================
+  const port = Number(process.env.PORT) || 5000;
+  httpServer.listen({ port, host: "0.0.0.0" }, () => {
+    log(`serving on port ${port}`);
+  });
 })();
