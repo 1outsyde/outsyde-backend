@@ -96,6 +96,29 @@ export async function registerRoutes(
   httpServer: Server,
   app: Express
 ): Promise<Server> {
+  // Middleware to check if user can monetize (centralized guard for all payment/checkout/payout endpoints)
+  const requireMonetization = async (req: any, res: any, next: any) => {
+    const userId = req.session?.userId;
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    const user = await storage.getUser(userId);
+    if (!user) {
+      return res.status(401).json({ error: "User not found" });
+    }
+
+    if (!user.canMonetize) {
+      return res.status(403).json({ 
+        error: "Monetization not enabled", 
+        message: "Your account is not approved for monetization. Please contact support to enable selling, services, or payouts." 
+      });
+    }
+
+    req.monetizationUser = user;
+    next();
+  };
+
   // ==================== AUTH ROUTES ====================
 
   // Customer signup
@@ -1082,7 +1105,7 @@ export async function registerRoutes(
   });
 
   // Create tier subscription checkout
-  app.post("/api/stripe/checkout/tier-subscription", async (req, res) => {
+  app.post("/api/stripe/checkout/tier-subscription", requireMonetization, async (req, res) => {
     const userId = req.session?.userId;
     if (!userId) {
       return res.status(401).json({ error: "Not authenticated" });
@@ -1691,7 +1714,7 @@ export async function registerRoutes(
   });
 
   // Create checkout for à la carte purchase
-  app.post("/api/ala-carte/checkout", async (req, res) => {
+  app.post("/api/ala-carte/checkout", requireMonetization, async (req, res) => {
     const userId = req.session?.userId;
     if (!userId) {
       return res.status(401).json({ error: "Not authenticated" });
@@ -5951,6 +5974,15 @@ export async function registerRoutes(
       const profile = await storage.getInfluencerProfile(influencerId);
       if (!profile) {
         return res.status(404).json({ error: "Influencer not found" });
+      }
+
+      // Check if the target influencer's user can monetize
+      const influencerUser = await storage.getUser(profile.userId);
+      if (influencerUser && !influencerUser.canMonetize) {
+        return res.status(403).json({ 
+          error: "Monetization not enabled", 
+          message: "The influencer's account is not approved for monetization." 
+        });
       }
 
       if (!profile.stripeAccountId || !profile.stripeOnboardingComplete) {
