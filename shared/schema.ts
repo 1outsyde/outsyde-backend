@@ -68,6 +68,14 @@ export const users = pgTable("users", {
   isAdmin: boolean("is_admin").default(false).notNull(),
   isOAuthUser: boolean("is_oauth_user").default(false),
 
+  // Monetization intent (user-controlled via API)
+  wantsToSellProducts: boolean("wants_to_sell_products").default(false).notNull(),
+  wantsToOfferServices: boolean("wants_to_offer_services").default(false).notNull(),
+  wantsToPromoteAsInfluencer: boolean("wants_to_promote_as_influencer").default(false).notNull(),
+
+  // Monetization permission (system-controlled, requires approval)
+  canMonetize: boolean("can_monetize").default(false).notNull(),
+
   address: text("address"),
   city: text("city"),
   state: text("state"),
