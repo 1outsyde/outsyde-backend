@@ -541,13 +541,15 @@ export async function registerRoutes(
 
   // Schema for monetization intent (user-controlled fields only)
   const monetizationIntentSchema = z.object({
-    userId: z.string().min(1, "userId is required"),
+    userId: z.string().optional(), // Optional: used if not authenticated via JWT
     wantsToSellProducts: z.boolean().optional(),
     wantsToOfferServices: z.boolean().optional(),
     wantsToPromoteAsInfluencer: z.boolean().optional(),
   });
 
-  app.post("/api/user/monetization-intent", async (req, res) => {
+  // Use optional auth middleware - allows both authenticated and body userId
+  app.post("/api/user/monetization-intent", optionalAuthMiddleware, async (req, res) => {
+    const authReq = req as AuthenticatedRequest;
     try {
       // Validate input
       const parsed = monetizationIntentSchema.safeParse(req.body);
@@ -558,7 +560,19 @@ export async function registerRoutes(
         });
       }
 
-      const { userId, wantsToSellProducts, wantsToOfferServices, wantsToPromoteAsInfluencer } = parsed.data;
+      const { wantsToSellProducts, wantsToOfferServices, wantsToPromoteAsInfluencer } = parsed.data;
+
+      // Priority: JWT userId > body userId
+      // For mobile apps with JWT auth, userId comes from token
+      // For initial development/testing, body userId is accepted as fallback
+      const userId = authReq.user?.userId || parsed.data.userId;
+      
+      if (!userId) {
+        return res.status(400).json({ 
+          success: false, 
+          error: "userId is required (via auth token or request body)" 
+        });
+      }
 
       // Check if user exists
       const existingUser = await storage.getUser(userId);

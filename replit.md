@@ -48,6 +48,11 @@ The Outsyde platform uses a React frontend, an Express (TypeScript) backend, and
     -   **Publishing Enforcement:** Vendors can create draft products/services without subscription, but publishing to "live" status requires both active Stripe subscription AND completed Stripe Connect onboarding.
     -   **Checkout Verification:** At checkout, system verifies vendor Stripe account status via Stripe API (`chargesEnabled` and `payoutsEnabled`) before processing payment.
     -   **Multi-Staff System:** Businesses (barbershops, salons, spas) can manage team members with individual availability calendars. Staff members have their own Stripe Connect accounts for direct payouts. Each staff member receives 100% of booking revenue minus 4% platform fee (same as business rate). Shop arrangements for rent/commission splits are handled outside Outsyde. Staff Dashboard (`/staff-dashboard`) allows staff to view their bookings, earnings, and manage availability. Vendor Dashboard Team tab provides staff CRUD, invite management, and Stripe onboarding tracking. Booking flow includes staff selection when staff are available.
+    -   **User Monetization Intent:** Captures user interest in selling products, offering services, or promoting as influencer. Fields: `wantsToSellProducts`, `wantsToOfferServices`, `wantsToPromoteAsInfluencer` (user-controlled) and `canMonetize` (system-controlled, requires approval). Endpoint: `POST /api/user/monetization-intent` updates intent fields only, never touches roles or canMonetize.
+-   **Mobile Backend (FlutterFlow):**
+    -   Backend serves as API for FlutterFlow mobile app
+    -   Authentication: JWT tokens (1hr access, 7-day refresh) via `/api/auth/mobile/login` and `/api/auth/mobile/refresh`
+    -   Monetization intent endpoint accepts userId from JWT token or request body (for FlutterFlow integration where auth is handled client-side)
 -   **Data Privacy:**
     -   **DOB:** Collected for eligibility, full DOB visible to user/admin only; vendors see age ranges. `sanitizeUserForResponse()` removes DOB from non-admin API responses.
     -   **Race/Ethnicity:** Optional, never exposed individually; only for aggregated analytics (future). `sanitizeUserForResponse()` removes ethnicity from all responses.
