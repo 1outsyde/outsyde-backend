@@ -537,6 +537,57 @@ export async function registerRoutes(
     }
   });
 
+  // ==================== USER MONETIZATION INTENT ====================
+
+  // Schema for monetization intent (user-controlled fields only)
+  const monetizationIntentSchema = z.object({
+    userId: z.string().min(1, "userId is required"),
+    wantsToSellProducts: z.boolean().optional(),
+    wantsToOfferServices: z.boolean().optional(),
+    wantsToPromoteAsInfluencer: z.boolean().optional(),
+  });
+
+  app.post("/api/user/monetization-intent", async (req, res) => {
+    try {
+      // Validate input
+      const parsed = monetizationIntentSchema.safeParse(req.body);
+      if (!parsed.success) {
+        return res.status(400).json({ 
+          success: false, 
+          error: parsed.error.errors[0]?.message || "Invalid input" 
+        });
+      }
+
+      const { userId, wantsToSellProducts, wantsToOfferServices, wantsToPromoteAsInfluencer } = parsed.data;
+
+      // Check if user exists
+      const existingUser = await storage.getUser(userId);
+      if (!existingUser) {
+        return res.status(404).json({ success: false, error: "User not found" });
+      }
+
+      // Build update object with only provided fields (never touch roles or canMonetize)
+      const updates: Record<string, boolean> = {};
+      if (wantsToSellProducts !== undefined) {
+        updates.wantsToSellProducts = wantsToSellProducts;
+      }
+      if (wantsToOfferServices !== undefined) {
+        updates.wantsToOfferServices = wantsToOfferServices;
+      }
+      if (wantsToPromoteAsInfluencer !== undefined) {
+        updates.wantsToPromoteAsInfluencer = wantsToPromoteAsInfluencer;
+      }
+
+      // Update user's monetization intent
+      await storage.updateUser(userId, updates);
+
+      res.json({ success: true });
+    } catch (error) {
+      console.error("Update monetization intent error:", error);
+      res.status(500).json({ success: false, error: "Failed to update monetization intent" });
+    }
+  });
+
   // ==================== NOTIFICATIONS ====================
 
   app.get("/api/notifications", async (req, res) => {
