@@ -96,6 +96,15 @@ export async function registerRoutes(
   httpServer: Server,
   app: Express
 ): Promise<Server> {
+  // Health check endpoint for Render and other hosting platforms
+  app.get("/health", (req, res) => {
+    res.json({ 
+      status: "ok", 
+      service: "vendor-booker", 
+      environment: process.env.NODE_ENV || "development" 
+    });
+  });
+
   // Middleware to check if user can monetize (centralized guard for all payment/checkout/payout endpoints)
   const requireMonetization = async (req: any, res: any, next: any) => {
     const userId = req.session?.userId;
