@@ -116,6 +116,22 @@ export async function registerRoutes(
     }
   });
 
+  // Public search endpoint for mobile app - searches businesses and photographers
+  app.get("/api/search", async (req, res) => {
+    try {
+      const { q, city, category } = req.query;
+      const results = await storage.searchAll({
+        search: q as string | undefined,
+        city: city as string | undefined,
+        category: category as string | undefined,
+      });
+      res.json(results);
+    } catch (error) {
+      console.error("Search error:", error);
+      res.status(500).json({ error: "Failed to search" });
+    }
+  });
+
   // Middleware to check if user can monetize (centralized guard for all payment/checkout/payout endpoints)
   const requireMonetization = async (req: any, res: any, next: any) => {
     const userId = req.session?.userId;
