@@ -192,6 +192,12 @@ export const businesses = pgTable("businesses", {
 
   billingAddress: jsonb("billing_address").$type<BillingAddress>(),
 
+  // Approval workflow: pending (new applications), approved, rejected
+  approvalStatus: text("approval_status").default("pending").notNull(),
+  approvalNotes: text("approval_notes"),
+  approvedAt: timestamp("approved_at"),
+  approvedBy: varchar("approved_by", { length: 36 }),
+
   createdAt: timestamp("created_at").defaultNow().notNull(),
 });
 
