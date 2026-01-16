@@ -248,8 +248,13 @@ export async function registerRoutes(
         zipCode: data.zipCode,
         websiteUrl: data.websiteUrl,
         socialMedia: data.socialMedia,
-        subscriptionActive: true,
+        subscriptionActive: false, // Starts inactive until approved
+        approvalStatus: "pending", // New businesses require approval
       });
+
+      // TODO: Send email notification to admin when Resend integration is configured
+      // await sendAdminNotification({ type: 'new_vendor_application', business });
+      console.log(`[Admin Notification] New vendor application: ${business.name} (${business.id})`);
 
       if (req.session) {
         req.session.userId = user.id;
@@ -258,7 +263,11 @@ export async function registerRoutes(
       }
 
       const safeUser = sanitizeUserForResponse(user, { includeOwnData: true });
-      res.json({ user: safeUser, business });
+      res.json({ 
+        user: safeUser, 
+        business,
+        message: "Your application has been submitted and is pending approval. You will be notified once reviewed."
+      });
     } catch (error) {
       if (error instanceof z.ZodError) {
         return res
@@ -5139,7 +5148,7 @@ export async function registerRoutes(
     }
   });
 
-  // ==================== ADMIN FULFILLMENT ROUTES ====================
+  // ==================== ADMIN VENDOR APPLICATIONS ROUTES ====================
 
   // Email-locked admin access - only these emails can have admin privileges
   // This list is hardcoded server-side and cannot be modified by client-side logic
@@ -5171,6 +5180,130 @@ export async function registerRoutes(
     req.adminUser = user;
     next();
   };
+
+  // Get pending vendor applications
+  app.get("/api/admin/applications", requireAdmin, async (req, res) => {
+    try {
+      const { status = "pending" } = req.query;
+      const allBusinesses = await storage.getBusinesses({});
+      
+      // Filter by approval status
+      const filtered = allBusinesses.filter(b => 
+        (b as any).approvalStatus === status
+      );
+      
+      // Enrich with owner info
+      const enriched = await Promise.all(filtered.map(async (business) => {
+        const owner = await storage.getUser((business as any).ownerId);
+        return {
+          ...business,
+          ownerName: owner?.name || null,
+          ownerEmail: owner?.email || null,
+          ownerPhone: owner?.phone || null,
+        };
+      }));
+
+      res.json({ applications: enriched });
+    } catch (error) {
+      console.error("Get vendor applications error:", error);
+      res.status(500).json({ error: "Failed to get applications" });
+    }
+  });
+
+  // Approve vendor application
+  app.post("/api/admin/applications/:id/approve", requireAdmin, async (req, res) => {
+    try {
+      const { id } = req.params;
+      const { notes } = req.body;
+      const adminUser = (req as any).adminUser;
+
+      const business = await storage.getBusiness(id);
+      if (!business) {
+        return res.status(404).json({ error: "Business not found" });
+      }
+
+      if ((business as any).approvalStatus === "approved") {
+        return res.status(400).json({ error: "Business is already approved" });
+      }
+
+      const updated = await storage.updateBusiness(id, {
+        approvalStatus: "approved",
+        approvalNotes: notes || null,
+        approvedAt: new Date(),
+        approvedBy: adminUser.id,
+        subscriptionActive: true, // Activate upon approval
+      });
+
+      // Create audit log
+      await storage.createAuditLog({
+        actorId: adminUser.id,
+        actorType: "admin",
+        action: "approve_vendor",
+        targetType: "business",
+        targetId: id,
+        beforeState: { approvalStatus: (business as any).approvalStatus },
+        afterState: { approvalStatus: "approved" },
+      });
+
+      // TODO: Send approval notification email when Resend is configured
+      console.log(`[Admin] Approved vendor: ${business.name} by ${adminUser.email}`);
+
+      res.json({ success: true, business: updated });
+    } catch (error) {
+      console.error("Approve vendor error:", error);
+      res.status(500).json({ error: "Failed to approve vendor" });
+    }
+  });
+
+  // Reject vendor application
+  app.post("/api/admin/applications/:id/reject", requireAdmin, async (req, res) => {
+    try {
+      const { id } = req.params;
+      const { notes } = req.body;
+      const adminUser = (req as any).adminUser;
+
+      if (!notes) {
+        return res.status(400).json({ error: "Rejection reason is required" });
+      }
+
+      const business = await storage.getBusiness(id);
+      if (!business) {
+        return res.status(404).json({ error: "Business not found" });
+      }
+
+      if ((business as any).approvalStatus === "rejected") {
+        return res.status(400).json({ error: "Business is already rejected" });
+      }
+
+      const updated = await storage.updateBusiness(id, {
+        approvalStatus: "rejected",
+        approvalNotes: notes,
+        approvedAt: new Date(),
+        approvedBy: adminUser.id,
+      });
+
+      // Create audit log
+      await storage.createAuditLog({
+        actorId: adminUser.id,
+        actorType: "admin",
+        action: "reject_vendor",
+        targetType: "business",
+        targetId: id,
+        beforeState: { approvalStatus: (business as any).approvalStatus },
+        afterState: { approvalStatus: "rejected", reason: notes },
+      });
+
+      // TODO: Send rejection notification email when Resend is configured
+      console.log(`[Admin] Rejected vendor: ${business.name} by ${adminUser.email} - Reason: ${notes}`);
+
+      res.json({ success: true, business: updated });
+    } catch (error) {
+      console.error("Reject vendor error:", error);
+      res.status(500).json({ error: "Failed to reject vendor" });
+    }
+  });
+
+  // ==================== ADMIN FULFILLMENT ROUTES ====================
 
   // Get all fulfillment tasks with optional filters
   app.get("/api/admin/fulfillment-tasks", requireAdmin, async (req, res) => {

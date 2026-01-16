@@ -616,6 +616,262 @@ function MessagesTab() {
   );
 }
 
+interface VendorApplication {
+  id: string;
+  name: string;
+  category: string;
+  description: string | null;
+  city: string | null;
+  state: string | null;
+  approvalStatus: string;
+  approvalNotes: string | null;
+  createdAt: string;
+  ownerName: string | null;
+  ownerEmail: string | null;
+  ownerPhone: string | null;
+}
+
+function VendorApplicationsTab() {
+  const [selectedApplication, setSelectedApplication] = useState<VendorApplication | null>(null);
+  const [reviewDialogOpen, setReviewDialogOpen] = useState(false);
+  const [adminNotes, setAdminNotes] = useState("");
+  const [statusFilter, setStatusFilter] = useState<"pending" | "approved" | "rejected">("pending");
+  const { toast } = useToast();
+
+  const { data: applicationsData, isLoading } = useQuery<{ applications: VendorApplication[] }>({
+    queryKey: ["/api/admin/applications", statusFilter],
+  });
+
+  const applications = applicationsData?.applications || [];
+
+  const approveMutation = useMutation({
+    mutationFn: async (data: { id: string; notes: string }) => {
+      return apiRequest("POST", `/api/admin/applications/${data.id}/approve`, { notes: data.notes });
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/admin/applications"] });
+      setReviewDialogOpen(false);
+      setSelectedApplication(null);
+      setAdminNotes("");
+      toast({ title: "Vendor approved", description: "The business is now active." });
+    },
+    onError: () => {
+      toast({ title: "Failed to approve vendor", variant: "destructive" });
+    },
+  });
+
+  const rejectMutation = useMutation({
+    mutationFn: async (data: { id: string; notes: string }) => {
+      return apiRequest("POST", `/api/admin/applications/${data.id}/reject`, { notes: data.notes });
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/admin/applications"] });
+      setReviewDialogOpen(false);
+      setSelectedApplication(null);
+      setAdminNotes("");
+      toast({ title: "Vendor rejected" });
+    },
+    onError: () => {
+      toast({ title: "Failed to reject vendor", variant: "destructive" });
+    },
+  });
+
+  const handleReview = (app: VendorApplication) => {
+    setSelectedApplication(app);
+    setAdminNotes(app.approvalNotes || "");
+    setReviewDialogOpen(true);
+  };
+
+  const getStatusBadge = (status: string) => {
+    switch (status) {
+      case "pending":
+        return <Badge variant="secondary" className="bg-amber-100 text-amber-800">Pending</Badge>;
+      case "approved":
+        return <Badge variant="secondary" className="bg-green-100 text-green-800">Approved</Badge>;
+      case "rejected":
+        return <Badge variant="secondary" className="bg-red-100 text-red-800">Rejected</Badge>;
+      default:
+        return <Badge variant="outline">{status}</Badge>;
+    }
+  };
+
+  if (isLoading) {
+    return (
+      <div className="flex items-center justify-center p-8 text-muted-foreground">
+        <Loader2 className="w-5 h-5 mr-2 animate-spin" />
+        Loading vendor applications...
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center justify-between gap-4 flex-wrap">
+        <div>
+          <h3 className="text-lg font-semibold">Vendor Applications</h3>
+          <p className="text-sm text-muted-foreground">
+            Review and approve new business applications
+          </p>
+        </div>
+        <div className="flex gap-2">
+          <Button
+            variant={statusFilter === "pending" ? "default" : "outline"}
+            size="sm"
+            onClick={() => setStatusFilter("pending")}
+            data-testid="filter-pending"
+          >
+            <Clock className="w-4 h-4 mr-1" />
+            Pending
+          </Button>
+          <Button
+            variant={statusFilter === "approved" ? "default" : "outline"}
+            size="sm"
+            onClick={() => setStatusFilter("approved")}
+            data-testid="filter-approved"
+          >
+            <CheckCircle2 className="w-4 h-4 mr-1" />
+            Approved
+          </Button>
+          <Button
+            variant={statusFilter === "rejected" ? "default" : "outline"}
+            size="sm"
+            onClick={() => setStatusFilter("rejected")}
+            data-testid="filter-rejected"
+          >
+            <XCircle className="w-4 h-4 mr-1" />
+            Rejected
+          </Button>
+        </div>
+      </div>
+
+      {applications.length === 0 ? (
+        <Card>
+          <CardContent className="p-8 text-center text-muted-foreground">
+            No {statusFilter} vendor applications
+          </CardContent>
+        </Card>
+      ) : (
+        <div className="grid gap-4">
+          {applications.map((app) => (
+            <Card key={app.id} data-testid={`vendor-application-${app.id}`}>
+              <CardContent className="p-4">
+                <div className="flex items-start justify-between gap-4">
+                  <div className="flex-1">
+                    <div className="flex items-center gap-2 mb-2">
+                      <Store className="w-5 h-5 text-primary" />
+                      <h4 className="font-semibold">{app.name}</h4>
+                      {getStatusBadge(app.approvalStatus)}
+                    </div>
+                    <p className="text-sm text-muted-foreground mb-2">{app.description}</p>
+                    <div className="flex flex-wrap gap-4 text-sm text-muted-foreground">
+                      <span className="flex items-center gap-1">
+                        <Building2 className="w-4 h-4" />
+                        {app.category}
+                      </span>
+                      <span className="flex items-center gap-1">
+                        <Users className="w-4 h-4" />
+                        {app.ownerName || "Unknown"}
+                      </span>
+                      {app.ownerEmail && (
+                        <span className="flex items-center gap-1">
+                          <Mail className="w-4 h-4" />
+                          {app.ownerEmail}
+                        </span>
+                      )}
+                      {app.city && app.state && (
+                        <span>{app.city}, {app.state}</span>
+                      )}
+                    </div>
+                    {app.approvalNotes && app.approvalStatus !== "pending" && (
+                      <p className="text-sm mt-2 p-2 bg-muted rounded">
+                        <strong>Notes:</strong> {app.approvalNotes}
+                      </p>
+                    )}
+                  </div>
+                  {app.approvalStatus === "pending" && (
+                    <Button 
+                      variant="outline" 
+                      onClick={() => handleReview(app)}
+                      data-testid={`review-button-${app.id}`}
+                    >
+                      Review
+                    </Button>
+                  )}
+                </div>
+              </CardContent>
+            </Card>
+          ))}
+        </div>
+      )}
+
+      <Dialog open={reviewDialogOpen} onOpenChange={setReviewDialogOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Review Vendor Application</DialogTitle>
+          </DialogHeader>
+          {selectedApplication && (
+            <div className="space-y-4">
+              <div>
+                <Label className="text-muted-foreground">Business Name</Label>
+                <p className="font-medium">{selectedApplication.name}</p>
+              </div>
+              <div>
+                <Label className="text-muted-foreground">Category</Label>
+                <p>{selectedApplication.category}</p>
+              </div>
+              <div>
+                <Label className="text-muted-foreground">Description</Label>
+                <p className="text-sm">{selectedApplication.description || "No description"}</p>
+              </div>
+              <div>
+                <Label className="text-muted-foreground">Owner</Label>
+                <p>{selectedApplication.ownerName} ({selectedApplication.ownerEmail})</p>
+              </div>
+              <div>
+                <Label htmlFor="adminNotes">Admin Notes</Label>
+                <Textarea
+                  id="adminNotes"
+                  value={adminNotes}
+                  onChange={(e) => setAdminNotes(e.target.value)}
+                  placeholder="Add notes (required for rejection)"
+                  data-testid="input-admin-notes"
+                />
+              </div>
+            </div>
+          )}
+          <DialogFooter className="gap-2">
+            <Button
+              variant="destructive"
+              onClick={() => {
+                if (!adminNotes.trim()) {
+                  toast({ title: "Please add a rejection reason", variant: "destructive" });
+                  return;
+                }
+                rejectMutation.mutate({ id: selectedApplication!.id, notes: adminNotes });
+              }}
+              disabled={rejectMutation.isPending}
+              data-testid="button-reject"
+            >
+              {rejectMutation.isPending ? <Loader2 className="w-4 h-4 animate-spin" /> : <XCircle className="w-4 h-4 mr-1" />}
+              Reject
+            </Button>
+            <Button
+              onClick={() => {
+                approveMutation.mutate({ id: selectedApplication!.id, notes: adminNotes });
+              }}
+              disabled={approveMutation.isPending}
+              data-testid="button-approve"
+            >
+              {approveMutation.isPending ? <Loader2 className="w-4 h-4 animate-spin" /> : <CheckCircle2 className="w-4 h-4 mr-1" />}
+              Approve
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </div>
+  );
+}
+
 interface InfluencerApplication {
   id: string;
   userId: string;
@@ -987,6 +1243,10 @@ export default function AdminDashboard({ onBack }: AdminDashboardProps) {
 
         <Tabs defaultValue="users" className="space-y-4">
           <TabsList className="flex flex-wrap gap-1">
+            <TabsTrigger value="applications" className="gap-2" data-testid="tab-applications">
+              <Store className="w-4 h-4" />
+              Applications
+            </TabsTrigger>
             <TabsTrigger value="users" className="gap-2" data-testid="tab-users">
               <Users className="w-4 h-4" />
               Users
@@ -1012,6 +1272,10 @@ export default function AdminDashboard({ onBack }: AdminDashboardProps) {
               Influencers
             </TabsTrigger>
           </TabsList>
+
+          <TabsContent value="applications">
+            <VendorApplicationsTab />
+          </TabsContent>
 
           <TabsContent value="users">
             <UsersTab />
