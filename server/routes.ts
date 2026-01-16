@@ -105,6 +105,17 @@ export async function registerRoutes(
     });
   });
 
+  // Public vendors list endpoint for mobile app
+  app.get("/api/vendors", async (req, res) => {
+    try {
+      const businesses = await storage.getBusinesses({});
+      res.json(businesses || []);
+    } catch (error) {
+      console.error("Get vendors error:", error);
+      res.status(500).json({ error: "Failed to get vendors" });
+    }
+  });
+
   // Middleware to check if user can monetize (centralized guard for all payment/checkout/payout endpoints)
   const requireMonetization = async (req: any, res: any, next: any) => {
     const userId = req.session?.userId;
