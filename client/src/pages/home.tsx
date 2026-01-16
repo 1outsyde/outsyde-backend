@@ -324,6 +324,7 @@ export default function HomePage({ onViewBusiness, onViewPhotographer, onLoginRe
                 product={post.product}
                 service={post.service}
                 isAuthenticated={!!user}
+                isAdmin={!!user?.isAdmin}
                 onLike={toggleLikePost}
                 onSave={toggleSavePost}
                 onShare={(id) => console.log("Share:", id)}

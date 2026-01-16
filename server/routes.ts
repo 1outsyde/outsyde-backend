@@ -5303,6 +5303,38 @@ export async function registerRoutes(
     }
   });
 
+  // Admin delete any post
+  app.delete("/api/admin/posts/:postId", requireAdmin, async (req, res) => {
+    try {
+      const { postId } = req.params;
+      const adminUser = (req as any).adminUser;
+      
+      const post = await storage.getFeedPost(postId);
+      if (!post) {
+        return res.status(404).json({ error: "Post not found" });
+      }
+
+      await storage.deleteFeedPost(postId);
+
+      // Create audit log
+      await storage.createAuditLog({
+        actorId: adminUser.id,
+        actorType: "admin",
+        action: "delete_post",
+        targetType: "feed_post",
+        targetId: postId,
+        beforeState: { authorId: post.authorId, content: post.content?.substring(0, 100) },
+        afterState: null,
+      });
+
+      console.log(`[Admin] Deleted post ${postId} by ${adminUser.email}`);
+      res.json({ success: true });
+    } catch (error) {
+      console.error("Admin delete post error:", error);
+      res.status(500).json({ error: "Failed to delete post" });
+    }
+  });
+
   // ==================== ADMIN FULFILLMENT ROUTES ====================
 
   // Get all fulfillment tasks with optional filters
