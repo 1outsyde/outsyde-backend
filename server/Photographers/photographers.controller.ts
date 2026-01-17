@@ -146,6 +146,11 @@ export class PhotographerController {
       if (logoImage !== undefined) updates.logoImage = logoImage;
       if (brandColors !== undefined) updates.brandColors = brandColors;
 
+      // Guard against empty update payload to prevent SQL error
+      if (Object.keys(updates).length === 0) {
+        return res.status(400).json({ error: "No valid fields provided for update" });
+      }
+
       const updated = await PhotographerService.update(photographer.id, updates);
       if (!updated) {
         return res.status(404).json({ error: "Photographer not found" });
