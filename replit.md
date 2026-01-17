@@ -45,8 +45,18 @@ The Outsyde platform uses a React frontend, an Express (TypeScript) backend, and
     -   **Subscription Tier Changes:** Full upgrade/downgrade flow for business subscriptions, including proration, benefit migration, and notifications.
     -   **Subscription Enforcement (Server-Side):** Comprehensive enforcement of vendor subscriptions, blocking operations, hiding storefronts, and preventing transactions for inactive subscriptions, with a 3-day grace period for `past_due` statuses. Data remains readable for inactive vendors.
     -   **Stripe Express Onboarding:** Vendors and photographers must complete Stripe Express onboarding before accepting payments. Onboarding status tracked via `stripeAccountId` and `stripeOnboardingComplete` fields on Business/Photographer models. Unified API endpoints (`/api/vendor/stripe-onboarding/status` and `/api/vendor/stripe-onboarding/create-link`) handle both account types based on session. "Go Live" functionality blocked until onboarding complete. `account.updated` webhook updates completion status.
-    -   **Publishing Enforcement:** Vendors can create draft products/services without subscription, but publishing to "live" status requires both active Stripe subscription AND completed Stripe Connect onboarding.
-    -   **Checkout Verification:** At checkout, system verifies vendor Stripe account status via Stripe API (`chargesEnabled` and `payoutsEnabled`) before processing payment.
+    -   **Publishing Enforcement:** Vendors can create draft products/services without subscription, but publishing to "live" status requires:
+        1. `stripeOnboardingComplete === true` (Stripe Connect setup complete)
+        2. Active subscription (`subscriptionActive === true` or subscription status is `active`/`trialing`)
+        3. `approvalStatus === 'approved'` (admin has approved the vendor application)
+        Server returns 403 with specific error codes (`requiresOnboarding`, `requiresSubscription`, `requiresApproval`) on violation.
+    -   **Auto-Pause on Subscription Lapse:** When a vendor's subscription becomes inactive (canceled, past_due, etc.), all their live products/services are automatically paused via webhook handler. Paused items:
+        - Remain editable by vendor in dashboard
+        - Are NOT visible on public storefront (filtered out in queries)
+        - Are NOT purchasable at checkout (blocked with error)
+        - Auto-unpause when subscription reactivates
+        Audit logs track all auto-pause/unpause events.
+    -   **Checkout Verification:** At checkout, system verifies vendor Stripe account status via Stripe API (`chargesEnabled` and `payoutsEnabled`) before processing payment, and confirms product status is 'live'.
     -   **Multi-Staff System:** Businesses (barbershops, salons, spas) can manage team members with individual availability calendars. Staff members have their own Stripe Connect accounts for direct payouts. Each staff member receives 100% of booking revenue minus 4% platform fee (same as business rate). Shop arrangements for rent/commission splits are handled outside Outsyde. Staff Dashboard (`/staff-dashboard`) allows staff to view their bookings, earnings, and manage availability. Vendor Dashboard Team tab provides staff CRUD, invite management, and Stripe onboarding tracking. Booking flow includes staff selection when staff are available.
     -   **User Monetization Intent:** Captures user interest in selling products, offering services, or promoting as influencer. Fields: `wantsToSellProducts`, `wantsToOfferServices`, `wantsToPromoteAsInfluencer` (user-controlled) and `canMonetize` (system-controlled, requires approval). Endpoint: `POST /api/user/monetization-intent` updates intent fields only, never touches roles or canMonetize.
 -   **Mobile Backend (FlutterFlow):**

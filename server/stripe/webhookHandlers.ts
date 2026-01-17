@@ -420,6 +420,75 @@ export class WebhookHandlers {
       await storage.updateBusiness(vendorSub.businessId, {
         subscriptionActive: newStatus === "active",
       });
+
+      // Auto-pause/unpause logic respects the 3-day grace period for past_due subscriptions
+      // Use the same logic as isBusinessSubscriptionActive to ensure policy consistency
+      const subActiveStatus = await storage.isBusinessSubscriptionActive(vendorSub.businessId);
+      
+      // Determine previous subscription active status for transition detection
+      // (previous status is what it was before this webhook, now check actual enforcement status)
+      const wasActiveStatus = previousStatus === 'active' || previousStatus === 'trialing';
+      const isNowActiveByPolicy = subActiveStatus.active;
+      
+      // Auto-pause: Only when subscription enforcement status goes from active to inactive
+      // This respects grace periods - past_due within 3 days is still considered "active"
+      if (wasActiveStatus && !isNowActiveByPolicy) {
+        const pauseResult = await storage.pauseBusinessLiveItems(vendorSub.businessId);
+        if (pauseResult.pausedProducts > 0 || pauseResult.pausedServices > 0) {
+          console.log(`[Subscription Enforcement] Paused ${pauseResult.pausedProducts} products and ${pauseResult.pausedServices} services for business ${vendorSub.businessId} due to subscription status: ${newStatus} (${subActiveStatus.reason})`);
+          
+          // Audit log for auto-pause
+          await storage.createAuditLog({
+            actorId: 'system',
+            actorType: 'system',
+            action: 'items_auto_paused',
+            targetType: 'business',
+            targetId: vendorSub.businessId,
+            beforeState: { subscriptionStatus: previousStatus },
+            afterState: { 
+              subscriptionStatus: newStatus,
+              pausedProducts: pauseResult.pausedProducts,
+              pausedServices: pauseResult.pausedServices,
+              reason: subActiveStatus.reason,
+            },
+            metadata: {
+              vendorId: vendorSub.vendorId,
+              stripeSubscriptionId: vendorSub.stripeSubscriptionId,
+              reason: 'subscription_inactive_after_grace_period',
+            }
+          });
+        }
+      }
+
+      // Auto-unpause: When subscription becomes active again (from any inactive state)
+      const wasInactiveStatus = previousStatus !== 'active' && previousStatus !== 'trialing';
+      
+      if (wasInactiveStatus && isNowActiveByPolicy) {
+        const unpauseResult = await storage.unpauseBusinessPausedItems(vendorSub.businessId);
+        if (unpauseResult.unpausedProducts > 0 || unpauseResult.unpausedServices > 0) {
+          console.log(`[Subscription Enforcement] Unpaused ${unpauseResult.unpausedProducts} products and ${unpauseResult.unpausedServices} services for business ${vendorSub.businessId} due to subscription status: ${newStatus}`);
+          
+          // Audit log for auto-unpause
+          await storage.createAuditLog({
+            actorId: 'system',
+            actorType: 'system',
+            action: 'items_auto_unpaused',
+            targetType: 'business',
+            targetId: vendorSub.businessId,
+            beforeState: { subscriptionStatus: previousStatus },
+            afterState: { 
+              subscriptionStatus: newStatus,
+              unpausedProducts: unpauseResult.unpausedProducts,
+              unpausedServices: unpauseResult.unpausedServices,
+            },
+            metadata: {
+              vendorId: vendorSub.vendorId,
+              stripeSubscriptionId: vendorSub.stripeSubscriptionId,
+              reason: 'subscription_reactivated',
+            }
+          });
+        }
+      }
     }
 
     // Handle tier change notifications and benefit migration

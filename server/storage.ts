@@ -391,6 +391,10 @@ export interface IStorage {
   updateVendorService(id: string, updates: Partial<VendorService>): Promise<VendorService | undefined>;
   deleteVendorService(id: string): Promise<void>;
 
+  // Subscription enforcement - pause/unpause items
+  pauseBusinessLiveItems(businessId: string): Promise<{ pausedProducts: number; pausedServices: number }>;
+  unpauseBusinessPausedItems(businessId: string): Promise<{ unpausedProducts: number; unpausedServices: number }>;
+
   // Business Availability Calendar
   getBusinessAvailability(businessId: string, startDate?: string, endDate?: string): Promise<BusinessAvailability[]>;
   getBusinessAvailabilitySlot(id: string): Promise<BusinessAvailability | undefined>;
@@ -3655,6 +3659,60 @@ export class DatabaseStorage implements IStorage {
 
   async deleteVendorService(id: string): Promise<void> {
     await db.delete(vendorServices).where(eq(vendorServices.id, id));
+  }
+
+  // =========================
+  // SUBSCRIPTION ENFORCEMENT - PAUSE/UNPAUSE ITEMS
+  // =========================
+
+  async pauseBusinessLiveItems(businessId: string): Promise<{ pausedProducts: number; pausedServices: number }> {
+    // Pause all live products for this business
+    const productResult = await db.update(vendorProducts)
+      .set({ status: 'paused' })
+      .where(and(
+        eq(vendorProducts.businessId, businessId),
+        eq(vendorProducts.status, 'live')
+      ))
+      .returning();
+
+    // Pause all live services for this business
+    const serviceResult = await db.update(vendorServices)
+      .set({ status: 'paused' })
+      .where(and(
+        eq(vendorServices.businessId, businessId),
+        eq(vendorServices.status, 'live')
+      ))
+      .returning();
+
+    return {
+      pausedProducts: productResult.length,
+      pausedServices: serviceResult.length,
+    };
+  }
+
+  async unpauseBusinessPausedItems(businessId: string): Promise<{ unpausedProducts: number; unpausedServices: number }> {
+    // Unpause all paused products for this business (restore to live)
+    const productResult = await db.update(vendorProducts)
+      .set({ status: 'live' })
+      .where(and(
+        eq(vendorProducts.businessId, businessId),
+        eq(vendorProducts.status, 'paused')
+      ))
+      .returning();
+
+    // Unpause all paused services for this business (restore to live)
+    const serviceResult = await db.update(vendorServices)
+      .set({ status: 'live' })
+      .where(and(
+        eq(vendorServices.businessId, businessId),
+        eq(vendorServices.status, 'paused')
+      ))
+      .returning();
+
+    return {
+      unpausedProducts: productResult.length,
+      unpausedServices: serviceResult.length,
+    };
   }
 
   // =========================

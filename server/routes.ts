@@ -2677,6 +2677,15 @@ export async function registerRoutes(
         });
       }
 
+      // Check business is approved before allowing Go Live
+      if ((business as any).approvalStatus !== 'approved') {
+        return res.status(403).json({
+          error: "Business not approved",
+          message: "Your business application must be approved before you can publish products. Please wait for admin approval.",
+          requiresApproval: true,
+        });
+      }
+
       const product = await storage.getVendorProduct(req.params.id);
       if (!product || product.businessId !== business.id) {
         return res.status(404).json({ error: "Product not found" });
@@ -2957,6 +2966,15 @@ export async function registerRoutes(
           error: "Subscription required",
           message: "You must have an active subscription to publish services. Please subscribe to a plan first.",
           requiresSubscription: true,
+        });
+      }
+
+      // Check business is approved before allowing Go Live
+      if ((business as any).approvalStatus !== 'approved') {
+        return res.status(403).json({
+          error: "Business not approved",
+          message: "Your business application must be approved before you can publish services. Please wait for admin approval.",
+          requiresApproval: true,
         });
       }
 
