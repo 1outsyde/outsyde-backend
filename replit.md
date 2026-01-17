@@ -24,7 +24,7 @@ The Outsyde platform uses a React frontend, an Express (TypeScript) backend, and
     -   **Referral System:** Users earn points for referrals, referred users get bonus points. Referral rewards are deferred and anti-abuse mechanisms are in place.
     -   **Cart Management:** Database-backed for authenticated users, `localStorage` for guests.
     -   **Multi-Vendor Checkout:** Supports purchasing from multiple vendors in a single cart session. Creates an `orderGroup` linking separate orders per vendor, with sequential Stripe checkout sessions. Frontend handles URL-based redirect flow for checkout continuation.
-    -   **Notifications:** Web Push for cart abandonment, server-side in-app notifications for various events.
+    -   **Notifications:** Web Push for cart abandonment, server-side in-app notifications for various events. Admin receives in-app notifications AND email (via Resend) when new vendor/photographer applications are submitted.
     -   **Refund System:** Allows users to request refunds, notifying admin. Refund approvals trigger point reversal, review revocation, and rating recalculation.
     -   **Availability Calendars:** Dedicated availability management for businesses and photographers, with CRUD operations and UI components. Protected against double-booking and ensures atomic reservation of slots. Slots are released upon cancellation/refund.
     -   **Billing Address Management:** Support for all user types.

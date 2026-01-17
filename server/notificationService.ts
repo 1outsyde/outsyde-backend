@@ -1,5 +1,6 @@
 import { storage } from './storage';
 import { sendPushNotification, isPushConfigured } from './pushService';
+import { isEmailConfigured, sendNewVendorApplicationEmail, sendNewPhotographerApplicationEmail } from './emailService';
 import type { InsertNotification } from '@shared/schema';
 
 export type NotificationType = 
@@ -368,6 +369,7 @@ export const NotificationTriggers = {
     state?: string | null;
   }): Promise<void> {
     const adminUsers = await storage.getAdminUsers();
+    const location = params.city && params.state ? `${params.city}, ${params.state}` : null;
     
     for (const admin of adminUsers) {
       await sendNotification({
@@ -383,9 +385,21 @@ export const NotificationTriggers = {
           businessCategory: params.businessCategory,
           ownerName: params.ownerName,
           ownerEmail: params.ownerEmail,
-          location: params.city && params.state ? `${params.city}, ${params.state}` : null,
+          location,
         },
       });
+
+      if (admin.email && await isEmailConfigured()) {
+        await sendNewVendorApplicationEmail({
+          adminEmail: admin.email,
+          businessName: params.businessName,
+          businessCategory: params.businessCategory,
+          ownerName: params.ownerName,
+          ownerEmail: params.ownerEmail,
+          location,
+          businessId: params.businessId,
+        });
+      }
     }
     
     console.log(`[Admin Notification] Notified ${adminUsers.length} admin(s) about new vendor: ${params.businessName}`);
@@ -401,6 +415,7 @@ export const NotificationTriggers = {
     specialties?: string[];
   }): Promise<void> {
     const adminUsers = await storage.getAdminUsers();
+    const location = params.city && params.state ? `${params.city}, ${params.state}` : null;
     
     for (const admin of adminUsers) {
       await sendNotification({
@@ -415,10 +430,22 @@ export const NotificationTriggers = {
           displayName: params.displayName,
           ownerName: params.ownerName,
           ownerEmail: params.ownerEmail,
-          location: params.city && params.state ? `${params.city}, ${params.state}` : null,
+          location,
           specialties: params.specialties,
         },
       });
+
+      if (admin.email && await isEmailConfigured()) {
+        await sendNewPhotographerApplicationEmail({
+          adminEmail: admin.email,
+          displayName: params.displayName,
+          ownerName: params.ownerName,
+          ownerEmail: params.ownerEmail,
+          location,
+          specialties: params.specialties,
+          photographerId: params.photographerId,
+        });
+      }
     }
     
     console.log(`[Admin Notification] Notified ${adminUsers.length} admin(s) about new photographer: ${params.displayName}`);
