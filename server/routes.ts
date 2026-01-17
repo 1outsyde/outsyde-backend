@@ -55,6 +55,7 @@ import {
   verifyRefreshToken,
   authMiddleware,
   optionalAuthMiddleware,
+  getUserIdFromRequest,
   type AuthenticatedRequest,
 } from "./auth";
 import { stripeService } from "./stripe/stripeService";
@@ -3725,10 +3726,11 @@ export async function registerRoutes(
   });
 
   // ==================== STAFF DASHBOARD ROUTES (Staff-facing) ====================
+  // Note: These endpoints now support both JWT (Authorization header) and session-based auth
 
   // Get current user's staff profile
   app.get("/api/staff/me", async (req, res) => {
-    const userId = req.session?.userId;
+    const userId = getUserIdFromRequest(req);
     if (!userId) {
       return res.status(401).json({ error: "Not authenticated" });
     }
@@ -3748,7 +3750,7 @@ export async function registerRoutes(
 
   // Get staff member's own bookings
   app.get("/api/staff/my-bookings", async (req, res) => {
-    const userId = req.session?.userId;
+    const userId = getUserIdFromRequest(req);
     if (!userId) {
       return res.status(401).json({ error: "Not authenticated" });
     }
@@ -3769,7 +3771,7 @@ export async function registerRoutes(
 
   // Get staff member's own availability
   app.get("/api/staff/my-availability", async (req, res) => {
-    const userId = req.session?.userId;
+    const userId = getUserIdFromRequest(req);
     if (!userId) {
       return res.status(401).json({ error: "Not authenticated" });
     }
@@ -3796,7 +3798,7 @@ export async function registerRoutes(
 
   // Add staff member's own availability
   app.post("/api/staff/my-availability", async (req, res) => {
-    const userId = req.session?.userId;
+    const userId = getUserIdFromRequest(req);
     if (!userId) {
       return res.status(401).json({ error: "Not authenticated" });
     }
@@ -3836,7 +3838,7 @@ export async function registerRoutes(
 
   // Delete staff member's own availability
   app.delete("/api/staff/my-availability/:id", async (req, res) => {
-    const userId = req.session?.userId;
+    const userId = getUserIdFromRequest(req);
     if (!userId) {
       return res.status(401).json({ error: "Not authenticated" });
     }
@@ -3865,7 +3867,7 @@ export async function registerRoutes(
 
   // Get staff member's earnings
   app.get("/api/staff/my-earnings", async (req, res) => {
-    const userId = req.session?.userId;
+    const userId = getUserIdFromRequest(req);
     if (!userId) {
       return res.status(401).json({ error: "Not authenticated" });
     }
@@ -3909,7 +3911,7 @@ export async function registerRoutes(
 
   // Staff member initiates their own Stripe onboarding
   app.post("/api/staff/stripe-onboarding/create-link", async (req, res) => {
-    const userId = req.session?.userId;
+    const userId = getUserIdFromRequest(req);
     if (!userId) {
       return res.status(401).json({ error: "Not authenticated" });
     }

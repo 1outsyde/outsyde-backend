@@ -3,11 +3,13 @@ import { Request, Response } from "express";
 import { PhotographerService } from "./photographers.service";
 import { stripeService } from "../stripe/stripeService";
 import { storage } from "../storage";
+import { verifyAccessToken, AuthenticatedRequest } from "../auth";
 
 // Helper to resolve photographer for authenticated user
+// Supports both JWT (Authorization header) and session-based auth
 // Returns: { user, photographer, error? }
 // Error cases:
-//   - 401: Not authenticated (no userId)
+//   - 401: Not authenticated (no userId from JWT or session)
 //   - 403: Not a photographer (role check)
 //   - null photographer: Profile doesn't exist (setupRequired)
 async function resolvePhotographerForUser(req: Request): Promise<{
@@ -16,10 +18,30 @@ async function resolvePhotographerForUser(req: Request): Promise<{
   photographer: any | null;
   error?: { status: number; message: string };
 }> {
-  const userId = req.session?.userId;
-  const photographerId = req.session?.photographerId;
+  let userId: string | null = null;
+  let photographerId: string | null = null;
 
-  // 401: Not authenticated
+  // First try JWT authentication (Authorization: Bearer <token>)
+  const authHeader = req.headers.authorization;
+  if (authHeader && authHeader.startsWith("Bearer ")) {
+    const token = authHeader.substring(7);
+    const payload = verifyAccessToken(token);
+    if (payload) {
+      userId = payload.userId;
+      // Also set session userId for downstream compatibility
+      if (req.session) {
+        req.session.userId = payload.userId;
+      }
+    }
+  }
+
+  // Fall back to session-based auth if no JWT
+  if (!userId) {
+    userId = req.session?.userId || null;
+    photographerId = req.session?.photographerId || null;
+  }
+
+  // 401: Not authenticated (neither JWT nor session)
   if (!userId) {
     return { userId: null, user: null, photographer: null, error: { status: 401, message: "Not authenticated" } };
   }
@@ -44,7 +66,7 @@ async function resolvePhotographerForUser(req: Request): Promise<{
     photographer = await PhotographerService.getByUserId(userId);
   }
 
-  // Update session if we found the photographer but photographerId wasn't set
+  // Update session if we found the photographer but photographerId wasn't set (session-based only)
   if (photographer && !photographerId && req.session) {
     req.session.photographerId = photographer.id;
   }

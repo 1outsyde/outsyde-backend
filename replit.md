@@ -63,6 +63,8 @@ The Outsyde platform uses a React frontend, an Express (TypeScript) backend, and
     -   Backend serves as API for FlutterFlow mobile app
     -   Authentication: JWT tokens (1hr access, 7-day refresh) via `/api/auth/mobile/login` and `/api/auth/mobile/refresh`
     -   Monetization intent endpoint accepts userId from JWT token or request body (for FlutterFlow integration where auth is handled client-side)
+    -   **Hybrid Auth Support:** All `/api/photographers/me/*` and `/api/staff/*` endpoints accept EITHER JWT (Authorization: Bearer header) OR session cookies, enabling Render/external deployments without cross-origin cookie issues
+    -   Helper functions: `getUserIdFromRequest(req)` extracts userId from JWT or session; `hybridAuthMiddleware` can be applied to any endpoint needing dual auth support
 -   **Data Privacy:**
     -   **DOB:** Collected for eligibility, full DOB visible to user/admin only; vendors see age ranges. `sanitizeUserForResponse()` removes DOB from non-admin API responses.
     -   **Race/Ethnicity:** Optional, never exposed individually; only for aggregated analytics (future). `sanitizeUserForResponse()` removes ethnicity from all responses.

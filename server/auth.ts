@@ -100,3 +100,70 @@ export function optionalAuthMiddleware(req: AuthenticatedRequest, res: Response,
   
   next();
 }
+
+/**
+ * Hybrid auth middleware - accepts EITHER JWT (Authorization header) OR session cookies
+ * Use this for endpoints that need to work with both mobile (JWT) and web (session) clients
+ * 
+ * If JWT is present and valid, sets req.user with token payload AND req.session.userId
+ * If no JWT, falls back to existing session-based auth
+ * Returns 401 only if NEITHER JWT nor session is valid
+ */
+export function hybridAuthMiddleware(req: AuthenticatedRequest, res: Response, next: NextFunction) {
+  const authHeader = req.headers.authorization;
+  
+  // First try JWT authentication
+  if (authHeader && authHeader.startsWith("Bearer ")) {
+    const token = authHeader.substring(7);
+    const payload = verifyAccessToken(token);
+    if (payload) {
+      req.user = payload;
+      // Also set session userId for compatibility with existing code
+      if (req.session) {
+        req.session.userId = payload.userId;
+      }
+      return next();
+    }
+    // Invalid JWT - return 401 immediately
+    return res.status(401).json({ 
+      success: false, 
+      error: { 
+        code: "TOKEN_INVALID", 
+        message: "Invalid or expired token" 
+      } 
+    });
+  }
+  
+  // Fall back to session-based auth
+  if (req.session?.userId) {
+    return next();
+  }
+  
+  // Neither JWT nor session - return 401
+  return res.status(401).json({ 
+    success: false, 
+    error: { 
+      code: "NO_AUTH", 
+      message: "Authentication required" 
+    } 
+  });
+}
+
+/**
+ * Helper function to get userId from request (JWT or session)
+ * Use this in route handlers when you need the userId but don't want middleware
+ */
+export function getUserIdFromRequest(req: Request): string | null {
+  // First try JWT authentication
+  const authHeader = req.headers.authorization;
+  if (authHeader && authHeader.startsWith("Bearer ")) {
+    const token = authHeader.substring(7);
+    const payload = verifyAccessToken(token);
+    if (payload) {
+      return payload.userId;
+    }
+  }
+  
+  // Fall back to session
+  return req.session?.userId || null;
+}
