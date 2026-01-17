@@ -165,6 +165,7 @@ export type NewPhotographerInput = {
 export interface IStorage {
   getUser(id: string): Promise<User | undefined>;
   getUserByEmail(email: string): Promise<User | undefined>;
+  getAdminUsers(): Promise<User[]>;
   createUser(user: InsertUser): Promise<User>;
   updateUser(id: string, updates: Partial<User>): Promise<User | undefined>;
   upsertUser(user: UpsertUser): Promise<User>;
@@ -173,6 +174,7 @@ export interface IStorage {
   getBusinessByOwnerId(ownerId: string): Promise<Business | undefined>;
   getBusinessByStripeAccountId(stripeAccountId: string): Promise<Business | undefined>;
   getBusinesses(filters?: { city?: string; category?: string; search?: string }): Promise<Business[]>;
+  getBusinessesByApprovalStatus(status: string): Promise<(Business & { owner?: User })[]>;
   createBusiness(business: InsertBusiness): Promise<Business>;
   updateBusiness(id: string, updates: Partial<Business>): Promise<Business | undefined>;
 
@@ -710,6 +712,11 @@ export class DatabaseStorage implements IStorage {
     return user;
   }
 
+  async getAdminUsers(): Promise<User[]> {
+    const result = await db.select().from(users).where(eq(users.isAdmin, true));
+    return result;
+  }
+
   // =========================
   // BUSINESSES
   // =========================
@@ -755,6 +762,23 @@ export class DatabaseStorage implements IStorage {
     }
 
     return db.select().from(businesses);
+  }
+
+  async getBusinessesByApprovalStatus(status: string): Promise<(Business & { owner?: User })[]> {
+    const result = await db
+      .select({
+        business: businesses,
+        owner: users,
+      })
+      .from(businesses)
+      .leftJoin(users, eq(businesses.ownerId, users.id))
+      .where(eq(businesses.approvalStatus, status))
+      .orderBy(desc(businesses.createdAt));
+
+    return result.map(row => ({
+      ...row.business,
+      owner: row.owner || undefined,
+    }));
   }
 
   async createBusiness(insertBusiness: InsertBusiness): Promise<Business> {

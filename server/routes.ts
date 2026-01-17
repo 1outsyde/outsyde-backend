@@ -253,9 +253,16 @@ export async function registerRoutes(
         approvalStatus: "pending", // New businesses require approval
       });
 
-      // TODO: Send email notification to admin when Resend integration is configured
-      // await sendAdminNotification({ type: 'new_vendor_application', business });
-      console.log(`[Admin Notification] New vendor application: ${business.name} (${business.id})`);
+      // Send in-app notification to all admins
+      await NotificationTriggers.newVendorApplication({
+        businessId: business.id,
+        businessName: business.name,
+        businessCategory: business.category,
+        ownerName: data.name,
+        ownerEmail: data.email,
+        city: data.city,
+        state: data.state,
+      });
 
       if (req.session) {
         req.session.userId = user.id;
@@ -311,6 +318,17 @@ export async function registerRoutes(
         state: data.state,
         hourlyRate: data.hourlyRate,
         portfolioUrl: data.portfolioUrl,
+        specialties: data.specialties,
+      });
+
+      // Send in-app notification to all admins
+      await NotificationTriggers.newPhotographerApplication({
+        photographerId: photographer.id,
+        displayName: data.displayName,
+        ownerName: data.name,
+        ownerEmail: data.email,
+        city: data.city,
+        state: data.state,
         specialties: data.specialties,
       });
 
@@ -5205,28 +5223,59 @@ export async function registerRoutes(
   app.get("/api/admin/applications", requireAdmin, async (req, res) => {
     try {
       const { status = "pending" } = req.query;
-      const allBusinesses = await storage.getBusinesses({});
-      
-      // Filter by approval status
-      const filtered = allBusinesses.filter(b => 
-        (b as any).approvalStatus === status
-      );
+      const applications = await storage.getBusinessesByApprovalStatus(status as string);
       
       // Enrich with owner info
-      const enriched = await Promise.all(filtered.map(async (business) => {
-        const owner = await storage.getUser((business as any).ownerId);
+      const enriched = applications.map((business) => {
+        const owner = business.owner;
         return {
           ...business,
           ownerName: owner?.name || null,
           ownerEmail: owner?.email || null,
           ownerPhone: owner?.phone || null,
+          ownerAddress: owner?.address || null,
+          ownerCity: owner?.city || null,
+          ownerState: owner?.state || null,
+          ownerZipCode: owner?.zipCode || null,
         };
-      }));
+      });
 
       res.json({ applications: enriched });
     } catch (error) {
       console.error("Get vendor applications error:", error);
       res.status(500).json({ error: "Failed to get applications" });
+    }
+  });
+
+  // Get single vendor application with full details
+  app.get("/api/admin/applications/:id", requireAdmin, async (req, res) => {
+    try {
+      const { id } = req.params;
+      const business = await storage.getBusiness(id);
+      
+      if (!business) {
+        return res.status(404).json({ error: "Application not found" });
+      }
+      
+      const owner = await storage.getUser((business as any).ownerId);
+      
+      res.json({
+        application: {
+          ...business,
+          ownerName: owner?.name || null,
+          ownerEmail: owner?.email || null,
+          ownerPhone: owner?.phone || null,
+          ownerAddress: owner?.address || null,
+          ownerCity: owner?.city || null,
+          ownerState: owner?.state || null,
+          ownerZipCode: owner?.zipCode || null,
+          ownerDateOfBirth: null,
+          ownerCreatedAt: owner?.createdAt || null,
+        },
+      });
+    } catch (error) {
+      console.error("Get vendor application error:", error);
+      res.status(500).json({ error: "Failed to get application" });
     }
   });
 

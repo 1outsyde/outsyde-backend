@@ -14,7 +14,9 @@ export type NotificationType =
   | 'order_shipped'
   | 'photographer_assigned'
   | 'subscription_tier_changed'
-  | 'stripe_onboarding_complete';
+  | 'stripe_onboarding_complete'
+  | 'new_vendor_application'
+  | 'new_photographer_application';
 
 interface NotificationData {
   userId: string;
@@ -68,6 +70,10 @@ function getNotificationUrl(type: NotificationType, referenceType?: string, refe
       return '/profile';
     case 'new_order':
       return referenceId ? `/vendor/orders/${referenceId}` : '/vendor/orders';
+    case 'new_vendor_application':
+      return referenceId ? `/admin/applications/${referenceId}` : '/admin/applications';
+    case 'new_photographer_application':
+      return referenceId ? `/admin/photographer-applications/${referenceId}` : '/admin/photographer-applications';
     default:
       return '/';
   }
@@ -350,6 +356,72 @@ export const NotificationTriggers = {
         businessName: params.businessName,
       },
     });
+  },
+
+  async newVendorApplication(params: {
+    businessId: string;
+    businessName: string;
+    businessCategory: string;
+    ownerName: string;
+    ownerEmail: string;
+    city?: string | null;
+    state?: string | null;
+  }): Promise<void> {
+    const adminUsers = await storage.getAdminUsers();
+    
+    for (const admin of adminUsers) {
+      await sendNotification({
+        userId: admin.id,
+        type: 'new_vendor_application',
+        title: 'New Vendor Application',
+        message: `${params.businessName} (${params.businessCategory}) has applied to join Outsyde. Owner: ${params.ownerName}`,
+        referenceType: 'business',
+        referenceId: params.businessId,
+        metadata: {
+          businessId: params.businessId,
+          businessName: params.businessName,
+          businessCategory: params.businessCategory,
+          ownerName: params.ownerName,
+          ownerEmail: params.ownerEmail,
+          location: params.city && params.state ? `${params.city}, ${params.state}` : null,
+        },
+      });
+    }
+    
+    console.log(`[Admin Notification] Notified ${adminUsers.length} admin(s) about new vendor: ${params.businessName}`);
+  },
+
+  async newPhotographerApplication(params: {
+    photographerId: string;
+    displayName: string;
+    ownerName: string;
+    ownerEmail: string;
+    city?: string | null;
+    state?: string | null;
+    specialties?: string[];
+  }): Promise<void> {
+    const adminUsers = await storage.getAdminUsers();
+    
+    for (const admin of adminUsers) {
+      await sendNotification({
+        userId: admin.id,
+        type: 'new_photographer_application',
+        title: 'New Photographer Application',
+        message: `${params.displayName} has applied to join Outsyde as a photographer. Location: ${params.city || 'Unknown'}, ${params.state || 'Unknown'}`,
+        referenceType: 'photographer',
+        referenceId: params.photographerId,
+        metadata: {
+          photographerId: params.photographerId,
+          displayName: params.displayName,
+          ownerName: params.ownerName,
+          ownerEmail: params.ownerEmail,
+          location: params.city && params.state ? `${params.city}, ${params.state}` : null,
+          specialties: params.specialties,
+        },
+      });
+    }
+    
+    console.log(`[Admin Notification] Notified ${adminUsers.length} admin(s) about new photographer: ${params.displayName}`);
   },
 };
 
