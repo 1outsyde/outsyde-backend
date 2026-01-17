@@ -202,6 +202,8 @@ function AppContent() {
     } catch (e) {
       // Ignore errors
     }
+    // Clear user data immediately to force UI update (bypasses 5-min staleTime cache)
+    queryClient.setQueryData(["/api/auth/user"], null);
     queryClient.invalidateQueries({ queryKey: ["/api/auth/user"] });
     setCurrentPage("home");
     setActiveTab("home");
