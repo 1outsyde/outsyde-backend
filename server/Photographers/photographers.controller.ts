@@ -4,29 +4,87 @@ import { PhotographerService } from "./photographers.service";
 import { stripeService } from "../stripe/stripeService";
 import { storage } from "../storage";
 
+// Helper to resolve photographer for authenticated user
+// Returns: { user, photographer, error? }
+// Error cases:
+//   - 401: Not authenticated (no userId)
+//   - 403: Not a photographer (role check)
+//   - null photographer: Profile doesn't exist (setupRequired)
+async function resolvePhotographerForUser(req: Request): Promise<{
+  userId: string | null;
+  user: any | null;
+  photographer: any | null;
+  error?: { status: number; message: string };
+}> {
+  const userId = req.session?.userId;
+  const photographerId = req.session?.photographerId;
+
+  // 401: Not authenticated
+  if (!userId) {
+    return { userId: null, user: null, photographer: null, error: { status: 401, message: "Not authenticated" } };
+  }
+
+  // Get user to check role
+  const user = await storage.getUser(userId);
+  if (!user) {
+    return { userId, user: null, photographer: null, error: { status: 401, message: "User not found" } };
+  }
+
+  // 403: Not a photographer role
+  if (!user.isPhotographer) {
+    return { userId, user, photographer: null, error: { status: 403, message: "Not authorized as photographer" } };
+  }
+
+  // Try to get photographer profile
+  let photographer = null;
+  if (photographerId) {
+    photographer = await PhotographerService.get(photographerId);
+  }
+  if (!photographer) {
+    photographer = await PhotographerService.getByUserId(userId);
+  }
+
+  // Update session if we found the photographer but photographerId wasn't set
+  if (photographer && !photographerId && req.session) {
+    req.session.photographerId = photographer.id;
+  }
+
+  return { userId, user, photographer };
+}
+
 export class PhotographerController {
   // GET /api/photographers/me
+  // Returns photographer profile or { setupRequired: true } if profile doesn't exist
   static async getMe(req: Request, res: Response) {
     try {
-      const photographerId = req.session?.photographerId;
-      const userId = req.session?.userId;
+      const { userId, user, photographer, error } = await resolvePhotographerForUser(req);
       
-      if (!photographerId && !userId) {
-        return res.status(401).json({ error: "Not authenticated" });
+      if (error) {
+        return res.status(error.status).json({ error: error.message });
       }
 
-      let photographer = null;
-      if (photographerId) {
-        photographer = await PhotographerService.get(photographerId);
-      } else if (userId) {
-        photographer = await PhotographerService.getByUserId(userId);
-      }
-      
+      // Profile doesn't exist - return setupRequired instead of 404
       if (!photographer) {
-        return res.status(404).json({ error: "Photographer not found" });
+        return res.json({ 
+          setupRequired: true,
+          user: { id: userId, email: user?.email, name: user?.name, isPhotographer: true },
+          message: "Photographer profile setup required"
+        });
       }
 
-      res.json(photographer);
+      // Check if profile is complete (has required business fields)
+      const isProfileComplete = !!(
+        photographer.displayName &&
+        photographer.hourlyRate > 0 &&
+        photographer.city &&
+        photographer.state
+      );
+
+      res.json({ 
+        ...photographer,
+        isProfileComplete,
+        stripeConnected: photographer.stripeOnboardingComplete || false,
+      });
     } catch (error) {
       console.error("Get me photographer error:", error);
       res.status(500).json({ error: "Failed to fetch photographer" });
@@ -36,20 +94,18 @@ export class PhotographerController {
   // PATCH /api/photographers/me - Update authenticated photographer's profile
   static async updateMe(req: Request, res: Response) {
     try {
-      const photographerId = req.session?.photographerId;
-      const userId = req.session?.userId;
+      const { userId, user, photographer, error } = await resolvePhotographerForUser(req);
       
-      if (!photographerId && !userId) {
-        return res.status(401).json({ error: "Not authenticated" });
+      if (error) {
+        return res.status(error.status).json({ error: error.message });
       }
 
-      let targetPhotographerId = photographerId;
-      if (!targetPhotographerId && userId) {
-        const photographer = await PhotographerService.getByUserId(userId);
-        if (!photographer) {
-          return res.status(404).json({ error: "Photographer not found" });
-        }
-        targetPhotographerId = photographer.id;
+      // If no profile exists, return setupRequired
+      if (!photographer) {
+        return res.status(400).json({ 
+          error: "Photographer profile not found",
+          setupRequired: true 
+        });
       }
 
       const { displayName, bio, city, state, portfolioUrl, hourlyRate, specialties, coverImage, logoImage, brandColors } = req.body;
@@ -68,7 +124,7 @@ export class PhotographerController {
       if (logoImage !== undefined) updates.logoImage = logoImage;
       if (brandColors !== undefined) updates.brandColors = brandColors;
 
-      const updated = await PhotographerService.update(targetPhotographerId!, updates);
+      const updated = await PhotographerService.update(photographer.id, updates);
       if (!updated) {
         return res.status(404).json({ error: "Photographer not found" });
       }
@@ -83,14 +139,20 @@ export class PhotographerController {
   // GET /api/photographers/me/stripe-status
   static async getStripeStatus(req: Request, res: Response) {
     try {
-      const photographerId = req.session?.photographerId;
-      if (!photographerId) {
-        return res.status(401).json({ error: "Not authenticated as photographer" });
+      const { photographer, error } = await resolvePhotographerForUser(req);
+      
+      if (error) {
+        return res.status(error.status).json({ error: error.message });
       }
 
-      const photographer = await PhotographerService.get(photographerId);
+      // If no profile or no Stripe account, return default status
       if (!photographer?.stripeAccountId) {
-        return res.json({ chargesEnabled: false, payoutsEnabled: false, detailsSubmitted: false });
+        return res.json({ 
+          chargesEnabled: false, 
+          payoutsEnabled: false, 
+          detailsSubmitted: false,
+          setupRequired: !photographer 
+        });
       }
 
       const status = await stripeService.getConnectAccountStatus(photographer.stripeAccountId);
@@ -104,20 +166,22 @@ export class PhotographerController {
   // POST /api/photographers/me/stripe-onboarding
   static async startStripeOnboarding(req: Request, res: Response) {
     try {
-      const userId = req.session?.userId;
-      const photographerId = req.session?.photographerId;
-      if (!photographerId || !userId) {
-        return res.status(401).json({ error: "Not authenticated as photographer" });
+      const { userId, user, photographer, error } = await resolvePhotographerForUser(req);
+      
+      if (error) {
+        return res.status(error.status).json({ error: error.message });
       }
 
-      const photographer = await PhotographerService.get(photographerId);
+      // Stripe onboarding requires a photographer profile to exist
       if (!photographer) {
-        return res.status(404).json({ error: "Photographer not found" });
+        return res.status(400).json({ 
+          error: "Photographer profile must be created first",
+          setupRequired: true 
+        });
       }
 
-      const user = await storage.getUser(userId);
-      if (!user) {
-        return res.status(404).json({ error: "User not found" });
+      if (!user?.email) {
+        return res.status(400).json({ error: "User email required for Stripe onboarding" });
       }
 
       const host = req.get('host') || process.env.REPLIT_DOMAINS?.split(',')[0];
@@ -129,12 +193,12 @@ export class PhotographerController {
       
       if (!stripeAccountId) {
         const account = await stripeService.createConnectAccount(
-          user.email!,
-          photographerId,
+          user.email,
+          photographer.id,
           photographer.displayName
         );
         stripeAccountId = account.id;
-        await storage.updatePhotographer(photographerId, { stripeAccountId });
+        await storage.updatePhotographer(photographer.id, { stripeAccountId });
       }
 
       const accountLink = await stripeService.createConnectOnboardingLink(
@@ -265,23 +329,18 @@ export class PhotographerController {
   // GET /api/photographers/me/bookings
   static async getBookingRecords(req: Request, res: Response) {
     try {
-      const photographerId = req.session?.photographerId;
-      const userId = req.session?.userId;
+      const { photographer, error } = await resolvePhotographerForUser(req);
       
-      if (!photographerId && !userId) {
-        return res.status(401).json({ error: "Not authenticated" });
+      if (error) {
+        return res.status(error.status).json({ error: error.message });
       }
 
-      let targetPhotographerId = photographerId;
-      if (!targetPhotographerId && userId) {
-        const photographer = await PhotographerService.getByUserId(userId);
-        if (!photographer) {
-          return res.status(404).json({ error: "Photographer not found" });
-        }
-        targetPhotographerId = photographer.id;
+      // If no profile, return empty bookings with setupRequired flag
+      if (!photographer) {
+        return res.json({ bookings: [], setupRequired: true });
       }
 
-      const bookings = await storage.getPhotographerBookingRecords(targetPhotographerId!);
+      const bookings = await storage.getPhotographerBookingRecords(photographer.id);
       res.json({ bookings });
     } catch (error) {
       console.error("Get photographer booking records error:", error);
@@ -292,24 +351,19 @@ export class PhotographerController {
   // GET /api/photographers/me/services - Get all services for authenticated photographer
   static async getMyServices(req: Request, res: Response) {
     try {
-      const photographerId = req.session?.photographerId;
-      const userId = req.session?.userId;
+      const { photographer, error } = await resolvePhotographerForUser(req);
       
-      if (!photographerId && !userId) {
-        return res.status(401).json({ error: "Not authenticated" });
+      if (error) {
+        return res.status(error.status).json({ error: error.message });
       }
 
-      let targetPhotographerId = photographerId;
-      if (!targetPhotographerId && userId) {
-        const photographer = await PhotographerService.getByUserId(userId);
-        if (!photographer) {
-          return res.status(404).json({ error: "Photographer not found" });
-        }
-        targetPhotographerId = photographer.id;
+      // If no profile, return empty services with setupRequired flag
+      if (!photographer) {
+        return res.json({ services: [], setupRequired: true });
       }
 
       // Owner dashboard: return all services regardless of status (draft, live, archived)
-      const services = await storage.getAllPhotographerServices(targetPhotographerId!);
+      const services = await storage.getAllPhotographerServices(photographer.id);
       res.json({ services });
     } catch (error) {
       console.error("Get photographer services error:", error);
@@ -320,20 +374,17 @@ export class PhotographerController {
   // POST /api/photographers/me/services - Create a new service
   static async createService(req: Request, res: Response) {
     try {
-      const photographerId = req.session?.photographerId;
-      const userId = req.session?.userId;
+      const { photographer, error } = await resolvePhotographerForUser(req);
       
-      if (!photographerId && !userId) {
-        return res.status(401).json({ error: "Not authenticated" });
+      if (error) {
+        return res.status(error.status).json({ error: error.message });
       }
 
-      let targetPhotographerId = photographerId;
-      if (!targetPhotographerId && userId) {
-        const photographer = await PhotographerService.getByUserId(userId);
-        if (!photographer) {
-          return res.status(404).json({ error: "Photographer not found" });
-        }
-        targetPhotographerId = photographer.id;
+      if (!photographer) {
+        return res.status(400).json({ 
+          error: "Photographer profile must be created first",
+          setupRequired: true 
+        });
       }
 
       const { 
@@ -353,7 +404,7 @@ export class PhotographerController {
       }
 
       const service = await storage.createPhotographerService({
-        photographerId: targetPhotographerId!,
+        photographerId: photographer.id,
         name,
         description,
         category,
@@ -375,11 +426,17 @@ export class PhotographerController {
   // PATCH /api/photographers/me/services/:serviceId - Update a service
   static async updateService(req: Request, res: Response) {
     try {
-      const photographerId = req.session?.photographerId;
-      const userId = req.session?.userId;
+      const { photographer, error } = await resolvePhotographerForUser(req);
       
-      if (!photographerId && !userId) {
-        return res.status(401).json({ error: "Not authenticated" });
+      if (error) {
+        return res.status(error.status).json({ error: error.message });
+      }
+
+      if (!photographer) {
+        return res.status(400).json({ 
+          error: "Photographer profile not found",
+          setupRequired: true 
+        });
       }
 
       const { serviceId } = req.params;
@@ -389,16 +446,7 @@ export class PhotographerController {
         return res.status(404).json({ error: "Service not found" });
       }
 
-      let targetPhotographerId = photographerId;
-      if (!targetPhotographerId && userId) {
-        const photographer = await PhotographerService.getByUserId(userId);
-        if (!photographer) {
-          return res.status(404).json({ error: "Photographer not found" });
-        }
-        targetPhotographerId = photographer.id;
-      }
-
-      if (service.photographerId !== targetPhotographerId) {
+      if (service.photographerId !== photographer.id) {
         return res.status(403).json({ error: "Not authorized to update this service" });
       }
 
@@ -444,7 +492,7 @@ export class PhotographerController {
             unitAmountCents: newPrice,
             metadata: {
               photographerServiceId: service.id,
-              photographerId: targetPhotographerId!,
+              photographerId: photographer.id,
               pricingModel: newPricingModel,
             },
           });
@@ -480,11 +528,17 @@ export class PhotographerController {
   // DELETE /api/photographers/me/services/:serviceId - Delete a service
   static async deleteService(req: Request, res: Response) {
     try {
-      const photographerId = req.session?.photographerId;
-      const userId = req.session?.userId;
+      const { photographer, error } = await resolvePhotographerForUser(req);
       
-      if (!photographerId && !userId) {
-        return res.status(401).json({ error: "Not authenticated" });
+      if (error) {
+        return res.status(error.status).json({ error: error.message });
+      }
+
+      if (!photographer) {
+        return res.status(400).json({ 
+          error: "Photographer profile not found",
+          setupRequired: true 
+        });
       }
 
       const { serviceId } = req.params;
@@ -494,16 +548,7 @@ export class PhotographerController {
         return res.status(404).json({ error: "Service not found" });
       }
 
-      let targetPhotographerId = photographerId;
-      if (!targetPhotographerId && userId) {
-        const photographer = await PhotographerService.getByUserId(userId);
-        if (!photographer) {
-          return res.status(404).json({ error: "Photographer not found" });
-        }
-        targetPhotographerId = photographer.id;
-      }
-
-      if (service.photographerId !== targetPhotographerId) {
+      if (service.photographerId !== photographer.id) {
         return res.status(403).json({ error: "Not authorized to delete this service" });
       }
 
@@ -518,11 +563,17 @@ export class PhotographerController {
   // POST /api/photographers/me/services/:serviceId/go-live - Publish service to Stripe
   static async goLiveService(req: Request, res: Response) {
     try {
-      const photographerId = req.session?.photographerId;
-      const userId = req.session?.userId;
+      const { photographer, error } = await resolvePhotographerForUser(req);
       
-      if (!photographerId && !userId) {
-        return res.status(401).json({ error: "Not authenticated" });
+      if (error) {
+        return res.status(error.status).json({ error: error.message });
+      }
+
+      if (!photographer) {
+        return res.status(400).json({ 
+          error: "Photographer profile not found",
+          setupRequired: true 
+        });
       }
 
       const { serviceId } = req.params;
@@ -532,16 +583,7 @@ export class PhotographerController {
         return res.status(404).json({ error: "Service not found" });
       }
 
-      let targetPhotographerId = photographerId;
-      if (!targetPhotographerId && userId) {
-        const photographer = await PhotographerService.getByUserId(userId);
-        if (!photographer) {
-          return res.status(404).json({ error: "Photographer not found" });
-        }
-        targetPhotographerId = photographer.id;
-      }
-
-      if (service.photographerId !== targetPhotographerId) {
+      if (service.photographerId !== photographer.id) {
         return res.status(403).json({ error: "Not authorized to publish this service" });
       }
 
@@ -566,7 +608,7 @@ export class PhotographerController {
         metadata: {
           type: 'photographer_service',
           itemId: service.id,
-          photographerId: targetPhotographerId!,
+          photographerId: photographer.id,
         },
       });
 
@@ -578,7 +620,7 @@ export class PhotographerController {
           unitAmountCents: priceInCents,
           metadata: {
             photographerServiceId: service.id,
-            photographerId: targetPhotographerId!,
+            photographerId: photographer.id,
             pricingModel: service.pricingModel || 'package',
           },
         });
@@ -602,11 +644,17 @@ export class PhotographerController {
   // POST /api/photographers/me/services/:serviceId/archive - Archive a service
   static async archiveService(req: Request, res: Response) {
     try {
-      const photographerId = req.session?.photographerId;
-      const userId = req.session?.userId;
+      const { photographer, error } = await resolvePhotographerForUser(req);
       
-      if (!photographerId && !userId) {
-        return res.status(401).json({ error: "Not authenticated" });
+      if (error) {
+        return res.status(error.status).json({ error: error.message });
+      }
+
+      if (!photographer) {
+        return res.status(400).json({ 
+          error: "Photographer profile not found",
+          setupRequired: true 
+        });
       }
 
       const { serviceId } = req.params;
@@ -616,16 +664,7 @@ export class PhotographerController {
         return res.status(404).json({ error: "Service not found" });
       }
 
-      let targetPhotographerId = photographerId;
-      if (!targetPhotographerId && userId) {
-        const photographer = await PhotographerService.getByUserId(userId);
-        if (!photographer) {
-          return res.status(404).json({ error: "Photographer not found" });
-        }
-        targetPhotographerId = photographer.id;
-      }
-
-      if (service.photographerId !== targetPhotographerId) {
+      if (service.photographerId !== photographer.id) {
         return res.status(403).json({ error: "Not authorized to archive this service" });
       }
 
@@ -668,25 +707,20 @@ export class PhotographerController {
   // GET /api/photographers/me/availability - Get photographer's availability slots
   static async getAvailability(req: Request, res: Response) {
     try {
-      const photographerId = req.session?.photographerId;
-      const userId = req.session?.userId;
+      const { photographer, error } = await resolvePhotographerForUser(req);
       
-      if (!photographerId && !userId) {
-        return res.status(401).json({ error: "Not authenticated" });
+      if (error) {
+        return res.status(error.status).json({ error: error.message });
       }
 
-      let targetPhotographerId = photographerId;
-      if (!targetPhotographerId && userId) {
-        const photographer = await PhotographerService.getByUserId(userId);
-        if (!photographer) {
-          return res.status(404).json({ error: "Photographer not found" });
-        }
-        targetPhotographerId = photographer.id;
+      // If no profile, return empty slots with setupRequired flag
+      if (!photographer) {
+        return res.json({ slots: [], setupRequired: true });
       }
 
       const { startDate, endDate } = req.query;
       const slots = await storage.getPhotographerAvailability(
-        targetPhotographerId!,
+        photographer.id,
         startDate as string | undefined,
         endDate as string | undefined
       );
@@ -701,20 +735,17 @@ export class PhotographerController {
   // POST /api/photographers/me/availability - Create availability slot
   static async createAvailabilitySlot(req: Request, res: Response) {
     try {
-      const photographerId = req.session?.photographerId;
-      const userId = req.session?.userId;
+      const { photographer, error } = await resolvePhotographerForUser(req);
       
-      if (!photographerId && !userId) {
-        return res.status(401).json({ error: "Not authenticated" });
+      if (error) {
+        return res.status(error.status).json({ error: error.message });
       }
 
-      let targetPhotographerId = photographerId;
-      if (!targetPhotographerId && userId) {
-        const photographer = await PhotographerService.getByUserId(userId);
-        if (!photographer) {
-          return res.status(404).json({ error: "Photographer not found" });
-        }
-        targetPhotographerId = photographer.id;
+      if (!photographer) {
+        return res.status(400).json({ 
+          error: "Photographer profile must be created first",
+          setupRequired: true 
+        });
       }
 
       const { date, startTime, endTime, slotType, title, notes, isRecurring, recurringDayOfWeek } = req.body;
@@ -724,7 +755,7 @@ export class PhotographerController {
       }
 
       const slot = await storage.createPhotographerAvailability({
-        photographerId: targetPhotographerId!,
+        photographerId: photographer.id,
         date,
         startTime,
         endTime,
@@ -745,11 +776,17 @@ export class PhotographerController {
   // PATCH /api/photographers/me/availability/:slotId - Update availability slot
   static async updateAvailabilitySlot(req: Request, res: Response) {
     try {
-      const photographerId = req.session?.photographerId;
-      const userId = req.session?.userId;
+      const { photographer, error } = await resolvePhotographerForUser(req);
       
-      if (!photographerId && !userId) {
-        return res.status(401).json({ error: "Not authenticated" });
+      if (error) {
+        return res.status(error.status).json({ error: error.message });
+      }
+
+      if (!photographer) {
+        return res.status(400).json({ 
+          error: "Photographer profile not found",
+          setupRequired: true 
+        });
       }
 
       const { slotId } = req.params;
@@ -759,16 +796,7 @@ export class PhotographerController {
         return res.status(404).json({ error: "Slot not found" });
       }
 
-      let targetPhotographerId = photographerId;
-      if (!targetPhotographerId && userId) {
-        const photographer = await PhotographerService.getByUserId(userId);
-        if (!photographer) {
-          return res.status(404).json({ error: "Photographer not found" });
-        }
-        targetPhotographerId = photographer.id;
-      }
-
-      if (existingSlot.photographerId !== targetPhotographerId) {
+      if (existingSlot.photographerId !== photographer.id) {
         return res.status(403).json({ error: "Not authorized to update this slot" });
       }
 
@@ -795,11 +823,17 @@ export class PhotographerController {
   // DELETE /api/photographers/me/availability/:slotId - Delete availability slot
   static async deleteAvailabilitySlot(req: Request, res: Response) {
     try {
-      const photographerId = req.session?.photographerId;
-      const userId = req.session?.userId;
+      const { photographer, error } = await resolvePhotographerForUser(req);
       
-      if (!photographerId && !userId) {
-        return res.status(401).json({ error: "Not authenticated" });
+      if (error) {
+        return res.status(error.status).json({ error: error.message });
+      }
+
+      if (!photographer) {
+        return res.status(400).json({ 
+          error: "Photographer profile not found",
+          setupRequired: true 
+        });
       }
 
       const { slotId } = req.params;
@@ -817,16 +851,7 @@ export class PhotographerController {
         });
       }
 
-      let targetPhotographerId = photographerId;
-      if (!targetPhotographerId && userId) {
-        const photographer = await PhotographerService.getByUserId(userId);
-        if (!photographer) {
-          return res.status(404).json({ error: "Photographer not found" });
-        }
-        targetPhotographerId = photographer.id;
-      }
-
-      if (existingSlot.photographerId !== targetPhotographerId) {
+      if (existingSlot.photographerId !== photographer.id) {
         return res.status(403).json({ error: "Not authorized to delete this slot" });
       }
 
@@ -841,11 +866,17 @@ export class PhotographerController {
   // PATCH /api/photographers/me/availability/:slotId - Update availability slot (with booked protection)
   static async updateAvailabilitySlotProtected(req: Request, res: Response) {
     try {
-      const photographerId = req.session?.photographerId;
-      const userId = req.session?.userId;
+      const { photographer, error } = await resolvePhotographerForUser(req);
       
-      if (!photographerId && !userId) {
-        return res.status(401).json({ error: "Not authenticated" });
+      if (error) {
+        return res.status(error.status).json({ error: error.message });
+      }
+
+      if (!photographer) {
+        return res.status(400).json({ 
+          error: "Photographer profile not found",
+          setupRequired: true 
+        });
       }
 
       const { slotId } = req.params;
@@ -863,16 +894,7 @@ export class PhotographerController {
         });
       }
 
-      let targetPhotographerId = photographerId;
-      if (!targetPhotographerId && userId) {
-        const photographer = await PhotographerService.getByUserId(userId);
-        if (!photographer) {
-          return res.status(404).json({ error: "Photographer not found" });
-        }
-        targetPhotographerId = photographer.id;
-      }
-
-      if (existingSlot.photographerId !== targetPhotographerId) {
+      if (existingSlot.photographerId !== photographer.id) {
         return res.status(403).json({ error: "Not authorized to update this slot" });
       }
 
