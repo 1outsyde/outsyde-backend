@@ -69,7 +69,8 @@ export const users = pgTable("users", {
   isOAuthUser: boolean("is_oauth_user").default(false),
 
   // Google OAuth sub (unique identifier from Google)
-  googleSub: text("google_sub").unique(),
+  // Note: Uniqueness enforced via partial index (see db migration) to allow NULL for legacy users
+  googleSub: text("google_sub"),
 
   // Monetization intent (user-controlled via API)
   wantsToSellProducts: boolean("wants_to_sell_products").default(false).notNull(),
