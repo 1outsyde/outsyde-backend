@@ -72,9 +72,17 @@ The Outsyde platform uses a React frontend, an Express (TypeScript) backend, and
         - `DELETE /api/follows/:targetUserId` - Unfollow a user
         - `GET /api/follows/check/:targetUserId` - Check if following (private, authenticated only)
         - Notification type `new_follower` sent to target user on follow
--   **Mobile Backend (FlutterFlow):**
-    -   Backend serves as API for FlutterFlow mobile app
+-   **Mobile Backend (FlutterFlow/Expo):**
+    -   Backend serves as API for FlutterFlow and Expo mobile apps
     -   Authentication: JWT tokens (1hr access, 7-day refresh) via `/api/auth/mobile/login` and `/api/auth/mobile/refresh`
+    -   **Google OAuth for Mobile:** `POST /api/auth/mobile/google` endpoint:
+        - Accepts Google ID token from Expo app (via expo-auth-session)
+        - Verifies token using Google's official OAuth2Client
+        - Finds or creates user by googleSub/email
+        - Auto-assigns admin role if email matches admin list
+        - Returns JWT access + refresh tokens (same format as email/password login)
+        - Links existing email/password accounts to Google if email matches
+        - Stores Google's unique `sub` identifier in users.googleSub field
     -   Monetization intent endpoint accepts userId from JWT token or request body (for FlutterFlow integration where auth is handled client-side)
     -   **Hybrid Auth Support:** All `/api/photographers/me/*` and `/api/staff/*` endpoints accept EITHER JWT (Authorization: Bearer header) OR session cookies, enabling Render/external deployments without cross-origin cookie issues
     -   Helper functions: `getUserIdFromRequest(req)` extracts userId from JWT or session; `hybridAuthMiddleware` can be applied to any endpoint needing dual auth support

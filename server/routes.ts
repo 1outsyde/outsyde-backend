@@ -483,6 +483,305 @@ export async function registerRoutes(
     }
   });
 
+  // ==================== MOBILE AUTH (JWT) ====================
+
+  // Mobile Google OAuth - Verify Google ID token and return JWT tokens
+  // Used by Expo app via expo-auth-session
+  app.post("/api/auth/mobile/google", async (req, res) => {
+    try {
+      const { idToken, clientId } = req.body;
+
+      if (!idToken || typeof idToken !== 'string') {
+        return res.status(400).json({ 
+          success: false, 
+          error: { code: "INVALID_REQUEST", message: "idToken is required" }
+        });
+      }
+
+      // Import Google Auth library
+      const { OAuth2Client } = await import('google-auth-library');
+      const client = new OAuth2Client();
+
+      // Verify the Google ID token
+      let payload;
+      try {
+        const ticket = await client.verifyIdToken({
+          idToken,
+          audience: clientId || undefined, // If clientId provided, verify it matches
+        });
+        payload = ticket.getPayload();
+      } catch (verifyError) {
+        console.error("Google token verification failed:", verifyError);
+        return res.status(401).json({
+          success: false,
+          error: { code: "INVALID_TOKEN", message: "Invalid or expired Google token" }
+        });
+      }
+
+      if (!payload) {
+        return res.status(401).json({
+          success: false,
+          error: { code: "INVALID_TOKEN", message: "Could not extract payload from token" }
+        });
+      }
+
+      const { sub: googleSub, email, name, picture, given_name, family_name } = payload;
+
+      if (!googleSub || !email) {
+        return res.status(401).json({
+          success: false,
+          error: { code: "INVALID_TOKEN", message: "Token missing required claims (sub, email)" }
+        });
+      }
+
+      // Try to find existing user by googleSub first, then by email
+      let user = await storage.getUserByGoogleSub(googleSub);
+      
+      if (!user) {
+        // Check if user exists by email (may have been created via email/password)
+        user = await storage.getUserByEmail(email);
+        
+        if (user) {
+          // Link Google account to existing user
+          await storage.updateUser(user.id, { 
+            googleSub,
+            isOAuthUser: true,
+            // Update profile picture if not already set
+            profileImageUrl: user.profileImageUrl || picture || null,
+          });
+          user = await storage.getUser(user.id);
+        }
+      }
+
+      // Check if email is in admin list for auto-granting admin role
+      const ALLOWED_ADMIN_EMAILS = [
+        'info@goutsyde.com',
+        'jamesmeyers2304@gmail.com',
+      ].map(e => e.toLowerCase());
+      const isAdminEmail = ALLOWED_ADMIN_EMAILS.includes(email.toLowerCase());
+
+      if (!user) {
+        // Create new user
+        const newUser = await storage.createUser({
+          email,
+          name: name || `${given_name || ''} ${family_name || ''}`.trim() || email.split('@')[0],
+          firstName: given_name || null,
+          lastName: family_name || null,
+          profileImageUrl: picture || null,
+          isOAuthUser: true,
+          isAdmin: isAdminEmail, // Auto-grant admin if email matches
+        });
+        
+        // Link googleSub
+        await storage.updateUser(newUser.id, { googleSub });
+        user = await storage.getUser(newUser.id);
+      } else {
+        // Update admin status if email is in admin list but not yet marked
+        if (isAdminEmail && !user.isAdmin) {
+          await storage.updateUser(user.id, { isAdmin: true });
+          user = await storage.getUser(user.id);
+        }
+      }
+
+      if (!user) {
+        return res.status(500).json({
+          success: false,
+          error: { code: "CREATE_FAILED", message: "Failed to create or retrieve user" }
+        });
+      }
+
+      // Generate JWT tokens
+      const tokenPayload: TokenPayload = {
+        userId: user.id,
+        isVendor: user.isVendor,
+      };
+
+      // Check for business association
+      if (user.isVendor) {
+        const business = await storage.getBusinessByOwnerId(user.id);
+        if (business) {
+          tokenPayload.businessId = business.id;
+        }
+      }
+
+      const accessToken = generateAccessToken(tokenPayload);
+      const refreshToken = generateRefreshToken(tokenPayload);
+
+      // Store refresh token in database
+      await storage.storeRefreshToken(user.id, refreshToken, new Date(Date.now() + 7 * 24 * 60 * 60 * 1000));
+
+      // Return user data and tokens
+      const safeUser = sanitizeUserForResponse(user, { includeOwnData: true });
+
+      res.json({
+        success: true,
+        user: safeUser,
+        accessToken,
+        refreshToken,
+        expiresIn: 3600, // 1 hour in seconds
+      });
+
+    } catch (error) {
+      console.error("Mobile Google auth error:", error);
+      res.status(500).json({
+        success: false,
+        error: { code: "SERVER_ERROR", message: "Authentication failed" }
+      });
+    }
+  });
+
+  // Mobile token refresh endpoint
+  app.post("/api/auth/mobile/refresh", async (req, res) => {
+    try {
+      const { refreshToken } = req.body;
+
+      if (!refreshToken || typeof refreshToken !== 'string') {
+        return res.status(400).json({
+          success: false,
+          error: { code: "INVALID_REQUEST", message: "refreshToken is required" }
+        });
+      }
+
+      // Verify refresh token JWT
+      const payload = verifyRefreshToken(refreshToken);
+      if (!payload) {
+        return res.status(401).json({
+          success: false,
+          error: { code: "TOKEN_INVALID", message: "Invalid or expired refresh token" }
+        });
+      }
+
+      // Validate against database
+      const tokenRecord = await storage.validateRefreshToken(refreshToken);
+      if (!tokenRecord) {
+        return res.status(401).json({
+          success: false,
+          error: { code: "TOKEN_REVOKED", message: "Refresh token has been revoked" }
+        });
+      }
+
+      // Get user
+      const user = await storage.getUser(payload.userId);
+      if (!user) {
+        return res.status(401).json({
+          success: false,
+          error: { code: "USER_NOT_FOUND", message: "User not found" }
+        });
+      }
+
+      // Generate new tokens
+      const tokenPayload: TokenPayload = {
+        userId: user.id,
+        isVendor: user.isVendor,
+      };
+
+      if (user.isVendor) {
+        const business = await storage.getBusinessByOwnerId(user.id);
+        if (business) {
+          tokenPayload.businessId = business.id;
+        }
+      }
+
+      const newAccessToken = generateAccessToken(tokenPayload);
+      const newRefreshToken = generateRefreshToken(tokenPayload);
+
+      // Revoke old refresh token and store new one
+      await storage.revokeRefreshToken(tokenRecord.tokenId);
+      await storage.storeRefreshToken(user.id, newRefreshToken, new Date(Date.now() + 7 * 24 * 60 * 60 * 1000));
+
+      res.json({
+        success: true,
+        accessToken: newAccessToken,
+        refreshToken: newRefreshToken,
+        expiresIn: 3600,
+      });
+
+    } catch (error) {
+      console.error("Token refresh error:", error);
+      res.status(500).json({
+        success: false,
+        error: { code: "SERVER_ERROR", message: "Token refresh failed" }
+      });
+    }
+  });
+
+  // Mobile login with email/password - returns JWT tokens
+  app.post("/api/auth/mobile/login", async (req, res) => {
+    try {
+      const data = loginSchema.parse(req.body);
+
+      const user = await storage.getUserByEmail(data.email);
+      if (!user) {
+        return res.status(401).json({
+          success: false,
+          error: { code: "INVALID_CREDENTIALS", message: "Invalid email or password" }
+        });
+      }
+
+      let isValidPassword = false;
+      if (!user.password) {
+        return res.status(401).json({
+          success: false,
+          error: { code: "INVALID_CREDENTIALS", message: "Invalid email or password" }
+        });
+      }
+      if (isLegacyHash(user.password)) {
+        isValidPassword = legacyVerifyPassword(data.password, user.password);
+      } else {
+        isValidPassword = await verifyPassword(data.password, user.password);
+      }
+
+      if (!isValidPassword) {
+        return res.status(401).json({
+          success: false,
+          error: { code: "INVALID_CREDENTIALS", message: "Invalid email or password" }
+        });
+      }
+
+      // Generate JWT tokens
+      const tokenPayload: TokenPayload = {
+        userId: user.id,
+        isVendor: user.isVendor,
+      };
+
+      if (user.isVendor) {
+        const business = await storage.getBusinessByOwnerId(user.id);
+        if (business) {
+          tokenPayload.businessId = business.id;
+        }
+      }
+
+      const accessToken = generateAccessToken(tokenPayload);
+      const refreshToken = generateRefreshToken(tokenPayload);
+
+      // Store refresh token
+      await storage.storeRefreshToken(user.id, refreshToken, new Date(Date.now() + 7 * 24 * 60 * 60 * 1000));
+
+      const safeUser = sanitizeUserForResponse(user, { includeOwnData: true });
+
+      res.json({
+        success: true,
+        user: safeUser,
+        accessToken,
+        refreshToken,
+        expiresIn: 3600,
+      });
+
+    } catch (error) {
+      if (error instanceof z.ZodError) {
+        return res.status(400).json({
+          success: false,
+          error: { code: "INVALID_REQUEST", message: "Invalid request data" }
+        });
+      }
+      console.error("Mobile login error:", error);
+      res.status(500).json({
+        success: false,
+        error: { code: "SERVER_ERROR", message: "Login failed" }
+      });
+    }
+  });
+
   // Get current authenticated user (supports both session and OAuth)
   // Returns user's own data including DOB, but excludes ethnicity (aggregation only)
   app.get("/api/auth/user", async (req, res) => {
