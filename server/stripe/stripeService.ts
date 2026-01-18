@@ -181,6 +181,61 @@ export class StripeService {
   }
 
   /**
+   * Check if a Connect account has completed onboarding by fetching from Stripe API.
+   * Returns true if charges_enabled AND payouts_enabled are both true.
+   * This is the source of truth for onboarding completion.
+   */
+  async isOnboardingComplete(accountId: string): Promise<boolean> {
+    try {
+      const status = await this.getConnectAccountStatus(accountId);
+      return status.chargesEnabled === true && status.payoutsEnabled === true;
+    } catch (error) {
+      console.error(`[Stripe] Failed to check onboarding status for ${accountId}:`, error);
+      return false;
+    }
+  }
+
+  /**
+   * Self-healing sync: Check Stripe API and update local database if onboarding is complete.
+   * Use this before blocking publish attempts or returning onboarding status.
+   * 
+   * @param entityType - 'photographer' | 'business'
+   * @param entityId - The photographer or business ID
+   * @param stripeAccountId - The Stripe Connect account ID
+   * @param currentOnboardingComplete - Current local database value
+   * @param updateFn - Function to update the entity in the database
+   * @returns Updated onboarding complete status
+   */
+  async syncOnboardingStatus(params: {
+    entityType: 'photographer' | 'business';
+    entityId: string;
+    stripeAccountId: string;
+    currentOnboardingComplete: boolean;
+    updateFn: (id: string, data: { stripeOnboardingComplete: boolean }) => Promise<any>;
+  }): Promise<boolean> {
+    // If already marked complete locally, trust it
+    if (params.currentOnboardingComplete) {
+      return true;
+    }
+
+    // If no Stripe account ID, can't be complete
+    if (!params.stripeAccountId) {
+      return false;
+    }
+
+    // Fetch from Stripe API
+    const isComplete = await this.isOnboardingComplete(params.stripeAccountId);
+
+    // If Stripe says complete but local says not, sync the database
+    if (isComplete && !params.currentOnboardingComplete) {
+      console.log(`[Stripe] Self-healing: ${params.entityType} ${params.entityId} onboarding is complete in Stripe, updating local database`);
+      await params.updateFn(params.entityId, { stripeOnboardingComplete: true });
+    }
+
+    return isComplete;
+  }
+
+  /**
    * Legacy alias for createPhotographerConnectAccount
    */
   async createConnectAccount(

@@ -1577,14 +1577,22 @@ export async function registerRoutes(
           return res.status(404).json({ error: "Business not found" });
         }
 
-        // If already has account, get fresh status from Stripe
+        // If already has account, get fresh status from Stripe and sync to DB
         if (business.stripeAccountId) {
           const status = await stripeService.getConnectAccountStatus(business.stripeAccountId);
+          const isComplete = status.chargesEnabled && status.payoutsEnabled;
+          
+          // Self-healing: sync to database if Stripe says complete but local says not
+          if (isComplete && !business.stripeOnboardingComplete) {
+            console.log(`[Stripe] Self-healing: business ${business.id} onboarding is complete in Stripe, updating local database`);
+            await storage.updateBusiness(business.id, { stripeOnboardingComplete: true });
+          }
+          
           return res.json({
             accountType: 'business',
             hasStripeAccount: true,
             stripeAccountId: business.stripeAccountId,
-            onboardingComplete: status.chargesEnabled && status.payoutsEnabled,
+            onboardingComplete: isComplete,
             chargesEnabled: status.chargesEnabled,
             payoutsEnabled: status.payoutsEnabled,
             detailsSubmitted: status.detailsSubmitted,
@@ -1606,13 +1614,22 @@ export async function registerRoutes(
           return res.status(404).json({ error: "Photographer profile not found" });
         }
 
+        // If already has account, get fresh status from Stripe and sync to DB
         if (photographer.stripeAccountId) {
           const status = await stripeService.getConnectAccountStatus(photographer.stripeAccountId);
+          const isComplete = status.chargesEnabled && status.payoutsEnabled;
+          
+          // Self-healing: sync to database if Stripe says complete but local says not
+          if (isComplete && !photographer.stripeOnboardingComplete) {
+            console.log(`[Stripe] Self-healing: photographer ${photographer.id} onboarding is complete in Stripe, updating local database`);
+            await storage.updatePhotographer(photographer.id, { stripeOnboardingComplete: true });
+          }
+          
           return res.json({
             accountType: 'photographer',
             hasStripeAccount: true,
             stripeAccountId: photographer.stripeAccountId,
-            onboardingComplete: status.chargesEnabled && status.payoutsEnabled,
+            onboardingComplete: isComplete,
             chargesEnabled: status.chargesEnabled,
             payoutsEnabled: status.payoutsEnabled,
             detailsSubmitted: status.detailsSubmitted,
@@ -2839,8 +2856,20 @@ export async function registerRoutes(
         return res.status(404).json({ error: "No business found" });
       }
 
+      // Self-healing sync: Check Stripe API for onboarding status if local says incomplete
+      let isOnboardingComplete = business.stripeOnboardingComplete || false;
+      if (!isOnboardingComplete && business.stripeAccountId) {
+        isOnboardingComplete = await stripeService.syncOnboardingStatus({
+          entityType: 'business',
+          entityId: business.id,
+          stripeAccountId: business.stripeAccountId,
+          currentOnboardingComplete: false,
+          updateFn: (id, data) => storage.updateBusiness(id, data),
+        });
+      }
+
       // Check Stripe onboarding is complete before allowing Go Live
-      if (!business.stripeAccountId || !business.stripeOnboardingComplete) {
+      if (!business.stripeAccountId || !isOnboardingComplete) {
         return res.status(403).json({ 
           error: "Payments not enabled",
           message: "You must complete Stripe payment setup before publishing products. Please complete your payment onboarding first.",
@@ -3131,8 +3160,20 @@ export async function registerRoutes(
         return res.status(404).json({ error: "No business found" });
       }
 
+      // Self-healing sync: Check Stripe API for onboarding status if local says incomplete
+      let isOnboardingComplete = business.stripeOnboardingComplete || false;
+      if (!isOnboardingComplete && business.stripeAccountId) {
+        isOnboardingComplete = await stripeService.syncOnboardingStatus({
+          entityType: 'business',
+          entityId: business.id,
+          stripeAccountId: business.stripeAccountId,
+          currentOnboardingComplete: false,
+          updateFn: (id, data) => storage.updateBusiness(id, data),
+        });
+      }
+
       // Check Stripe onboarding is complete before allowing Go Live
-      if (!business.stripeAccountId || !business.stripeOnboardingComplete) {
+      if (!business.stripeAccountId || !isOnboardingComplete) {
         return res.status(403).json({ 
           error: "Payments not enabled",
           message: "You must complete Stripe payment setup before publishing services. Please complete your payment onboarding first.",

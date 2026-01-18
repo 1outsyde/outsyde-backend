@@ -603,8 +603,20 @@ export class PhotographerController {
         });
       }
 
+      // Self-healing sync: Check Stripe API for onboarding status if local says incomplete
+      let isOnboardingComplete = photographer.stripeOnboardingComplete || false;
+      if (!isOnboardingComplete && photographer.stripeAccountId) {
+        isOnboardingComplete = await stripeService.syncOnboardingStatus({
+          entityType: 'photographer',
+          entityId: photographer.id,
+          stripeAccountId: photographer.stripeAccountId,
+          currentOnboardingComplete: false,
+          updateFn: (id, data) => storage.updatePhotographer(id, data),
+        });
+      }
+
       // Require Stripe Connect onboarding before going live
-      if (!photographer.stripeAccountId || !photographer.stripeOnboardingComplete) {
+      if (!photographer.stripeAccountId || !isOnboardingComplete) {
         return res.status(403).json({ 
           error: "Stripe onboarding required",
           message: "Please complete Stripe Connect setup before publishing services",
