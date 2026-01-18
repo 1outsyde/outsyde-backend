@@ -68,6 +68,9 @@ export const users = pgTable("users", {
   isAdmin: boolean("is_admin").default(false).notNull(),
   isOAuthUser: boolean("is_oauth_user").default(false),
 
+  // Google OAuth sub (unique identifier from Google)
+  googleSub: text("google_sub").unique(),
+
   // Monetization intent (user-controlled via API)
   wantsToSellProducts: boolean("wants_to_sell_products").default(false).notNull(),
   wantsToOfferServices: boolean("wants_to_offer_services").default(false).notNull(),
