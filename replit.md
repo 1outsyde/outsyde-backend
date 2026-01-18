@@ -45,6 +45,14 @@ The Outsyde platform uses a React frontend, an Express (TypeScript) backend, and
     -   **Subscription Tier Changes:** Full upgrade/downgrade flow for business subscriptions, including proration, benefit migration, and notifications.
     -   **Subscription Enforcement (Server-Side):** Comprehensive enforcement of vendor subscriptions, blocking operations, hiding storefronts, and preventing transactions for inactive subscriptions, with a 3-day grace period for `past_due` statuses. Data remains readable for inactive vendors.
     -   **Stripe Express Onboarding:** Vendors and photographers must complete Stripe Express onboarding before accepting payments. Onboarding status tracked via `stripeAccountId` and `stripeOnboardingComplete` fields on Business/Photographer models. Unified API endpoints (`/api/vendor/stripe-onboarding/status` and `/api/vendor/stripe-onboarding/create-link`) handle both account types based on session. "Go Live" functionality blocked until onboarding complete. `account.updated` webhook updates completion status.
+    -   **Stripe Connect Marketplace Model (Destination Charges):**
+        - Uses Stripe destination charges pattern - platform creates payment, funds transferred to connected account minus application fee
+        - Platform fee collection: 10% for photographers, 4% for businesses
+        - Payment flow: Customer → Stripe Checkout → Platform collects → Transfers to connected account (minus fee)
+        - Products stored on connected accounts for catalog management (`stripeConnectedProductId`, `stripeConnectedPriceId` on photographerServices)
+        - Checkout uses `price_data` with `transfer_data.destination` for dynamic pricing
+        - Booking statuses: awaiting_payment → paid → confirmed → completed
+        - Payment confirmation endpoint validates: payment_status, metadata.bookingId, and amount_total
     -   **Publishing Enforcement:** Vendors can create draft products/services without subscription, but publishing to "live" status requires:
         1. `stripeOnboardingComplete === true` (Stripe Connect setup complete)
         2. Active subscription (`subscriptionActive === true` or subscription status is `active`/`trialing`)

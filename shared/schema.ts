@@ -475,9 +475,12 @@ export const photographerServices = pgTable("photographer_services", {
 
   // Publishing status: draft (default) | live | archived
   status: text("status").default("draft").notNull(),
-  // Stripe catalog IDs - populated when item goes live
+  // Stripe catalog IDs - populated when item goes live (legacy: platform-owned)
   stripeProductId: text("stripe_product_id"),
   stripePriceId: text("stripe_price_id"),
+  // Connected account Stripe IDs - for marketplace model (creator-owned)
+  stripeConnectedProductId: text("stripe_connected_product_id"),
+  stripeConnectedPriceId: text("stripe_connected_price_id"),
 
   createdAt: timestamp("created_at").defaultNow().notNull(),
 });
@@ -506,6 +509,7 @@ export const shootBookings = pgTable("shoot_bookings", {
   vendorNet: integer("vendor_net").default(0),
 
   stripePaymentIntentId: text("stripe_payment_intent_id"),
+  stripeCheckoutSessionId: text("stripe_checkout_session_id"),
   status: text("status").default("pending"),
 
   createdAt: timestamp("created_at").defaultNow().notNull(),

@@ -603,6 +603,15 @@ export class PhotographerController {
         });
       }
 
+      // Require Stripe Connect onboarding before going live
+      if (!photographer.stripeAccountId || !photographer.stripeOnboardingComplete) {
+        return res.status(403).json({ 
+          error: "Stripe onboarding required",
+          message: "Please complete Stripe Connect setup before publishing services",
+          requiresOnboarding: true
+        });
+      }
+
       const { serviceId } = req.params;
       const service = await storage.getPhotographerService(serviceId);
       
@@ -614,8 +623,8 @@ export class PhotographerController {
         return res.status(403).json({ error: "Not authorized to publish this service" });
       }
 
-      // Already live? Just return the service
-      if (service.status === 'live' && service.stripeProductId && service.stripePriceId) {
+      // Already live with connected account IDs? Just return the service
+      if (service.status === 'live' && service.stripeConnectedProductId && service.stripeConnectedPriceId) {
         return res.json({ service, message: "Service is already live" });
       }
 
@@ -628,7 +637,7 @@ export class PhotographerController {
         return res.status(400).json({ error: "Service must have a price or be marked as 'Contact for Pricing'" });
       }
 
-      // Create Stripe Product
+      // Create Stripe Product on the photographer's connected account (marketplace model)
       const stripeProduct = await stripeService.createStripeProduct({
         name: service.name,
         description: service.description || undefined,
@@ -637,10 +646,11 @@ export class PhotographerController {
           itemId: service.id,
           photographerId: photographer.id,
         },
+        connectedAccountId: photographer.stripeAccountId,
       });
 
-      // Create Stripe Price (skip if contact for pricing)
-      let stripePriceId: string | null = null;
+      // Create Stripe Price on the connected account (skip if contact for pricing)
+      let stripeConnectedPriceId: string | null = null;
       if (!service.isContactForPricing && priceInCents > 0) {
         const stripePrice = await stripeService.createStripePrice({
           productId: stripeProduct.id,
@@ -650,18 +660,19 @@ export class PhotographerController {
             photographerId: photographer.id,
             pricingModel: service.pricingModel || 'package',
           },
+          connectedAccountId: photographer.stripeAccountId,
         });
-        stripePriceId = stripePrice.id;
+        stripeConnectedPriceId = stripePrice.id;
       }
 
-      // Update service with Stripe IDs and set status to live
+      // Update service with connected account Stripe IDs and set status to live
       const updated = await storage.updatePhotographerService(service.id, {
         status: 'live',
-        stripeProductId: stripeProduct.id,
-        stripePriceId: stripePriceId,
+        stripeConnectedProductId: stripeProduct.id,
+        stripeConnectedPriceId: stripeConnectedPriceId,
       });
 
-      res.json({ service: updated, message: "Service is now live" });
+      res.json({ service: updated, message: "Service is now live on your Stripe account" });
     } catch (error) {
       console.error("Go live photographer service error:", error);
       res.status(500).json({ error: "Failed to publish service" });

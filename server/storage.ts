@@ -513,6 +513,8 @@ export interface IStorage {
   getNextPendingOrderInGroup(orderGroupId: string): Promise<Order | undefined>;
   getUserByBusinessOwnerId(businessId: string): Promise<User | undefined>;
   getShootBooking(id: string): Promise<ShootBooking | undefined>;
+  updateShootBooking(id: string, updates: Partial<ShootBooking>): Promise<ShootBooking | undefined>;
+  getShootBookingByCheckoutSession(sessionId: string): Promise<ShootBooking | undefined>;
   getPhotographerBookings(photographerId: string): Promise<ShootBooking[]>;
   getMessages(conversationId: string): Promise<Message[]>;
 
@@ -2075,6 +2077,19 @@ export class DatabaseStorage implements IStorage {
 
   async getShootBooking(id: string): Promise<ShootBooking | undefined> {
     const result = await db.select().from(shootBookings).where(eq(shootBookings.id, id));
+    return result[0];
+  }
+
+  async updateShootBooking(id: string, updates: Partial<ShootBooking>): Promise<ShootBooking | undefined> {
+    const result = await db.update(shootBookings)
+      .set({ ...updates, updatedAt: new Date() })
+      .where(eq(shootBookings.id, id))
+      .returning();
+    return result[0];
+  }
+
+  async getShootBookingByCheckoutSession(sessionId: string): Promise<ShootBooking | undefined> {
+    const result = await db.select().from(shootBookings).where(eq(shootBookings.stripeCheckoutSessionId, sessionId));
     return result[0];
   }
 

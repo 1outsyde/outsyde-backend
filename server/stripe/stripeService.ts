@@ -250,7 +250,8 @@ export class StripeService {
 
   /**
    * Create a Stripe Product for a vendor product, service, or photographer service
-   * Products are owned by the platform, not connected accounts
+   * If connectedAccountId is provided, creates on the connected account (marketplace model)
+   * Otherwise creates on the platform account (legacy behavior)
    */
   async createStripeProduct(params: {
     name: string;
@@ -262,35 +263,54 @@ export class StripeService {
       photographerId?: string;
     };
     images?: string[];
+    connectedAccountId?: string;
   }) {
     const stripe = await getUncachableStripeClient();
 
-    return stripe.products.create({
+    const productData = {
       name: params.name,
       description: params.description || undefined,
       metadata: params.metadata,
       images: params.images?.filter(Boolean) || undefined,
-    });
+    };
+
+    if (params.connectedAccountId) {
+      return stripe.products.create(productData, {
+        stripeAccount: params.connectedAccountId,
+      });
+    }
+
+    return stripe.products.create(productData);
   }
 
   /**
    * Create a Stripe Price for a product
    * Prices are immutable in Stripe - to change price, create a new one
+   * If connectedAccountId is provided, creates on the connected account (marketplace model)
    */
   async createStripePrice(params: {
     productId: string;
     unitAmountCents: number;
     currency?: string;
     metadata?: Record<string, string>;
+    connectedAccountId?: string;
   }) {
     const stripe = await getUncachableStripeClient();
 
-    return stripe.prices.create({
+    const priceData = {
       product: params.productId,
       unit_amount: params.unitAmountCents,
       currency: params.currency || 'usd',
       metadata: params.metadata,
-    });
+    };
+
+    if (params.connectedAccountId) {
+      return stripe.prices.create(priceData, {
+        stripeAccount: params.connectedAccountId,
+      });
+    }
+
+    return stripe.prices.create(priceData);
   }
 
   /**
@@ -564,6 +584,117 @@ export class StripeService {
     return stripe.checkout.sessions.retrieve(sessionId, {
       expand: ['payment_intent', 'payment_intent.latest_charge'],
     });
+  }
+
+  // =========================
+  // PHOTOGRAPHER BOOKING CHECKOUT (Marketplace Model)
+  // =========================
+
+  /**
+   * Create a checkout session for photographer booking using destination charges.
+   * Uses price_data for dynamic pricing - Stripe's destination charges model
+   * allows platform to create charges and transfer funds to connected account.
+   * Application fee is collected by platform automatically.
+   */
+  async createPhotographerBookingCheckout(params: {
+    customerId?: string;
+    connectedAccountId: string;
+    amountInCents: number;
+    platformFeeInCents: number;
+    serviceName: string;
+    serviceDescription?: string;
+    successUrl: string;
+    cancelUrl: string;
+    metadata: Record<string, string>;
+  }) {
+    const stripe = await getUncachableStripeClient();
+
+    // Build checkout session config
+    const sessionConfig: any = {
+      mode: "payment",
+      payment_method_types: ["card"],
+      line_items: [
+        {
+          price_data: {
+            currency: "usd",
+            product_data: {
+              name: params.serviceName,
+              description: params.serviceDescription,
+            },
+            unit_amount: params.amountInCents,
+          },
+          quantity: 1,
+        },
+      ],
+      success_url: params.successUrl,
+      cancel_url: params.cancelUrl,
+      payment_intent_data: {
+        application_fee_amount: params.platformFeeInCents,
+        transfer_data: {
+          destination: params.connectedAccountId,
+        },
+      },
+      metadata: params.metadata,
+    };
+
+    // Associate with existing Stripe customer if available
+    if (params.customerId) {
+      sessionConfig.customer = params.customerId;
+    }
+
+    return stripe.checkout.sessions.create(sessionConfig);
+  }
+
+  /**
+   * Create a checkout session for business/staff appointment using destination charges.
+   * Application fee (4%) is deducted and sent to platform.
+   */
+  async createAppointmentCheckout(params: {
+    customerId?: string;
+    connectedAccountId: string;
+    amountInCents: number;
+    platformFeeInCents: number;
+    serviceName: string;
+    serviceDescription?: string;
+    successUrl: string;
+    cancelUrl: string;
+    metadata: Record<string, string>;
+  }) {
+    const stripe = await getUncachableStripeClient();
+
+    const sessionConfig: any = {
+      mode: "payment",
+      payment_method_types: ["card"],
+      line_items: [
+        {
+          price_data: {
+            currency: "usd",
+            product_data: {
+              name: params.serviceName,
+              description: params.serviceDescription,
+            },
+            unit_amount: params.amountInCents,
+          },
+          quantity: 1,
+        },
+      ],
+      success_url: params.successUrl,
+      cancel_url: params.cancelUrl,
+      payment_intent_data: {
+        application_fee_amount: params.platformFeeInCents,
+        transfer_data: {
+          destination: params.connectedAccountId,
+        },
+      },
+      metadata: params.metadata,
+    };
+
+    // Associate with existing Stripe customer if available
+    if (params.customerId) {
+      sessionConfig.customer = params.customerId;
+    }
+
+    return stripe.checkout.sessions.create(sessionConfig);
   }
 }
 

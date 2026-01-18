@@ -848,7 +848,7 @@ export async function registerRoutes(
 
   // ==================== PHOTOGRAPHER BOOKING ROUTES ====================
 
-  // Create photographer booking (customer facing)
+  // Create photographer booking with Stripe checkout (customer facing)
   app.post("/api/bookings/photographer", async (req, res) => {
     const userId = req.session?.userId;
     if (!userId) {
@@ -863,10 +863,16 @@ export async function registerRoutes(
         bookingDateTime: z.string().min(1, "Booking date/time is required"),
         locationDetails: z.string().min(1, "Location is required"),
         specialRequests: z.string().optional(),
-        totalPriceCents: z.number().default(0),
+        totalPriceCents: z.number().min(100, "Price must be at least $1.00"),
       });
 
       const data = bookingSchema.parse(req.body);
+
+      // Get user for Stripe customer ID
+      const user = await storage.getUser(userId);
+      if (!user) {
+        return res.status(404).json({ error: "User not found" });
+      }
 
       // Check if photographer has completed Stripe onboarding before allowing booking
       const photographer = await storage.getPhotographer(data.photographerId);
@@ -879,6 +885,17 @@ export async function registerRoutes(
           error: "Photographer not accepting bookings",
           message: "This photographer has not completed their payment setup and cannot accept bookings at this time."
         });
+      }
+
+      // Get service details for display name
+      let serviceName = data.shootType;
+      let serviceDescription: string | undefined;
+      if (data.serviceId) {
+        const service = await storage.getPhotographerService(data.serviceId);
+        if (service) {
+          serviceName = service.name;
+          serviceDescription = service.description || undefined;
+        }
       }
 
       // Parse datetime into date and time components
@@ -909,6 +926,7 @@ export async function registerRoutes(
       const platformFee = Math.round(data.totalPriceCents * 0.10);
       const vendorNet = data.totalPriceCents - platformFee;
 
+      // Create booking with "awaiting_payment" status
       const booking = await storage.createShootBooking({
         photographerId: data.photographerId,
         clientId: userId,
@@ -923,7 +941,7 @@ export async function registerRoutes(
         totalPrice: data.totalPriceCents,
         platformFee,
         vendorNet,
-        status: "pending",
+        status: "awaiting_payment",
       });
 
       // Reserve the photographer's time slot to prevent double bookings
@@ -935,25 +953,169 @@ export async function registerRoutes(
         booking.id
       );
 
+      // Create Stripe checkout session with destination charges
+      const baseUrl = `https://${process.env.REPLIT_DOMAINS?.split(',')[0]}`;
       const photographerName = photographer.displayName || 'Photographer';
       
-      NotificationTriggers.bookingConfirmed({
-        customerId: userId,
-        photographerId: data.photographerId,
-        bookingId: booking.id,
-        photographerName,
-        shootType: data.shootType,
-        date,
-        time: startTime,
-      }).catch(err => console.error('Notification error:', err));
+      const session = await stripeService.createPhotographerBookingCheckout({
+        customerId: user.stripeCustomerId || '',
+        connectedAccountId: photographer.stripeAccountId,
+        amountInCents: data.totalPriceCents,
+        platformFeeInCents: platformFee,
+        serviceName: `${serviceName} - ${photographerName}`,
+        serviceDescription: serviceDescription || `Photography session on ${date} at ${startTime}`,
+        successUrl: `${baseUrl}/booking-success?bookingId=${booking.id}&type=photographer`,
+        cancelUrl: `${baseUrl}/photographer/${photographer.id}?cancelled=true`,
+        metadata: {
+          type: 'photographer_booking',
+          bookingId: booking.id,
+          photographerId: photographer.id,
+          clientId: userId,
+          serviceId: data.serviceId || '',
+        },
+      });
 
-      res.status(201).json({ booking });
+      // Update booking with checkout session ID
+      await storage.updateShootBooking(booking.id, {
+        stripeCheckoutSessionId: session.id,
+      });
+
+      res.status(201).json({ 
+        booking,
+        checkoutUrl: session.url,
+        message: "Booking created - please complete payment"
+      });
     } catch (error) {
       if (error instanceof z.ZodError) {
         return res.status(400).json({ error: "Invalid data", details: error.errors });
       }
       console.error("Create photographer booking error:", error);
       res.status(500).json({ error: "Failed to create booking" });
+    }
+  });
+
+  // Confirm photographer booking payment (called from success page)
+  app.post("/api/bookings/photographer/:bookingId/confirm-payment", async (req, res) => {
+    const userId = req.session?.userId;
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    try {
+      const { bookingId } = req.params;
+      const booking = await storage.getShootBooking(bookingId);
+
+      if (!booking) {
+        return res.status(404).json({ error: "Booking not found" });
+      }
+
+      if (booking.clientId !== userId) {
+        return res.status(403).json({ error: "Not authorized" });
+      }
+
+      // Already confirmed? Return success
+      if (booking.status === 'paid' || booking.status === 'confirmed') {
+        return res.json({ booking, message: "Booking already confirmed" });
+      }
+
+      // Verify payment via Stripe if checkout session exists
+      if (booking.stripeCheckoutSessionId) {
+        const session = await stripeService.getCheckoutSession(booking.stripeCheckoutSessionId);
+        
+        if (session.payment_status !== 'paid') {
+          return res.status(400).json({ 
+            error: "Payment not completed",
+            message: "Please complete payment to confirm your booking"
+          });
+        }
+
+        // Verify metadata matches booking
+        if (session.metadata?.bookingId !== bookingId) {
+          console.error(`Metadata mismatch: session bookingId=${session.metadata?.bookingId}, expected=${bookingId}`);
+          return res.status(400).json({ error: "Payment verification failed - booking mismatch" });
+        }
+
+        // Verify amount matches (amount_total is in cents)
+        if (session.amount_total !== booking.totalPrice) {
+          console.error(`Amount mismatch: session=${session.amount_total}, booking=${booking.totalPrice}`);
+          return res.status(400).json({ error: "Payment verification failed - amount mismatch" });
+        }
+
+        // Update booking status to paid
+        const updated = await storage.updateShootBooking(bookingId, {
+          status: 'paid',
+          stripePaymentIntentId: typeof session.payment_intent === 'string' 
+            ? session.payment_intent 
+            : session.payment_intent?.id,
+        });
+
+        // Send confirmation notification
+        const photographer = await storage.getPhotographer(booking.photographerId);
+        const photographerName = photographer?.displayName || 'Photographer';
+        
+        NotificationTriggers.bookingConfirmed({
+          customerId: userId,
+          photographerId: booking.photographerId,
+          bookingId: booking.id,
+          photographerName,
+          shootType: booking.shootType,
+          date: booking.date,
+          time: booking.startTime,
+        }).catch(err => console.error('Notification error:', err));
+
+        return res.json({ booking: updated, message: "Booking confirmed - payment received" });
+      }
+
+      return res.status(400).json({ error: "No payment session found" });
+    } catch (error) {
+      console.error("Confirm photographer booking error:", error);
+      res.status(500).json({ error: "Failed to confirm booking" });
+    }
+  });
+
+  // Get photographer booking details (for success page)
+  app.get("/api/bookings/photographer/:bookingId", async (req, res) => {
+    const userId = req.session?.userId;
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    try {
+      const { bookingId } = req.params;
+      const booking = await storage.getShootBooking(bookingId);
+
+      if (!booking) {
+        return res.status(404).json({ error: "Booking not found" });
+      }
+
+      // Allow client to view their own booking, or photographer to view their bookings
+      const photographer = await storage.getPhotographerByUserId(userId);
+      const isClient = booking.clientId === userId;
+      const isPhotographer = photographer && photographer.id === booking.photographerId;
+
+      if (!isClient && !isPhotographer) {
+        return res.status(403).json({ error: "Not authorized" });
+      }
+
+      // Get service and photographer details
+      let service = null;
+      if (booking.serviceId) {
+        service = await storage.getPhotographerService(booking.serviceId);
+      }
+      const photographerDetails = await storage.getPhotographer(booking.photographerId);
+
+      res.json({ 
+        booking,
+        service,
+        photographer: photographerDetails ? {
+          id: photographerDetails.id,
+          displayName: photographerDetails.displayName,
+          profileImageUrl: photographerDetails.profileImageUrl,
+        } : null,
+      });
+    } catch (error) {
+      console.error("Get photographer booking error:", error);
+      res.status(500).json({ error: "Failed to get booking" });
     }
   });
 
