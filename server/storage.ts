@@ -621,6 +621,11 @@ export interface IStorage {
     entityTypes?: string[];
     userLatitude?: number;
     userLongitude?: number;
+    userPreferences?: {
+      selectedIndustries?: string[];
+      industryNiches?: Record<string, string[]>;
+      industryValues?: Record<string, string[]>;
+    };
     limit?: number;
     offset?: number;
   }): Promise<{
@@ -2457,10 +2462,15 @@ export class DatabaseStorage implements IStorage {
     entityTypes?: string[];
     userLatitude?: number;
     userLongitude?: number;
+    userPreferences?: {
+      selectedIndustries?: string[];
+      industryNiches?: Record<string, string[]>;
+      industryValues?: Record<string, string[]>;
+    };
     limit?: number;
     offset?: number;
   }): Promise<{ results: SearchIndexEntry[]; total: number }> {
-    const { query, city, category, entityTypes, userLatitude, userLongitude, limit = 50, offset = 0 } = params;
+    const { query, city, category, entityTypes, userLatitude, userLongitude, userPreferences, limit = 50, offset = 0 } = params;
     
     let conditions: any[] = [eq(searchIndex.isActive, true)];
     
@@ -2493,22 +2503,30 @@ export class DatabaseStorage implements IStorage {
       .from(searchIndex)
       .where(and(...conditions));
     const total = Number(countResult[0]?.count || 0);
-    
-    let orderBy: any[];
+
+    // Build distance expression for SQL ordering
+    let distanceExpr: any = sql`99999`;
     if (userLatitude !== undefined && userLongitude !== undefined) {
-      const distanceExpr = sql`
+      distanceExpr = sql`
         CASE 
           WHEN ${searchIndex.latitude} IS NOT NULL AND ${searchIndex.longitude} IS NOT NULL 
           THEN (
             6371 * acos(
-              cos(radians(${userLatitude})) * cos(radians(${searchIndex.latitude})) *
-              cos(radians(${searchIndex.longitude}) - radians(${userLongitude})) +
-              sin(radians(${userLatitude})) * sin(radians(${searchIndex.latitude}))
+              LEAST(1.0, GREATEST(-1.0,
+                cos(radians(${userLatitude})) * cos(radians(${searchIndex.latitude})) *
+                cos(radians(${searchIndex.longitude}) - radians(${userLongitude})) +
+                sin(radians(${userLatitude})) * sin(radians(${searchIndex.latitude}))
+              ))
             )
           )
           ELSE 99999
         END
       `;
+    }
+
+    // Standard SQL ordering (without preference matching - that's done in JS for safety)
+    let orderBy: any[];
+    if (userLatitude !== undefined && userLongitude !== undefined) {
       orderBy = [
         desc(searchIndex.hasActiveSubscription),
         desc(searchIndex.rating),
@@ -2522,11 +2540,72 @@ export class DatabaseStorage implements IStorage {
       ];
     }
     
-    const results = await db.select().from(searchIndex)
+    // Fetch more results if personalization is enabled so we can re-rank them
+    const fetchLimit = userPreferences ? Math.max(limit * 3, 150) : limit;
+    
+    let results = await db.select().from(searchIndex)
       .where(and(...conditions))
       .orderBy(...orderBy)
-      .limit(limit)
+      .limit(fetchLimit)
       .offset(offset);
+
+    // Apply preference-based ranking in JavaScript (safe from SQL injection)
+    if (userPreferences && results.length > 0) {
+      const allNiches: string[] = [];
+      const allIndustries = (userPreferences.selectedIndustries || []).map(i => i.toLowerCase());
+      
+      // Flatten all niches from industryNiches map
+      if (userPreferences.industryNiches) {
+        for (const niches of Object.values(userPreferences.industryNiches)) {
+          allNiches.push(...niches.map(n => n.toLowerCase()));
+        }
+      }
+      
+      if (allNiches.length > 0 || allIndustries.length > 0) {
+        // Calculate preference score for each result
+        const scoredResults = results.map(result => {
+          let score = 0;
+          const category = (result.category || '').toLowerCase();
+          const name = (result.name || '').toLowerCase();
+          const description = (result.description || '').toLowerCase();
+          
+          // Score 2 for matching a specific niche (in category or name)
+          for (const niche of allNiches) {
+            if (category.includes(niche) || name.includes(niche)) {
+              score = Math.max(score, 2);
+            } else if (description.includes(niche)) {
+              score = Math.max(score, 1);
+            }
+          }
+          
+          // Score 1 for matching industry (if no higher score already)
+          if (score < 2) {
+            for (const industry of allIndustries) {
+              if (category.includes(industry)) {
+                score = Math.max(score, 1);
+              }
+            }
+          }
+          
+          return { ...result, _preferenceScore: score };
+        });
+        
+        // Sort by preference score first, then maintain original ordering within same score
+        scoredResults.sort((a, b) => {
+          if (b._preferenceScore !== a._preferenceScore) {
+            return b._preferenceScore - a._preferenceScore;
+          }
+          // Maintain original SQL ordering for same preference score
+          return 0;
+        });
+        
+        // Remove internal score field and apply limit
+        results = scoredResults.slice(0, limit).map(({ _preferenceScore, ...rest }) => rest) as SearchIndexEntry[];
+      } else {
+        // No preferences to apply, just limit
+        results = results.slice(0, limit);
+      }
+    }
     
     return { results, total };
   }

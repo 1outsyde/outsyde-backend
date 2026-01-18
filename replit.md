@@ -92,6 +92,13 @@ The Outsyde platform uses a React frontend, an Express (TypeScript) backend, and
         - `GET /api/user/location` - Retrieves stored location
         - Both endpoints support JWT/session/body userId (mobile + web compatible)
         - `/api/unified-search` uses authenticated user's stored location as fallback for distance-based sorting when lat/lng not provided in query params
+    -   **Personalized Search:** Unified search uses user's onboarding preferences for ranking:
+        - `selectedIndustries`, `industryNiches`, `industryValues` fields from user profile
+        - Businesses/services matching user's niches are boosted to top of results (score 2)
+        - Businesses matching user's industries are also boosted (score 1)
+        - Query param `personalized=false` disables preference-based ranking
+        - Default: personalization ON for authenticated users
+        - Non-authenticated users get standard ranking (subscription > rating > distance)
 -   **Data Privacy:**
     -   **DOB:** Collected for eligibility, full DOB visible to user/admin only; vendors see age ranges. `sanitizeUserForResponse()` removes DOB from non-admin API responses.
     -   **Race/Ethnicity:** Optional, never exposed individually; only for aggregated analytics (future). `sanitizeUserForResponse()` removes ethnicity from all responses.

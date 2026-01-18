@@ -502,12 +502,15 @@ export async function registerRoutes(
       const { OAuth2Client } = await import('google-auth-library');
       const client = new OAuth2Client();
 
+      // Use server-configured Client ID for verification, with request clientId as fallback
+      const expectedAudience = process.env.GOOGLE_OAUTH_CLIENT_ID || clientId;
+
       // Verify the Google ID token
       let payload;
       try {
         const ticket = await client.verifyIdToken({
           idToken,
-          audience: clientId || undefined, // If clientId provided, verify it matches
+          audience: expectedAudience || undefined, // Verify token was issued for our app
         });
         payload = ticket.getPayload();
       } catch (verifyError) {
@@ -2702,6 +2705,7 @@ export async function registerRoutes(
   // ==================== UNIFIED SEARCH ====================
 
   // Unified search across products, services, businesses, photographers
+  // Supports personalization based on user's onboarding preferences (selectedIndustries, industryNiches)
   app.get("/api/unified-search", optionalAuthMiddleware, async (req, res) => {
     const authReq = req as AuthenticatedRequest;
     try {
@@ -2713,7 +2717,8 @@ export async function registerRoutes(
         lat, 
         lng,
         limit,
-        offset 
+        offset,
+        personalized // If "true", boost results matching user's preferences
       } = req.query;
 
       const entityTypes = types ? (types as string).split(',') : undefined;
@@ -2722,15 +2727,35 @@ export async function registerRoutes(
       let userLatitude = lat ? parseFloat(lat as string) : undefined;
       let userLongitude = lng ? parseFloat(lng as string) : undefined;
 
-      // If lat/lng not provided, use authenticated user's stored location as fallback
-      // Priority: JWT userId (mobile) > session userId (web)
-      if (userLatitude === undefined || userLongitude === undefined) {
-        const userId = authReq.user?.userId || req.session?.userId;
-        if (userId) {
-          const user = await storage.getUser(userId);
-          if (user?.latitude && user?.longitude) {
-            userLatitude = user.latitude;
-            userLongitude = user.longitude;
+      // User preferences for personalized search
+      let userPreferences: {
+        selectedIndustries?: string[];
+        industryNiches?: Record<string, string[]>;
+        industryValues?: Record<string, string[]>;
+      } | undefined;
+
+      // If lat/lng not provided OR personalization enabled, fetch user data
+      const userId = authReq.user?.userId || req.session?.userId;
+      if (userId) {
+        const user = await storage.getUser(userId);
+        if (user) {
+          // Use stored location as fallback if not provided
+          if (userLatitude === undefined || userLongitude === undefined) {
+            if (user.latitude && user.longitude) {
+              userLatitude = user.latitude;
+              userLongitude = user.longitude;
+            }
+          }
+
+          // Get user preferences for personalized ranking
+          // Default to personalized=true for authenticated users unless explicitly disabled
+          const enablePersonalization = personalized !== 'false';
+          if (enablePersonalization) {
+            userPreferences = {
+              selectedIndustries: user.selectedIndustries || [],
+              industryNiches: user.industryNiches || {},
+              industryValues: user.industryValues || {},
+            };
           }
         }
       }
@@ -2742,6 +2767,7 @@ export async function registerRoutes(
         entityTypes,
         userLatitude,
         userLongitude,
+        userPreferences,
         limit: limit ? parseInt(limit as string) : 50,
         offset: offset ? parseInt(offset as string) : 0,
       });

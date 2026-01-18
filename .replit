@@ -40,3 +40,8 @@ waitForPort = 5000
 
 [agent]
 integrations = ["javascript_mem_db:1.0.0", "javascript_websocket:1.0.0", "stripe:2.0.0", "javascript_log_in_with_replit:1.0.0", "javascript_object_storage:1.0.0", "resend:1.0.0"]
+
+[userenv]
+
+[userenv.shared]
+GOOGLE_OAUTH_CLIENT_ID = "315196435620-06bf0ng91lbqfdop97si4iaoldr2trjj.apps.googleusercontent.com"
