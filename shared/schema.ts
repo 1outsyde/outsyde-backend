@@ -80,6 +80,8 @@ export const users = pgTable("users", {
   city: text("city"),
   state: text("state"),
   zipCode: text("zip_code"),
+  latitude: doublePrecision("latitude"),
+  longitude: doublePrecision("longitude"),
 
   billingAddress: jsonb("billing_address").$type<BillingAddress>(),
 

@@ -689,6 +689,108 @@ export async function registerRoutes(
     }
   });
 
+  // ==================== USER LOCATION ====================
+
+  // Schema for location update with validation
+  const locationUpdateSchema = z.object({
+    userId: z.string().optional(), // Optional: used if not authenticated via JWT
+    latitude: z.number().min(-90).max(90),
+    longitude: z.number().min(-180).max(180),
+    city: z.string().min(1).max(100).optional(),
+    state: z.string().min(1).max(100).optional(),
+  });
+
+  // Update user location (POST)
+  app.post("/api/user/location", optionalAuthMiddleware, async (req, res) => {
+    const authReq = req as AuthenticatedRequest;
+    try {
+      const parsed = locationUpdateSchema.safeParse(req.body);
+      if (!parsed.success) {
+        return res.status(400).json({ 
+          success: false, 
+          error: parsed.error.errors[0]?.message || "Invalid location data",
+          details: parsed.error.errors,
+        });
+      }
+
+      const { latitude, longitude, city, state } = parsed.data;
+
+      // Priority: JWT userId > session userId > body userId
+      const userId = authReq.user?.userId || req.session?.userId || parsed.data.userId;
+      
+      if (!userId) {
+        return res.status(400).json({ 
+          success: false, 
+          error: "userId is required (via auth token, session, or request body)" 
+        });
+      }
+
+      // Check if user exists
+      const existingUser = await storage.getUser(userId);
+      if (!existingUser) {
+        return res.status(404).json({ success: false, error: "User not found" });
+      }
+
+      // Build update object
+      const updates: { latitude: number; longitude: number; city?: string; state?: string } = {
+        latitude,
+        longitude,
+      };
+      if (city !== undefined) updates.city = city;
+      if (state !== undefined) updates.state = state;
+
+      // Update user's location
+      await storage.updateUser(userId, updates);
+
+      res.json({ 
+        success: true,
+        location: {
+          latitude,
+          longitude,
+          city: city || existingUser.city,
+          state: state || existingUser.state,
+        }
+      });
+    } catch (error) {
+      console.error("Update user location error:", error);
+      res.status(500).json({ success: false, error: "Failed to update location" });
+    }
+  });
+
+  // Get user location (GET)
+  app.get("/api/user/location", optionalAuthMiddleware, async (req, res) => {
+    const authReq = req as AuthenticatedRequest;
+    try {
+      // Priority: JWT userId > session userId > query userId
+      const userId = authReq.user?.userId || req.session?.userId || (req.query.userId as string);
+      
+      if (!userId) {
+        return res.status(400).json({ 
+          success: false, 
+          error: "userId is required (via auth token, session, or query param)" 
+        });
+      }
+
+      const user = await storage.getUser(userId);
+      if (!user) {
+        return res.status(404).json({ success: false, error: "User not found" });
+      }
+
+      res.json({ 
+        success: true,
+        location: {
+          latitude: user.latitude || null,
+          longitude: user.longitude || null,
+          city: user.city || null,
+          state: user.state || null,
+        }
+      });
+    } catch (error) {
+      console.error("Get user location error:", error);
+      res.status(500).json({ success: false, error: "Failed to get location" });
+    }
+  });
+
   // ==================== NOTIFICATIONS ====================
 
   app.get("/api/notifications", async (req, res) => {
@@ -2195,7 +2297,8 @@ export async function registerRoutes(
   // ==================== UNIFIED SEARCH ====================
 
   // Unified search across products, services, businesses, photographers
-  app.get("/api/unified-search", async (req, res) => {
+  app.get("/api/unified-search", optionalAuthMiddleware, async (req, res) => {
+    const authReq = req as AuthenticatedRequest;
     try {
       const { 
         q, 
@@ -2210,13 +2313,30 @@ export async function registerRoutes(
 
       const entityTypes = types ? (types as string).split(',') : undefined;
 
+      // Use provided lat/lng from query params
+      let userLatitude = lat ? parseFloat(lat as string) : undefined;
+      let userLongitude = lng ? parseFloat(lng as string) : undefined;
+
+      // If lat/lng not provided, use authenticated user's stored location as fallback
+      // Priority: JWT userId (mobile) > session userId (web)
+      if (userLatitude === undefined || userLongitude === undefined) {
+        const userId = authReq.user?.userId || req.session?.userId;
+        if (userId) {
+          const user = await storage.getUser(userId);
+          if (user?.latitude && user?.longitude) {
+            userLatitude = user.latitude;
+            userLongitude = user.longitude;
+          }
+        }
+      }
+
       const results = await storage.unifiedSearch({
         query: q as string | undefined,
         city: city as string | undefined,
         category: category as string | undefined,
         entityTypes,
-        userLatitude: lat ? parseFloat(lat as string) : undefined,
-        userLongitude: lng ? parseFloat(lng as string) : undefined,
+        userLatitude,
+        userLongitude,
         limit: limit ? parseInt(limit as string) : 50,
         offset: offset ? parseInt(offset as string) : 0,
       });

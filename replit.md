@@ -73,6 +73,12 @@ The Outsyde platform uses a React frontend, an Express (TypeScript) backend, and
     -   Monetization intent endpoint accepts userId from JWT token or request body (for FlutterFlow integration where auth is handled client-side)
     -   **Hybrid Auth Support:** All `/api/photographers/me/*` and `/api/staff/*` endpoints accept EITHER JWT (Authorization: Bearer header) OR session cookies, enabling Render/external deployments without cross-origin cookie issues
     -   Helper functions: `getUserIdFromRequest(req)` extracts userId from JWT or session; `hybridAuthMiddleware` can be applied to any endpoint needing dual auth support
+    -   **User Location Storage:** Backend is source of truth for user location data:
+        - `users` table stores `latitude`, `longitude`, `city`, `state` fields
+        - `POST /api/user/location` - Validates and stores location (lat: -90 to 90, lng: -180 to 180, optional city/state strings)
+        - `GET /api/user/location` - Retrieves stored location
+        - Both endpoints support JWT/session/body userId (mobile + web compatible)
+        - `/api/unified-search` uses authenticated user's stored location as fallback for distance-based sorting when lat/lng not provided in query params
 -   **Data Privacy:**
     -   **DOB:** Collected for eligibility, full DOB visible to user/admin only; vendors see age ranges. `sanitizeUserForResponse()` removes DOB from non-admin API responses.
     -   **Race/Ethnicity:** Optional, never exposed individually; only for aggregated analytics (future). `sanitizeUserForResponse()` removes ethnicity from all responses.
