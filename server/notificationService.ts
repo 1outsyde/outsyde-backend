@@ -17,7 +17,8 @@ export type NotificationType =
   | 'subscription_tier_changed'
   | 'stripe_onboarding_complete'
   | 'new_vendor_application'
-  | 'new_photographer_application';
+  | 'new_photographer_application'
+  | 'new_follower';
 
 interface NotificationData {
   userId: string;
@@ -75,6 +76,8 @@ function getNotificationUrl(type: NotificationType, referenceType?: string, refe
       return referenceId ? `/admin/applications/${referenceId}` : '/admin/applications';
     case 'new_photographer_application':
       return referenceId ? `/admin/photographer-applications/${referenceId}` : '/admin/photographer-applications';
+    case 'new_follower':
+      return referenceId ? `/profile/${referenceId}` : '/';
     default:
       return '/';
   }
@@ -449,6 +452,25 @@ export const NotificationTriggers = {
     }
     
     console.log(`[Admin Notification] Notified ${adminUsers.length} admin(s) about new photographer: ${params.displayName}`);
+  },
+
+  async newFollower(params: {
+    targetUserId: string;
+    followerUserId: string;
+    followerName: string;
+  }): Promise<void> {
+    await sendNotification({
+      userId: params.targetUserId,
+      type: 'new_follower',
+      title: 'New Follower',
+      message: `${params.followerName} started following you.`,
+      referenceType: 'user',
+      referenceId: params.followerUserId,
+      metadata: {
+        followerUserId: params.followerUserId,
+        followerName: params.followerName,
+      },
+    });
   },
 };
 

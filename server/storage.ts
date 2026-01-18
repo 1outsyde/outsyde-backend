@@ -90,6 +90,8 @@ import {
   type InsertInfluencerPayout,
   type SearchIndexEntry,
   type InsertSearchIndexEntry,
+  type Follow,
+  type InsertFollow,
   users,
   businesses,
   cities,
@@ -142,6 +144,7 @@ import {
   influencerEarningLedger,
   influencerPayouts,
   searchIndex,
+  follows,
   isValidOrderTransition,
   isValidBookingTransition
 } from "@shared/schema";
@@ -625,6 +628,11 @@ export interface IStorage {
   }>;
 
   seedInitialData(): Promise<void>;
+
+  // Follows (Private)
+  createFollow(data: InsertFollow): Promise<Follow>;
+  getFollow(followerUserId: string, targetUserId: string): Promise<Follow | undefined>;
+  deleteFollow(followerUserId: string, targetUserId: string): Promise<void>;
 }
 
 export class DatabaseStorage implements IStorage {
@@ -5208,6 +5216,37 @@ export class DatabaseStorage implements IStorage {
       .where(eq(influencerPayouts.id, id))
       .returning();
     return result[0];
+  }
+
+  // =========================
+  // FOLLOWS (Private)
+  // =========================
+
+  async createFollow(data: InsertFollow): Promise<Follow> {
+    const id = randomUUID();
+    const result = await db.insert(follows).values({
+      id,
+      followerUserId: data.followerUserId,
+      targetUserId: data.targetUserId,
+    }).returning();
+    return result[0];
+  }
+
+  async getFollow(followerUserId: string, targetUserId: string): Promise<Follow | undefined> {
+    const result = await db.select().from(follows)
+      .where(and(
+        eq(follows.followerUserId, followerUserId),
+        eq(follows.targetUserId, targetUserId)
+      ));
+    return result[0];
+  }
+
+  async deleteFollow(followerUserId: string, targetUserId: string): Promise<void> {
+    await db.delete(follows)
+      .where(and(
+        eq(follows.followerUserId, followerUserId),
+        eq(follows.targetUserId, targetUserId)
+      ));
   }
 }
 

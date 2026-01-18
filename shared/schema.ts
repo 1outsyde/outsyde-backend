@@ -1,5 +1,5 @@
 import {
-  pgTable, text, varchar, boolean, integer, jsonb, timestamp, index, doublePrecision
+  pgTable, text, varchar, boolean, integer, jsonb, timestamp, index, doublePrecision, unique
 } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
@@ -726,6 +726,20 @@ export const notifications = pgTable("notifications", {
 });
 
 /* =====================================================
+   FOLLOWS (Private follow relationships)
+===================================================== */
+export const follows = pgTable("follows", {
+  id: varchar("id", { length: 36 }).primaryKey().default(sql`gen_random_uuid()`),
+  followerUserId: varchar("follower_user_id", { length: 36 }).notNull().references(() => users.id),
+  targetUserId: varchar("target_user_id", { length: 36 }).notNull().references(() => users.id),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+}, (table) => [
+  index("idx_follows_follower").on(table.followerUserId),
+  index("idx_follows_target").on(table.targetUserId),
+  unique("follows_unique").on(table.followerUserId, table.targetUserId),
+]);
+
+/* =====================================================
    CART ITEMS
 ===================================================== */
 export const cartItems = pgTable("cart_items", {
@@ -1242,6 +1256,11 @@ export const insertNotificationSchema = createInsertSchema(notifications).omit({
   readAt: true,
 });
 
+export const insertFollowSchema = createInsertSchema(follows).omit({
+  id: true,
+  createdAt: true,
+});
+
 export const insertCartItemSchema = createInsertSchema(cartItems).omit({
   id: true,
   createdAt: true,
@@ -1449,6 +1468,9 @@ export type InsertPushSubscription = z.infer<typeof insertPushSubscriptionSchema
 
 export type Notification = typeof notifications.$inferSelect;
 export type InsertNotification = z.infer<typeof insertNotificationSchema>;
+
+export type Follow = typeof follows.$inferSelect;
+export type InsertFollow = z.infer<typeof insertFollowSchema>;
 
 export type CartItem = typeof cartItems.$inferSelect;
 export type InsertCartItem = z.infer<typeof insertCartItemSchema>;

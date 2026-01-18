@@ -67,6 +67,11 @@ The Outsyde platform uses a React frontend, an Express (TypeScript) backend, and
     -   **Checkout Verification:** At checkout, system verifies vendor Stripe account status via Stripe API (`chargesEnabled` and `payoutsEnabled`) before processing payment, and confirms product status is 'live'.
     -   **Multi-Staff System:** Businesses (barbershops, salons, spas) can manage team members with individual availability calendars. Staff members have their own Stripe Connect accounts for direct payouts. Each staff member receives 100% of booking revenue minus 4% platform fee (same as business rate). Shop arrangements for rent/commission splits are handled outside Outsyde. Staff Dashboard (`/staff-dashboard`) allows staff to view their bookings, earnings, and manage availability. Vendor Dashboard Team tab provides staff CRUD, invite management, and Stripe onboarding tracking. Booking flow includes staff selection when staff are available.
     -   **User Monetization Intent:** Captures user interest in selling products, offering services, or promoting as influencer. Fields: `wantsToSellProducts`, `wantsToOfferServices`, `wantsToPromoteAsInfluencer` (user-controlled) and `canMonetize` (system-controlled, requires approval). Endpoint: `POST /api/user/monetization-intent` updates intent fields only, never touches roles or canMonetize.
+    -   **Private Follow System:** Users can follow/unfollow other users. Follow relationships are private (no public counts or lists). Follows are used only for notifications and internal feed logic. Endpoints:
+        - `POST /api/follows` - Follow a user (body: `{targetUserId}`)
+        - `DELETE /api/follows/:targetUserId` - Unfollow a user
+        - `GET /api/follows/check/:targetUserId` - Check if following (private, authenticated only)
+        - Notification type `new_follower` sent to target user on follow
 -   **Mobile Backend (FlutterFlow):**
     -   Backend serves as API for FlutterFlow mobile app
     -   Authentication: JWT tokens (1hr access, 7-day refresh) via `/api/auth/mobile/login` and `/api/auth/mobile/refresh`

@@ -791,6 +791,112 @@ export async function registerRoutes(
     }
   });
 
+  // ==================== FOLLOWS (Private) ====================
+
+  // Follow a user - requires authentication (JWT or session only, no body/query spoofing)
+  app.post("/api/follows", optionalAuthMiddleware, async (req: AuthenticatedRequest, res) => {
+    try {
+      // SECURITY: Only accept userId from verified auth context (JWT or session)
+      const followerUserId = req.user?.userId || req.session?.userId;
+      if (!followerUserId) {
+        return res.status(401).json({ success: false, error: "Authentication required" });
+      }
+
+      const { targetUserId } = req.body;
+      if (!targetUserId || typeof targetUserId !== 'string') {
+        return res.status(400).json({ success: false, error: "targetUserId is required" });
+      }
+
+      // Prevent self-follow
+      if (followerUserId === targetUserId) {
+        return res.status(400).json({ success: false, error: "Cannot follow yourself" });
+      }
+
+      // Verify target user exists
+      const targetUser = await storage.getUser(targetUserId);
+      if (!targetUser) {
+        return res.status(404).json({ success: false, error: "Target user not found" });
+      }
+
+      // Check if already following
+      const existingFollow = await storage.getFollow(followerUserId, targetUserId);
+      if (existingFollow) {
+        return res.status(409).json({ success: false, error: "Already following this user" });
+      }
+
+      // Create follow relationship
+      const follow = await storage.createFollow({ followerUserId, targetUserId });
+
+      // Get follower info for notification
+      const followerUser = await storage.getUser(followerUserId);
+      const followerName = followerUser?.name || followerUser?.firstName || "Someone";
+
+      // Send notification to target user
+      await NotificationTriggers.newFollower({
+        targetUserId,
+        followerUserId,
+        followerName,
+      });
+
+      res.status(201).json({ success: true, follow });
+    } catch (error) {
+      console.error("Follow user error:", error);
+      res.status(500).json({ success: false, error: "Failed to follow user" });
+    }
+  });
+
+  // Unfollow a user - requires authentication (JWT or session only)
+  app.delete("/api/follows/:targetUserId", optionalAuthMiddleware, async (req: AuthenticatedRequest, res) => {
+    try {
+      // SECURITY: Only accept userId from verified auth context (JWT or session)
+      const followerUserId = req.user?.userId || req.session?.userId;
+      if (!followerUserId) {
+        return res.status(401).json({ success: false, error: "Authentication required" });
+      }
+
+      const { targetUserId } = req.params;
+      if (!targetUserId) {
+        return res.status(400).json({ success: false, error: "targetUserId is required" });
+      }
+
+      // Check if follow exists
+      const existingFollow = await storage.getFollow(followerUserId, targetUserId);
+      if (!existingFollow) {
+        return res.status(404).json({ success: false, error: "Not following this user" });
+      }
+
+      // Delete follow relationship
+      await storage.deleteFollow(followerUserId, targetUserId);
+
+      res.json({ success: true, message: "Unfollowed successfully" });
+    } catch (error) {
+      console.error("Unfollow user error:", error);
+      res.status(500).json({ success: false, error: "Failed to unfollow user" });
+    }
+  });
+
+  // Check if following a user - requires authentication (JWT or session only)
+  app.get("/api/follows/check/:targetUserId", optionalAuthMiddleware, async (req: AuthenticatedRequest, res) => {
+    try {
+      // SECURITY: Only accept userId from verified auth context (JWT or session)
+      const followerUserId = req.user?.userId || req.session?.userId;
+      if (!followerUserId) {
+        return res.status(401).json({ success: false, error: "Authentication required" });
+      }
+
+      const { targetUserId } = req.params;
+      if (!targetUserId) {
+        return res.status(400).json({ success: false, error: "targetUserId is required" });
+      }
+
+      const follow = await storage.getFollow(followerUserId, targetUserId);
+      res.json({ success: true, isFollowing: !!follow });
+    } catch (error) {
+      console.error("Check follow error:", error);
+      res.status(500).json({ success: false, error: "Failed to check follow status" });
+    }
+  });
+
   // ==================== NOTIFICATIONS ====================
 
   app.get("/api/notifications", async (req, res) => {
