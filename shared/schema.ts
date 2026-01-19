@@ -204,6 +204,9 @@ export const businesses = pgTable("businesses", {
   approvedAt: timestamp("approved_at"),
   approvedBy: varchar("approved_by", { length: 36 }),
 
+  // Demo/seed data flag - hidden from non-admin users in search
+  isDemo: boolean("is_demo").default(false).notNull(),
+
   createdAt: timestamp("created_at").defaultNow().notNull(),
 });
 
@@ -425,6 +428,9 @@ export const photographers = pgTable("photographers", {
   }>(),
 
   billingAddress: jsonb("billing_address").$type<BillingAddress>(),
+
+  // Demo/seed data flag - hidden from non-admin users in search
+  isDemo: boolean("is_demo").default(false).notNull(),
 
   createdAt: timestamp("created_at").defaultNow().notNull(),
 });
@@ -1855,6 +1861,9 @@ export const searchIndex = pgTable("search_index", {
   
   // Subscription boost for businesses
   hasActiveSubscription: boolean("has_active_subscription").default(false),
+  
+  // Demo/seed data flag - hidden from non-admin users in search
+  isDemo: boolean("is_demo").default(false).notNull(),
   
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 });
