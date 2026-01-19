@@ -628,6 +628,7 @@ export interface IStorage {
     };
     limit?: number;
     offset?: number;
+    isAdmin?: boolean;
   }): Promise<{
     results: SearchIndexEntry[];
     total: number;
@@ -2476,10 +2477,16 @@ export class DatabaseStorage implements IStorage {
     };
     limit?: number;
     offset?: number;
+    isAdmin?: boolean;
   }): Promise<{ results: SearchIndexEntry[]; total: number }> {
-    const { query, city, category, entityTypes, userLatitude, userLongitude, userPreferences, limit = 50, offset = 0 } = params;
+    const { query, city, category, entityTypes, userLatitude, userLongitude, userPreferences, limit = 50, offset = 0, isAdmin = false } = params;
     
     let conditions: any[] = [eq(searchIndex.isActive, true)];
+    
+    // Hide demo data from non-admin users
+    if (!isAdmin) {
+      conditions.push(eq(searchIndex.isDemo, false));
+    }
     
     if (query) {
       conditions.push(
