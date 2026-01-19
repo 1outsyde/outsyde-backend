@@ -99,6 +99,7 @@ The Outsyde platform uses a React frontend, an Express (TypeScript) backend, and
         - Query param `personalized=false` disables preference-based ranking
         - Default: personalization ON for authenticated users
         - Non-authenticated users get standard ranking (subscription > rating > distance)
+-   **Demo Data Filtering:** Seed/demo businesses and photographers are marked with `isDemo=true` in the database and search index. Non-admin users cannot see demo data in search results via `/api/unified-search`. Admin users see all data including demo entries. This ensures real users only see actual vendor listings while admins can still access demo data for testing.
 -   **Data Privacy:**
     -   **DOB:** Collected for eligibility, full DOB visible to user/admin only; vendors see age ranges. `sanitizeUserForResponse()` removes DOB from non-admin API responses.
     -   **Race/Ethnicity:** Optional, never exposed individually; only for aggregated analytics (future). `sanitizeUserForResponse()` removes ethnicity from all responses.
