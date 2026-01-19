@@ -2749,6 +2749,7 @@ export class DatabaseStorage implements IStorage {
         websiteUrl: "https://sunrisecoffee.com",
         socialMedia: "@sunrisecoffee",
         subscriptionActive: true,
+        isDemo: true,
       },
       {
         ownerId: "demo-owner-2",
@@ -2766,6 +2767,7 @@ export class DatabaseStorage implements IStorage {
         zipCode: "10002",
         socialMedia: "@bellashair",
         subscriptionActive: true,
+        isDemo: true,
       },
       {
         ownerId: "demo-owner-3",
@@ -2784,6 +2786,7 @@ export class DatabaseStorage implements IStorage {
         websiteUrl: "https://artisanjewelry.co",
         socialMedia: "@artisanjewelry",
         subscriptionActive: true,
+        isDemo: true,
       },
       {
         ownerId: "demo-owner-4",
@@ -2802,6 +2805,7 @@ export class DatabaseStorage implements IStorage {
         websiteUrl: "https://zenyoga.com",
         socialMedia: "@zenyogala",
         subscriptionActive: true,
+        isDemo: true,
       },
       {
         ownerId: "demo-owner-5",
@@ -2819,6 +2823,7 @@ export class DatabaseStorage implements IStorage {
         zipCode: "33101",
         socialMedia: "@greenvalleyorganics",
         subscriptionActive: true,
+        isDemo: true,
       },
       {
         ownerId: "demo-owner-6",
@@ -2826,6 +2831,7 @@ export class DatabaseStorage implements IStorage {
         category: "Beauty",
         description: "Classic cuts and modern styles for men.",
         isStartup: false,
+        isDemo: true,
         yearsInBusiness: "10+",
         employeeCount: "2-5",
         businessType: "sole-proprietor",
@@ -2854,6 +2860,7 @@ export class DatabaseStorage implements IStorage {
         websiteUrl: "https://soulfoodkitchen.com",
         socialMedia: "@soulfoodkitchen",
         subscriptionActive: true,
+        isDemo: true,
       },
       {
         ownerId: "demo-owner-8",
@@ -2872,6 +2879,7 @@ export class DatabaseStorage implements IStorage {
         websiteUrl: "https://beachvibes.com",
         socialMedia: "@beachvibesboutique",
         subscriptionActive: true,
+        isDemo: true,
       },
     ];
 

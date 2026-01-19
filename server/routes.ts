@@ -2760,6 +2760,14 @@ export async function registerRoutes(
         }
       }
 
+      // Check if user is admin (admins can see demo data)
+      // Note: user may already be fetched above, but we only need the isAdmin flag here
+      let isAdmin = false;
+      if (userId) {
+        const userForAdmin = await storage.getUser(userId);
+        isAdmin = userForAdmin?.isAdmin || false;
+      }
+
       const results = await storage.unifiedSearch({
         query: q as string | undefined,
         city: city as string | undefined,
@@ -2770,6 +2778,7 @@ export async function registerRoutes(
         userPreferences,
         limit: limit ? parseInt(limit as string) : 50,
         offset: offset ? parseInt(offset as string) : 0,
+        isAdmin,
       });
 
       res.json(results);
