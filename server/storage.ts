@@ -2284,6 +2284,7 @@ export class DatabaseStorage implements IStorage {
           parentType: entry.parentType,
           parentId: entry.parentId,
           hasActiveSubscription: entry.hasActiveSubscription,
+          isDemo: entry.isDemo ?? false,
           updatedAt: new Date(),
         })
         .where(eq(searchIndex.id, existing[0].id))
@@ -2312,6 +2313,7 @@ export class DatabaseStorage implements IStorage {
       parentType: entry.parentType,
       parentId: entry.parentId,
       hasActiveSubscription: entry.hasActiveSubscription,
+      isDemo: entry.isDemo ?? false,
     }).returning();
     return created;
   }
@@ -2345,6 +2347,7 @@ export class DatabaseStorage implements IStorage {
         imageUrl: business.logoImage || business.coverImage || undefined,
         isActive: business.subscriptionActive || false,
         hasActiveSubscription: business.subscriptionActive || false,
+        isDemo: business.isDemo || false,
       });
       
       const products = await db.select().from(vendorProducts)
@@ -2374,6 +2377,7 @@ export class DatabaseStorage implements IStorage {
           imageUrl: product.imageUrl || undefined,
           isActive: product.isActive || false,
           hasActiveSubscription: business.subscriptionActive || false,
+          isDemo: business.isDemo || false,
         });
       }
       
@@ -2402,6 +2406,7 @@ export class DatabaseStorage implements IStorage {
           priceCents: service.price,
           isActive: service.isActive || false,
           hasActiveSubscription: business.subscriptionActive || false,
+          isDemo: business.isDemo || false,
         });
       }
     }
@@ -2423,6 +2428,7 @@ export class DatabaseStorage implements IStorage {
         priceCents: photographer.hourlyRate * 100,
         imageUrl: photographer.logoImage || photographer.coverImage || undefined,
         isActive: photographer.stripeOnboardingComplete || false,
+        isDemo: photographer.isDemo || false,
       });
       
       const photoServices = await db.select().from(photographerServices)
@@ -2448,6 +2454,7 @@ export class DatabaseStorage implements IStorage {
           reviewCount: photographer.reviewCount || 0,
           priceCents: service.priceCents || (service.hourlyRateCents ? service.hourlyRateCents : undefined),
           isActive: service.isActive || false,
+          isDemo: photographer.isDemo || false,
         });
       }
     }
