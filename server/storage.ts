@@ -2884,6 +2884,7 @@ export class DatabaseStorage implements IStorage {
         logoImage: null,
         rating: Math.floor(Math.random() * 5 + 45),
         reviewCount: Math.floor(Math.random() * 200 + 50),
+        isDemo: true, // Mark seed data as demo - hidden from non-admin users
       }).returning();
     }
 
