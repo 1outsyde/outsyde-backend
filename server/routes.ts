@@ -594,10 +594,12 @@ export async function registerRoutes(
         });
       }
 
-      // Generate JWT tokens
+      // Generate JWT tokens with full role information
       const tokenPayload: TokenPayload = {
         userId: user.id,
-        isVendor: user.isVendor,
+        isVendor: user.isVendor || false,
+        isPhotographer: user.isPhotographer || false,
+        isAdmin: user.isAdmin || false,
       };
 
       // Check for business association
@@ -605,6 +607,14 @@ export async function registerRoutes(
         const business = await storage.getBusinessByOwnerId(user.id);
         if (business) {
           tokenPayload.businessId = business.id;
+        }
+      }
+
+      // Check for photographer association
+      if (user.isPhotographer) {
+        const photographer = await storage.getPhotographerByUserId(user.id);
+        if (photographer) {
+          tokenPayload.photographerId = photographer.id;
         }
       }
 
@@ -867,11 +877,14 @@ export async function registerRoutes(
         }
       }
 
-      // Generate JWT tokens for mobile app
+      // Generate JWT tokens for mobile app with full role information
       const tokenPayload: TokenPayload = {
         userId: user.id,
         isVendor: user.isVendor || false,
+        isPhotographer: user.isPhotographer || false,
+        isAdmin: user.isAdmin || false,
         businessId,
+        photographerId,
       };
 
       const accessToken = generateAccessToken(tokenPayload);
@@ -968,16 +981,25 @@ export async function registerRoutes(
         });
       }
 
-      // Generate new tokens
+      // Generate new tokens with full role information
       const tokenPayload: TokenPayload = {
         userId: user.id,
-        isVendor: user.isVendor,
+        isVendor: user.isVendor || false,
+        isPhotographer: user.isPhotographer || false,
+        isAdmin: user.isAdmin || false,
       };
 
       if (user.isVendor) {
         const business = await storage.getBusinessByOwnerId(user.id);
         if (business) {
           tokenPayload.businessId = business.id;
+        }
+      }
+
+      if (user.isPhotographer) {
+        const photographer = await storage.getPhotographerByUserId(user.id);
+        if (photographer) {
+          tokenPayload.photographerId = photographer.id;
         }
       }
 
@@ -1037,16 +1059,25 @@ export async function registerRoutes(
         });
       }
 
-      // Generate JWT tokens
+      // Generate JWT tokens with full role information
       const tokenPayload: TokenPayload = {
         userId: user.id,
-        isVendor: user.isVendor,
+        isVendor: user.isVendor || false,
+        isPhotographer: user.isPhotographer || false,
+        isAdmin: user.isAdmin || false,
       };
 
       if (user.isVendor) {
         const business = await storage.getBusinessByOwnerId(user.id);
         if (business) {
           tokenPayload.businessId = business.id;
+        }
+      }
+
+      if (user.isPhotographer) {
+        const photographer = await storage.getPhotographerByUserId(user.id);
+        if (photographer) {
+          tokenPayload.photographerId = photographer.id;
         }
       }
 
