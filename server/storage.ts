@@ -145,6 +145,7 @@ import {
   influencerPayouts,
   searchIndex,
   follows,
+  oauthStates,
   isValidOrderTransition,
   isValidBookingTransition
 } from "@shared/schema";
@@ -192,6 +193,11 @@ export interface IStorage {
   revokeRefreshToken(tokenId: string): Promise<void>;
   revokeAllUserRefreshTokens(userId: string): Promise<void>;
   cleanupExpiredTokens(): Promise<void>;
+
+  // OAuth State CRUD (for mobile OAuth CSRF protection)
+  createOAuthState(state: string, expiresAt: Date, deviceId?: string): Promise<void>;
+  validateAndConsumeOAuthState(state: string): Promise<{ state: string; deviceId: string | null } | null>;
+  cleanupExpiredOAuthStates(): Promise<void>;
 
   // Photographer CRUD
   createPhotographer(data: NewPhotographerInput): Promise<Photographer>;
@@ -931,6 +937,45 @@ export class DatabaseStorage implements IStorage {
   async cleanupExpiredTokens(): Promise<void> {
     await db.delete(refreshTokens).where(
       sql`${refreshTokens.expiresAt} < NOW()`
+    );
+  }
+
+  // =========================
+  // OAUTH STATES (Mobile Auth CSRF)
+  // =========================
+
+  async createOAuthState(state: string, expiresAt: Date, deviceId?: string): Promise<void> {
+    await db.insert(oauthStates).values({
+      state,
+      expiresAt,
+      deviceId: deviceId || null,
+    });
+  }
+
+  async validateAndConsumeOAuthState(state: string): Promise<{ state: string; deviceId: string | null } | null> {
+    // Delete and return the state in one operation (atomic)
+    const result = await db.delete(oauthStates)
+      .where(
+        and(
+          eq(oauthStates.state, state),
+          sql`${oauthStates.expiresAt} > NOW()`
+        )
+      )
+      .returning();
+
+    if (result.length === 0) {
+      return null;
+    }
+
+    return {
+      state: result[0].state,
+      deviceId: result[0].deviceId,
+    };
+  }
+
+  async cleanupExpiredOAuthStates(): Promise<void> {
+    await db.delete(oauthStates).where(
+      sql`${oauthStates.expiresAt} < NOW()`
     );
   }
 

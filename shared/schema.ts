@@ -19,6 +19,20 @@ export const sessions = pgTable(
 );
 
 /* =====================================================
+   OAUTH STATES (Mobile Auth CSRF Protection)
+===================================================== */
+export const oauthStates = pgTable(
+  "oauth_states",
+  {
+    state: varchar("state", { length: 36 }).primaryKey(),
+    deviceId: text("device_id"),
+    createdAt: timestamp("created_at").defaultNow().notNull(),
+    expiresAt: timestamp("expires_at").notNull(),
+  },
+  (t) => [index("IDX_oauth_states_expires").on(t.expiresAt)]
+);
+
+/* =====================================================
    BILLING ADDRESS TYPE
 ===================================================== */
 export interface BillingAddress {
