@@ -633,6 +633,156 @@ export async function registerRoutes(
     }
   });
 
+  // Mobile Google OAuth Callback - Server-side OAuth code exchange for Expo apps
+  // This handles the OAuth redirect from Google and redirects to the app via deep link
+  app.get("/api/auth/mobile/google/callback", async (req, res) => {
+    const successRedirect = "outsyde://auth/success";
+    const errorRedirect = "outsyde://auth/error";
+
+    try {
+      const { code, error: oauthError } = req.query;
+
+      // Handle OAuth errors from Google
+      if (oauthError) {
+        console.error("Google OAuth error:", oauthError);
+        return res.redirect(`${errorRedirect}?error=${encodeURIComponent(String(oauthError))}`);
+      }
+
+      // Validate code parameter
+      if (!code || typeof code !== 'string') {
+        return res.status(400).send("Missing authorization code");
+      }
+
+      // Get environment variables
+      const clientId = process.env.GOOGLE_OAUTH_CLIENT_ID;
+      const clientSecret = process.env.GOOGLE_CLIENT_SECRET;
+      const redirectUri = "https://outsyde-backend.onrender.com/api/auth/mobile/google/callback";
+
+      if (!clientId || !clientSecret) {
+        console.error("Missing Google OAuth configuration");
+        return res.redirect(`${errorRedirect}?error=server_configuration`);
+      }
+
+      // Exchange authorization code for tokens
+      const tokenResponse = await fetch("https://oauth2.googleapis.com/token", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/x-www-form-urlencoded",
+        },
+        body: new URLSearchParams({
+          code,
+          client_id: clientId,
+          client_secret: clientSecret,
+          redirect_uri: redirectUri,
+          grant_type: "authorization_code",
+        }),
+      });
+
+      if (!tokenResponse.ok) {
+        const errorData = await tokenResponse.text();
+        console.error("Token exchange failed:", errorData);
+        return res.redirect(`${errorRedirect}?error=token_exchange_failed`);
+      }
+
+      const tokens = await tokenResponse.json() as { 
+        access_token: string; 
+        id_token?: string;
+        refresh_token?: string;
+      };
+
+      // Get user info from Google
+      const userInfoResponse = await fetch("https://www.googleapis.com/oauth2/v2/userinfo", {
+        headers: {
+          Authorization: `Bearer ${tokens.access_token}`,
+        },
+      });
+
+      if (!userInfoResponse.ok) {
+        console.error("Failed to fetch user info");
+        return res.redirect(`${errorRedirect}?error=userinfo_failed`);
+      }
+
+      const googleUser = await userInfoResponse.json() as {
+        id: string;
+        email: string;
+        name?: string;
+        given_name?: string;
+        family_name?: string;
+        picture?: string;
+      };
+
+      const { id: googleSub, email, name, given_name, family_name, picture } = googleUser;
+
+      if (!googleSub || !email) {
+        console.error("Missing user info from Google");
+        return res.redirect(`${errorRedirect}?error=missing_user_info`);
+      }
+
+      // Try to find existing user by googleSub first, then by email
+      let user = await storage.getUserByGoogleSub(googleSub);
+      
+      if (!user) {
+        // Check if user exists by email (may have been created via email/password)
+        user = await storage.getUserByEmail(email);
+        
+        if (user) {
+          // Link Google account to existing user
+          await storage.updateUser(user.id, { 
+            googleSub,
+            isOAuthUser: true,
+            profileImageUrl: user.profileImageUrl || picture || null,
+          });
+          user = await storage.getUser(user.id);
+        }
+      }
+
+      // Check if email is in admin list for auto-granting admin role
+      const ALLOWED_ADMIN_EMAILS = [
+        'info@goutsyde.com',
+        'jamesmeyers2304@gmail.com',
+      ].map(e => e.toLowerCase());
+      const isAdminEmail = ALLOWED_ADMIN_EMAILS.includes(email.toLowerCase());
+
+      if (!user) {
+        // Create new user
+        const newUser = await storage.createUser({
+          email,
+          name: name || `${given_name || ''} ${family_name || ''}`.trim() || email.split('@')[0],
+          firstName: given_name || null,
+          lastName: family_name || null,
+          profileImageUrl: picture || null,
+          isOAuthUser: true,
+          isAdmin: isAdminEmail,
+        });
+        
+        // Link googleSub
+        await storage.updateUser(newUser.id, { googleSub });
+        user = await storage.getUser(newUser.id);
+      } else {
+        // Update admin status if email is in admin list but not yet marked
+        if (isAdminEmail && !user.isAdmin) {
+          await storage.updateUser(user.id, { isAdmin: true });
+          user = await storage.getUser(user.id);
+        }
+      }
+
+      if (!user) {
+        console.error("Failed to create or retrieve user");
+        return res.redirect(`${errorRedirect}?error=user_creation_failed`);
+      }
+
+      // Create session for the user
+      req.session.userId = user.id;
+
+      // Redirect to the mobile app with success
+      res.redirect(successRedirect);
+
+    } catch (error) {
+      console.error("Mobile Google OAuth callback error:", error);
+      res.redirect(`${errorRedirect}?error=server_error`);
+    }
+  });
+
   // Mobile token refresh endpoint
   app.post("/api/auth/mobile/refresh", async (req, res) => {
     try {
