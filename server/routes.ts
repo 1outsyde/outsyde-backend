@@ -6297,6 +6297,12 @@ export async function registerRoutes(
   // Supports both session-based auth (web) and JWT-based auth (mobile)
   // Order: Session first, then JWT fallback
   const requireAdmin = async (req: any, res: any, next: any) => {
+    console.log("requireAdmin check:", {
+      hasSession: !!req.session?.userId,
+      authHeader: req.headers.authorization?.substring(0, 50),
+      sessionUserId: req.session?.userId
+    });
+
     let userId: string | null = null;
     let tokenPayload: TokenPayload | null = null;
 
