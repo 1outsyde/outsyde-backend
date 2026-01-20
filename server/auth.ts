@@ -17,7 +17,10 @@ const REFRESH_TOKEN_EXPIRY = "7d";
 export interface TokenPayload {
   userId: string;
   isVendor: boolean;
+  isPhotographer?: boolean;
+  isAdmin?: boolean;
   businessId?: string;
+  photographerId?: string;
 }
 
 export interface AuthenticatedRequest extends Request {
