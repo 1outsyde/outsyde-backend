@@ -6397,6 +6397,74 @@ export async function registerRoutes(
     next();
   };
 
+  // Trigger admin notification for new business application (called by mobile app after vendor signup)
+  // Requires authentication - caller must be the business owner
+  app.post("/api/admin/notifications/business-application", async (req, res) => {
+    try {
+      // Check for JWT auth (mobile) or session auth (web)
+      let userId: string | null = null;
+      
+      const authHeader = req.headers.authorization;
+      if (authHeader && authHeader.startsWith("Bearer ")) {
+        try {
+          const token = authHeader.substring(7);
+          const decoded = verifyAccessToken(token);
+          if (decoded) {
+            userId = decoded.userId;
+          }
+        } catch (e) {
+          // JWT verification failed, try session
+        }
+      }
+      
+      // Fall back to session auth
+      if (!userId && req.session?.userId) {
+        userId = req.session.userId;
+      }
+      
+      if (!userId) {
+        return res.status(401).json({ error: "Not authenticated" });
+      }
+      
+      const { businessId } = req.body;
+      
+      if (!businessId) {
+        return res.status(400).json({ error: "businessId is required" });
+      }
+      
+      const business = await storage.getBusiness(businessId);
+      if (!business) {
+        return res.status(404).json({ error: "Business not found" });
+      }
+      
+      // Verify the caller owns this business
+      if ((business as any).ownerId !== userId) {
+        return res.status(403).json({ error: "Not authorized to trigger notifications for this business" });
+      }
+      
+      const owner = await storage.getUser((business as any).ownerId);
+      if (!owner) {
+        return res.status(404).json({ error: "Business owner not found" });
+      }
+      
+      // Trigger admin notifications (in-app + email)
+      await NotificationTriggers.newVendorApplication({
+        businessId: business.id,
+        businessName: business.name,
+        businessCategory: business.category,
+        ownerName: owner.name || 'Unknown',
+        ownerEmail: owner.email,
+        city: business.city,
+        state: business.state,
+      });
+      
+      res.json({ success: true, message: "Admin notification sent" });
+    } catch (error) {
+      console.error("Admin notification error:", error);
+      res.status(500).json({ error: "Failed to send admin notification" });
+    }
+  });
+
   // Get pending vendor applications
   app.get("/api/admin/applications", requireAdmin, async (req, res) => {
     try {
