@@ -6295,27 +6295,34 @@ export async function registerRoutes(
 
   // Middleware to check if user is admin (email-locked, server-enforced)
   // Supports both session-based auth (web) and JWT-based auth (mobile)
+  // Order: Session first, then JWT fallback
   const requireAdmin = async (req: any, res: any, next: any) => {
     let userId: string | null = null;
     let tokenPayload: TokenPayload | null = null;
 
-    // First, try JWT-based auth (Authorization: Bearer <token>)
-    const authHeader = req.headers.authorization;
-    if (authHeader && authHeader.startsWith("Bearer ")) {
-      const token = authHeader.substring(7);
-      tokenPayload = verifyAccessToken(token);
-      if (tokenPayload) {
-        userId = tokenPayload.userId;
-        // Quick check: if JWT says isAdmin is false, reject early
-        if (!tokenPayload.isAdmin) {
-          return res.status(403).json({ error: "Admin access required" });
-        }
-      }
+    // First, try session-based auth (web clients)
+    if (req.session?.userId) {
+      userId = req.session.userId;
     }
 
-    // Fall back to session-based auth if no valid JWT
+    // If no session, try JWT-based auth (mobile clients)
     if (!userId) {
-      userId = req.session?.userId;
+      const authHeader = req.headers.authorization;
+      if (authHeader && authHeader.startsWith("Bearer ")) {
+        const token = authHeader.substring(7);
+        tokenPayload = verifyAccessToken(token);
+        if (tokenPayload) {
+          userId = tokenPayload.userId;
+          // Set session userId for compatibility with downstream code
+          if (req.session) {
+            req.session.userId = tokenPayload.userId;
+          }
+          // Quick check: if JWT says isAdmin is false, reject early
+          if (!tokenPayload.isAdmin) {
+            return res.status(403).json({ error: "Admin access required" });
+          }
+        }
+      }
     }
 
     if (!userId) {
