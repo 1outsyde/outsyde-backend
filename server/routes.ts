@@ -53,11 +53,13 @@ import {
   verifyPassword,
   generateAccessToken,
   generateRefreshToken,
+  verifyAccessToken,
   verifyRefreshToken,
   authMiddleware,
   optionalAuthMiddleware,
   getUserIdFromRequest,
   type AuthenticatedRequest,
+  type TokenPayload,
 } from "./auth";
 import { stripeService } from "./stripe/stripeService";
 import { getStripePublishableKey, getUncachableStripeClient } from "./stripe/stripeClient";
@@ -6292,20 +6294,44 @@ export async function registerRoutes(
   };
 
   // Middleware to check if user is admin (email-locked, server-enforced)
+  // Supports both session-based auth (web) and JWT-based auth (mobile)
   const requireAdmin = async (req: any, res: any, next: any) => {
-    const userId = req.session?.userId;
+    let userId: string | null = null;
+    let tokenPayload: TokenPayload | null = null;
+
+    // First, try JWT-based auth (Authorization: Bearer <token>)
+    const authHeader = req.headers.authorization;
+    if (authHeader && authHeader.startsWith("Bearer ")) {
+      const token = authHeader.substring(7);
+      tokenPayload = verifyAccessToken(token);
+      if (tokenPayload) {
+        userId = tokenPayload.userId;
+        // Quick check: if JWT says isAdmin is false, reject early
+        if (!tokenPayload.isAdmin) {
+          return res.status(403).json({ error: "Admin access required" });
+        }
+      }
+    }
+
+    // Fall back to session-based auth if no valid JWT
+    if (!userId) {
+      userId = req.session?.userId;
+    }
+
     if (!userId) {
       return res.status(401).json({ error: "Not authenticated" });
     }
 
+    // Fetch user from database to verify current admin status and email
     const user = await storage.getUser(userId);
     
-    // Check both isAdmin flag AND email is in allowed list
+    // Check both isAdmin flag AND email is in allowed list (double verification)
     if (!user?.isAdmin || !isAllowedAdminEmail(user.email)) {
       return res.status(403).json({ error: "Admin access required" });
     }
 
     req.adminUser = user;
+    req.user = tokenPayload || req.user; // Preserve token payload for downstream use
     next();
   };
 
