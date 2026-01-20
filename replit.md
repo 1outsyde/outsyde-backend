@@ -40,6 +40,7 @@ The Outsyde platform operates as a monorepo, utilizing a React frontend, an Expr
         - Environment variables: `GOOGLE_OAUTH_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `GOOGLE_OAUTH_REDIRECT_URI`
 -   **User Location & Personalized Search:** The backend is the source of truth for user location, enabling personalized search results based on user preferences (industries, niches, values).
 -   **Data Privacy:** Strict measures are in place for sensitive data like DOB and ethnicity, ensuring limited visibility and aggregation for analytics only. Demo data is filtered for non-admin users.
+-   **Business Visibility Filtering:** Server-side `isBusinessVisibleToPublic()` helper enforces visibility on all public business endpoints (/api/vendors, /api/search, /api/businesses, /api/businesses/:id, /api/businesses/:id/products, /api/businesses/:id/services). Criteria: approvalStatus === "approved", excludes demo data (ownerId contains "demo"), stripeOnboardingComplete required only if hasProducts/hasServices, and active subscription.
 
 ## External Dependencies
 -   **PostgreSQL:** Primary database.
