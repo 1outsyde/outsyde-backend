@@ -6295,7 +6295,8 @@ export async function registerRoutes(
 
   // Middleware to check if user is admin (email-locked, server-enforced)
   // Supports both session-based auth (web) and JWT-based auth (mobile)
-  // Order: Session first, then JWT fallback
+  // Order: JWT first (if present), then session fallback
+  // This ensures mobile apps use the JWT identity, not a stale session
   const requireAdmin = async (req: any, res: any, next: any) => {
     console.log("requireAdmin check:", {
       hasSession: !!req.session?.userId,
@@ -6306,29 +6307,29 @@ export async function registerRoutes(
     let userId: string | null = null;
     let tokenPayload: TokenPayload | null = null;
 
-    // First, try session-based auth (web clients)
-    if (req.session?.userId) {
-      userId = req.session.userId;
-    }
-
-    // If no session, try JWT-based auth (mobile clients)
-    if (!userId) {
-      const authHeader = req.headers.authorization;
-      if (authHeader && authHeader.startsWith("Bearer ")) {
-        const token = authHeader.substring(7);
-        tokenPayload = verifyAccessToken(token);
-        if (tokenPayload) {
-          userId = tokenPayload.userId;
-          // Set session userId for compatibility with downstream code
-          if (req.session) {
-            req.session.userId = tokenPayload.userId;
-          }
-          // Quick check: if JWT says isAdmin is false, reject early
-          if (!tokenPayload.isAdmin) {
-            return res.status(403).json({ error: "Admin access required" });
-          }
+    // First, try JWT-based auth (prioritize over session for mobile clients)
+    const authHeader = req.headers.authorization;
+    if (authHeader && authHeader.startsWith("Bearer ")) {
+      const token = authHeader.substring(7);
+      tokenPayload = verifyAccessToken(token);
+      if (tokenPayload) {
+        userId = tokenPayload.userId;
+        console.log("requireAdmin: Using JWT auth, userId:", userId, "isAdmin:", tokenPayload.isAdmin);
+        // Set session userId for compatibility with downstream code
+        if (req.session) {
+          req.session.userId = tokenPayload.userId;
+        }
+        // Quick check: if JWT says isAdmin is false, reject early
+        if (!tokenPayload.isAdmin) {
+          return res.status(403).json({ error: "Admin access required" });
         }
       }
+    }
+
+    // Fall back to session-based auth if no valid JWT (web clients)
+    if (!userId && req.session?.userId) {
+      userId = req.session.userId;
+      console.log("requireAdmin: Using session auth, userId:", userId);
     }
 
     if (!userId) {
@@ -6340,9 +6341,11 @@ export async function registerRoutes(
     
     // Check both isAdmin flag AND email is in allowed list (double verification)
     if (!user?.isAdmin || !isAllowedAdminEmail(user.email)) {
+      console.log("requireAdmin: Admin check failed for user:", user?.email, "isAdmin:", user?.isAdmin);
       return res.status(403).json({ error: "Admin access required" });
     }
 
+    console.log("requireAdmin: Access granted for admin:", user.email);
     req.adminUser = user;
     req.user = tokenPayload || req.user; // Preserve token payload for downstream use
     next();
