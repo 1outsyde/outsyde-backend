@@ -101,7 +101,7 @@ export async function registerRoutes(
   app: Express
 ): Promise<Server> {
   // Helper function to check if a business is visible to public users
-  // Filters out: pending approval, demo data, incomplete Stripe onboarding, inactive subscriptions
+  // Filters out: pending approval, demo data, incomplete Stripe onboarding (if monetization enabled), inactive subscriptions
   const isBusinessVisibleToPublic = async (business: any): Promise<boolean> => {
     // Must be approved
     if (business.approvalStatus !== "approved") {
@@ -113,8 +113,10 @@ export async function registerRoutes(
       return false;
     }
     
-    // Must have completed Stripe onboarding (if payment is enabled)
-    if (!business.stripeOnboardingComplete) {
+    // Must have completed Stripe onboarding only if business has monetization features enabled
+    // (hasProducts or hasServices indicates they need payment processing)
+    const needsStripe = business.hasProducts || business.hasServices;
+    if (needsStripe && !business.stripeOnboardingComplete) {
       return false;
     }
     
@@ -3302,9 +3304,8 @@ export async function registerRoutes(
         return res.status(404).json({ error: "Business not found" });
       }
       
-      // Check if business has active subscription
-      const subStatus = await storage.isBusinessSubscriptionActive(business.id);
-      if (!subStatus.active) {
+      // Server-side filtering: check visibility for public access
+      if (!(await isBusinessVisibleToPublic(business))) {
         return res.status(404).json({ error: "This business is currently unavailable" });
       }
       
@@ -3326,9 +3327,8 @@ export async function registerRoutes(
         return res.status(404).json({ error: "Business not found" });
       }
       
-      // Check if business has active subscription
-      const subStatus = await storage.isBusinessSubscriptionActive(business.id);
-      if (!subStatus.active) {
+      // Server-side filtering: check visibility for public access
+      if (!(await isBusinessVisibleToPublic(business))) {
         return res.status(404).json({ error: "This business is currently unavailable" });
       }
       
