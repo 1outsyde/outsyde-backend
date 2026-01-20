@@ -848,22 +848,57 @@ export async function registerRoutes(
       req.session.isPhotographer = user.isPhotographer;
       // Note: isStaff and isAdmin are accessed via user lookup from userId
 
-      // Add business/photographer IDs if applicable
+      // Get business/photographer IDs if applicable
+      let businessId: string | undefined;
+      let photographerId: string | undefined;
+      
       if (user.isVendor) {
         const business = await storage.getBusinessByOwnerId(user.id);
         if (business) {
           req.session.businessId = business.id;
+          businessId = business.id;
         }
       }
       if (user.isPhotographer) {
         const photographer = await storage.getPhotographerByUserId(user.id);
         if (photographer) {
           req.session.photographerId = photographer.id;
+          photographerId = photographer.id;
         }
       }
 
-      // Include state in success redirect so mobile app can validate
-      res.redirect(`${successRedirect}?state=${encodeURIComponent(String(state))}`);
+      // Generate JWT tokens for mobile app
+      const tokenPayload: TokenPayload = {
+        userId: user.id,
+        isVendor: user.isVendor || false,
+        businessId,
+      };
+
+      const accessToken = generateAccessToken(tokenPayload);
+      const refreshToken = generateRefreshToken(tokenPayload);
+
+      // Store refresh token in database (7 day expiry)
+      await storage.storeRefreshToken(user.id, refreshToken, new Date(Date.now() + 7 * 24 * 60 * 60 * 1000));
+
+      // Build success redirect URL with tokens
+      const redirectParams = new URLSearchParams({
+        accessToken,
+        refreshToken,
+        userId: user.id,
+      });
+      
+      // Include optional IDs if present
+      if (businessId) {
+        redirectParams.append('businessId', businessId);
+      }
+      if (photographerId) {
+        redirectParams.append('photographerId', photographerId);
+      }
+      if (user.isAdmin) {
+        redirectParams.append('isAdmin', 'true');
+      }
+
+      res.redirect(`${successRedirect}?${redirectParams.toString()}`);
 
     } catch (error) {
       console.error("Mobile Google OAuth callback error:", error);
