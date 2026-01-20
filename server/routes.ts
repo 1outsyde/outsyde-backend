@@ -100,6 +100,33 @@ export async function registerRoutes(
   httpServer: Server,
   app: Express
 ): Promise<Server> {
+  // Helper function to check if a business is visible to public users
+  // Filters out: pending approval, demo data, incomplete Stripe onboarding, inactive subscriptions
+  const isBusinessVisibleToPublic = async (business: any): Promise<boolean> => {
+    // Must be approved
+    if (business.approvalStatus !== "approved") {
+      return false;
+    }
+    
+    // Filter out demo data (ownerId contains "demo")
+    if (business.ownerId && typeof business.ownerId === "string" && business.ownerId.toLowerCase().includes("demo")) {
+      return false;
+    }
+    
+    // Must have completed Stripe onboarding (if payment is enabled)
+    if (!business.stripeOnboardingComplete) {
+      return false;
+    }
+    
+    // Must have active subscription
+    const subStatus = await storage.isBusinessSubscriptionActive(business.id);
+    if (!subStatus.active) {
+      return false;
+    }
+    
+    return true;
+  };
+
   // Health check endpoint for Render and other hosting platforms
   app.get("/health", (req, res) => {
     res.json({ 
@@ -113,7 +140,16 @@ export async function registerRoutes(
   app.get("/api/vendors", async (req, res) => {
     try {
       const businesses = await storage.getBusinesses({});
-      res.json(businesses || []);
+      
+      // Server-side filtering: only return approved, non-demo, Stripe-complete, subscription-active businesses
+      const visibleBusinesses = [];
+      for (const business of businesses) {
+        if (await isBusinessVisibleToPublic(business)) {
+          visibleBusinesses.push(business);
+        }
+      }
+      
+      res.json(visibleBusinesses);
     } catch (error) {
       console.error("Get vendors error:", error);
       res.status(500).json({ error: "Failed to get vendors" });
@@ -129,6 +165,18 @@ export async function registerRoutes(
         city: city as string | undefined,
         category: category as string | undefined,
       });
+      
+      // Server-side filtering for businesses in search results
+      if (results.businesses && Array.isArray(results.businesses)) {
+        const filteredBusinesses = [];
+        for (const business of results.businesses) {
+          if (await isBusinessVisibleToPublic(business)) {
+            filteredBusinesses.push(business);
+          }
+        }
+        results.businesses = filteredBusinesses;
+      }
+      
       res.json(results);
     } catch (error) {
       console.error("Search error:", error);
@@ -3212,16 +3260,15 @@ export async function registerRoutes(
         search: search as string | undefined,
       });
       
-      // Filter out businesses without active subscriptions
-      const activeBusinesses = [];
+      // Server-side filtering: only return approved, non-demo, Stripe-complete, subscription-active businesses
+      const visibleBusinesses = [];
       for (const business of businesses) {
-        const subStatus = await storage.isBusinessSubscriptionActive(business.id);
-        if (subStatus.active) {
-          activeBusinesses.push(business);
+        if (await isBusinessVisibleToPublic(business)) {
+          visibleBusinesses.push(business);
         }
       }
       
-      res.json({ businesses: activeBusinesses });
+      res.json({ businesses: visibleBusinesses });
     } catch (error) {
       console.error("Get businesses error:", error);
       res.status(500).json({ error: "Failed to get businesses" });
@@ -3235,9 +3282,8 @@ export async function registerRoutes(
         return res.status(404).json({ error: "Business not found" });
       }
       
-      // Check if business has active subscription
-      const subStatus = await storage.isBusinessSubscriptionActive(business.id);
-      if (!subStatus.active) {
+      // Server-side filtering: check visibility for public access
+      if (!(await isBusinessVisibleToPublic(business))) {
         return res.status(404).json({ error: "This business is currently unavailable" });
       }
       
