@@ -880,12 +880,38 @@ export async function registerRoutes(
       // Store refresh token in database (7 day expiry)
       await storage.storeRefreshToken(user.id, refreshToken, new Date(Date.now() + 7 * 24 * 60 * 60 * 1000));
 
-      // Build success redirect URL with tokens
+      // Build success redirect URL with tokens and user data
       const redirectParams = new URLSearchParams({
         accessToken,
         refreshToken,
         userId: user.id,
+        email: user.email,
       });
+      
+      // Include user profile data
+      if (user.firstName) {
+        redirectParams.append('firstName', user.firstName);
+      }
+      if (user.lastName) {
+        redirectParams.append('lastName', user.lastName);
+      }
+      if (user.name) {
+        redirectParams.append('name', user.name);
+      }
+      if (user.profileImageUrl) {
+        redirectParams.append('profileImageUrl', user.profileImageUrl);
+      }
+      
+      // Include role flags
+      if (user.isVendor) {
+        redirectParams.append('isVendor', 'true');
+      }
+      if (user.isPhotographer) {
+        redirectParams.append('isPhotographer', 'true');
+      }
+      if (user.isAdmin) {
+        redirectParams.append('isAdmin', 'true');
+      }
       
       // Include optional IDs if present
       if (businessId) {
@@ -893,9 +919,6 @@ export async function registerRoutes(
       }
       if (photographerId) {
         redirectParams.append('photographerId', photographerId);
-      }
-      if (user.isAdmin) {
-        redirectParams.append('isAdmin', 'true');
       }
 
       res.redirect(`${successRedirect}?${redirectParams.toString()}`);
