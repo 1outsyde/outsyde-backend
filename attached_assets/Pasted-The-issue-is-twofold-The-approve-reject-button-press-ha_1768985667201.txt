@@ -1,0 +1,36 @@
+The issue is twofold:
+
+The approve/reject button press handlers might be capturing the touch before the card navigation can trigger
+The API endpoints might be returning errors
+Let me add better error logging and fix the touch handling by making sure approve/reject buttons stop propagation:
+Now let me fix the button press handling to stop propagation and prevent the card navigation from being blocked. I also need to check the navigation route registration:
+The navigation route is registered. Let me fix the button presses to stop event propagation so they don't interfere with card taps, and update the code to properly handle the touch events:
+Now let me also update the renderBusinessItem function which is used in the FlatList version to do the same:
+Now let me check the API service to ensure the approve/reject endpoints are correctly defined:
+The API endpoints look correct. Let me check if there's an issue with the request method by looking at the base request method - it might need to handle the body properly with a Content-Type header:
+The API service looks good - it properly sets Content-Type: application/json. Let me check the workflow logs and restart to apply the changes:
+The application is running. Let me run a test to verify the admin dashboard business approval workflow:
+The test revealed a CORS issue with the backend. The backend is returning Access-Control-Allow-Origin: * which is incompatible with credentials: 'include'. This is a backend configuration issue that needs to be fixed on the VendorBooker backend server - it's not something I can fix in the frontend code.
+
+However, I should update the task list and document this issue. The core business approval/rejection functionality appears to be correctly implemented - the blockerr is the backend CORS configuration.
+
+Let me verify the frontend code changes are correct and update the task list:
+I've completed the fixes to the Admin Dashboard for business approval/rejection:
+
+Changes Made:
+
+Added detailed error logging to the handleApprove and handleReject functions to capture and display specific error messages when API calls fail
+Fixed touch event handling on approve/reject buttons with stopPropagation() to prevent them from blocking the card tap navigation
+Updated both the FlatList and ScrollView versions of the business card rendering:
+Changed from Pressable to TouchableOpacity for better touch handling
+Added navigation logging to help debug navigation issues
+Ensured consistent behavior across both rendering modes
+Backend Issue Identified:
+
+The testing uncovered a CORS configuration issue on the VendorBooker backend. The backend is returning Access-Control-Allow-Origin: * which is incompatible with credentials: 'include' required for session-based authentication. This is preventing login from working in the test environment.
+
+The backend team needs to update the CORS configuration to:
+
+Return the specific origin instead of *
+Or configure the allowed origins list to include the Replit domain
+The frontend code changes for the business approval/rejection workflow are now complete and ready to work once the backend CORS issue is resolved. Would you like me to document this backend issue for the team, or is there something else you'd like me to work on?
