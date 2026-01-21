@@ -80,10 +80,14 @@ import {
 import { 
   appointments, 
   shootBookings,
+  photographerAvailability,
+  photographerBlackoutDates,
   createAppointmentDraftSchema,
   createShootDraftSchema,
+  updatePhotographerAvailabilitySettingsSchema,
   BOOKING_STATES
 } from "@shared/schema";
+import { and } from "drizzle-orm";
 
 // ✅ CORRECT IMPORT (default export)
 import { photographersRouter } from "./Photographers/photographers.routes";
@@ -1718,6 +1722,160 @@ export async function registerRoutes(
       }
       console.error("Update photographer billing address error:", error);
       res.status(500).json({ error: "Failed to update billing address" });
+    }
+  });
+
+  // ==================== PHOTOGRAPHER AVAILABILITY ROUTES ====================
+
+  // Get photographer's availability settings (weekly hours, travel settings, blackout dates)
+  app.get("/api/photographers/me/availability", async (req, res) => {
+    const userId = req.session?.userId || getUserIdFromRequest(req);
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    try {
+      const photographer = await storage.getPhotographerByUserId(userId);
+      if (!photographer) {
+        return res.status(404).json({ error: "Photographer profile not found" });
+      }
+
+      // Get blackout dates
+      const blackoutDates = await db.select()
+        .from(photographerBlackoutDates)
+        .where(eq(photographerBlackoutDates.photographerId, photographer.id))
+        .orderBy(photographerBlackoutDates.date);
+
+      // Get date-specific availability slots
+      const availabilitySlots = await db.select()
+        .from(photographerAvailability)
+        .where(eq(photographerAvailability.photographerId, photographer.id));
+
+      res.json({
+        hoursOfOperation: photographer.hoursOfOperation || {},
+        travelBufferMinutes: photographer.travelBufferMinutes || 30,
+        serviceRadiusMiles: photographer.serviceRadiusMiles || 25,
+        serviceLocations: photographer.serviceLocations || [],
+        blackoutDates: blackoutDates.map(d => ({ id: d.id, date: d.date, reason: d.reason })),
+        availabilitySlots,
+      });
+    } catch (error) {
+      console.error("Get photographer availability error:", error);
+      res.status(500).json({ error: "Failed to get availability" });
+    }
+  });
+
+  // Update photographer's availability settings (weekly hours, travel settings)
+  app.put("/api/photographers/me/availability", async (req, res) => {
+    const userId = req.session?.userId || getUserIdFromRequest(req);
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    try {
+      const photographer = await storage.getPhotographerByUserId(userId);
+      if (!photographer) {
+        return res.status(404).json({ error: "Photographer profile not found" });
+      }
+
+      const data = updatePhotographerAvailabilitySettingsSchema.parse(req.body);
+
+      const updated = await storage.updatePhotographer(photographer.id, {
+        hoursOfOperation: data.hoursOfOperation,
+        travelBufferMinutes: data.travelBufferMinutes,
+        serviceRadiusMiles: data.serviceRadiusMiles,
+        serviceLocations: data.serviceLocations,
+      });
+
+      if (!updated) {
+        return res.status(500).json({ error: "Failed to update availability settings" });
+      }
+
+      res.json({
+        hoursOfOperation: updated.hoursOfOperation,
+        travelBufferMinutes: updated.travelBufferMinutes,
+        serviceRadiusMiles: updated.serviceRadiusMiles,
+        serviceLocations: updated.serviceLocations,
+      });
+    } catch (error) {
+      if (error instanceof z.ZodError) {
+        return res.status(400).json({ error: "Invalid data", details: error.errors });
+      }
+      console.error("Update photographer availability error:", error);
+      res.status(500).json({ error: "Failed to update availability" });
+    }
+  });
+
+  // Add blackout date
+  app.post("/api/photographers/me/availability/blackout-dates", async (req, res) => {
+    const userId = req.session?.userId || getUserIdFromRequest(req);
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    try {
+      const photographer = await storage.getPhotographerByUserId(userId);
+      if (!photographer) {
+        return res.status(404).json({ error: "Photographer profile not found" });
+      }
+
+      const blackoutSchema = z.object({
+        date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "Date must be YYYY-MM-DD"),
+        reason: z.string().optional(),
+      });
+
+      const data = blackoutSchema.parse(req.body);
+
+      const [blackoutDate] = await db.insert(photographerBlackoutDates).values({
+        photographerId: photographer.id,
+        date: data.date,
+        reason: data.reason || null,
+      }).returning();
+
+      res.status(201).json(blackoutDate);
+    } catch (error) {
+      if (error instanceof z.ZodError) {
+        return res.status(400).json({ error: "Invalid data", details: error.errors });
+      }
+      console.error("Add blackout date error:", error);
+      res.status(500).json({ error: "Failed to add blackout date" });
+    }
+  });
+
+  // Delete blackout date
+  app.delete("/api/photographers/me/availability/blackout-dates/:dateId", async (req, res) => {
+    const userId = req.session?.userId || getUserIdFromRequest(req);
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    try {
+      const photographer = await storage.getPhotographerByUserId(userId);
+      if (!photographer) {
+        return res.status(404).json({ error: "Photographer profile not found" });
+      }
+
+      const { dateId } = req.params;
+
+      // Verify ownership
+      const [existing] = await db.select()
+        .from(photographerBlackoutDates)
+        .where(and(
+          eq(photographerBlackoutDates.id, dateId),
+          eq(photographerBlackoutDates.photographerId, photographer.id)
+        ));
+
+      if (!existing) {
+        return res.status(404).json({ error: "Blackout date not found" });
+      }
+
+      await db.delete(photographerBlackoutDates)
+        .where(eq(photographerBlackoutDates.id, dateId));
+
+      res.json({ success: true });
+    } catch (error) {
+      console.error("Delete blackout date error:", error);
+      res.status(500).json({ error: "Failed to delete blackout date" });
     }
   });
 

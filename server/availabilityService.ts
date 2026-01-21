@@ -4,6 +4,7 @@ import {
   staffMembers,
   appointments, 
   photographerAvailability,
+  photographerBlackoutDates,
   shootBookings,
   vendorServices,
   photographerServices,
@@ -186,6 +187,20 @@ export async function getPhotographerAvailabilitySlots(
     throw new Error("Photographer not found");
   }
 
+  // Get travel buffer setting (default 30 mins)
+  const travelBufferMinutes = photographer.travelBufferMinutes || 30;
+
+  // Get blackout dates for this photographer
+  const blackoutDates = await db.select().from(photographerBlackoutDates)
+    .where(
+      and(
+        eq(photographerBlackoutDates.photographerId, photographerId),
+        gte(photographerBlackoutDates.date, startDate),
+        lte(photographerBlackoutDates.date, endDate)
+      )
+    );
+  const blackoutDateSet = new Set(blackoutDates.map(d => d.date));
+
   const availabilityRecords = await db.select().from(photographerAvailability)
     .where(
       and(
@@ -213,6 +228,14 @@ export async function getPhotographerAvailabilitySlots(
 
   while (currentDate <= end) {
     const dateStr = currentDate.toISOString().split('T')[0];
+
+    // Check if this date is a blackout date
+    if (blackoutDateSet.has(dateStr)) {
+      result.push({ date: dateStr, slots: [], totalAvailable: 0 });
+      currentDate.setDate(currentDate.getDate() + 1);
+      continue;
+    }
+
     const dayOfWeek = currentDate.getDay();
     const dayNames = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
     const dayName = dayNames[dayOfWeek] as keyof typeof photographer.hoursOfOperation;
@@ -239,9 +262,20 @@ export async function getPhotographerAvailabilitySlots(
         return { startTime: slot.start, endTime: slot.end, available: false, reason: 'blocked' as const };
       }
 
-      const booking = dayBookings.find(b => 
-        doTimesOverlap(slot.start, slot.end, b.startTime, b.endTime)
-      );
+      // Check if slot overlaps with any booking INCLUDING travel buffer
+      const booking = dayBookings.find(b => {
+        // Calculate buffered booking window
+        const bookingStartMins = timeToMinutes(b.startTime);
+        const bookingEndMins = timeToMinutes(b.endTime);
+        const bufferedStart = Math.max(0, bookingStartMins - travelBufferMinutes);
+        const bufferedEnd = Math.min(24 * 60, bookingEndMins + travelBufferMinutes);
+        
+        const slotStartMins = timeToMinutes(slot.start);
+        const slotEndMins = timeToMinutes(slot.end);
+        
+        // Check overlap with buffered window
+        return slotStartMins < bufferedEnd && slotEndMins > bufferedStart;
+      });
 
       if (booking) {
         const reason = booking.status === BOOKING_STATES.DRAFT ? 'draft_locked' as const : 'booked' as const;

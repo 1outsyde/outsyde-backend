@@ -481,9 +481,34 @@ export const photographers = pgTable("photographers", {
 
   billingAddress: jsonb("billing_address").$type<BillingAddress>(),
 
+  // Travel/availability settings
+  travelBufferMinutes: integer("travel_buffer_minutes").default(30), // Buffer between shoots for travel
+  serviceRadiusMiles: integer("service_radius_miles").default(25), // Max travel distance
+  serviceLocations: jsonb("service_locations").$type<Array<{
+    name: string;
+    address?: string;
+    city?: string;
+    state?: string;
+    latitude?: number;
+    longitude?: number;
+    isStudio?: boolean;
+  }>>(),
+
   // Demo/seed data flag - hidden from non-admin users in search
   isDemo: boolean("is_demo").default(false).notNull(),
 
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+
+/* =====================================================
+   PHOTOGRAPHER BLACKOUT DATES (Days photographer is unavailable)
+===================================================== */
+export const photographerBlackoutDates = pgTable("photographer_blackout_dates", {
+  id: varchar("id", { length: 36 }).primaryKey().default(sql`gen_random_uuid()`),
+  photographerId: varchar("photographer_id", { length: 36 }).notNull().references(() => photographers.id),
+  date: text("date").notNull(), // Format: YYYY-MM-DD
+  reason: text("reason"), // Optional reason (vacation, personal, etc.)
   createdAt: timestamp("created_at").defaultNow().notNull(),
 });
 
@@ -1303,6 +1328,30 @@ export const insertPhotographerAvailabilitySchema = createInsertSchema(photograp
   createdAt: true,
 });
 
+export const insertPhotographerBlackoutDateSchema = createInsertSchema(photographerBlackoutDates).omit({
+  id: true,
+  createdAt: true,
+});
+
+export const updatePhotographerAvailabilitySettingsSchema = z.object({
+  hoursOfOperation: z.record(z.object({
+    open: z.string(),
+    close: z.string(),
+    closed: z.boolean().optional(),
+  })).optional(),
+  travelBufferMinutes: z.number().min(0).max(180).optional(),
+  serviceRadiusMiles: z.number().min(1).max(200).optional(),
+  serviceLocations: z.array(z.object({
+    name: z.string(),
+    address: z.string().optional(),
+    city: z.string().optional(),
+    state: z.string().optional(),
+    latitude: z.number().optional(),
+    longitude: z.number().optional(),
+    isStudio: z.boolean().optional(),
+  })).optional(),
+});
+
 export const insertStaffMemberSchema = createInsertSchema(staffMembers).omit({
   id: true,
   rating: true,
@@ -1597,6 +1646,11 @@ export type BusinessAvailability = typeof businessAvailability.$inferSelect;
 
 export type InsertPhotographerAvailability = z.infer<typeof insertPhotographerAvailabilitySchema>;
 export type PhotographerAvailability = typeof photographerAvailability.$inferSelect;
+
+export type InsertPhotographerBlackoutDate = z.infer<typeof insertPhotographerBlackoutDateSchema>;
+export type PhotographerBlackoutDate = typeof photographerBlackoutDates.$inferSelect;
+
+export type UpdatePhotographerAvailabilitySettings = z.infer<typeof updatePhotographerAvailabilitySettingsSchema>;
 
 export type InsertStaffMember = z.infer<typeof insertStaffMemberSchema>;
 export type StaffMember = typeof staffMembers.$inferSelect;
