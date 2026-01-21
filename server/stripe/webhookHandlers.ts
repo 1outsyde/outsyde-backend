@@ -121,6 +121,7 @@ export class WebhookHandlers {
     await storage.earnPoints({
       userId: user.id,
       dollarAmountCents: session.amount_total,
+      transactionType: 'business_transaction',
       referenceType: "checkout_session",
       referenceId: session.id,
       description: "Points earned from purchase",
@@ -266,6 +267,7 @@ export class WebhookHandlers {
       await storage.earnPoints({
         userId: user.id,
         dollarAmountCents: session.amount_total,
+        transactionType: 'business_transaction',
         referenceType: "cart_order",
         referenceId: orderId,
         description: "Points earned from purchase",
@@ -376,6 +378,7 @@ export class WebhookHandlers {
       await storage.earnPoints({
         userId: user.id,
         dollarAmountCents: session.amount_total,
+        transactionType: 'business_transaction',
         referenceType: "multi_vendor_order",
         referenceId: orderGroupId,
         description: "Points earned from multi-vendor purchase",
@@ -753,6 +756,7 @@ export class WebhookHandlers {
         await storage.earnPoints({
           userId: clientId,
           dollarAmountCents: appointment.totalPrice,
+          transactionType: 'business_transaction',
           referenceType: "appointment",
           referenceId: appointmentId,
           description: "Points earned from service booking",
@@ -826,6 +830,7 @@ export class WebhookHandlers {
         await storage.earnPoints({
           userId: clientId,
           dollarAmountCents: booking.totalPrice,
+          transactionType: 'photographer_booking',
           referenceType: "shoot_booking",
           referenceId: shootBookingId,
           description: "Points earned from photography booking",

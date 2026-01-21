@@ -6344,6 +6344,7 @@ export async function registerRoutes(
     try {
       const earnSchema = z.object({
         dollarAmountCents: z.number().int().positive(),
+        transactionType: z.enum(['photographer_booking', 'business_transaction', 'bonus']),
         businessId: z.string().optional(),
         businessName: z.string().optional(),
         referenceType: z.string().optional(),
@@ -6354,6 +6355,7 @@ export async function registerRoutes(
       const transaction = await storage.earnPoints({
         userId,
         dollarAmountCents: data.dollarAmountCents,
+        transactionType: data.transactionType,
         businessId: data.businessId,
         businessName: data.businessName,
         referenceType: data.referenceType,

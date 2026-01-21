@@ -298,11 +298,13 @@ export interface IStorage {
   getUnreadCount(userId: string): Promise<number>;
 
   // Outsyde Points (Loyalty System)
-  // $1 = 100 points
+  // Points calculated from platform profit only: 10% photographers, 4% businesses
+  // $1 platform profit = 100 points
   getUserPointsBalance(userId: string): Promise<number>;
   earnPoints(data: {
     userId: string;
     dollarAmountCents: number;
+    transactionType: 'photographer_booking' | 'business_transaction' | 'bonus';
     businessId?: string;
     businessName?: string;
     referenceType?: string;
@@ -1799,18 +1801,37 @@ export class DatabaseStorage implements IStorage {
     return user?.loyaltyPoints || 0;
   }
 
+  // Platform fee percentages for loyalty point calculation
+  private readonly PHOTOGRAPHER_FEE_PERCENT = 10; // 10% platform fee on photographer bookings
+  private readonly BUSINESS_FEE_PERCENT = 4; // 4% platform fee on business transactions
+
   async earnPoints(data: {
     userId: string;
     dollarAmountCents: number;
+    transactionType: 'photographer_booking' | 'business_transaction' | 'bonus';
     businessId?: string;
     businessName?: string;
     referenceType?: string;
     referenceId?: string;
     description?: string;
   }): Promise<PointTransaction> {
-    // Calculate points: $1 = 100 points, so cents/100 * 100 = cents
-    // dollarAmountCents is in cents, so $5.00 = 500 cents = 500 points
-    const pointsEarned = Math.floor(data.dollarAmountCents);
+    // Calculate points from PLATFORM PROFIT only (not total transaction amount)
+    // Photographer bookings: 10% platform fee → points on that 10%
+    // Business transactions: 4% platform fee → points on that 4%
+    // Bonuses: Direct point award (referrals, promotions)
+    let platformProfitCents: number;
+    
+    if (data.transactionType === 'photographer_booking') {
+      platformProfitCents = Math.floor(data.dollarAmountCents * this.PHOTOGRAPHER_FEE_PERCENT / 100);
+    } else if (data.transactionType === 'business_transaction') {
+      platformProfitCents = Math.floor(data.dollarAmountCents * this.BUSINESS_FEE_PERCENT / 100);
+    } else {
+      // 'bonus' type - direct point award (referrals, promotions, etc.)
+      platformProfitCents = data.dollarAmountCents;
+    }
+    
+    // $1 platform profit = 100 points (1 cent = 1 point)
+    const pointsEarned = Math.floor(platformProfitCents);
     
     // Get current balance
     const currentBalance = await this.getUserPointsBalance(data.userId);
@@ -2012,6 +2033,7 @@ export class DatabaseStorage implements IStorage {
     await this.earnPoints({
       userId: newUserId,
       dollarAmountCents: this.NEW_USER_REFERRAL_BONUS,
+      transactionType: 'bonus',
       referenceType: 'referral_welcome',
       referenceId: referrer.id,
       description: `Welcome bonus for joining via referral`,
@@ -2048,6 +2070,7 @@ export class DatabaseStorage implements IStorage {
     await this.earnPoints({
       userId: referral.referrerId,
       dollarAmountCents: referral.referrerBonusPoints,
+      transactionType: 'bonus',
       referenceType: 'referral',
       referenceId: referredUserId,
       description: `Referral bonus - your friend completed their first purchase!`,
