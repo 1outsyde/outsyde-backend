@@ -7827,6 +7827,48 @@ export async function registerRoutes(
     }
   });
 
+  // Admin: Get single business by ID
+  app.get("/api/admin/businesses/:id", requireAdmin, async (req, res) => {
+    try {
+      const { id } = req.params;
+      const business = await storage.getBusiness(id);
+
+      if (!business) {
+        return res.status(404).json({ error: "Business not found" });
+      }
+
+      // Get owner info
+      const owner = await storage.getUser(business.ownerId);
+
+      // Get products and services for this business
+      const products = await storage.getVendorProducts(id);
+      const services = await storage.getVendorServicesByBusiness(id);
+
+      // Get staff members if any
+      const staff = await storage.getStaffMembersByBusiness(id);
+
+      res.json({
+        ...business,
+        owner: owner ? {
+          id: owner.id,
+          email: owner.email,
+          name: owner.name,
+          profileImage: owner.profileImage,
+          phone: owner.phone,
+        } : null,
+        products,
+        services,
+        staff,
+        productCount: products.length,
+        serviceCount: services.length,
+        staffCount: staff.length,
+      });
+    } catch (error) {
+      console.error("Get admin business detail error:", error);
+      res.status(500).json({ error: "Failed to get business details" });
+    }
+  });
+
   // Admin: Update business
   app.patch("/api/admin/businesses/:id", requireAdmin, async (req, res) => {
     try {
