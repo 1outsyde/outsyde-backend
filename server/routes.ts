@@ -7907,6 +7907,124 @@ export async function registerRoutes(
     }
   });
 
+  // Admin: Approve business (alias for /api/admin/applications/:id/approve)
+  app.post("/api/admin/businesses/:id/approve", requireAdmin, async (req, res) => {
+    try {
+      const { id } = req.params;
+      const { notes } = req.body;
+      const adminUser = (req as any).adminUser;
+
+      const business = await storage.getBusiness(id);
+      if (!business) {
+        return res.status(404).json({ error: "Business not found" });
+      }
+
+      if ((business as any).approvalStatus === "approved") {
+        return res.status(400).json({ error: "Business is already approved" });
+      }
+
+      const updated = await storage.updateBusiness(id, {
+        approvalStatus: "approved",
+        approvalNotes: notes || null,
+        approvedAt: new Date(),
+        approvedBy: adminUser.id,
+        subscriptionActive: true,
+      });
+
+      // Create audit log
+      await storage.createAuditLog({
+        actorId: adminUser.id,
+        actorType: "admin",
+        action: "approve_vendor",
+        targetType: "business",
+        targetId: id,
+        beforeState: { approvalStatus: (business as any).approvalStatus },
+        afterState: { approvalStatus: "approved" },
+      });
+
+      // Send approval notification to business owner
+      const owner = await storage.getUser((business as any).ownerId);
+      if (owner) {
+        await NotificationTriggers.vendorApplicationApproved({
+          ownerId: owner.id,
+          ownerName: owner.name || owner.email,
+          ownerEmail: owner.email,
+          businessId: business.id,
+          businessName: business.name,
+          stripeOnboardingUrl: null,
+        });
+      }
+
+      console.log(`[Admin] Approved business: ${business.name} by ${adminUser.email}`);
+
+      res.json({ success: true, business: updated });
+    } catch (error) {
+      console.error("Approve business error:", error);
+      res.status(500).json({ error: "Failed to approve business" });
+    }
+  });
+
+  // Admin: Reject business (alias for /api/admin/applications/:id/reject)
+  app.post("/api/admin/businesses/:id/reject", requireAdmin, async (req, res) => {
+    try {
+      const { id } = req.params;
+      const { notes, reason } = req.body;
+      const adminUser = (req as any).adminUser;
+
+      const rejectionReason = notes || reason;
+      if (!rejectionReason) {
+        return res.status(400).json({ error: "Rejection reason is required" });
+      }
+
+      const business = await storage.getBusiness(id);
+      if (!business) {
+        return res.status(404).json({ error: "Business not found" });
+      }
+
+      if ((business as any).approvalStatus === "rejected") {
+        return res.status(400).json({ error: "Business is already rejected" });
+      }
+
+      const updated = await storage.updateBusiness(id, {
+        approvalStatus: "rejected",
+        approvalNotes: rejectionReason,
+        approvedAt: new Date(),
+        approvedBy: adminUser.id,
+      });
+
+      // Create audit log
+      await storage.createAuditLog({
+        actorId: adminUser.id,
+        actorType: "admin",
+        action: "reject_vendor",
+        targetType: "business",
+        targetId: id,
+        beforeState: { approvalStatus: (business as any).approvalStatus },
+        afterState: { approvalStatus: "rejected" },
+      });
+
+      // Send rejection notification to business owner
+      const owner = await storage.getUser((business as any).ownerId);
+      if (owner) {
+        await NotificationTriggers.vendorApplicationRejected({
+          ownerId: owner.id,
+          ownerName: owner.name || owner.email,
+          ownerEmail: owner.email,
+          businessId: business.id,
+          businessName: business.name,
+          reason: rejectionReason,
+        });
+      }
+
+      console.log(`[Admin] Rejected business: ${business.name} by ${adminUser.email} - Reason: ${rejectionReason}`);
+
+      res.json({ success: true, business: updated });
+    } catch (error) {
+      console.error("Reject business error:", error);
+      res.status(500).json({ error: "Failed to reject business" });
+    }
+  });
+
   // Admin: Get all photographers
   app.get("/api/admin/photographers", requireAdmin, async (req, res) => {
     try {

@@ -19,7 +19,44 @@ function isOnReplit(): boolean {
 const app = express();
 const httpServer = createServer(app);
 
-app.use(cors());
+// CORS configuration - mobile apps use JWT auth (no cookies needed)
+// Web clients on same origin don't need CORS, mobile apps use Authorization headers
+const allowedOrigins = [
+  // Replit dev/preview domains
+  /\.replit\.dev$/,
+  /\.replit\.app$/,
+  /\.janeway\.replit\.dev$/,
+  // Local development
+  'http://localhost:5000',
+  'http://localhost:3000',
+  'http://localhost:8081', // Expo
+];
+
+app.use(cors({
+  origin: function (origin, callback) {
+    // Allow requests with no origin (mobile apps, Postman, curl, server-to-server)
+    // Mobile apps using JWT don't send cookies, so CSRF is not a concern
+    if (!origin) return callback(null, true);
+    
+    // Check against allowed origins (strings and regexes)
+    const isAllowed = allowedOrigins.some(allowed => {
+      if (allowed instanceof RegExp) {
+        return allowed.test(origin);
+      }
+      return allowed === origin;
+    });
+    
+    if (isAllowed) {
+      return callback(null, true);
+    }
+    
+    // Reject unknown origins
+    callback(new Error('CORS not allowed'), false);
+  },
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
+}));
 
 // =======================
 // Stripe Webhook (RAW BODY)
