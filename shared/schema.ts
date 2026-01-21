@@ -1226,6 +1226,7 @@ export const feedPosts = pgTable("feed_posts", {
 
   productId: varchar("product_id", { length: 36 }).references(() => vendorProducts.id),
   serviceId: varchar("service_id", { length: 36 }).references(() => vendorServices.id),
+  photographerServiceId: varchar("photographer_service_id", { length: 36 }).references(() => photographerServices.id),
 
   likesCount: integer("likes_count").default(0),
   commentsCount: integer("comments_count").default(0),

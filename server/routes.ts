@@ -2380,20 +2380,43 @@ export async function registerRoutes(
   app.get("/api/availability/photographer/:photographerId", async (req, res) => {
     try {
       const { photographerId } = req.params;
-      const { startDate, endDate, durationHours } = req.query;
+      const { startDate, endDate, durationHours, serviceId } = req.query;
 
       if (!startDate || !endDate) {
         return res.status(400).json({ error: "startDate and endDate are required" });
+      }
+
+      // If serviceId is provided, get duration from the service
+      let effectiveDurationHours: number | undefined;
+      let serviceInfo = null;
+      
+      if (serviceId) {
+        const service = await storage.getPhotographerService(serviceId as string);
+        if (!service) {
+          return res.status(404).json({ error: "Service not found" });
+        }
+        if (service.photographerId !== photographerId) {
+          return res.status(400).json({ error: "Service does not belong to this photographer" });
+        }
+        effectiveDurationHours = service.durationMinutes ? Math.ceil(service.durationMinutes / 60) : undefined;
+        serviceInfo = {
+          id: service.id,
+          name: service.name,
+          durationMinutes: service.durationMinutes,
+          basePrice: service.basePrice,
+        };
+      } else if (durationHours) {
+        effectiveDurationHours = parseInt(durationHours as string, 10);
       }
 
       const availability = await getPhotographerAvailabilitySlots(
         photographerId,
         startDate as string,
         endDate as string,
-        durationHours ? parseInt(durationHours as string, 10) : undefined
+        effectiveDurationHours
       );
 
-      res.json({ availability });
+      res.json({ availability, serviceInfo });
     } catch (error) {
       console.error("Get photographer availability error:", error);
       res.status(500).json({ error: "Failed to get availability" });
@@ -9260,6 +9283,7 @@ export async function registerRoutes(
         let taggedPhotographer = null;
         let product = null;
         let service = null;
+        let photographerService = null;
         let authorBusinessId: string | null = null;
         let authorPhotographerId: string | null = null;
         
@@ -9287,6 +9311,9 @@ export async function registerRoutes(
         }
         if (post.serviceId) {
           service = await storage.getVendorService(post.serviceId);
+        }
+        if (post.photographerServiceId) {
+          photographerService = await storage.getPhotographerService(post.photographerServiceId);
         }
         
         return {
@@ -9325,6 +9352,14 @@ export async function registerRoutes(
             durationMinutes: service.durationMinutes,
             businessId: service.businessId,
           } : null,
+          photographerService: photographerService ? {
+            id: photographerService.id,
+            name: photographerService.name,
+            description: photographerService.description,
+            basePrice: photographerService.basePrice,
+            durationMinutes: photographerService.durationMinutes,
+            photographerId: photographerService.photographerId,
+          } : null,
         };
       }));
       
@@ -9351,6 +9386,7 @@ export async function registerRoutes(
         postType: z.enum(['text', 'product', 'service']).optional(),
         productId: z.string().optional(),
         serviceId: z.string().optional(),
+        photographerServiceId: z.string().optional(),
       }).refine(data => {
         // For text posts, content is required
         if (!data.postType || data.postType === 'text') {
@@ -9372,35 +9408,39 @@ export async function registerRoutes(
       if (user.isVendor) authorType = 'vendor';
       if (user.isPhotographer) authorType = 'photographer';
 
-      // Validate product/service posts - only vendors can create them
-      if (data.postType === 'product' || data.postType === 'service') {
-        if (authorType !== 'vendor') {
-          return res.status(403).json({ 
-            error: "Only vendors can create product or service posts" 
-          });
+      // Validate productId ownership - only business owners can attach their products
+      if (data.productId) {
+        const product = await storage.getVendorProduct(data.productId);
+        if (!product) {
+          return res.status(404).json({ error: "Product not found" });
         }
-        
-        // Verify the product/service belongs to the vendor
-        if (data.postType === 'product' && data.productId) {
-          const product = await storage.getVendorProduct(data.productId);
-          if (!product) {
-            return res.status(404).json({ error: "Product not found" });
-          }
-          const business = await storage.getBusinessByOwnerId(userId);
-          if (!business || product.businessId !== business.id) {
-            return res.status(403).json({ error: "You can only share your own products" });
-          }
+        const business = await storage.getBusinessByOwnerId(userId);
+        if (!business || product.businessId !== business.id) {
+          return res.status(403).json({ error: "You can only attach your own products" });
         }
-        
-        if (data.postType === 'service' && data.serviceId) {
-          const service = await storage.getVendorService(data.serviceId);
-          if (!service) {
-            return res.status(404).json({ error: "Service not found" });
-          }
-          const business = await storage.getBusinessByOwnerId(userId);
-          if (!business || service.businessId !== business.id) {
-            return res.status(403).json({ error: "You can only share your own services" });
-          }
+      }
+
+      // Validate serviceId ownership - only business owners can attach their services
+      if (data.serviceId) {
+        const service = await storage.getVendorService(data.serviceId);
+        if (!service) {
+          return res.status(404).json({ error: "Service not found" });
+        }
+        const business = await storage.getBusinessByOwnerId(userId);
+        if (!business || service.businessId !== business.id) {
+          return res.status(403).json({ error: "You can only attach your own services" });
+        }
+      }
+
+      // Validate photographerServiceId ownership - only photographers can attach their services
+      if (data.photographerServiceId) {
+        const photographerService = await storage.getPhotographerService(data.photographerServiceId);
+        if (!photographerService) {
+          return res.status(404).json({ error: "Photographer service not found" });
+        }
+        const photographer = await storage.getPhotographerByUserId(userId);
+        if (!photographer || photographerService.photographerId !== photographer.id) {
+          return res.status(403).json({ error: "You can only attach your own photographer services" });
         }
       }
 
@@ -9442,6 +9482,7 @@ export async function registerRoutes(
         taggedPhotographerId: data.taggedPhotographerId,
         productId: data.productId,
         serviceId: data.serviceId,
+        photographerServiceId: data.photographerServiceId,
       });
 
       res.json({ success: true, post });
