@@ -9061,12 +9061,17 @@ export async function registerRoutes(
 
   // ==================== FEED POSTS ROUTES ====================
 
-  // Get feed posts (public)
+  // Get feed posts (public, algorithmic for authenticated users)
   app.get("/api/feed", async (req, res) => {
     try {
       const limit = parseInt(req.query.limit as string) || 50;
       const offset = parseInt(req.query.offset as string) || 0;
-      const posts = await storage.getFeedPosts(limit, offset);
+      const userId = req.session?.userId || getUserIdFromRequest(req);
+      
+      // Use algorithmic feed - works for both authenticated and anonymous users
+      // For authenticated users, personalizes based on preferences and location
+      // For anonymous users, ranks by engagement and recency
+      const posts = await storage.getAlgorithmicFeed(userId || null, limit, offset);
       
       // Filter out posts from vendors with inactive subscriptions
       const activePosts = [];

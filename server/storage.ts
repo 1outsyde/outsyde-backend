@@ -479,6 +479,7 @@ export interface IStorage {
   createFeedPost(data: InsertFeedPost): Promise<FeedPost>;
   getFeedPost(id: string): Promise<FeedPost | undefined>;
   getFeedPosts(limit?: number, offset?: number): Promise<FeedPost[]>;
+  getAlgorithmicFeed(userId: string | null, limit?: number, offset?: number): Promise<FeedPost[]>;
   getUserFeedPosts(authorId: string): Promise<FeedPost[]>;
   getBusinessFeedPosts(businessId: string): Promise<FeedPost[]>;
   getPhotographerFeedPosts(photographerId: string): Promise<FeedPost[]>;
@@ -4539,6 +4540,141 @@ export class DatabaseStorage implements IStorage {
       .orderBy(sql`${feedPosts.createdAt} DESC`)
       .limit(limit)
       .offset(offset);
+  }
+
+  async getAlgorithmicFeed(userId: string | null, limit = 50, offset = 0): Promise<FeedPost[]> {
+    // Get user preferences if authenticated
+    let userPreferences: { 
+      selectedIndustries?: string[]; 
+      industryNiches?: Record<string, string[]>;
+      latitude?: number | null;
+      longitude?: number | null;
+    } = {};
+    
+    if (userId) {
+      const [user] = await db.select({
+        selectedIndustries: users.selectedIndustries,
+        industryNiches: users.industryNiches,
+        latitude: users.latitude,
+        longitude: users.longitude,
+      }).from(users).where(eq(users.id, userId));
+      if (user) {
+        userPreferences = {
+          selectedIndustries: user.selectedIndustries ?? undefined,
+          industryNiches: user.industryNiches ?? undefined,
+          latitude: user.latitude,
+          longitude: user.longitude,
+        };
+      }
+    }
+
+    // Fetch more posts than needed for ranking to ensure we don't miss high-scoring older posts
+    // Also fetch posts from last 7 days to balance recency with discovery
+    const fetchLimit = Math.max(limit * 5, 500);
+    
+    const allPosts = await db.select({
+      post: feedPosts,
+      business: {
+        id: businesses.id,
+        category: businesses.category,
+        city: businesses.city,
+        state: businesses.state,
+        latitude: businesses.latitude,
+        longitude: businesses.longitude,
+      },
+      photographer: {
+        id: photographers.id,
+        city: photographers.city,
+        state: photographers.state,
+        latitude: photographers.latitude,
+        longitude: photographers.longitude,
+      },
+    })
+    .from(feedPosts)
+    .leftJoin(businesses, eq(feedPosts.taggedBusinessId, businesses.id))
+    .leftJoin(photographers, eq(feedPosts.taggedPhotographerId, photographers.id))
+    .where(eq(feedPosts.isActive, true))
+    .orderBy(sql`${feedPosts.createdAt} DESC`)
+    .limit(fetchLimit);
+
+    // Calculate scores for each post
+    const scoredPosts = allPosts.map(({ post, business, photographer }) => {
+      let score = 0;
+      const now = Date.now();
+      const postAge = now - new Date(post.createdAt).getTime();
+      const hoursOld = postAge / (1000 * 60 * 60);
+
+      // Recency score (newer posts get higher base score, decays over 72 hours)
+      const recencyScore = Math.max(0, 100 - (hoursOld / 72) * 50);
+      score += recencyScore;
+
+      // Engagement score (likes + comments weighted)
+      const engagementScore = (post.likesCount || 0) * 2 + (post.commentsCount || 0) * 5;
+      score += Math.min(engagementScore, 50); // Cap at 50 points
+
+      // Vendor posts (product/service) get a boost
+      if (post.postType === 'product' || post.postType === 'service') {
+        score += 15;
+      }
+
+      // Category/industry preference matching
+      if (userId && userPreferences.selectedIndustries?.length) {
+        if (business?.category && userPreferences.selectedIndustries.includes(business.category)) {
+          score += 30; // Strong boost for matching industry
+        }
+      }
+
+      // Location proximity boost (if user has location and post is from nearby)
+      // Use explicit null checks to handle coordinates at 0 latitude/longitude
+      if (userPreferences.latitude != null && userPreferences.longitude != null) {
+        const vendorLat = business?.latitude ?? photographer?.latitude;
+        const vendorLng = business?.longitude ?? photographer?.longitude;
+        
+        if (vendorLat != null && vendorLng != null) {
+          const distance = this.calculateDistance(
+            userPreferences.latitude, 
+            userPreferences.longitude,
+            vendorLat,
+            vendorLng
+          );
+          // Boost nearby posts (within 50 miles gets max boost)
+          if (distance <= 10) score += 40;
+          else if (distance <= 25) score += 25;
+          else if (distance <= 50) score += 15;
+          else if (distance <= 100) score += 5;
+        }
+      }
+
+      return { post, score };
+    });
+
+    // Sort by score descending, then by recency for ties
+    scoredPosts.sort((a, b) => {
+      if (b.score !== a.score) return b.score - a.score;
+      return new Date(b.post.createdAt).getTime() - new Date(a.post.createdAt).getTime();
+    });
+
+    // Apply pagination and return posts only
+    return scoredPosts
+      .slice(offset, offset + limit)
+      .map(sp => sp.post);
+  }
+
+  private calculateDistance(lat1: number, lng1: number, lat2: number, lng2: number): number {
+    // Haversine formula to calculate distance in miles
+    const R = 3959; // Earth's radius in miles
+    const dLat = this.toRad(lat2 - lat1);
+    const dLng = this.toRad(lng2 - lng1);
+    const a = 
+      Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+      Math.cos(this.toRad(lat1)) * Math.cos(this.toRad(lat2)) *
+      Math.sin(dLng / 2) * Math.sin(dLng / 2);
+    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+    return R * c;
+  }
+
+  private toRad(deg: number): number {
+    return deg * (Math.PI / 180);
   }
 
   async getUserFeedPosts(authorId: string): Promise<FeedPost[]> {
