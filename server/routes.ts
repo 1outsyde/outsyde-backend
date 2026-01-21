@@ -7791,6 +7791,13 @@ export async function registerRoutes(
       const { search, category, limit = "50", offset = "0" } = req.query;
       let businesses = await storage.getAllBusinesses();
 
+      // Filter out demo/test data - admin should only see real businesses
+      businesses = businesses.filter(b => 
+        !b.isDemo && 
+        !b.ownerId?.includes('demo') && 
+        !b.ownerId?.includes('vendor-test')
+      );
+
       // Category filter
       if (category) {
         businesses = businesses.filter(b => b.category === category);
