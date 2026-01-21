@@ -164,6 +164,10 @@ export const users = pgTable("users", {
   // Stripe customer ID for checkout (not connected account - that's on business/photographer)
   stripeCustomerId: text("stripe_customer_id"),
 
+  // Identity change tracking (rate limiting)
+  usernameLastChangedAt: timestamp("username_last_changed_at"),
+  displayNameLastChangedAt: timestamp("display_name_last_changed_at"),
+
   createdAt: timestamp("created_at").defaultNow().notNull(),
 });
 

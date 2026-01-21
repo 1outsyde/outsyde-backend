@@ -5,6 +5,21 @@ import { stripeService } from "../stripe/stripeService";
 import { storage } from "../storage";
 import { verifyAccessToken, AuthenticatedRequest } from "../auth";
 
+// Rate limit for displayName changes (7 days cooldown)
+const DISPLAY_NAME_CHANGE_COOLDOWN_DAYS = 7;
+
+// Helper to check if enough time has passed since last displayName change
+const canChangeDisplayName = (lastChangedAt: Date | null): { allowed: boolean; daysRemaining: number } => {
+  if (!lastChangedAt) {
+    return { allowed: true, daysRemaining: 0 };
+  }
+  const cooldownMs = DISPLAY_NAME_CHANGE_COOLDOWN_DAYS * 24 * 60 * 60 * 1000;
+  const timeSinceChange = Date.now() - lastChangedAt.getTime();
+  const allowed = timeSinceChange >= cooldownMs;
+  const daysRemaining = allowed ? 0 : Math.ceil((cooldownMs - timeSinceChange) / (24 * 60 * 60 * 1000));
+  return { allowed, daysRemaining };
+};
+
 // Helper to resolve photographer for authenticated user
 // Supports both JWT (Authorization header) and session-based auth
 // Returns: { user, photographer, error? }
@@ -133,7 +148,23 @@ export class PhotographerController {
       const { displayName, bio, city, state, portfolioUrl, hourlyRate, specialties, coverImage, logoImage, brandColors } = req.body;
       
       const updates: any = {};
-      if (displayName !== undefined) updates.displayName = displayName;
+      
+      // Enforce displayName rate limit (7 days between changes)
+      if (displayName !== undefined && displayName !== photographer.displayName) {
+        const { allowed, daysRemaining } = canChangeDisplayName(user?.displayNameLastChangedAt);
+        if (!allowed) {
+          return res.status(429).json({ 
+            error: "Rate limit exceeded",
+            message: `Display name can only be changed once every ${DISPLAY_NAME_CHANGE_COOLDOWN_DAYS} days. ${daysRemaining} days remaining.`
+          });
+        }
+        updates.displayName = displayName;
+        // Update the user's displayNameLastChangedAt timestamp
+        if (userId) {
+          await storage.updateUser(userId, { displayNameLastChangedAt: new Date() });
+        }
+      }
+      
       if (bio !== undefined) updates.bio = bio;
       if (city !== undefined) updates.city = city;
       if (state !== undefined) updates.state = state;

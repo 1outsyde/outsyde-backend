@@ -169,6 +169,7 @@ export type NewPhotographerInput = {
 export interface IStorage {
   getUser(id: string): Promise<User | undefined>;
   getUserByEmail(email: string): Promise<User | undefined>;
+  getUserByUsername(username: string): Promise<User | undefined>;
   getUserByGoogleSub(googleSub: string): Promise<User | undefined>;
   getAdminUsers(): Promise<User[]>;
   createUser(user: InsertUser): Promise<User>;
@@ -675,6 +676,13 @@ export class DatabaseStorage implements IStorage {
   async getUserByEmail(email: string): Promise<User | undefined> {
     const result = await db.select().from(users).where(
       sql`LOWER(${users.email}) = LOWER(${email})`
+    );
+    return result[0];
+  }
+
+  async getUserByUsername(username: string): Promise<User | undefined> {
+    const result = await db.select().from(users).where(
+      sql`LOWER(${users.username}) = LOWER(${username})`
     );
     return result[0];
   }

@@ -1297,6 +1297,172 @@ export async function registerRoutes(
     }
   });
 
+  // ==================== USER IDENTITY (with rate limiting) ====================
+  
+  // Rate limits for identity changes (similar to major platforms)
+  const USERNAME_CHANGE_COOLDOWN_DAYS = 30;
+  const DISPLAY_NAME_CHANGE_COOLDOWN_DAYS = 7;
+  
+  // Helper to check if enough time has passed since last change
+  const canChangeIdentityField = (lastChangedAt: Date | null, cooldownDays: number): { allowed: boolean; daysRemaining: number } => {
+    if (!lastChangedAt) {
+      return { allowed: true, daysRemaining: 0 };
+    }
+    const cooldownMs = cooldownDays * 24 * 60 * 60 * 1000;
+    const timeSinceChange = Date.now() - lastChangedAt.getTime();
+    const allowed = timeSinceChange >= cooldownMs;
+    const daysRemaining = allowed ? 0 : Math.ceil((cooldownMs - timeSinceChange) / (24 * 60 * 60 * 1000));
+    return { allowed, daysRemaining };
+  };
+
+  // Update user identity fields (username, displayName) with rate limiting
+  app.patch("/api/users/identity", optionalAuthMiddleware, async (req, res) => {
+    const authReq = req as AuthenticatedRequest;
+    const userId = authReq.user?.userId || req.session?.userId;
+    
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    try {
+      const schema = z.object({
+        username: z.string().min(3).max(30).regex(/^[a-zA-Z0-9_]+$/, "Username can only contain letters, numbers, and underscores").optional(),
+        displayName: z.string().min(1).max(50).optional(),
+        name: z.string().min(1).max(100).optional(), // Alias for displayName
+      });
+
+      const parsed = schema.safeParse(req.body);
+      if (!parsed.success) {
+        return res.status(400).json({ 
+          error: parsed.error.errors[0]?.message || "Invalid data" 
+        });
+      }
+
+      const { username, displayName, name } = parsed.data;
+      const user = await storage.getUser(userId);
+      
+      if (!user) {
+        return res.status(404).json({ error: "User not found" });
+      }
+
+      const updates: Record<string, any> = {};
+      const errors: string[] = [];
+
+      // Username change with 30-day cooldown
+      if (username !== undefined && username !== user.username) {
+        const { allowed, daysRemaining } = canChangeIdentityField(user.usernameLastChangedAt, USERNAME_CHANGE_COOLDOWN_DAYS);
+        
+        if (!allowed) {
+          errors.push(`Username can only be changed once every ${USERNAME_CHANGE_COOLDOWN_DAYS} days. ${daysRemaining} days remaining.`);
+        } else {
+          // Check username uniqueness
+          const existingUser = await storage.getUserByUsername(username);
+          if (existingUser && existingUser.id !== userId) {
+            errors.push("This username is already taken");
+          } else {
+            updates.username = username;
+            updates.usernameLastChangedAt = new Date();
+          }
+        }
+      }
+
+      // DisplayName/Name change with 7-day cooldown
+      const newDisplayName = displayName || name;
+      const currentDisplayName = user.name || user.firstName;
+      if (newDisplayName !== undefined && newDisplayName !== currentDisplayName) {
+        const { allowed, daysRemaining } = canChangeIdentityField(user.displayNameLastChangedAt, DISPLAY_NAME_CHANGE_COOLDOWN_DAYS);
+        
+        if (!allowed) {
+          errors.push(`Display name can only be changed once every ${DISPLAY_NAME_CHANGE_COOLDOWN_DAYS} days. ${daysRemaining} days remaining.`);
+        } else {
+          updates.name = newDisplayName;
+          updates.displayNameLastChangedAt = new Date();
+        }
+      }
+
+      // If there are rate limit errors, return them
+      if (errors.length > 0) {
+        return res.status(429).json({ 
+          error: "Rate limit exceeded",
+          message: errors.join(" "),
+          details: errors
+        });
+      }
+
+      // If no updates needed
+      if (Object.keys(updates).length === 0) {
+        return res.json({ 
+          success: true, 
+          message: "No changes made",
+          user: { 
+            id: user.id, 
+            username: user.username, 
+            displayName: user.name || user.firstName,
+            usernameLastChangedAt: user.usernameLastChangedAt,
+            displayNameLastChangedAt: user.displayNameLastChangedAt,
+          }
+        });
+      }
+
+      // Apply updates
+      const updatedUser = await storage.updateUser(userId, updates);
+      
+      res.json({ 
+        success: true, 
+        user: {
+          id: updatedUser!.id,
+          username: updatedUser!.username,
+          displayName: updatedUser!.name || updatedUser!.firstName,
+          usernameLastChangedAt: updatedUser!.usernameLastChangedAt,
+          displayNameLastChangedAt: updatedUser!.displayNameLastChangedAt,
+        }
+      });
+    } catch (error) {
+      console.error("Update user identity error:", error);
+      res.status(500).json({ error: "Failed to update identity" });
+    }
+  });
+
+  // Get identity change status (advisory for frontend)
+  app.get("/api/users/identity/status", optionalAuthMiddleware, async (req, res) => {
+    const authReq = req as AuthenticatedRequest;
+    const userId = authReq.user?.userId || req.session?.userId;
+    
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    try {
+      const user = await storage.getUser(userId);
+      if (!user) {
+        return res.status(404).json({ error: "User not found" });
+      }
+
+      const usernameStatus = canChangeIdentityField(user.usernameLastChangedAt, USERNAME_CHANGE_COOLDOWN_DAYS);
+      const displayNameStatus = canChangeIdentityField(user.displayNameLastChangedAt, DISPLAY_NAME_CHANGE_COOLDOWN_DAYS);
+
+      res.json({
+        username: {
+          current: user.username,
+          canChange: usernameStatus.allowed,
+          daysRemaining: usernameStatus.daysRemaining,
+          cooldownDays: USERNAME_CHANGE_COOLDOWN_DAYS,
+          lastChangedAt: user.usernameLastChangedAt,
+        },
+        displayName: {
+          current: user.name || user.firstName,
+          canChange: displayNameStatus.allowed,
+          daysRemaining: displayNameStatus.daysRemaining,
+          cooldownDays: DISPLAY_NAME_CHANGE_COOLDOWN_DAYS,
+          lastChangedAt: user.displayNameLastChangedAt,
+        }
+      });
+    } catch (error) {
+      console.error("Get identity status error:", error);
+      res.status(500).json({ error: "Failed to get identity status" });
+    }
+  });
+
   // ==================== USER PREFERENCES ====================
 
   app.patch("/api/users/preferences", async (req, res) => {
