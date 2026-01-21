@@ -66,6 +66,24 @@ import { getStripePublishableKey, getUncachableStripeClient } from "./stripe/str
 import { ObjectStorageService, ObjectNotFoundError } from "./objectStorage";
 import { ObjectPermission } from "./objectAcl";
 import { NotificationTriggers } from "./notificationService";
+import { 
+  getStaffAvailabilitySlots, 
+  getPhotographerAvailabilitySlots, 
+  getBusinessAvailability,
+  isSlotAvailable 
+} from "./availabilityService";
+import { 
+  transitionAppointmentState, 
+  transitionShootBookingState,
+  getDraftExpiryTime
+} from "./bookingStateMachine";
+import { 
+  appointments, 
+  shootBookings,
+  createAppointmentDraftSchema,
+  createShootDraftSchema,
+  BOOKING_STATES
+} from "@shared/schema";
 
 // ✅ CORRECT IMPORT (default export)
 import { photographersRouter } from "./Photographers/photographers.routes";
@@ -2004,6 +2022,523 @@ export async function registerRoutes(
       });
     } catch (error) {
       console.error("Get photographer booking error:", error);
+      res.status(500).json({ error: "Failed to get booking" });
+    }
+  });
+
+  // ==================== AVAILABILITY & BOOKING STATE MACHINE ROUTES ====================
+
+  // Get available slots for a staff member
+  app.get("/api/availability/staff/:staffMemberId", async (req, res) => {
+    try {
+      const { staffMemberId } = req.params;
+      const { startDate, endDate, serviceId } = req.query;
+
+      if (!startDate || !endDate) {
+        return res.status(400).json({ error: "startDate and endDate are required" });
+      }
+
+      const availability = await getStaffAvailabilitySlots(
+        staffMemberId,
+        startDate as string,
+        endDate as string,
+        serviceId ? parseInt(serviceId as string, 10) : undefined
+      );
+
+      res.json({ availability });
+    } catch (error) {
+      console.error("Get staff availability error:", error);
+      res.status(500).json({ error: "Failed to get availability" });
+    }
+  });
+
+  // Get available slots for a photographer
+  app.get("/api/availability/photographer/:photographerId", async (req, res) => {
+    try {
+      const { photographerId } = req.params;
+      const { startDate, endDate, durationHours } = req.query;
+
+      if (!startDate || !endDate) {
+        return res.status(400).json({ error: "startDate and endDate are required" });
+      }
+
+      const availability = await getPhotographerAvailabilitySlots(
+        photographerId,
+        startDate as string,
+        endDate as string,
+        durationHours ? parseInt(durationHours as string, 10) : undefined
+      );
+
+      res.json({ availability });
+    } catch (error) {
+      console.error("Get photographer availability error:", error);
+      res.status(500).json({ error: "Failed to get availability" });
+    }
+  });
+
+  // Get all staff availability for a business
+  app.get("/api/availability/business/:businessId", async (req, res) => {
+    try {
+      const { businessId } = req.params;
+      const { startDate, endDate, serviceId } = req.query;
+
+      if (!startDate || !endDate) {
+        return res.status(400).json({ error: "startDate and endDate are required" });
+      }
+
+      const staffAvailability = await getBusinessAvailability(
+        businessId,
+        startDate as string,
+        endDate as string,
+        serviceId as string | undefined
+      );
+
+      res.json({ staffAvailability });
+    } catch (error) {
+      console.error("Get business availability error:", error);
+      res.status(500).json({ error: "Failed to get availability" });
+    }
+  });
+
+  // Check if a specific slot is available
+  app.get("/api/availability/check", async (req, res) => {
+    try {
+      const { type, providerId, date, startTime, endTime } = req.query;
+
+      if (!type || !providerId || !date || !startTime || !endTime) {
+        return res.status(400).json({ 
+          error: "type, providerId, date, startTime, and endTime are required" 
+        });
+      }
+
+      if (type !== 'staff' && type !== 'photographer') {
+        return res.status(400).json({ error: "type must be 'staff' or 'photographer'" });
+      }
+
+      const result = await isSlotAvailable(
+        type as 'staff' | 'photographer',
+        providerId as string,
+        date as string,
+        startTime as string,
+        endTime as string
+      );
+
+      res.json(result);
+    } catch (error) {
+      console.error("Check slot availability error:", error);
+      res.status(500).json({ error: "Failed to check availability" });
+    }
+  });
+
+  // Create appointment draft (10-min lock on slot)
+  app.post("/api/bookings/appointments/draft", async (req, res) => {
+    const userId = req.session?.userId || getUserIdFromRequest(req);
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    try {
+      const data = createAppointmentDraftSchema.parse(req.body);
+
+      // Get service to calculate end time
+      const service = await storage.getVendorService(data.serviceId);
+      if (!service) {
+        return res.status(404).json({ error: "Service not found" });
+      }
+
+      const durationMinutes = service.durationMinutes || 60;
+      const [hours, minutes] = data.appointmentTime.split(':').map(Number);
+      const totalMinutes = hours * 60 + minutes + durationMinutes;
+      const endHours = Math.floor(totalMinutes / 60) % 24;
+      const endMins = totalMinutes % 60;
+      const endTime = `${endHours.toString().padStart(2, '0')}:${endMins.toString().padStart(2, '0')}`;
+
+      // Check slot availability (including drafts from other users)
+      const providerId = data.staffMemberId || data.businessId;
+      const providerType = data.staffMemberId ? 'staff' : 'staff'; // Default to first staff if none specified
+      
+      if (data.staffMemberId) {
+        const available = await isSlotAvailable(
+          'staff',
+          data.staffMemberId,
+          data.appointmentDate,
+          data.appointmentTime,
+          endTime
+        );
+
+        if (!available.available) {
+          return res.status(409).json({ 
+            error: "Slot unavailable",
+            message: available.reason || "This time slot is not available"
+          });
+        }
+      }
+
+      // Calculate fees (4% platform fee)
+      const totalPrice = service.price || 0;
+      const platformFee = Math.round(totalPrice * 0.04);
+      const vendorNet = totalPrice - platformFee;
+
+      // Create draft booking with 10-minute TTL
+      const draftExpiresAt = getDraftExpiryTime();
+
+      const [appointment] = await db.insert(appointments).values({
+        businessId: data.businessId,
+        clientId: userId,
+        serviceId: data.serviceId,
+        staffMemberId: data.staffMemberId || null,
+        appointmentDate: data.appointmentDate,
+        appointmentTime: data.appointmentTime,
+        appointmentEndTime: endTime,
+        durationMinutes: durationMinutes,
+        totalPrice,
+        platformFee,
+        vendorNet,
+        status: 'draft',
+        draftExpiresAt,
+        stateChangedAt: new Date(),
+        stateChangedBy: userId,
+      }).returning();
+
+      res.status(201).json({ 
+        booking: appointment,
+        expiresAt: draftExpiresAt.toISOString(),
+        ttlSeconds: 600, // 10 minutes
+      });
+    } catch (error) {
+      if (error instanceof z.ZodError) {
+        return res.status(400).json({ error: "Invalid data", details: error.errors });
+      }
+      // Handle DB constraint violations (exclusion or unique constraint)
+      // 23P01 = exclusion_violation, 23505 = unique_violation
+      const pgError = error as { code?: string };
+      if (pgError.code === '23P01' || pgError.code === '23505') {
+        return res.status(409).json({ 
+          error: "Slot unavailable",
+          message: "This time slot was just booked by someone else. Please select a different time."
+        });
+      }
+      console.error("Create appointment draft error:", error);
+      res.status(500).json({ error: "Failed to create booking draft" });
+    }
+  });
+
+  // Create shoot booking draft (photographers)
+  app.post("/api/bookings/shoots/draft", async (req, res) => {
+    const userId = req.session?.userId || getUserIdFromRequest(req);
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    try {
+      const data = createShootDraftSchema.parse(req.body);
+
+      // Calculate end time
+      const [hours, minutes] = data.startTime.split(':').map(Number);
+      const totalMinutes = hours * 60 + minutes + (data.durationHours * 60);
+      const endHours = Math.floor(totalMinutes / 60) % 24;
+      const endMins = totalMinutes % 60;
+      const endTime = `${endHours.toString().padStart(2, '0')}:${endMins.toString().padStart(2, '0')}`;
+
+      // Check availability
+      const available = await isSlotAvailable(
+        'photographer',
+        data.photographerId,
+        data.date,
+        data.startTime,
+        endTime
+      );
+
+      if (!available.available) {
+        return res.status(409).json({ 
+          error: "Slot unavailable",
+          message: available.reason || "This time slot is not available"
+        });
+      }
+
+      // Get photographer for pricing
+      const photographer = await storage.getPhotographer(data.photographerId);
+      if (!photographer) {
+        return res.status(404).json({ error: "Photographer not found" });
+      }
+
+      // Calculate price (10% platform fee for photographers)
+      const totalPrice = photographer.hourlyRate * data.durationHours * 100; // Convert to cents
+      const platformFee = Math.round(totalPrice * 0.10);
+      const vendorNet = totalPrice - platformFee;
+
+      // Create draft with 10-minute TTL
+      const draftExpiresAt = getDraftExpiryTime();
+
+      const [booking] = await db.insert(shootBookings).values({
+        photographerId: data.photographerId,
+        clientId: userId,
+        serviceId: data.serviceId || null,
+        shootType: data.shootType,
+        date: data.date,
+        startTime: data.startTime,
+        endTime,
+        durationHours: data.durationHours,
+        locationType: data.locationType || null,
+        locationDetails: data.locationDetails || null,
+        specialRequests: data.specialRequests || null,
+        totalPrice,
+        platformFee,
+        vendorNet,
+        status: 'draft',
+        draftExpiresAt,
+        stateChangedAt: new Date(),
+        stateChangedBy: userId,
+      }).returning();
+
+      res.status(201).json({ 
+        booking,
+        expiresAt: draftExpiresAt.toISOString(),
+        ttlSeconds: 600,
+      });
+    } catch (error) {
+      if (error instanceof z.ZodError) {
+        return res.status(400).json({ error: "Invalid data", details: error.errors });
+      }
+      // Handle DB constraint violations (exclusion or unique constraint)
+      // 23P01 = exclusion_violation, 23505 = unique_violation
+      const pgError = error as { code?: string };
+      if (pgError.code === '23P01' || pgError.code === '23505') {
+        return res.status(409).json({ 
+          error: "Slot unavailable",
+          message: "This time slot was just booked by someone else. Please select a different time."
+        });
+      }
+      console.error("Create shoot draft error:", error);
+      res.status(500).json({ error: "Failed to create booking draft" });
+    }
+  });
+
+  // Initiate payment for a draft booking (creates Stripe checkout session)
+  app.post("/api/bookings/:type/:id/initiate-payment", async (req, res) => {
+    const userId = req.session?.userId || getUserIdFromRequest(req);
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    try {
+      const { type, id } = req.params;
+      const { successUrl, cancelUrl } = req.body;
+
+      if (!successUrl || !cancelUrl) {
+        return res.status(400).json({ error: "successUrl and cancelUrl are required" });
+      }
+
+      if (type === 'appointment') {
+        const [booking] = await db.select().from(appointments).where(eq(appointments.id, id));
+        if (!booking) {
+          return res.status(404).json({ error: "Booking not found" });
+        }
+        if (booking.clientId !== userId) {
+          return res.status(403).json({ error: "Not authorized" });
+        }
+        if (booking.status !== 'draft') {
+          return res.status(400).json({ error: "Booking is not in draft state" });
+        }
+
+        // Get business for Stripe account
+        const business = await storage.getBusiness(booking.businessId);
+        if (!business || !business.stripeAccountId) {
+          return res.status(400).json({ error: "Business not configured for payments" });
+        }
+
+        // Get service details
+        const service = await storage.getVendorService(booking.serviceId);
+
+        // Create Stripe checkout session with destination charge
+        const checkoutSession = await stripeService.createAppointmentCheckout({
+          connectedAccountId: business.stripeAccountId,
+          amountInCents: booking.totalPrice,
+          platformFeeInCents: booking.platformFee,
+          serviceName: service?.name || 'Service Booking',
+          successUrl: `${successUrl}?session_id={CHECKOUT_SESSION_ID}`,
+          cancelUrl,
+          metadata: {
+            type: 'appointment_booking',
+            appointmentId: id,
+            clientId: userId,
+            businessId: booking.businessId,
+          }
+        });
+
+        // Transition to pending_payment
+        await transitionAppointmentState(id, 'pending_payment', {
+          triggeredBy: userId,
+          triggerSource: 'api',
+          metadata: { stripeCheckoutSessionId: checkoutSession.id }
+        });
+
+        // Update booking with checkout session ID
+        await db.update(appointments)
+          .set({ 
+            stripeCheckoutSessionId: checkoutSession.id,
+            updatedAt: new Date(),
+          })
+          .where(eq(appointments.id, id));
+
+        res.json({ 
+          checkoutUrl: checkoutSession.url,
+          sessionId: checkoutSession.id,
+        });
+      } else if (type === 'shoot') {
+        const [booking] = await db.select().from(shootBookings).where(eq(shootBookings.id, id));
+        if (!booking) {
+          return res.status(404).json({ error: "Booking not found" });
+        }
+        if (booking.clientId !== userId) {
+          return res.status(403).json({ error: "Not authorized" });
+        }
+        if (booking.status !== 'draft') {
+          return res.status(400).json({ error: "Booking is not in draft state" });
+        }
+
+        // Get photographer for Stripe account
+        const photographer = await storage.getPhotographer(booking.photographerId);
+        if (!photographer || !photographer.stripeAccountId) {
+          return res.status(400).json({ error: "Photographer not configured for payments" });
+        }
+
+        // Create Stripe checkout session with destination charge
+        const checkoutSession = await stripeService.createPhotographerBookingCheckout({
+          connectedAccountId: photographer.stripeAccountId,
+          amountInCents: booking.totalPrice,
+          platformFeeInCents: booking.platformFee,
+          serviceName: `${booking.shootType} Photography Session`,
+          successUrl: `${successUrl}?session_id={CHECKOUT_SESSION_ID}`,
+          cancelUrl,
+          metadata: {
+            type: 'shoot_booking',
+            shootBookingId: id,
+            clientId: userId,
+            photographerId: booking.photographerId,
+          }
+        });
+
+        // Transition to pending_payment
+        await transitionShootBookingState(id, 'pending_payment', {
+          triggeredBy: userId,
+          triggerSource: 'api',
+          metadata: { stripeCheckoutSessionId: checkoutSession.id }
+        });
+
+        // Update booking with checkout session ID
+        await db.update(shootBookings)
+          .set({ 
+            stripeCheckoutSessionId: checkoutSession.id,
+            updatedAt: new Date(),
+          })
+          .where(eq(shootBookings.id, id));
+
+        res.json({ 
+          checkoutUrl: checkoutSession.url,
+          sessionId: checkoutSession.id,
+        });
+      } else {
+        return res.status(400).json({ error: "type must be 'appointment' or 'shoot'" });
+      }
+    } catch (error) {
+      console.error("Initiate payment error:", error);
+      res.status(500).json({ error: "Failed to initiate payment" });
+    }
+  });
+
+  // Transition booking state (cancel, complete, etc.)
+  app.post("/api/bookings/:type/:id/transition", async (req, res) => {
+    const userId = req.session?.userId || getUserIdFromRequest(req);
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    try {
+      const { type, id } = req.params;
+      const { toState, reason } = req.body;
+
+      if (!toState) {
+        return res.status(400).json({ error: "toState is required" });
+      }
+
+      if (type !== 'appointment' && type !== 'shoot') {
+        return res.status(400).json({ error: "type must be 'appointment' or 'shoot'" });
+      }
+
+      const context = {
+        triggeredBy: userId,
+        triggerSource: 'api' as const,
+        metadata: reason ? { reason } : undefined,
+      };
+
+      let result;
+      if (type === 'appointment') {
+        result = await transitionAppointmentState(id, toState, context);
+      } else {
+        result = await transitionShootBookingState(id, toState, context);
+      }
+
+      if (!result.success) {
+        return res.status(400).json({ error: result.error });
+      }
+
+      res.json({ 
+        success: true,
+        previousState: result.previousState,
+        newState: result.newState,
+      });
+    } catch (error) {
+      console.error("Booking transition error:", error);
+      res.status(500).json({ error: "Failed to transition booking state" });
+    }
+  });
+
+  // Get booking details with state info
+  app.get("/api/bookings/:type/:id", async (req, res) => {
+    const userId = req.session?.userId || getUserIdFromRequest(req);
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    try {
+      const { type, id } = req.params;
+
+      if (type === 'appointment') {
+        const [booking] = await db.select().from(appointments).where(eq(appointments.id, id));
+        if (!booking) {
+          return res.status(404).json({ error: "Booking not found" });
+        }
+        
+        // Check user is client or business owner
+        if (booking.clientId !== userId) {
+          const business = await storage.getBusiness(booking.businessId);
+          if (business?.ownerId !== userId) {
+            return res.status(403).json({ error: "Not authorized" });
+          }
+        }
+
+        res.json({ booking });
+      } else if (type === 'shoot') {
+        const [booking] = await db.select().from(shootBookings).where(eq(shootBookings.id, id));
+        if (!booking) {
+          return res.status(404).json({ error: "Booking not found" });
+        }
+
+        // Check user is client or photographer
+        if (booking.clientId !== userId) {
+          const photographer = await storage.getPhotographer(booking.photographerId);
+          if (photographer?.userId !== userId) {
+            return res.status(403).json({ error: "Not authorized" });
+          }
+        }
+
+        res.json({ booking });
+      } else {
+        return res.status(400).json({ error: "type must be 'appointment' or 'shoot'" });
+      }
+    } catch (error) {
+      console.error("Get booking error:", error);
       res.status(500).json({ error: "Failed to get booking" });
     }
   });

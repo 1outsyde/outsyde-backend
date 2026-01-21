@@ -64,6 +64,44 @@ export interface HoursOfOperation {
 }
 
 /* =====================================================
+   BOOKING STATE MACHINE
+===================================================== */
+// Valid booking states: DRAFT -> PENDING_PAYMENT -> CONFIRMED -> COMPLETED/CANCELED
+export const BOOKING_STATES = {
+  DRAFT: 'draft',              // Slot locked, awaiting payment initiation (10-min TTL)
+  PENDING_PAYMENT: 'pending_payment', // Payment initiated, awaiting confirmation
+  CONFIRMED: 'confirmed',      // Payment succeeded, booking active
+  COMPLETED: 'completed',      // Service delivered
+  CANCELED: 'canceled',        // Booking canceled (by user, vendor, or system)
+  EXPIRED: 'expired',          // Draft TTL expired
+  NO_SHOW: 'no_show',          // Client didn't show up
+} as const;
+
+export type BookingState = typeof BOOKING_STATES[keyof typeof BOOKING_STATES];
+
+// Valid state transitions
+export const BOOKING_TRANSITIONS: Record<BookingState, BookingState[]> = {
+  draft: ['pending_payment', 'canceled', 'expired'],
+  pending_payment: ['confirmed', 'canceled', 'expired'],
+  confirmed: ['completed', 'canceled', 'no_show'],
+  completed: [], // Terminal state
+  canceled: [],  // Terminal state
+  expired: [],   // Terminal state
+  no_show: [],   // Terminal state
+};
+
+// Booking cancellation reasons
+export const CANCELLATION_REASONS = {
+  CLIENT_REQUEST: 'client_request',
+  VENDOR_REQUEST: 'vendor_request',
+  PAYMENT_FAILED: 'payment_failed',
+  SYSTEM_TIMEOUT: 'system_timeout',
+  DOUBLE_BOOKING: 'double_booking',
+} as const;
+
+export type CancellationReason = typeof CANCELLATION_REASONS[keyof typeof CANCELLATION_REASONS];
+
+/* =====================================================
    USERS
 ===================================================== */
 export const users = pgTable("users", {
@@ -536,14 +574,40 @@ export const shootBookings = pgTable("shoot_bookings", {
 
   stripePaymentIntentId: text("stripe_payment_intent_id"),
   stripeCheckoutSessionId: text("stripe_checkout_session_id"),
-  status: text("status").default("pending"),
+  
+  // State machine status: draft, pending_payment, confirmed, completed, canceled, expired, no_show
+  status: text("status").default("draft").notNull(),
+  
+  // Draft lock TTL - when this expires, draft becomes invalid
+  draftExpiresAt: timestamp("draft_expires_at"),
+  
+  // Cancellation tracking
+  canceledAt: timestamp("canceled_at"),
+  canceledBy: varchar("canceled_by", { length: 36 }), // userId who canceled
+  cancellationReason: text("cancellation_reason"),
+  
+  // Audit trail for state changes
+  stateChangedAt: timestamp("state_changed_at"),
+  stateChangedBy: varchar("state_changed_by", { length: 36 }), // 'system', 'stripe', or userId
+  previousState: text("previous_state"),
 
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
-});
+}, (table) => ({
+  // Prevent double bookings: unique constraint on photographer + date + time
+  uniquePhotographerSlot: unique("unique_photographer_slot").on(
+    table.photographerId, 
+    table.date, 
+    table.startTime
+  ),
+  // Index for draft expiry cleanup job
+  shootDraftExpiryIdx: index("idx_shoot_bookings_draft_expiry").on(table.status, table.draftExpiresAt),
+  // Index for availability queries
+  shootAvailabilityIdx: index("idx_shoot_bookings_availability").on(table.photographerId, table.date, table.status),
+}));
 
 /* =====================================================
-   APPOINTMENTS (Service Bookings)
+   APPOINTMENTS (Service Bookings) - State Machine
 ===================================================== */
 export const appointments = pgTable("appointments", {
   id: varchar("id", { length: 36 }).primaryKey().default(sql`gen_random_uuid()`),
@@ -556,6 +620,10 @@ export const appointments = pgTable("appointments", {
 
   appointmentDate: text("appointment_date").notNull(),
   appointmentTime: text("appointment_time").notNull(),
+  // End time for slot blocking (calculated from service duration)
+  appointmentEndTime: text("appointment_end_time"),
+  // Duration in minutes (from service)
+  durationMinutes: integer("duration_minutes"),
 
   totalPrice: integer("total_price").notNull(),
   platformFee: integer("platform_fee").default(0),
@@ -565,11 +633,39 @@ export const appointments = pgTable("appointments", {
   staffPayout: integer("staff_payout").default(0), // Amount going to staff Stripe account
 
   stripePaymentIntentId: text("stripe_payment_intent_id"),
-  status: text("status").default("pending"),
+  stripeCheckoutSessionId: text("stripe_checkout_session_id"),
+  
+  // State machine status: draft, pending_payment, confirmed, completed, canceled, expired, no_show
+  status: text("status").default("draft").notNull(),
+  
+  // Draft lock TTL - when this expires, draft becomes invalid
+  draftExpiresAt: timestamp("draft_expires_at"),
+  
+  // Cancellation tracking
+  canceledAt: timestamp("canceled_at"),
+  canceledBy: varchar("canceled_by", { length: 36 }), // userId who canceled
+  cancellationReason: text("cancellation_reason"),
+  
+  // Audit trail for state changes
+  stateChangedAt: timestamp("state_changed_at"),
+  stateChangedBy: varchar("state_changed_by", { length: 36 }), // 'system', 'stripe', or userId
+  previousState: text("previous_state"),
 
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
-});
+}, (table) => ({
+  // Prevent double bookings: unique constraint on staff + date + time for active bookings
+  // Only one confirmed/pending_payment booking allowed per slot
+  uniqueStaffSlot: unique("unique_staff_slot").on(
+    table.staffMemberId, 
+    table.appointmentDate, 
+    table.appointmentTime
+  ).nullsNotDistinct(),
+  // Index for draft expiry cleanup job
+  draftExpiryIdx: index("idx_appointments_draft_expiry").on(table.status, table.draftExpiresAt),
+  // Index for availability queries
+  availabilityIdx: index("idx_appointments_availability").on(table.staffMemberId, table.appointmentDate, table.status),
+}));
 
 /* =====================================================
    ORDER GROUPS (Multi-Vendor Cart Purchases)
@@ -679,6 +775,39 @@ export const referrals = pgTable("referrals", {
 
   createdAt: timestamp("created_at").defaultNow().notNull(),
 });
+
+/* =====================================================
+   BOOKING AUDIT LOG (State Machine History)
+===================================================== */
+export const bookingAuditLog = pgTable("booking_audit_log", {
+  id: varchar("id", { length: 36 }).primaryKey().default(sql`gen_random_uuid()`),
+  
+  // Reference to the booking (appointment or shoot_booking)
+  bookingType: text("booking_type").notNull(), // 'appointment' | 'shoot_booking'
+  bookingId: varchar("booking_id", { length: 36 }).notNull(),
+  
+  // State transition
+  fromState: text("from_state"),
+  toState: text("to_state").notNull(),
+  
+  // Actor: who triggered this transition
+  triggeredBy: varchar("triggered_by", { length: 36 }), // userId, 'system', or 'stripe'
+  triggerSource: text("trigger_source").notNull(), // 'api', 'webhook', 'cron', 'admin'
+  
+  // Additional context
+  metadata: jsonb("metadata").$type<{
+    reason?: string;
+    stripePaymentIntentId?: string;
+    stripeEventId?: string;
+    clientIp?: string;
+    userAgent?: string;
+  }>(),
+  
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+}, (table) => ({
+  bookingIdx: index("idx_booking_audit_booking").on(table.bookingType, table.bookingId),
+  triggeredByIdx: index("idx_booking_audit_triggered_by").on(table.triggeredBy),
+}));
 
 /* =====================================================
    CONVERSATIONS (Real-time Chat)
@@ -1341,6 +1470,33 @@ export const insertShipmentSchema = createInsertSchema(shipments).omit({
   updatedAt: true,
 });
 
+export const insertBookingAuditLogSchema = createInsertSchema(bookingAuditLog).omit({
+  id: true,
+  createdAt: true,
+});
+
+// Booking draft creation schema (for appointments)
+export const createAppointmentDraftSchema = z.object({
+  businessId: z.string().min(1),
+  serviceId: z.string().min(1),
+  staffMemberId: z.string().optional(),
+  appointmentDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "Date must be YYYY-MM-DD"),
+  appointmentTime: z.string().regex(/^\d{2}:\d{2}$/, "Time must be HH:MM"),
+});
+
+// Booking draft creation schema (for photographer shoots)
+export const createShootDraftSchema = z.object({
+  photographerId: z.string().min(1),
+  serviceId: z.string().optional(),
+  shootType: z.string().min(1),
+  date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "Date must be YYYY-MM-DD"),
+  startTime: z.string().regex(/^\d{2}:\d{2}$/, "Time must be HH:MM"),
+  durationHours: z.number().min(1).max(12),
+  locationType: z.string().optional(),
+  locationDetails: z.string().optional(),
+  specialRequests: z.string().optional(),
+});
+
 /* =====================================================
    SIGNUP SCHEMAS
 ===================================================== */
@@ -1480,6 +1636,12 @@ export type PointTransaction = typeof pointTransactions.$inferSelect;
 export type InsertPointTransaction = z.infer<typeof insertPointTransactionSchema>;
 
 export type Referral = typeof referrals.$inferSelect;
+
+export type BookingAuditLog = typeof bookingAuditLog.$inferSelect;
+export type InsertBookingAuditLog = z.infer<typeof insertBookingAuditLogSchema>;
+
+export type CreateAppointmentDraft = z.infer<typeof createAppointmentDraftSchema>;
+export type CreateShootDraft = z.infer<typeof createShootDraftSchema>;
 
 export type Conversation = typeof conversations.$inferSelect;
 export type InsertConversation = z.infer<typeof insertConversationSchema>;

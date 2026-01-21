@@ -1,10 +1,11 @@
 import { getStripeSync, getUncachableStripeClient } from "./stripeClient";
 import { storage } from "../storage";
 import { db } from "../db";
-import { fulfillmentTasks, subscriptionTiers } from "@shared/schema";
+import { fulfillmentTasks, subscriptionTiers, appointments, shootBookings, BOOKING_STATES } from "@shared/schema";
 import { sql, eq } from "drizzle-orm";
 import { NotificationTriggers } from "../notificationService";
 import { stripeService } from "./stripeService";
+import { transitionAppointmentState, transitionShootBookingState } from "../bookingStateMachine";
 
 function isOnReplit(): boolean {
   return !!(process.env.REPL_IDENTITY || process.env.WEB_REPL_RENEWAL || process.env.REPL_ID);
@@ -98,6 +99,18 @@ export class WebhookHandlers {
 
     if (metadata.type === "multi_vendor_cart_checkout") {
       await this.handleMultiVendorCartCheckoutCompleted(session);
+      return;
+    }
+
+    // Handle appointment booking checkout (state machine confirmation)
+    if (metadata.type === "appointment_booking") {
+      await this.handleAppointmentBookingCompleted(session);
+      return;
+    }
+
+    // Handle photographer shoot booking checkout (state machine confirmation)
+    if (metadata.type === "shoot_booking") {
+      await this.handleShootBookingCompleted(session);
       return;
     }
 
@@ -678,6 +691,151 @@ export class WebhookHandlers {
     
     if (!business && !photographer) {
       console.log(`[Stripe] No business or photographer found for account ${accountId}`);
+    }
+  }
+
+  /* =====================================================
+     APPOINTMENT BOOKING CONFIRMATION (STATE MACHINE)
+  ===================================================== */
+  static async handleAppointmentBookingCompleted(session: any) {
+    const { appointmentId, clientId } = session.metadata || {};
+    
+    if (!appointmentId) {
+      console.error("[Stripe] Appointment booking checkout missing appointmentId in metadata");
+      return;
+    }
+
+    console.log(`[Stripe] Confirming appointment booking ${appointmentId}`);
+
+    try {
+      // Transition from pending_payment to confirmed
+      const result = await transitionAppointmentState(
+        appointmentId,
+        BOOKING_STATES.CONFIRMED,
+        {
+          triggeredBy: 'stripe',
+          triggerSource: 'webhook',
+          metadata: {
+            stripeCheckoutSessionId: session.id,
+            stripePaymentIntentId: session.payment_intent,
+          }
+        }
+      );
+
+      if (!result.success) {
+        console.error(`[Stripe] Failed to confirm appointment ${appointmentId}: ${result.error}`);
+        return;
+      }
+
+      // Update appointment with Stripe IDs
+      await db.update(appointments)
+        .set({
+          stripeCheckoutSessionId: session.id,
+          stripePaymentIntentId: session.payment_intent,
+          updatedAt: new Date(),
+        })
+        .where(eq(appointments.id, appointmentId));
+
+      console.log(`[Stripe] Appointment ${appointmentId} confirmed successfully`);
+
+      // Send booking confirmation notification (async, non-blocking)
+      if (clientId) {
+        NotificationTriggers.bookingConfirmed({
+          userId: clientId,
+          bookingType: 'appointment',
+          bookingId: appointmentId,
+        }).catch(err => console.error("[Stripe] Failed to send booking notification:", err));
+      }
+
+      // Award points for the booking
+      const [appointment] = await db.select().from(appointments).where(eq(appointments.id, appointmentId));
+      if (appointment && clientId) {
+        await storage.earnPoints({
+          userId: clientId,
+          dollarAmountCents: appointment.totalPrice,
+          referenceType: "appointment",
+          referenceId: appointmentId,
+          description: "Points earned from service booking",
+          businessId: appointment.businessId,
+        });
+
+        // Complete referral bonus if applicable
+        await this.tryCompleteReferral(clientId, appointmentId, 'appointment');
+      }
+    } catch (error) {
+      console.error(`[Stripe] Error confirming appointment ${appointmentId}:`, error);
+    }
+  }
+
+  /* =====================================================
+     SHOOT BOOKING CONFIRMATION (STATE MACHINE)
+  ===================================================== */
+  static async handleShootBookingCompleted(session: any) {
+    const { shootBookingId, clientId } = session.metadata || {};
+    
+    if (!shootBookingId) {
+      console.error("[Stripe] Shoot booking checkout missing shootBookingId in metadata");
+      return;
+    }
+
+    console.log(`[Stripe] Confirming shoot booking ${shootBookingId}`);
+
+    try {
+      // Transition from pending_payment to confirmed
+      const result = await transitionShootBookingState(
+        shootBookingId,
+        BOOKING_STATES.CONFIRMED,
+        {
+          triggeredBy: 'stripe',
+          triggerSource: 'webhook',
+          metadata: {
+            stripeCheckoutSessionId: session.id,
+            stripePaymentIntentId: session.payment_intent,
+          }
+        }
+      );
+
+      if (!result.success) {
+        console.error(`[Stripe] Failed to confirm shoot booking ${shootBookingId}: ${result.error}`);
+        return;
+      }
+
+      // Update shoot booking with Stripe IDs
+      await db.update(shootBookings)
+        .set({
+          stripeCheckoutSessionId: session.id,
+          stripePaymentIntentId: session.payment_intent,
+          updatedAt: new Date(),
+        })
+        .where(eq(shootBookings.id, shootBookingId));
+
+      console.log(`[Stripe] Shoot booking ${shootBookingId} confirmed successfully`);
+
+      // Send booking confirmation notification (async, non-blocking)
+      if (clientId) {
+        NotificationTriggers.bookingConfirmed({
+          userId: clientId,
+          bookingType: 'shoot_booking',
+          bookingId: shootBookingId,
+        }).catch(err => console.error("[Stripe] Failed to send booking notification:", err));
+      }
+
+      // Award points for the booking
+      const [booking] = await db.select().from(shootBookings).where(eq(shootBookings.id, shootBookingId));
+      if (booking && clientId) {
+        await storage.earnPoints({
+          userId: clientId,
+          dollarAmountCents: booking.totalPrice,
+          referenceType: "shoot_booking",
+          referenceId: shootBookingId,
+          description: "Points earned from photography booking",
+        });
+
+        // Complete referral bonus if applicable
+        await this.tryCompleteReferral(clientId, shootBookingId, 'shoot_booking');
+      }
+    } catch (error) {
+      console.error(`[Stripe] Error confirming shoot booking ${shootBookingId}:`, error);
     }
   }
 }

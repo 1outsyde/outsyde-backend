@@ -10,6 +10,7 @@ import { stripeService } from "./stripe/stripeService";
 import { setupWebSocket } from "./websocket";
 import { setupAuth, getSession } from "./replitAuth";
 import { initializePushService, sendCartReminderNotifications, isPushConfigured } from "./pushService";
+import { startDraftCleanupJob } from "./bookingStateMachine";
 import passport from "passport";
 
 function isOnReplit(): boolean {
@@ -240,6 +241,10 @@ async function initStripe() {
   if (isPushConfigured()) {
     setInterval(sendCartReminderNotifications, 30 * 60 * 1000);
   }
+
+  // Start booking draft cleanup job (runs every 60 seconds)
+  startDraftCleanupJob(60000);
+  console.log("Booking draft cleanup job started");
 
   await registerRoutes(httpServer, app);
   setupWebSocket(httpServer);
