@@ -762,18 +762,21 @@ export const pointTransactions = pgTable("point_transactions", {
   id: varchar("id", { length: 36 }).primaryKey().default(sql`gen_random_uuid()`),
   userId: varchar("user_id", { length: 36 }).notNull().references(() => users.id),
 
-  type: text("type").notNull(),
+  type: text("type").notNull(), // 'earn' | 'redeem' | 'reversal'
   points: integer("points").notNull(),
   dollarAmountCents: integer("dollar_amount_cents").notNull(),
 
   businessId: varchar("business_id", { length: 36 }),
   businessName: text("business_name"),
 
-  referenceType: text("reference_type"),
+  referenceType: text("reference_type"), // 'booking' | 'order' | 'referral' | 'shoot_booking' | 'appointment'
   referenceId: varchar("reference_id", { length: 36 }),
 
   balanceAfter: integer("balance_after").notNull(),
   description: text("description"),
+  
+  // Per-transaction cap tracking (5,000 max points per transaction)
+  capped: boolean("capped").default(false).notNull(),
 
   createdAt: timestamp("created_at").defaultNow().notNull(),
 });

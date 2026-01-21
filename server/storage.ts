@@ -1804,6 +1804,8 @@ export class DatabaseStorage implements IStorage {
   // Platform fee percentages for loyalty point calculation
   private readonly PHOTOGRAPHER_FEE_PERCENT = 10; // 10% platform fee on photographer bookings
   private readonly BUSINESS_FEE_PERCENT = 4; // 4% platform fee on business transactions
+  private readonly POINTS_REWARD_PERCENT = 10; // 10% of platform profit awarded as points
+  private readonly MAX_POINTS_PER_TRANSACTION = 5000; // Hard cap per transaction
 
   async earnPoints(data: {
     userId: string;
@@ -1816,22 +1818,37 @@ export class DatabaseStorage implements IStorage {
     description?: string;
   }): Promise<PointTransaction> {
     // Calculate points from PLATFORM PROFIT only (not total transaction amount)
-    // Photographer bookings: 10% platform fee → points on that 10%
-    // Business transactions: 4% platform fee → points on that 4%
-    // Bonuses: Direct point award (referrals, promotions)
+    // Step 1: Calculate Outsyde's profit from the transaction
+    // Step 2: Award 10% of that profit as points (rounded down to nearest 100)
+    // Step 3: Apply 5,000 cap per transaction
     let platformProfitCents: number;
+    let pointsEarned: number;
+    let isCapped = false;
     
     if (data.transactionType === 'photographer_booking') {
+      // Photographer: 10% platform fee
       platformProfitCents = Math.floor(data.dollarAmountCents * this.PHOTOGRAPHER_FEE_PERCENT / 100);
+      // 10% of profit as points, rounded down to nearest 100
+      const rawPoints = Math.floor(platformProfitCents * this.POINTS_REWARD_PERCENT / 100);
+      pointsEarned = Math.floor(rawPoints / 100) * 100;
     } else if (data.transactionType === 'business_transaction') {
+      // Business: 4% platform fee
       platformProfitCents = Math.floor(data.dollarAmountCents * this.BUSINESS_FEE_PERCENT / 100);
+      // 10% of profit as points, rounded down to nearest 100
+      const rawPoints = Math.floor(platformProfitCents * this.POINTS_REWARD_PERCENT / 100);
+      pointsEarned = Math.floor(rawPoints / 100) * 100;
     } else {
       // 'bonus' type - direct point award (referrals, promotions, etc.)
+      // Bonuses are already in points, not cents
       platformProfitCents = data.dollarAmountCents;
+      pointsEarned = data.dollarAmountCents; // Direct award
     }
     
-    // $1 platform profit = 100 points (1 cent = 1 point)
-    const pointsEarned = Math.floor(platformProfitCents);
+    // Apply per-transaction cap (5,000 max)
+    if (pointsEarned > this.MAX_POINTS_PER_TRANSACTION) {
+      pointsEarned = this.MAX_POINTS_PER_TRANSACTION;
+      isCapped = true;
+    }
     
     // Get current balance
     const currentBalance = await this.getUserPointsBalance(data.userId);
@@ -1842,7 +1859,7 @@ export class DatabaseStorage implements IStorage {
       .set({ loyaltyPoints: newBalance })
       .where(eq(users.id, data.userId));
 
-    // Create transaction record
+    // Create transaction record with capped flag
     const id = randomUUID();
     const result = await db.insert(pointTransactions).values({
       id,
@@ -1855,21 +1872,57 @@ export class DatabaseStorage implements IStorage {
       referenceType: data.referenceType || null,
       referenceId: data.referenceId || null,
       balanceAfter: newBalance,
-      description: data.description || `Earned ${pointsEarned} points`,
+      description: data.description || `Earned ${pointsEarned} points${isCapped ? ' (capped)' : ''}`,
+      capped: isCapped,
     }).returning();
 
     return result[0];
   }
 
+  // Fixed redemption tiers - NO custom amounts allowed
+  private readonly REDEMPTION_TIERS = [
+    { points: 500,   valueCents: 500 },
+    { points: 1000,  valueCents: 1000 },
+    { points: 2500,  valueCents: 2500 },
+    { points: 5000,  valueCents: 5000 },
+    { points: 10000, valueCents: 10000 },
+    { points: 25000, valueCents: 25000 }
+  ];
+  
+  // Max discount as percentage of order total
+  private readonly MAX_REDEMPTION_PERCENT = 30;
+
   async redeemPoints(data: {
     userId: string;
     points: number;
+    orderTotalCents?: number; // Required for 30% cap validation
     businessId?: string;
     businessName?: string;
     referenceType?: string;
     referenceId?: string;
     description?: string;
+    isFirstBooking?: boolean; // Block redemption on first-time bookings
+    isDeposit?: boolean; // Block redemption on deposits
+    isSubscription?: boolean; // Block redemption on subscriptions
   }): Promise<{ transaction: PointTransaction; discountCents: number } | { error: string }> {
+    // TIER-BASED REDEMPTION: Only allow fixed tier amounts
+    const tier = this.REDEMPTION_TIERS.find(t => t.points === data.points);
+    if (!tier) {
+      const validTiers = this.REDEMPTION_TIERS.map(t => t.points).join(', ');
+      return { error: `Invalid redemption amount. Points must be one of: ${validTiers}` };
+    }
+    
+    // Block redemption on restricted transaction types
+    if (data.isDeposit) {
+      return { error: 'Points cannot be redeemed on deposits' };
+    }
+    if (data.isFirstBooking) {
+      return { error: 'Points cannot be redeemed on first-time bookings' };
+    }
+    if (data.isSubscription) {
+      return { error: 'Points cannot be redeemed on subscription payments' };
+    }
+    
     // Check user has enough points
     const currentBalance = await this.getUserPointsBalance(data.userId);
     
@@ -1877,12 +1930,15 @@ export class DatabaseStorage implements IStorage {
       return { error: `Insufficient points. You have ${currentBalance} points but tried to redeem ${data.points}` };
     }
 
-    if (data.points <= 0) {
-      return { error: 'Points to redeem must be greater than 0' };
+    // Validate 30% max of order total (if order total provided)
+    if (data.orderTotalCents) {
+      const maxDiscountCents = Math.floor(data.orderTotalCents * this.MAX_REDEMPTION_PERCENT / 100);
+      if (tier.valueCents > maxDiscountCents) {
+        return { error: `Redemption value cannot exceed 30% of order total. Max allowed: $${(maxDiscountCents / 100).toFixed(2)}` };
+      }
     }
 
-    // Calculate discount: 100 points = $1 = 100 cents
-    const discountCents = this.calculatePointsValue(data.points);
+    const discountCents = tier.valueCents;
     const newBalance = currentBalance - data.points;
 
     // Update user's loyalty points
@@ -1904,12 +1960,18 @@ export class DatabaseStorage implements IStorage {
       referenceId: data.referenceId || null,
       balanceAfter: newBalance,
       description: data.description || `Redeemed ${data.points} points for $${(discountCents / 100).toFixed(2)} discount`,
+      capped: false,
     }).returning();
 
     return { 
       transaction: result[0], 
       discountCents 
     };
+  }
+  
+  // Get available redemption tiers for a user based on their balance
+  getAvailableRedemptionTiers(balance: number): { points: number; valueCents: number }[] {
+    return this.REDEMPTION_TIERS.filter(tier => tier.points <= balance);
   }
 
   async getPointTransactions(userId: string, limit: number = 50): Promise<PointTransaction[]> {
