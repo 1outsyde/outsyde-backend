@@ -1,0 +1,132 @@
+1️⃣ Source of Truth (Do Not Deviate)
+
+All loyalty points must be calculated ONLY from Outsyde’s platform profit, never from the full transaction amount.
+
+Platform profit rates:
+
+Photographer bookings: 10% platform fee
+
+Business/product transactions: 4% platform fee
+
+These percentages represent Outsyde’s actual earned revenue and are the ONLY base for rewards.
+
+2️⃣ Profit Calculation Rules
+Photographer Booking
+outsydProfitCents = bookingTotalCents * 0.10
+
+Business / Product Transaction
+outsydProfitCents = orderTotalCents * 0.04
+
+
+No other revenue, fees, taxes, or partner payouts are included.
+
+3️⃣ Points Earning Formula (Strict)
+
+Outsyde Points are earned as 10% of Outsyde’s profit.
+
+pointsEarnedRaw = floor(outsydProfitCents * 0.10 / 100) * 100
+
+
+Which means:
+
+$1 of Outsyde profit = 100 points
+
+10% of that profit is awarded as points
+
+Always round DOWN
+
+4️⃣ Per-Transaction Earning Cap
+
+Apply a hard cap after calculation:
+
+MAX_POINTS_PER_TRANSACTION = 5_000
+
+
+If calculated points exceed this:
+
+Credit only 5,000 points
+
+Mark transaction as capped = true in the ledger
+
+5️⃣ When Points Are Earned
+
+Points should be issued only when:
+
+Payment is confirmed (Stripe webhook success)
+
+Booking/order is completed or confirmed per business rules
+
+Points must be reversed if:
+
+Transaction is refunded
+
+Booking is canceled under refund policy
+
+6️⃣ Redemption System (Tier-Based Only)
+
+Points can be redeemed only in the following fixed tiers:
+
+REDEMPTION_TIERS = [
+  { points: 500,   valueCents: 500 },
+  { points: 1000,  valueCents: 1000 },
+  { points: 2500,  valueCents: 2500 },
+  { points: 5000,  valueCents: 5000 },
+  { points: 10000, valueCents: 10000 },
+  { points: 25000, valueCents: 25000 }
+]
+
+
+❌ No custom redemption amounts
+❌ No partial redemptions
+
+7️⃣ Redemption Guardrails
+
+Max 1 redemption per transaction
+
+Redemption value must not exceed 30% of order total
+
+Points cannot be redeemed on:
+
+Deposits
+
+First-time bookings
+
+Subscription payments (unless explicitly enabled later)
+
+8️⃣ Funding Rule (Critical)
+
+When points are redeemed:
+
+The discount is absorbed entirely by Outsyde
+
+Photographer/business payouts remain unchanged
+
+Points never reduce partner earnings
+
+9️⃣ Ledger Requirements (No Exceptions)
+
+Every points action must create a pointTransactions record:
+
+type: "earn" | "redeem" | "reversal"
+
+points
+
+dollarAmountCents
+
+balanceAfter
+
+referenceType: "booking" | "order" | "referral"
+
+referenceId
+
+capped: boolean
+
+No silent balance changes.
+
+🔟 Referral System (Confirming Existing Logic)
+
+New user welcome bonus: 250 points (on signup via referral)
+
+Referrer bonus: 500 points (only after referred user’s first completed purchase)
+
+Max 50 completed referrals per user
