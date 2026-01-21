@@ -53,6 +53,12 @@ The Outsyde platform operates as a monorepo, utilizing a React frontend, an Expr
     - Endpoints: `PATCH /api/users/identity` (update), `GET /api/users/identity/status` (check cooldowns)
 -   **Data Privacy:** Strict measures are in place for sensitive data like DOB and ethnicity, ensuring limited visibility and aggregation for analytics only. Demo data is filtered for non-admin users.
 -   **Business Visibility Filtering:** Server-side `isBusinessVisibleToPublic()` helper enforces visibility on all public business endpoints (/api/vendors, /api/search, /api/businesses, /api/businesses/:id, /api/businesses/:id/products, /api/businesses/:id/services). Criteria: approvalStatus === "approved", excludes demo data (ownerId contains "demo"), stripeOnboardingComplete required only if hasProducts/hasServices, and active subscription.
+-   **Post Commerce Support:** Feed posts can optionally include commerce links for booking/purchase CTAs:
+    - `productId` - Links to a business product (validated ownership)
+    - `serviceId` - Links to a business service (validated ownership)
+    - `photographerServiceId` - Links to a photographer service (validated ownership)
+    - Feed responses expose these IDs plus enriched product/service objects with details
+    - Availability endpoints accept optional `serviceId` to auto-determine booking duration
 
 ## External Dependencies
 -   **PostgreSQL:** Primary database.
