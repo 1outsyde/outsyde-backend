@@ -9125,9 +9125,18 @@ export async function registerRoutes(
         
         return {
           ...post,
+          // Identity fields for mobile apps (top-level for easy access)
+          userId: post.authorId, // Canonical identifier
+          username: author?.username || null, // For profile URL routing
+          displayName: author?.name || author?.firstName || null, // For UI display
+          providerId: authorPhotographerId || authorBusinessId || null, // Photographer or vendor ID
+          // Keep existing nested objects for backwards compatibility
           author: author ? { 
             id: author.id, 
-            name: author.name, 
+            name: author.name,
+            username: author.username,
+            firstName: author.firstName,
+            lastName: author.lastName,
             profileImageUrl: author.profileImageUrl,
             businessId: authorBusinessId,
             photographerId: authorPhotographerId,

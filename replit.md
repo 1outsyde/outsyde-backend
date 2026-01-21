@@ -17,7 +17,14 @@ The Outsyde platform operates as a monorepo, utilizing a React frontend, an Expr
 -   **Real-time Communication:** Implemented using WebSockets for features like chat.
 -   **UI/UX:** Adheres to a modern, social media-inspired design, incorporating a golden yellow color scheme and specified fonts.
 -   **Transaction Fees:** A tiered fee structure applies: 10% for photographers per booking and 4% for businesses per transaction, in addition to subscription fees.
--   **Core Features:** Includes multi-step onboarding, verified reviews, a loyalty point system ("Outsyde Points"), and a referral program.
+-   **Outsyde Points System (Loyalty):** Profit-based rewards system:
+    - **Earning:** Points = 10% of Outsyde's platform profit (10% photographer fee, 4% business fee), rounded down to nearest 100 points, max 5,000 points per transaction (tracked via `capped` flag in ledger)
+    - **Redemption Tiers:** Fixed amounts only: 500, 1000, 2500, 5000, 10000, 25000 points
+    - **Redemption Guardrails:** Max 30% of order total, max 1 per transaction, blocked on deposits/first bookings/subscriptions
+    - **Reversals:** Points reversed on refunds/cancellations via `reversePoints()`
+    - **Funding Rule:** Redemption discounts absorbed by Outsyde, vendor payouts unchanged
+    - **Referral Bonuses:** New user: 250 points, Referrer: 500 points (after first purchase), max 50 referrals/user
+-   **Core Features:** Includes multi-step onboarding, verified reviews, and a referral program.
 -   **Cart & Checkout:** Supports database-backed cart management for authenticated users, `localStorage` for guests, and multi-vendor checkout allowing purchases from various vendors in one session.
 -   **Notifications:** Utilizes Web Push for cart abandonment and server-side in-app notifications for various events. Admins receive email notifications for new vendor applications.
 -   **Refund System:** Provides a mechanism for users to request refunds, triggering point reversals and review revocations upon approval.

@@ -314,13 +314,23 @@ export interface IStorage {
   redeemPoints(data: {
     userId: string;
     points: number;
+    orderTotalCents?: number;
     businessId?: string;
     businessName?: string;
     referenceType?: string;
     referenceId?: string;
     description?: string;
+    isFirstBooking?: boolean;
+    isDeposit?: boolean;
+    isSubscription?: boolean;
   }): Promise<{ transaction: PointTransaction; discountCents: number } | { error: string }>;
+  reversePoints(data: {
+    userId: string;
+    originalTransactionId: string;
+    reason: string;
+  }): Promise<PointTransaction | { error: string }>;
   getPointTransactions(userId: string, limit?: number): Promise<PointTransaction[]>;
+  getAvailableRedemptionTiers(balance: number): { points: number; valueCents: number }[];
   calculatePointsValue(points: number): number; // Returns discount in cents
 
   // Referral system (deferred rewards - only after first transaction)
@@ -1912,6 +1922,21 @@ export class DatabaseStorage implements IStorage {
       return { error: `Invalid redemption amount. Points must be one of: ${validTiers}` };
     }
     
+    // MAX 1 REDEMPTION PER TRANSACTION: Check if already redeemed for this referenceId
+    if (data.referenceId) {
+      const existingRedemptions = await db.select()
+        .from(pointTransactions)
+        .where(and(
+          eq(pointTransactions.userId, data.userId),
+          eq(pointTransactions.referenceId, data.referenceId),
+          eq(pointTransactions.type, 'redeem')
+        ));
+      
+      if (existingRedemptions.length > 0) {
+        return { error: 'Only one redemption allowed per transaction' };
+      }
+    }
+    
     // Block redemption on restricted transaction types
     if (data.isDeposit) {
       return { error: 'Points cannot be redeemed on deposits' };
@@ -1972,6 +1997,78 @@ export class DatabaseStorage implements IStorage {
   // Get available redemption tiers for a user based on their balance
   getAvailableRedemptionTiers(balance: number): { points: number; valueCents: number }[] {
     return this.REDEMPTION_TIERS.filter(tier => tier.points <= balance);
+  }
+
+  // Reverse points for refunds and cancellations
+  async reversePoints(data: {
+    userId: string;
+    originalTransactionId: string;
+    reason: string;
+  }): Promise<PointTransaction | { error: string }> {
+    // Find the original transaction
+    const [originalTransaction] = await db.select()
+      .from(pointTransactions)
+      .where(eq(pointTransactions.id, data.originalTransactionId));
+    
+    if (!originalTransaction) {
+      return { error: 'Original transaction not found' };
+    }
+    
+    if (originalTransaction.userId !== data.userId) {
+      return { error: 'Transaction does not belong to this user' };
+    }
+    
+    // Check if already reversed (look for existing reversal)
+    const existingReversals = await db.select()
+      .from(pointTransactions)
+      .where(and(
+        eq(pointTransactions.referenceId, data.originalTransactionId),
+        eq(pointTransactions.type, 'reversal')
+      ));
+    
+    if (existingReversals.length > 0) {
+      return { error: 'Transaction has already been reversed' };
+    }
+    
+    const currentBalance = await this.getUserPointsBalance(data.userId);
+    let newBalance: number;
+    let pointsToReverse: number;
+    
+    if (originalTransaction.type === 'earn') {
+      // Earned points being reversed = subtract from balance
+      pointsToReverse = -originalTransaction.points;
+      newBalance = Math.max(0, currentBalance - originalTransaction.points);
+    } else if (originalTransaction.type === 'redeem') {
+      // Redeemed points being reversed = add back to balance
+      pointsToReverse = originalTransaction.points;
+      newBalance = currentBalance + originalTransaction.points;
+    } else {
+      return { error: 'Cannot reverse a reversal transaction' };
+    }
+    
+    // Update user's balance
+    await db.update(users)
+      .set({ loyaltyPoints: newBalance })
+      .where(eq(users.id, data.userId));
+    
+    // Create reversal transaction record
+    const id = randomUUID();
+    const result = await db.insert(pointTransactions).values({
+      id,
+      userId: data.userId,
+      type: 'reversal',
+      points: pointsToReverse,
+      dollarAmountCents: originalTransaction.dollarAmountCents,
+      businessId: originalTransaction.businessId,
+      businessName: originalTransaction.businessName,
+      referenceType: 'reversal',
+      referenceId: data.originalTransactionId,
+      balanceAfter: newBalance,
+      description: `Reversal: ${data.reason}`,
+      capped: false,
+    }).returning();
+    
+    return result[0];
   }
 
   async getPointTransactions(userId: string, limit: number = 50): Promise<PointTransaction[]> {
