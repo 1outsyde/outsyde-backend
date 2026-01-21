@@ -223,3 +223,152 @@ ${baseUrl ? `Review: ${baseUrl}/admin/photographer-applications/${params.photogr
     text,
   });
 }
+
+export async function sendVendorApprovalEmail(params: {
+  ownerEmail: string;
+  ownerName: string;
+  businessName: string;
+  stripeOnboardingUrl?: string | null;
+}): Promise<boolean> {
+  const subject = `Congratulations! ${params.businessName} is Approved on Outsyde`;
+  
+  const html = `
+    <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+      <div style="background: linear-gradient(135deg, #f5a623, #f7b84b); padding: 20px; text-align: center;">
+        <h1 style="color: white; margin: 0;">Welcome to Outsyde!</h1>
+      </div>
+      
+      <div style="padding: 30px; background: #ffffff;">
+        <p style="font-size: 16px; color: #333;">Hi ${params.ownerName},</p>
+        
+        <p style="font-size: 16px; color: #333;">
+          Great news! Your business <strong>${params.businessName}</strong> has been approved to join the Outsyde marketplace.
+        </p>
+        
+        <div style="background: #f0f9e8; padding: 20px; border-radius: 8px; margin: 20px 0; border-left: 4px solid #4CAF50;">
+          <h3 style="color: #2e7d32; margin-top: 0;">Next Steps</h3>
+          <p style="margin: 8px 0; color: #333;">To start accepting payments and go live on Outsyde, you need to complete your Stripe payment setup.</p>
+        </div>
+        
+        ${params.stripeOnboardingUrl ? `
+        <div style="text-align: center; margin-top: 30px;">
+          <a href="${params.stripeOnboardingUrl}" 
+             style="background: #635bff; color: white; padding: 14px 35px; text-decoration: none; border-radius: 6px; font-weight: bold; display: inline-block;">
+            Complete Payment Setup
+          </a>
+        </div>
+        ` : `
+        <div style="text-align: center; margin-top: 30px;">
+          <a href="${getAppBaseUrl()}" 
+             style="background: #f5a623; color: white; padding: 14px 35px; text-decoration: none; border-radius: 6px; font-weight: bold; display: inline-block;">
+            Go to Dashboard
+          </a>
+        </div>
+        `}
+        
+        <p style="font-size: 14px; color: #666; margin-top: 30px;">
+          Once you complete payment setup, your business will be visible to customers in your area. Start adding your products and services to get discovered!
+        </p>
+      </div>
+      
+      <div style="background: #f5f5f5; padding: 15px; text-align: center; color: #666; font-size: 12px;">
+        <p>Welcome to the Outsyde family!</p>
+      </div>
+    </div>
+  `;
+
+  const text = `
+Congratulations! ${params.businessName} is Approved on Outsyde
+
+Hi ${params.ownerName},
+
+Great news! Your business ${params.businessName} has been approved to join the Outsyde marketplace.
+
+Next Steps:
+To start accepting payments and go live on Outsyde, you need to complete your Stripe payment setup.
+
+${params.stripeOnboardingUrl ? `Complete payment setup: ${params.stripeOnboardingUrl}` : `Visit your dashboard: ${getAppBaseUrl()}`}
+
+Once you complete payment setup, your business will be visible to customers in your area.
+
+Welcome to the Outsyde family!
+  `;
+
+  return sendAdminEmail({
+    to: params.ownerEmail,
+    subject,
+    html,
+    text,
+  });
+}
+
+export async function sendVendorRejectionEmail(params: {
+  ownerEmail: string;
+  ownerName: string;
+  businessName: string;
+  rejectionReason: string;
+}): Promise<boolean> {
+  const subject = `Update on Your ${params.businessName} Application`;
+  
+  const html = `
+    <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+      <div style="background: linear-gradient(135deg, #666, #888); padding: 20px; text-align: center;">
+        <h1 style="color: white; margin: 0;">Application Update</h1>
+      </div>
+      
+      <div style="padding: 30px; background: #ffffff;">
+        <p style="font-size: 16px; color: #333;">Hi ${params.ownerName},</p>
+        
+        <p style="font-size: 16px; color: #333;">
+          Thank you for your interest in joining Outsyde with <strong>${params.businessName}</strong>.
+        </p>
+        
+        <p style="font-size: 16px; color: #333;">
+          After careful review, we're unable to approve your application at this time.
+        </p>
+        
+        <div style="background: #fff3cd; padding: 20px; border-radius: 8px; margin: 20px 0; border-left: 4px solid #ffc107;">
+          <h3 style="color: #856404; margin-top: 0;">Reason</h3>
+          <p style="margin: 8px 0; color: #333;">${params.rejectionReason}</p>
+        </div>
+        
+        <p style="font-size: 14px; color: #666; margin-top: 20px;">
+          If you believe this decision was made in error or would like to address the concerns mentioned above, please reply to this email or contact our support team.
+        </p>
+        
+        <p style="font-size: 14px; color: #666;">
+          You're welcome to reapply once you've addressed the feedback provided.
+        </p>
+      </div>
+      
+      <div style="background: #f5f5f5; padding: 15px; text-align: center; color: #666; font-size: 12px;">
+        <p>Thank you for considering Outsyde.</p>
+      </div>
+    </div>
+  `;
+
+  const text = `
+Update on Your ${params.businessName} Application
+
+Hi ${params.ownerName},
+
+Thank you for your interest in joining Outsyde with ${params.businessName}.
+
+After careful review, we're unable to approve your application at this time.
+
+Reason: ${params.rejectionReason}
+
+If you believe this decision was made in error or would like to address the concerns mentioned above, please reply to this email or contact our support team.
+
+You're welcome to reapply once you've addressed the feedback provided.
+
+Thank you for considering Outsyde.
+  `;
+
+  return sendAdminEmail({
+    to: params.ownerEmail,
+    subject,
+    html,
+    text,
+  });
+}

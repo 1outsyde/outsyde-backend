@@ -6560,7 +6560,19 @@ export async function registerRoutes(
         afterState: { approvalStatus: "approved" },
       });
 
-      // TODO: Send approval notification email when Resend is configured
+      // Send approval notification to business owner
+      const owner = await storage.getUser((business as any).ownerId);
+      if (owner) {
+        await NotificationTriggers.vendorApplicationApproved({
+          ownerId: owner.id,
+          ownerName: owner.name || owner.email,
+          ownerEmail: owner.email,
+          businessId: business.id,
+          businessName: business.name,
+          stripeOnboardingUrl: null, // They can initiate from their dashboard
+        });
+      }
+      
       console.log(`[Admin] Approved vendor: ${business.name} by ${adminUser.email}`);
 
       res.json({ success: true, business: updated });
@@ -6608,7 +6620,19 @@ export async function registerRoutes(
         afterState: { approvalStatus: "rejected", reason: notes },
       });
 
-      // TODO: Send rejection notification email when Resend is configured
+      // Send rejection notification to business owner
+      const owner = await storage.getUser((business as any).ownerId);
+      if (owner) {
+        await NotificationTriggers.vendorApplicationRejected({
+          ownerId: owner.id,
+          ownerName: owner.name || owner.email,
+          ownerEmail: owner.email,
+          businessId: business.id,
+          businessName: business.name,
+          rejectionReason: notes,
+        });
+      }
+      
       console.log(`[Admin] Rejected vendor: ${business.name} by ${adminUser.email} - Reason: ${notes}`);
 
       res.json({ success: true, business: updated });

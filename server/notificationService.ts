@@ -1,6 +1,6 @@
 import { storage } from './storage';
 import { sendPushNotification, isPushConfigured } from './pushService';
-import { isEmailConfigured, sendNewVendorApplicationEmail, sendNewPhotographerApplicationEmail } from './emailService';
+import { isEmailConfigured, sendNewVendorApplicationEmail, sendNewPhotographerApplicationEmail, sendVendorApprovalEmail, sendVendorRejectionEmail } from './emailService';
 import type { InsertNotification } from '@shared/schema';
 
 export type NotificationType = 
@@ -18,7 +18,9 @@ export type NotificationType =
   | 'stripe_onboarding_complete'
   | 'new_vendor_application'
   | 'new_photographer_application'
-  | 'new_follower';
+  | 'new_follower'
+  | 'vendor_approved'
+  | 'vendor_rejected';
 
 interface NotificationData {
   userId: string;
@@ -78,6 +80,10 @@ function getNotificationUrl(type: NotificationType, referenceType?: string, refe
       return referenceId ? `/admin/photographer-applications/${referenceId}` : '/admin/photographer-applications';
     case 'new_follower':
       return referenceId ? `/profile/${referenceId}` : '/';
+    case 'vendor_approved':
+      return referenceId ? `/vendor/dashboard` : '/vendor/dashboard';
+    case 'vendor_rejected':
+      return referenceId ? `/vendor/application-status` : '/';
     default:
       return '/';
   }
@@ -471,6 +477,78 @@ export const NotificationTriggers = {
         followerName: params.followerName,
       },
     });
+  },
+
+  async vendorApplicationApproved(params: {
+    ownerId: string;
+    ownerName: string;
+    ownerEmail: string;
+    businessId: string;
+    businessName: string;
+    stripeOnboardingUrl?: string | null;
+  }): Promise<void> {
+    // Send in-app notification
+    await sendNotification({
+      userId: params.ownerId,
+      type: 'vendor_approved',
+      title: 'Application Approved!',
+      message: `Congratulations! ${params.businessName} has been approved. Complete your payment setup to go live.`,
+      referenceType: 'business',
+      referenceId: params.businessId,
+      metadata: {
+        businessId: params.businessId,
+        businessName: params.businessName,
+        requiresStripe: true,
+      },
+    });
+
+    // Send email notification
+    if (params.ownerEmail && await isEmailConfigured()) {
+      await sendVendorApprovalEmail({
+        ownerEmail: params.ownerEmail,
+        ownerName: params.ownerName,
+        businessName: params.businessName,
+        stripeOnboardingUrl: params.stripeOnboardingUrl,
+      });
+    }
+
+    console.log(`[Notification] Sent approval notification to vendor: ${params.businessName}`);
+  },
+
+  async vendorApplicationRejected(params: {
+    ownerId: string;
+    ownerName: string;
+    ownerEmail: string;
+    businessId: string;
+    businessName: string;
+    rejectionReason: string;
+  }): Promise<void> {
+    // Send in-app notification
+    await sendNotification({
+      userId: params.ownerId,
+      type: 'vendor_rejected',
+      title: 'Application Update',
+      message: `Your application for ${params.businessName} was not approved. Reason: ${params.rejectionReason}`,
+      referenceType: 'business',
+      referenceId: params.businessId,
+      metadata: {
+        businessId: params.businessId,
+        businessName: params.businessName,
+        rejectionReason: params.rejectionReason,
+      },
+    });
+
+    // Send email notification
+    if (params.ownerEmail && await isEmailConfigured()) {
+      await sendVendorRejectionEmail({
+        ownerEmail: params.ownerEmail,
+        ownerName: params.ownerName,
+        businessName: params.businessName,
+        rejectionReason: params.rejectionReason,
+      });
+    }
+
+    console.log(`[Notification] Sent rejection notification to vendor: ${params.businessName}`);
   },
 };
 
