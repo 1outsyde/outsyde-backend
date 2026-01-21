@@ -1,0 +1,52 @@
+Here's a complete summary of the frontend changes for backend compatibility:
+
+Identity System Implementation
+Post Data Model - Posts now expect these fields:
+
+userId (required) - Canonical identifier for the post author
+username (optional) - For profile URL routing (e.g., /profile/johndoe)
+displayName (optional) - For UI display (falls back to username if missing)
+providerId (optional) - The photographer or vendor ID if it's a service/product post
+serviceId (optional) - Triggers "Book" button when present
+productId (optional) - Triggers "Buy Now" button when present
+What the frontend expects from GET /api/feed:
+
+{
+  "id": "post-uuid",
+  "userId": "user-uuid",
+  "username": "johndoe",
+  "displayName": "John Doe",
+  "providerId": "photographer-or-vendor-uuid",
+  "serviceId": "service-uuid-if-bookable",
+  "productId": "product-uuid-if-purchasable",
+  ...other post fields
+}
+Booking Flow
+When user taps "Book" button:
+
+Frontend navigates to BookingScreen with photographerId and optional preselectedServiceId
+BookingScreen calls GET /api/photographers/:photographerId to fetch photographer details
+If photographer exists → shows booking flow (service → date → slot → review)
+If 404 → shows "Photographer Not Found" error with back button
+API endpoints used:
+
+GET /api/photographers/:id - Fetch photographer profile
+GET /api/photographers/:id/services - Fetch photographer's bookable services
+GET /api/photographers/:id/available-dates - Get available dates
+GET /api/photographers/:id/slots?date=YYYY-MM-DD - Get time slots for a date
+Engagement (Likes/Comments)
+Likes and comments use userId for attribution, not email or displayName. The frontend sends:
+
+userId when creating likes/comments
+Expects userId in response data for displaying who liked/commented
+Navigation Patterns
+Author avatar/name tap → Goes to public profile using userId (route: /photographer/:id or /vendor/:id)
+Book button → Goes directly to booking screen (skips profile)
+Buy Now button → Goes to vendor products tab with productId highlighted
+Key Backend Requirements
+Feed posts must include userId - This is the canonical identifier
+Feed posts should include providerId - Links to photographer/vendor for booking
+Feed posts can include serviceId/productId - Enables direct commerce actions
+Photographer endpoint must exist - GET /api/photographers/:id should return photographer or 404
+404 handling is expected - Frontend gracefully handles missing photographers
+Let me know if you need any clarification or if the backend needs additional fields!
