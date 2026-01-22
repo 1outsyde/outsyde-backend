@@ -287,6 +287,7 @@ export interface IStorage {
     platformFee: number;
     vendorNet: number;
     status?: string;
+    draftExpiresAt?: Date | null;
   }): Promise<ShootBooking>;
 
   // Chat (Real-time messaging)
@@ -1422,6 +1423,7 @@ export class DatabaseStorage implements IStorage {
     platformFee: number;
     vendorNet: number;
     status?: string;
+    draftExpiresAt?: Date | null;
   }): Promise<ShootBooking> {
     const [booking] = await db
       .insert(shootBookings)
@@ -1441,6 +1443,7 @@ export class DatabaseStorage implements IStorage {
         platformFee: data.platformFee,
         vendorNet: data.vendorNet,
         status: data.status || "pending",
+        draftExpiresAt: data.draftExpiresAt || null,
       })
       .returning();
     return booking;

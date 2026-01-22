@@ -2079,6 +2079,197 @@ export async function registerRoutes(
 
   // ==================== PHOTOGRAPHER BOOKING ROUTES ====================
 
+  // Create draft booking to hold a time slot (10-min TTL)
+  app.post("/api/bookings/photographer/draft", async (req, res) => {
+    const userId = req.session?.userId;
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    try {
+      const draftSchema = z.object({
+        photographerId: z.string().min(1, "Photographer ID is required"),
+        serviceId: z.string().min(1, "Service ID is required"),
+        date: z.string().min(1, "Date is required"), // YYYY-MM-DD
+        startTime: z.string().min(1, "Start time is required"), // HH:MM
+      });
+
+      const data = draftSchema.parse(req.body);
+
+      // Get user
+      const user = await storage.getUser(userId);
+      if (!user) {
+        return res.status(404).json({ error: "User not found" });
+      }
+
+      // Get photographer
+      const photographer = await storage.getPhotographer(data.photographerId);
+      if (!photographer) {
+        return res.status(404).json({ error: "Photographer not found" });
+      }
+
+      // Check Stripe setup
+      if (!photographer.stripeAccountId || !photographer.stripeOnboardingComplete) {
+        return res.status(400).json({ 
+          error: "Photographer not accepting bookings",
+          message: "This photographer has not completed their payment setup."
+        });
+      }
+
+      // Get service to determine duration and price
+      const service = await storage.getPhotographerService(data.serviceId);
+      if (!service) {
+        return res.status(404).json({ error: "Service not found" });
+      }
+      if (service.photographerId !== data.photographerId) {
+        return res.status(400).json({ error: "Service does not belong to this photographer" });
+      }
+      
+      // Validate service is active, live, and has valid pricing
+      if (!service.isActive) {
+        return res.status(400).json({ error: "Service is not available for booking" });
+      }
+      if (service.status !== 'live') {
+        return res.status(400).json({ error: "Service is not published for booking" });
+      }
+      const priceCents = service.priceCents || 0;
+      if (priceCents < 100) {
+        return res.status(400).json({ error: "Service does not have valid pricing set" });
+      }
+
+      // Validate date format (YYYY-MM-DD)
+      const dateRegex = /^\d{4}-\d{2}-\d{2}$/;
+      if (!dateRegex.test(data.date)) {
+        return res.status(400).json({ error: "Invalid date format. Use YYYY-MM-DD" });
+      }
+      const bookingDate = new Date(data.date);
+      if (isNaN(bookingDate.getTime())) {
+        return res.status(400).json({ error: "Invalid date value" });
+      }
+      const today = new Date();
+      today.setHours(0, 0, 0, 0);
+      if (bookingDate < today) {
+        return res.status(400).json({ error: "Cannot book dates in the past" });
+      }
+
+      // Calculate end time based on the actual booking date
+      const durationMinutes = service.estimatedDurationMinutes || 60;
+      const durationHours = Math.ceil(durationMinutes / 60);
+      
+      // Parse start time and compute end time properly
+      const [startHour, startMin] = data.startTime.split(':').map(Number);
+      if (isNaN(startHour) || isNaN(startMin) || startHour < 0 || startHour > 23 || startMin < 0 || startMin > 59) {
+        return res.status(400).json({ error: "Invalid start time format. Use HH:MM" });
+      }
+      
+      // Compute end time in total minutes
+      const startTotalMinutes = startHour * 60 + startMin;
+      const endTotalMinutes = startTotalMinutes + durationMinutes;
+      
+      // Validate doesn't cross midnight (reject overnight bookings for simplicity)
+      if (endTotalMinutes >= 24 * 60) {
+        return res.status(400).json({ 
+          error: "Invalid booking duration",
+          message: "Booking cannot extend past midnight. Please choose an earlier time slot."
+        });
+      }
+      
+      const endHour = Math.floor(endTotalMinutes / 60);
+      const endMin = endTotalMinutes % 60;
+      const endTime = `${endHour.toString().padStart(2, '0')}:${endMin.toString().padStart(2, '0')}`;
+
+      // Check photographer availability
+      const isAvailable = await storage.checkPhotographerSlotAvailable(
+        data.photographerId,
+        data.date,
+        data.startTime,
+        endTime
+      );
+
+      if (!isAvailable) {
+        return res.status(409).json({ 
+          error: "Time slot unavailable",
+          message: "This time slot is no longer available. Please choose a different time."
+        });
+      }
+
+      // Calculate pricing (10% Outsyde fee for photographers)
+      const platformFee = Math.round(priceCents * 0.10);
+      const vendorNet = priceCents - platformFee;
+
+      // Set draft expiry (10 minutes from now)
+      const draftExpiresAt = new Date(Date.now() + 10 * 60 * 1000);
+
+      // Create draft booking with expiry included in initial insert
+      const booking = await storage.createShootBooking({
+        photographerId: data.photographerId,
+        clientId: userId,
+        serviceId: data.serviceId,
+        shootType: service.name,
+        date: data.date,
+        startTime: data.startTime,
+        endTime,
+        durationHours,
+        totalPrice: priceCents,
+        platformFee,
+        vendorNet,
+        status: "draft",
+        draftExpiresAt,
+      });
+
+      // Reserve the photographer's time slot
+      let slotReserved = false;
+      try {
+        await storage.reservePhotographerSlot(
+          data.photographerId,
+          data.date,
+          data.startTime,
+          endTime,
+          booking.id
+        );
+        slotReserved = true;
+      } catch (slotError) {
+        // If slot reservation fails, clean up the draft booking
+        console.error("Failed to reserve slot, cleaning up draft:", slotError);
+        await storage.updateShootBooking(booking.id, { status: "expired" });
+        return res.status(409).json({ 
+          error: "Time slot unavailable",
+          message: "Failed to reserve time slot. Please try again."
+        });
+      }
+
+      // If we reach here, both booking and slot are created successfully
+      res.json({
+        success: true,
+        draftId: booking.id,
+        expiresAt: draftExpiresAt.toISOString(),
+        slot: {
+          date: data.date,
+          startTime: data.startTime,
+          endTime,
+          durationMinutes,
+        },
+        service: {
+          id: service.id,
+          name: service.name,
+          priceCents,
+          description: service.description,
+        },
+        pricing: {
+          totalCents: priceCents,
+          platformFeeCents: platformFee,
+          vendorNetCents: vendorNet,
+        },
+      });
+    } catch (error) {
+      if (error instanceof z.ZodError) {
+        return res.status(400).json({ error: "Invalid data", details: error.errors });
+      }
+      console.error("Create photographer draft booking error:", error);
+      res.status(500).json({ error: "Failed to create draft booking" });
+    }
+  });
+
   // Create photographer booking with Stripe checkout (customer facing)
   app.post("/api/bookings/photographer", async (req, res) => {
     const userId = req.session?.userId;
