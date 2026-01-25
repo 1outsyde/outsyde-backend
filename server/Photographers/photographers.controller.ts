@@ -145,7 +145,7 @@ export class PhotographerController {
         });
       }
 
-      const { displayName, bio, city, state, portfolioUrl, hourlyRate, specialties, coverImage, logoImage, brandColors } = req.body;
+      const { displayName, bio, city, state, portfolioUrl, hourlyRate, specialties, coverImage, coverMediaType, logoImage, brandColors } = req.body;
       
       const updates: any = {};
       
@@ -174,6 +174,17 @@ export class PhotographerController {
       if (specialties !== undefined && Array.isArray(specialties)) updates.specialties = specialties;
       // Storefront customization
       if (coverImage !== undefined) updates.coverImage = coverImage;
+      // Validate coverMediaType when coverImage is set (must be 'image' or 'video')
+      if (coverMediaType !== undefined) {
+        if (coverMediaType !== null && coverMediaType !== 'image' && coverMediaType !== 'video') {
+          return res.status(400).json({ error: "coverMediaType must be 'image' or 'video'" });
+        }
+        updates.coverMediaType = coverMediaType;
+      }
+      // Require coverMediaType when setting coverImage
+      if (coverImage !== undefined && coverImage !== null && coverMediaType === undefined) {
+        return res.status(400).json({ error: "coverMediaType is required when setting coverImage" });
+      }
       if (logoImage !== undefined) updates.logoImage = logoImage;
       if (brandColors !== undefined) updates.brandColors = brandColors;
 

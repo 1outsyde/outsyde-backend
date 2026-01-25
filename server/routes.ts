@@ -4513,7 +4513,26 @@ export async function registerRoutes(
         return res.status(404).json({ error: "No business found for this account" });
       }
 
-      const updated = await storage.updateBusiness(business.id, req.body);
+      const { coverImage, coverMediaType, ...otherFields } = req.body;
+      const updates: Record<string, any> = { ...otherFields };
+
+      // Validate coverMediaType when coverImage is set (must be 'image' or 'video')
+      if (coverMediaType !== undefined) {
+        if (coverMediaType !== null && coverMediaType !== 'image' && coverMediaType !== 'video') {
+          return res.status(400).json({ error: "coverMediaType must be 'image' or 'video'" });
+        }
+        updates.coverMediaType = coverMediaType;
+      }
+      
+      // Require coverMediaType when setting coverImage
+      if (coverImage !== undefined) {
+        updates.coverImage = coverImage;
+        if (coverImage !== null && coverMediaType === undefined) {
+          return res.status(400).json({ error: "coverMediaType is required when setting coverImage" });
+        }
+      }
+
+      const updated = await storage.updateBusiness(business.id, updates);
       res.json({ business: updated });
     } catch (error) {
       console.error("Update vendor business error:", error);
