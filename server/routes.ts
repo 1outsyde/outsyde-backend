@@ -1495,7 +1495,7 @@ export async function registerRoutes(
 
   // ==================== USER PROFILE UPDATE ====================
 
-  // Update user profile (for consumers/influencers - profileImageUrl)
+  // Update user profile (for consumers/influencers - profileImageUrl, coverMediaUrl, coverMediaType)
   app.patch("/api/users/me", async (req, res) => {
     const userId = req.session?.userId || getUserIdFromRequest(req);
     if (!userId) {
@@ -1505,6 +1505,8 @@ export async function registerRoutes(
     try {
       const updateSchema = z.object({
         profileImageUrl: z.string().url().optional().nullable(),
+        coverMediaUrl: z.string().url().optional().nullable(),
+        coverMediaType: z.enum(['image', 'video']).optional().nullable(),
       });
 
       const validated = updateSchema.safeParse(req.body);
@@ -1515,9 +1517,22 @@ export async function registerRoutes(
         });
       }
 
+      // Validate that coverMediaType is provided when coverMediaUrl is set
+      if (validated.data.coverMediaUrl && !validated.data.coverMediaType) {
+        return res.status(400).json({ 
+          error: "coverMediaType is required when setting coverMediaUrl" 
+        });
+      }
+
       const updateData: Record<string, any> = {};
       if (validated.data.profileImageUrl !== undefined) {
         updateData.profileImageUrl = validated.data.profileImageUrl;
+      }
+      if (validated.data.coverMediaUrl !== undefined) {
+        updateData.coverMediaUrl = validated.data.coverMediaUrl;
+      }
+      if (validated.data.coverMediaType !== undefined) {
+        updateData.coverMediaType = validated.data.coverMediaType;
       }
 
       if (Object.keys(updateData).length === 0) {
