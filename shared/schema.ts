@@ -113,6 +113,8 @@ export const users = pgTable("users", {
   lastName: text("last_name"),
   phone: text("phone"),
   profileImageUrl: text("profile_image_url"),
+  coverMediaUrl: text("cover_media_url"),
+  coverMediaType: text("cover_media_type"), // 'image' or 'video'
 
   isVendor: boolean("is_vendor").default(false).notNull(),
   isPhotographer: boolean("is_photographer").default(false).notNull(),
