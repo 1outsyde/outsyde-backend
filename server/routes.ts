@@ -1493,6 +1493,55 @@ export async function registerRoutes(
     }
   });
 
+  // ==================== USER PROFILE UPDATE ====================
+
+  // Update user profile (for consumers/influencers - profileImageUrl)
+  app.patch("/api/users/me", async (req, res) => {
+    const userId = req.session?.userId || getUserIdFromRequest(req);
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    try {
+      const updateSchema = z.object({
+        profileImageUrl: z.string().url().optional().nullable(),
+      });
+
+      const validated = updateSchema.safeParse(req.body);
+      if (!validated.success) {
+        return res.status(400).json({ 
+          error: "Invalid data", 
+          details: validated.error.errors 
+        });
+      }
+
+      const updateData: Record<string, any> = {};
+      if (validated.data.profileImageUrl !== undefined) {
+        updateData.profileImageUrl = validated.data.profileImageUrl;
+      }
+
+      if (Object.keys(updateData).length === 0) {
+        return res.status(400).json({ error: "No fields to update" });
+      }
+
+      const user = await storage.updateUser(userId, updateData);
+
+      if (!user) {
+        return res.status(404).json({ error: "User not found" });
+      }
+
+      const safeUser = sanitizeUserForResponse(user, { includeOwnData: true });
+      res.json({ 
+        success: true,
+        user: safeUser,
+        message: "Profile updated successfully"
+      });
+    } catch (error) {
+      console.error("Update user profile error:", error);
+      res.status(500).json({ error: "Failed to update profile" });
+    }
+  });
+
   // ==================== USER MONETIZATION INTENT ====================
 
   // Schema for monetization intent (user-controlled fields only)
