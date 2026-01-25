@@ -225,6 +225,7 @@ export const businesses = pgTable("businesses", {
   socialMedia: text("social_media"),
 
   coverImage: text("cover_image"),
+  coverMediaType: text("cover_media_type"), // 'image' or 'video'
   logoImage: text("logo_image"),
 
   rating: integer("rating").default(0),
@@ -472,6 +473,7 @@ export const photographers = pgTable("photographers", {
 
   // Storefront customization
   coverImage: text("cover_image"),
+  coverMediaType: text("cover_media_type"), // 'image' or 'video'
   logoImage: text("logo_image"),
   brandColors: jsonb("brand_colors").$type<{ primary?: string; secondary?: string }>(),
 
