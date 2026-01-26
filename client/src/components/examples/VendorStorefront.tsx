@@ -40,6 +40,7 @@ export default function VendorStorefrontExample() {
   return (
     <VendorStorefront
       id="1"
+      ownerId="example-owner-1"
       name="Bella's Hair Studio"
       banner={hairSalonImage}
       category="Beauty & Wellness"
@@ -47,13 +48,11 @@ export default function VendorStorefrontExample() {
       rating={4.9}
       reviewCount={89}
       description="Welcome to Bella's Hair Studio! We've been serving our community for over 10 years, specializing in modern cuts, vibrant colors, and personalized styling. Our team of expert stylists is dedicated to making you look and feel your best."
-      businessHours="Open 9 AM - 7 PM"
       products={products}
       services={services}
       availableSlots={availableSlots}
       isFollowing={isFollowing}
       onFollow={() => setIsFollowing(!isFollowing)}
-      onMessage={() => console.log("Message vendor")}
       onShare={() => console.log("Share vendor")}
       onBookService={(serviceId, date, time) =>
         console.log("Book:", serviceId, date, time)

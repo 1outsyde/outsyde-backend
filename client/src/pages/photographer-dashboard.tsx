@@ -1,7 +1,8 @@
 import { useState, useEffect } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
-import { Camera, DollarSign, Calendar, MessageCircle, Star, Eye, ExternalLink, AlertCircle, Check, Loader2, RotateCcw, Plus, Pencil, Trash2, MapPin, FileText, Phone, User as UserIcon, X, Image, CalendarClock } from "lucide-react";
+import { Camera, DollarSign, Calendar, MessageCircle, Star, Eye, ExternalLink, AlertCircle, Check, Loader2, RotateCcw, Plus, Pencil, Trash2, MapPin, FileText, Phone, User as UserIcon, X, Image, CalendarClock, Video } from "lucide-react";
 import { ImageUploader } from "@/components/ImageUploader";
+import { MediaUploader } from "@/components/MediaUploader";
 import BillingAddressForm from "@/components/BillingAddressForm";
 import BusinessHoursEditor from "@/components/BusinessHoursEditor";
 import type { HoursOfOperation } from "@shared/schema";
@@ -79,6 +80,7 @@ export default function PhotographerDashboardPage({ onLogout }: PhotographerDash
 
   // Storefront customization state
   const [storefrontCoverImage, setStorefrontCoverImage] = useState("");
+  const [storefrontCoverMediaType, setStorefrontCoverMediaType] = useState<"image" | "video">("image");
   const [storefrontLogoImage, setStorefrontLogoImage] = useState("");
   const [storefrontPrimaryColor, setStorefrontPrimaryColor] = useState("#eab308");
 
@@ -309,6 +311,7 @@ export default function PhotographerDashboardPage({ onLogout }: PhotographerDash
       setProfileSpecialties(photographer.specialties || []);
       // Storefront customization
       setStorefrontCoverImage(photographer.coverImage || "");
+      setStorefrontCoverMediaType((photographer as any).coverMediaType || "image");
       setStorefrontLogoImage(photographer.logoImage || "");
       setStorefrontPrimaryColor((photographer.brandColors as { primary?: string })?.primary || "#eab308");
     }
@@ -324,6 +327,7 @@ export default function PhotographerDashboardPage({ onLogout }: PhotographerDash
       hourlyRate?: number;
       specialties?: string[];
       coverImage?: string;
+      coverMediaType?: "image" | "video";
       logoImage?: string;
       brandColors?: { primary?: string; secondary?: string };
       hoursOfOperation?: HoursOfOperation;
@@ -355,6 +359,7 @@ export default function PhotographerDashboardPage({ onLogout }: PhotographerDash
   const handleSaveStorefront = () => {
     updateProfileMutation.mutate({
       coverImage: storefrontCoverImage.trim(),
+      coverMediaType: storefrontCoverMediaType,
       logoImage: storefrontLogoImage.trim(),
       brandColors: { primary: storefrontPrimaryColor },
     });
@@ -855,41 +860,68 @@ export default function PhotographerDashboardPage({ onLogout }: PhotographerDash
                       <div className="pt-4 border-t">
                         <Label className="flex items-center gap-2">
                           <Image className="h-4 w-4" />
-                          Cover Image
+                          Cover Image / Video
                         </Label>
                         <p className="text-sm text-muted-foreground mb-2">
-                          Add a banner image for the top of your page. Use a landscape photo (recommended: 1920x600px).
+                          Add a banner image or short video for the top of your page. Use landscape format (recommended: 1920x600px for images, max 15s for videos).
                         </p>
                         {storefrontCoverImage ? (
                           <div className="relative">
                             <div className="mt-3 rounded-lg overflow-hidden border">
-                              <img 
-                                src={storefrontCoverImage} 
-                                alt="Cover preview" 
-                                className="w-full h-32 object-cover"
-                                onError={(e) => (e.currentTarget.style.display = 'none')}
-                              />
+                              {storefrontCoverMediaType === "video" ? (
+                                <video 
+                                  src={storefrontCoverImage} 
+                                  className="w-full h-32 object-cover"
+                                  controls
+                                  muted
+                                  data-testid="cover-video-preview"
+                                />
+                              ) : (
+                                <img 
+                                  src={storefrontCoverImage} 
+                                  alt="Cover preview" 
+                                  className="w-full h-32 object-cover"
+                                  onError={(e) => (e.currentTarget.style.display = 'none')}
+                                  data-testid="cover-image-preview"
+                                />
+                              )}
                             </div>
-                            <Button
-                              type="button"
-                              size="icon"
-                              variant="secondary"
-                              className="absolute top-5 right-2"
-                              onClick={() => setStorefrontCoverImage("")}
-                              data-testid="button-remove-cover"
-                            >
-                              <X className="h-4 w-4" />
-                            </Button>
+                            <div className="absolute top-5 right-2 flex gap-1">
+                              {storefrontCoverMediaType === "video" && (
+                                <Badge variant="secondary" className="text-xs">
+                                  <Video className="h-3 w-3 mr-1" />
+                                  Video
+                                </Badge>
+                              )}
+                              <Button
+                                type="button"
+                                size="icon"
+                                variant="secondary"
+                                onClick={() => {
+                                  setStorefrontCoverImage("");
+                                  setStorefrontCoverMediaType("image");
+                                }}
+                                data-testid="button-remove-cover"
+                              >
+                                <X className="h-4 w-4" />
+                              </Button>
+                            </div>
                           </div>
                         ) : (
-                          <ImageUploader
-                            onUploadComplete={(url) => setStorefrontCoverImage(url)}
+                          <MediaUploader
+                            onUploadComplete={(url, mediaType) => {
+                              setStorefrontCoverImage(url);
+                              setStorefrontCoverMediaType(mediaType);
+                            }}
                             buttonVariant="outline"
                             buttonClassName="w-full"
+                            allowVideo={true}
+                            allowImage={true}
+                            maxVideoDuration={15}
                           >
                             <Camera className="h-4 w-4 mr-2" />
-                            Upload Cover Image
-                          </ImageUploader>
+                            Upload Cover Image or Video
+                          </MediaUploader>
                         )}
                       </div>
 

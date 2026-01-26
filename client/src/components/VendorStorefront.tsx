@@ -43,6 +43,7 @@ interface VendorStorefrontProps {
   name: string;
   avatar?: string;
   banner: string;
+  bannerType?: "image" | "video";
   category: string;
   location: string;
   rating: number;
@@ -76,6 +77,7 @@ export default function VendorStorefront({
   name,
   avatar,
   banner,
+  bannerType = "image",
   category,
   location,
   rating,
@@ -125,11 +127,24 @@ export default function VendorStorefront({
     >
       <div className="relative">
         <div className="aspect-[16/9] max-h-[300px] overflow-hidden">
-          <img
-            src={banner}
-            alt={name}
-            className="w-full h-full object-cover"
-          />
+          {bannerType === "video" && banner ? (
+            <video
+              src={banner}
+              className="w-full h-full object-cover"
+              autoPlay
+              loop
+              muted
+              playsInline
+              data-testid="storefront-banner-video"
+            />
+          ) : (
+            <img
+              src={banner}
+              alt={name}
+              className="w-full h-full object-cover"
+              data-testid="storefront-banner-image"
+            />
+          )}
         </div>
         <div className="absolute inset-0 bg-gradient-to-t from-black/60 to-transparent" />
         <div className="absolute bottom-0 left-0 right-0 p-4 md:p-6">

@@ -198,6 +198,7 @@ export default function VendorPage({ vendorId, vendorType = "business", onBack, 
           name={business.name}
           avatar={business.logoImage || undefined}
           banner={business.coverImage || fallbackImages[vendorId] || coffeeShopImage}
+          bannerType={business.coverMediaType === "video" ? "video" : "image"}
           category={business.category}
           location={location}
           rating={(business.rating || 0) / 10}
@@ -257,6 +258,7 @@ export default function VendorPage({ vendorId, vendorType = "business", onBack, 
           name={photographer.displayName || "Photographer"}
           avatar={photographer.logoImage || undefined}
           banner={photographer.coverImage || fallbackImages[vendorId] || coffeeShopImage}
+          bannerType={photographer.coverMediaType === "video" ? "video" : "image"}
           category="Photography"
           location={location}
           rating={0}

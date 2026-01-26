@@ -1,7 +1,8 @@
 import { useState } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
-import { Loader2, Store, Palette, Package, Clock, Plus, Pencil, Trash2, Image, DollarSign, Share2, Camera, X, CalendarClock, Rocket, CheckCircle } from "lucide-react";
+import { Loader2, Store, Palette, Package, Clock, Plus, Pencil, Trash2, Image, DollarSign, Share2, Camera, X, CalendarClock, Rocket, CheckCircle, Video } from "lucide-react";
 import { ImageUploader } from "@/components/ImageUploader";
+import { MediaUploader } from "@/components/MediaUploader";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Button } from "@/components/ui/button";
@@ -148,6 +149,7 @@ export default function StorefrontEditor() {
 
 function BrandingTab({ business, onUpdate, isPending }: { business: Business; onUpdate: (data: Partial<Business>) => void; isPending: boolean }) {
   const [coverImage, setCoverImage] = useState(business.coverImage || "");
+  const [coverMediaType, setCoverMediaType] = useState<"image" | "video">((business as any).coverMediaType || "image");
   const [logoImage, setLogoImage] = useState(business.logoImage || "");
   const [primaryColor, setPrimaryColor] = useState(
     (business.brandColors as { primary?: string })?.primary || "#eab308"
@@ -165,47 +167,78 @@ function BrandingTab({ business, onUpdate, isPending }: { business: Business; on
   ];
 
   const handleSave = () => {
-    onUpdate({ coverImage, logoImage, brandColors: { primary: primaryColor } });
+    onUpdate({ coverImage, coverMediaType, logoImage, brandColors: { primary: primaryColor } } as any);
   };
 
   return (
     <div className="grid gap-6 md:grid-cols-2">
       <Card className="overflow-visible">
         <CardHeader>
-          <CardTitle className="text-lg">Cover Image</CardTitle>
+          <CardTitle className="text-lg">Cover Image / Video</CardTitle>
           <CardDescription>
-            This is the banner image that appears at the top of your storefront
+            This is the banner that appears at the top of your storefront. Upload an image or a short video (max 15s).
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
           {coverImage ? (
             <div className="relative">
               <div className="aspect-video bg-muted rounded-lg overflow-hidden">
-                <img src={coverImage} alt="Cover" className="w-full h-full object-cover" />
+                {coverMediaType === "video" ? (
+                  <video 
+                    src={coverImage} 
+                    className="w-full h-full object-cover" 
+                    controls 
+                    muted
+                    data-testid="cover-video-preview"
+                  />
+                ) : (
+                  <img 
+                    src={coverImage} 
+                    alt="Cover" 
+                    className="w-full h-full object-cover"
+                    data-testid="cover-image-preview"
+                  />
+                )}
               </div>
-              <Button
-                type="button"
-                size="icon"
-                variant="secondary"
-                className="absolute top-2 right-2"
-                onClick={() => setCoverImage("")}
-                data-testid="button-remove-cover"
-              >
-                <X className="h-4 w-4" />
-              </Button>
+              <div className="absolute top-2 right-2 flex gap-1">
+                {coverMediaType === "video" && (
+                  <Badge variant="secondary" className="text-xs">
+                    <Video className="h-3 w-3 mr-1" />
+                    Video
+                  </Badge>
+                )}
+                <Button
+                  type="button"
+                  size="icon"
+                  variant="secondary"
+                  onClick={() => {
+                    setCoverImage("");
+                    setCoverMediaType("image");
+                  }}
+                  data-testid="button-remove-cover"
+                >
+                  <X className="h-4 w-4" />
+                </Button>
+              </div>
             </div>
           ) : (
             <div className="aspect-video bg-muted rounded-lg flex items-center justify-center">
               <div className="text-center">
                 <Image className="h-12 w-12 mx-auto mb-2 text-muted-foreground" />
-                <p className="text-sm text-muted-foreground mb-4">No cover image</p>
-                <ImageUploader
-                  onUploadComplete={(url) => setCoverImage(url)}
+                <p className="text-sm text-muted-foreground mb-4">No cover media</p>
+                <MediaUploader
+                  onUploadComplete={(url, mediaType) => {
+                    setCoverImage(url);
+                    setCoverMediaType(mediaType);
+                  }}
                   buttonVariant="outline"
+                  allowVideo={true}
+                  allowImage={true}
+                  maxVideoDuration={15}
                 >
                   <Camera className="h-4 w-4 mr-2" />
-                  Upload Cover Image
-                </ImageUploader>
+                  Upload Cover Image or Video
+                </MediaUploader>
               </div>
             </div>
           )}
