@@ -2398,7 +2398,7 @@ export async function registerRoutes(
 
       if (!isAvailable) {
         return res.status(409).json({ 
-          error: "Time slot unavailable",
+          code: "SLOT_UNAVAILABLE",
           message: "This time slot is no longer available. Please choose a different time."
         });
       }
@@ -2638,16 +2638,31 @@ export async function registerRoutes(
       const booking = await storage.getShootBooking(bookingId);
 
       if (!booking) {
-        return res.status(404).json({ error: "Booking not found" });
+        return res.status(410).json({ code: "BOOKING_EXPIRED", message: "Booking not found or has expired. Please restart booking." });
       }
 
       if (booking.clientId !== userId) {
-        return res.status(403).json({ error: "Not authorized" });
+        return res.status(403).json({ code: "UNAUTHORIZED", message: "Not authorized to access this booking" });
       }
 
-      // Already confirmed? Return success
+      // Check for terminal states
+      if (['expired', 'canceled', 'no_show'].includes(booking.status)) {
+        return res.status(410).json({ code: "BOOKING_EXPIRED", message: "Booking can no longer be modified. Please restart booking." });
+      }
+
+      // Already confirmed? Return success (idempotent)
       if (booking.status === 'paid' || booking.status === 'confirmed') {
-        return res.json({ booking, message: "Booking already confirmed" });
+        return res.json({ booking, code: "ALREADY_CONFIRMED", message: "Booking already confirmed" });
+      }
+
+      // Check if draft expired
+      if (booking.status === 'draft' && booking.draftExpiresAt && new Date() > new Date(booking.draftExpiresAt)) {
+        return res.status(410).json({ code: "BOOKING_EXPIRED", message: "Booking draft has expired. Please restart booking." });
+      }
+
+      // Must be in pending_payment state to confirm
+      if (booking.status === 'draft') {
+        return res.status(409).json({ code: "INVALID_STATE", message: "Payment has not been initiated. Please start payment first." });
       }
 
       // Verify payment via Stripe if checkout session exists
@@ -2656,7 +2671,7 @@ export async function registerRoutes(
         
         if (session.payment_status !== 'paid') {
           return res.status(400).json({ 
-            error: "Payment not completed",
+            code: "PAYMENT_INCOMPLETE",
             message: "Please complete payment to confirm your booking"
           });
         }
@@ -2664,13 +2679,13 @@ export async function registerRoutes(
         // Verify metadata matches booking
         if (session.metadata?.bookingId !== bookingId) {
           console.error(`Metadata mismatch: session bookingId=${session.metadata?.bookingId}, expected=${bookingId}`);
-          return res.status(400).json({ error: "Payment verification failed - booking mismatch" });
+          return res.status(400).json({ code: "PAYMENT_VERIFICATION_FAILED", message: "Payment verification failed - booking mismatch" });
         }
 
         // Verify amount matches (amount_total is in cents)
         if (session.amount_total !== booking.totalPrice) {
           console.error(`Amount mismatch: session=${session.amount_total}, booking=${booking.totalPrice}`);
-          return res.status(400).json({ error: "Payment verification failed - amount mismatch" });
+          return res.status(400).json({ code: "PAYMENT_VERIFICATION_FAILED", message: "Payment verification failed - amount mismatch" });
         }
 
         // Update booking status to paid
@@ -2698,10 +2713,10 @@ export async function registerRoutes(
         return res.json({ booking: updated, message: "Booking confirmed - payment received" });
       }
 
-      return res.status(400).json({ error: "No payment session found" });
+      return res.status(400).json({ code: "PAYMENT_SESSION_MISSING", message: "No payment session found. Please restart booking." });
     } catch (error) {
       console.error("Confirm photographer booking error:", error);
-      res.status(500).json({ error: "Failed to confirm booking" });
+      res.status(500).json({ code: "INTERNAL_ERROR", message: "Failed to confirm booking" });
     }
   });
 
@@ -2916,8 +2931,8 @@ export async function registerRoutes(
 
         if (!available.available) {
           return res.status(409).json({ 
-            error: "Slot unavailable",
-            message: available.reason || "This time slot is not available"
+            code: "SLOT_UNAVAILABLE",
+            message: available.reason || "This time slot is not available. Please choose a different time."
           });
         }
       }
@@ -2962,12 +2977,12 @@ export async function registerRoutes(
       const pgError = error as { code?: string };
       if (pgError.code === '23P01' || pgError.code === '23505') {
         return res.status(409).json({ 
-          error: "Slot unavailable",
+          code: "SLOT_UNAVAILABLE",
           message: "This time slot was just booked by someone else. Please select a different time."
         });
       }
       console.error("Create appointment draft error:", error);
-      res.status(500).json({ error: "Failed to create booking draft" });
+      res.status(500).json({ code: "INTERNAL_ERROR", message: "Failed to create booking draft" });
     }
   });
 
@@ -2999,8 +3014,8 @@ export async function registerRoutes(
 
       if (!available.available) {
         return res.status(409).json({ 
-          error: "Slot unavailable",
-          message: available.reason || "This time slot is not available"
+          code: "SLOT_UNAVAILABLE",
+          message: available.reason || "This time slot is not available. Please choose a different time."
         });
       }
 
@@ -3053,12 +3068,12 @@ export async function registerRoutes(
       const pgError = error as { code?: string };
       if (pgError.code === '23P01' || pgError.code === '23505') {
         return res.status(409).json({ 
-          error: "Slot unavailable",
+          code: "SLOT_UNAVAILABLE",
           message: "This time slot was just booked by someone else. Please select a different time."
         });
       }
       console.error("Create shoot draft error:", error);
-      res.status(500).json({ error: "Failed to create booking draft" });
+      res.status(500).json({ code: "INTERNAL_ERROR", message: "Failed to create booking draft" });
     }
   });
 
@@ -3080,19 +3095,30 @@ export async function registerRoutes(
       if (type === 'appointment') {
         const [booking] = await db.select().from(appointments).where(eq(appointments.id, id));
         if (!booking) {
-          return res.status(404).json({ error: "Booking not found" });
+          return res.status(410).json({ code: "BOOKING_EXPIRED", message: "Booking not found or has expired. Please restart booking." });
         }
         if (booking.clientId !== userId) {
-          return res.status(403).json({ error: "Not authorized" });
+          return res.status(403).json({ code: "UNAUTHORIZED", message: "Not authorized to access this booking" });
         }
+        
+        // Check if draft is expired
+        if (booking.status === 'draft' && booking.draftExpiresAt && new Date() > new Date(booking.draftExpiresAt)) {
+          return res.status(410).json({ code: "BOOKING_EXPIRED", message: "Booking draft has expired. Please restart booking." });
+        }
+        
+        // Must be in draft state to initiate payment
         if (booking.status !== 'draft') {
-          return res.status(400).json({ error: "Booking is not in draft state" });
+          // Already in payment/confirmed flow
+          if (booking.status === 'pending_payment' || booking.status === 'confirmed') {
+            return res.status(409).json({ code: "INVALID_STATE", message: "Booking can no longer be confirmed. Please restart booking." });
+          }
+          return res.status(410).json({ code: "BOOKING_EXPIRED", message: "Booking can no longer be modified. Please restart booking." });
         }
 
         // Get business for Stripe account
         const business = await storage.getBusiness(booking.businessId);
         if (!business || !business.stripeAccountId) {
-          return res.status(400).json({ error: "Business not configured for payments" });
+          return res.status(400).json({ code: "PAYMENT_NOT_CONFIGURED", message: "Business not configured for payments" });
         }
 
         // Get service details
@@ -3136,19 +3162,30 @@ export async function registerRoutes(
       } else if (type === 'shoot') {
         const [booking] = await db.select().from(shootBookings).where(eq(shootBookings.id, id));
         if (!booking) {
-          return res.status(404).json({ error: "Booking not found" });
+          return res.status(410).json({ code: "BOOKING_EXPIRED", message: "Booking not found or has expired. Please restart booking." });
         }
         if (booking.clientId !== userId) {
-          return res.status(403).json({ error: "Not authorized" });
+          return res.status(403).json({ code: "UNAUTHORIZED", message: "Not authorized to access this booking" });
         }
+        
+        // Check if draft is expired
+        if (booking.status === 'draft' && booking.draftExpiresAt && new Date() > new Date(booking.draftExpiresAt)) {
+          return res.status(410).json({ code: "BOOKING_EXPIRED", message: "Booking draft has expired. Please restart booking." });
+        }
+        
+        // Must be in draft state to initiate payment
         if (booking.status !== 'draft') {
-          return res.status(400).json({ error: "Booking is not in draft state" });
+          // Already in payment/confirmed flow
+          if (booking.status === 'pending_payment' || booking.status === 'confirmed') {
+            return res.status(409).json({ code: "INVALID_STATE", message: "Booking can no longer be confirmed. Please restart booking." });
+          }
+          return res.status(410).json({ code: "BOOKING_EXPIRED", message: "Booking can no longer be modified. Please restart booking." });
         }
 
         // Get photographer for Stripe account
         const photographer = await storage.getPhotographer(booking.photographerId);
         if (!photographer || !photographer.stripeAccountId) {
-          return res.status(400).json({ error: "Photographer not configured for payments" });
+          return res.status(400).json({ code: "PAYMENT_NOT_CONFIGURED", message: "Photographer not configured for payments" });
         }
 
         // Create Stripe checkout session with destination charge

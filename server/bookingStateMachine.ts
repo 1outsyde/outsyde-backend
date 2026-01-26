@@ -12,9 +12,12 @@ import { eq, and, or, lt, inArray } from "drizzle-orm";
 
 const DRAFT_TTL_MINUTES = 10;
 
+export type BookingErrorCode = 'BOOKING_NOT_FOUND' | 'BOOKING_EXPIRED' | 'INVALID_STATE' | 'ALREADY_CONFIRMED';
+
 export interface StateTransitionResult {
   success: boolean;
   error?: string;
+  code?: BookingErrorCode;
   previousState?: BookingState;
   newState?: BookingState;
 }
@@ -69,10 +72,20 @@ export async function transitionAppointmentState(
   const [appointment] = await db.select().from(appointments).where(eq(appointments.id, appointmentId));
   
   if (!appointment) {
-    return { success: false, error: "Appointment not found" };
+    return { success: false, code: 'BOOKING_NOT_FOUND', error: "Booking not found" };
   }
 
   const currentState = appointment.status as BookingState;
+
+  // Idempotency check: if already confirmed and trying to confirm again
+  if (currentState === 'confirmed' && toState === 'confirmed') {
+    return { 
+      success: false, 
+      code: 'ALREADY_CONFIRMED', 
+      error: "Booking is already confirmed",
+      previousState: currentState 
+    };
+  }
 
   if (currentState === 'draft' && isDraftExpired(appointment.draftExpiresAt)) {
     await db.update(appointments)
@@ -91,13 +104,24 @@ export async function transitionAppointmentState(
       BOOKING_STATES.EXPIRED
     );
     
-    return { success: false, error: "Draft has expired" };
+    return { success: false, code: 'BOOKING_EXPIRED', error: "Booking draft has expired. Please restart booking." };
+  }
+
+  // Check for expired/canceled states trying to transition
+  if (['expired', 'canceled', 'completed', 'no_show'].includes(currentState)) {
+    return { 
+      success: false, 
+      code: 'BOOKING_EXPIRED', 
+      error: "Booking can no longer be modified. Please restart booking.",
+      previousState: currentState 
+    };
   }
 
   if (!isValidTransition(currentState, toState)) {
     return { 
       success: false, 
-      error: `Invalid transition: ${currentState} -> ${toState}` 
+      code: 'INVALID_STATE',
+      error: "Booking can no longer be confirmed. Please restart booking." 
     };
   }
 
@@ -146,10 +170,20 @@ export async function transitionShootBookingState(
   const [booking] = await db.select().from(shootBookings).where(eq(shootBookings.id, shootBookingId));
   
   if (!booking) {
-    return { success: false, error: "Shoot booking not found" };
+    return { success: false, code: 'BOOKING_NOT_FOUND', error: "Booking not found" };
   }
 
   const currentState = booking.status as BookingState;
+
+  // Idempotency check: if already confirmed and trying to confirm again
+  if (currentState === 'confirmed' && toState === 'confirmed') {
+    return { 
+      success: false, 
+      code: 'ALREADY_CONFIRMED', 
+      error: "Booking is already confirmed",
+      previousState: currentState 
+    };
+  }
 
   if (currentState === 'draft' && isDraftExpired(booking.draftExpiresAt)) {
     await db.update(shootBookings)
@@ -168,13 +202,24 @@ export async function transitionShootBookingState(
       BOOKING_STATES.EXPIRED
     );
     
-    return { success: false, error: "Draft has expired" };
+    return { success: false, code: 'BOOKING_EXPIRED', error: "Booking draft has expired. Please restart booking." };
+  }
+
+  // Check for expired/canceled states trying to transition
+  if (['expired', 'canceled', 'completed', 'no_show'].includes(currentState)) {
+    return { 
+      success: false, 
+      code: 'BOOKING_EXPIRED', 
+      error: "Booking can no longer be modified. Please restart booking.",
+      previousState: currentState 
+    };
   }
 
   if (!isValidTransition(currentState, toState)) {
     return { 
       success: false, 
-      error: `Invalid transition: ${currentState} -> ${toState}` 
+      code: 'INVALID_STATE',
+      error: "Booking can no longer be confirmed. Please restart booking." 
     };
   }
 
