@@ -73,6 +73,12 @@ The Outsyde platform operates as a monorepo, utilizing a React frontend, an Expr
     - `GET /api/users/:userId/following` - Get any user's following list (public)
     - `GET /api/users/:userId/followers` - Get any user's followers list (public)
     - All user lists return canonical objects: `{ userId, username, displayName, profilePhotoUrl }`
+-   **Storefront Video Banners:** Vendors and photographers can upload video banners for their storefronts:
+    - `coverMediaType`: "image" | "video" - determines banner rendering type
+    - Video specs: max 15 seconds duration, max 50MB file size
+    - Video banners render with autoPlay, loop, muted, playsInline attributes
+    - MediaUploader component handles both image and video uploads with preview
+    - Falls back to image rendering if video URL is missing/empty
 
 ## External Dependencies
 -   **PostgreSQL:** Primary database.
