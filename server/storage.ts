@@ -661,6 +661,10 @@ export interface IStorage {
   createFollow(data: InsertFollow): Promise<Follow>;
   getFollow(followerUserId: string, targetUserId: string): Promise<Follow | undefined>;
   deleteFollow(followerUserId: string, targetUserId: string): Promise<void>;
+  getUserFollowing(userId: string, limit?: number, offset?: number): Promise<User[]>;
+  getUserFollowers(userId: string, limit?: number, offset?: number): Promise<User[]>;
+  getFollowingCount(userId: string): Promise<number>;
+  getFollowerCount(userId: string): Promise<number>;
 }
 
 export class DatabaseStorage implements IStorage {
@@ -5729,6 +5733,46 @@ export class DatabaseStorage implements IStorage {
         eq(follows.followerUserId, followerUserId),
         eq(follows.targetUserId, targetUserId)
       ));
+  }
+
+  async getUserFollowing(userId: string, limit: number = 50, offset: number = 0): Promise<User[]> {
+    const result = await db.select({
+      user: users
+    })
+      .from(follows)
+      .innerJoin(users, eq(follows.targetUserId, users.id))
+      .where(eq(follows.followerUserId, userId))
+      .orderBy(desc(follows.createdAt))
+      .limit(limit)
+      .offset(offset);
+    return result.map(r => r.user);
+  }
+
+  async getUserFollowers(userId: string, limit: number = 50, offset: number = 0): Promise<User[]> {
+    const result = await db.select({
+      user: users
+    })
+      .from(follows)
+      .innerJoin(users, eq(follows.followerUserId, users.id))
+      .where(eq(follows.targetUserId, userId))
+      .orderBy(desc(follows.createdAt))
+      .limit(limit)
+      .offset(offset);
+    return result.map(r => r.user);
+  }
+
+  async getFollowingCount(userId: string): Promise<number> {
+    const result = await db.select({ count: sql<number>`count(*)::int` })
+      .from(follows)
+      .where(eq(follows.followerUserId, userId));
+    return result[0]?.count || 0;
+  }
+
+  async getFollowerCount(userId: string): Promise<number> {
+    const result = await db.select({ count: sql<number>`count(*)::int` })
+      .from(follows)
+      .where(eq(follows.targetUserId, userId));
+    return result[0]?.count || 0;
   }
 }
 

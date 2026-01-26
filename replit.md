@@ -59,6 +59,20 @@ The Outsyde platform operates as a monorepo, utilizing a React frontend, an Expr
     - `photographerServiceId` - Links to a photographer service (validated ownership)
     - Feed responses expose these IDs plus enriched product/service objects with details
     - Availability endpoints accept optional `serviceId` to auto-determine booking duration
+-   **Feed Author Object:** Every feed post includes a canonical `author` object for frontend identity:
+    - Structure: `{ userId, username, displayName, profilePhotoUrl, role }`
+    - `role`: "consumer" | "photographer" | "vendor"
+    - Posts with missing authors are excluded from feed (fail closed)
+    - No frontend joins required - author data is fully hydrated server-side
+-   **Follow System:** Users can follow each other:
+    - `POST /api/follows` - Follow a user (auth required)
+    - `DELETE /api/follows/:targetUserId` - Unfollow (auth required)
+    - `GET /api/follows/check/:targetUserId` - Check follow status (auth required)
+    - `GET /api/users/me/following` - Get current user's following list (auth required)
+    - `GET /api/users/me/followers` - Get current user's followers list (auth required)
+    - `GET /api/users/:userId/following` - Get any user's following list (public)
+    - `GET /api/users/:userId/followers` - Get any user's followers list (public)
+    - All user lists return canonical objects: `{ userId, username, displayName, profilePhotoUrl }`
 
 ## External Dependencies
 -   **PostgreSQL:** Primary database.

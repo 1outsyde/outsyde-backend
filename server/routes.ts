@@ -1830,6 +1830,152 @@ export async function registerRoutes(
     }
   });
 
+  // Get current user's following list
+  app.get("/api/users/me/following", optionalAuthMiddleware, async (req: AuthenticatedRequest, res) => {
+    try {
+      const userId = req.user?.userId || req.session?.userId;
+      if (!userId) {
+        return res.status(401).json({ success: false, error: "Authentication required" });
+      }
+
+      const limit = parseInt(req.query.limit as string) || 50;
+      const offset = parseInt(req.query.offset as string) || 0;
+
+      const followingUsers = await storage.getUserFollowing(userId, limit, offset);
+      const totalCount = await storage.getFollowingCount(userId);
+
+      // Return canonical user objects (safe public data only)
+      const following = followingUsers.map(user => ({
+        userId: user.id,
+        username: user.username || null,
+        displayName: user.name || user.firstName || 'Anonymous',
+        profilePhotoUrl: user.profileImageUrl || null,
+      }));
+
+      res.json({ 
+        success: true, 
+        following, 
+        total: totalCount,
+        limit,
+        offset 
+      });
+    } catch (error) {
+      console.error("Get following error:", error);
+      res.status(500).json({ success: false, error: "Failed to get following list" });
+    }
+  });
+
+  // Get current user's followers list
+  app.get("/api/users/me/followers", optionalAuthMiddleware, async (req: AuthenticatedRequest, res) => {
+    try {
+      const userId = req.user?.userId || req.session?.userId;
+      if (!userId) {
+        return res.status(401).json({ success: false, error: "Authentication required" });
+      }
+
+      const limit = parseInt(req.query.limit as string) || 50;
+      const offset = parseInt(req.query.offset as string) || 0;
+
+      const followerUsers = await storage.getUserFollowers(userId, limit, offset);
+      const totalCount = await storage.getFollowerCount(userId);
+
+      // Return canonical user objects (safe public data only)
+      const followers = followerUsers.map(user => ({
+        userId: user.id,
+        username: user.username || null,
+        displayName: user.name || user.firstName || 'Anonymous',
+        profilePhotoUrl: user.profileImageUrl || null,
+      }));
+
+      res.json({ 
+        success: true, 
+        followers, 
+        total: totalCount,
+        limit,
+        offset 
+      });
+    } catch (error) {
+      console.error("Get followers error:", error);
+      res.status(500).json({ success: false, error: "Failed to get followers list" });
+    }
+  });
+
+  // Get any user's following list (public profile)
+  app.get("/api/users/:userId/following", async (req, res) => {
+    try {
+      const { userId } = req.params;
+      
+      // Verify user exists
+      const targetUser = await storage.getUser(userId);
+      if (!targetUser) {
+        return res.status(404).json({ success: false, error: "User not found" });
+      }
+
+      const limit = parseInt(req.query.limit as string) || 50;
+      const offset = parseInt(req.query.offset as string) || 0;
+
+      const followingUsers = await storage.getUserFollowing(userId, limit, offset);
+      const totalCount = await storage.getFollowingCount(userId);
+
+      // Return canonical user objects (safe public data only)
+      const following = followingUsers.map(user => ({
+        userId: user.id,
+        username: user.username || null,
+        displayName: user.name || user.firstName || 'Anonymous',
+        profilePhotoUrl: user.profileImageUrl || null,
+      }));
+
+      res.json({ 
+        success: true, 
+        following, 
+        total: totalCount,
+        limit,
+        offset 
+      });
+    } catch (error) {
+      console.error("Get user following error:", error);
+      res.status(500).json({ success: false, error: "Failed to get following list" });
+    }
+  });
+
+  // Get any user's followers list (public profile)
+  app.get("/api/users/:userId/followers", async (req, res) => {
+    try {
+      const { userId } = req.params;
+      
+      // Verify user exists
+      const targetUser = await storage.getUser(userId);
+      if (!targetUser) {
+        return res.status(404).json({ success: false, error: "User not found" });
+      }
+
+      const limit = parseInt(req.query.limit as string) || 50;
+      const offset = parseInt(req.query.offset as string) || 0;
+
+      const followerUsers = await storage.getUserFollowers(userId, limit, offset);
+      const totalCount = await storage.getFollowerCount(userId);
+
+      // Return canonical user objects (safe public data only)
+      const followers = followerUsers.map(user => ({
+        userId: user.id,
+        username: user.username || null,
+        displayName: user.name || user.firstName || 'Anonymous',
+        profilePhotoUrl: user.profileImageUrl || null,
+      }));
+
+      res.json({ 
+        success: true, 
+        followers, 
+        total: totalCount,
+        limit,
+        offset 
+      });
+    } catch (error) {
+      console.error("Get user followers error:", error);
+      res.status(500).json({ success: false, error: "Failed to get followers list" });
+    }
+  });
+
   // ==================== NOTIFICATIONS ====================
 
   app.get("/api/notifications", async (req, res) => {
@@ -9551,8 +9697,18 @@ export async function registerRoutes(
       }
       
       // Enrich posts with author, tagged entities, and product/service info
-      const enrichedPosts = await Promise.all(activePosts.map(async (post) => {
+      // Filter out posts with missing/invalid authors (fail closed)
+      const enrichedPosts: any[] = [];
+      
+      for (const post of activePosts) {
         const author = await storage.getUser(post.authorId);
+        
+        // FAIL CLOSED: Skip posts with missing or invalid authors
+        if (!author) {
+          console.warn(`[Feed] Skipping post ${post.id}: author ${post.authorId} not found`);
+          continue;
+        }
+        
         let taggedBusiness = null;
         let taggedPhotographer = null;
         let product = null;
@@ -9562,15 +9718,20 @@ export async function registerRoutes(
         let authorPhotographerId: string | null = null;
         
         // Get the author's storefront ID based on their type
+        // Also determines the role for the canonical author object
+        let authorRole: 'consumer' | 'photographer' | 'vendor' = 'consumer';
+        
         if (post.authorType === 'vendor' && post.authorId) {
           const business = await storage.getBusinessByOwnerId(post.authorId);
           if (business) {
             authorBusinessId = business.id;
+            authorRole = 'vendor';
           }
         } else if (post.authorType === 'photographer' && post.authorId) {
           const photographer = await storage.getPhotographerByUserId(post.authorId);
           if (photographer) {
             authorPhotographerId = photographer.id;
+            authorRole = 'photographer';
           }
         }
         
@@ -9590,24 +9751,21 @@ export async function registerRoutes(
           photographerService = await storage.getPhotographerService(post.photographerServiceId);
         }
         
-        return {
+        enrichedPosts.push({
           ...post,
-          // Identity fields for mobile apps (top-level for easy access)
-          userId: post.authorId, // Canonical identifier
-          username: author?.username || null, // For profile URL routing
-          displayName: author?.name || author?.firstName || null, // For UI display
-          providerId: authorPhotographerId || authorBusinessId || null, // Photographer or vendor ID
-          // Keep existing nested objects for backwards compatibility
-          author: author ? { 
-            id: author.id, 
-            name: author.name,
-            username: author.username,
-            firstName: author.firstName,
-            lastName: author.lastName,
-            profileImageUrl: author.profileImageUrl,
-            businessId: authorBusinessId,
-            photographerId: authorPhotographerId,
-          } : null,
+          // Canonical author object - ALWAYS present (fail closed ensures this)
+          author: {
+            userId: author.id,
+            username: author.username || null,
+            displayName: author.name || author.firstName || 'Anonymous',
+            profilePhotoUrl: author.profileImageUrl || null,
+            role: authorRole,
+          },
+          // Legacy identity fields for backwards compatibility
+          userId: post.authorId,
+          username: author.username || null,
+          displayName: author.name || author.firstName || null,
+          providerId: authorPhotographerId || authorBusinessId || null,
           taggedBusiness: taggedBusiness ? { id: taggedBusiness.id, name: taggedBusiness.name, logoImage: taggedBusiness.logoImage } : null,
           taggedPhotographer: taggedPhotographer ? { id: taggedPhotographer.id, displayName: taggedPhotographer.displayName } : null,
           product: product ? {
@@ -9634,8 +9792,8 @@ export async function registerRoutes(
             durationMinutes: photographerService.durationMinutes,
             photographerId: photographerService.photographerId,
           } : null,
-        };
-      }));
+        });
+      }
       
       res.json({ posts: enrichedPosts });
     } catch (error) {
@@ -9759,7 +9917,40 @@ export async function registerRoutes(
         photographerServiceId: data.photographerServiceId,
       });
 
-      res.json({ success: true, post });
+      // Build canonical author object
+      let authorBusinessId: string | null = null;
+      let authorPhotographerId: string | null = null;
+      let authorRoleResponse: 'consumer' | 'photographer' | 'vendor' = 'consumer';
+      
+      if (authorType === 'vendor') {
+        const business = await storage.getBusinessByOwnerId(userId);
+        if (business) {
+          authorBusinessId = business.id;
+          authorRoleResponse = 'vendor';
+        }
+      } else if (authorType === 'photographer') {
+        const photographer = await storage.getPhotographerByUserId(userId);
+        if (photographer) {
+          authorPhotographerId = photographer.id;
+          authorRoleResponse = 'photographer';
+        }
+      }
+
+      // Return post with canonical author object
+      res.json({ 
+        success: true, 
+        post: {
+          ...post,
+          author: {
+            userId: user.id,
+            username: user.username || null,
+            displayName: user.name || user.firstName || 'Anonymous',
+            profilePhotoUrl: user.profileImageUrl || null,
+            role: authorRoleResponse,
+          },
+          providerId: authorPhotographerId || authorBusinessId || null,
+        }
+      });
     } catch (error) {
       if (error instanceof z.ZodError) {
         return res.status(400).json({ error: "Invalid data", details: error.errors });
