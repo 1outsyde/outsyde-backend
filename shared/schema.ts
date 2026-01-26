@@ -1223,7 +1223,13 @@ export const feedPosts = pgTable("feed_posts", {
   postType: text("post_type").default("text").notNull(), // 'text', 'product', 'service'
 
   content: text("content").notNull(),
-  imageUrl: text("image_url"),
+  imageUrl: text("image_url"), // Legacy field, use mediaUrl for new posts
+
+  mediaUrl: text("media_url"),
+  mediaType: text("media_type"), // 'image' | 'video'
+  mediaWidth: integer("media_width"),
+  mediaHeight: integer("media_height"),
+  aspectRatio: doublePrecision("aspect_ratio"),
 
   taggedBusinessId: varchar("tagged_business_id", { length: 36 }).references(() => businesses.id),
   taggedPhotographerId: varchar("tagged_photographer_id", { length: 36 }).references(() => photographers.id),

@@ -9751,6 +9751,15 @@ export async function registerRoutes(
           photographerService = await storage.getPhotographerService(post.photographerServiceId);
         }
         
+        // Build media object for response (prefer new fields, fall back to legacy imageUrl)
+        const mediaObj = (post.mediaUrl || post.imageUrl) ? {
+          mediaUrl: post.mediaUrl || post.imageUrl,
+          mediaType: post.mediaType || 'image',
+          width: post.mediaWidth || null,
+          height: post.mediaHeight || null,
+          aspectRatio: post.aspectRatio || null,
+        } : null;
+        
         enrichedPosts.push({
           ...post,
           // Canonical author object - ALWAYS present (fail closed ensures this)
@@ -9761,6 +9770,8 @@ export async function registerRoutes(
             profilePhotoUrl: author.profileImageUrl || null,
             role: authorRole,
           },
+          // Media metadata object
+          media: mediaObj,
           // Legacy identity fields for backwards compatibility
           userId: post.authorId,
           username: author.username || null,
@@ -9812,7 +9823,14 @@ export async function registerRoutes(
     try {
       const schema = z.object({
         content: z.string().max(2000).optional().default(""),
-        imageUrl: z.string().optional(),
+        imageUrl: z.string().optional(), // Legacy field, use media object for new posts
+        media: z.object({
+          url: z.string(),
+          type: z.enum(['image', 'video']),
+          width: z.number().int().positive().optional(),
+          height: z.number().int().positive().optional(),
+          aspectRatio: z.number().positive().optional(),
+        }).optional(),
         taggedBusinessId: z.string().optional(),
         taggedPhotographerId: z.string().optional(),
         postType: z.enum(['text', 'product', 'service']).optional(),
@@ -9909,7 +9927,12 @@ export async function registerRoutes(
         authorType,
         postType: data.postType || 'text',
         content: data.content,
-        imageUrl: data.imageUrl,
+        imageUrl: data.imageUrl || data.media?.url, // Backwards compat: populate legacy field
+        mediaUrl: data.media?.url,
+        mediaType: data.media?.type,
+        mediaWidth: data.media?.width,
+        mediaHeight: data.media?.height,
+        aspectRatio: data.media?.aspectRatio,
         taggedBusinessId: data.taggedBusinessId,
         taggedPhotographerId: data.taggedPhotographerId,
         productId: data.productId,
@@ -9936,6 +9959,15 @@ export async function registerRoutes(
         }
       }
 
+      // Build media object for response (prefer new fields, fall back to legacy imageUrl)
+      const mediaResponse = (post.mediaUrl || post.imageUrl) ? {
+        mediaUrl: post.mediaUrl || post.imageUrl,
+        mediaType: post.mediaType || 'image',
+        width: post.mediaWidth || null,
+        height: post.mediaHeight || null,
+        aspectRatio: post.aspectRatio || null,
+      } : null;
+
       // Return post with canonical author object
       res.json({ 
         success: true, 
@@ -9948,6 +9980,7 @@ export async function registerRoutes(
             profilePhotoUrl: user.profileImageUrl || null,
             role: authorRoleResponse,
           },
+          media: mediaResponse,
           providerId: authorPhotographerId || authorBusinessId || null,
         }
       });
