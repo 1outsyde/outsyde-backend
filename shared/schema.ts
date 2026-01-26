@@ -2077,6 +2077,9 @@ export const searchIndex = pgTable("search_index", {
   entityType: text("entity_type").notNull(), // 'product' | 'service' | 'business' | 'photographer' | 'photographer_service'
   entityId: varchar("entity_id", { length: 36 }).notNull(),
   
+  // User ID for profile navigation (for businesses and photographers)
+  userId: varchar("user_id", { length: 36 }),
+  
   // Parent reference for products/services
   parentType: text("parent_type"), // 'business' | 'photographer'
   parentId: varchar("parent_id", { length: 36 }),

@@ -79,6 +79,10 @@ The Outsyde platform operates as a monorepo, utilizing a React frontend, an Expr
     - Video banners render with autoPlay, loop, muted, playsInline attributes
     - MediaUploader component handles both image and video uploads with preview
     - Falls back to image rendering if video URL is missing/empty
+-   **Unified Search with Profile Navigation:** Search results include `userId` field for businesses and photographers, enabling mobile apps to navigate directly to user profiles from search results. The search index stores:
+    - `entityType`: "business" | "photographer" | "product" | "service" | "photographer_service"
+    - `entityId`: The ID of the entity
+    - `userId`: The user ID of the business owner or photographer (for profile navigation)
 
 ## External Dependencies
 -   **PostgreSQL:** Primary database.

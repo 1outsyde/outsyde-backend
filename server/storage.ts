@@ -2511,6 +2511,7 @@ export class DatabaseStorage implements IStorage {
     if (existing.length > 0) {
       const [updated] = await db.update(searchIndex)
         .set({
+          userId: entry.userId,
           name: entry.name,
           description: entry.description,
           category: entry.category,
@@ -2540,6 +2541,7 @@ export class DatabaseStorage implements IStorage {
       id: randomUUID(),
       entityType: entry.entityType,
       entityId: entry.entityId,
+      userId: entry.userId,
       name: entry.name,
       description: entry.description,
       category: entry.category,
@@ -2578,6 +2580,7 @@ export class DatabaseStorage implements IStorage {
       await this.upsertSearchIndexEntry({
         entityType: 'business',
         entityId: business.id,
+        userId: business.ownerId,
         name: business.name,
         description: business.description || undefined,
         category: business.category,
@@ -2660,6 +2663,7 @@ export class DatabaseStorage implements IStorage {
       await this.upsertSearchIndexEntry({
         entityType: 'photographer',
         entityId: photographer.id,
+        userId: photographer.userId,
         name: photographer.displayName,
         description: photographer.bio || undefined,
         category: photographer.specialties?.join(', ') || undefined,
