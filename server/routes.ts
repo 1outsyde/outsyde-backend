@@ -6481,33 +6481,48 @@ export async function registerRoutes(
     try {
       const createConvoSchema = z.object({
         participantId: z.string().min(1, "Participant ID is required"),
-        participantType: z.enum(["user", "photographer", "vendor"]).optional().default("user"),
+        participantType: z.string().optional(),
+        participantName: z.string().optional(),
+        participantAvatar: z.string().optional(),
       });
-      const { participantId, participantType } = createConvoSchema.parse(req.body);
+      const parsed = createConvoSchema.parse(req.body);
+      const participantId = parsed.participantId;
+      const participantType = parsed.participantType || "user";
+
+      console.log("DEBUG - Create conversation request:");
+      console.log("DEBUG - participantId:", participantId);
+      console.log("DEBUG - participantType (raw):", parsed.participantType);
+      console.log("DEBUG - participantType (resolved):", participantType);
+      console.log("DEBUG - userId (authenticated):", userId);
 
       // Resolve the actual userId based on participant type
       let otherUserId: string;
       let otherUserName: string;
 
       if (participantType === "photographer") {
+        console.log("DEBUG - Entering photographer lookup branch");
         // participantId is a photographer entity ID - look up the photographer to get their userId
         const photographer = await storage.getPhotographer(participantId);
         if (!photographer) {
           return res.status(404).json({ error: "Photographer not found" });
         }
         otherUserId = photographer.userId;
+        console.log("DEBUG - Photographer found, userId:", photographer.userId);
         const photographerUser = await storage.getUser(photographer.userId);
         otherUserName = photographerUser?.name || photographer.businessName || "Photographer";
-      } else if (participantType === "vendor") {
+      } else if (participantType === "vendor" || participantType === "business") {
+        console.log("DEBUG - Entering vendor/business lookup branch");
         // participantId is a business entity ID - look up the business to get the owner's userId
         const business = await storage.getBusiness(participantId);
         if (!business) {
           return res.status(404).json({ error: "Business not found" });
         }
         otherUserId = business.ownerId;
+        console.log("DEBUG - Business found, ownerId:", business.ownerId);
         const businessUser = await storage.getUser(business.ownerId);
         otherUserName = businessUser?.name || business.name || "Vendor";
       } else {
+        console.log("DEBUG - Entering default user lookup branch");
         // participantId is already a userId
         otherUserId = participantId;
         const otherUser = await storage.getUser(participantId);
