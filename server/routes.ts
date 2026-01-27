@@ -1188,6 +1188,36 @@ export async function registerRoutes(
       // Store refresh token
       await storage.storeRefreshToken(user.id, refreshToken, new Date(Date.now() + 7 * 24 * 60 * 60 * 1000));
 
+      // ============================================================
+      // CRITICAL: Establish session for ALL user types (consumers, photographers, vendors)
+      // This ensures subsequent requests are authenticated via session cookie
+      // ============================================================
+      if (req.session) {
+        req.session.userId = user.id;
+        req.session.role = user.role || "consumer";
+        req.session.isPhotographer = user.isPhotographer || false;
+        req.session.isVendor = user.isVendor || false;
+        
+        // Also store entity IDs if available from token payload
+        if (tokenPayload.businessId) {
+          req.session.businessId = tokenPayload.businessId;
+        }
+        if (tokenPayload.photographerId) {
+          req.session.photographerId = tokenPayload.photographerId;
+        }
+      }
+
+      // TEMP DEBUG: Log session state after login
+      console.log("LOGIN SESSION SET:", {
+        userId: req.session?.userId,
+        role: req.session?.role,
+        isPhotographer: req.session?.isPhotographer,
+        isVendor: req.session?.isVendor,
+        businessId: req.session?.businessId,
+        photographerId: req.session?.photographerId,
+        sessionID: req.sessionID,
+      });
+
       const safeUser = sanitizeUserForResponse(user, { includeOwnData: true });
 
       res.json({
