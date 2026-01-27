@@ -1,0 +1,61 @@
+Now I can see the data structure. Looking at storage.ts:
+
+export type NewPhotographerInput = {
+  userId: string;  // <-- This is the field linking photographer to user account
+  displayName: string;
+  ...
+};
+The photographer has a userId field. The backend's POST /api/conversations endpoint needs to be updated like this:
+
+The fix in server/routes.ts (around line 6400-6700):
+
+// POST /api/conversations
+app.post("/api/conversations", authMiddleware, async (req, res) => {
+  try {
+    const userId = req.user.id; // Authenticated user's ID
+    const { participantId, participantType, participantName, participantAvatar } = req.body;
+    
+    // Resolve the actual user ID based on participant type
+    let targetUserId = participantId; // Default: assume it's a user ID
+    
+    if (participantType === "photographer") {
+      // participantId is a photographer entity ID, need to get their userId
+      const photographer = await storage.getPhotographer(participantId);
+      if (!photographer) {
+        return res.status(404).json({ error: "Photographer not found" });
+      }
+      console.log("DEBUG: photographer found:", photographer.id, "photographer.userId:", photographer.userId);
+      targetUserId = photographer.userId; // Get the actual user ID
+    } else if (participantType === "vendor" || participantType === "business") {
+      // participantId is a business entity ID, need to get owner's userId
+      const business = await storage.getBusiness(participantId);
+      if (!business) {
+        return res.status(404).json({ error: "Business not found" });
+      }
+      console.log("DEBUG: business found:", business.id, "business.ownerId:", business.ownerId);
+      targetUserId = business.ownerId; // Get the owner's user ID
+    }
+    
+    // Now compare user IDs (both are auth user IDs)
+    console.log("DEBUG: userId (authenticated):", userId, "targetUserId (resolved):", targetUserId);
+    
+    if (targetUserId === userId) {
+      return res.status(400).json({ error: "Cannot create conversation with yourself" });
+    }
+    
+    // Create conversation using the resolved user IDs
+    const conversation = await storage.getOrCreateConversation(userId, targetUserId);
+    
+    res.json(conversation);
+  } catch (error) {
+    console.error("Create conversation error:", error);
+    res.status(500).json({ error: "Failed to create conversation" });
+  }
+});
+Key points:
+
+For participantType: "photographer" → use photographer.userId
+For participantType: "business" → use business.ownerId
+Both userId (authenticated user) and targetUserId (resolved) are now auth user IDs
+The comparison will work correctly
+Can you check if your current backend fix is using photographer.userId to get the target user ID?
