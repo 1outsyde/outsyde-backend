@@ -6803,6 +6803,47 @@ export async function registerRoutes(
         content,
       });
 
+      // ============================================================
+      // PUSH NOTIFICATION: Send to recipient (REST fallback)
+      // Note: WebSocket handler also sends push notifications
+      // ============================================================
+      try {
+        const { sendPushNotification, isPushConfigured } = await import('./pushService');
+        if (isPushConfigured()) {
+          const subscriptions = await storage.getUserPushSubscriptions(otherUserId);
+          if (subscriptions.length > 0) {
+            const sender = await storage.getUser(userId);
+            const totalUnreadCount = await storage.getUnreadCount(otherUserId);
+            
+            const messagePreview = content.length > 50 
+              ? content.substring(0, 47) + "..." 
+              : content;
+            
+            const pushPayload = {
+              title: sender?.name || "New Message",
+              body: messagePreview,
+              url: `/messages?conversation=${req.params.id}`,
+              tag: `message-${req.params.id}`,
+              data: {
+                type: "new_message",
+                conversationId: req.params.id,
+                senderDisplayName: sender?.name || "Unknown",
+                messagePreview,
+                badgeCount: totalUnreadCount,
+              },
+            };
+            
+            for (const subscription of subscriptions) {
+              await sendPushNotification(subscription, pushPayload);
+            }
+            console.log(`[PUSH/REST] Sent message notification to ${otherUserId}`);
+          }
+        }
+      } catch (pushError) {
+        console.error("Push notification error (REST):", pushError);
+        // Don't fail message send if push fails
+      }
+
       res.json({ message });
     } catch (error) {
       if (error instanceof z.ZodError) {
