@@ -298,6 +298,7 @@ export interface IStorage {
   getConversationMessages(conversationId: string, limit?: number, before?: string): Promise<Message[]>;
   markMessagesAsRead(conversationId: string, userId: string): Promise<void>;
   getUnreadCount(userId: string): Promise<number>;
+  getUnreadCountPerConversation(userId: string): Promise<Map<string, number>>;
 
   // Outsyde Points (Loyalty System)
   // Points calculated from platform profit only: 10% photographers, 4% businesses
@@ -1811,6 +1812,42 @@ export class DatabaseStorage implements IStorage {
     );
 
     return Number(unread[0]?.count || 0);
+  }
+
+  async getUnreadCountPerConversation(userId: string): Promise<Map<string, number>> {
+    // Get all conversations where user is a participant
+    const userConvos = await db.select({ id: conversations.id }).from(conversations).where(
+      or(
+        eq(conversations.participant1Id, userId),
+        eq(conversations.participant2Id, userId)
+      )
+    );
+
+    if (userConvos.length === 0) return new Map();
+
+    const convoIds = userConvos.map(c => c.id);
+    
+    // Group unread messages by conversation (messages not from this user)
+    const unreadPerConvo = await db
+      .select({ 
+        conversationId: messages.conversationId, 
+        count: sql<number>`count(*)` 
+      })
+      .from(messages)
+      .where(
+        and(
+          sql`${messages.conversationId} IN (${sql.join(convoIds.map(id => sql`${id}`), sql`, `)})`,
+          sql`${messages.senderId} != ${userId}`,
+          eq(messages.isRead, false)
+        )
+      )
+      .groupBy(messages.conversationId);
+
+    const result = new Map<string, number>();
+    for (const row of unreadPerConvo) {
+      result.set(row.conversationId, Number(row.count));
+    }
+    return result;
   }
 
   // =========================
