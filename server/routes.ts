@@ -122,6 +122,33 @@ export async function registerRoutes(
   httpServer: Server,
   app: Express
 ): Promise<Server> {
+  // ============================================================
+  // AUTH DEBUG MIDDLEWARE - Logs authenticated requests for debugging
+  // ============================================================
+  app.use("/api", (req, res, next) => {
+    // Skip logging for public endpoints
+    const publicPaths = ["/api/health", "/api/vendors", "/api/businesses", "/api/feed", "/api/search"];
+    const isPublicPath = publicPaths.some(p => req.path.startsWith(p.replace("/api", "")));
+    
+    // Get authenticated user info from session or OAuth
+    const sessionUserId = req.session?.userId;
+    const oauthUser = req.user as any;
+    const oauthUserId = oauthUser?.claims?.sub;
+    const authenticatedUserId = sessionUserId || oauthUserId || null;
+    
+    // Get role from session
+    const sessionRole = req.session?.role || req.session?.userRole;
+    const isVendor = req.session?.isVendor;
+    const isPhotographer = req.session?.isPhotographer;
+    
+    // Only log authenticated requests or auth-related endpoints
+    if (authenticatedUserId || req.path.includes("/auth")) {
+      console.log(`[AUTH_DEBUG] ${req.method} ${req.path} | userId: ${authenticatedUserId || 'none'} | role: ${sessionRole || 'none'} | isVendor: ${isVendor} | isPhotographer: ${isPhotographer}`);
+    }
+    
+    next();
+  });
+
   // Helper function to check if a business is visible to public users
   // Filters out: pending approval, demo data, incomplete Stripe onboarding (if monetization enabled), inactive subscriptions
   const isBusinessVisibleToPublic = async (business: any): Promise<boolean> => {
@@ -1262,6 +1289,91 @@ export async function registerRoutes(
     } catch (error) {
       console.error("Get user error:", error);
       res.status(500).json({ error: "Failed to get user" });
+    }
+  });
+
+  // ============================================================
+  // GET /api/auth/me - Single source of truth for authenticated session
+  // Mobile apps and frontends should use this to verify session state
+  // ============================================================
+  app.get("/api/auth/me", async (req, res) => {
+    try {
+      // Get authenticated user ID from session or OAuth
+      const oauthUser = req.user as any;
+      const oauthUserId = oauthUser?.claims?.sub;
+      const sessionUserId = req.session?.userId;
+      const authenticatedUserId = oauthUserId || sessionUserId;
+
+      if (!authenticatedUserId) {
+        return res.status(401).json({ 
+          authenticated: false,
+          error: "Not authenticated",
+          code: "NOT_AUTHENTICATED"
+        });
+      }
+
+      const user = await storage.getUser(authenticatedUserId);
+      if (!user) {
+        // Session references non-existent user - clear session
+        if (req.session) {
+          req.session.destroy((err) => {
+            if (err) console.error("Session destroy error:", err);
+          });
+        }
+        return res.status(401).json({ 
+          authenticated: false,
+          error: "Session invalid - user not found",
+          code: "USER_NOT_FOUND"
+        });
+      }
+
+      // Build session state object - this is the authoritative source
+      const sessionState = {
+        authenticated: true,
+        userId: user.id,
+        username: user.username,
+        displayName: user.name,
+        email: user.email,
+        profilePhotoUrl: user.profilePhoto,
+        isVendor: false as boolean,
+        isPhotographer: false as boolean,
+        businessId: null as string | null,
+        photographerId: null as string | null,
+      };
+
+      // Check for business ownership
+      const business = await storage.getBusinessByOwnerId(user.id);
+      if (business) {
+        sessionState.isVendor = true;
+        sessionState.businessId = business.id;
+        // Update session to keep in sync
+        if (req.session) {
+          req.session.isVendor = true;
+          req.session.businessId = business.id;
+        }
+      }
+
+      // Check for photographer profile
+      const photographer = await storage.getPhotographerByUserId(user.id);
+      if (photographer) {
+        sessionState.isPhotographer = true;
+        sessionState.photographerId = photographer.id;
+        // Update session to keep in sync
+        if (req.session) {
+          req.session.isPhotographer = true;
+          req.session.photographerId = photographer.id;
+        }
+      }
+
+      console.log(`[AUTH_ME] Session verified for userId: ${user.id} | isVendor: ${sessionState.isVendor} | isPhotographer: ${sessionState.isPhotographer}`);
+      res.json(sessionState);
+    } catch (error) {
+      console.error("Get /api/auth/me error:", error);
+      res.status(500).json({ 
+        authenticated: false,
+        error: "Failed to verify session",
+        code: "SERVER_ERROR"
+      });
     }
   });
 
@@ -6532,11 +6644,18 @@ export async function registerRoutes(
         otherUserName = otherUser.name || "User";
       }
 
-      // Now compare the actual user IDs
+      // HARDENED SELF-CHECK: Compare resolved user IDs
+      console.log("DEBUG - Self-check: authenticatedUserId:", userId, "vs resolvedOtherUserId:", otherUserId);
       if (otherUserId === userId) {
-        return res.status(400).json({ error: "Cannot create conversation with yourself" });
+        console.log("DEBUG - BLOCKED: User attempted to message themselves");
+        return res.status(400).json({ 
+          error: "Cannot create conversation with yourself",
+          code: "SELF_MESSAGE_BLOCKED",
+          debug: { authenticatedUserId: userId, resolvedOtherUserId: otherUserId }
+        });
       }
 
+      console.log("DEBUG - Creating conversation between:", userId, "and", otherUserId);
       const conversation = await storage.getOrCreateConversation(userId, otherUserId);
       res.json({ conversation, otherParticipant: { id: otherUserId, name: otherUserName } });
     } catch (error) {
