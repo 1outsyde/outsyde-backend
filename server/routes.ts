@@ -6813,7 +6813,7 @@ export async function registerRoutes(
     }
   });
 
-  // Get unread message count
+  // Get unread message count (total across all conversations)
   app.get("/api/messages/unread-count", async (req, res) => {
     const userId = req.session?.userId;
     if (!userId) {
@@ -6821,8 +6821,8 @@ export async function registerRoutes(
     }
 
     try {
-      const count = await storage.getUnreadCount(userId);
-      res.json({ count });
+      const totalUnreadCount = await storage.getUnreadCount(userId);
+      res.json({ totalUnreadCount, count: totalUnreadCount }); // count for backwards compatibility
     } catch (error) {
       console.error("Get unread count error:", error);
       res.status(500).json({ error: "Failed to get unread count" });
