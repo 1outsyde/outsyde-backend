@@ -6481,20 +6481,49 @@ export async function registerRoutes(
     try {
       const createConvoSchema = z.object({
         participantId: z.string().min(1, "Participant ID is required"),
+        participantType: z.enum(["user", "photographer", "vendor"]).optional().default("user"),
       });
-      const { participantId } = createConvoSchema.parse(req.body);
+      const { participantId, participantType } = createConvoSchema.parse(req.body);
 
-      if (participantId === userId) {
+      // Resolve the actual userId based on participant type
+      let otherUserId: string;
+      let otherUserName: string;
+
+      if (participantType === "photographer") {
+        // participantId is a photographer entity ID - look up the photographer to get their userId
+        const photographer = await storage.getPhotographer(participantId);
+        if (!photographer) {
+          return res.status(404).json({ error: "Photographer not found" });
+        }
+        otherUserId = photographer.userId;
+        const photographerUser = await storage.getUser(photographer.userId);
+        otherUserName = photographerUser?.name || photographer.businessName || "Photographer";
+      } else if (participantType === "vendor") {
+        // participantId is a business entity ID - look up the business to get the owner's userId
+        const business = await storage.getBusiness(participantId);
+        if (!business) {
+          return res.status(404).json({ error: "Business not found" });
+        }
+        otherUserId = business.ownerId;
+        const businessUser = await storage.getUser(business.ownerId);
+        otherUserName = businessUser?.name || business.name || "Vendor";
+      } else {
+        // participantId is already a userId
+        otherUserId = participantId;
+        const otherUser = await storage.getUser(participantId);
+        if (!otherUser) {
+          return res.status(404).json({ error: "User not found" });
+        }
+        otherUserName = otherUser.name || "User";
+      }
+
+      // Now compare the actual user IDs
+      if (otherUserId === userId) {
         return res.status(400).json({ error: "Cannot create conversation with yourself" });
       }
 
-      const otherUser = await storage.getUser(participantId);
-      if (!otherUser) {
-        return res.status(404).json({ error: "User not found" });
-      }
-
-      const conversation = await storage.getOrCreateConversation(userId, participantId);
-      res.json({ conversation, otherParticipant: { id: otherUser.id, name: otherUser.name } });
+      const conversation = await storage.getOrCreateConversation(userId, otherUserId);
+      res.json({ conversation, otherParticipant: { id: otherUserId, name: otherUserName } });
     } catch (error) {
       if (error instanceof z.ZodError) {
         return res.status(400).json({ error: "Invalid data", details: error.errors });
