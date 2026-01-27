@@ -6601,10 +6601,19 @@ export async function registerRoutes(
 
     try {
       const conversations = await storage.getUserConversations(userId);
-      // Sanitize user data to remove sensitive fields like DOB
+      
+      // Get unread counts per conversation
+      const unreadCounts = await storage.getUnreadCountPerConversation(userId);
+      
+      // Sanitize user data and include unread count
       const sanitizedConversations = conversations.map(convo => ({
         ...convo,
-        otherParticipant: sanitizeUserForResponse(convo.otherParticipant),
+        otherParticipant: {
+          id: convo.otherParticipant.id,
+          displayName: convo.otherParticipant.name || convo.otherParticipant.username,
+          avatar: convo.otherParticipant.profilePhoto,
+        },
+        unreadCount: unreadCounts.get(convo.id) || 0,
       }));
       res.json({ conversations: sanitizedConversations });
     } catch (error) {
