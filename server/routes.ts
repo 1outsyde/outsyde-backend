@@ -207,30 +207,45 @@ export async function registerRoutes(
     }
   });
 
-  // Public search endpoint for mobile app - searches businesses and photographers
-  app.get("/api/search", async (req, res) => {
+  // Unified search endpoint for mobile app - searches across users, businesses, products, services
+  // Supports scope-based filtering and personalization
+  app.get("/api/search", optionalAuthMiddleware, async (req, res) => {
+    const authReq = req as AuthenticatedRequest;
     try {
-      const { q, city, category } = req.query;
-      const results = await storage.searchAll({
-        search: q as string | undefined,
-        city: city as string | undefined,
-        category: category as string | undefined,
-      });
-      
-      // Server-side filtering for businesses in search results
-      if (results.businesses && Array.isArray(results.businesses)) {
-        const filteredBusinesses = [];
-        for (const business of results.businesses) {
-          if (await isBusinessVisibleToPublic(business)) {
-            filteredBusinesses.push(business);
-          }
-        }
-        results.businesses = filteredBusinesses;
+      const { 
+        q, 
+        scope = 'all', 
+        viewerUserId,
+        limit = '50',
+        offset = '0'
+      } = req.query;
+
+      // Validate scope
+      const validScopes = ['all', 'consumers', 'photographers', 'businesses', 'products', 'services'];
+      const searchScope = validScopes.includes(scope as string) ? scope as any : 'all';
+
+      // Use authenticated user's ID if viewerUserId not provided
+      const effectiveViewerUserId = (viewerUserId as string) || authReq.session?.userId;
+
+      // Check if current user is admin for demo data visibility
+      let isAdmin = false;
+      if (authReq.session?.userId) {
+        const user = await storage.getUser(authReq.session.userId);
+        isAdmin = user?.isAdmin || false;
       }
-      
+
+      const results = await storage.unifiedSearchWithScope({
+        q: (q as string) || '',
+        scope: searchScope,
+        viewerUserId: effectiveViewerUserId,
+        limit: Math.min(100, parseInt(limit as string) || 50),
+        offset: parseInt(offset as string) || 0,
+        isAdmin,
+      });
+
       res.json(results);
     } catch (error) {
-      console.error("Search error:", error);
+      console.error("Unified search error:", error);
       res.status(500).json({ error: "Failed to search" });
     }
   });

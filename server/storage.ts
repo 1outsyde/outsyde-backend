@@ -666,6 +666,43 @@ export interface IStorage {
   getUserFollowers(userId: string, limit?: number, offset?: number): Promise<User[]>;
   getFollowingCount(userId: string): Promise<number>;
   getFollowerCount(userId: string): Promise<number>;
+
+  // Unified Search (normalized results)
+  unifiedSearchWithScope(params: UnifiedSearchParams): Promise<UnifiedSearchResponse>;
+}
+
+// ==================== UNIFIED SEARCH TYPES ====================
+
+export type SearchScope = 'all' | 'consumers' | 'photographers' | 'businesses' | 'products' | 'services';
+
+export interface UnifiedSearchParams {
+  q: string;
+  scope: SearchScope;
+  viewerUserId?: string;
+  limit?: number;
+  offset?: number;
+  isAdmin?: boolean;
+}
+
+export interface UnifiedSearchResult {
+  id: string;
+  type: 'consumer' | 'photographer' | 'business' | 'product' | 'service';
+  title: string;
+  subtitle: string | null;
+  imageUrl: string | null;
+  ratingAvg: number | null;
+  ratingCount: number | null;
+  category: string | null;
+  providerUserId: string | null;
+  baseScore: number;
+  personalizationScore: number;
+}
+
+export interface UnifiedSearchResponse {
+  results: UnifiedSearchResult[];
+  total: number;
+  limit: number;
+  offset: number;
 }
 
 export class DatabaseStorage implements IStorage {
@@ -5139,6 +5176,357 @@ export class DatabaseStorage implements IStorage {
     return {
       businesses: businessResults,
       photographers: photographerResults
+    };
+  }
+
+  // =========================
+  // UNIFIED SEARCH WITH SCOPE
+  // =========================
+
+  async unifiedSearchWithScope(params: UnifiedSearchParams): Promise<UnifiedSearchResponse> {
+    const { q, scope, viewerUserId, limit = 50, offset = 0, isAdmin = false } = params;
+    const query = q.trim().toLowerCase();
+    
+    if (!query) {
+      return { results: [], total: 0, limit, offset };
+    }
+
+    let allResults: UnifiedSearchResult[] = [];
+    let viewerPreferences: { selectedIndustries?: string[]; industryNiches?: Record<string, string[]> } | null = null;
+    let followedUserIds: Set<string> = new Set();
+
+    // Load viewer preferences for personalization (scope=all only)
+    if (viewerUserId && scope === 'all') {
+      const viewer = await this.getUser(viewerUserId);
+      if (viewer) {
+        viewerPreferences = {
+          selectedIndustries: viewer.selectedIndustries ?? [],
+          industryNiches: viewer.industryNiches ?? {},
+        };
+      }
+      // Load followed users for personalization boost
+      const following = await this.getUserFollowing(viewerUserId, 500, 0);
+      followedUserIds = new Set(following.map(u => u.id));
+    }
+
+    // Helper to calculate base text relevance score
+    const calculateBaseScore = (fields: (string | null | undefined)[]): number => {
+      let score = 0;
+      for (const field of fields) {
+        if (!field) continue;
+        const lower = field.toLowerCase();
+        // Exact match gets highest score
+        if (lower === query) score = Math.max(score, 100);
+        // Starts with query
+        else if (lower.startsWith(query)) score = Math.max(score, 80);
+        // Contains query as word
+        else if (lower.includes(` ${query}`) || lower.includes(`${query} `)) score = Math.max(score, 60);
+        // Contains query
+        else if (lower.includes(query)) score = Math.max(score, 40);
+      }
+      return score;
+    };
+
+    // Helper to calculate personalization score
+    const calculatePersonalizationScore = (
+      category: string | null,
+      providerId: string | null,
+      rating: number | null
+    ): number => {
+      if (!viewerPreferences) return 0;
+      let score = 0;
+      
+      // Followed provider boost
+      if (providerId && followedUserIds.has(providerId)) {
+        score += 30;
+      }
+      
+      // Category preference match
+      if (category) {
+        const catLower = category.toLowerCase();
+        const industries = (viewerPreferences.selectedIndustries || []).map(i => i.toLowerCase());
+        for (const ind of industries) {
+          if (catLower.includes(ind)) {
+            score += 20;
+            break;
+          }
+        }
+        // Niche match is higher
+        const allNiches: string[] = [];
+        if (viewerPreferences.industryNiches) {
+          for (const niches of Object.values(viewerPreferences.industryNiches)) {
+            allNiches.push(...niches.map(n => n.toLowerCase()));
+          }
+        }
+        for (const niche of allNiches) {
+          if (catLower.includes(niche)) {
+            score += 25;
+            break;
+          }
+        }
+      }
+      
+      // Rating boost (0-10 points based on rating 0-50)
+      if (rating !== null && rating > 0) {
+        score += Math.min(10, rating / 5);
+      }
+      
+      return score;
+    };
+
+    // ==================== SEARCH CONSUMERS ====================
+    if (scope === 'all' || scope === 'consumers') {
+      // Search users who are NOT vendors and NOT photographers (regular consumers)
+      const consumerResults = await db.select().from(users)
+        .where(and(
+          eq(users.isVendor, false),
+          eq(users.isPhotographer, false),
+          or(
+            ilike(users.username, `%${query}%`),
+            ilike(users.name, `%${query}%`),
+            ilike(users.firstName, `%${query}%`),
+            ilike(users.lastName, `%${query}%`)
+          ),
+          // Hide demo users from non-admins
+          isAdmin ? undefined : sql`NOT (${users.id}::text ILIKE '%demo%')`
+        ))
+        .limit(limit * 2);
+
+      for (const user of consumerResults) {
+        const displayName = user.name || `${user.firstName || ''} ${user.lastName || ''}`.trim() || user.username || 'User';
+        const baseScore = calculateBaseScore([user.username, user.name, user.firstName, user.lastName]);
+        const personalizationScore = calculatePersonalizationScore(null, user.id, null);
+        
+        allResults.push({
+          id: user.id,
+          type: 'consumer',
+          title: displayName,
+          subtitle: user.username ? `@${user.username}` : (user.city ? `${user.city}, ${user.state || ''}` : null),
+          imageUrl: user.profileImageUrl,
+          ratingAvg: null,
+          ratingCount: null,
+          category: null,
+          providerUserId: user.id,
+          baseScore,
+          personalizationScore: scope === 'all' ? personalizationScore : 0,
+        });
+      }
+    }
+
+    // ==================== SEARCH PHOTOGRAPHERS ====================
+    if (scope === 'all' || scope === 'photographers') {
+      const photographerResults = await db.select({
+        photographer: photographers,
+        user: users,
+      })
+        .from(photographers)
+        .leftJoin(users, eq(photographers.userId, users.id))
+        .where(and(
+          or(
+            ilike(photographers.displayName, `%${query}%`),
+            ilike(photographers.bio, `%${query}%`),
+            sql`array_to_string(${photographers.specialties}, ' ') ILIKE ${'%' + query + '%'}`
+          ),
+          // Hide demo data from non-admins
+          isAdmin ? undefined : sql`NOT (${photographers.userId}::text ILIKE '%demo%')`
+        ))
+        .limit(limit * 2);
+
+      for (const { photographer, user } of photographerResults) {
+        const baseScore = calculateBaseScore([
+          photographer.displayName,
+          photographer.bio,
+          ...(photographer.specialties || [])
+        ]);
+        const personalizationScore = calculatePersonalizationScore(
+          photographer.specialties?.[0] || null,
+          photographer.userId,
+          photographer.rating
+        );
+        
+        allResults.push({
+          id: photographer.id,
+          type: 'photographer',
+          title: photographer.displayName || user?.name || 'Photographer',
+          subtitle: photographer.city ? `${photographer.city}${photographer.state ? `, ${photographer.state}` : ''}` : null,
+          imageUrl: photographer.logoImage || photographer.coverImage || user?.profileImageUrl,
+          ratingAvg: photographer.rating ? photographer.rating / 10 : null, // Convert to 0-5 scale
+          ratingCount: photographer.reviewCount,
+          category: photographer.specialties?.[0] || 'Photography',
+          providerUserId: photographer.userId,
+          baseScore,
+          personalizationScore: scope === 'all' ? personalizationScore : 0,
+        });
+      }
+    }
+
+    // ==================== SEARCH BUSINESSES ====================
+    if (scope === 'all' || scope === 'businesses') {
+      const businessResults = await db.select({
+        business: businesses,
+        user: users,
+      })
+        .from(businesses)
+        .leftJoin(users, eq(businesses.ownerId, users.id))
+        .where(and(
+          eq(businesses.approvalStatus, 'approved'),
+          or(
+            ilike(businesses.name, `%${query}%`),
+            ilike(businesses.category, `%${query}%`),
+            ilike(businesses.description, `%${query}%`),
+            ilike(businesses.tagline, `%${query}%`)
+          ),
+          // Hide demo data from non-admins
+          isAdmin ? undefined : sql`NOT (${businesses.ownerId}::text ILIKE '%demo%')`
+        ))
+        .limit(limit * 2);
+
+      for (const { business } of businessResults) {
+        const baseScore = calculateBaseScore([
+          business.name,
+          business.category,
+          business.description,
+          business.tagline
+        ]);
+        const personalizationScore = calculatePersonalizationScore(
+          business.category,
+          business.ownerId,
+          business.rating
+        );
+        
+        allResults.push({
+          id: business.id,
+          type: 'business',
+          title: business.name,
+          subtitle: business.city ? `${business.category} · ${business.city}, ${business.state || ''}` : business.category,
+          imageUrl: business.logoImage || business.coverImage,
+          ratingAvg: business.rating ? business.rating / 10 : null, // Convert to 0-5 scale
+          ratingCount: business.reviewCount,
+          category: business.category,
+          providerUserId: business.ownerId,
+          baseScore,
+          personalizationScore: scope === 'all' ? personalizationScore : 0,
+        });
+      }
+    }
+
+    // ==================== SEARCH PRODUCTS ====================
+    if (scope === 'all' || scope === 'products') {
+      // Use search index for products
+      const productResults = await db.select().from(searchIndex)
+        .where(and(
+          eq(searchIndex.entityType, 'product'),
+          eq(searchIndex.isActive, true),
+          or(
+            ilike(searchIndex.name, `%${query}%`),
+            ilike(searchIndex.description, `%${query}%`),
+            ilike(searchIndex.category, `%${query}%`),
+            sql`array_to_string(${searchIndex.tags}, ' ') ILIKE ${'%' + query + '%'}`
+          ),
+          // Hide demo data from non-admins
+          isAdmin ? undefined : eq(searchIndex.isDemo, false)
+        ))
+        .limit(limit * 2);
+
+      for (const product of productResults) {
+        const baseScore = calculateBaseScore([
+          product.name,
+          product.description,
+          product.category,
+          ...(product.tags || [])
+        ]);
+        const personalizationScore = calculatePersonalizationScore(
+          product.category,
+          product.userId,
+          product.rating
+        );
+        
+        allResults.push({
+          id: product.entityId,
+          type: 'product',
+          title: product.name,
+          subtitle: product.priceCents ? `$${(product.priceCents / 100).toFixed(2)}` : product.category,
+          imageUrl: product.imageUrl,
+          ratingAvg: product.rating ? product.rating / 10 : null,
+          ratingCount: product.reviewCount,
+          category: product.category,
+          providerUserId: product.userId,
+          baseScore,
+          personalizationScore: scope === 'all' ? personalizationScore : 0,
+        });
+      }
+    }
+
+    // ==================== SEARCH SERVICES ====================
+    if (scope === 'all' || scope === 'services') {
+      // Use search index for services (both business services and photographer services)
+      const serviceResults = await db.select().from(searchIndex)
+        .where(and(
+          or(
+            eq(searchIndex.entityType, 'service'),
+            eq(searchIndex.entityType, 'photographer_service')
+          ),
+          eq(searchIndex.isActive, true),
+          or(
+            ilike(searchIndex.name, `%${query}%`),
+            ilike(searchIndex.description, `%${query}%`),
+            ilike(searchIndex.category, `%${query}%`)
+          ),
+          // Hide demo data from non-admins
+          isAdmin ? undefined : eq(searchIndex.isDemo, false)
+        ))
+        .limit(limit * 2);
+
+      for (const service of serviceResults) {
+        const baseScore = calculateBaseScore([
+          service.name,
+          service.description,
+          service.category
+        ]);
+        const personalizationScore = calculatePersonalizationScore(
+          service.category,
+          service.userId,
+          service.rating
+        );
+        
+        allResults.push({
+          id: service.entityId,
+          type: 'service',
+          title: service.name,
+          subtitle: service.priceCents ? `From $${(service.priceCents / 100).toFixed(2)}` : service.category,
+          imageUrl: service.imageUrl,
+          ratingAvg: service.rating ? service.rating / 10 : null,
+          ratingCount: service.reviewCount,
+          category: service.category,
+          providerUserId: service.userId,
+          baseScore,
+          personalizationScore: scope === 'all' ? personalizationScore : 0,
+        });
+      }
+    }
+
+    // ==================== SORTING ====================
+    if (scope === 'all') {
+      // Sort by personalization score (higher is better), then base score
+      allResults.sort((a, b) => {
+        const totalA = a.personalizationScore + a.baseScore;
+        const totalB = b.personalizationScore + b.baseScore;
+        return totalB - totalA;
+      });
+    } else {
+      // Sort by base score only (text relevance)
+      allResults.sort((a, b) => b.baseScore - a.baseScore);
+    }
+
+    // Apply pagination
+    const total = allResults.length;
+    const paginatedResults = allResults.slice(offset, offset + limit);
+
+    return {
+      results: paginatedResults,
+      total,
+      limit,
+      offset,
     };
   }
 
