@@ -418,6 +418,34 @@ export async function cleanupExpiredDrafts(): Promise<{ appointments: number; sh
 export async function cleanupExpiredPendingProvider(): Promise<{ appointments: number; shootBookings: number }> {
   const now = new Date();
   
+  // First, find expired appointments with PaymentIntents to cancel
+  const expiredAptsWithPayment = await db.select({
+    id: appointments.id,
+    stripePaymentIntentId: appointments.stripePaymentIntentId,
+    captureMethod: appointments.captureMethod,
+  })
+  .from(appointments)
+  .where(
+    and(
+      eq(appointments.status, BOOKING_STATES.PENDING_PROVIDER),
+      lt(appointments.pendingProviderExpiresAt, now)
+    )
+  );
+
+  // Cancel PaymentIntents for manual capture appointments
+  for (const apt of expiredAptsWithPayment) {
+    if (apt.captureMethod === 'manual' && apt.stripePaymentIntentId) {
+      try {
+        const { stripeService } = await import('./stripe/stripeService');
+        await stripeService.cancelPaymentIntent(apt.stripePaymentIntentId, 'abandoned');
+        console.log(`[PendingProviderCleanup] Canceled PaymentIntent ${apt.stripePaymentIntentId} for expired appointment ${apt.id}`);
+      } catch (stripeError) {
+        console.error(`[PendingProviderCleanup] Failed to cancel PaymentIntent for appointment ${apt.id}:`, stripeError);
+      }
+    }
+  }
+
+  // Update expired appointments
   const expiredAppointments = await db.update(appointments)
     .set({ 
       status: BOOKING_STATES.EXPIRED,
@@ -434,6 +462,34 @@ export async function cleanupExpiredPendingProvider(): Promise<{ appointments: n
     )
     .returning({ id: appointments.id });
 
+  // Find expired shoot bookings with PaymentIntents to cancel
+  const expiredShootsWithPayment = await db.select({
+    id: shootBookings.id,
+    stripePaymentIntentId: shootBookings.stripePaymentIntentId,
+    captureMethod: shootBookings.captureMethod,
+  })
+  .from(shootBookings)
+  .where(
+    and(
+      eq(shootBookings.status, BOOKING_STATES.PENDING_PROVIDER),
+      lt(shootBookings.pendingProviderExpiresAt, now)
+    )
+  );
+
+  // Cancel PaymentIntents for manual capture shoot bookings
+  for (const booking of expiredShootsWithPayment) {
+    if (booking.captureMethod === 'manual' && booking.stripePaymentIntentId) {
+      try {
+        const { stripeService } = await import('./stripe/stripeService');
+        await stripeService.cancelPaymentIntent(booking.stripePaymentIntentId, 'abandoned');
+        console.log(`[PendingProviderCleanup] Canceled PaymentIntent ${booking.stripePaymentIntentId} for expired shoot booking ${booking.id}`);
+      } catch (stripeError) {
+        console.error(`[PendingProviderCleanup] Failed to cancel PaymentIntent for shoot booking ${booking.id}:`, stripeError);
+      }
+    }
+  }
+
+  // Update expired shoot bookings
   const expiredShootBookings = await db.update(shootBookings)
     .set({ 
       status: BOOKING_STATES.EXPIRED,

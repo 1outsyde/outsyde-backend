@@ -284,6 +284,92 @@ export class StripeService {
   }
 
   // =========================
+  // PAYMENT INTENTS (BOOKING PAYMENTS)
+  // =========================
+
+  /**
+   * Create a PaymentIntent for a booking with destination charges (Stripe Connect)
+   * 
+   * @param captureMethod - "automatic" for immediate capture, "manual" for auth-only (pending provider approval)
+   * @param connectedAccountId - The vendor's Stripe Connect account ID
+   * @param applicationFeeAmount - Platform fee in cents
+   */
+  async createBookingPaymentIntent(params: {
+    amountCents: number;
+    currency?: string;
+    customerId?: string;
+    connectedAccountId: string;
+    applicationFeeAmount: number;
+    captureMethod: 'automatic' | 'manual';
+    metadata: {
+      type: 'appointment_booking' | 'shoot_booking';
+      bookingId: string;
+      clientId: string;
+      providerId: string;
+      serviceId?: string;
+    };
+    description?: string;
+  }) {
+    const stripe = await getUncachableStripeClient();
+
+    const paymentIntentData: any = {
+      amount: params.amountCents,
+      currency: params.currency || 'usd',
+      capture_method: params.captureMethod,
+      application_fee_amount: params.applicationFeeAmount,
+      transfer_data: {
+        destination: params.connectedAccountId,
+      },
+      metadata: params.metadata,
+      description: params.description,
+      automatic_payment_methods: {
+        enabled: true,
+      },
+    };
+
+    if (params.customerId) {
+      paymentIntentData.customer = params.customerId;
+    }
+
+    return stripe.paymentIntents.create(paymentIntentData);
+  }
+
+  /**
+   * Capture a previously authorized PaymentIntent (for manual capture flow)
+   * Called when provider accepts a booking
+   */
+  async capturePaymentIntent(paymentIntentId: string, amountToCaptureCents?: number) {
+    const stripe = await getUncachableStripeClient();
+
+    const captureParams: any = {};
+    if (amountToCaptureCents !== undefined) {
+      captureParams.amount_to_capture = amountToCaptureCents;
+    }
+
+    return stripe.paymentIntents.capture(paymentIntentId, captureParams);
+  }
+
+  /**
+   * Cancel a PaymentIntent (void authorization for manual capture)
+   * Called when provider declines or booking expires
+   */
+  async cancelPaymentIntent(paymentIntentId: string, cancellationReason?: 'duplicate' | 'fraudulent' | 'requested_by_customer' | 'abandoned') {
+    const stripe = await getUncachableStripeClient();
+
+    return stripe.paymentIntents.cancel(paymentIntentId, {
+      cancellation_reason: cancellationReason || 'abandoned',
+    });
+  }
+
+  /**
+   * Retrieve a PaymentIntent to check its status
+   */
+  async getPaymentIntent(paymentIntentId: string) {
+    const stripe = await getUncachableStripeClient();
+    return stripe.paymentIntents.retrieve(paymentIntentId);
+  }
+
+  // =========================
   // REFUNDS (PLATFORM CONTROLLED)
   // =========================
 
@@ -296,6 +382,26 @@ export class StripeService {
     return stripe.refunds.create({
       payment_intent: paymentIntentId,
       amount: amountInCents,
+    });
+  }
+
+  /**
+   * Create a refund for a booking with tracking
+   * Returns the refund object for storing stripeRefundId
+   */
+  async createBookingRefund(params: {
+    paymentIntentId: string;
+    amountCents?: number; // undefined = full refund
+    reason?: 'duplicate' | 'fraudulent' | 'requested_by_customer';
+    metadata?: Record<string, string>;
+  }) {
+    const stripe = await getUncachableStripeClient();
+
+    return stripe.refunds.create({
+      payment_intent: params.paymentIntentId,
+      amount: params.amountCents,
+      reason: params.reason || 'requested_by_customer',
+      metadata: params.metadata,
     });
   }
 

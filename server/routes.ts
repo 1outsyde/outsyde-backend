@@ -3469,8 +3469,20 @@ export async function registerRoutes(
         });
       }
 
-      // TODO: Capture the PaymentIntent if using manual capture
-      // For now, just transition to confirmed
+      // Capture the PaymentIntent if using manual capture
+      if (appointment.captureMethod === 'manual' && appointment.stripePaymentIntentId) {
+        try {
+          console.log(`[Booking] Capturing PaymentIntent ${appointment.stripePaymentIntentId} for appointment ${appointmentId}`);
+          await stripeService.capturePaymentIntent(appointment.stripePaymentIntentId);
+          console.log(`[Booking] PaymentIntent captured successfully`);
+        } catch (stripeError: any) {
+          console.error(`[Booking] Failed to capture PaymentIntent:`, stripeError);
+          return res.status(400).json({ 
+            error: "Failed to capture payment", 
+            details: stripeError.message 
+          });
+        }
+      }
 
       const result = await transitionAppointmentState(appointmentId, BOOKING_STATES.CONFIRMED, {
         triggeredBy: userId,
@@ -3519,7 +3531,17 @@ export async function registerRoutes(
         });
       }
 
-      // TODO: Void the PaymentIntent if using manual capture
+      // Cancel/void the PaymentIntent if using manual capture
+      if (appointment.captureMethod === 'manual' && appointment.stripePaymentIntentId) {
+        try {
+          console.log(`[Booking] Canceling PaymentIntent ${appointment.stripePaymentIntentId} for declined appointment ${appointmentId}`);
+          await stripeService.cancelPaymentIntent(appointment.stripePaymentIntentId, 'requested_by_customer');
+          console.log(`[Booking] PaymentIntent canceled successfully`);
+        } catch (stripeError: any) {
+          console.error(`[Booking] Failed to cancel PaymentIntent:`, stripeError);
+          // Continue with decline even if Stripe cancel fails - log for manual resolution
+        }
+      }
 
       const result = await transitionAppointmentState(appointmentId, BOOKING_STATES.DECLINED, {
         triggeredBy: userId,
@@ -3567,7 +3589,20 @@ export async function registerRoutes(
         });
       }
 
-      // TODO: Capture the PaymentIntent if using manual capture
+      // Capture the PaymentIntent if using manual capture
+      if (booking.captureMethod === 'manual' && booking.stripePaymentIntentId) {
+        try {
+          console.log(`[Booking] Capturing PaymentIntent ${booking.stripePaymentIntentId} for shoot booking ${bookingId}`);
+          await stripeService.capturePaymentIntent(booking.stripePaymentIntentId);
+          console.log(`[Booking] PaymentIntent captured successfully`);
+        } catch (stripeError: any) {
+          console.error(`[Booking] Failed to capture PaymentIntent:`, stripeError);
+          return res.status(400).json({ 
+            error: "Failed to capture payment", 
+            details: stripeError.message 
+          });
+        }
+      }
 
       const result = await transitionShootBookingState(bookingId, BOOKING_STATES.CONFIRMED, {
         triggeredBy: userId,
@@ -3616,7 +3651,17 @@ export async function registerRoutes(
         });
       }
 
-      // TODO: Void the PaymentIntent if using manual capture
+      // Cancel/void the PaymentIntent if using manual capture
+      if (booking.captureMethod === 'manual' && booking.stripePaymentIntentId) {
+        try {
+          console.log(`[Booking] Canceling PaymentIntent ${booking.stripePaymentIntentId} for declined shoot booking ${bookingId}`);
+          await stripeService.cancelPaymentIntent(booking.stripePaymentIntentId, 'requested_by_customer');
+          console.log(`[Booking] PaymentIntent canceled successfully`);
+        } catch (stripeError: any) {
+          console.error(`[Booking] Failed to cancel PaymentIntent:`, stripeError);
+          // Continue with decline even if Stripe cancel fails
+        }
+      }
 
       const result = await transitionShootBookingState(bookingId, BOOKING_STATES.DECLINED, {
         triggeredBy: userId,
@@ -3633,6 +3678,506 @@ export async function registerRoutes(
     } catch (error) {
       console.error("Decline photographer booking error:", error);
       res.status(500).json({ error: "Failed to decline booking" });
+    }
+  });
+
+  // =========================
+  // PAYMENT INTENT CREATION FOR BOOKINGS
+  // =========================
+
+  /**
+   * Create PaymentIntent for an appointment booking
+   * For mobile apps using PaymentSheet (instead of Checkout Sessions)
+   * 
+   * Request: { appointmentId: string }
+   * Response: { clientSecret: string, paymentIntentId: string, captureMethod: string }
+   */
+  app.post("/api/bookings/appointments/:appointmentId/create-payment-intent", async (req, res) => {
+    const userId = req.session?.userId || getUserIdFromRequest(req);
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    try {
+      const { appointmentId } = req.params;
+      const appointment = await storage.getAppointment(appointmentId);
+      
+      if (!appointment) {
+        return res.status(404).json({ error: "Appointment not found" });
+      }
+
+      // Only the client who created the booking can pay for it
+      if (appointment.clientId !== userId) {
+        return res.status(403).json({ error: "Not authorized to pay for this booking" });
+      }
+
+      // Must be in draft or pending_payment state
+      if (appointment.status !== BOOKING_STATES.DRAFT && appointment.status !== BOOKING_STATES.PENDING_PAYMENT) {
+        return res.status(400).json({ 
+          error: "Booking is not in a payable state",
+          currentStatus: appointment.status 
+        });
+      }
+
+      // Idempotency: If PaymentIntent already exists and is valid, return it
+      if (appointment.stripePaymentIntentId) {
+        try {
+          const existingPI = await stripeService.getPaymentIntent(appointment.stripePaymentIntentId);
+          // If the existing PaymentIntent is usable (requires_payment_method, requires_confirmation, requires_action)
+          if (['requires_payment_method', 'requires_confirmation', 'requires_action'].includes(existingPI.status)) {
+            console.log(`[Booking] Reusing existing PaymentIntent ${existingPI.id} for appointment ${appointmentId}`);
+            return res.json({
+              clientSecret: existingPI.client_secret,
+              paymentIntentId: existingPI.id,
+              captureMethod: existingPI.capture_method,
+              amount: existingPI.amount,
+              currency: existingPI.currency,
+            });
+          }
+          // If canceled or failed, we'll create a new one
+        } catch (piError) {
+          console.log(`[Booking] Existing PaymentIntent ${appointment.stripePaymentIntentId} not found or invalid, creating new one`);
+        }
+      }
+
+      // Get business to check autoAcceptBookings and get Stripe account
+      const business = await storage.getBusiness(appointment.businessId);
+      if (!business) {
+        return res.status(404).json({ error: "Business not found" });
+      }
+
+      if (!business.stripeAccountId) {
+        return res.status(400).json({ error: "Business has not completed Stripe onboarding" });
+      }
+
+      // Determine capture method based on autoAcceptBookings
+      const captureMethod = business.autoAcceptBookings === false ? 'manual' : 'automatic';
+      
+      // Calculate platform fee (4% for businesses)
+      const platformFeeAmount = Math.round(appointment.totalPrice * 0.04);
+
+      // Get or create Stripe customer for the user
+      const user = await storage.getUser(userId);
+      if (!user) {
+        return res.status(404).json({ error: "User not found" });
+      }
+
+      // Create PaymentIntent
+      const paymentIntent = await stripeService.createBookingPaymentIntent({
+        amountCents: appointment.totalPrice,
+        customerId: user.stripeCustomerId || undefined,
+        connectedAccountId: business.stripeAccountId,
+        applicationFeeAmount: platformFeeAmount,
+        captureMethod,
+        metadata: {
+          type: 'appointment_booking',
+          bookingId: appointmentId,
+          clientId: userId,
+          providerId: appointment.businessId,
+          serviceId: appointment.serviceId,
+        },
+        description: `Appointment booking at ${business.businessName}`,
+      });
+
+      // Update appointment with payment details and transition to pending_payment if still draft
+      await db.update(appointments).set({
+        stripePaymentIntentId: paymentIntent.id,
+        paymentMethod: 'payment_intent',
+        captureMethod,
+        platformFee: platformFeeAmount,
+        vendorNet: appointment.totalPrice - platformFeeAmount,
+        status: BOOKING_STATES.PENDING_PAYMENT,
+        updatedAt: new Date()
+      }).where(eq(appointments.id, appointmentId));
+
+      console.log(`[Booking] Created PaymentIntent ${paymentIntent.id} for appointment ${appointmentId} (captureMethod: ${captureMethod})`);
+
+      res.json({
+        clientSecret: paymentIntent.client_secret,
+        paymentIntentId: paymentIntent.id,
+        captureMethod,
+        amount: appointment.totalPrice,
+        currency: 'usd',
+      });
+    } catch (error: any) {
+      console.error("Create appointment PaymentIntent error:", error);
+      res.status(500).json({ error: "Failed to create payment intent", details: error.message });
+    }
+  });
+
+  /**
+   * Create PaymentIntent for a photographer shoot booking
+   * For mobile apps using PaymentSheet (instead of Checkout Sessions)
+   * 
+   * Request: { bookingId: string }
+   * Response: { clientSecret: string, paymentIntentId: string, captureMethod: string }
+   */
+  app.post("/api/bookings/photographer/:bookingId/create-payment-intent", async (req, res) => {
+    const userId = req.session?.userId || getUserIdFromRequest(req);
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    try {
+      const { bookingId } = req.params;
+      const booking = await storage.getShootBooking(bookingId);
+      
+      if (!booking) {
+        return res.status(404).json({ error: "Booking not found" });
+      }
+
+      // Only the client who created the booking can pay for it
+      if (booking.clientId !== userId) {
+        return res.status(403).json({ error: "Not authorized to pay for this booking" });
+      }
+
+      // Must be in draft or pending_payment state
+      if (booking.status !== BOOKING_STATES.DRAFT && booking.status !== BOOKING_STATES.PENDING_PAYMENT) {
+        return res.status(400).json({ 
+          error: "Booking is not in a payable state",
+          currentStatus: booking.status 
+        });
+      }
+
+      // Idempotency: If PaymentIntent already exists and is valid, return it
+      if (booking.stripePaymentIntentId) {
+        try {
+          const existingPI = await stripeService.getPaymentIntent(booking.stripePaymentIntentId);
+          if (['requires_payment_method', 'requires_confirmation', 'requires_action'].includes(existingPI.status)) {
+            console.log(`[Booking] Reusing existing PaymentIntent ${existingPI.id} for shoot booking ${bookingId}`);
+            return res.json({
+              clientSecret: existingPI.client_secret,
+              paymentIntentId: existingPI.id,
+              captureMethod: existingPI.capture_method,
+              amount: existingPI.amount,
+              currency: existingPI.currency,
+            });
+          }
+        } catch (piError) {
+          console.log(`[Booking] Existing PaymentIntent ${booking.stripePaymentIntentId} not found or invalid, creating new one`);
+        }
+      }
+
+      // Get photographer to check autoAcceptBookings and get Stripe account
+      const photographer = await storage.getPhotographer(booking.photographerId);
+      if (!photographer) {
+        return res.status(404).json({ error: "Photographer not found" });
+      }
+
+      if (!photographer.stripeAccountId) {
+        return res.status(400).json({ error: "Photographer has not completed Stripe onboarding" });
+      }
+
+      // Determine capture method based on autoAcceptBookings
+      const captureMethod = photographer.autoAcceptBookings === false ? 'manual' : 'automatic';
+      
+      // Calculate platform fee (10% for photographers)
+      const platformFeeAmount = Math.round(booking.totalPrice * 0.10);
+
+      // Get user for Stripe customer
+      const user = await storage.getUser(userId);
+      if (!user) {
+        return res.status(404).json({ error: "User not found" });
+      }
+
+      // Create PaymentIntent
+      const paymentIntent = await stripeService.createBookingPaymentIntent({
+        amountCents: booking.totalPrice,
+        customerId: user.stripeCustomerId || undefined,
+        connectedAccountId: photographer.stripeAccountId,
+        applicationFeeAmount: platformFeeAmount,
+        captureMethod,
+        metadata: {
+          type: 'shoot_booking',
+          bookingId: bookingId,
+          clientId: userId,
+          providerId: booking.photographerId,
+          serviceId: booking.serviceId || undefined,
+        },
+        description: `Photography shoot booking with ${photographer.displayName}`,
+      });
+
+      // Update booking with payment details and transition to pending_payment if still draft
+      await db.update(shootBookings).set({
+        stripePaymentIntentId: paymentIntent.id,
+        paymentMethod: 'payment_intent',
+        captureMethod,
+        platformFee: platformFeeAmount,
+        vendorNet: booking.totalPrice - platformFeeAmount,
+        status: BOOKING_STATES.PENDING_PAYMENT,
+        updatedAt: new Date()
+      }).where(eq(shootBookings.id, bookingId));
+
+      console.log(`[Booking] Created PaymentIntent ${paymentIntent.id} for shoot booking ${bookingId} (captureMethod: ${captureMethod})`);
+
+      res.json({
+        clientSecret: paymentIntent.client_secret,
+        paymentIntentId: paymentIntent.id,
+        captureMethod,
+        amount: booking.totalPrice,
+        currency: 'usd',
+      });
+    } catch (error: any) {
+      console.error("Create shoot booking PaymentIntent error:", error);
+      res.status(500).json({ error: "Failed to create payment intent", details: error.message });
+    }
+  });
+
+  // =========================
+  // BOOKING REFUNDS
+  // =========================
+
+  /**
+   * Refund an appointment booking
+   * Can be initiated by provider (business owner) or admin
+   * 
+   * Request: { reason?: string, amount?: number (partial refund in cents) }
+   * Response: { success: boolean, refundId: string, amount: number }
+   */
+  app.post("/api/bookings/appointments/:appointmentId/refund", async (req, res) => {
+    const userId = req.session?.userId || getUserIdFromRequest(req);
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    try {
+      const { appointmentId } = req.params;
+      const { reason, amount } = req.body;
+      const appointment = await storage.getAppointment(appointmentId);
+      
+      if (!appointment) {
+        return res.status(404).json({ error: "Appointment not found" });
+      }
+
+      // Check if user is the business owner or admin
+      const business = await storage.getBusiness(appointment.businessId);
+      const user = await storage.getUser(userId);
+      if (!business || (business.ownerId !== userId && user?.role !== 'admin')) {
+        return res.status(403).json({ error: "Not authorized to refund this booking" });
+      }
+
+      // Handle non-refundable states by canceling PaymentIntent if applicable
+      if (appointment.status !== BOOKING_STATES.CONFIRMED && appointment.status !== BOOKING_STATES.COMPLETED) {
+        // For pending_payment or pending_provider with PaymentIntent, cancel the authorization
+        if ((appointment.status === BOOKING_STATES.PENDING_PAYMENT || appointment.status === BOOKING_STATES.PENDING_PROVIDER) 
+            && appointment.stripePaymentIntentId) {
+          try {
+            await stripeService.cancelPaymentIntent(appointment.stripePaymentIntentId, 'requested_by_customer');
+            await transitionAppointmentState(appointmentId, BOOKING_STATES.CANCELED, {
+              triggeredBy: userId,
+              triggerSource: 'api',
+              metadata: { action: 'provider_cancel', reason }
+            });
+            return res.json({ success: true, message: "Payment authorization voided, booking canceled" });
+          } catch (stripeError: any) {
+            console.error(`[Booking] Failed to cancel PaymentIntent for appointment ${appointmentId}:`, stripeError);
+            // Continue with state transition even if Stripe cancel fails
+            await transitionAppointmentState(appointmentId, BOOKING_STATES.CANCELED, {
+              triggeredBy: userId,
+              triggerSource: 'api',
+              metadata: { action: 'provider_cancel', reason, stripeError: stripeError.message }
+            });
+            return res.json({ success: true, message: "Booking canceled (payment may need manual resolution)" });
+          }
+        }
+        
+        // For draft state, just cancel
+        if (appointment.status === BOOKING_STATES.DRAFT) {
+          await transitionAppointmentState(appointmentId, BOOKING_STATES.CANCELED, {
+            triggeredBy: userId,
+            triggerSource: 'api',
+            metadata: { action: 'provider_cancel', reason }
+          });
+          return res.json({ success: true, message: "Draft booking canceled" });
+        }
+        
+        return res.status(400).json({ 
+          error: "Booking cannot be refunded in current state",
+          currentStatus: appointment.status 
+        });
+      }
+
+      if (!appointment.stripePaymentIntentId) {
+        return res.status(400).json({ error: "No payment found for this booking" });
+      }
+
+      // Create refund
+      const refundAmount = amount || appointment.totalPrice; // Full refund if no amount specified
+      const refund = await stripeService.createBookingRefund({
+        paymentIntentId: appointment.stripePaymentIntentId,
+        amountCents: refundAmount,
+        reason: 'requested_by_customer',
+        metadata: {
+          appointmentId,
+          initiatedBy: userId,
+          reason: reason || 'Provider initiated refund',
+        }
+      });
+
+      // Use state machine for consistent audit logging
+      await transitionAppointmentState(appointmentId, BOOKING_STATES.CANCELED, {
+        triggeredBy: userId,
+        triggerSource: 'api',
+        metadata: { 
+          action: 'refund',
+          refundId: refund.id,
+          refundAmount,
+          reason: reason || 'Refunded by provider'
+        }
+      });
+
+      // Update appointment with refund details (additional fields not in state machine)
+      await db.update(appointments).set({
+        stripeRefundId: refund.id,
+        refundedAt: new Date(),
+        refundAmount: refundAmount,
+        canceledBy: userId,
+        cancellationReason: reason || 'Refunded by provider'
+      }).where(eq(appointments.id, appointmentId));
+
+      // Reverse points if applicable
+      try {
+        await storage.reversePoints(appointment.clientId, 'appointment', appointmentId, 'Booking refunded');
+      } catch (pointsError) {
+        console.error("Failed to reverse points:", pointsError);
+      }
+
+      console.log(`[Booking] Refunded appointment ${appointmentId}: ${refundAmount} cents (refund ID: ${refund.id})`);
+
+      res.json({ 
+        success: true, 
+        refundId: refund.id,
+        amount: refundAmount,
+        status: refund.status
+      });
+    } catch (error: any) {
+      console.error("Refund appointment error:", error);
+      res.status(500).json({ error: "Failed to process refund", details: error.message });
+    }
+  });
+
+  /**
+   * Refund a photographer shoot booking
+   * Can be initiated by provider (photographer) or admin
+   */
+  app.post("/api/bookings/photographer/:bookingId/refund", async (req, res) => {
+    const userId = req.session?.userId || getUserIdFromRequest(req);
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    try {
+      const { bookingId } = req.params;
+      const { reason, amount } = req.body;
+      const booking = await storage.getShootBooking(bookingId);
+      
+      if (!booking) {
+        return res.status(404).json({ error: "Booking not found" });
+      }
+
+      // Check if user is the photographer or admin
+      const photographer = await storage.getPhotographer(booking.photographerId);
+      const user = await storage.getUser(userId);
+      if (!photographer || (photographer.userId !== userId && user?.role !== 'admin')) {
+        return res.status(403).json({ error: "Not authorized to refund this booking" });
+      }
+
+      // Handle non-refundable states by canceling PaymentIntent if applicable
+      if (booking.status !== BOOKING_STATES.CONFIRMED && booking.status !== BOOKING_STATES.COMPLETED) {
+        // For pending_payment or pending_provider with PaymentIntent, cancel the authorization
+        if ((booking.status === BOOKING_STATES.PENDING_PAYMENT || booking.status === BOOKING_STATES.PENDING_PROVIDER) 
+            && booking.stripePaymentIntentId) {
+          try {
+            await stripeService.cancelPaymentIntent(booking.stripePaymentIntentId, 'requested_by_customer');
+            await transitionShootBookingState(bookingId, BOOKING_STATES.CANCELED, {
+              triggeredBy: userId,
+              triggerSource: 'api',
+              metadata: { action: 'provider_cancel', reason }
+            });
+            return res.json({ success: true, message: "Payment authorization voided, booking canceled" });
+          } catch (stripeError: any) {
+            console.error(`[Booking] Failed to cancel PaymentIntent for shoot booking ${bookingId}:`, stripeError);
+            await transitionShootBookingState(bookingId, BOOKING_STATES.CANCELED, {
+              triggeredBy: userId,
+              triggerSource: 'api',
+              metadata: { action: 'provider_cancel', reason, stripeError: stripeError.message }
+            });
+            return res.json({ success: true, message: "Booking canceled (payment may need manual resolution)" });
+          }
+        }
+        
+        // For draft state, just cancel
+        if (booking.status === BOOKING_STATES.DRAFT) {
+          await transitionShootBookingState(bookingId, BOOKING_STATES.CANCELED, {
+            triggeredBy: userId,
+            triggerSource: 'api',
+            metadata: { action: 'provider_cancel', reason }
+          });
+          return res.json({ success: true, message: "Draft booking canceled" });
+        }
+        
+        return res.status(400).json({ 
+          error: "Booking cannot be refunded in current state",
+          currentStatus: booking.status 
+        });
+      }
+
+      if (!booking.stripePaymentIntentId) {
+        return res.status(400).json({ error: "No payment found for this booking" });
+      }
+
+      // Create refund
+      const refundAmount = amount || booking.totalPrice;
+      const refund = await stripeService.createBookingRefund({
+        paymentIntentId: booking.stripePaymentIntentId,
+        amountCents: refundAmount,
+        reason: 'requested_by_customer',
+        metadata: {
+          shootBookingId: bookingId,
+          initiatedBy: userId,
+          reason: reason || 'Provider initiated refund',
+        }
+      });
+
+      // Use state machine for consistent audit logging
+      await transitionShootBookingState(bookingId, BOOKING_STATES.CANCELED, {
+        triggeredBy: userId,
+        triggerSource: 'api',
+        metadata: { 
+          action: 'refund',
+          refundId: refund.id,
+          refundAmount,
+          reason: reason || 'Refunded by provider'
+        }
+      });
+
+      // Update booking with refund details (additional fields not in state machine)
+      await db.update(shootBookings).set({
+        stripeRefundId: refund.id,
+        refundedAt: new Date(),
+        refundAmount: refundAmount,
+        canceledBy: userId,
+        cancellationReason: reason || 'Refunded by provider'
+      }).where(eq(shootBookings.id, bookingId));
+
+      // Reverse points if applicable
+      try {
+        await storage.reversePoints(booking.clientId, 'shoot_booking', bookingId, 'Booking refunded');
+      } catch (pointsError) {
+        console.error("Failed to reverse points:", pointsError);
+      }
+
+      console.log(`[Booking] Refunded shoot booking ${bookingId}: ${refundAmount} cents (refund ID: ${refund.id})`);
+
+      res.json({ 
+        success: true, 
+        refundId: refund.id,
+        amount: refundAmount,
+        status: refund.status
+      });
+    } catch (error: any) {
+      console.error("Refund shoot booking error:", error);
+      res.status(500).json({ error: "Failed to process refund", details: error.message });
     }
   });
 

@@ -73,6 +73,319 @@ export class WebhookHandlers {
       case "account.updated":
         await this.handleConnectAccountUpdated(event.data.object);
         break;
+      
+      // PaymentIntent events for booking payments
+      case "payment_intent.succeeded":
+        await this.handlePaymentIntentSucceeded(event.data.object);
+        break;
+      
+      case "payment_intent.canceled":
+        await this.handlePaymentIntentCanceled(event.data.object);
+        break;
+      
+      case "payment_intent.payment_failed":
+        await this.handlePaymentIntentFailed(event.data.object);
+        break;
+      
+      case "payment_intent.amount_capturable_updated":
+        await this.handlePaymentIntentCapturableUpdated(event.data.object);
+        break;
+    }
+  }
+
+  /* =====================================================
+     PAYMENT INTENT HANDLERS (BOOKING PAYMENTS)
+  ===================================================== */
+
+  /**
+   * Handle payment_intent.succeeded - called when:
+   * 1. PaymentIntent with capture_method=automatic completes payment
+   * 2. PaymentIntent with capture_method=manual is captured
+   */
+  static async handlePaymentIntentSucceeded(paymentIntent: any) {
+    const metadata = paymentIntent.metadata || {};
+    const { type, bookingId, clientId } = metadata;
+
+    if (!type || !bookingId) {
+      // Not a booking-related PaymentIntent, ignore
+      return;
+    }
+
+    console.log(`[Stripe] PaymentIntent succeeded for ${type} ${bookingId}`);
+
+    try {
+      if (type === 'appointment_booking') {
+        const appointment = await storage.getAppointment(bookingId);
+        if (!appointment) {
+          console.error(`[Stripe] Appointment ${bookingId} not found`);
+          return;
+        }
+
+        // If status is pending_payment (automatic capture) -> CONFIRMED
+        // If status is pending_provider (manual capture just captured) -> CONFIRMED
+        if (appointment.status === BOOKING_STATES.PENDING_PAYMENT || 
+            appointment.status === BOOKING_STATES.PENDING_PROVIDER) {
+          const result = await transitionAppointmentState(
+            bookingId,
+            BOOKING_STATES.CONFIRMED,
+            {
+              triggeredBy: 'stripe',
+              triggerSource: 'webhook',
+              metadata: {
+                stripePaymentIntentId: paymentIntent.id,
+                event: 'payment_intent.succeeded'
+              }
+            }
+          );
+
+          if (!result.success) {
+            console.error(`[Stripe] Failed to confirm appointment ${bookingId}: ${result.error}`);
+            return;
+          }
+
+          // Update appointment with payment details
+          await db.update(appointments).set({
+            stripePaymentIntentId: paymentIntent.id,
+            updatedAt: new Date()
+          }).where(eq(appointments.id, bookingId));
+
+          // Award points
+          const user = clientId ? await storage.getUser(clientId) : null;
+          if (user) {
+            await storage.earnPoints({
+              userId: user.id,
+              dollarAmountCents: paymentIntent.amount,
+              transactionType: 'business_transaction',
+              referenceType: 'appointment',
+              referenceId: bookingId,
+              description: 'Points earned from appointment booking',
+            });
+            await this.tryCompleteReferral(user.id, bookingId, 'appointment');
+          }
+
+          console.log(`[Stripe] Appointment ${bookingId} confirmed via PaymentIntent`);
+        }
+      } else if (type === 'shoot_booking') {
+        const booking = await storage.getShootBooking(bookingId);
+        if (!booking) {
+          console.error(`[Stripe] Shoot booking ${bookingId} not found`);
+          return;
+        }
+
+        if (booking.status === BOOKING_STATES.PENDING_PAYMENT || 
+            booking.status === BOOKING_STATES.PENDING_PROVIDER) {
+          const result = await transitionShootBookingState(
+            bookingId,
+            BOOKING_STATES.CONFIRMED,
+            {
+              triggeredBy: 'stripe',
+              triggerSource: 'webhook',
+              metadata: {
+                stripePaymentIntentId: paymentIntent.id,
+                event: 'payment_intent.succeeded'
+              }
+            }
+          );
+
+          if (!result.success) {
+            console.error(`[Stripe] Failed to confirm shoot booking ${bookingId}: ${result.error}`);
+            return;
+          }
+
+          // Update shoot booking with payment details
+          await db.update(shootBookings).set({
+            stripePaymentIntentId: paymentIntent.id,
+            updatedAt: new Date()
+          }).where(eq(shootBookings.id, bookingId));
+
+          // Award points
+          const user = clientId ? await storage.getUser(clientId) : null;
+          if (user) {
+            await storage.earnPoints({
+              userId: user.id,
+              dollarAmountCents: paymentIntent.amount,
+              transactionType: 'photographer_booking',
+              referenceType: 'shoot_booking',
+              referenceId: bookingId,
+              description: 'Points earned from photographer booking',
+            });
+            await this.tryCompleteReferral(user.id, bookingId, 'shoot_booking');
+          }
+
+          console.log(`[Stripe] Shoot booking ${bookingId} confirmed via PaymentIntent`);
+        }
+      }
+    } catch (error) {
+      console.error(`[Stripe] Error handling payment_intent.succeeded:`, error);
+    }
+  }
+
+  /**
+   * Handle payment_intent.amount_capturable_updated - called when manual capture PaymentIntent is authorized
+   * This transitions to PENDING_PROVIDER state for manual approval flow
+   */
+  static async handlePaymentIntentCapturableUpdated(paymentIntent: any) {
+    const metadata = paymentIntent.metadata || {};
+    const { type, bookingId } = metadata;
+
+    if (!type || !bookingId) {
+      return;
+    }
+
+    // Only handle if there's an amount to capture (authorization successful)
+    if (!paymentIntent.amount_capturable || paymentIntent.amount_capturable === 0) {
+      return;
+    }
+
+    console.log(`[Stripe] PaymentIntent ${paymentIntent.id} authorized for ${type} ${bookingId}`);
+
+    try {
+      if (type === 'appointment_booking') {
+        const appointment = await storage.getAppointment(bookingId);
+        if (!appointment || appointment.status !== BOOKING_STATES.PENDING_PAYMENT) {
+          return;
+        }
+
+        // Check if provider requires manual approval
+        const business = await storage.getBusiness(appointment.businessId);
+        if (business && business.autoAcceptBookings === false) {
+          // Transition to PENDING_PROVIDER
+          const pendingProviderExpiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000);
+          
+          const result = await transitionAppointmentState(
+            bookingId,
+            BOOKING_STATES.PENDING_PROVIDER,
+            {
+              triggeredBy: 'stripe',
+              triggerSource: 'webhook',
+              metadata: { event: 'payment_intent.amount_capturable_updated' }
+            }
+          );
+
+          if (result.success) {
+            await db.update(appointments).set({
+              stripePaymentIntentId: paymentIntent.id,
+              pendingProviderExpiresAt,
+              updatedAt: new Date()
+            }).where(eq(appointments.id, bookingId));
+            
+            console.log(`[Stripe] Appointment ${bookingId} awaiting provider approval (24h timeout)`);
+          }
+        }
+      } else if (type === 'shoot_booking') {
+        const booking = await storage.getShootBooking(bookingId);
+        if (!booking || booking.status !== BOOKING_STATES.PENDING_PAYMENT) {
+          return;
+        }
+
+        const photographer = await storage.getPhotographer(booking.photographerId);
+        if (photographer && photographer.autoAcceptBookings === false) {
+          const pendingProviderExpiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000);
+          
+          const result = await transitionShootBookingState(
+            bookingId,
+            BOOKING_STATES.PENDING_PROVIDER,
+            {
+              triggeredBy: 'stripe',
+              triggerSource: 'webhook',
+              metadata: { event: 'payment_intent.amount_capturable_updated' }
+            }
+          );
+
+          if (result.success) {
+            await db.update(shootBookings).set({
+              stripePaymentIntentId: paymentIntent.id,
+              pendingProviderExpiresAt,
+              updatedAt: new Date()
+            }).where(eq(shootBookings.id, bookingId));
+            
+            console.log(`[Stripe] Shoot booking ${bookingId} awaiting provider approval (24h timeout)`);
+          }
+        }
+      }
+    } catch (error) {
+      console.error(`[Stripe] Error handling payment_intent.amount_capturable_updated:`, error);
+    }
+  }
+
+  /**
+   * Handle payment_intent.canceled - authorization was voided
+   */
+  static async handlePaymentIntentCanceled(paymentIntent: any) {
+    const metadata = paymentIntent.metadata || {};
+    const { type, bookingId } = metadata;
+
+    if (!type || !bookingId) {
+      return;
+    }
+
+    console.log(`[Stripe] PaymentIntent canceled for ${type} ${bookingId}`);
+
+    try {
+      if (type === 'appointment_booking') {
+        const appointment = await storage.getAppointment(bookingId);
+        if (!appointment) return;
+
+        // Only handle if still in a cancellable state
+        if ([BOOKING_STATES.PENDING_PAYMENT, BOOKING_STATES.PENDING_PROVIDER, BOOKING_STATES.DRAFT].includes(appointment.status as any)) {
+          await transitionAppointmentState(
+            bookingId,
+            BOOKING_STATES.CANCELED,
+            {
+              triggeredBy: 'stripe',
+              triggerSource: 'webhook',
+              metadata: { 
+                event: 'payment_intent.canceled',
+                cancellationReason: paymentIntent.cancellation_reason 
+              }
+            }
+          );
+          console.log(`[Stripe] Appointment ${bookingId} canceled (payment voided)`);
+        }
+      } else if (type === 'shoot_booking') {
+        const booking = await storage.getShootBooking(bookingId);
+        if (!booking) return;
+
+        if ([BOOKING_STATES.PENDING_PAYMENT, BOOKING_STATES.PENDING_PROVIDER, BOOKING_STATES.DRAFT].includes(booking.status as any)) {
+          await transitionShootBookingState(
+            bookingId,
+            BOOKING_STATES.CANCELED,
+            {
+              triggeredBy: 'stripe',
+              triggerSource: 'webhook',
+              metadata: { 
+                event: 'payment_intent.canceled',
+                cancellationReason: paymentIntent.cancellation_reason 
+              }
+            }
+          );
+          console.log(`[Stripe] Shoot booking ${bookingId} canceled (payment voided)`);
+        }
+      }
+    } catch (error) {
+      console.error(`[Stripe] Error handling payment_intent.canceled:`, error);
+    }
+  }
+
+  /**
+   * Handle payment_intent.payment_failed - payment attempt failed
+   */
+  static async handlePaymentIntentFailed(paymentIntent: any) {
+    const metadata = paymentIntent.metadata || {};
+    const { type, bookingId } = metadata;
+
+    if (!type || !bookingId) {
+      return;
+    }
+
+    console.log(`[Stripe] PaymentIntent failed for ${type} ${bookingId}`);
+
+    try {
+      // Log the failure but don't immediately cancel - let the user retry
+      // The draft/pending_payment cleanup job will expire it if they don't complete payment
+      console.log(`[Stripe] Payment failed for ${type} ${bookingId}: ${paymentIntent.last_payment_error?.message || 'Unknown error'}`);
+    } catch (error) {
+      console.error(`[Stripe] Error handling payment_intent.payment_failed:`, error);
     }
   }
 

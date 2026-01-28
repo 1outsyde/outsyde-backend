@@ -1,7 +1,7 @@
 # Outsyde - Social Marketplace Platform
 
 ## Overview
-Outsyde is a social marketplace platform designed to connect customers with local small businesses. It offers customizable vendor storefronts, service booking capabilities, real-time chat, loyalty rewards, and a social media-style discovery feed with location-based browsing. The platform's core purpose is to empower small businesses with essential tools for expanding their reach and optimizing operations, while providing customers with a seamless experience for discovering and engaging with local services and products.
+Outsyde is a social marketplace platform connecting customers with local small businesses. It features customizable vendor storefronts, service booking, real-time chat, loyalty rewards, and a social media-style discovery feed with location-based browsing. The platform's goal is to empower small businesses with tools for growth and operational efficiency, while offering customers a seamless experience for local product and service discovery.
 
 ## User Preferences
 - Golden yellow color scheme for branding
@@ -9,126 +9,38 @@ Outsyde is a social marketplace platform designed to connect customers with loca
 - Inter/DM Sans/Poppins font family
 
 ## System Architecture
-The Outsyde platform operates as a monorepo, utilizing a React frontend, an Express (TypeScript) backend, and a PostgreSQL database managed with Drizzle ORM.
+Outsyde is built as a monorepo, using a React frontend, an Express (TypeScript) backend, and a PostgreSQL database managed with Drizzle ORM.
 
-**Key Architectural Decisions & Implementations:**
+**Core Architectural Decisions & Implementations:**
 -   **Authentication:** Session-based for web, JWT-based for mobile (1hr access, 7-day refresh), and OAuth via Replit Auth. Passwords are secured using bcrypt.
 -   **Database:** PostgreSQL with Drizzle ORM.
--   **Real-time Communication:** Implemented using WebSockets for features like chat.
--   **UI/UX:** Adheres to a modern, social media-inspired design, incorporating a golden yellow color scheme and specified fonts.
--   **Transaction Fees:** A tiered fee structure applies: 10% for photographers per booking and 4% for businesses per transaction, in addition to subscription fees.
--   **Outsyde Points System (Loyalty):** Profit-based rewards system:
-    - **Earning:** Points = 10% of Outsyde's platform profit (10% photographer fee, 4% business fee), rounded down to nearest 100 points, max 5,000 points per transaction (tracked via `capped` flag in ledger)
-    - **Redemption Tiers:** Fixed amounts only: 500, 1000, 2500, 5000, 10000, 25000 points
-    - **Redemption Guardrails:** Max 30% of order total, max 1 per transaction, blocked on deposits/first bookings/subscriptions
-    - **Reversals:** Points reversed on refunds/cancellations via `reversePoints()`
-    - **Funding Rule:** Redemption discounts absorbed by Outsyde, vendor payouts unchanged
-    - **Referral Bonuses:** New user: 250 points, Referrer: 500 points (after first purchase), max 50 referrals/user
--   **Core Features:** Includes multi-step onboarding, verified reviews, and a referral program.
--   **Cart & Checkout:** Supports database-backed cart management for authenticated users, `localStorage` for guests, and multi-vendor checkout allowing purchases from various vendors in one session.
--   **Notifications:** Utilizes Web Push for cart abandonment and server-side in-app notifications for various events. Admins receive email notifications for new vendor applications.
--   **Refund System:** Provides a mechanism for users to request refunds, triggering point reversals and review revocations upon approval.
--   **Availability Calendars:** Dedicated systems for businesses and photographers to manage availability, prevent double-booking, and ensure atomic slot reservations.
--   **Admin & Vendor Dashboards:** Comprehensive dashboards for administrators to manage platform aspects, and for vendors/photographers to manage their profiles, services, and bookings.
--   **Multi-Staff System:** Businesses can manage team members with individual availability calendars and direct payouts via Stripe Connect.
--   **Monetization Intent:** Captures user interest in selling products, offering services, or promoting as an influencer, with a system-controlled `canMonetize` status requiring approval.
--   **Stripe Connect Marketplace:** Implements Stripe's destination charges model for payment processing, facilitating platform fee collection and direct payouts to vendors and photographers. Vendors must complete Stripe Express onboarding.
--   **Subscription Enforcement:** Server-side logic enforces vendor subscriptions, blocking operations and hiding storefronts for inactive subscriptions, with a grace period. Products require active subscriptions and admin approval to go live.
--   **Shipment Tracking:** A comprehensive fulfillment system with carrier integration provides shipment tracking visible to customers.
--   **Booking State Machine:** Backend-driven booking flow with provider approval support:
-    - **States:** DRAFT (10-min TTL) → PENDING_PAYMENT → [PENDING_PROVIDER (24h TTL)] → CONFIRMED → COMPLETED/CANCELED/DECLINED
-    - **Provider Acceptance Workflow:**
-        - `autoAcceptBookings=true` (default): Payment → CONFIRMED immediately
-        - `autoAcceptBookings=false`: Payment → PENDING_PROVIDER → await provider action
-        - Accept: Transitions to CONFIRMED (captures PaymentIntent if manual capture)
-        - Decline: Transitions to DECLINED (voids PaymentIntent if manual capture)
-        - Timeout (24h): Auto-expires booking (voids PaymentIntent)
-    - **Zero double-booking:** DB-level EXCLUDE constraints with GiST indexes for time overlap detection
-    - **Active states for slot blocking:** DRAFT, PENDING_PAYMENT, PENDING_PROVIDER, CONFIRMED
-    - **Cleanup job:** Runs every 60s for draft (10-min) and pending_provider (24h) expiry
-    - **Audit trail:** All state changes logged in booking_audit_log table
--   **Weekly Availability Patterns:** Recurring schedule templates for providers:
-    - `GET/PUT /api/businesses/me/weekly-availability` - Business owner availability
-    - `GET/PUT /api/photographers/me/weekly-availability` - Photographer availability
-    - Schema: `{ dayOfWeek: 0-6, startTime: "HH:MM", endTime: "HH:MM", isActive: boolean }`
-    - Supports staff-specific schedules via `staffMemberId` parameter
--   **Provider Blocks:** Time-off and unavailability management:
-    - `GET/POST/PATCH/DELETE /api/businesses/me/blocks` - Business blocking
-    - `GET/POST/PATCH/DELETE /api/photographers/me/blocks` - Photographer blocking
-    - Schema: `{ startAt: Date, endAt: Date, blockType: "vacation"|"personal"|"holiday"|"custom", title?, reason? }`
-    - Timestamp-based for multi-day support, checked against slot availability
--   **State Machines & Audit Logging:** Server-side state machines enforce valid status transitions for orders and bookings, complemented by comprehensive audit logging for financial actions.
--   **Messaging Features:** Includes user blocking, message reporting, and basic abuse prevention measures.
--   **Mobile Backend Integration:** The backend serves as an API for FlutterFlow and Expo mobile apps, supporting JWT authentication and two Google OAuth flows:
-    - **ID Token Flow** (`POST /api/auth/mobile/google`): Verifies Google ID tokens directly, returns JWT tokens
-    - **Authorization Code Flow** (`GET /api/auth/mobile/google/callback`): Server-side OAuth for Expo apps with CSRF protection via `state` parameter, creates session, redirects to `outsyde://auth/success` or `outsyde://auth/error`
-        - Mobile app calls `POST /api/auth/mobile/google/preflight` first to get server-generated state and OAuth URL
-        - Preflight returns: `{ state, authUrl, expiresIn }` - state is stored server-side for validation
-        - On callback, server validates state exists in store (one-time use, 10min TTL)
-        - Requires `GOOGLE_OAUTH_REDIRECT_URI` env var to match registered redirect URI in Google Console
-        - Environment variables: `GOOGLE_OAUTH_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `GOOGLE_OAUTH_REDIRECT_URI`
--   **User Location & Personalized Search:** The backend is the source of truth for user location, enabling personalized search results based on user preferences (industries, niches, values).
--   **Identity Change Limits:** Server-side rate limiting for identity fields (similar to major platforms):
-    - **Username:** Unique, used for profile routing/search/tagging. Can only be changed once every 30 days. Tracked via `usernameLastChangedAt`.
-    - **DisplayName:** Not unique, UI-only display. Can only be changed once every 7 days. Tracked via `displayNameLastChangedAt`.
-    - Endpoints: `PATCH /api/users/identity` (update), `GET /api/users/identity/status` (check cooldowns)
--   **Data Privacy:** Strict measures are in place for sensitive data like DOB and ethnicity, ensuring limited visibility and aggregation for analytics only. Demo data is filtered for non-admin users.
--   **Business Visibility Filtering:** Server-side `isBusinessVisibleToPublic()` helper enforces visibility on all public business endpoints (/api/vendors, /api/search, /api/businesses, /api/businesses/:id, /api/businesses/:id/products, /api/businesses/:id/services). Criteria: approvalStatus === "approved", excludes demo data (ownerId contains "demo"), stripeOnboardingComplete required only if hasProducts/hasServices, and active subscription.
--   **Post Commerce Support:** Feed posts can optionally include commerce links for booking/purchase CTAs:
-    - `productId` - Links to a business product (validated ownership)
-    - `serviceId` - Links to a business service (validated ownership)
-    - `photographerServiceId` - Links to a photographer service (validated ownership)
-    - Feed responses expose these IDs plus enriched product/service objects with details
-    - Availability endpoints accept optional `serviceId` to auto-determine booking duration
--   **Post Intent System:** Role-based authorization for post types:
-    - `postIntent`: "social" | "review" | "promotion" (defaults to "social" for legacy clients)
-    - **Social posts:** Open to all users, tagging optional
-    - **Review posts:** Requires `taggedBusinessId` or `taggedPhotographerId` + transaction/booking history
-    - **Promotion posts:** Only business owners, photographers, or approved influencers (`isInfluencer=true`)
-    - Error codes: `PROMOTION_NOT_ALLOWED`, `TAGGED_ENTITY_REQUIRED`, `NO_TRANSACTION_HISTORY`
--   **Feed Author Object:** Every feed post includes a canonical `author` object for frontend identity:
-    - Structure: `{ userId, username, displayName, profilePhotoUrl, role }`
-    - `role`: "consumer" | "photographer" | "vendor"
-    - Posts with missing authors are excluded from feed (fail closed)
-    - No frontend joins required - author data is fully hydrated server-side
--   **Follow System:** Users can follow each other:
-    - `POST /api/follows` - Follow a user (auth required)
-    - `DELETE /api/follows/:targetUserId` - Unfollow (auth required)
-    - `GET /api/follows/check/:targetUserId` - Check follow status (auth required)
-    - `GET /api/users/me/following` - Get current user's following list (auth required)
-    - `GET /api/users/me/followers` - Get current user's followers list (auth required)
-    - `GET /api/users/:userId/following` - Get any user's following list (public)
-    - `GET /api/users/:userId/followers` - Get any user's followers list (public)
-    - All user lists return canonical objects: `{ userId, username, displayName, profilePhotoUrl }`
--   **Storefront Video Banners:** Vendors and photographers can upload video banners for their storefronts:
-    - `coverMediaType`: "image" | "video" - determines banner rendering type
-    - Video specs: max 15 seconds duration, max 50MB file size
-    - Video banners render with autoPlay, loop, muted, playsInline attributes
-    - MediaUploader component handles both image and video uploads with preview
-    - Falls back to image rendering if video URL is missing/empty
--   **Unified Search Engine:** `GET /api/search` provides cross-entity search with scope filtering and personalization:
-    - **Scopes:** `all` (default), `consumers`, `photographers`, `businesses`, `products`, `services`
-    - **Parameters:** `q` (query), `scope`, `viewerUserId` (optional), `limit`, `offset`
-    - **Normalized Result Shape:**
-      ```json
-      {
-        "id": "uuid",
-        "type": "consumer | photographer | business | product | service",
-        "title": "Display name",
-        "subtitle": "Category or location info",
-        "imageUrl": "string | null",
-        "ratingAvg": "number | null (0-5 scale)",
-        "ratingCount": "number | null",
-        "category": "string | null",
-        "providerUserId": "uuid | null",
-        "baseScore": "number (text relevance)",
-        "personalizationScore": "number (preference match)"
-      }
-      ```
-    - **Personalization (scope=all):** Boosts results based on followed users, industry preferences, and niche matches from user's onboarding data
-    - **Business Visibility:** Only shows approved businesses with active subscriptions; Stripe onboarding required if monetization enabled
-    - **Products/Services:** Only shows items from visible parent businesses; photographer services always visible if active
-    - **Sorting:** scope=all sorts by personalizationScore+baseScore; scoped searches sort by baseScore only
+-   **Real-time Communication:** WebSockets for features like chat.
+-   **Monetization:** Tiered transaction fees (10% for photographers, 4% for businesses) plus subscription fees.
+-   **Outsyde Points System (Loyalty):** Profit-based rewards with earning, redemption tiers, guardrails, and referral bonuses.
+-   **Core Features:** Multi-step onboarding, verified reviews, and a referral program.
+-   **Cart & Checkout:** Supports database-backed carts for authenticated users, `localStorage` for guests, and multi-vendor checkout.
+-   **Notifications:** Web Push for cart abandonment, server-side in-app notifications, and email notifications for admins on new vendor applications.
+-   **Refund System:** Allows user-initiated refunds, triggering point reversals and review revocations.
+-   **Availability Calendars & Blocking:** Dedicated systems for businesses and photographers to manage schedules, prevent double-booking, and set time-off.
+-   **Dashboards:** Admin, Vendor, and Photographer dashboards for platform management, profiles, services, and bookings.
+-   **Multi-Staff System:** Businesses can manage team members with individual availability and Stripe Connect payouts.
+-   **Monetization Intent:** Tracks user interest in selling products/services or influencing, with `canMonetize` status requiring approval.
+-   **Stripe Connect Marketplace:** Uses Stripe's destination charges for payment processing, platform fee collection, and direct vendor/photographer payouts, requiring Stripe Express onboarding.
+-   **Subscription Enforcement:** Server-side logic enforces vendor subscriptions, impacting storefront visibility and product/service availability, with a grace period.
+-   **Shipment Tracking:** Comprehensive fulfillment system with carrier integration.
+-   **Booking State Machine:** Backend-driven booking flow with provider approval support (DRAFT, PENDING_PAYMENT, PENDING_PROVIDER, CONFIRMED, COMPLETED/CANCELED/DECLINED states), ensuring zero double-booking with DB-level constraints and audit logging.
+-   **Mobile Backend Integration:** API support for FlutterFlow and Expo mobile apps, including JWT and two Google OAuth flows (ID Token & Authorization Code), with CSRF protection for Expo.
+-   **User Location & Personalized Search:** Backend as source of truth for user location, enabling personalized search.
+-   **Identity Change Limits:** Server-side rate limiting for username (30 days) and display name (7 days) changes.
+-   **Data Privacy:** Strict measures for sensitive data, limited visibility, and aggregation for analytics.
+-   **Business Visibility Filtering:** Server-side logic for public business endpoints based on approval, demo data, Stripe onboarding, and active subscriptions.
+-   **Post Commerce Support:** Feed posts can include validated commerce links (products, services, photographer services).
+-   **Post Intent System:** Role-based authorization for post types: "social", "review", and "promotion".
+-   **Feed Author Object:** Canonical author object included with every feed post for frontend identity.
+-   **Follow System:** Functionality for users to follow/unfollow and retrieve follower/following lists.
+-   **Storefront Video Banners:** Support for video banners on vendor/photographer storefronts with specific media attributes and fallback to images.
+-   **Unified Search Engine:** `GET /api/search` provides cross-entity search with scopes (consumers, photographers, businesses, products, services), personalization based on user preferences and follows, and normalized results.
+-   **Stripe PaymentIntent Integration:** Complete booking payment flow with Stripe for creation, capture (automatic/manual), idempotency, fee handling, webhook event processing, and refund management.
 
 ## External Dependencies
 -   **PostgreSQL:** Primary database.
