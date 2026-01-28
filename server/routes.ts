@@ -3050,6 +3050,592 @@ export async function registerRoutes(
     }
   });
 
+  // =========================
+  // WEEKLY AVAILABILITY (Recurring patterns)
+  // =========================
+
+  // Get weekly availability for a business
+  app.get("/api/businesses/me/weekly-availability", async (req, res) => {
+    const userId = req.session?.userId || getUserIdFromRequest(req);
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    try {
+      const business = await storage.getBusinessByOwnerId(userId);
+      if (!business) {
+        return res.status(404).json({ error: "Business not found" });
+      }
+
+      const { staffMemberId } = req.query;
+      const availability = await storage.getWeeklyAvailability(
+        'business',
+        business.id,
+        staffMemberId as string | undefined
+      );
+
+      res.json({ availability, autoAcceptBookings: business.autoAcceptBookings });
+    } catch (error) {
+      console.error("Get business weekly availability error:", error);
+      res.status(500).json({ error: "Failed to get weekly availability" });
+    }
+  });
+
+  // Set weekly availability for a business
+  app.put("/api/businesses/me/weekly-availability", async (req, res) => {
+    const userId = req.session?.userId || getUserIdFromRequest(req);
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    try {
+      const business = await storage.getBusinessByOwnerId(userId);
+      if (!business) {
+        return res.status(404).json({ error: "Business not found" });
+      }
+
+      const { slots, staffMemberId, autoAcceptBookings } = req.body;
+
+      if (!Array.isArray(slots)) {
+        return res.status(400).json({ error: "slots must be an array" });
+      }
+
+      const updated = await storage.setWeeklyAvailability(
+        'business',
+        business.id,
+        slots,
+        staffMemberId
+      );
+
+      if (typeof autoAcceptBookings === 'boolean') {
+        await storage.updateBusiness(business.id, { autoAcceptBookings });
+      }
+
+      res.json({ availability: updated });
+    } catch (error) {
+      console.error("Set business weekly availability error:", error);
+      res.status(500).json({ error: "Failed to set weekly availability" });
+    }
+  });
+
+  // Get weekly availability for a photographer
+  app.get("/api/photographers/me/weekly-availability", async (req, res) => {
+    const userId = req.session?.userId || getUserIdFromRequest(req);
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    try {
+      const photographer = await storage.getPhotographerByUserId(userId);
+      if (!photographer) {
+        return res.status(404).json({ error: "Photographer profile not found" });
+      }
+
+      const availability = await storage.getWeeklyAvailability(
+        'photographer',
+        photographer.id
+      );
+
+      res.json({ availability, autoAcceptBookings: photographer.autoAcceptBookings });
+    } catch (error) {
+      console.error("Get photographer weekly availability error:", error);
+      res.status(500).json({ error: "Failed to get weekly availability" });
+    }
+  });
+
+  // Set weekly availability for a photographer
+  app.put("/api/photographers/me/weekly-availability", async (req, res) => {
+    const userId = req.session?.userId || getUserIdFromRequest(req);
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    try {
+      const photographer = await storage.getPhotographerByUserId(userId);
+      if (!photographer) {
+        return res.status(404).json({ error: "Photographer profile not found" });
+      }
+
+      const { slots, autoAcceptBookings } = req.body;
+
+      if (!Array.isArray(slots)) {
+        return res.status(400).json({ error: "slots must be an array" });
+      }
+
+      const updated = await storage.setWeeklyAvailability(
+        'photographer',
+        photographer.id,
+        slots
+      );
+
+      if (typeof autoAcceptBookings === 'boolean') {
+        await storage.updatePhotographer(photographer.id, { autoAcceptBookings });
+      }
+
+      res.json({ availability: updated });
+    } catch (error) {
+      console.error("Set photographer weekly availability error:", error);
+      res.status(500).json({ error: "Failed to set weekly availability" });
+    }
+  });
+
+  // =========================
+  // PROVIDER BLOCKS (Time-off, vacations, etc.)
+  // =========================
+
+  // Get blocks for a business
+  app.get("/api/businesses/me/blocks", async (req, res) => {
+    const userId = req.session?.userId || getUserIdFromRequest(req);
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    try {
+      const business = await storage.getBusinessByOwnerId(userId);
+      if (!business) {
+        return res.status(404).json({ error: "Business not found" });
+      }
+
+      const { startDate, endDate, staffMemberId } = req.query;
+      
+      const start = startDate ? new Date(startDate as string) : new Date();
+      const end = endDate ? new Date(endDate as string) : new Date(Date.now() + 90 * 24 * 60 * 60 * 1000); // 90 days ahead
+
+      const blocks = await storage.getProviderBlocks(
+        'business',
+        business.id,
+        start,
+        end,
+        staffMemberId as string | undefined
+      );
+
+      res.json({ blocks });
+    } catch (error) {
+      console.error("Get business blocks error:", error);
+      res.status(500).json({ error: "Failed to get blocks" });
+    }
+  });
+
+  // Create a block for a business
+  app.post("/api/businesses/me/blocks", async (req, res) => {
+    const userId = req.session?.userId || getUserIdFromRequest(req);
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    try {
+      const business = await storage.getBusinessByOwnerId(userId);
+      if (!business) {
+        return res.status(404).json({ error: "Business not found" });
+      }
+
+      const { startAt, endAt, blockType, reason, title, staffMemberId } = req.body;
+
+      if (!startAt || !endAt) {
+        return res.status(400).json({ error: "startAt and endAt are required" });
+      }
+
+      const block = await storage.createProviderBlock({
+        providerType: 'business',
+        providerId: business.id,
+        staffMemberId: staffMemberId || null,
+        startAt: new Date(startAt),
+        endAt: new Date(endAt),
+        blockType: blockType || 'custom',
+        reason,
+        title,
+      });
+
+      res.status(201).json({ block });
+    } catch (error) {
+      console.error("Create business block error:", error);
+      res.status(500).json({ error: "Failed to create block" });
+    }
+  });
+
+  // Update a block for a business
+  app.patch("/api/businesses/me/blocks/:blockId", async (req, res) => {
+    const userId = req.session?.userId || getUserIdFromRequest(req);
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    try {
+      const business = await storage.getBusinessByOwnerId(userId);
+      if (!business) {
+        return res.status(404).json({ error: "Business not found" });
+      }
+
+      const { blockId } = req.params;
+      const { startAt, endAt, blockType, reason, title } = req.body;
+
+      const updates: Record<string, any> = {};
+      if (startAt) updates.startAt = new Date(startAt);
+      if (endAt) updates.endAt = new Date(endAt);
+      if (blockType) updates.blockType = blockType;
+      if (reason !== undefined) updates.reason = reason;
+      if (title !== undefined) updates.title = title;
+
+      const block = await storage.updateProviderBlock(blockId, updates);
+      if (!block) {
+        return res.status(404).json({ error: "Block not found" });
+      }
+
+      res.json({ block });
+    } catch (error) {
+      console.error("Update business block error:", error);
+      res.status(500).json({ error: "Failed to update block" });
+    }
+  });
+
+  // Delete a block for a business
+  app.delete("/api/businesses/me/blocks/:blockId", async (req, res) => {
+    const userId = req.session?.userId || getUserIdFromRequest(req);
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    try {
+      const business = await storage.getBusinessByOwnerId(userId);
+      if (!business) {
+        return res.status(404).json({ error: "Business not found" });
+      }
+
+      const { blockId } = req.params;
+      await storage.deleteProviderBlock(blockId);
+
+      res.json({ success: true });
+    } catch (error) {
+      console.error("Delete business block error:", error);
+      res.status(500).json({ error: "Failed to delete block" });
+    }
+  });
+
+  // Get blocks for a photographer
+  app.get("/api/photographers/me/blocks", async (req, res) => {
+    const userId = req.session?.userId || getUserIdFromRequest(req);
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    try {
+      const photographer = await storage.getPhotographerByUserId(userId);
+      if (!photographer) {
+        return res.status(404).json({ error: "Photographer profile not found" });
+      }
+
+      const { startDate, endDate } = req.query;
+      
+      const start = startDate ? new Date(startDate as string) : new Date();
+      const end = endDate ? new Date(endDate as string) : new Date(Date.now() + 90 * 24 * 60 * 60 * 1000);
+
+      const blocks = await storage.getProviderBlocks(
+        'photographer',
+        photographer.id,
+        start,
+        end
+      );
+
+      res.json({ blocks });
+    } catch (error) {
+      console.error("Get photographer blocks error:", error);
+      res.status(500).json({ error: "Failed to get blocks" });
+    }
+  });
+
+  // Create a block for a photographer
+  app.post("/api/photographers/me/blocks", async (req, res) => {
+    const userId = req.session?.userId || getUserIdFromRequest(req);
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    try {
+      const photographer = await storage.getPhotographerByUserId(userId);
+      if (!photographer) {
+        return res.status(404).json({ error: "Photographer profile not found" });
+      }
+
+      const { startAt, endAt, blockType, reason, title } = req.body;
+
+      if (!startAt || !endAt) {
+        return res.status(400).json({ error: "startAt and endAt are required" });
+      }
+
+      const block = await storage.createProviderBlock({
+        providerType: 'photographer',
+        providerId: photographer.id,
+        startAt: new Date(startAt),
+        endAt: new Date(endAt),
+        blockType: blockType || 'custom',
+        reason,
+        title,
+      });
+
+      res.status(201).json({ block });
+    } catch (error) {
+      console.error("Create photographer block error:", error);
+      res.status(500).json({ error: "Failed to create block" });
+    }
+  });
+
+  // Update a block for a photographer
+  app.patch("/api/photographers/me/blocks/:blockId", async (req, res) => {
+    const userId = req.session?.userId || getUserIdFromRequest(req);
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    try {
+      const photographer = await storage.getPhotographerByUserId(userId);
+      if (!photographer) {
+        return res.status(404).json({ error: "Photographer profile not found" });
+      }
+
+      const { blockId } = req.params;
+      const { startAt, endAt, blockType, reason, title } = req.body;
+
+      const updates: Record<string, any> = {};
+      if (startAt) updates.startAt = new Date(startAt);
+      if (endAt) updates.endAt = new Date(endAt);
+      if (blockType) updates.blockType = blockType;
+      if (reason !== undefined) updates.reason = reason;
+      if (title !== undefined) updates.title = title;
+
+      const block = await storage.updateProviderBlock(blockId, updates);
+      if (!block) {
+        return res.status(404).json({ error: "Block not found" });
+      }
+
+      res.json({ block });
+    } catch (error) {
+      console.error("Update photographer block error:", error);
+      res.status(500).json({ error: "Failed to update block" });
+    }
+  });
+
+  // Delete a block for a photographer
+  app.delete("/api/photographers/me/blocks/:blockId", async (req, res) => {
+    const userId = req.session?.userId || getUserIdFromRequest(req);
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    try {
+      const photographer = await storage.getPhotographerByUserId(userId);
+      if (!photographer) {
+        return res.status(404).json({ error: "Photographer profile not found" });
+      }
+
+      const { blockId } = req.params;
+      await storage.deleteProviderBlock(blockId);
+
+      res.json({ success: true });
+    } catch (error) {
+      console.error("Delete photographer block error:", error);
+      res.status(500).json({ error: "Failed to delete block" });
+    }
+  });
+
+  // =========================
+  // PROVIDER ACCEPT/DECLINE BOOKINGS
+  // =========================
+
+  // Accept an appointment (for providers with manual acceptance)
+  app.post("/api/bookings/appointments/:appointmentId/accept", async (req, res) => {
+    const userId = req.session?.userId || getUserIdFromRequest(req);
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    try {
+      const { appointmentId } = req.params;
+      const appointment = await storage.getAppointment(appointmentId);
+      
+      if (!appointment) {
+        return res.status(404).json({ error: "Appointment not found" });
+      }
+
+      // Check if user is the business owner
+      const business = await storage.getBusiness(appointment.businessId);
+      if (!business || business.ownerId !== userId) {
+        return res.status(403).json({ error: "Not authorized to accept this booking" });
+      }
+
+      if (appointment.status !== BOOKING_STATES.PENDING_PROVIDER) {
+        return res.status(400).json({ 
+          error: "Booking is not pending provider approval",
+          currentStatus: appointment.status 
+        });
+      }
+
+      // TODO: Capture the PaymentIntent if using manual capture
+      // For now, just transition to confirmed
+
+      const result = await transitionAppointmentState(appointmentId, BOOKING_STATES.CONFIRMED, {
+        triggeredBy: userId,
+        triggerSource: 'api',
+        metadata: { action: 'provider_accept' }
+      });
+
+      if (!result.success) {
+        return res.status(400).json({ error: result.error });
+      }
+
+      const updatedAppointment = await storage.getAppointment(appointmentId);
+      res.json({ success: true, appointment: updatedAppointment });
+    } catch (error) {
+      console.error("Accept appointment error:", error);
+      res.status(500).json({ error: "Failed to accept booking" });
+    }
+  });
+
+  // Decline an appointment (for providers with manual acceptance)
+  app.post("/api/bookings/appointments/:appointmentId/decline", async (req, res) => {
+    const userId = req.session?.userId || getUserIdFromRequest(req);
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    try {
+      const { appointmentId } = req.params;
+      const { reason } = req.body;
+      const appointment = await storage.getAppointment(appointmentId);
+      
+      if (!appointment) {
+        return res.status(404).json({ error: "Appointment not found" });
+      }
+
+      // Check if user is the business owner
+      const business = await storage.getBusiness(appointment.businessId);
+      if (!business || business.ownerId !== userId) {
+        return res.status(403).json({ error: "Not authorized to decline this booking" });
+      }
+
+      if (appointment.status !== BOOKING_STATES.PENDING_PROVIDER) {
+        return res.status(400).json({ 
+          error: "Booking is not pending provider approval",
+          currentStatus: appointment.status 
+        });
+      }
+
+      // TODO: Void the PaymentIntent if using manual capture
+
+      const result = await transitionAppointmentState(appointmentId, BOOKING_STATES.DECLINED, {
+        triggeredBy: userId,
+        triggerSource: 'api',
+        metadata: { action: 'provider_decline', reason }
+      });
+
+      if (!result.success) {
+        return res.status(400).json({ error: result.error });
+      }
+
+      const updatedAppointment = await storage.getAppointment(appointmentId);
+      res.json({ success: true, appointment: updatedAppointment });
+    } catch (error) {
+      console.error("Decline appointment error:", error);
+      res.status(500).json({ error: "Failed to decline booking" });
+    }
+  });
+
+  // Accept a photographer shoot booking
+  app.post("/api/bookings/photographer/:bookingId/accept", async (req, res) => {
+    const userId = req.session?.userId || getUserIdFromRequest(req);
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    try {
+      const { bookingId } = req.params;
+      const booking = await storage.getShootBooking(bookingId);
+      
+      if (!booking) {
+        return res.status(404).json({ error: "Booking not found" });
+      }
+
+      // Check if user is the photographer owner
+      const photographer = await storage.getPhotographer(booking.photographerId);
+      if (!photographer || photographer.userId !== userId) {
+        return res.status(403).json({ error: "Not authorized to accept this booking" });
+      }
+
+      if (booking.status !== BOOKING_STATES.PENDING_PROVIDER) {
+        return res.status(400).json({ 
+          error: "Booking is not pending provider approval",
+          currentStatus: booking.status 
+        });
+      }
+
+      // TODO: Capture the PaymentIntent if using manual capture
+
+      const result = await transitionShootBookingState(bookingId, BOOKING_STATES.CONFIRMED, {
+        triggeredBy: userId,
+        triggerSource: 'api',
+        metadata: { action: 'provider_accept' }
+      });
+
+      if (!result.success) {
+        return res.status(400).json({ error: result.error });
+      }
+
+      const updatedBooking = await storage.getShootBooking(bookingId);
+      res.json({ success: true, booking: updatedBooking });
+    } catch (error) {
+      console.error("Accept photographer booking error:", error);
+      res.status(500).json({ error: "Failed to accept booking" });
+    }
+  });
+
+  // Decline a photographer shoot booking
+  app.post("/api/bookings/photographer/:bookingId/decline", async (req, res) => {
+    const userId = req.session?.userId || getUserIdFromRequest(req);
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    try {
+      const { bookingId } = req.params;
+      const { reason } = req.body;
+      const booking = await storage.getShootBooking(bookingId);
+      
+      if (!booking) {
+        return res.status(404).json({ error: "Booking not found" });
+      }
+
+      // Check if user is the photographer owner
+      const photographer = await storage.getPhotographer(booking.photographerId);
+      if (!photographer || photographer.userId !== userId) {
+        return res.status(403).json({ error: "Not authorized to decline this booking" });
+      }
+
+      if (booking.status !== BOOKING_STATES.PENDING_PROVIDER) {
+        return res.status(400).json({ 
+          error: "Booking is not pending provider approval",
+          currentStatus: booking.status 
+        });
+      }
+
+      // TODO: Void the PaymentIntent if using manual capture
+
+      const result = await transitionShootBookingState(bookingId, BOOKING_STATES.DECLINED, {
+        triggeredBy: userId,
+        triggerSource: 'api',
+        metadata: { action: 'provider_decline', reason }
+      });
+
+      if (!result.success) {
+        return res.status(400).json({ error: result.error });
+      }
+
+      const updatedBooking = await storage.getShootBooking(bookingId);
+      res.json({ success: true, booking: updatedBooking });
+    } catch (error) {
+      console.error("Decline photographer booking error:", error);
+      res.status(500).json({ error: "Failed to decline booking" });
+    }
+  });
+
   // Create appointment draft (10-min lock on slot)
   app.post("/api/bookings/appointments/draft", async (req, res) => {
     const userId = req.session?.userId || getUserIdFromRequest(req);

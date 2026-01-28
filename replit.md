@@ -35,7 +35,28 @@ The Outsyde platform operates as a monorepo, utilizing a React frontend, an Expr
 -   **Stripe Connect Marketplace:** Implements Stripe's destination charges model for payment processing, facilitating platform fee collection and direct payouts to vendors and photographers. Vendors must complete Stripe Express onboarding.
 -   **Subscription Enforcement:** Server-side logic enforces vendor subscriptions, blocking operations and hiding storefronts for inactive subscriptions, with a grace period. Products require active subscriptions and admin approval to go live.
 -   **Shipment Tracking:** A comprehensive fulfillment system with carrier integration provides shipment tracking visible to customers.
--   **Booking State Machine:** Backend-driven booking flow with states: DRAFT (10-min TTL) → PENDING_PAYMENT → CONFIRMED → COMPLETED/CANCELED. Zero double-booking guarantee via DB-level EXCLUDE constraints using GiST indexes with int4range for time overlap detection on (staff_member_id, appointment_date, time_range) and (photographer_id, date, time_range) for active states only. Draft cleanup runs every 60s. Audit trail via booking_audit_log table.
+-   **Booking State Machine:** Backend-driven booking flow with provider approval support:
+    - **States:** DRAFT (10-min TTL) → PENDING_PAYMENT → [PENDING_PROVIDER (24h TTL)] → CONFIRMED → COMPLETED/CANCELED/DECLINED
+    - **Provider Acceptance Workflow:**
+        - `autoAcceptBookings=true` (default): Payment → CONFIRMED immediately
+        - `autoAcceptBookings=false`: Payment → PENDING_PROVIDER → await provider action
+        - Accept: Transitions to CONFIRMED (captures PaymentIntent if manual capture)
+        - Decline: Transitions to DECLINED (voids PaymentIntent if manual capture)
+        - Timeout (24h): Auto-expires booking (voids PaymentIntent)
+    - **Zero double-booking:** DB-level EXCLUDE constraints with GiST indexes for time overlap detection
+    - **Active states for slot blocking:** DRAFT, PENDING_PAYMENT, PENDING_PROVIDER, CONFIRMED
+    - **Cleanup job:** Runs every 60s for draft (10-min) and pending_provider (24h) expiry
+    - **Audit trail:** All state changes logged in booking_audit_log table
+-   **Weekly Availability Patterns:** Recurring schedule templates for providers:
+    - `GET/PUT /api/businesses/me/weekly-availability` - Business owner availability
+    - `GET/PUT /api/photographers/me/weekly-availability` - Photographer availability
+    - Schema: `{ dayOfWeek: 0-6, startTime: "HH:MM", endTime: "HH:MM", isActive: boolean }`
+    - Supports staff-specific schedules via `staffMemberId` parameter
+-   **Provider Blocks:** Time-off and unavailability management:
+    - `GET/POST/PATCH/DELETE /api/businesses/me/blocks` - Business blocking
+    - `GET/POST/PATCH/DELETE /api/photographers/me/blocks` - Photographer blocking
+    - Schema: `{ startAt: Date, endAt: Date, blockType: "vacation"|"personal"|"holiday"|"custom", title?, reason? }`
+    - Timestamp-based for multi-day support, checked against slot availability
 -   **State Machines & Audit Logging:** Server-side state machines enforce valid status transitions for orders and bookings, complemented by comprehensive audit logging for financial actions.
 -   **Messaging Features:** Includes user blocking, message reporting, and basic abuse prevention measures.
 -   **Mobile Backend Integration:** The backend serves as an API for FlutterFlow and Expo mobile apps, supporting JWT authentication and two Google OAuth flows:

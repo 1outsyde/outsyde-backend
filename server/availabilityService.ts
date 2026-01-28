@@ -10,9 +10,11 @@ import {
   photographerServices,
   businesses,
   photographers,
+  weeklyAvailability,
+  providerBlocks,
   BOOKING_STATES
 } from "@shared/schema";
-import { eq, and, or, gte, lte, inArray, ne, sql } from "drizzle-orm";
+import { eq, and, or, gte, lte, inArray, ne, sql, isNull } from "drizzle-orm";
 
 export interface TimeSlot {
   startTime: string;
@@ -79,6 +81,86 @@ function doTimesOverlap(
   const s2 = timeToMinutes(start2);
   const e2 = timeToMinutes(end2);
   return s1 < e2 && e1 > s2;
+}
+
+async function getWeeklyAvailabilityForDay(
+  providerType: string,
+  providerId: string,
+  dayOfWeek: number,
+  staffMemberId?: string
+): Promise<{ startTime: string; endTime: string }[]> {
+  const conditions = [
+    eq(weeklyAvailability.providerType, providerType),
+    eq(weeklyAvailability.providerId, providerId),
+    eq(weeklyAvailability.dayOfWeek, dayOfWeek),
+    eq(weeklyAvailability.isActive, true),
+  ];
+  
+  if (staffMemberId) {
+    conditions.push(eq(weeklyAvailability.staffMemberId, staffMemberId));
+  } else {
+    conditions.push(isNull(weeklyAvailability.staffMemberId));
+  }
+  
+  const slots = await db.select()
+    .from(weeklyAvailability)
+    .where(and(...conditions));
+  
+  return slots.map(s => ({ startTime: s.startTime, endTime: s.endTime }));
+}
+
+async function getProviderBlocksForDate(
+  providerType: string,
+  providerId: string,
+  date: Date,
+  staffMemberId?: string
+): Promise<{ startAt: Date; endAt: Date }[]> {
+  const startOfDay = new Date(date);
+  startOfDay.setHours(0, 0, 0, 0);
+  
+  const endOfDay = new Date(date);
+  endOfDay.setHours(23, 59, 59, 999);
+  
+  const conditions = [
+    eq(providerBlocks.providerType, providerType),
+    eq(providerBlocks.providerId, providerId),
+    lte(providerBlocks.startAt, endOfDay),
+    gte(providerBlocks.endAt, startOfDay),
+  ];
+  
+  if (staffMemberId) {
+    conditions.push(eq(providerBlocks.staffMemberId, staffMemberId));
+  }
+  
+  const blocks = await db.select()
+    .from(providerBlocks)
+    .where(and(...conditions));
+  
+  return blocks.map(b => ({ startAt: b.startAt, endAt: b.endAt }));
+}
+
+function isTimeBlockedByProviderBlock(
+  date: Date,
+  startTime: string,
+  endTime: string,
+  blocks: { startAt: Date; endAt: Date }[]
+): boolean {
+  const [startH, startM] = startTime.split(':').map(Number);
+  const [endH, endM] = endTime.split(':').map(Number);
+  
+  const slotStart = new Date(date);
+  slotStart.setHours(startH, startM, 0, 0);
+  
+  const slotEnd = new Date(date);
+  slotEnd.setHours(endH, endM, 0, 0);
+  
+  for (const block of blocks) {
+    if (slotStart < block.endAt && slotEnd > block.startAt) {
+      return true;
+    }
+  }
+  
+  return false;
 }
 
 export async function getStaffAvailabilitySlots(
@@ -304,9 +386,19 @@ export async function isSlotAvailable(
   startTime: string,
   endTime: string
 ): Promise<{ available: boolean; reason?: string }> {
-  const activeStates = [BOOKING_STATES.DRAFT, BOOKING_STATES.PENDING_PAYMENT, BOOKING_STATES.CONFIRMED];
+  const activeStates = [BOOKING_STATES.DRAFT, BOOKING_STATES.PENDING_PAYMENT, BOOKING_STATES.PENDING_PROVIDER, BOOKING_STATES.CONFIRMED];
+  const dateObj = new Date(date);
 
   if (type === 'staff') {
+    // Check provider_blocks table first
+    const [staff] = await db.select().from(staffMembers).where(eq(staffMembers.id, providerId));
+    if (staff) {
+      const blocks = await getProviderBlocksForDate('business', staff.businessId, dateObj, providerId);
+      if (isTimeBlockedByProviderBlock(dateObj, startTime, endTime, blocks)) {
+        return { available: false, reason: 'Staff has blocked this time' };
+      }
+    }
+
     const blockedSlot = await db.select().from(staffAvailability)
       .where(
         and(
@@ -347,6 +439,12 @@ export async function isSlotAvailable(
   }
 
   if (type === 'photographer') {
+    // Check provider_blocks table first
+    const photographerBlocks = await getProviderBlocksForDate('photographer', providerId, dateObj);
+    if (isTimeBlockedByProviderBlock(dateObj, startTime, endTime, photographerBlocks)) {
+      return { available: false, reason: 'Photographer has blocked this time' };
+    }
+
     const blockedSlot = await db.select().from(photographerAvailability)
       .where(
         and(

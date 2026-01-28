@@ -11,8 +11,9 @@ import {
 import { eq, and, or, lt, inArray } from "drizzle-orm";
 
 const DRAFT_TTL_MINUTES = 10;
+const PENDING_PROVIDER_TTL_HOURS = 24;
 
-export type BookingErrorCode = 'BOOKING_NOT_FOUND' | 'BOOKING_EXPIRED' | 'INVALID_STATE' | 'ALREADY_CONFIRMED';
+export type BookingErrorCode = 'BOOKING_NOT_FOUND' | 'BOOKING_EXPIRED' | 'INVALID_STATE' | 'ALREADY_CONFIRMED' | 'PENDING_PROVIDER_EXPIRED' | 'DECLINED';
 
 export interface StateTransitionResult {
   success: boolean;
@@ -42,6 +43,15 @@ export function getDraftExpiryTime(): Date {
 export function isDraftExpired(draftExpiresAt: Date | null): boolean {
   if (!draftExpiresAt) return true;
   return new Date() > new Date(draftExpiresAt);
+}
+
+export function getPendingProviderExpiryTime(): Date {
+  return new Date(Date.now() + PENDING_PROVIDER_TTL_HOURS * 60 * 60 * 1000);
+}
+
+export function isPendingProviderExpired(expiresAt: Date | null): boolean {
+  if (!expiresAt) return true;
+  return new Date() > new Date(expiresAt);
 }
 
 async function logAuditEntry(
@@ -107,6 +117,37 @@ export async function transitionAppointmentState(
     return { success: false, code: 'BOOKING_EXPIRED', error: "Booking draft has expired. Please restart booking." };
   }
 
+  // Check for pending_provider expiry
+  if (currentState === 'pending_provider' && isPendingProviderExpired(appointment.pendingProviderExpiresAt)) {
+    await db.update(appointments)
+      .set({ 
+        status: BOOKING_STATES.EXPIRED,
+        stateChangedAt: new Date(),
+        stateChangedBy: 'system',
+        previousState: currentState,
+        updatedAt: new Date(),
+      })
+      .where(eq(appointments.id, appointmentId));
+    
+    await logAuditEntry(
+      { bookingType: 'appointment', bookingId: appointmentId, triggeredBy: 'system', triggerSource: 'cron' },
+      currentState,
+      BOOKING_STATES.EXPIRED
+    );
+    
+    return { success: false, code: 'PENDING_PROVIDER_EXPIRED', error: "Provider did not respond in time. Please restart booking." };
+  }
+
+  // Check for declined state
+  if (currentState === 'declined') {
+    return { 
+      success: false, 
+      code: 'DECLINED', 
+      error: "Booking was declined by the provider. Please try a different time or provider.",
+      previousState: currentState 
+    };
+  }
+
   // Check for expired/canceled states trying to transition
   if (['expired', 'canceled', 'completed', 'no_show'].includes(currentState)) {
     return { 
@@ -137,6 +178,18 @@ export async function transitionAppointmentState(
     updateData.canceledAt = new Date();
     updateData.canceledBy = context.triggeredBy;
     updateData.cancellationReason = context.metadata?.reason;
+  }
+
+  // Handle pending_provider transition - set expiry time
+  if (toState === BOOKING_STATES.PENDING_PROVIDER) {
+    updateData.pendingProviderExpiresAt = getPendingProviderExpiryTime();
+  }
+
+  // Handle decline transition
+  if (toState === BOOKING_STATES.DECLINED) {
+    updateData.declinedAt = new Date();
+    updateData.declinedBy = context.triggeredBy;
+    updateData.declineReason = context.metadata?.reason;
   }
 
   await db.update(appointments)
@@ -205,6 +258,37 @@ export async function transitionShootBookingState(
     return { success: false, code: 'BOOKING_EXPIRED', error: "Booking draft has expired. Please restart booking." };
   }
 
+  // Check for pending_provider expiry
+  if (currentState === 'pending_provider' && isPendingProviderExpired(booking.pendingProviderExpiresAt)) {
+    await db.update(shootBookings)
+      .set({ 
+        status: BOOKING_STATES.EXPIRED,
+        stateChangedAt: new Date(),
+        stateChangedBy: 'system',
+        previousState: currentState,
+        updatedAt: new Date(),
+      })
+      .where(eq(shootBookings.id, shootBookingId));
+    
+    await logAuditEntry(
+      { bookingType: 'shoot_booking', bookingId: shootBookingId, triggeredBy: 'system', triggerSource: 'cron' },
+      currentState,
+      BOOKING_STATES.EXPIRED
+    );
+    
+    return { success: false, code: 'PENDING_PROVIDER_EXPIRED', error: "Provider did not respond in time. Please restart booking." };
+  }
+
+  // Check for declined state
+  if (currentState === 'declined') {
+    return { 
+      success: false, 
+      code: 'DECLINED', 
+      error: "Booking was declined by the provider. Please try a different time or provider.",
+      previousState: currentState 
+    };
+  }
+
   // Check for expired/canceled states trying to transition
   if (['expired', 'canceled', 'completed', 'no_show'].includes(currentState)) {
     return { 
@@ -235,6 +319,18 @@ export async function transitionShootBookingState(
     updateData.canceledAt = new Date();
     updateData.canceledBy = context.triggeredBy;
     updateData.cancellationReason = context.metadata?.reason;
+  }
+
+  // Handle pending_provider transition - set expiry time
+  if (toState === BOOKING_STATES.PENDING_PROVIDER) {
+    updateData.pendingProviderExpiresAt = getPendingProviderExpiryTime();
+  }
+
+  // Handle decline transition
+  if (toState === BOOKING_STATES.DECLINED) {
+    updateData.declinedAt = new Date();
+    updateData.declinedBy = context.triggeredBy;
+    updateData.declineReason = context.metadata?.reason;
   }
 
   await db.update(shootBookings)
@@ -319,14 +415,76 @@ export async function cleanupExpiredDrafts(): Promise<{ appointments: number; sh
   };
 }
 
-export function startDraftCleanupJob(intervalMs: number = 60000): NodeJS.Timeout {
-  console.log(`[DraftCleanup] Starting cleanup job (interval: ${intervalMs}ms)`);
+export async function cleanupExpiredPendingProvider(): Promise<{ appointments: number; shootBookings: number }> {
+  const now = new Date();
+  
+  const expiredAppointments = await db.update(appointments)
+    .set({ 
+      status: BOOKING_STATES.EXPIRED,
+      stateChangedAt: now,
+      stateChangedBy: 'system',
+      previousState: BOOKING_STATES.PENDING_PROVIDER,
+      updatedAt: now,
+    })
+    .where(
+      and(
+        eq(appointments.status, BOOKING_STATES.PENDING_PROVIDER),
+        lt(appointments.pendingProviderExpiresAt, now)
+      )
+    )
+    .returning({ id: appointments.id });
+
+  const expiredShootBookings = await db.update(shootBookings)
+    .set({ 
+      status: BOOKING_STATES.EXPIRED,
+      stateChangedAt: now,
+      stateChangedBy: 'system',
+      previousState: BOOKING_STATES.PENDING_PROVIDER,
+      updatedAt: now,
+    })
+    .where(
+      and(
+        eq(shootBookings.status, BOOKING_STATES.PENDING_PROVIDER),
+        lt(shootBookings.pendingProviderExpiresAt, now)
+      )
+    )
+    .returning({ id: shootBookings.id });
+
+  for (const apt of expiredAppointments) {
+    await logAuditEntry(
+      { bookingType: 'appointment', bookingId: apt.id, triggeredBy: 'system', triggerSource: 'cron' },
+      BOOKING_STATES.PENDING_PROVIDER,
+      BOOKING_STATES.EXPIRED
+    );
+  }
+
+  for (const booking of expiredShootBookings) {
+    await logAuditEntry(
+      { bookingType: 'shoot_booking', bookingId: booking.id, triggeredBy: 'system', triggerSource: 'cron' },
+      BOOKING_STATES.PENDING_PROVIDER,
+      BOOKING_STATES.EXPIRED
+    );
+  }
+
+  if (expiredAppointments.length > 0 || expiredShootBookings.length > 0) {
+    console.log(`[PendingProviderCleanup] Expired ${expiredAppointments.length} appointments, ${expiredShootBookings.length} shoot bookings`);
+  }
+
+  return {
+    appointments: expiredAppointments.length,
+    shootBookings: expiredShootBookings.length,
+  };
+}
+
+export function startBookingCleanupJob(intervalMs: number = 60000): NodeJS.Timeout {
+  console.log(`[BookingCleanup] Starting cleanup job (interval: ${intervalMs}ms)`);
   
   const cleanup = async () => {
     try {
       await cleanupExpiredDrafts();
+      await cleanupExpiredPendingProvider();
     } catch (error) {
-      console.error("[DraftCleanup] Error during cleanup:", error);
+      console.error("[BookingCleanup] Error during cleanup:", error);
     }
   };
 
@@ -334,3 +492,5 @@ export function startDraftCleanupJob(intervalMs: number = 60000): NodeJS.Timeout
   
   return setInterval(cleanup, intervalMs);
 }
+
+export const startDraftCleanupJob = startBookingCleanupJob;

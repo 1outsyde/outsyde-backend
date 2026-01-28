@@ -92,6 +92,10 @@ import {
   type InsertSearchIndexEntry,
   type Follow,
   type InsertFollow,
+  type WeeklyAvailability,
+  type InsertWeeklyAvailability,
+  type ProviderBlock,
+  type InsertProviderBlock,
   users,
   businesses,
   cities,
@@ -146,6 +150,8 @@ import {
   searchIndex,
   follows,
   oauthStates,
+  weeklyAvailability,
+  providerBlocks,
   isValidOrderTransition,
   isValidBookingTransition
 } from "@shared/schema";
@@ -669,6 +675,16 @@ export interface IStorage {
 
   // Unified Search (normalized results)
   unifiedSearchWithScope(params: UnifiedSearchParams): Promise<UnifiedSearchResponse>;
+
+  // Weekly Availability CRUD
+  getWeeklyAvailability(providerType: string, providerId: string, staffMemberId?: string): Promise<WeeklyAvailability[]>;
+  setWeeklyAvailability(providerType: string, providerId: string, slots: InsertWeeklyAvailability[], staffMemberId?: string): Promise<WeeklyAvailability[]>;
+  
+  // Provider Blocks CRUD
+  getProviderBlocks(providerType: string, providerId: string, startDate: Date, endDate: Date, staffMemberId?: string): Promise<ProviderBlock[]>;
+  createProviderBlock(data: InsertProviderBlock): Promise<ProviderBlock>;
+  updateProviderBlock(id: string, updates: Partial<ProviderBlock>): Promise<ProviderBlock | undefined>;
+  deleteProviderBlock(id: string): Promise<void>;
 }
 
 // ==================== UNIFIED SEARCH TYPES ====================
@@ -6228,6 +6244,106 @@ export class DatabaseStorage implements IStorage {
       .from(follows)
       .where(eq(follows.targetUserId, userId));
     return result[0]?.count || 0;
+  }
+
+  // =========================
+  // WEEKLY AVAILABILITY
+  // =========================
+
+  async getWeeklyAvailability(providerType: string, providerId: string, staffMemberId?: string): Promise<WeeklyAvailability[]> {
+    const conditions = [
+      eq(weeklyAvailability.providerType, providerType),
+      eq(weeklyAvailability.providerId, providerId),
+    ];
+    
+    if (staffMemberId) {
+      conditions.push(eq(weeklyAvailability.staffMemberId, staffMemberId));
+    } else {
+      conditions.push(isNull(weeklyAvailability.staffMemberId));
+    }
+    
+    return await db.select()
+      .from(weeklyAvailability)
+      .where(and(...conditions))
+      .orderBy(asc(weeklyAvailability.dayOfWeek), asc(weeklyAvailability.startTime));
+  }
+
+  async setWeeklyAvailability(
+    providerType: string, 
+    providerId: string, 
+    slots: InsertWeeklyAvailability[], 
+    staffMemberId?: string
+  ): Promise<WeeklyAvailability[]> {
+    const deleteConditions = [
+      eq(weeklyAvailability.providerType, providerType),
+      eq(weeklyAvailability.providerId, providerId),
+    ];
+    
+    if (staffMemberId) {
+      deleteConditions.push(eq(weeklyAvailability.staffMemberId, staffMemberId));
+    } else {
+      deleteConditions.push(isNull(weeklyAvailability.staffMemberId));
+    }
+    
+    await db.delete(weeklyAvailability).where(and(...deleteConditions));
+    
+    if (slots.length === 0) {
+      return [];
+    }
+    
+    const insertData = slots.map(slot => ({
+      ...slot,
+      providerType,
+      providerId,
+      staffMemberId: staffMemberId || null,
+    }));
+    
+    return await db.insert(weeklyAvailability).values(insertData).returning();
+  }
+
+  // =========================
+  // PROVIDER BLOCKS
+  // =========================
+
+  async getProviderBlocks(
+    providerType: string, 
+    providerId: string, 
+    startDate: Date, 
+    endDate: Date, 
+    staffMemberId?: string
+  ): Promise<ProviderBlock[]> {
+    const conditions = [
+      eq(providerBlocks.providerType, providerType),
+      eq(providerBlocks.providerId, providerId),
+      lte(providerBlocks.startAt, endDate),
+      gte(providerBlocks.endAt, startDate),
+    ];
+    
+    if (staffMemberId) {
+      conditions.push(eq(providerBlocks.staffMemberId, staffMemberId));
+    }
+    
+    return await db.select()
+      .from(providerBlocks)
+      .where(and(...conditions))
+      .orderBy(asc(providerBlocks.startAt));
+  }
+
+  async createProviderBlock(data: InsertProviderBlock): Promise<ProviderBlock> {
+    const [block] = await db.insert(providerBlocks).values(data).returning();
+    return block;
+  }
+
+  async updateProviderBlock(id: string, updates: Partial<ProviderBlock>): Promise<ProviderBlock | undefined> {
+    const [updated] = await db.update(providerBlocks)
+      .set({ ...updates, updatedAt: new Date() })
+      .where(eq(providerBlocks.id, id))
+      .returning();
+    return updated;
+  }
+
+  async deleteProviderBlock(id: string): Promise<void> {
+    await db.delete(providerBlocks).where(eq(providerBlocks.id, id));
   }
 }
 
