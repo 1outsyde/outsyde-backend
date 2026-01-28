@@ -5325,7 +5325,10 @@ export class DatabaseStorage implements IStorage {
           or(
             ilike(photographers.displayName, `%${query}%`),
             ilike(photographers.bio, `%${query}%`),
-            sql`array_to_string(${photographers.specialties}, ' ') ILIKE ${'%' + query + '%'}`
+            sql`array_to_string(${photographers.specialties}, ' ') ILIKE ${'%' + query + '%'}`,
+            // Also search by owner's username and name
+            ilike(users.username, `%${query}%`),
+            ilike(users.name, `%${query}%`)
           ),
           // Hide demo data from non-admins
           isAdmin ? undefined : sql`NOT (${photographers.userId}::text ILIKE '%demo%')`
@@ -5380,7 +5383,10 @@ export class DatabaseStorage implements IStorage {
             ilike(businesses.name, `%${query}%`),
             ilike(businesses.category, `%${query}%`),
             ilike(businesses.description, `%${query}%`),
-            ilike(businesses.tagline, `%${query}%`)
+            ilike(businesses.tagline, `%${query}%`),
+            // Also search by owner's username and name
+            ilike(users.username, `%${query}%`),
+            ilike(users.name, `%${query}%`)
           ),
           // Hide demo data from non-admins
           isAdmin ? undefined : sql`NOT (${businesses.ownerId}::text ILIKE '%demo%')`
