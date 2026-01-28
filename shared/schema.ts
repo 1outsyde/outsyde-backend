@@ -66,15 +66,17 @@ export interface HoursOfOperation {
 /* =====================================================
    BOOKING STATE MACHINE
 ===================================================== */
-// Valid booking states: DRAFT -> PENDING_PAYMENT -> CONFIRMED -> COMPLETED/CANCELED
+// Valid booking states: DRAFT -> PENDING_PAYMENT -> PENDING_PROVIDER (if !autoAccept) -> CONFIRMED -> COMPLETED/CANCELED
 export const BOOKING_STATES = {
   DRAFT: 'draft',              // Slot locked, awaiting payment initiation (10-min TTL)
   PENDING_PAYMENT: 'pending_payment', // Payment initiated, awaiting confirmation
-  CONFIRMED: 'confirmed',      // Payment succeeded, booking active
+  PENDING_PROVIDER: 'pending_provider', // Payment authorized, awaiting provider accept/decline (24h TTL, only if autoAccept=false)
+  CONFIRMED: 'confirmed',      // Payment captured, booking active
   COMPLETED: 'completed',      // Service delivered
   CANCELED: 'canceled',        // Booking canceled (by user, vendor, or system)
-  EXPIRED: 'expired',          // Draft TTL expired
+  EXPIRED: 'expired',          // Draft TTL or pending_provider TTL expired
   NO_SHOW: 'no_show',          // Client didn't show up
+  DECLINED: 'declined',        // Provider declined the booking (auth voided)
 } as const;
 
 export type BookingState = typeof BOOKING_STATES[keyof typeof BOOKING_STATES];
@@ -82,12 +84,14 @@ export type BookingState = typeof BOOKING_STATES[keyof typeof BOOKING_STATES];
 // Valid state transitions
 export const BOOKING_TRANSITIONS: Record<BookingState, BookingState[]> = {
   draft: ['pending_payment', 'canceled', 'expired'],
-  pending_payment: ['confirmed', 'canceled', 'expired'],
+  pending_payment: ['confirmed', 'pending_provider', 'canceled', 'expired'],
+  pending_provider: ['confirmed', 'declined', 'expired', 'canceled'], // Provider accepts -> confirmed, declines -> declined, timeout -> expired
   confirmed: ['completed', 'canceled', 'no_show'],
   completed: [], // Terminal state
   canceled: [],  // Terminal state
   expired: [],   // Terminal state
   no_show: [],   // Terminal state
+  declined: [],  // Terminal state
 };
 
 // Booking cancellation reasons
@@ -265,6 +269,9 @@ export const businesses = pgTable("businesses", {
 
   // Demo/seed data flag - hidden from non-admin users in search
   isDemo: boolean("is_demo").default(false).notNull(),
+
+  // Booking settings
+  autoAcceptBookings: boolean("auto_accept_bookings").default(true).notNull(), // If false, bookings require provider approval within 24h
 
   createdAt: timestamp("created_at").defaultNow().notNull(),
 });
@@ -505,6 +512,9 @@ export const photographers = pgTable("photographers", {
   // Demo/seed data flag - hidden from non-admin users in search
   isDemo: boolean("is_demo").default(false).notNull(),
 
+  // Booking settings
+  autoAcceptBookings: boolean("auto_accept_bookings").default(true).notNull(), // If false, bookings require provider approval within 24h
+
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 });
@@ -608,16 +618,32 @@ export const shootBookings = pgTable("shoot_bookings", {
   stripePaymentIntentId: text("stripe_payment_intent_id"),
   stripeCheckoutSessionId: text("stripe_checkout_session_id"),
   
-  // State machine status: draft, pending_payment, confirmed, completed, canceled, expired, no_show
+  // Payment method used: "checkout_session" (legacy/redirect) or "payment_intent" (in-app PaymentSheet)
+  paymentMethod: text("payment_method").default("checkout_session"), // "checkout_session" | "payment_intent"
+  
+  // Refund tracking
+  stripeRefundId: text("stripe_refund_id"),
+  refundedAt: timestamp("refunded_at"),
+  refundAmount: integer("refund_amount"), // Amount refunded in cents
+  
+  // State machine status: draft, pending_payment, pending_provider, confirmed, completed, canceled, expired, no_show, declined
   status: text("status").default("draft").notNull(),
   
   // Draft lock TTL - when this expires, draft becomes invalid
   draftExpiresAt: timestamp("draft_expires_at"),
   
+  // Pending provider TTL - 24h window for provider to accept/decline (only used when autoAccept=false)
+  pendingProviderExpiresAt: timestamp("pending_provider_expires_at"),
+  
   // Cancellation tracking
   canceledAt: timestamp("canceled_at"),
   canceledBy: varchar("canceled_by", { length: 36 }), // userId who canceled
   cancellationReason: text("cancellation_reason"),
+  
+  // Decline tracking (when provider declines)
+  declinedAt: timestamp("declined_at"),
+  declinedBy: varchar("declined_by", { length: 36 }),
+  declineReason: text("decline_reason"),
   
   // Audit trail for state changes
   stateChangedAt: timestamp("state_changed_at"),
@@ -637,6 +663,8 @@ export const shootBookings = pgTable("shoot_bookings", {
   shootDraftExpiryIdx: index("idx_shoot_bookings_draft_expiry").on(table.status, table.draftExpiresAt),
   // Index for availability queries
   shootAvailabilityIdx: index("idx_shoot_bookings_availability").on(table.photographerId, table.date, table.status),
+  // Index for pending provider expiry cleanup
+  shootPendingProviderIdx: index("idx_shoot_bookings_pending_provider").on(table.status, table.pendingProviderExpiresAt),
 }));
 
 /* =====================================================
@@ -668,16 +696,32 @@ export const appointments = pgTable("appointments", {
   stripePaymentIntentId: text("stripe_payment_intent_id"),
   stripeCheckoutSessionId: text("stripe_checkout_session_id"),
   
-  // State machine status: draft, pending_payment, confirmed, completed, canceled, expired, no_show
+  // Payment method used: "checkout_session" (legacy/redirect) or "payment_intent" (in-app PaymentSheet)
+  paymentMethod: text("payment_method").default("checkout_session"), // "checkout_session" | "payment_intent"
+  
+  // Refund tracking
+  stripeRefundId: text("stripe_refund_id"),
+  refundedAt: timestamp("refunded_at"),
+  refundAmount: integer("refund_amount"), // Amount refunded in cents
+  
+  // State machine status: draft, pending_payment, pending_provider, confirmed, completed, canceled, expired, no_show, declined
   status: text("status").default("draft").notNull(),
   
   // Draft lock TTL - when this expires, draft becomes invalid
   draftExpiresAt: timestamp("draft_expires_at"),
   
+  // Pending provider TTL - 24h window for provider to accept/decline (only used when autoAccept=false)
+  pendingProviderExpiresAt: timestamp("pending_provider_expires_at"),
+  
   // Cancellation tracking
   canceledAt: timestamp("canceled_at"),
   canceledBy: varchar("canceled_by", { length: 36 }), // userId who canceled
   cancellationReason: text("cancellation_reason"),
+  
+  // Decline tracking (when provider declines)
+  declinedAt: timestamp("declined_at"),
+  declinedBy: varchar("declined_by", { length: 36 }),
+  declineReason: text("decline_reason"),
   
   // Audit trail for state changes
   stateChangedAt: timestamp("state_changed_at"),
@@ -698,6 +742,8 @@ export const appointments = pgTable("appointments", {
   draftExpiryIdx: index("idx_appointments_draft_expiry").on(table.status, table.draftExpiresAt),
   // Index for availability queries
   availabilityIdx: index("idx_appointments_availability").on(table.staffMemberId, table.appointmentDate, table.status),
+  // Index for pending provider expiry cleanup
+  pendingProviderIdx: index("idx_appointments_pending_provider").on(table.status, table.pendingProviderExpiresAt),
 }));
 
 /* =====================================================
@@ -1140,7 +1186,7 @@ export const alaCartePurchases = pgTable("ala_carte_purchases", {
 });
 
 /* =====================================================
-   AVAILABILITY SLOTS (Businesses + Photographers)
+   AVAILABILITY SLOTS (Businesses + Photographers) - Legacy
 ===================================================== */
 export const availabilitySlots = pgTable("availability_slots", {
   id: varchar("id", { length: 36 }).primaryKey().default(sql`gen_random_uuid()`),
@@ -1159,6 +1205,73 @@ export const availabilitySlots = pgTable("availability_slots", {
 
   createdAt: timestamp("created_at").defaultNow().notNull(),
 });
+
+/* =====================================================
+   WEEKLY AVAILABILITY (Recurring Weekly Slots)
+   Works for BOTH photographers and businesses
+===================================================== */
+export const weeklyAvailability = pgTable("weekly_availability", {
+  id: varchar("id", { length: 36 }).primaryKey().default(sql`gen_random_uuid()`),
+
+  // Provider discriminator: "business" or "photographer"
+  providerType: text("provider_type").notNull(), // "business" | "photographer"
+  providerId: varchar("provider_id", { length: 36 }).notNull(),
+
+  // For businesses, optionally link to a specific staff member
+  staffMemberId: varchar("staff_member_id", { length: 36 }),
+
+  // Day of week: 0 = Sunday, 6 = Saturday
+  dayOfWeek: integer("day_of_week").notNull(),
+
+  // Time range for this day (24hr format: "09:00", "17:00")
+  startTime: text("start_time").notNull(),
+  endTime: text("end_time").notNull(),
+
+  // Whether this slot is active
+  isActive: boolean("is_active").default(true).notNull(),
+
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+}, (table) => ({
+  // Index for fast lookups by provider
+  providerIdx: index("idx_weekly_availability_provider").on(table.providerType, table.providerId),
+  // Index for staff-specific availability
+  staffIdx: index("idx_weekly_availability_staff").on(table.staffMemberId),
+}));
+
+/* =====================================================
+   PROVIDER BLOCKS (Timestamp-based Blocked Periods)
+   Unified blocking system for both provider types
+===================================================== */
+export const providerBlocks = pgTable("provider_blocks", {
+  id: varchar("id", { length: 36 }).primaryKey().default(sql`gen_random_uuid()`),
+
+  // Provider discriminator: "business" or "photographer"
+  providerType: text("provider_type").notNull(), // "business" | "photographer"
+  providerId: varchar("provider_id", { length: 36 }).notNull(),
+
+  // For businesses, optionally link to a specific staff member
+  staffMemberId: varchar("staff_member_id", { length: 36 }),
+
+  // Full timestamp range for the block (supports multi-day and partial-day blocks)
+  startAt: timestamp("start_at").notNull(),
+  endAt: timestamp("end_at").notNull(),
+
+  // Block type for UI/display purposes
+  blockType: text("block_type").default("custom").notNull(), // "full_day" | "partial" | "multi_day" | "vacation" | "custom"
+
+  // Optional metadata
+  reason: text("reason"), // "Vacation", "Personal", "Holiday", etc.
+  title: text("title"), // Display title for the block
+
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+}, (table) => ({
+  // Index for fast lookups by provider and date range
+  providerDateIdx: index("idx_provider_blocks_provider_dates").on(table.providerType, table.providerId, table.startAt, table.endAt),
+  // Index for staff-specific blocks
+  staffBlockIdx: index("idx_provider_blocks_staff").on(table.staffMemberId),
+}));
 
 /* =====================================================
    SCHEDULING (Unconfirmed Bookings)
@@ -1381,6 +1494,35 @@ export const insertStaffMemberSchema = createInsertSchema(staffMembers).omit({
 export const insertStaffAvailabilitySchema = createInsertSchema(staffAvailability).omit({
   id: true,
   createdAt: true,
+});
+
+// Weekly Availability schemas
+export const insertWeeklyAvailabilitySchema = createInsertSchema(weeklyAvailability).omit({
+  id: true,
+  createdAt: true,
+  updatedAt: true,
+});
+
+export const updateWeeklyAvailabilitySchema = z.object({
+  dayOfWeek: z.number().min(0).max(6).optional(),
+  startTime: z.string().regex(/^\d{2}:\d{2}$/).optional(),
+  endTime: z.string().regex(/^\d{2}:\d{2}$/).optional(),
+  isActive: z.boolean().optional(),
+});
+
+// Provider Blocks schemas
+export const insertProviderBlockSchema = createInsertSchema(providerBlocks).omit({
+  id: true,
+  createdAt: true,
+  updatedAt: true,
+});
+
+export const updateProviderBlockSchema = z.object({
+  startAt: z.coerce.date().optional(),
+  endAt: z.coerce.date().optional(),
+  blockType: z.enum(["full_day", "partial", "multi_day", "vacation", "custom"]).optional(),
+  reason: z.string().optional(),
+  title: z.string().optional(),
 });
 
 export const insertStaffInviteSchema = createInsertSchema(staffInvites).omit({
@@ -1677,6 +1819,14 @@ export type UpdateStaffMember = z.infer<typeof updateStaffMemberSchema>;
 
 export type InsertStaffAvailability = z.infer<typeof insertStaffAvailabilitySchema>;
 export type StaffAvailability = typeof staffAvailability.$inferSelect;
+
+export type InsertWeeklyAvailability = z.infer<typeof insertWeeklyAvailabilitySchema>;
+export type WeeklyAvailability = typeof weeklyAvailability.$inferSelect;
+export type UpdateWeeklyAvailability = z.infer<typeof updateWeeklyAvailabilitySchema>;
+
+export type InsertProviderBlock = z.infer<typeof insertProviderBlockSchema>;
+export type ProviderBlock = typeof providerBlocks.$inferSelect;
+export type UpdateProviderBlock = z.infer<typeof updateProviderBlockSchema>;
 
 export type InsertStaffInvite = z.infer<typeof insertStaffInviteSchema>;
 export type StaffInvite = typeof staffInvites.$inferSelect;
