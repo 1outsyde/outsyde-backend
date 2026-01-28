@@ -10129,6 +10129,7 @@ export async function registerRoutes(
         taggedBusinessId: z.string().optional(),
         taggedPhotographerId: z.string().optional(),
         postType: z.enum(['text', 'product', 'service']).optional(),
+        postIntent: z.enum(['social', 'review', 'promotion']).optional().default('social'), // Default to social for legacy clients
         productId: z.string().optional(),
         serviceId: z.string().optional(),
         photographerServiceId: z.string().optional(),
@@ -10148,10 +10149,72 @@ export async function registerRoutes(
         return res.status(404).json({ error: "User not found" });
       }
 
-      // Determine author type
+      // Determine author type and user role
       let authorType = 'customer';
-      if (user.isVendor) authorType = 'vendor';
-      if (user.isPhotographer) authorType = 'photographer';
+      let userRole: 'business' | 'photographer' | 'consumer' = 'consumer';
+      if (user.isVendor) {
+        authorType = 'vendor';
+        userRole = 'business';
+      }
+      if (user.isPhotographer) {
+        authorType = 'photographer';
+        userRole = 'photographer';
+      }
+
+      // ==================== POST INTENT VALIDATION ====================
+      
+      // 1. PROMOTION INTENT - Role-based permissions
+      if (data.postIntent === 'promotion') {
+        // Allow only: business, photographer, or approved influencer
+        const canPostPromotion = 
+          userRole === 'business' || 
+          userRole === 'photographer' || 
+          (userRole === 'consumer' && user.isInfluencer === true);
+        
+        if (!canPostPromotion) {
+          return res.status(403).json({
+            code: "PROMOTION_NOT_ALLOWED",
+            message: "Promotional posts require influencer approval"
+          });
+        }
+      }
+      
+      // 2. REVIEW INTENT - Requires tagging + transaction history
+      if (data.postIntent === 'review') {
+        // taggedEntityId REQUIRED for reviews
+        if (!data.taggedBusinessId && !data.taggedPhotographerId) {
+          return res.status(400).json({
+            code: "TAGGED_ENTITY_REQUIRED",
+            message: "Review posts must tag a business or photographer"
+          });
+        }
+        
+        // Validate user has transaction/booking history with tagged entity
+        if (data.taggedBusinessId) {
+          const hasHistory = await storage.canCustomerTagBusiness(userId, data.taggedBusinessId);
+          if (!hasHistory) {
+            return res.status(403).json({
+              code: "NO_TRANSACTION_HISTORY",
+              message: "You can only review businesses you've purchased from or used services of"
+            });
+          }
+        }
+        
+        if (data.taggedPhotographerId) {
+          const hasHistory = await storage.canCustomerTagPhotographer(userId, data.taggedPhotographerId);
+          if (!hasHistory) {
+            return res.status(403).json({
+              code: "NO_TRANSACTION_HISTORY",
+              message: "You can only review photographers you've had sessions with"
+            });
+          }
+        }
+      }
+      
+      // 3. SOCIAL INTENT - taggedEntityId OPTIONAL (no validation required)
+      // No special validation needed for social posts
+
+      // ==================== END POST INTENT VALIDATION ====================
 
       // Validate productId ownership - only business owners can attach their products
       if (data.productId) {
@@ -10189,38 +10252,13 @@ export async function registerRoutes(
         }
       }
 
-      // If customer, they must tag a business or photographer they've used
-      if (authorType === 'customer') {
-        if (!data.taggedBusinessId && !data.taggedPhotographerId) {
-          return res.status(400).json({ 
-            error: "Customers must tag a business or photographer they've purchased from or used services of" 
-          });
-        }
-
-        // Verify customer can tag the business or photographer
-        if (data.taggedBusinessId) {
-          const canTag = await storage.canCustomerTagBusiness(userId, data.taggedBusinessId);
-          if (!canTag) {
-            return res.status(403).json({ 
-              error: "You can only tag businesses you've purchased from or used services of" 
-            });
-          }
-        }
-
-        if (data.taggedPhotographerId) {
-          const canTag = await storage.canCustomerTagPhotographer(userId, data.taggedPhotographerId);
-          if (!canTag) {
-            return res.status(403).json({ 
-              error: "You can only tag photographers you've had sessions with" 
-            });
-          }
-        }
-      }
+      // NOTE: Global tagging requirement REMOVED - tagging is only required for review intent
 
       const post = await storage.createFeedPost({
         authorId: userId,
         authorType,
         postType: data.postType || 'text',
+        postIntent: data.postIntent, // 'social' | 'review' | 'promotion'
         content: data.content,
         imageUrl: data.imageUrl || data.media?.url, // Backwards compat: populate legacy field
         mediaUrl: data.media?.url,

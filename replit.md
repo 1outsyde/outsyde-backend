@@ -59,6 +59,12 @@ The Outsyde platform operates as a monorepo, utilizing a React frontend, an Expr
     - `photographerServiceId` - Links to a photographer service (validated ownership)
     - Feed responses expose these IDs plus enriched product/service objects with details
     - Availability endpoints accept optional `serviceId` to auto-determine booking duration
+-   **Post Intent System:** Role-based authorization for post types:
+    - `postIntent`: "social" | "review" | "promotion" (defaults to "social" for legacy clients)
+    - **Social posts:** Open to all users, tagging optional
+    - **Review posts:** Requires `taggedBusinessId` or `taggedPhotographerId` + transaction/booking history
+    - **Promotion posts:** Only business owners, photographers, or approved influencers (`isInfluencer=true`)
+    - Error codes: `PROMOTION_NOT_ALLOWED`, `TAGGED_ENTITY_REQUIRED`, `NO_TRANSACTION_HISTORY`
 -   **Feed Author Object:** Every feed post includes a canonical `author` object for frontend identity:
     - Structure: `{ userId, username, displayName, profilePhotoUrl, role }`
     - `role`: "consumer" | "photographer" | "vendor"
