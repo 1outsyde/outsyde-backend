@@ -1221,6 +1221,7 @@ export const feedPosts = pgTable("feed_posts", {
   authorType: text("author_type").notNull(), // 'customer', 'vendor', 'photographer'
 
   postType: text("post_type").default("text").notNull(), // 'text', 'product', 'service'
+  postIntent: text("post_intent").default("social").notNull(), // 'social', 'review', 'promotion'
 
   content: text("content").notNull(),
   imageUrl: text("image_url"), // Legacy field, use mediaUrl for new posts
