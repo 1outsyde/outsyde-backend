@@ -1,0 +1,59 @@
+BACKEND-ONLY: Extend existing booking system to support:
+1) recurring weekly availability (infinite carryover)
+2) blocked date/time ranges via timestamp blocks
+3) provider accept vs auto-accept with 24h pending and correct Stripe refund/void behavior
+4) migrate booking payments from Checkout Sessions toward PaymentIntents (support both during transition)
+
+CURRENT SYSTEM (do not break):
+- Business booking: POST /api/bookings/appointments/draft (10-min hold), then /:id/initiate-payment -> Checkout Session, webhook -> CONFIRMED
+- Photographer booking: POST /api/bookings/photographer/draft (10-min hold), then /:id/confirm-payment -> Checkout Session, webhook -> CONFIRMED
+- Availability endpoints exist for both types
+- Platform fees: photographers 10%, businesses 4% via Stripe Connect destination charges
+
+REQUIREMENTS:
+A) Weekly recurring availability:
+- Add weekly availability tables for BOTH photographers and businesses (providerType discriminator).
+- Update existing availability endpoints to generate slots from weekly availability + subtract:
+  - manual blocks (blocked dates/times)
+  - confirmed bookings
+  - pending bookings
+  - draft holds (10 min)
+- Availability must work months ahead (no “one week only” limitation).
+- Slot generation must consider service duration (durationMinutes from serviceId).
+
+B) Blocked dates system (expand existing):
+- Keep existing blocked dates feature but store blocks as startAt/endAt timestamps (not just date+startTime strings).
+- Support full-day blocks and partial-time blocks; allow multi-day blocks.
+- Add unified endpoints (or extend existing):
+  - GET /api/providers/me/blocks?startDate&endDate
+  - PUT /api/providers/me/blocks (create/update/delete)
+
+C) Provider booking acceptance + Stripe behavior:
+- Add provider_settings.auto_accept_bookings for BOTH provider types.
+- Auto-accept ON:
+  - booking flow remains instant confirm after payment success.
+- Auto-accept OFF:
+  - after consumer payment, booking becomes PENDING_PROVIDER for 24h.
+  - payment must be authorized/held and NOT paid out until accepted.
+  - provider can Accept/Decline from dashboard:
+    - Accept: capture payment then confirm booking and payout provider (minus Outsyde cut)
+    - Decline or expire (24h): void authorization, release slot, booking status EXPIRED/CANCELLED
+
+D) Refunds:
+- If provider cancels a CONFIRMED booking: issue a Stripe refund automatically and record refund id.
+- If booking expires or provider declines while payment is only authorized: cancel/void the PaymentIntent (no refund object needed).
+- Add provider refund endpoint:
+  - POST /api/bookings/:id/refund (provider-only, creates refund if captured)
+  - enforce permissions + refund eligibility rules
+
+E) Payment migration:
+- Add optional PaymentIntent-based flow for bookings:
+  - Create PaymentIntent (automatic capture if auto-accept ON, manual capture if OFF)
+  - Return clientSecret for mobile PaymentSheet
+- During transition, keep Checkout Session flow working, but prefer PaymentIntent for in-app purchase.
+
+OUTPUT:
+- List schema changes
+- List endpoints added/changed
+- State transitions for bookings (DRAFT -> PENDING_PAYMENT -> PENDING_PROVIDER -> CONFIRMED / EXPIRED / CANCELLED)
+- How holds and slot locking are enforced (DB constraints + overlap checks)
