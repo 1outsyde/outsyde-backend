@@ -1,0 +1,114 @@
+BACKEND-ONLY IMPLEMENTATION — UNIFIED SEARCH ENGINE
+
+GOAL:
+Create a unified search endpoint that:
+- Searches across users, businesses, products, and services
+- Supports intent-based filtering via scope (chips)
+- Ranks results based on text relevance and user preferences
+- Returns normalized mixed results for frontend rendering
+
+--------------------------------
+1) SEARCH ENDPOINT
+--------------------------------
+Create or update a unified endpoint:
+
+GET /api/search
+OR
+POST /api/search
+
+Request parameters:
+- q: string (search text)
+- scope: string
+  ("all" | "consumers" | "photographers" | "businesses" | "products" | "services")
+- viewerUserId: string (used for personalization)
+
+--------------------------------
+2) TEXT MATCHING
+--------------------------------
+Search across:
+
+Users:
+- username
+- displayName
+- businessName
+- category (if business)
+
+Products:
+- productName
+- brandName
+- tags
+- category
+
+Services:
+- serviceName
+- serviceCategory
+- providerName
+
+--------------------------------
+3) RESULT NORMALIZATION
+--------------------------------
+Return a unified result shape:
+
+{
+  "id": "uuid",
+  "type": "consumer | photographer | business | product | service",
+  "title": "Jim’s Burgers",
+  "subtitle": "Restaurant · Queens, NY",
+  "imageUrl": "string",
+  "ratingAvg": number | null,
+  "ratingCount": number | null,
+  "category": "restaurant | clothing | photography | etc",
+  "providerUserId": "uuid | null",
+  "baseScore": number,
+  "personalizationScore": number
+}
+
+--------------------------------
+4) SCOPE FILTERING
+--------------------------------
+If scope ≠ "all":
+- ONLY return results matching the scope type
+
+If scope = "all":
+- Return mixed results (all types)
+
+--------------------------------
+5) PERSONALIZATION & RANKING (SCOPE = ALL ONLY)
+--------------------------------
+Rank results based on:
+
+- baseScore (text relevance)
+- category preference match
+- recency/activity
+- rating (for businesses/photographers/services)
+
+User preference signals may come from:
+- Followed accounts
+- Viewed profiles
+- Saved posts
+- Bookings
+- Product clicks (future)
+
+Example:
+- Food-focused users → restaurants & food services ranked higher
+- Fashion-focused users → clothing brands & products ranked higher
+
+Final sorting:
+- scope = all → sort by personalizationScore desc
+- scope ≠ all → sort by baseScore desc or recency
+
+--------------------------------
+6) PERFORMANCE
+--------------------------------
+- Limit results per type if needed
+- Paginate results
+- Avoid returning unused fields
+
+--------------------------------
+7) CONSTRAINTS
+--------------------------------
+- Do NOT exclude consumers from search
+- Do NOT hardcode ranking by role
+- Do NOT return mock/demo data
+
+END BACKEND PROMPT
