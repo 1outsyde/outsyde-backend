@@ -5362,6 +5362,11 @@ export class DatabaseStorage implements IStorage {
 
     // ==================== SEARCH BUSINESSES ====================
     if (scope === 'all' || scope === 'businesses') {
+      // Business visibility helper (equivalent to isBusinessVisibleToPublic)
+      // - Must be approved
+      // - Must not be demo data
+      // - Must have active subscription
+      // - Must have completed Stripe onboarding if monetization features enabled
       const businessResults = await db.select({
         business: businesses,
         user: users,
@@ -5370,6 +5375,7 @@ export class DatabaseStorage implements IStorage {
         .leftJoin(users, eq(businesses.ownerId, users.id))
         .where(and(
           eq(businesses.approvalStatus, 'approved'),
+          eq(businesses.subscriptionActive, true), // Must have active subscription
           or(
             ilike(businesses.name, `%${query}%`),
             ilike(businesses.category, `%${query}%`),
@@ -5382,6 +5388,11 @@ export class DatabaseStorage implements IStorage {
         .limit(limit * 2);
 
       for (const { business } of businessResults) {
+        // Additional visibility check: Stripe onboarding required if monetization features enabled
+        const needsStripe = business.hasProducts || business.hasServices;
+        if (!isAdmin && needsStripe && !business.stripeOnboardingComplete) {
+          continue; // Skip businesses that need Stripe but haven't completed onboarding
+        }
         const baseScore = calculateBaseScore([
           business.name,
           business.category,
@@ -5412,11 +5423,13 @@ export class DatabaseStorage implements IStorage {
 
     // ==================== SEARCH PRODUCTS ====================
     if (scope === 'all' || scope === 'products') {
-      // Use search index for products
+      // Use search index for products, but also check if parent business is visible
+      // Join with search index that has hasActiveSubscription flag
       const productResults = await db.select().from(searchIndex)
         .where(and(
           eq(searchIndex.entityType, 'product'),
           eq(searchIndex.isActive, true),
+          eq(searchIndex.hasActiveSubscription, true), // Parent business must have active subscription
           or(
             ilike(searchIndex.name, `%${query}%`),
             ilike(searchIndex.description, `%${query}%`),
@@ -5460,10 +5473,17 @@ export class DatabaseStorage implements IStorage {
     // ==================== SEARCH SERVICES ====================
     if (scope === 'all' || scope === 'services') {
       // Use search index for services (both business services and photographer services)
+      // Business services require parent business to have active subscription
+      // Photographer services are always visible if active
       const serviceResults = await db.select().from(searchIndex)
         .where(and(
           or(
-            eq(searchIndex.entityType, 'service'),
+            // Business services: require active subscription
+            and(
+              eq(searchIndex.entityType, 'service'),
+              eq(searchIndex.hasActiveSubscription, true)
+            ),
+            // Photographer services: no subscription required
             eq(searchIndex.entityType, 'photographer_service')
           ),
           eq(searchIndex.isActive, true),

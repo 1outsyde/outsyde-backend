@@ -79,10 +79,29 @@ The Outsyde platform operates as a monorepo, utilizing a React frontend, an Expr
     - Video banners render with autoPlay, loop, muted, playsInline attributes
     - MediaUploader component handles both image and video uploads with preview
     - Falls back to image rendering if video URL is missing/empty
--   **Unified Search with Profile Navigation:** Search results include `userId` field for businesses and photographers, enabling mobile apps to navigate directly to user profiles from search results. The search index stores:
-    - `entityType`: "business" | "photographer" | "product" | "service" | "photographer_service"
-    - `entityId`: The ID of the entity
-    - `userId`: The user ID of the business owner or photographer (for profile navigation)
+-   **Unified Search Engine:** `GET /api/search` provides cross-entity search with scope filtering and personalization:
+    - **Scopes:** `all` (default), `consumers`, `photographers`, `businesses`, `products`, `services`
+    - **Parameters:** `q` (query), `scope`, `viewerUserId` (optional), `limit`, `offset`
+    - **Normalized Result Shape:**
+      ```json
+      {
+        "id": "uuid",
+        "type": "consumer | photographer | business | product | service",
+        "title": "Display name",
+        "subtitle": "Category or location info",
+        "imageUrl": "string | null",
+        "ratingAvg": "number | null (0-5 scale)",
+        "ratingCount": "number | null",
+        "category": "string | null",
+        "providerUserId": "uuid | null",
+        "baseScore": "number (text relevance)",
+        "personalizationScore": "number (preference match)"
+      }
+      ```
+    - **Personalization (scope=all):** Boosts results based on followed users, industry preferences, and niche matches from user's onboarding data
+    - **Business Visibility:** Only shows approved businesses with active subscriptions; Stripe onboarding required if monetization enabled
+    - **Products/Services:** Only shows items from visible parent businesses; photographer services always visible if active
+    - **Sorting:** scope=all sorts by personalizationScore+baseScore; scoped searches sort by baseScore only
 
 ## External Dependencies
 -   **PostgreSQL:** Primary database.
