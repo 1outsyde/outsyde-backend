@@ -1,0 +1,72 @@
+BACKEND-ONLY: Finish Stripe money logic for pending approval + refunds (remove TODOs)
+
+You implemented:
+- weekly availability
+- provider blocks
+- autoAcceptBookings
+- booking states incl. PENDING_PROVIDER
+- accept/decline endpoints
+- 24h cleanup
+
+But Stripe PaymentIntent capture/void logic is still TODO.
+
+REQUIREMENTS (must work for BOTH appointments and shootBookings):
+
+1) PaymentIntent creation (replace/extend Checkout Sessions for services)
+Add endpoints to create PaymentIntents for bookings:
+- For autoAcceptBookings = true:
+  - create PaymentIntent with capture_method=automatic
+- For autoAcceptBookings = false:
+  - create PaymentIntent with capture_method=manual (authorize only)
+
+Store on booking:
+- paymentMethod = "payment_intent"
+- paymentIntentId
+- captureMethod
+- pendingProviderExpiresAt (when applicable)
+
+Return to frontend:
+- clientSecret (for PaymentSheet)
+- paymentIntentId
+
+2) Webhooks
+Handle:
+- payment_intent.succeeded:
+  - automatic capture path -> set CONFIRMED and payout provider
+- payment_intent.amount_capturable_updated or after manual capture:
+  - set CONFIRMED and payout provider
+- payment_intent.canceled / payment_failed:
+  - set DECLINED/CANCELLED/EXPIRED and release slot
+
+3) Accept/Decline endpoints
+- Accept:
+  - if capture_method=manual -> capture PaymentIntent
+  - transition to CONFIRMED (or wait for webhook and transition safely)
+- Decline:
+  - if manual -> cancel PaymentIntent (void authorization)
+  - transition to DECLINED/CANCELLED and release slot
+
+4) Expiry cleanup (24h)
+- When pendingProvider expires:
+  - cancel PaymentIntent if manual
+  - release slot
+  - status EXPIRED
+
+5) Refunds
+- Provider cancel before appointment OR provider-issued refund action:
+  - if payment captured -> create Stripe refund (full or partial)
+  - store stripeRefundId
+  - update booking status CANCELLED/REFUNDED as appropriate
+- If payment not captured (manual auth only):
+  - cancel PI (no refund)
+
+6) Payout logic (keep existing Outsyde fee split)
+- photographers: 10% fee
+- businesses: 4% fee
+Continue using Stripe Connect destination charges / transfers consistent with current system.
+
+OUTPUT REQUIRED:
+- exact new endpoints and request/response examples (clientSecret etc.)
+- confirm which webhook events you handle
+- confirm slot release rules on decline/expire/refund
+- remove TODOs and ensure tests or log-based verification

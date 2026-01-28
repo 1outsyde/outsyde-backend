@@ -621,6 +621,9 @@ export const shootBookings = pgTable("shoot_bookings", {
   // Payment method used: "checkout_session" (legacy/redirect) or "payment_intent" (in-app PaymentSheet)
   paymentMethod: text("payment_method").default("checkout_session"), // "checkout_session" | "payment_intent"
   
+  // Capture method for PaymentIntent: "automatic" (immediate capture) or "manual" (auth only, capture later)
+  captureMethod: text("capture_method"), // "automatic" | "manual"
+  
   // Refund tracking
   stripeRefundId: text("stripe_refund_id"),
   refundedAt: timestamp("refunded_at"),
@@ -698,6 +701,9 @@ export const appointments = pgTable("appointments", {
   
   // Payment method used: "checkout_session" (legacy/redirect) or "payment_intent" (in-app PaymentSheet)
   paymentMethod: text("payment_method").default("checkout_session"), // "checkout_session" | "payment_intent"
+  
+  // Capture method for PaymentIntent: "automatic" (immediate capture) or "manual" (auth only, capture later)
+  captureMethod: text("capture_method"), // "automatic" | "manual"
   
   // Refund tracking
   stripeRefundId: text("stripe_refund_id"),
