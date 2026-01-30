@@ -5,6 +5,16 @@ import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
 import { sql } from "drizzle-orm";
 
+const booleanOrStringToBool = z.preprocess((v) => {
+  if (typeof v === "boolean") return v;
+  if (typeof v === "string") {
+    const s = v.toLowerCase().trim();
+    if (s === "true" || s === "open") return true;
+    if (s === "false" || s === "closed") return false;
+  }
+  return v;
+}, z.boolean());
+
 /* =====================================================
    SESSIONS (Auth)
 ===================================================== */
@@ -1540,7 +1550,7 @@ export const insertPhotographerBlackoutDateSchema = createInsertSchema(photograp
 
 export const updatePhotographerAvailabilitySettingsSchema = z.object({
   hoursOfOperation: z.record(z.object({
-    open: z.string(),
+    open: booleanOrStringToBool,
     close: z.string(),
     closed: z.boolean().optional(),
   })).optional(),
@@ -1615,7 +1625,7 @@ export const updateStaffMemberSchema = z.object({
   role: z.enum(['staff', 'manager', 'owner']).optional(),
   status: z.enum(['active', 'inactive', 'pending']).optional(),
   hoursOfOperation: z.record(z.string(), z.object({
-    open: z.string(),
+    open: booleanOrStringToBool,
     close: z.string(),
     closed: z.boolean().optional(),
   })).optional(),
@@ -1637,7 +1647,7 @@ export const updateBusinessProfileSchema = z.object({
   contactEmail: z.string().email().optional(),
   contactPhone: z.string().optional(),
   hoursOfOperation: z.record(z.string(), z.object({
-    open: z.string(),
+    open: booleanOrStringToBool,
     close: z.string(),
     closed: z.boolean().optional(),
   })).optional(),
