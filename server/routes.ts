@@ -10071,6 +10071,69 @@ export async function registerRoutes(
     }
   });
 
+  // ==================== ADMIN PHOTOGRAPHER VISIBILITY ====================
+
+  // List all photographers (admin view - includes hidden/flagged)
+  app.get("/api/admin/photographers", requireAdmin, async (req, res) => {
+    try {
+      const allPhotographers = await storage.listAllPhotographers();
+      res.json(allPhotographers);
+    } catch (error) {
+      console.error("Admin list photographers error:", error);
+      res.status(500).json({ error: "Failed to list photographers" });
+    }
+  });
+
+  // Update photographer visibility status
+  app.patch("/api/admin/photographers/:id/visibility", requireAdmin, async (req, res) => {
+    try {
+      const { id } = req.params;
+      const { visibilityStatus, adminNotes } = req.body;
+      const adminUser = (req as any).adminUser;
+
+      if (!visibilityStatus || !['public', 'hidden', 'flagged'].includes(visibilityStatus)) {
+        return res.status(400).json({ 
+          error: "Invalid visibility status. Must be 'public', 'hidden', or 'flagged'" 
+        });
+      }
+
+      const photographer = await storage.getPhotographer(id);
+      if (!photographer) {
+        return res.status(404).json({ error: "Photographer not found" });
+      }
+
+      const beforeState = {
+        visibilityStatus: photographer.visibilityStatus,
+        adminNotes: photographer.adminNotes,
+      };
+
+      const updatedPhotographer = await storage.updatePhotographer(id, {
+        visibilityStatus,
+        adminNotes: adminNotes || photographer.adminNotes,
+      });
+
+      // Create audit log
+      await storage.createAuditLog({
+        actorId: adminUser.id,
+        actorType: "admin",
+        action: "update_photographer_visibility",
+        targetType: "photographer",
+        targetId: id,
+        beforeState,
+        afterState: { visibilityStatus, adminNotes },
+      });
+
+      console.log(`[Admin] Updated photographer ${id} visibility to ${visibilityStatus} by ${adminUser.email}`);
+      res.json({ 
+        photographer: updatedPhotographer,
+        message: `Photographer visibility updated to ${visibilityStatus}`,
+      });
+    } catch (error) {
+      console.error("Admin update photographer visibility error:", error);
+      res.status(500).json({ error: "Failed to update photographer visibility" });
+    }
+  });
+
   // ==================== ADMIN FULFILLMENT ROUTES ====================
 
   // Get all fulfillment tasks with optional filters

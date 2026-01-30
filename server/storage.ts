@@ -212,6 +212,7 @@ export interface IStorage {
   getPhotographerByUserId(userId: string): Promise<Photographer | undefined>;
   getPhotographerByStripeAccountId(stripeAccountId: string): Promise<Photographer | undefined>;
   listPhotographers(): Promise<Photographer[]>;
+  listAllPhotographers(): Promise<Photographer[]>;
   updatePhotographer(id: string, updates: Partial<Photographer>): Promise<Photographer | undefined>;
   deletePhotographer(id: string): Promise<void>;
 
@@ -1087,6 +1088,14 @@ export class DatabaseStorage implements IStorage {
   }
 
   async listPhotographers(): Promise<Photographer[]> {
+    // Public listing: only show photographers with public visibility
+    return db.select().from(photographers).where(
+      eq(photographers.visibilityStatus, 'public')
+    );
+  }
+
+  async listAllPhotographers(): Promise<Photographer[]> {
+    // Admin/internal: show all photographers regardless of visibility
     return db.select().from(photographers);
   }
 
@@ -5169,8 +5178,10 @@ export class DatabaseStorage implements IStorage {
     // Search businesses
     const businessResults = await this.getBusinesses(filters);
 
-    // Search photographers with similar filters
-    let photographerResults = await db.select().from(photographers);
+    // Search photographers with similar filters (only public visibility)
+    let photographerResults = await db.select().from(photographers).where(
+      eq(photographers.visibilityStatus, 'public')
+    );
     
     if (filters?.city) {
       photographerResults = photographerResults.filter(p => 
@@ -5345,7 +5356,9 @@ export class DatabaseStorage implements IStorage {
             ilike(users.name, `%${query}%`)
           ),
           // Hide demo data from non-admins
-          isAdmin ? undefined : sql`NOT (${photographers.userId}::text ILIKE '%demo%')`
+          isAdmin ? undefined : sql`NOT (${photographers.userId}::text ILIKE '%demo%')`,
+          // Only show public photographers in search (admins see all)
+          isAdmin ? undefined : eq(photographers.visibilityStatus, 'public')
         ))
         .limit(limit * 2);
 
