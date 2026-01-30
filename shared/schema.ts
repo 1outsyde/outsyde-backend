@@ -15,6 +15,15 @@ const booleanOrStringToBool = z.preprocess((v) => {
   return v;
 }, z.boolean());
 
+const hoursOfOperationDaySchema = z.object({
+  open: booleanOrStringToBool,
+  close: z.string().optional(),
+  closed: z.boolean().optional(),
+}).refine(
+  (d) => d.open === false || (d.open === true && typeof d.close === 'string' && d.close.length > 0),
+  { message: "close time is required when open is true", path: ["close"] }
+);
+
 /* =====================================================
    SESSIONS (Auth)
 ===================================================== */
@@ -1549,11 +1558,7 @@ export const insertPhotographerBlackoutDateSchema = createInsertSchema(photograp
 });
 
 export const updatePhotographerAvailabilitySettingsSchema = z.object({
-  hoursOfOperation: z.record(z.object({
-    open: booleanOrStringToBool,
-    close: z.string(),
-    closed: z.boolean().optional(),
-  })).optional(),
+  hoursOfOperation: z.record(hoursOfOperationDaySchema).optional(),
   travelBufferMinutes: z.number().min(0).max(180).optional(),
   serviceRadiusMiles: z.number().min(1).max(200).optional(),
   serviceLocations: z.array(z.object({
@@ -1624,11 +1629,7 @@ export const updateStaffMemberSchema = z.object({
   specialties: z.array(z.string()).optional(),
   role: z.enum(['staff', 'manager', 'owner']).optional(),
   status: z.enum(['active', 'inactive', 'pending']).optional(),
-  hoursOfOperation: z.record(z.string(), z.object({
-    open: booleanOrStringToBool,
-    close: z.string(),
-    closed: z.boolean().optional(),
-  })).optional(),
+  hoursOfOperation: z.record(z.string(), hoursOfOperationDaySchema).optional(),
 });
 
 export const updateBusinessProfileSchema = z.object({
@@ -1646,11 +1647,7 @@ export const updateBusinessProfileSchema = z.object({
   logoImage: z.string().optional(),
   contactEmail: z.string().email().optional(),
   contactPhone: z.string().optional(),
-  hoursOfOperation: z.record(z.string(), z.object({
-    open: booleanOrStringToBool,
-    close: z.string(),
-    closed: z.boolean().optional(),
-  })).optional(),
+  hoursOfOperation: z.record(z.string(), hoursOfOperationDaySchema).optional(),
   brandColors: z.object({
     primary: z.string().optional(),
     secondary: z.string().optional(),
