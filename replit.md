@@ -34,6 +34,7 @@ Outsyde is built as a monorepo, using a React frontend, an Express (TypeScript) 
 -   **Identity Change Limits:** Server-side rate limiting for username (30 days) and display name (7 days) changes.
 -   **Data Privacy:** Strict measures for sensitive data, limited visibility, and aggregation for analytics.
 -   **Business Visibility Filtering:** Server-side logic for public business endpoints based on approval, demo data, Stripe onboarding, and active subscriptions.
+-   **Photographer Visibility Control:** Lightweight moderation system (not approval gate). Photographers auto-qualify once Stripe Connect onboarding completes. Admin can set visibilityStatus (public/hidden/flagged) to control search/profile visibility without blocking onboarding. Fields: visibilityStatus, adminNotes.
 -   **Post Commerce Support:** Feed posts can include validated commerce links (products, services, photographer services).
 -   **Post Intent System:** Role-based authorization for post types: "social", "review", and "promotion".
 -   **Feed Author Object:** Canonical author object included with every feed post for frontend identity.
