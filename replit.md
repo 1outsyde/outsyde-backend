@@ -49,6 +49,14 @@ Outsyde is built as a monorepo, using a React frontend, an Express (TypeScript) 
     - Error codes: OUTSIDE_HOURS, TIME_NOT_COMPATIBLE, SLOT_UNAVAILABLE, HOLD_EXPIRED, HOLD_NOT_FOUND, SERVICE_NOT_FOUND, INVALID_DATE
     - Endpoints: GET /availability/calendar, GET /availability/slots, POST /booking/validate, POST /booking/hold, POST /booking/confirm, DELETE /booking/hold/:holdId, GET /booking/holds
     - All money handled in cents (servicePriceCents)
+-   **Availability Data Model & Migration:**
+    - **Source of Truth:** `weekly_availability` table is the authoritative source for availability, slot generation, and booking logic
+    - **Legacy Field:** `hoursOfOperation` JSON field on photographers/businesses is legacy/derived data
+    - **Fallback Logic:** Calendar/slots endpoints fall back to `hoursOfOperation` JSON when `weekly_availability` is empty (temporary compatibility)
+    - **Sync Safety Net:** When `hoursOfOperation` is updated via API endpoints, data is automatically synced to `weekly_availability` table
+    - **Dashboard Integration:** Dashboard writes directly to `weekly_availability` via `PUT /api/photographers/me/weekly-availability`
+    - **Migration Path:** Once stable, remove fallback logic reading from `hoursOfOperation` (server/availabilityService.ts)
+    - **Day Mapping:** dayOfWeek integers (0=Sunday...6=Saturday) map to hoursOfOperation keys (sunday, monday, etc.)
 
 ## External Dependencies
 -   **PostgreSQL:** Primary database.

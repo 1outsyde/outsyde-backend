@@ -81,7 +81,8 @@ import {
   getUserActiveHolds,
   calculateEndTime,
   AvailabilityError,
-  AVAILABILITY_ERRORS
+  AVAILABILITY_ERRORS,
+  syncHoursOfOperationToWeeklyAvailability
 } from "./availabilityService";
 import { 
   transitionAppointmentState, 
@@ -2341,6 +2342,15 @@ export async function registerRoutes(
 
       if (!updated) {
         return res.status(500).json({ error: "Failed to update availability settings" });
+      }
+
+      // Sync hoursOfOperation to weeklyAvailability table as safety net
+      if (data.hoursOfOperation) {
+        await syncHoursOfOperationToWeeklyAvailability(
+          'photographer',
+          photographer.id,
+          data.hoursOfOperation as Record<string, { open?: string; close?: string; closed?: boolean }>
+        );
       }
 
       res.json({
@@ -6692,6 +6702,16 @@ export async function registerRoutes(
       }
 
       const updated = await storage.updateBusiness(business.id, updates);
+
+      // Sync hoursOfOperation to weeklyAvailability table as safety net
+      if (updates.hoursOfOperation) {
+        await syncHoursOfOperationToWeeklyAvailability(
+          'business',
+          business.id,
+          updates.hoursOfOperation as Record<string, { open?: string; close?: string; closed?: boolean }>
+        );
+      }
+
       res.json({ business: updated });
     } catch (error) {
       console.error("Update vendor business error:", error);

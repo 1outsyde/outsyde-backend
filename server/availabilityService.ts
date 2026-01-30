@@ -120,6 +120,72 @@ const DAY_OF_WEEK_TO_KEY: Record<number, string> = {
   6: 'saturday',
 };
 
+// Reverse mapping: hoursOfOperation keys to dayOfWeek integers
+const KEY_TO_DAY_OF_WEEK: Record<string, number> = {
+  'sunday': 0,
+  'monday': 1,
+  'tuesday': 2,
+  'wednesday': 3,
+  'thursday': 4,
+  'friday': 5,
+  'saturday': 6,
+};
+
+/**
+ * Sync hoursOfOperation JSON field to weeklyAvailability table.
+ * This is a safety net for legacy or external writers that update hoursOfOperation directly.
+ * The dashboard writes directly to weeklyAvailability, so this sync ensures consistency.
+ */
+export async function syncHoursOfOperationToWeeklyAvailability(
+  providerType: 'photographer' | 'business',
+  providerId: string,
+  hoursOfOperation: Record<string, { open?: string; close?: string; closed?: boolean }> | null
+): Promise<void> {
+  console.log("[AVAILABILITY_SYNC] Syncing hoursOfOperation to weeklyAvailability for", providerType, providerId);
+  
+  if (!hoursOfOperation) {
+    console.log("[AVAILABILITY_SYNC] No hoursOfOperation to sync");
+    return;
+  }
+  
+  // Delete existing weeklyAvailability rows for this provider (without staffMemberId)
+  await db.delete(weeklyAvailability)
+    .where(and(
+      eq(weeklyAvailability.providerType, providerType),
+      eq(weeklyAvailability.providerId, providerId),
+      isNull(weeklyAvailability.staffMemberId)
+    ));
+  
+  // Insert new rows for each day with availability
+  const rowsToInsert = [];
+  for (const [dayKey, dayHours] of Object.entries(hoursOfOperation)) {
+    const dayOfWeek = KEY_TO_DAY_OF_WEEK[dayKey];
+    if (dayOfWeek === undefined) continue;
+    
+    // Skip days that are closed or have no open/close times
+    if (dayHours.closed || !dayHours.open || !dayHours.close) {
+      continue;
+    }
+    
+    rowsToInsert.push({
+      providerType,
+      providerId,
+      dayOfWeek,
+      startTime: dayHours.open,
+      endTime: dayHours.close,
+      isActive: true,
+      staffMemberId: null,
+    });
+  }
+  
+  if (rowsToInsert.length > 0) {
+    await db.insert(weeklyAvailability).values(rowsToInsert);
+    console.log("[AVAILABILITY_SYNC] Inserted", rowsToInsert.length, "weeklyAvailability rows");
+  } else {
+    console.log("[AVAILABILITY_SYNC] No open days to insert");
+  }
+}
+
 async function getWeeklyAvailabilityForDay(
   providerType: string,
   providerId: string,
@@ -169,7 +235,7 @@ async function getWeeklyAvailabilityForDay(
     
     if (hoursOfOperation) {
       const dayKey = DAY_OF_WEEK_TO_KEY[dayOfWeek];
-      const dayHours = hoursOfOperation[dayKey];
+      const dayHours = hoursOfOperation[dayKey] as { open?: string; close?: string; closed?: boolean } | undefined;
       
       if (dayHours && !dayHours.closed && dayHours.open && dayHours.close) {
         console.log("[AVAILABILITY_DEBUG]   Found hours for", dayKey, ":", dayHours.open, "-", dayHours.close);
