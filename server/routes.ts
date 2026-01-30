@@ -92,6 +92,14 @@ import { and } from "drizzle-orm";
 // ✅ CORRECT IMPORT (default export)
 import { photographersRouter } from "./Photographers/photographers.routes";
 
+// =========================
+// PAYMENTS CONFIGURATION
+// =========================
+// Set to false to disable Stripe payments during development (e.g., for Expo Go without native SDK)
+// Set to true to enable real Stripe payment processing
+// This flag only affects PaymentIntent creation - booking flows still work normally
+const PAYMENTS_ENABLED = process.env.PAYMENTS_ENABLED !== 'false'; // Default: true unless explicitly set to 'false'
+
 // Legacy password functions for backward compatibility with existing users
 function legacyHashPassword(password: string): string {
   return Buffer.from(password).toString("base64");
@@ -3719,6 +3727,22 @@ export async function registerRoutes(
         });
       }
 
+      // ========================================
+      // PAYMENTS PAUSED MODE (for Expo Go dev)
+      // ========================================
+      // When payments are disabled, skip Stripe calls but do NOT modify booking state.
+      // Booking remains in current state (DRAFT/PENDING_PAYMENT) - frontend handles navigation.
+      if (!PAYMENTS_ENABLED) {
+        console.log(`[Booking] PAYMENTS_ENABLED=false - Skipping Stripe for appointment ${appointmentId}`);
+        console.log(`[Booking] Booking ${appointmentId} remains in status: ${appointment.status}`);
+        
+        return res.json({
+          paymentStatus: "paused",
+          mode: "development",
+          message: "Payments temporarily disabled for UI development"
+        });
+      }
+
       // Idempotency: If PaymentIntent already exists and is valid, return it
       if (appointment.stripePaymentIntentId) {
         try {
@@ -3836,6 +3860,22 @@ export async function registerRoutes(
         return res.status(400).json({ 
           error: "Booking is not in a payable state",
           currentStatus: booking.status 
+        });
+      }
+
+      // ========================================
+      // PAYMENTS PAUSED MODE (for Expo Go dev)
+      // ========================================
+      // When payments are disabled, skip Stripe calls but do NOT modify booking state.
+      // Booking remains in current state (DRAFT/PENDING_PAYMENT) - frontend handles navigation.
+      if (!PAYMENTS_ENABLED) {
+        console.log(`[Booking] PAYMENTS_ENABLED=false - Skipping Stripe for shoot booking ${bookingId}`);
+        console.log(`[Booking] Booking ${bookingId} remains in status: ${booking.status}`);
+        
+        return res.json({
+          paymentStatus: "paused",
+          mode: "development",
+          message: "Payments temporarily disabled for UI development"
         });
       }
 
