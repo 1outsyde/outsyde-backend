@@ -1,0 +1,119 @@
+BACKEND + FRONTEND — Availability mismatch bug (source-of-truth + API contract fix)
+
+We have a critical availability mismatch:
+
+1) Provider sets Base Availability in Dashboard:
+   - Example: Mon–Sat 9:00 AM to 5:00 PM (Sunday closed)
+   - UI shows it saved successfully.
+
+2) Public profile banner shows "Available Today: 10AM - 6PM" (incorrect vs base availability).
+3) BookingFlow Step 2 (Select Date) calendar shows all days unavailable (no highlighted days).
+   This happens even though base availability is set.
+
+We need you to find the correct APIs and ensure ALL availability views are driven by the SAME backend truth.
+
+----------------------------------------
+EXPECTED SOURCE OF TRUTH
+----------------------------------------
+Availability must be computed from backend:
+weeklyAvailability windows
+minus providerBlocks
+minus confirmed bookings
+minus active booking holds
+
+Slots are generated dynamically from the above, and vary by service duration.
+
+----------------------------------------
+REQUIRED BACKEND BEHAVIOR (VERIFY + FIX)
+----------------------------------------
+
+A) Confirm that the dashboard "Base Availability" Save action writes to the correct tables:
+   - weeklyAvailability (or equivalent)
+   - providerBlocks (if used)
+   Make sure it is saved under the correct providerType + providerId
+   (Photographer vs Business must not be mixed)
+
+B) Confirm that GET /availability/calendar uses:
+   providerType, providerId, year, month
+   and returns availability days based on weeklyAvailability windows.
+   If weeklyAvailability exists, calendar must show available days (NOT all disabled).
+
+C) Confirm that GET /availability/slots uses:
+   providerType, providerId, date, durationMinutes (or serviceId)
+   and returns slots consistent with weeklyAvailability.
+
+D) Confirm timezone handling:
+   - weekly availability times are stored consistently (either local time or standardized)
+   - "Available Today" banner must reflect the provider’s local schedule.
+   If we store times as strings like "09:00", treat them as provider-local (not UTC).
+   Avoid shifting times by timezone accidentally.
+
+E) Add server-side debug logs (temporary) for a single provider when calendar is requested:
+   Log:
+   - providerType/providerId received
+   - weeklyAvailability rows found for that provider
+   - computed window for the requested month (at least for today)
+   - number of available days returned
+   - any blocks/bookings/holds applied
+
+If weeklyAvailability rows are not found, that explains the all-unavailable calendar.
+
+----------------------------------------
+REQUIRED FRONTEND BEHAVIOR (VERIFY + FIX)
+----------------------------------------
+
+1) Dashboard Save:
+   Ensure the Base Availability "Save" calls the correct backend endpoint and passes:
+   - providerType
+   - providerId
+   - dayOfWeek
+   - startTime/endTime
+   Confirm request payload matches backend schema.
+
+2) Banner "Available Today":
+   The banner must NOT be hardcoded or derived from stale local UI state.
+   It must be computed from the same backend availability logic as the calendar.
+   Preferred implementation:
+   - call a backend endpoint (or reuse calendar/slots endpoint for "today")
+   - compute earliest available start + latest available end for today based on returned slots
+   - display "Available Today: X - Y" only if slots exist; otherwise show "Not available today"
+
+3) BookingFlow Calendar:
+   Ensure it calls:
+   /availability/calendar?providerType=...&providerId=...&year=YYYY&month=MM
+   and correctly renders available/partial/unavailable based on response.
+   If calendar response has counts per day, treat count>0 as available.
+
+4) Provider identity consistency:
+   Confirm providerId used across dashboard + banner + booking flow is the SAME ID:
+   - Must be photographer.id for photographers
+   - Must be business.id for businesses
+   Do NOT accidentally use:
+   - userId
+   - serviceId
+   - connectedAccountId
+   Any mismatch will cause “no availability found”.
+
+----------------------------------------
+ACCEPTANCE TESTS (MUST PASS)
+----------------------------------------
+
+Test with a provider that has Base Availability set:
+- Mon–Sat 9:00 AM–5:00 PM, Sunday closed.
+
+Expected:
+1) Banner shows "Available Today: 9AM - 5PM" (or subset if blocks/bookings exist)
+2) BookingFlow calendar shows multiple available days (highlighted)
+3) Selecting a highlighted day shows slots within 9AM–5PM
+4) If a block/booking exists, those slots are removed and calendar day may become partial/unavailable
+5) No timezone shift (should NOT show 10–6 unless the provider actually set 10–6)
+
+Deliverables:
+- Identify why banner shows wrong time (wrong endpoint, timezone shift, or hardcoded fallback)
+- Identify why calendar returns all-unavailable (providerId mismatch, missing weeklyAvailability rows, or API not using weeklyAvailability)
+- Fix the pipeline so all views use the same computed availability logic
+- Provide the exact backend endpoints used by:
+  (a) dashboard save
+  (b) banner summary
+  (c) calendar month view
+  (d) slots list

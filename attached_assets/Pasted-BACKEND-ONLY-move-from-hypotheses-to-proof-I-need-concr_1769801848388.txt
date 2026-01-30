@@ -1,0 +1,56 @@
+BACKEND ONLY — move from hypotheses to proof. I need concrete evidence + exact fixes.
+
+You listed the correct suspected causes (providerId mismatch, providerType mismatch, banner source, timezone).
+Now prove which one is happening with these steps and report findings:
+
+1) Identify the exact provider I'm testing (the photographer shown in the screenshots).
+   In logs, print these IDs:
+   - auth user id
+   - photographer.id
+   - photographer.userId
+   - providerId being used in weeklyAvailability writes
+   - providerId being used by /availability/calendar queries
+
+2) Database proof (SQL):
+   Run queries to show whether weeklyAvailability rows exist and under which IDs:
+
+   a) Show weeklyAvailability rows by photographer.id:
+      SELECT * FROM weeklyAvailability
+      WHERE providerType='photographer' AND providerId = '<photographer.id>';
+
+   b) Show weeklyAvailability rows by photographer.userId:
+      SELECT * FROM weeklyAvailability
+      WHERE providerType='photographer' AND providerId = '<photographer.userId>';
+
+   c) If there are rows under some other ID, print that ID and explain why.
+
+3) Endpoint instrumentation (temporary logging):
+   Add debug logging to BOTH endpoints:
+   - PUT /api/photographers/me/weekly-availability (on save)
+   - GET /api/availability/calendar (on fetch)
+
+   Log at least:
+   - providerType, providerId used
+   - number of weeklyAvailability rows found
+   - for calendar: computed availableDays count for the month
+
+4) Correctness requirement:
+   The providerId used in weeklyAvailability MUST match the providerId used by calendar/slots endpoints.
+   Decide the system contract and enforce it:
+   - For photographers, providerId should be photographer.id (preferred)
+   - For businesses, providerId should be business.id
+
+   If current save endpoint is writing providerId = userId, change it to photographer.id.
+
+5) Timezone requirement:
+   Clarify how times are stored:
+   - Are startTime/endTime strings like "09:00"?
+   - Are they timestamps?
+   If strings, they must be treated as provider-local time (no UTC shifting).
+   Confirm no conversion is being applied on server that turns 9–5 into 10–6.
+
+Deliverables I need back from you:
+- Which ID mismatch is happening (photographer.id vs userId or other)
+- The SQL results proving where rows exist
+- The exact code change you made (or will make) to unify providerId usage
+- Confirmation that /availability/calendar returns available days once weeklyAvailability exists
