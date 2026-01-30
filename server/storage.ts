@@ -1141,13 +1141,11 @@ export class DatabaseStorage implements IStorage {
   }
 
   async getAllPhotographerServices(photographerId: string): Promise<PhotographerService[]> {
-    // Owner dashboard: return all services regardless of status
+    // Owner dashboard: return all services regardless of status or isActive
+    // This allows owners to see archived and deleted services
     return db.select()
       .from(photographerServices)
-      .where(and(
-        eq(photographerServices.photographerId, photographerId),
-        eq(photographerServices.isActive, true)
-      ));
+      .where(eq(photographerServices.photographerId, photographerId));
   }
 
   async updatePhotographerService(id: string, updates: Partial<PhotographerService>): Promise<PhotographerService | undefined> {

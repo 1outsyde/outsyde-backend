@@ -4029,9 +4029,9 @@ export async function registerRoutes(
         }
       }
 
+      // Only update status to archived, keep isActive true so it shows in owner dashboard
       const updatedService = await storage.updatePhotographerService(service.id, {
         status: 'archived',
-        isActive: false,
       });
 
       res.json({ 
