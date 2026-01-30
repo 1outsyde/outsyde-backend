@@ -1280,6 +1280,66 @@ export const providerBlocks = pgTable("provider_blocks", {
 }));
 
 /* =====================================================
+   BOOKING HOLDS (Temporary Reservation Lock)
+   Auto-expiring holds that block availability for other users
+===================================================== */
+export const bookingHolds = pgTable("booking_holds", {
+  id: varchar("id", { length: 36 }).primaryKey().default(sql`gen_random_uuid()`),
+
+  // Provider discriminator: "business" or "photographer"
+  providerType: text("provider_type").notNull(), // "business" | "photographer"
+  providerId: varchar("provider_id", { length: 36 }).notNull(),
+
+  // For businesses, optionally link to a specific staff member
+  staffMemberId: varchar("staff_member_id", { length: 36 }),
+
+  // User holding this slot
+  userId: varchar("user_id", { length: 36 }).notNull().references(() => users.id),
+
+  // Service being held
+  serviceId: varchar("service_id", { length: 36 }).notNull(),
+  serviceName: text("service_name").notNull(),
+  servicePriceCents: integer("service_price_cents").notNull(),
+  durationMinutes: integer("duration_minutes").notNull(),
+
+  // Time slot being held (full timestamps for precision)
+  holdDate: text("hold_date").notNull(), // YYYY-MM-DD
+  startTime: text("start_time").notNull(), // HH:MM (24hr)
+  endTime: text("end_time").notNull(), // HH:MM (24hr)
+  startAt: timestamp("start_at").notNull(), // Full timestamp for overlap checks
+  endAt: timestamp("end_at").notNull(), // Full timestamp for overlap checks
+
+  // Hold lifecycle
+  status: text("status").default("active").notNull(), // "active" | "converted" | "expired" | "released"
+  expiresAt: timestamp("expires_at").notNull(),
+
+  // If converted to a booking, store the reference
+  convertedToBookingId: varchar("converted_to_booking_id", { length: 36 }),
+  convertedToBookingType: text("converted_to_booking_type"), // "appointment" | "shoot_booking"
+
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+}, (table) => ({
+  // Index for finding active holds by provider
+  providerActiveIdx: index("idx_booking_holds_provider_active").on(table.providerType, table.providerId, table.status),
+  // Index for finding holds by user
+  userIdx: index("idx_booking_holds_user").on(table.userId, table.status),
+  // Index for expiry cleanup job
+  expiryIdx: index("idx_booking_holds_expiry").on(table.status, table.expiresAt),
+  // Index for overlap checks
+  overlapIdx: index("idx_booking_holds_overlap").on(table.providerType, table.providerId, table.startAt, table.endAt, table.status),
+}));
+
+export const insertBookingHoldSchema = createInsertSchema(bookingHolds).omit({
+  id: true,
+  createdAt: true,
+  updatedAt: true,
+  status: true,
+  convertedToBookingId: true,
+  convertedToBookingType: true,
+});
+
+/* =====================================================
    SCHEDULING (Unconfirmed Bookings)
 ===================================================== */
 export const scheduling = pgTable("scheduling", {
@@ -1833,6 +1893,9 @@ export type UpdateWeeklyAvailability = z.infer<typeof updateWeeklyAvailabilitySc
 export type InsertProviderBlock = z.infer<typeof insertProviderBlockSchema>;
 export type ProviderBlock = typeof providerBlocks.$inferSelect;
 export type UpdateProviderBlock = z.infer<typeof updateProviderBlockSchema>;
+
+export type InsertBookingHold = z.infer<typeof insertBookingHoldSchema>;
+export type BookingHold = typeof bookingHolds.$inferSelect;
 
 export type InsertStaffInvite = z.infer<typeof insertStaffInviteSchema>;
 export type StaffInvite = typeof staffInvites.$inferSelect;

@@ -9,6 +9,7 @@ import {
   type CancellationReason 
 } from "@shared/schema";
 import { eq, and, or, lt, inArray } from "drizzle-orm";
+import { expireOldHolds } from "./availabilityService";
 
 const DRAFT_TTL_MINUTES = 10;
 const PENDING_PROVIDER_TTL_HOURS = 24;
@@ -539,6 +540,8 @@ export function startBookingCleanupJob(intervalMs: number = 60000): NodeJS.Timeo
     try {
       await cleanupExpiredDrafts();
       await cleanupExpiredPendingProvider();
+      // Also expire old booking holds
+      await expireOldHolds();
     } catch (error) {
       console.error("[BookingCleanup] Error during cleanup:", error);
     }

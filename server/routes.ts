@@ -70,7 +70,18 @@ import {
   getStaffAvailabilitySlots, 
   getPhotographerAvailabilitySlots, 
   getBusinessAvailability,
-  isSlotAvailable 
+  isSlotAvailable,
+  getAvailabilityCalendar,
+  generateAvailabilitySlots,
+  validateBookingSlot,
+  createBookingHold,
+  confirmBookingHold,
+  releaseBookingHold,
+  getBookingHold,
+  getUserActiveHolds,
+  calculateEndTime,
+  AvailabilityError,
+  AVAILABILITY_ERRORS
 } from "./availabilityService";
 import { 
   transitionAppointmentState, 
@@ -3055,6 +3066,289 @@ export async function registerRoutes(
     } catch (error) {
       console.error("Check slot availability error:", error);
       res.status(500).json({ error: "Failed to check availability" });
+    }
+  });
+
+  // =========================
+  // DYNAMIC AVAILABILITY SYSTEM (New - Slot Generation)
+  // Endpoints for calendar, slots, validate, hold, confirm
+  // =========================
+
+  // GET /api/availability/calendar - Available days for a month
+  app.get("/api/availability/calendar", async (req, res) => {
+    try {
+      const { providerType, providerId, year, month, staffMemberId, serviceDurationMinutes } = req.query;
+
+      if (!providerType || !providerId || !year || !month) {
+        return res.status(400).json({ 
+          error: "providerType, providerId, year, and month are required" 
+        });
+      }
+
+      if (providerType !== 'business' && providerType !== 'photographer') {
+        return res.status(400).json({ error: "providerType must be 'business' or 'photographer'" });
+      }
+
+      const calendar = await getAvailabilityCalendar(
+        providerType as 'business' | 'photographer',
+        providerId as string,
+        parseInt(year as string, 10),
+        parseInt(month as string, 10),
+        staffMemberId as string | undefined,
+        serviceDurationMinutes ? parseInt(serviceDurationMinutes as string, 10) : undefined
+      );
+
+      res.json({ days: calendar });
+    } catch (error) {
+      console.error("Get availability calendar error:", error);
+      res.status(500).json({ error: "Failed to get availability calendar" });
+    }
+  });
+
+  // GET /api/availability/slots - Generated time slots for a specific date
+  app.get("/api/availability/slots", async (req, res) => {
+    try {
+      const { providerType, providerId, date, serviceDurationMinutes, staffMemberId } = req.query;
+
+      if (!providerType || !providerId || !date || !serviceDurationMinutes) {
+        return res.status(400).json({ 
+          error: "providerType, providerId, date, and serviceDurationMinutes are required" 
+        });
+      }
+
+      if (providerType !== 'business' && providerType !== 'photographer') {
+        return res.status(400).json({ error: "providerType must be 'business' or 'photographer'" });
+      }
+
+      const slots = await generateAvailabilitySlots(
+        providerType as 'business' | 'photographer',
+        providerId as string,
+        date as string,
+        parseInt(serviceDurationMinutes as string, 10),
+        staffMemberId as string | undefined
+      );
+
+      res.json({ 
+        date,
+        slots,
+        totalAvailable: slots.filter(s => s.available).length 
+      });
+    } catch (error) {
+      console.error("Generate availability slots error:", error);
+      res.status(500).json({ error: "Failed to generate availability slots" });
+    }
+  });
+
+  // POST /api/booking/validate - Validates service + time compatibility
+  app.post("/api/booking/validate", async (req, res) => {
+    try {
+      const { providerType, providerId, serviceId, date, startTime, staffMemberId } = req.body;
+
+      if (!providerType || !providerId || !serviceId || !date || !startTime) {
+        return res.status(400).json({ 
+          error: "providerType, providerId, serviceId, date, and startTime are required" 
+        });
+      }
+
+      if (providerType !== 'business' && providerType !== 'photographer') {
+        return res.status(400).json({ error: "providerType must be 'business' or 'photographer'" });
+      }
+
+      const result = await validateBookingSlot(
+        providerType as 'business' | 'photographer',
+        providerId as string,
+        serviceId as string,
+        date as string,
+        startTime as string,
+        staffMemberId as string | undefined
+      );
+
+      if (!result.valid) {
+        return res.status(400).json({
+          valid: false,
+          errorCode: result.errorCode,
+          error: result.errorMessage
+        });
+      }
+
+      res.json({
+        valid: true,
+        serviceName: result.serviceName,
+        servicePriceCents: result.servicePriceCents,
+        serviceDurationMinutes: result.serviceDurationMinutes,
+        endTime: calculateEndTime(startTime, result.serviceDurationMinutes!)
+      });
+    } catch (error) {
+      if (error instanceof AvailabilityError) {
+        return res.status(400).json({
+          valid: false,
+          errorCode: error.code,
+          error: error.message
+        });
+      }
+      console.error("Validate booking slot error:", error);
+      res.status(500).json({ error: "Failed to validate booking slot" });
+    }
+  });
+
+  // POST /api/booking/hold - Creates a temporary hold
+  app.post("/api/booking/hold", async (req, res) => {
+    const userId = req.session?.userId || getUserIdFromRequest(req);
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    try {
+      const { providerType, providerId, serviceId, date, startTime, staffMemberId, holdDurationMinutes } = req.body;
+
+      if (!providerType || !providerId || !serviceId || !date || !startTime) {
+        return res.status(400).json({ 
+          error: "providerType, providerId, serviceId, date, and startTime are required" 
+        });
+      }
+
+      if (providerType !== 'business' && providerType !== 'photographer') {
+        return res.status(400).json({ error: "providerType must be 'business' or 'photographer'" });
+      }
+
+      const result = await createBookingHold({
+        providerType: providerType as 'business' | 'photographer',
+        providerId: providerId as string,
+        staffMemberId: staffMemberId as string | undefined,
+        userId,
+        serviceId: serviceId as string,
+        date: date as string,
+        startTime: startTime as string,
+        holdDurationMinutes: holdDurationMinutes ? parseInt(holdDurationMinutes, 10) : undefined
+      });
+
+      res.json({
+        success: true,
+        holdId: result.holdId,
+        expiresAt: result.expiresAt.toISOString(),
+        serviceName: result.serviceName,
+        servicePriceCents: result.servicePriceCents,
+        durationMinutes: result.durationMinutes,
+        startTime: result.startTime,
+        endTime: result.endTime
+      });
+    } catch (error) {
+      if (error instanceof AvailabilityError) {
+        return res.status(400).json({
+          success: false,
+          errorCode: error.code,
+          error: error.message
+        });
+      }
+      console.error("Create booking hold error:", error);
+      res.status(500).json({ error: "Failed to create booking hold" });
+    }
+  });
+
+  // POST /api/booking/confirm - Converts hold to confirmed booking
+  app.post("/api/booking/confirm", async (req, res) => {
+    const userId = req.session?.userId || getUserIdFromRequest(req);
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    try {
+      const { holdId } = req.body;
+
+      if (!holdId) {
+        return res.status(400).json({ error: "holdId is required" });
+      }
+
+      // Validate the hold
+      const { hold } = await confirmBookingHold(holdId, userId);
+
+      // Return hold details for the frontend to create the actual booking
+      // The actual booking creation should use existing appointment/shoot booking endpoints
+      res.json({
+        success: true,
+        hold: {
+          id: hold.id,
+          providerType: hold.providerType,
+          providerId: hold.providerId,
+          staffMemberId: hold.staffMemberId,
+          serviceId: hold.serviceId,
+          serviceName: hold.serviceName,
+          servicePriceCents: hold.servicePriceCents,
+          durationMinutes: hold.durationMinutes,
+          date: hold.holdDate,
+          startTime: hold.startTime,
+          endTime: hold.endTime,
+          expiresAt: hold.expiresAt.toISOString()
+        },
+        message: "Hold validated. Proceed to payment."
+      });
+    } catch (error) {
+      if (error instanceof AvailabilityError) {
+        return res.status(400).json({
+          success: false,
+          errorCode: error.code,
+          error: error.message
+        });
+      }
+      console.error("Confirm booking hold error:", error);
+      res.status(500).json({ error: "Failed to confirm booking hold" });
+    }
+  });
+
+  // DELETE /api/booking/hold/:holdId - Release a hold
+  app.delete("/api/booking/hold/:holdId", async (req, res) => {
+    const userId = req.session?.userId || getUserIdFromRequest(req);
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    try {
+      const { holdId } = req.params;
+
+      // Verify the hold belongs to the user
+      const hold = await getBookingHold(holdId);
+      if (!hold) {
+        return res.status(404).json({ error: "Hold not found" });
+      }
+      if (hold.userId !== userId) {
+        return res.status(403).json({ error: "Not authorized" });
+      }
+
+      await releaseBookingHold(holdId);
+
+      res.json({ success: true, message: "Hold released" });
+    } catch (error) {
+      console.error("Release booking hold error:", error);
+      res.status(500).json({ error: "Failed to release booking hold" });
+    }
+  });
+
+  // GET /api/booking/holds - Get user's active holds
+  app.get("/api/booking/holds", async (req, res) => {
+    const userId = req.session?.userId || getUserIdFromRequest(req);
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    try {
+      const holds = await getUserActiveHolds(userId);
+
+      res.json({ 
+        holds: holds.map(h => ({
+          id: h.id,
+          providerType: h.providerType,
+          providerId: h.providerId,
+          serviceName: h.serviceName,
+          servicePriceCents: h.servicePriceCents,
+          date: h.holdDate,
+          startTime: h.startTime,
+          endTime: h.endTime,
+          expiresAt: h.expiresAt.toISOString()
+        }))
+      });
+    } catch (error) {
+      console.error("Get user holds error:", error);
+      res.status(500).json({ error: "Failed to get holds" });
     }
   });
 

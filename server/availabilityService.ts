@@ -12,9 +12,35 @@ import {
   photographers,
   weeklyAvailability,
   providerBlocks,
-  BOOKING_STATES
+  bookingHolds,
+  BOOKING_STATES,
+  type BookingHold
 } from "@shared/schema";
-import { eq, and, or, gte, lte, inArray, ne, sql, isNull } from "drizzle-orm";
+import { eq, and, or, gte, lte, inArray, ne, sql, isNull, lt } from "drizzle-orm";
+
+// ============================================
+// ERROR CODES
+// ============================================
+export const AVAILABILITY_ERRORS = {
+  TIME_NOT_COMPATIBLE: 'TIME_NOT_COMPATIBLE',
+  SLOT_UNAVAILABLE: 'SLOT_UNAVAILABLE',
+  HOLD_EXPIRED: 'HOLD_EXPIRED',
+  HOLD_NOT_FOUND: 'HOLD_NOT_FOUND',
+  SERVICE_NOT_FOUND: 'SERVICE_NOT_FOUND',
+  PROVIDER_NOT_FOUND: 'PROVIDER_NOT_FOUND',
+  INVALID_DATE: 'INVALID_DATE',
+  OUTSIDE_HOURS: 'OUTSIDE_HOURS',
+} as const;
+
+export class AvailabilityError extends Error {
+  constructor(public code: string, message: string) {
+    super(message);
+    this.name = 'AvailabilityError';
+  }
+}
+
+// Default hold duration in minutes
+export const DEFAULT_HOLD_DURATION_MINUTES = 10;
 
 export interface TimeSlot {
   startTime: string;
@@ -523,4 +549,710 @@ export async function getBusinessAvailability(
   }
 
   return results;
+}
+
+// ============================================
+// BOOKING HOLDS FUNCTIONS
+// ============================================
+
+/**
+ * Get active booking holds for a provider on a specific date
+ */
+export async function getActiveHoldsForDate(
+  providerType: 'business' | 'photographer',
+  providerId: string,
+  date: string,
+  staffMemberId?: string
+): Promise<BookingHold[]> {
+  const now = new Date();
+  
+  const conditions = [
+    eq(bookingHolds.providerType, providerType),
+    eq(bookingHolds.providerId, providerId),
+    eq(bookingHolds.holdDate, date),
+    eq(bookingHolds.status, 'active'),
+    gte(bookingHolds.expiresAt, now),
+  ];
+  
+  if (staffMemberId) {
+    conditions.push(eq(bookingHolds.staffMemberId, staffMemberId));
+  }
+  
+  return db.select()
+    .from(bookingHolds)
+    .where(and(...conditions));
+}
+
+/**
+ * Check if a time range is blocked by an active hold
+ */
+function isTimeBlockedByHold(
+  startTime: string,
+  endTime: string,
+  holds: BookingHold[],
+  excludeHoldId?: string
+): { blocked: boolean; holdId?: string } {
+  for (const hold of holds) {
+    if (excludeHoldId && hold.id === excludeHoldId) continue;
+    if (doTimesOverlap(startTime, endTime, hold.startTime, hold.endTime)) {
+      return { blocked: true, holdId: hold.id };
+    }
+  }
+  return { blocked: false };
+}
+
+/**
+ * Calculate end time given start time and duration in minutes
+ */
+export function calculateEndTime(startTime: string, durationMinutes: number): string {
+  const startMinutes = timeToMinutes(startTime);
+  const endMinutes = startMinutes + durationMinutes;
+  const endHours = Math.floor(endMinutes / 60);
+  const endMins = endMinutes % 60;
+  return `${endHours.toString().padStart(2, '0')}:${endMins.toString().padStart(2, '0')}`;
+}
+
+/**
+ * Parse date string to Date object at specific time
+ */
+function parseDateWithTime(dateStr: string, timeStr: string): Date {
+  const [year, month, day] = dateStr.split('-').map(Number);
+  const [hours, minutes] = timeStr.split(':').map(Number);
+  return new Date(year, month - 1, day, hours, minutes, 0, 0);
+}
+
+// ============================================
+// CALENDAR ENDPOINT - Available Days for Month
+// ============================================
+
+export interface CalendarDay {
+  date: string;
+  hasAvailability: boolean;
+  totalSlots?: number;
+}
+
+export async function getAvailabilityCalendar(
+  providerType: 'business' | 'photographer',
+  providerId: string,
+  year: number,
+  month: number,
+  staffMemberId?: string,
+  serviceDurationMinutes?: number
+): Promise<CalendarDay[]> {
+  // Get first and last day of month
+  const startDate = new Date(year, month - 1, 1);
+  const endDate = new Date(year, month, 0);
+  
+  // Default to 60 minutes if not specified
+  const slotDuration = serviceDurationMinutes || 60;
+  
+  const result: CalendarDay[] = [];
+  const currentDate = new Date(startDate);
+  
+  // Get today for filtering past dates
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  
+  while (currentDate <= endDate) {
+    const dateStr = currentDate.toISOString().split('T')[0];
+    
+    // Skip past dates
+    if (currentDate < today) {
+      result.push({ date: dateStr, hasAvailability: false });
+      currentDate.setDate(currentDate.getDate() + 1);
+      continue;
+    }
+    
+    // Use the slot generation function which properly accounts for:
+    // - Weekly windows
+    // - Provider blocks
+    // - Confirmed bookings
+    // - Active holds
+    const slots = await generateAvailabilitySlots(
+      providerType,
+      providerId,
+      dateStr,
+      slotDuration,
+      staffMemberId
+    );
+    
+    const availableCount = slots.filter(s => s.available).length;
+    
+    result.push({ 
+      date: dateStr, 
+      hasAvailability: availableCount > 0,
+      totalSlots: availableCount
+    });
+    
+    currentDate.setDate(currentDate.getDate() + 1);
+  }
+  
+  return result;
+}
+
+// ============================================
+// SLOTS ENDPOINT - Dynamic Slot Generation
+// ============================================
+
+export interface GeneratedSlot {
+  startTime: string;
+  endTime: string;
+  available: boolean;
+  reason?: 'booked' | 'blocked' | 'held' | 'outside_hours';
+}
+
+export async function generateAvailabilitySlots(
+  providerType: 'business' | 'photographer',
+  providerId: string,
+  date: string,
+  serviceDurationMinutes: number,
+  staffMemberId?: string,
+  excludeHoldId?: string
+): Promise<GeneratedSlot[]> {
+  const dateObj = new Date(date + 'T00:00:00');
+  const dayOfWeek = dateObj.getDay();
+  
+  // 1. Get weekly availability windows
+  const windows = await getWeeklyAvailabilityForDay(
+    providerType,
+    providerId,
+    dayOfWeek,
+    staffMemberId
+  );
+  
+  if (windows.length === 0) {
+    return [];
+  }
+  
+  // 2. Get provider blocks for this date
+  const blocks = await getProviderBlocksForDate(
+    providerType,
+    providerId,
+    dateObj,
+    staffMemberId
+  );
+  
+  // 3. Get confirmed bookings for this date
+  const bookings = await getConfirmedBookingsForDate(
+    providerType,
+    providerId,
+    date,
+    staffMemberId
+  );
+  
+  // 4. Get active holds for this date
+  const holds = await getActiveHoldsForDate(
+    providerType,
+    providerId,
+    date,
+    staffMemberId
+  );
+  
+  // 5. Generate slots for each window
+  const allSlots: GeneratedSlot[] = [];
+  
+  for (const window of windows) {
+    const windowStart = timeToMinutes(window.startTime);
+    const windowEnd = timeToMinutes(window.endTime);
+    
+    let currentMinutes = windowStart;
+    
+    while (currentMinutes + serviceDurationMinutes <= windowEnd) {
+      const startHours = Math.floor(currentMinutes / 60);
+      const startMins = currentMinutes % 60;
+      const startTime = `${startHours.toString().padStart(2, '0')}:${startMins.toString().padStart(2, '0')}`;
+      const endTime = calculateEndTime(startTime, serviceDurationMinutes);
+      
+      // Check if slot is blocked by provider block
+      if (isTimeBlockedByProviderBlock(dateObj, startTime, endTime, blocks)) {
+        allSlots.push({ startTime, endTime, available: false, reason: 'blocked' });
+        currentMinutes += 15; // Advance by 15 minutes to find next slot
+        continue;
+      }
+      
+      // Check if slot overlaps with confirmed booking
+      const bookingConflict = bookings.find(b => 
+        doTimesOverlap(startTime, endTime, b.startTime, b.endTime)
+      );
+      if (bookingConflict) {
+        allSlots.push({ startTime, endTime, available: false, reason: 'booked' });
+        currentMinutes += 15;
+        continue;
+      }
+      
+      // Check if slot overlaps with active hold
+      const holdCheck = isTimeBlockedByHold(startTime, endTime, holds, excludeHoldId);
+      if (holdCheck.blocked) {
+        allSlots.push({ startTime, endTime, available: false, reason: 'held' });
+        currentMinutes += 15;
+        continue;
+      }
+      
+      // Slot is available
+      allSlots.push({ startTime, endTime, available: true });
+      currentMinutes += 15; // 15-minute increments for slot starts
+    }
+  }
+  
+  return allSlots;
+}
+
+/**
+ * Get confirmed bookings for a date (both appointments and shoot_bookings)
+ */
+async function getConfirmedBookingsForDate(
+  providerType: 'business' | 'photographer',
+  providerId: string,
+  date: string,
+  staffMemberId?: string
+): Promise<{ startTime: string; endTime: string; status: string }[]> {
+  const activeStates = [
+    BOOKING_STATES.DRAFT,
+    BOOKING_STATES.PENDING_PAYMENT,
+    BOOKING_STATES.PENDING_PROVIDER,
+    BOOKING_STATES.CONFIRMED
+  ];
+  
+  if (providerType === 'business') {
+    const conditions = [
+      eq(appointments.businessId, providerId),
+      eq(appointments.appointmentDate, date),
+      inArray(appointments.status, activeStates),
+    ];
+    
+    if (staffMemberId) {
+      conditions.push(eq(appointments.staffMemberId, staffMemberId));
+    }
+    
+    const appts = await db.select()
+      .from(appointments)
+      .where(and(...conditions));
+    
+    return appts.map(a => ({
+      startTime: a.appointmentTime,
+      endTime: a.appointmentEndTime || calculateEndTime(a.appointmentTime, a.durationMinutes || 60),
+      status: a.status,
+    }));
+  }
+  
+  if (providerType === 'photographer') {
+    const shoots = await db.select()
+      .from(shootBookings)
+      .where(and(
+        eq(shootBookings.photographerId, providerId),
+        eq(shootBookings.date, date),
+        inArray(shootBookings.status, activeStates)
+      ));
+    
+    return shoots.map(s => ({
+      startTime: s.startTime,
+      endTime: s.endTime,
+      status: s.status,
+    }));
+  }
+  
+  return [];
+}
+
+// ============================================
+// VALIDATE ENDPOINT - Service + Time Compatibility
+// ============================================
+
+export interface ValidationResult {
+  valid: boolean;
+  errorCode?: string;
+  errorMessage?: string;
+  serviceDurationMinutes?: number;
+  servicePriceCents?: number;
+  serviceName?: string;
+}
+
+export async function validateBookingSlot(
+  providerType: 'business' | 'photographer',
+  providerId: string,
+  serviceId: string,
+  date: string,
+  startTime: string,
+  staffMemberId?: string,
+  excludeHoldId?: string
+): Promise<ValidationResult> {
+  // 1. Fetch service details
+  let serviceDurationMinutes: number;
+  let servicePriceCents: number;
+  let serviceName: string;
+  
+  if (providerType === 'business') {
+    const [service] = await db.select()
+      .from(vendorServices)
+      .where(eq(vendorServices.id, serviceId));
+    
+    if (!service) {
+      return {
+        valid: false,
+        errorCode: AVAILABILITY_ERRORS.SERVICE_NOT_FOUND,
+        errorMessage: 'Service not found',
+      };
+    }
+    
+    serviceDurationMinutes = service.durationMinutes || 60;
+    servicePriceCents = Math.round((service.price || 0) * 100); // Convert to cents
+    serviceName = service.name;
+  } else {
+    const [service] = await db.select()
+      .from(photographerServices)
+      .where(eq(photographerServices.id, serviceId));
+    
+    if (!service) {
+      return {
+        valid: false,
+        errorCode: AVAILABILITY_ERRORS.SERVICE_NOT_FOUND,
+        errorMessage: 'Service not found',
+      };
+    }
+    
+    // Use packageHours for duration, or estimatedDurationMinutes, or default to 1 hour
+    serviceDurationMinutes = service.estimatedDurationMinutes || (service.packageHours ? service.packageHours * 60 : 60);
+    // Price is already in cents
+    servicePriceCents = service.priceCents || service.hourlyRateCents || 0;
+    serviceName = service.name;
+  }
+  
+  const endTime = calculateEndTime(startTime, serviceDurationMinutes);
+  const dateObj = new Date(date + 'T00:00:00');
+  const dayOfWeek = dateObj.getDay();
+  
+  // 2. Check if date is valid (not in past)
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  if (dateObj < today) {
+    return {
+      valid: false,
+      errorCode: AVAILABILITY_ERRORS.INVALID_DATE,
+      errorMessage: 'Cannot book dates in the past',
+    };
+  }
+  
+  // 3. Check weekly availability windows
+  const windows = await getWeeklyAvailabilityForDay(
+    providerType,
+    providerId,
+    dayOfWeek,
+    staffMemberId
+  );
+  
+  // Check if slot fits within any window
+  const slotStartMins = timeToMinutes(startTime);
+  const slotEndMins = timeToMinutes(endTime);
+  
+  // First check if start time is within any window
+  const startsInWindow = windows.some(w => {
+    const windowStart = timeToMinutes(w.startTime);
+    const windowEnd = timeToMinutes(w.endTime);
+    return slotStartMins >= windowStart && slotStartMins < windowEnd;
+  });
+  
+  if (!startsInWindow) {
+    return {
+      valid: false,
+      errorCode: AVAILABILITY_ERRORS.OUTSIDE_HOURS,
+      errorMessage: 'Selected start time is outside available hours',
+    };
+  }
+  
+  // Check if the full duration fits within a window
+  const fitsInWindow = windows.some(w => {
+    const windowStart = timeToMinutes(w.startTime);
+    const windowEnd = timeToMinutes(w.endTime);
+    return slotStartMins >= windowStart && slotEndMins <= windowEnd;
+  });
+  
+  if (!fitsInWindow) {
+    return {
+      valid: false,
+      errorCode: AVAILABILITY_ERRORS.TIME_NOT_COMPATIBLE,
+      errorMessage: `Service duration (${serviceDurationMinutes} min) does not fit within available hours`,
+    };
+  }
+  
+  // 4. Check provider blocks
+  const blocks = await getProviderBlocksForDate(
+    providerType,
+    providerId,
+    dateObj,
+    staffMemberId
+  );
+  
+  if (isTimeBlockedByProviderBlock(dateObj, startTime, endTime, blocks)) {
+    return {
+      valid: false,
+      errorCode: AVAILABILITY_ERRORS.SLOT_UNAVAILABLE,
+      errorMessage: 'Provider has blocked this time',
+    };
+  }
+  
+  // 5. Check existing bookings
+  const bookings = await getConfirmedBookingsForDate(
+    providerType,
+    providerId,
+    date,
+    staffMemberId
+  );
+  
+  const bookingConflict = bookings.find(b => 
+    doTimesOverlap(startTime, endTime, b.startTime, b.endTime)
+  );
+  
+  if (bookingConflict) {
+    return {
+      valid: false,
+      errorCode: AVAILABILITY_ERRORS.SLOT_UNAVAILABLE,
+      errorMessage: 'Slot is already booked',
+    };
+  }
+  
+  // 6. Check active holds
+  const holds = await getActiveHoldsForDate(
+    providerType,
+    providerId,
+    date,
+    staffMemberId
+  );
+  
+  const holdCheck = isTimeBlockedByHold(startTime, endTime, holds, excludeHoldId);
+  if (holdCheck.blocked) {
+    return {
+      valid: false,
+      errorCode: AVAILABILITY_ERRORS.SLOT_UNAVAILABLE,
+      errorMessage: 'Slot is temporarily held by another customer',
+    };
+  }
+  
+  // Valid!
+  return {
+    valid: true,
+    serviceDurationMinutes,
+    servicePriceCents,
+    serviceName,
+  };
+}
+
+// ============================================
+// HOLD ENDPOINT - Create Temporary Hold
+// ============================================
+
+export interface CreateHoldParams {
+  providerType: 'business' | 'photographer';
+  providerId: string;
+  staffMemberId?: string;
+  userId: string;
+  serviceId: string;
+  date: string;
+  startTime: string;
+  holdDurationMinutes?: number;
+}
+
+export interface HoldResult {
+  holdId: string;
+  expiresAt: Date;
+  serviceName: string;
+  servicePriceCents: number;
+  durationMinutes: number;
+  startTime: string;
+  endTime: string;
+}
+
+export async function createBookingHold(params: CreateHoldParams): Promise<HoldResult> {
+  const holdDuration = params.holdDurationMinutes || DEFAULT_HOLD_DURATION_MINUTES;
+  
+  // Validate slot first
+  const validation = await validateBookingSlot(
+    params.providerType,
+    params.providerId,
+    params.serviceId,
+    params.date,
+    params.startTime,
+    params.staffMemberId
+  );
+  
+  if (!validation.valid) {
+    throw new AvailabilityError(
+      validation.errorCode || AVAILABILITY_ERRORS.SLOT_UNAVAILABLE,
+      validation.errorMessage || 'Slot not available'
+    );
+  }
+  
+  const endTime = calculateEndTime(params.startTime, validation.serviceDurationMinutes!);
+  const expiresAt = new Date(Date.now() + holdDuration * 60 * 1000);
+  
+  // Create timestamps for overlap indexing
+  const startAt = parseDateWithTime(params.date, params.startTime);
+  const endAt = parseDateWithTime(params.date, endTime);
+  
+  // Insert hold
+  const [hold] = await db.insert(bookingHolds).values({
+    providerType: params.providerType,
+    providerId: params.providerId,
+    staffMemberId: params.staffMemberId,
+    userId: params.userId,
+    serviceId: params.serviceId,
+    serviceName: validation.serviceName!,
+    servicePriceCents: validation.servicePriceCents!,
+    durationMinutes: validation.serviceDurationMinutes!,
+    holdDate: params.date,
+    startTime: params.startTime,
+    endTime,
+    startAt,
+    endAt,
+    expiresAt,
+  }).returning();
+  
+  console.log(`[BookingHold] Created hold ${hold.id} for user ${params.userId}, expires at ${expiresAt.toISOString()}`);
+  
+  return {
+    holdId: hold.id,
+    expiresAt,
+    serviceName: validation.serviceName!,
+    servicePriceCents: validation.servicePriceCents!,
+    durationMinutes: validation.serviceDurationMinutes!,
+    startTime: params.startTime,
+    endTime,
+  };
+}
+
+// ============================================
+// CONFIRM ENDPOINT - Convert Hold to Booking
+// ============================================
+
+export interface ConfirmHoldResult {
+  bookingId: string;
+  bookingType: 'appointment' | 'shoot_booking';
+  status: string;
+}
+
+export async function confirmBookingHold(
+  holdId: string,
+  userId: string
+): Promise<{ hold: BookingHold }> {
+  // 1. Find and validate hold
+  const [hold] = await db.select()
+    .from(bookingHolds)
+    .where(and(
+      eq(bookingHolds.id, holdId),
+      eq(bookingHolds.userId, userId)
+    ));
+  
+  if (!hold) {
+    throw new AvailabilityError(
+      AVAILABILITY_ERRORS.HOLD_NOT_FOUND,
+      'Booking hold not found'
+    );
+  }
+  
+  if (hold.status !== 'active') {
+    throw new AvailabilityError(
+      AVAILABILITY_ERRORS.HOLD_EXPIRED,
+      `Booking hold is ${hold.status}`
+    );
+  }
+  
+  if (new Date() > hold.expiresAt) {
+    // Mark as expired
+    await db.update(bookingHolds)
+      .set({ status: 'expired', updatedAt: new Date() })
+      .where(eq(bookingHolds.id, holdId));
+    
+    throw new AvailabilityError(
+      AVAILABILITY_ERRORS.HOLD_EXPIRED,
+      'Booking hold has expired'
+    );
+  }
+  
+  // Return the hold - actual booking creation happens via existing routes
+  return { hold };
+}
+
+/**
+ * Mark a hold as converted when booking is created
+ */
+export async function markHoldAsConverted(
+  holdId: string,
+  bookingId: string,
+  bookingType: 'appointment' | 'shoot_booking'
+): Promise<void> {
+  await db.update(bookingHolds)
+    .set({
+      status: 'converted',
+      convertedToBookingId: bookingId,
+      convertedToBookingType: bookingType,
+      updatedAt: new Date(),
+    })
+    .where(eq(bookingHolds.id, holdId));
+  
+  console.log(`[BookingHold] Hold ${holdId} converted to ${bookingType} ${bookingId}`);
+}
+
+/**
+ * Release a hold (on payment failure or user cancellation)
+ */
+export async function releaseBookingHold(holdId: string): Promise<void> {
+  await db.update(bookingHolds)
+    .set({ status: 'released', updatedAt: new Date() })
+    .where(eq(bookingHolds.id, holdId));
+  
+  console.log(`[BookingHold] Hold ${holdId} released`);
+}
+
+// ============================================
+// HOLD EXPIRY CLEANUP JOB
+// ============================================
+
+export async function expireOldHolds(): Promise<number> {
+  const now = new Date();
+  
+  // Get active holds that have expired
+  const expiredHolds = await db.select({ id: bookingHolds.id })
+    .from(bookingHolds)
+    .where(and(
+      eq(bookingHolds.status, 'active'),
+      lt(bookingHolds.expiresAt, now)
+    ));
+  
+  if (expiredHolds.length === 0) {
+    return 0;
+  }
+  
+  // Update them to expired
+  await db.update(bookingHolds)
+    .set({ status: 'expired', updatedAt: now })
+    .where(inArray(bookingHolds.id, expiredHolds.map(h => h.id)));
+  
+  console.log(`[BookingHold] Expired ${expiredHolds.length} holds`);
+  
+  return expiredHolds.length;
+}
+
+/**
+ * Get hold by ID
+ */
+export async function getBookingHold(holdId: string): Promise<BookingHold | null> {
+  const [hold] = await db.select()
+    .from(bookingHolds)
+    .where(eq(bookingHolds.id, holdId));
+  
+  return hold || null;
+}
+
+/**
+ * Get user's active holds
+ */
+export async function getUserActiveHolds(userId: string): Promise<BookingHold[]> {
+  const now = new Date();
+  
+  return db.select()
+    .from(bookingHolds)
+    .where(and(
+      eq(bookingHolds.userId, userId),
+      eq(bookingHolds.status, 'active'),
+      gte(bookingHolds.expiresAt, now)
+    ));
 }
