@@ -5,24 +5,43 @@ import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
 import { sql } from "drizzle-orm";
 
-const booleanOrStringToBool = z.preprocess((v) => {
-  if (typeof v === "boolean") return v;
-  if (typeof v === "string") {
-    const s = v.toLowerCase().trim();
-    if (s === "true" || s === "open") return true;
-    if (s === "false" || s === "closed") return false;
-  }
-  return v;
-}, z.boolean());
+/**
+ * Hours of Operation Day Schema - Aligned with Frontend Format
+ * 
+ * Frontend sends:
+ * - Closed day: { open: false }
+ * - Open day: { open: true, start: "09:00", end: "17:00" }
+ * 
+ * This schema accepts the frontend format and normalizes internally.
+ * Also supports legacy format for backward compatibility:
+ * - Legacy: { open: "09:00", close: "17:00", closed?: boolean }
+ */
 
-const hoursOfOperationDaySchema = z.object({
-  open: booleanOrStringToBool,
-  close: z.string().optional(),
+// Closed day schema
+const closedDaySchema = z.object({
+  open: z.literal(false),
+});
+
+// Open day schema (frontend format with start/end)
+const openDaySchema = z.object({
+  open: z.literal(true),
+  start: z.string().regex(/^\d{2}:\d{2}$/, "Time must be in HH:MM format"),
+  end: z.string().regex(/^\d{2}:\d{2}$/, "Time must be in HH:MM format"),
+});
+
+// Legacy format support (open/close as time strings)
+const legacyDaySchema = z.object({
+  open: z.string().regex(/^\d{2}:\d{2}$/, "Time must be in HH:MM format"),
+  close: z.string().regex(/^\d{2}:\d{2}$/, "Time must be in HH:MM format"),
   closed: z.boolean().optional(),
-}).refine(
-  (d) => d.open === false || (d.open === true && typeof d.close === 'string' && d.close.length > 0),
-  { message: "close time is required when open is true", path: ["close"] }
-);
+});
+
+// Combined schema supporting both formats
+const hoursOfOperationDaySchema = z.union([
+  closedDaySchema,
+  openDaySchema,
+  legacyDaySchema,
+]);
 
 /* =====================================================
    SESSIONS (Auth)

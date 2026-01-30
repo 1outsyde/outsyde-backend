@@ -132,16 +132,54 @@ const KEY_TO_DAY_OF_WEEK: Record<string, number> = {
 };
 
 /**
+ * Normalize hoursOfOperation entry to canonical format.
+ * 
+ * Frontend format: { open: true, start: "09:00", end: "17:00" } or { open: false }
+ * Legacy format: { open: "09:00", close: "17:00", closed?: boolean }
+ * 
+ * Returns: { isOpen: boolean, startTime?: string, endTime?: string }
+ */
+function normalizeHoursEntry(dayHours: any): { isOpen: boolean; startTime?: string; endTime?: string } {
+  if (!dayHours) {
+    return { isOpen: false };
+  }
+  
+  // Frontend format: { open: false } = closed day
+  if (dayHours.open === false) {
+    return { isOpen: false };
+  }
+  
+  // Frontend format: { open: true, start: "09:00", end: "17:00" }
+  if (dayHours.open === true && dayHours.start && dayHours.end) {
+    return { isOpen: true, startTime: dayHours.start, endTime: dayHours.end };
+  }
+  
+  // Legacy format: { open: "09:00", close: "17:00", closed?: boolean }
+  if (typeof dayHours.open === 'string' && typeof dayHours.close === 'string') {
+    if (dayHours.closed) {
+      return { isOpen: false };
+    }
+    return { isOpen: true, startTime: dayHours.open, endTime: dayHours.close };
+  }
+  
+  // Default to closed for invalid data
+  return { isOpen: false };
+}
+
+/**
  * Sync hoursOfOperation JSON field to weeklyAvailability table.
  * This is a safety net for legacy or external writers that update hoursOfOperation directly.
  * The dashboard writes directly to weeklyAvailability, so this sync ensures consistency.
+ * 
+ * Supports both frontend format and legacy format.
  */
 export async function syncHoursOfOperationToWeeklyAvailability(
   providerType: 'photographer' | 'business',
   providerId: string,
-  hoursOfOperation: Record<string, { open?: string; close?: string; closed?: boolean }> | null
+  hoursOfOperation: Record<string, any> | null
 ): Promise<void> {
   console.log("[AVAILABILITY_SYNC] Syncing hoursOfOperation to weeklyAvailability for", providerType, providerId);
+  console.log("[AVAILABILITY_SYNC] Input:", JSON.stringify(hoursOfOperation));
   
   if (!hoursOfOperation) {
     console.log("[AVAILABILITY_SYNC] No hoursOfOperation to sync");
@@ -162,8 +200,11 @@ export async function syncHoursOfOperationToWeeklyAvailability(
     const dayOfWeek = KEY_TO_DAY_OF_WEEK[dayKey];
     if (dayOfWeek === undefined) continue;
     
-    // Skip days that are closed or have no open/close times
-    if (dayHours.closed || !dayHours.open || !dayHours.close) {
+    const normalized = normalizeHoursEntry(dayHours);
+    console.log("[AVAILABILITY_SYNC]", dayKey, "-> normalized:", JSON.stringify(normalized));
+    
+    // Skip closed days
+    if (!normalized.isOpen || !normalized.startTime || !normalized.endTime) {
       continue;
     }
     
@@ -171,8 +212,8 @@ export async function syncHoursOfOperationToWeeklyAvailability(
       providerType,
       providerId,
       dayOfWeek,
-      startTime: dayHours.open,
-      endTime: dayHours.close,
+      startTime: normalized.startTime,
+      endTime: normalized.endTime,
       isActive: true,
       staffMemberId: null,
     });
@@ -220,8 +261,9 @@ async function getWeeklyAvailabilityForDay(
   
   // FALLBACK: If no weeklyAvailability rows, check hoursOfOperation JSON field
   // This handles the case where dashboard saves to hoursOfOperation but calendar reads weeklyAvailability
+  // Supports both frontend format { open: true, start, end } and legacy format { open, close, closed }
   if (!staffMemberId) {
-    let hoursOfOperation: Record<string, { open?: string; close?: string; closed?: boolean }> | null = null;
+    let hoursOfOperation: Record<string, any> | null = null;
     
     if (providerType === 'photographer') {
       const [photographer] = await db.select().from(photographers).where(eq(photographers.id, providerId));
@@ -235,11 +277,14 @@ async function getWeeklyAvailabilityForDay(
     
     if (hoursOfOperation) {
       const dayKey = DAY_OF_WEEK_TO_KEY[dayOfWeek];
-      const dayHours = hoursOfOperation[dayKey] as { open?: string; close?: string; closed?: boolean } | undefined;
+      const dayHours = hoursOfOperation[dayKey];
       
-      if (dayHours && !dayHours.closed && dayHours.open && dayHours.close) {
-        console.log("[AVAILABILITY_DEBUG]   Found hours for", dayKey, ":", dayHours.open, "-", dayHours.close);
-        return [{ startTime: dayHours.open, endTime: dayHours.close }];
+      // Use normalizeHoursEntry to handle both frontend and legacy formats
+      const normalized = normalizeHoursEntry(dayHours);
+      
+      if (normalized.isOpen && normalized.startTime && normalized.endTime) {
+        console.log("[AVAILABILITY_DEBUG]   Found hours for", dayKey, ":", normalized.startTime, "-", normalized.endTime);
+        return [{ startTime: normalized.startTime, endTime: normalized.endTime }];
       }
     }
   }
@@ -349,15 +394,17 @@ export async function getStaffAvailabilitySlots(
     const dayNames = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
     const dayName = dayNames[dayOfWeek] as keyof typeof business.hoursOfOperation;
 
-    const hours = business.hoursOfOperation?.[dayName] as { open: string; close: string; closed?: boolean } | undefined;
-    if (!hours || hours.closed) {
+    // Use normalizeHoursEntry to support both frontend and legacy formats
+    const rawHours = business.hoursOfOperation?.[dayName];
+    const normalized = normalizeHoursEntry(rawHours);
+    if (!normalized.isOpen || !normalized.startTime || !normalized.endTime) {
       result.push({ date: dateStr, slots: [], totalAvailable: 0 });
       currentDate.setDate(currentDate.getDate() + 1);
       continue;
     }
 
-    const openHour = parseInt(hours.open.split(':')[0], 10);
-    const closeHour = parseInt(hours.close.split(':')[0], 10);
+    const openHour = parseInt(normalized.startTime.split(':')[0], 10);
+    const closeHour = parseInt(normalized.endTime.split(':')[0], 10);
     const possibleSlots = generateTimeSlots(openHour, closeHour, slotDuration);
 
     const dayAvailability = availabilityRecords.filter(r => r.date === dateStr);
@@ -461,15 +508,17 @@ export async function getPhotographerAvailabilitySlots(
     const dayNames = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
     const dayName = dayNames[dayOfWeek] as keyof typeof photographer.hoursOfOperation;
 
-    const hours = photographer.hoursOfOperation?.[dayName] as { open: string; close: string; closed?: boolean } | undefined;
-    if (!hours || hours.closed) {
+    // Use normalizeHoursEntry to support both frontend and legacy formats
+    const rawHours = photographer.hoursOfOperation?.[dayName];
+    const normalized = normalizeHoursEntry(rawHours);
+    if (!normalized.isOpen || !normalized.startTime || !normalized.endTime) {
       result.push({ date: dateStr, slots: [], totalAvailable: 0 });
       currentDate.setDate(currentDate.getDate() + 1);
       continue;
     }
 
-    const openHour = parseInt(hours.open.split(':')[0], 10);
-    const closeHour = parseInt(hours.close.split(':')[0], 10);
+    const openHour = parseInt(normalized.startTime.split(':')[0], 10);
+    const closeHour = parseInt(normalized.endTime.split(':')[0], 10);
     const possibleSlots = generateTimeSlots(openHour, closeHour, 60);
 
     const dayAvailability = availabilityRecords.filter(r => r.date === dateStr);

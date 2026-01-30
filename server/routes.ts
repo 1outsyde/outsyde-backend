@@ -2466,11 +2466,12 @@ export async function registerRoutes(
       }
 
       // Sync hoursOfOperation to weeklyAvailability table as safety net
+      // Supports both frontend format { open: true, start, end } and legacy format
       if (data.hoursOfOperation) {
         await syncHoursOfOperationToWeeklyAvailability(
           'photographer',
           photographer.id,
-          data.hoursOfOperation as Record<string, { open?: string; close?: string; closed?: boolean }>
+          data.hoursOfOperation as Record<string, any>
         );
       }
 
@@ -6825,11 +6826,12 @@ export async function registerRoutes(
       const updated = await storage.updateBusiness(business.id, updates);
 
       // Sync hoursOfOperation to weeklyAvailability table as safety net
+      // Supports both frontend format { open: true, start, end } and legacy format
       if (updates.hoursOfOperation) {
         await syncHoursOfOperationToWeeklyAvailability(
           'business',
           business.id,
-          updates.hoursOfOperation as Record<string, { open?: string; close?: string; closed?: boolean }>
+          updates.hoursOfOperation as Record<string, any>
         );
       }
 

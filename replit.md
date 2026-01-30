@@ -64,6 +64,10 @@ Outsyde is built as a monorepo, using a React frontend, an Express (TypeScript) 
     - **Dashboard Integration:** Dashboard writes directly to `weekly_availability` via `PUT /api/photographers/me/weekly-availability`
     - **Migration Path:** Once stable, remove fallback logic reading from `hoursOfOperation` (server/availabilityService.ts)
     - **Day Mapping:** dayOfWeek integers (0=Sunday...6=Saturday) map to hoursOfOperation keys (sunday, monday, etc.)
+    - **Hours Format (Aligned Jan 2026):** Backend accepts both frontend and legacy formats:
+      - **Frontend format:** `{ open: true, start: "09:00", end: "17:00" }` or `{ open: false }` for closed days
+      - **Legacy format:** `{ open: "09:00", close: "17:00", closed?: boolean }`
+      - Internal `normalizeHoursEntry()` function converts both to canonical format for storage
 
 ## External Dependencies
 -   **PostgreSQL:** Primary database.
