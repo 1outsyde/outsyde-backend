@@ -41,6 +41,13 @@ Outsyde is built as a monorepo, using a React frontend, an Express (TypeScript) 
 -   **Storefront Video Banners:** Support for video banners on vendor/photographer storefronts with specific media attributes and fallback to images.
 -   **Unified Search Engine:** `GET /api/search` provides cross-entity search with scopes (consumers, photographers, businesses, products, services), personalization based on user preferences and follows, and normalized results.
 -   **Stripe PaymentIntent Integration:** Complete booking payment flow with Stripe for creation, capture (automatic/manual), idempotency, fee handling, webhook event processing, and refund management.
+-   **Dynamic Availability & Booking Hold System:** Real-time slot generation from weekly availability windows minus confirmed bookings minus active holds. Features:
+    - Slots generated dynamically on-demand (never stored in database)
+    - Temporary booking holds with auto-expiration (default 10 minutes)
+    - Hold lifecycle: active → expired/released/converted
+    - Error codes: OUTSIDE_HOURS, TIME_NOT_COMPATIBLE, SLOT_UNAVAILABLE, HOLD_EXPIRED, HOLD_NOT_FOUND, SERVICE_NOT_FOUND, INVALID_DATE
+    - Endpoints: GET /availability/calendar, GET /availability/slots, POST /booking/validate, POST /booking/hold, POST /booking/confirm, DELETE /booking/hold/:holdId, GET /booking/holds
+    - All money handled in cents (servicePriceCents)
 
 ## External Dependencies
 -   **PostgreSQL:** Primary database.
