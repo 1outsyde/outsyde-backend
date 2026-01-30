@@ -3079,6 +3079,12 @@ export async function registerRoutes(
     try {
       const { providerType, providerId, year, month, staffMemberId, serviceDurationMinutes } = req.query;
 
+      // DEBUG: Log incoming request
+      console.log("[AVAILABILITY_DEBUG] GET /api/availability/calendar");
+      console.log("[AVAILABILITY_DEBUG] providerType:", providerType);
+      console.log("[AVAILABILITY_DEBUG] providerId:", providerId);
+      console.log("[AVAILABILITY_DEBUG] year:", year, "month:", month);
+
       if (!providerType || !providerId || !year || !month) {
         return res.status(400).json({ 
           error: "providerType, providerId, year, and month are required" 
@@ -3097,6 +3103,10 @@ export async function registerRoutes(
         staffMemberId as string | undefined,
         serviceDurationMinutes ? parseInt(serviceDurationMinutes as string, 10) : undefined
       );
+
+      // DEBUG: Log result
+      const availableDays = calendar.filter(d => d.availableSlots > 0).length;
+      console.log("[AVAILABILITY_DEBUG] Calendar result: total days =", calendar.length, "available days =", availableDays);
 
       res.json({ days: calendar });
     } catch (error) {
@@ -3460,6 +3470,14 @@ export async function registerRoutes(
 
       const { slots, autoAcceptBookings } = req.body;
 
+      // DEBUG: Log incoming data
+      console.log("[AVAILABILITY_DEBUG] PUT /api/photographers/me/weekly-availability");
+      console.log("[AVAILABILITY_DEBUG] userId:", userId);
+      console.log("[AVAILABILITY_DEBUG] photographer.id:", photographer.id);
+      console.log("[AVAILABILITY_DEBUG] photographer.userId:", photographer.userId);
+      console.log("[AVAILABILITY_DEBUG] slots received:", JSON.stringify(slots, null, 2));
+      console.log("[AVAILABILITY_DEBUG] slots count:", Array.isArray(slots) ? slots.length : "not an array");
+
       if (!Array.isArray(slots)) {
         return res.status(400).json({ error: "slots must be an array" });
       }
@@ -3469,6 +3487,9 @@ export async function registerRoutes(
         photographer.id,
         slots
       );
+
+      console.log("[AVAILABILITY_DEBUG] Saved with providerType=photographer, providerId=", photographer.id);
+      console.log("[AVAILABILITY_DEBUG] Rows saved:", updated.length);
 
       if (typeof autoAcceptBookings === 'boolean') {
         await storage.updatePhotographer(photographer.id, { autoAcceptBookings });

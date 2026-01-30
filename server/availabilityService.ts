@@ -109,12 +109,24 @@ function doTimesOverlap(
   return s1 < e2 && e1 > s2;
 }
 
+// Map dayOfWeek (0=Sunday...6=Saturday) to hoursOfOperation keys
+const DAY_OF_WEEK_TO_KEY: Record<number, string> = {
+  0: 'sunday',
+  1: 'monday',
+  2: 'tuesday',
+  3: 'wednesday',
+  4: 'thursday',
+  5: 'friday',
+  6: 'saturday',
+};
+
 async function getWeeklyAvailabilityForDay(
   providerType: string,
   providerId: string,
   dayOfWeek: number,
   staffMemberId?: string
 ): Promise<{ startTime: string; endTime: string }[]> {
+  // First, try to get from weeklyAvailability table
   const conditions = [
     eq(weeklyAvailability.providerType, providerType),
     eq(weeklyAvailability.providerId, providerId),
@@ -132,7 +144,42 @@ async function getWeeklyAvailabilityForDay(
     .from(weeklyAvailability)
     .where(and(...conditions));
   
-  return slots.map(s => ({ startTime: s.startTime, endTime: s.endTime }));
+  console.log("[AVAILABILITY_DEBUG] getWeeklyAvailabilityForDay:");
+  console.log("[AVAILABILITY_DEBUG]   providerType:", providerType, "providerId:", providerId, "dayOfWeek:", dayOfWeek);
+  console.log("[AVAILABILITY_DEBUG]   weeklyAvailability table slots found:", slots.length);
+  
+  if (slots.length > 0) {
+    return slots.map(s => ({ startTime: s.startTime, endTime: s.endTime }));
+  }
+  
+  // FALLBACK: If no weeklyAvailability rows, check hoursOfOperation JSON field
+  // This handles the case where dashboard saves to hoursOfOperation but calendar reads weeklyAvailability
+  if (!staffMemberId) {
+    let hoursOfOperation: Record<string, { open?: string; close?: string; closed?: boolean }> | null = null;
+    
+    if (providerType === 'photographer') {
+      const [photographer] = await db.select().from(photographers).where(eq(photographers.id, providerId));
+      hoursOfOperation = photographer?.hoursOfOperation as typeof hoursOfOperation;
+      console.log("[AVAILABILITY_DEBUG]   Fallback to photographer.hoursOfOperation:", JSON.stringify(hoursOfOperation));
+    } else if (providerType === 'business') {
+      const [business] = await db.select().from(businesses).where(eq(businesses.id, providerId));
+      hoursOfOperation = business?.hoursOfOperation as typeof hoursOfOperation;
+      console.log("[AVAILABILITY_DEBUG]   Fallback to business.hoursOfOperation:", JSON.stringify(hoursOfOperation));
+    }
+    
+    if (hoursOfOperation) {
+      const dayKey = DAY_OF_WEEK_TO_KEY[dayOfWeek];
+      const dayHours = hoursOfOperation[dayKey];
+      
+      if (dayHours && !dayHours.closed && dayHours.open && dayHours.close) {
+        console.log("[AVAILABILITY_DEBUG]   Found hours for", dayKey, ":", dayHours.open, "-", dayHours.close);
+        return [{ startTime: dayHours.open, endTime: dayHours.close }];
+      }
+    }
+  }
+  
+  console.log("[AVAILABILITY_DEBUG]   No availability found for day", dayOfWeek);
+  return [];
 }
 
 async function getProviderBlocksForDate(
