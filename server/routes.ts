@@ -46,7 +46,7 @@ function sanitizeUserForResponse(user: User, options: { includeOwnData?: boolean
     ageRange: calculateAgeRange(dateOfBirth),
   };
 }
-import { eq } from "drizzle-orm";
+import { eq, desc } from "drizzle-orm";
 import { z } from "zod";
 import {
   hashPassword,
@@ -11954,6 +11954,197 @@ export async function registerRoutes(
       res.status(500).json({ error: "Failed to get orders" });
     }
   });
+
+  /* =====================================================
+     TEMP / TEST ONLY - Development Test Endpoints
+     Remove before production deployment
+  ===================================================== */
+
+  /**
+   * TEMP / TEST ONLY: Create or retrieve a draft photographer booking for payment testing
+   * This endpoint bypasses normal booking flow for Postman/API testing purposes
+   * 
+   * Usage: POST /api/dev/test-booking
+   * Optional body: { photographerId?: string, clientId?: string, totalPrice?: number }
+   * 
+   * DO NOT USE IN PRODUCTION - Remove before deployment
+   */
+  app.post("/api/dev/test-booking", async (req, res) => {
+    // TEMP / TEST ONLY - This endpoint is for development testing
+    console.log("[DEV] Test booking endpoint called - FOR TESTING ONLY");
+
+    try {
+      const { photographerId, clientId, totalPrice } = req.body;
+
+      // Try to find an existing draft booking first
+      const existingDraft = await db.select()
+        .from(shootBookings)
+        .where(eq(shootBookings.status, BOOKING_STATES.DRAFT))
+        .orderBy(desc(shootBookings.createdAt))
+        .limit(1);
+
+      if (existingDraft.length > 0) {
+        console.log(`[DEV] Returning existing draft booking: ${existingDraft[0].id}`);
+        return res.json({
+          bookingId: existingDraft[0].id,
+          status: existingDraft[0].status,
+          total: existingDraft[0].totalPrice,
+          photographerId: existingDraft[0].photographerId,
+          clientId: existingDraft[0].clientId,
+          message: "Existing draft booking found"
+        });
+      }
+
+      // No existing draft - create a new one with placeholder data
+      // First, find a photographer and user to use
+      const allPhotographers = await storage.getAllPhotographers();
+      const allUsers = await storage.getAllUsers();
+
+      if (allPhotographers.length === 0) {
+        return res.status(400).json({ 
+          error: "No photographers exist in the database. Create a photographer first." 
+        });
+      }
+
+      if (allUsers.length === 0) {
+        return res.status(400).json({ 
+          error: "No users exist in the database. Create a user first." 
+        });
+      }
+
+      const testPhotographerId = photographerId || allPhotographers[0].id;
+      const testClientId = clientId || allUsers[0].id;
+      const testTotalPrice = totalPrice || 7500; // $75.00 default
+
+      // Create the draft booking
+      const newBookingId = crypto.randomUUID();
+      const now = new Date();
+      const scheduledDate = new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000); // 1 week from now
+
+      await db.insert(shootBookings).values({
+        id: newBookingId,
+        photographerId: testPhotographerId,
+        clientId: testClientId,
+        status: BOOKING_STATES.DRAFT,
+        totalPrice: testTotalPrice,
+        shootType: "portrait", // Required field
+        date: scheduledDate.toISOString().split('T')[0], // YYYY-MM-DD format
+        startTime: "10:00",
+        endTime: "11:00",
+        durationHours: 1,
+        locationType: "studio",
+        locationDetails: "Test Location - 123 Main St",
+        specialRequests: "TEST BOOKING - Created via /api/dev/test-booking endpoint",
+        createdAt: now,
+        updatedAt: now,
+        draftExpiresAt: new Date(now.getTime() + 10 * 60 * 1000) // 10 minutes from now
+      });
+
+      console.log(`[DEV] Created new test draft booking: ${newBookingId}`);
+
+      res.json({
+        bookingId: newBookingId,
+        status: BOOKING_STATES.DRAFT,
+        total: testTotalPrice,
+        photographerId: testPhotographerId,
+        clientId: testClientId,
+        scheduledDate: scheduledDate.toISOString(),
+        message: "New draft booking created for testing"
+      });
+    } catch (error: any) {
+      console.error("[DEV] Test booking error:", error);
+      res.status(500).json({ error: "Failed to create test booking", details: error.message });
+    }
+  });
+
+  /**
+   * TEMP / TEST ONLY: Get a test booking for an appointment (business service)
+   * POST /api/dev/test-appointment
+   */
+  app.post("/api/dev/test-appointment", async (req, res) => {
+    console.log("[DEV] Test appointment endpoint called - FOR TESTING ONLY");
+
+    try {
+      const { businessId, clientId, totalPrice } = req.body;
+
+      // Try to find an existing draft appointment first
+      const existingDraft = await db.select()
+        .from(appointments)
+        .where(eq(appointments.status, BOOKING_STATES.DRAFT))
+        .orderBy(desc(appointments.createdAt))
+        .limit(1);
+
+      if (existingDraft.length > 0) {
+        console.log(`[DEV] Returning existing draft appointment: ${existingDraft[0].id}`);
+        return res.json({
+          bookingId: existingDraft[0].id,
+          status: existingDraft[0].status,
+          total: existingDraft[0].totalPrice,
+          businessId: existingDraft[0].businessId,
+          clientId: existingDraft[0].clientId,
+          message: "Existing draft appointment found"
+        });
+      }
+
+      // No existing draft - create a new one
+      const allBusinesses = await storage.getAllBusinesses();
+      const allUsers = await storage.getAllUsers();
+      const allServices = await storage.getServices();
+
+      if (allBusinesses.length === 0) {
+        return res.status(400).json({ 
+          error: "No businesses exist in the database. Create a business first." 
+        });
+      }
+
+      if (allUsers.length === 0) {
+        return res.status(400).json({ 
+          error: "No users exist in the database. Create a user first." 
+        });
+      }
+
+      const testBusinessId = businessId || allBusinesses[0].id;
+      const testClientId = clientId || allUsers[0].id;
+      const testTotalPrice = totalPrice || 5000; // $50.00 default
+      const testServiceId = allServices.length > 0 ? allServices[0].id : null;
+
+      const newAppointmentId = crypto.randomUUID();
+      const now = new Date();
+      const scheduledDate = new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000);
+
+      await db.insert(appointments).values({
+        id: newAppointmentId,
+        businessId: testBusinessId,
+        clientId: testClientId,
+        serviceId: testServiceId,
+        status: BOOKING_STATES.DRAFT,
+        totalPrice: testTotalPrice,
+        scheduledDate: scheduledDate,
+        duration: 30,
+        notes: "TEST APPOINTMENT - Created via /api/dev/test-appointment endpoint",
+        createdAt: now,
+        updatedAt: now,
+        draftExpiresAt: new Date(now.getTime() + 10 * 60 * 1000)
+      });
+
+      console.log(`[DEV] Created new test draft appointment: ${newAppointmentId}`);
+
+      res.json({
+        bookingId: newAppointmentId,
+        status: BOOKING_STATES.DRAFT,
+        total: testTotalPrice,
+        businessId: testBusinessId,
+        clientId: testClientId,
+        scheduledDate: scheduledDate.toISOString(),
+        message: "New draft appointment created for testing"
+      });
+    } catch (error: any) {
+      console.error("[DEV] Test appointment error:", error);
+      res.status(500).json({ error: "Failed to create test appointment", details: error.message });
+    }
+  });
+
+  /* END TEMP / TEST ONLY */
 
   return httpServer;
 }
