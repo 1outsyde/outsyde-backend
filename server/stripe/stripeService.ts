@@ -494,15 +494,23 @@ export class StripeService {
     description?: string;
     images?: string[];
     active?: boolean;
-  }) {
+  }, connectedAccountId?: string) {
     const stripe = await getUncachableStripeClient();
 
-    return stripe.products.update(productId, {
+    const updateData = {
       name: params.name,
       description: params.description || undefined,
       images: params.images?.filter(Boolean) || undefined,
       active: params.active,
-    });
+    };
+
+    if (connectedAccountId) {
+      return stripe.products.update(productId, updateData, {
+        stripeAccount: connectedAccountId,
+      });
+    }
+
+    return stripe.products.update(productId, updateData);
   }
 
   /**
