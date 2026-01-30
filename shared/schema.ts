@@ -515,6 +515,13 @@ export const photographers = pgTable("photographers", {
   // Booking settings
   autoAcceptBookings: boolean("auto_accept_bookings").default(true).notNull(), // If false, bookings require provider approval within 24h
 
+  // Visibility control (moderation, not approval gate)
+  // public = visible in search/profiles/booking
+  // hidden = admin-hidden, not visible publicly
+  // flagged = under review, not visible publicly
+  visibilityStatus: text("visibility_status").default("public").notNull(),
+  adminNotes: text("admin_notes"), // Internal notes explaining visibility changes
+
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 });
