@@ -2153,6 +2153,127 @@ export async function registerRoutes(
     }
   });
 
+  // Get user's posts with optional featured content grouping
+  // Query params: 
+  //   - limit (default 50), offset (default 0): pagination for all posts
+  //   - includeFeaturedContent (optional): when 'true', includes featuredContent object with proPosts and pulsePosts
+  //   - featuredLimit (default 5): max items per featured category
+  app.get("/api/users/:userId/posts", async (req, res) => {
+    try {
+      const { userId } = req.params;
+      
+      const targetUser = await storage.getUser(userId);
+      if (!targetUser) {
+        return res.status(404).json({ success: false, error: "User not found" });
+      }
+
+      const limit = parseInt(req.query.limit as string) || 50;
+      const offset = parseInt(req.query.offset as string) || 0;
+      const includeFeaturedContent = req.query.includeFeaturedContent === 'true';
+      const featuredLimit = parseInt(req.query.featuredLimit as string) || 5;
+
+      // Helper to enrich a single post with author and metadata
+      const enrichPost = async (post: any) => {
+        const author = await storage.getUser(post.authorId);
+        if (!author) return null;
+
+        let authorRole: 'consumer' | 'photographer' | 'vendor' = 'consumer';
+        let authorBusinessId: string | null = null;
+        let authorPhotographerId: string | null = null;
+
+        if (post.authorType === 'vendor') {
+          const business = await storage.getBusinessByOwnerId(post.authorId);
+          if (business) {
+            authorBusinessId = business.id;
+            authorRole = 'vendor';
+          }
+        } else if (post.authorType === 'photographer') {
+          const photographer = await storage.getPhotographerByUserId(post.authorId);
+          if (photographer) {
+            authorPhotographerId = photographer.id;
+            authorRole = 'photographer';
+          }
+        }
+
+        const mediaObj = (post.mediaUrl || post.imageUrl) ? {
+          mediaUrl: post.mediaUrl || post.imageUrl,
+          mediaType: post.mediaType || 'image',
+          width: post.mediaWidth || null,
+          height: post.mediaHeight || null,
+          aspectRatio: post.aspectRatio || null,
+        } : null;
+
+        return {
+          id: post.id,
+          mediaUrl: post.mediaUrl || post.imageUrl || null,
+          mediaType: post.mediaType || 'image',
+          postIntent: post.postIntent,
+          likeCount: post.likesCount || 0,
+          duration: null,
+          createdAt: post.createdAt,
+          content: post.content,
+          author: {
+            userId: author.id,
+            username: author.username || null,
+            displayName: author.name || author.firstName || 'Anonymous',
+            profilePhotoUrl: author.profileImageUrl || null,
+            role: authorRole,
+          },
+          media: mediaObj,
+        };
+      };
+
+      // Get all posts for the user (with pagination)
+      const allPosts = await storage.getUserFeedPosts(userId);
+      const paginatedPosts = allPosts.slice(offset, offset + limit);
+      
+      const enrichedPosts = [];
+      for (const post of paginatedPosts) {
+        const enriched = await enrichPost(post);
+        if (enriched) enrichedPosts.push(enriched);
+      }
+
+      // Build response
+      const response: any = {
+        success: true,
+        posts: enrichedPosts,
+        total: allPosts.length,
+        limit,
+        offset,
+      };
+
+      // Optionally add featured content grouping
+      if (includeFeaturedContent) {
+        const [proPosts, pulsePosts] = await Promise.all([
+          storage.getUserFeedPostsByIntent(userId, 'promotion', featuredLimit),
+          storage.getUserFeedPostsByIntent(userId, 'social', featuredLimit),
+        ]);
+
+        const enrichedProPosts = [];
+        for (const post of proPosts) {
+          const enriched = await enrichPost(post);
+          if (enriched) enrichedProPosts.push(enriched);
+        }
+
+        const enrichedPulsePosts = [];
+        for (const post of pulsePosts) {
+          const enriched = await enrichPost(post);
+          if (enriched) enrichedPulsePosts.push(enriched);
+        }
+
+        response.featuredContent = {
+          proPosts: enrichedProPosts,
+          pulsePosts: enrichedPulsePosts,
+        };
+      }
+
+      res.json(response);
+    } catch (error) {
+      console.error("Get user posts error:", error);
+      res.status(500).json({ success: false, error: "Failed to get user posts" });
+    }
+  });
+
   // ==================== NOTIFICATIONS ====================
 
   app.get("/api/notifications", async (req, res) => {

@@ -39,6 +39,13 @@ Outsyde is built as a monorepo, using a React frontend, an Express (TypeScript) 
 -   **Post Intent System:** Role-based authorization for post types: "social", "review", and "promotion".
 -   **Feed Author Object:** Canonical author object included with every feed post for frontend identity.
 -   **Follow System:** Functionality for users to follow/unfollow and retrieve follower/following lists.
+-   **Profile Featured Content:** `GET /api/users/:userId/posts` endpoint supports optional featured content grouping:
+    - Query params: `limit`, `offset` for pagination; `includeFeaturedContent=true` to include grouped posts; `featuredLimit` (default 5) for max items per category
+    - When `includeFeaturedContent=true`, response includes `featuredContent: { proPosts: Post[], pulsePosts: Post[] }`
+    - proPosts = posts with postIntent "promotion" (professional/business content)
+    - pulsePosts = posts with postIntent "social" (casual community content)
+    - Reviews (postIntent "review") are excluded from featured grouping
+    - Backward compatible: featuredContent is optional, older clients can ignore it
 -   **Storefront Video Banners:** Support for video banners on vendor/photographer storefronts with specific media attributes and fallback to images.
 -   **Unified Search Engine:** `GET /api/search` provides cross-entity search with scopes (consumers, photographers, businesses, products, services), personalization based on user preferences and follows, and normalized results.
 -   **Stripe PaymentIntent Integration:** Complete booking payment flow with Stripe for creation, capture (automatic/manual), idempotency, fee handling, webhook event processing, and refund management.

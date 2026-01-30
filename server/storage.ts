@@ -503,6 +503,7 @@ export interface IStorage {
   getFeedPosts(limit?: number, offset?: number): Promise<FeedPost[]>;
   getAlgorithmicFeed(userId: string | null, limit?: number, offset?: number): Promise<FeedPost[]>;
   getUserFeedPosts(authorId: string): Promise<FeedPost[]>;
+  getUserFeedPostsByIntent(authorId: string, postIntent: 'social' | 'promotion', limit?: number): Promise<FeedPost[]>;
   getBusinessFeedPosts(businessId: string): Promise<FeedPost[]>;
   getPhotographerFeedPosts(photographerId: string): Promise<FeedPost[]>;
   deleteFeedPost(id: string): Promise<void>;
@@ -4983,6 +4984,18 @@ export class DatabaseStorage implements IStorage {
         eq(feedPosts.isActive, true)
       ))
       .orderBy(sql`${feedPosts.createdAt} DESC`);
+  }
+
+  async getUserFeedPostsByIntent(authorId: string, postIntent: 'social' | 'promotion', limit = 5): Promise<FeedPost[]> {
+    return db.select()
+      .from(feedPosts)
+      .where(and(
+        eq(feedPosts.authorId, authorId),
+        eq(feedPosts.postIntent, postIntent),
+        eq(feedPosts.isActive, true)
+      ))
+      .orderBy(sql`${feedPosts.createdAt} DESC`)
+      .limit(limit);
   }
 
   async getBusinessFeedPosts(businessId: string): Promise<FeedPost[]> {
