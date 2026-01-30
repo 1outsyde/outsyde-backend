@@ -12144,6 +12144,81 @@ export async function registerRoutes(
     }
   });
 
+  /**
+   * TEMP / TEST ONLY: Create a Stripe PaymentIntent for testing
+   * POST /api/dev/test-payment-intent
+   * 
+   * Body: { bookingId: string, amount?: number (cents, default 7500) }
+   * 
+   * This endpoint:
+   * - Creates a PaymentIntent in Stripe test mode
+   * - Attaches bookingId in metadata
+   * - Does NOT confirm or capture payment
+   * - Does NOT require authentication
+   * 
+   * Returns: { paymentIntentId, clientSecret, status }
+   */
+  app.post("/api/dev/test-payment-intent", async (req, res) => {
+    console.log("[DEV] ===== TEST PAYMENT INTENT ENDPOINT - FOR TESTING ONLY =====");
+
+    try {
+      const { bookingId, amount } = req.body;
+
+      if (!bookingId) {
+        return res.status(400).json({ 
+          error: "bookingId is required" 
+        });
+      }
+
+      const testAmount = amount || 7500; // Default $75.00
+
+      console.log(`[DEV] Creating PaymentIntent for bookingId: ${bookingId}, amount: ${testAmount} cents`);
+
+      // Get Stripe client
+      const stripe = await getUncachableStripeClient();
+      
+      // Create PaymentIntent directly via Stripe SDK (no connected account, platform only)
+      const paymentIntent = await stripe.paymentIntents.create({
+        amount: testAmount,
+        currency: 'usd',
+        capture_method: 'manual', // Don't capture automatically
+        metadata: {
+          test_mode: 'true',
+          bookingId: bookingId,
+          created_via: '/api/dev/test-payment-intent',
+          created_at: new Date().toISOString()
+        },
+        description: `TEST PaymentIntent for booking ${bookingId}`,
+      });
+
+      console.log(`[DEV] ✓ PaymentIntent created successfully!`);
+      console.log(`[DEV]   - PaymentIntent ID: ${paymentIntent.id}`);
+      console.log(`[DEV]   - Status: ${paymentIntent.status}`);
+      console.log(`[DEV]   - Amount: ${paymentIntent.amount} ${paymentIntent.currency}`);
+      console.log(`[DEV]   - Capture Method: ${paymentIntent.capture_method}`);
+      console.log(`[DEV]   - Metadata: ${JSON.stringify(paymentIntent.metadata)}`);
+      console.log(`[DEV] ===== END TEST PAYMENT INTENT =====`);
+
+      res.json({
+        paymentIntentId: paymentIntent.id,
+        clientSecret: paymentIntent.client_secret,
+        status: paymentIntent.status,
+        amount: paymentIntent.amount,
+        currency: paymentIntent.currency,
+        captureMethod: paymentIntent.capture_method,
+        metadata: paymentIntent.metadata,
+        message: "TEST PaymentIntent created - check Stripe Dashboard"
+      });
+    } catch (error: any) {
+      console.error("[DEV] Test PaymentIntent error:", error);
+      res.status(500).json({ 
+        error: "Failed to create test PaymentIntent", 
+        details: error.message,
+        type: error.type || 'unknown'
+      });
+    }
+  });
+
   /* END TEMP / TEST ONLY */
 
   return httpServer;
