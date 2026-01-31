@@ -47,7 +47,8 @@ Outsyde is built as a monorepo, using a React frontend, an Express (TypeScript) 
     - Reviews (postIntent "review") are excluded from featured grouping
     - Backward compatible: featuredContent is optional, older clients can ignore it
 -   **Storefront Video Banners:** Support for video banners on vendor/photographer storefronts with specific media attributes and fallback to images.
--   **Unified Search Engine:** `GET /api/search` provides cross-entity search with scopes (consumers, photographers, businesses, products, services), personalization based on user preferences and follows, and normalized results.
+-   **Unified Search Engine:** `GET /api/search` and `GET /api/unified-search` provide cross-entity search with scopes (consumers, photographers, businesses, products, services), personalization based on user preferences and follows, and normalized results.
+-   **Consumer Discovery (Jan 2026):** Unified search supports "consumer" entity type for discovering regular users. Queries users table directly (isVendor=false, isPhotographer=false), supports city/text filtering, hides demo users for non-admins, and maintains proper pagination/total count semantics. Frontend /search page includes Consumers tab with User icon, "Discovering in [City]" context banner, and consumer-specific empty state messaging.
 -   **Stripe PaymentIntent Integration:** Complete booking payment flow with Stripe for creation, capture (automatic/manual), idempotency, fee handling, webhook event processing, and refund management.
 -   **Dynamic Availability & Booking Hold System:** Real-time slot generation from weekly availability windows minus confirmed bookings minus active holds. Features:
     - Slots generated dynamically on-demand (never stored in database)
