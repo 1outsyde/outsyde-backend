@@ -12155,6 +12155,7 @@ export async function registerRoutes(
         taggedPhotographerId: z.string().optional(),
         postType: z.enum(['text', 'product', 'service']).optional(),
         postIntent: z.enum(['social', 'review', 'promotion']).optional().default('social'), // Default to social for legacy clients
+        displayLayout: z.enum(['pro', 'pulse']).optional(), // Optional layout hint for frontend display
         productId: z.string().optional(),
         serviceId: z.string().optional(),
         photographerServiceId: z.string().optional(),
@@ -12284,6 +12285,7 @@ export async function registerRoutes(
         authorType,
         postType: data.postType || 'text',
         postIntent: data.postIntent, // 'social' | 'review' | 'promotion'
+        displayLayout: data.displayLayout, // 'pro' | 'pulse' - optional, null if not specified
         content: data.content,
         imageUrl: data.imageUrl || data.media?.url, // Backwards compat: populate legacy field
         mediaUrl: data.media?.url,

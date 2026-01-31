@@ -37,6 +37,7 @@ Outsyde is built as a monorepo, using a React frontend, an Express (TypeScript) 
 -   **Photographer Visibility Control:** Lightweight moderation system (not approval gate). Photographers auto-qualify once Stripe Connect onboarding completes. Admin can set visibilityStatus (public/hidden/flagged) to control search/profile visibility without blocking onboarding. Fields: visibilityStatus, adminNotes.
 -   **Post Commerce Support:** Feed posts can include validated commerce links (products, services, photographer services).
 -   **Post Intent System:** Role-based authorization for post types: "social", "review", and "promotion".
+-   **Post Display Layout:** Optional `displayLayout` field ("pro" | "pulse") on posts for frontend display hints. Stored as-is without inference or mapping to postIntent. Returns `null` for posts without this field (backward compatible).
 -   **Feed Author Object:** Canonical author object included with every feed post for frontend identity.
 -   **Follow System:** Functionality for users to follow/unfollow and retrieve follower/following lists.
 -   **Profile Featured Content:** `GET /api/users/:userId/posts` endpoint supports optional featured content grouping:
