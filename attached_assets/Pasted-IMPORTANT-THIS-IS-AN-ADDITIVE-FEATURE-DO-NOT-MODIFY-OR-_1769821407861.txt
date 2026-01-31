@@ -1,0 +1,102 @@
+IMPORTANT: THIS IS AN ADDITIVE FEATURE. DO NOT MODIFY OR BREAK EXISTING SEARCH BEHAVIOR.
+
+Current state (DO NOT CHANGE):
+- Keyword search already works on mobile and web
+- Searching by name returns businesses, photographers, and consumers correctly
+- Empty states, loading states, and ranking logic are correct
+- Backend search endpoints and response contracts must remain unchanged
+
+New feature to ADD:
+LOCATION-BASED DISCOVERY USING CITY CARDS
+
+GOAL:
+City cards (e.g., New York, Atlanta, Miami, Los Angeles, etc.) should be tappable.
+Tapping a city becomes a SEARCH ENTRY POINT that surfaces discoverable users from that city.
+
+--------------------------------
+BACKEND REQUIREMENTS (ADDITIVE)
+--------------------------------
+
+1. Introduce a LOCATION DISCOVERY QUERY MODE
+   - Reuse existing search infrastructure where possible
+   - Do NOT alter existing keyword search logic
+   - Add optional filters:
+     • city
+     • state
+     • country (future-safe)
+
+2. When a city is selected:
+   - Return discoverable entities that match that city:
+     • Businesses (approved + visible)
+     • Photographers (public profiles)
+     • Consumers (discoverable/public only)
+   - Respect all existing visibility rules and privacy constraints
+
+3. Group results by type:
+   - Businesses
+   - Photographers
+   - Consumers
+   (Use the same data contracts already used by search results)
+
+4. Ensure performance safety:
+   - Paginate results
+   - Default limit per category
+   - No full table scans
+
+--------------------------------
+FRONTEND REQUIREMENTS (ADDITIVE)
+--------------------------------
+
+1. Make city cards tappable
+   - Each city card triggers a search using:
+     • city name
+     • state code
+   - This should route into the EXISTING search results screen
+
+2. UI behavior after tapping a city:
+   - Show results as if the user searched, but label context as:
+     “Discovering in [City, State]”
+   - Allow filtering between:
+     • All
+     • Businesses
+     • Photographers
+     • Consumers
+
+3. Preserve existing search UX:
+   - Keyword search remains unchanged
+   - City-based discovery should coexist with text search
+   - User can refine results further using keywords AFTER city selection
+
+4. Empty state handling:
+   - If a city has no results:
+     Show “No discoverable users found in this area yet”
+
+--------------------------------
+STRICT RULES
+--------------------------------
+
+DO NOT:
+- Rewrite or refactor existing search logic
+- Change ranking, scoring, or relevance weights
+- Modify API response shapes used by keyword search
+- Break booking, messaging, or profile navigation
+- Remove or rename existing search endpoints
+
+YOU MAY:
+- Add optional query parameters
+- Add new endpoints ONLY if absolutely necessary
+- Add frontend routing/state to support city-based discovery
+
+--------------------------------
+OUTPUT REQUIRED
+--------------------------------
+
+1. Brief explanation of:
+   - How city-based discovery integrates with existing search
+   - Which backend fields are used for location filtering
+2. Confirmation that:
+   - Keyword search behavior is unchanged
+   - City discovery is fully additive
+
+If there is any uncertainty about breaking existing behavior:
+STOP and REPORT before implementing.
