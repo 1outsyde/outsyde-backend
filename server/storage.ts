@@ -2965,6 +2965,96 @@ export class DatabaseStorage implements IStorage {
         results = results.slice(0, limit);
       }
     }
+
+    // ADDITIVE: Consumer discovery support (when "consumer" entityType is requested)
+    // Consumers are not in searchIndex, so we query users table directly
+    // This is handled SEPARATELY to maintain API semantics for existing search behavior
+    const includesConsumerType = entityTypes && entityTypes.includes("consumer");
+    const onlyConsumerType = includesConsumerType && entityTypes?.length === 1;
+    
+    if (includesConsumerType) {
+      let consumerConditions: any[] = [
+        eq(users.isVendor, false),
+        eq(users.isPhotographer, false),
+      ];
+      
+      // Hide demo users from non-admins
+      if (!isAdmin) {
+        consumerConditions.push(sql`NOT (${users.id}::text ILIKE '%demo%')`);
+      }
+      
+      // City-based filtering for consumers
+      if (city) {
+        consumerConditions.push(ilike(users.city, `%${city}%`));
+      }
+      
+      // Text query matching for consumers
+      if (query) {
+        consumerConditions.push(
+          or(
+            ilike(users.username, `%${query}%`),
+            ilike(users.name, `%${query}%`),
+            ilike(users.firstName, `%${query}%`),
+            ilike(users.lastName, `%${query}%`)
+          )
+        );
+      }
+      
+      // Get consumer count for accurate total
+      const consumerCountResult = await db.select({ count: sql<number>`count(*)` })
+        .from(users)
+        .where(and(...consumerConditions));
+      const consumerTotal = Number(consumerCountResult[0]?.count || 0);
+      
+      // Calculate how many consumers to fetch based on remaining limit
+      const existingResultCount = results.length;
+      const remainingLimit = onlyConsumerType ? limit : Math.max(0, limit - existingResultCount);
+      
+      const consumerResults = await db.select().from(users)
+        .where(and(...consumerConditions))
+        .orderBy(desc(users.createdAt)) // Deterministic ordering by creation date
+        .limit(remainingLimit)
+        .offset(onlyConsumerType ? offset : 0);
+      
+      // Transform to SearchIndexEntry format
+      const consumerEntries: SearchIndexEntry[] = consumerResults.map(user => ({
+        id: `consumer-${user.id}`, // Virtual ID for consumers
+        entityType: "consumer",
+        entityId: user.id,
+        parentType: null,
+        parentId: null,
+        userId: user.id,
+        name: user.name || `${user.firstName || ''} ${user.lastName || ''}`.trim() || user.username || 'User',
+        description: user.username ? `@${user.username}` : null,
+        category: null,
+        tags: null,
+        city: user.city || null,
+        state: user.state || null,
+        latitude: user.latitude || null,
+        longitude: user.longitude || null,
+        imageUrl: user.profileImageUrl || null,
+        priceCents: null,
+        rating: null,
+        reviewCount: null,
+        knownFor: null,
+        isActive: true,
+        isDemo: user.id.toLowerCase().includes("demo"),
+        hasActiveSubscription: false,
+        updatedAt: new Date(),
+      }));
+      
+      // Merge consumer results with searchIndex results
+      results = [...results, ...consumerEntries];
+      
+      // If only consumers are requested, return just consumers with proper pagination
+      if (onlyConsumerType) {
+        return { results: consumerEntries, total: consumerTotal };
+      }
+      
+      // For mixed results, cap at limit and update total
+      results = results.slice(0, limit);
+      return { results, total: total + consumerTotal };
+    }
     
     return { results, total };
   }

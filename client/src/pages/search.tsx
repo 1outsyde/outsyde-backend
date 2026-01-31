@@ -1,6 +1,6 @@
 import { useState, useEffect } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { MapPin, TrendingUp, Plane, Loader2, Store, Camera, Package, Wrench, Navigation, X } from "lucide-react";
+import { MapPin, TrendingUp, Plane, Loader2, Store, Camera, Package, Wrench, Navigation, X, User } from "lucide-react";
 import SearchFilter from "@/components/SearchFilter";
 import BusinessCard from "@/components/BusinessCard";
 import PhotographerCard from "@/components/PhotographerCard";
@@ -27,7 +27,7 @@ const categoryImageMap: Record<string, string> = {
   "Health": yogaImage,
 };
 
-type SearchTab = "all" | "businesses" | "photographers" | "products" | "services";
+type SearchTab = "all" | "businesses" | "photographers" | "products" | "services" | "consumers";
 
 const SPECIALTY_FILTERS = [
   "Taste", "Presentation", "Ambiance", "Speed", "Quality", 
@@ -98,6 +98,8 @@ export default function SearchPage({ onViewBusiness, onViewPhotographer }: Searc
         return ["product"];
       case "services":
         return ["service", "photographer_service"];
+      case "consumers":
+        return ["consumer"];
       default:
         return undefined;
     }
@@ -156,6 +158,7 @@ export default function SearchPage({ onViewBusiness, onViewPhotographer }: Searc
   const photographerResults = results.filter(r => r.entityType === "photographer");
   const productResults = results.filter(r => r.entityType === "product");
   const serviceResults = results.filter(r => r.entityType === "service" || r.entityType === "photographer_service");
+  const consumerResults = results.filter(r => r.entityType === "consumer");
 
   const handleCategoryToggle = (category: string) => {
     if (selectedCategories.includes(category)) {
@@ -222,6 +225,8 @@ export default function SearchPage({ onViewBusiness, onViewPhotographer }: Searc
       onViewBusiness(result.parentId);
     } else if (result.entityType === "photographer_service" && result.parentId) {
       handleViewPhotographer(result.parentId);
+    } else if (result.entityType === "consumer") {
+      window.location.href = `/profile/${result.entityId}`;
     }
   };
 
@@ -236,6 +241,8 @@ export default function SearchPage({ onViewBusiness, onViewPhotographer }: Searc
       case "service":
       case "photographer_service":
         return <Wrench className="h-4 w-4" />;
+      case "consumer":
+        return <User className="h-4 w-4" />;
       default:
         return null;
     }
@@ -248,6 +255,7 @@ export default function SearchPage({ onViewBusiness, onViewPhotographer }: Searc
       product: "Product",
       service: "Service",
       photographer_service: "Photo Service",
+      consumer: "Person",
     };
     return labels[entityType] || entityType;
   };
@@ -321,6 +329,10 @@ export default function SearchPage({ onViewBusiness, onViewPhotographer }: Searc
               <TabsTrigger value="photographers" data-testid="tab-photographers">
                 <Camera className="h-4 w-4 mr-1" />
                 Photographers
+              </TabsTrigger>
+              <TabsTrigger value="consumers" data-testid="tab-consumers">
+                <User className="h-4 w-4 mr-1" />
+                Consumers
               </TabsTrigger>
               <TabsTrigger value="products" data-testid="tab-products">
                 <Package className="h-4 w-4 mr-1" />
@@ -427,7 +439,7 @@ export default function SearchPage({ onViewBusiness, onViewPhotographer }: Searc
                 </div>
                 <div>
                   <p className="font-medium">
-                    Exploring {selectedCityData.name}, {selectedCityData.state}
+                    Discovering in {selectedCityData.name}, {selectedCityData.state}
                   </p>
                   <p className="text-sm text-muted-foreground">
                     {totalResults} results found
@@ -573,7 +585,7 @@ export default function SearchPage({ onViewBusiness, onViewPhotographer }: Searc
               <h3 className="text-lg font-medium mb-2">No results found</h3>
               <p className="text-muted-foreground">
                 {selectedCity
-                  ? "Try selecting a different city or adjusting your filters"
+                  ? "No discoverable users found in this area yet"
                   : "Try adjusting your search criteria"}
               </p>
             </div>
