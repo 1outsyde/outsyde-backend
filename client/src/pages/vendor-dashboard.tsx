@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
-import { LayoutDashboard, Package, Calendar, MessageCircle, Settings, PlusCircle, Crown, Store, Users, ClipboardList, RotateCcw, Truck, UserPlus, Trash2, ExternalLink, CheckCircle, XCircle } from "lucide-react";
+import { LayoutDashboard, Package, Calendar, MessageCircle, Settings, PlusCircle, Crown, Store, Users, ClipboardList, RotateCcw, Truck, UserPlus, Trash2, ExternalLink, CheckCircle, XCircle, PenSquare } from "lucide-react";
+import CreatePostDialog from "@/components/CreatePostDialog";
 import { queryClient, apiRequest } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
 import { format } from "date-fns";
@@ -340,10 +341,14 @@ export default function VendorDashboardPage({ onLogout }: VendorDashboardPagePro
               </h1>
             </div>
             <div className="flex items-center gap-2">
-              <Button data-testid="button-new-post">
-                <PlusCircle className="h-4 w-4 mr-2" />
-                New Post
-              </Button>
+              <CreatePostDialog
+                trigger={
+                  <Button data-testid="button-new-post">
+                    <PenSquare className="h-4 w-4 mr-2" />
+                    Create Post
+                  </Button>
+                }
+              />
               <ThemeToggle />
             </div>
           </header>

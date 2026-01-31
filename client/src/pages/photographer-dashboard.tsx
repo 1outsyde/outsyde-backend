@@ -1,6 +1,7 @@
 import { useState, useEffect } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
-import { Camera, DollarSign, Calendar, MessageCircle, Star, Eye, ExternalLink, AlertCircle, Check, Loader2, RotateCcw, Plus, Pencil, Trash2, MapPin, FileText, Phone, User as UserIcon, X, Image, CalendarClock, Video } from "lucide-react";
+import { Camera, DollarSign, Calendar, MessageCircle, Star, Eye, ExternalLink, AlertCircle, Check, Loader2, RotateCcw, Plus, Pencil, Trash2, MapPin, FileText, Phone, User as UserIcon, X, Image, CalendarClock, Video, PenSquare } from "lucide-react";
+import CreatePostDialog from "@/components/CreatePostDialog";
 import { ImageUploader } from "@/components/ImageUploader";
 import { MediaUploader } from "@/components/MediaUploader";
 import BillingAddressForm from "@/components/BillingAddressForm";
@@ -428,9 +429,19 @@ export default function PhotographerDashboardPage({ onLogout }: PhotographerDash
               </p>
             </div>
           </div>
-          <Button variant="outline" onClick={onLogout} data-testid="button-logout">
-            Log Out
-          </Button>
+          <div className="flex items-center gap-2">
+            <CreatePostDialog
+              trigger={
+                <Button data-testid="button-create-post">
+                  <PenSquare className="h-4 w-4 mr-2" />
+                  Create Post
+                </Button>
+              }
+            />
+            <Button variant="outline" onClick={onLogout} data-testid="button-logout">
+              Log Out
+            </Button>
+          </div>
         </div>
       </header>
 
