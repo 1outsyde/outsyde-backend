@@ -12543,6 +12543,116 @@ export async function registerRoutes(
   });
 
   // =====================================================
+  // PULSE FEED ROUTES (TikTok-style Discovery)
+  // =====================================================
+
+  // Get Pulse feed - separate from Pro feed, purely discovery-based
+  app.get("/api/pulse/feed", async (req, res) => {
+    try {
+      const userId = req.session?.userId; // Optional - used for personalization
+      const limit = Math.min(parseInt(req.query.limit as string) || 10, 50);
+      const offset = parseInt(req.query.offset as string) || 0;
+      const excludeIds = req.query.excludeIds 
+        ? (req.query.excludeIds as string).split(',').filter(Boolean)
+        : [];
+
+      const { getPulseFeed } = await import('./pulseService');
+      
+      const posts = await getPulseFeed({
+        userId,
+        limit,
+        offset,
+        excludePostIds: excludeIds,
+      });
+
+      res.json({
+        posts,
+        hasMore: posts.length === limit,
+        nextOffset: offset + posts.length,
+      });
+    } catch (error) {
+      console.error("Get Pulse feed error:", error);
+      res.status(500).json({ error: "Failed to get Pulse feed" });
+    }
+  });
+
+  // Record engagement for Pulse ranking
+  app.post("/api/pulse/engagement", async (req, res) => {
+    const userId = req.session?.userId;
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    try {
+      const schema = z.object({
+        postId: z.string().min(1),
+        watchTimeMs: z.number().int().min(0),
+        videoDurationMs: z.number().int().min(0),
+        isRewatch: z.boolean().optional().default(false),
+        shared: z.boolean().optional(),
+        saved: z.boolean().optional(),
+      });
+
+      const data = schema.parse(req.body);
+      const { recordEngagement } = await import('./pulseService');
+      
+      const engagement = await recordEngagement({
+        userId,
+        postId: data.postId,
+        watchTimeMs: data.watchTimeMs,
+        videoDurationMs: data.videoDurationMs,
+        isRewatch: data.isRewatch,
+        shared: data.shared,
+        saved: data.saved,
+      });
+
+      res.json({ success: true, engagement });
+    } catch (error) {
+      if (error instanceof z.ZodError) {
+        return res.status(400).json({ error: "Invalid engagement data", details: error.errors });
+      }
+      console.error("Record Pulse engagement error:", error);
+      res.status(500).json({ error: "Failed to record engagement" });
+    }
+  });
+
+  // Get post distribution stats (for debugging/analytics)
+  app.get("/api/pulse/distribution/:postId", async (req, res) => {
+    try {
+      const { postId } = req.params;
+      const { getPostDistribution } = await import('./pulseService');
+      
+      const dist = await getPostDistribution(postId);
+      if (!dist) {
+        return res.status(404).json({ error: "Distribution data not found" });
+      }
+
+      res.json({ distribution: dist });
+    } catch (error) {
+      console.error("Get post distribution error:", error);
+      res.status(500).json({ error: "Failed to get distribution data" });
+    }
+  });
+
+  // Get user interests (for debugging/personalization insights)
+  app.get("/api/pulse/interests", async (req, res) => {
+    const userId = req.session?.userId;
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    try {
+      const { getUserInterests } = await import('./pulseService');
+      
+      const interests = await getUserInterests(userId);
+      res.json({ interests: interests || { interestVector: {}, recentEngagements: [] } });
+    } catch (error) {
+      console.error("Get user interests error:", error);
+      res.status(500).json({ error: "Failed to get user interests" });
+    }
+  });
+
+  // =====================================================
   // SHIPMENT TRACKING ROUTES
   // =====================================================
 

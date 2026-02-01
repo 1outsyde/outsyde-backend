@@ -70,6 +70,28 @@ Outsyde is built as a monorepo, using a React frontend, an Express (TypeScript) 
       - **Frontend format:** `{ open: true, start: "09:00", end: "17:00" }` or `{ open: false }` for closed days
       - **Legacy format:** `{ open: "09:00", close: "17:00", closed?: boolean }`
       - Internal `normalizeHoursEntry()` function converts both to canonical format for storage
+-   **Pulse Feed System (TikTok 2020-style Discovery):**
+    - **Philosophy:** Pure discovery/culture feed. Rank individual posts, NOT creators. Followers don't influence ranking. All user roles treated equally.
+    - **Separate from Pro Feed:** Pulse is entertainment + discovery. Pro is business + intent. Completely separate pipelines.
+    - **Content Eligibility:** Short-form vertical videos (priority), photos (lower priority). Excludes ads, sponsored posts, promotional intent.
+    - **Ranking Signals (TikTok weights):**
+      - Primary: avg_watch_time (30%), completion_rate (25%), rewatch_rate (20%)
+      - Secondary: share_rate (12%), save_rate (8%), comment_rate (4%), like_rate (1%)
+    - **Cold Start Distribution:** Every new Pulse post enters cold-start pool (~300-1000 impressions, 60 min window), distributed to non-followers based on interest similarity.
+    - **Tier Escalation System:**
+      - Tier 1: ~1k impressions (15% score threshold to advance)
+      - Tier 2: ~10k impressions (25% threshold)
+      - Tier 3: ~50k impressions (35% threshold)
+      - Tier 4: Unlimited viral distribution
+      - Posts that fail at any tier stop distribution (no account penalty)
+    - **User Interest Graph:** Behavior-based clustering (watch fully, skip, rewatch, share). Interest signals decay over time. Matches posts to users based on micro-interests, not social graph.
+    - **API Endpoints:**
+      - `GET /api/pulse/feed` - Returns ranked Pulse posts with personalization
+      - `POST /api/pulse/engagement` - Records watch time, completion, rewatches, shares, saves
+      - `GET /api/pulse/distribution/:postId` - Post distribution stats (debugging)
+      - `GET /api/pulse/interests` - User interest vector (debugging)
+    - **Frontend:** Full-screen vertical scroll, one post at a time, autoplay video with audio, tap to pause/play, loop on completion, infinite scroll.
+    - **Database Tables:** `pulse_engagements`, `post_distribution`, `user_interests`
 
 ## External Dependencies
 -   **PostgreSQL:** Primary database.

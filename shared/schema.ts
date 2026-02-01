@@ -1493,6 +1493,91 @@ export const postComments = pgTable("post_comments", {
   createdAt: timestamp("created_at").defaultNow().notNull(),
 });
 
+/* =====================================================
+   PULSE FEED SYSTEM (TikTok-style Discovery)
+===================================================== */
+
+// Pulse engagements - tracks user interactions with posts for ranking
+export const pulseEngagements = pgTable("pulse_engagements", {
+  id: varchar("id", { length: 36 }).primaryKey().default(sql`gen_random_uuid()`),
+
+  userId: varchar("user_id", { length: 36 }).notNull().references(() => users.id),
+  postId: varchar("post_id", { length: 36 }).notNull().references(() => feedPosts.id),
+
+  // Primary signals (highest weight)
+  watchTimeMs: integer("watch_time_ms").default(0).notNull(), // Total time spent watching
+  completionRate: doublePrecision("completion_rate").default(0), // 0.0 - 1.0 (percentage watched)
+  rewatchCount: integer("rewatch_count").default(0).notNull(), // Number of times user rewatched
+
+  // Secondary signals
+  shared: boolean("shared").default(false).notNull(),
+  saved: boolean("saved").default(false).notNull(),
+
+  // Tracking
+  impressionAt: timestamp("impression_at").defaultNow().notNull(),
+  lastInteractionAt: timestamp("last_interaction_at").defaultNow().notNull(),
+
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+
+// Post distribution - tracks cold start and tier escalation
+export const postDistribution = pgTable("post_distribution", {
+  id: varchar("id", { length: 36 }).primaryKey().default(sql`gen_random_uuid()`),
+
+  postId: varchar("post_id", { length: 36 }).notNull().references(() => feedPosts.id).unique(),
+
+  // Current distribution tier (1-4)
+  currentTier: integer("current_tier").default(1).notNull(),
+
+  // Impression counts per tier
+  impressionsTier1: integer("impressions_tier1").default(0).notNull(), // ~1k target
+  impressionsTier2: integer("impressions_tier2").default(0).notNull(), // ~10k target
+  impressionsTier3: integer("impressions_tier3").default(0).notNull(), // ~50k target
+  impressionsTier4: integer("impressions_tier4").default(0).notNull(), // unlimited
+
+  // Performance metrics (aggregated)
+  avgWatchTimeMs: integer("avg_watch_time_ms").default(0),
+  avgCompletionRate: doublePrecision("avg_completion_rate").default(0),
+  totalRewatches: integer("total_rewatches").default(0),
+  totalShares: integer("total_shares").default(0),
+  totalSaves: integer("total_saves").default(0),
+
+  // Tier advancement tracking
+  tierAdvancedAt: timestamp("tier_advanced_at"),
+  coldStartEndsAt: timestamp("cold_start_ends_at"), // 30-90 min after first impression
+  
+  // Status
+  isActive: boolean("is_active").default(true).notNull(), // false if post failed to advance
+
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+
+// User interests - behavior-based clustering for feed personalization
+export const userInterests = pgTable("user_interests", {
+  id: varchar("id", { length: 36 }).primaryKey().default(sql`gen_random_uuid()`),
+
+  userId: varchar("user_id", { length: 36 }).notNull().references(() => users.id).unique(),
+
+  // Interest vector - JSON object mapping category/tag to weight (0.0 - 1.0)
+  // Example: { "photography": 0.8, "food": 0.6, "music": 0.4 }
+  interestVector: jsonb("interest_vector").default({}).notNull(),
+
+  // Engagement history for time decay
+  // Stores recent interactions: [{ postId, category, action, weight, timestamp }]
+  recentEngagements: jsonb("recent_engagements").default([]).notNull(),
+
+  // Statistics
+  totalWatched: integer("total_watched").default(0).notNull(),
+  totalSkipped: integer("total_skipped").default(0).notNull(),
+  totalShared: integer("total_shared").default(0).notNull(),
+  totalSaved: integer("total_saved").default(0).notNull(),
+
+  lastUpdated: timestamp("last_updated").defaultNow().notNull(),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+});
+
 // Profile comments for businesses and photographers
 export const profileComments = pgTable("profile_comments", {
   id: varchar("id", { length: 36 }).primaryKey().default(sql`gen_random_uuid()`),
@@ -1774,6 +1859,24 @@ export const insertProfileCommentSchema = createInsertSchema(profileComments).om
   createdAt: true,
 });
 
+// Pulse feed system schemas
+export const insertPulseEngagementSchema = createInsertSchema(pulseEngagements).omit({
+  id: true,
+  createdAt: true,
+  updatedAt: true,
+});
+
+export const insertPostDistributionSchema = createInsertSchema(postDistribution).omit({
+  id: true,
+  createdAt: true,
+  updatedAt: true,
+});
+
+export const insertUserInterestsSchema = createInsertSchema(userInterests).omit({
+  id: true,
+  createdAt: true,
+});
+
 export const insertShipmentSchema = createInsertSchema(shipments).omit({
   id: true,
   createdAt: true,
@@ -2021,6 +2124,16 @@ export type InsertPostComment = z.infer<typeof insertPostCommentSchema>;
 
 export type ProfileComment = typeof profileComments.$inferSelect;
 export type InsertProfileComment = z.infer<typeof insertProfileCommentSchema>;
+
+// Pulse feed system types
+export type PulseEngagement = typeof pulseEngagements.$inferSelect;
+export type InsertPulseEngagement = z.infer<typeof insertPulseEngagementSchema>;
+
+export type PostDistribution = typeof postDistribution.$inferSelect;
+export type InsertPostDistribution = z.infer<typeof insertPostDistributionSchema>;
+
+export type UserInterests = typeof userInterests.$inferSelect;
+export type InsertUserInterests = z.infer<typeof insertUserInterestsSchema>;
 
 export type Shipment = typeof shipments.$inferSelect;
 export type InsertShipment = z.infer<typeof insertShipmentSchema>;

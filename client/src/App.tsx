@@ -25,11 +25,12 @@ import CreatePostPage from "@/pages/create-post";
 import OrderSuccessPage from "@/pages/order-success";
 import CheckoutContinuePage from "@/pages/checkout-continue";
 import VendorOnboardingPage from "@/pages/vendor-onboarding";
+import PulsePage from "@/pages/pulse";
 
 import jewelryImage from "@assets/generated_images/jewelry_artisan_vendor_image.png";
 import type { User } from "@shared/schema";
 
-type Page = "home" | "search" | "messages" | "profile" | "vendor" | "auth" | "vendor-dashboard" | "photographer-dashboard" | "influencer-dashboard" | "staff-dashboard" | "admin-fulfillment" | "admin-dashboard" | "create-post" | "photographer-page" | "order-success" | "checkout-continue" | "vendor-onboarding" | "influencer-onboarding";
+type Page = "home" | "search" | "messages" | "profile" | "vendor" | "auth" | "vendor-dashboard" | "photographer-dashboard" | "influencer-dashboard" | "staff-dashboard" | "admin-fulfillment" | "admin-dashboard" | "create-post" | "photographer-page" | "order-success" | "checkout-continue" | "vendor-onboarding" | "influencer-onboarding" | "pulse";
 type NavTab = "home" | "search" | "create" | "messages" | "profile" | "dashboard";
 
 interface MessageTarget {
@@ -77,6 +78,8 @@ function AppContent() {
     } else if (path === "/search") {
       setCurrentPage("search");
       setActiveTab("search");
+    } else if (path === "/pulse") {
+      setCurrentPage("pulse");
     }
   }, []);
 
@@ -307,6 +310,9 @@ function AppContent() {
               onViewBusiness={handleViewBusiness}
               onViewPhotographer={handleViewPhotographer}
             />
+          )}
+          {currentPage === "pulse" && (
+            <PulsePage isAuthenticated={isAuthenticated} />
           )}
           {currentPage === "messages" && (
             <MessagesPage 
