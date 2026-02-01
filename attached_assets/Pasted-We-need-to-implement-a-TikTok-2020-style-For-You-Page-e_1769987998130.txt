@@ -1,0 +1,195 @@
+We need to implement a TikTok 2020-style For You Page engine for the Pulse Home Feed only.
+
+This feed is pure discovery and culture.
+It must behave like early TikTok FYP, not Instagram, not Reels, not a business feed.
+
+1. CORE PRINCIPLES (NON-NEGOTIABLE)
+
+Rank individual posts, NOT creators or accounts
+
+Followers must NOT influence ranking
+
+Businesses, consumers, photographers, influencers are treated equally
+
+No paid boosting
+
+No profile authority weighting
+
+No conversion or booking bias
+
+Optimize ONLY for attention and retention
+
+Pulse = entertainment + discovery
+Pro = business + intent (DO NOT TOUCH PRO)
+
+2. CONTENT ELIGIBILITY (Pulse Only)
+
+Include:
+
+Short-form vertical videos (Reels/TikTok format)
+
+Photos (lower priority than video)
+
+Any user role allowed
+
+Exclude:
+
+Ads
+
+Sponsored posts
+
+Explicitly tagged promotional/business intent
+
+Pro-only content
+
+3. RANKING SIGNALS (TikTok 2020 Weights)
+
+Use these signals ONLY for Pulse ranking:
+
+Primary Signals (Highest Weight)
+
+Average watch time
+
+Completion rate (video watched to end)
+
+Rewatches (same user watches again)
+
+Secondary Signals
+
+Shares
+
+Saves
+
+Comments (quality > quantity)
+
+Low-Weight Signal
+
+Likes (cosmetic only)
+
+Explicitly IGNORE:
+
+Follower count
+
+Account age
+
+Verification
+
+Profile completeness
+
+Location bias (unless used only to seed test pool)
+
+4. COLD START DISTRIBUTION (MANDATORY)
+
+Every new Pulse post must enter a cold-start test pool:
+
+Initial distribution: ~300–1,000 impressions
+
+Majority non-followers
+
+Users selected based on interest similarity, not social graph
+
+Track performance over the first 30–90 minutes.
+
+5. ESCALATION TIERS (REQUIRED)
+
+Implement tier-based distribution:
+
+Tier 1: ~1k impressions
+
+Tier 2: ~10k impressions
+
+Tier 3: ~50k impressions
+
+Tier 4: Unlimited viral distribution
+
+A post advances ONLY if it beats thresholds at each tier.
+
+If it fails at any tier → distribution stops (no penalty to account).
+
+6. INTEREST GRAPH (SIMPLIFIED BUT REQUIRED)
+
+Users should be clustered by behavior, not demographics:
+
+What they watch fully
+
+What they skip instantly
+
+What they rewatch
+
+What they share/save
+
+Pulse feed should match posts to users based on micro-interests, not who they follow.
+
+Interest signals should decay over time (recent behavior matters more).
+
+7. AUDIO & VISUAL SIGNALS
+
+Boost matching when:
+
+Same or similar audio is reused
+
+Visual similarity exists (scene, objects, format)
+
+Hashtags and captions are secondary — use them only for categorization, not ranking.
+
+8. FRONTEND REQUIREMENTS (Pulse Feed UI)
+
+Full-screen vertical scroll (TikTok-style)
+
+One post at a time
+
+Autoplay video
+
+Tap to pause/play
+
+Loop on completion
+
+Infinite scroll
+
+No grids.
+No mixed Pro content.
+No ads inserted.
+
+9. SAFETY & SUPPRESSION (LIGHT TOUCH)
+
+Do NOT shadowban accounts.
+
+If a post performs poorly:
+
+Reduce distribution
+
+Do not punish future posts
+
+Suppress only if:
+
+Duplicate reposts
+
+Watermarks from other platforms
+
+Extremely low watch time (instant swipes)
+
+10. HARD CONSTRAINTS
+
+This logic applies ONLY to the Pulse Home Feed
+
+Do NOT reuse Pro feed ranking logic
+
+Do NOT add business, booking, or commerce signals
+
+Do NOT privilege verified or business accounts
+
+Do NOT insert ads into Pulse logic
+
+Pulse is sacred discovery.
+
+11. DELIVERABLES EXPECTED
+
+Backend ranking logic for Pulse feed
+
+Clear separation between Pulse and Pro feed pipelines
+
+Documented scoring formula
+
+Clear tier thresholds (can be configurable)
+
+Frontend feed behavior aligned with TikTok UX
