@@ -1,0 +1,43 @@
+ound the issue! Look at the debug logs:
+
+[API.getPulseFeed] Post 0: id=60b67e40-b286-4da2-9590-2dfb10e36004, videoUrl=undefined, feedSurface=pulse
+The backend is returning feedSurface=pulse but videoUrl=undefined!
+
+The post exists in the Pulse feed, but the backend isn't returning the video URL. This is why videos show as black - there's no video URL to play.
+
+Let me also check the ProfileFeedScreen to understand why "Photo's Pulse" shows 0 posts:
+
+The issue is clear now. The backend is returning the post with feedSurface=pulse but not returning the videoUrl field. The frontend ApiPost type expects videoUrl, but the backend may be returning it as media_url instead.
+
+Two issues to fix:
+
+Backend needs to return videoUrl (or media_url) - The Render backend's /api/pulse/feed and /api/profiles/:id/posts endpoints need to include the video URL in their SELECT query
+
+ProfileFeedScreen filtering - It filters by displayLayout, but if the backend isn't returning that field, all posts get filtered out
+
+Let me also update the frontend to handle both videoUrl and media_url (in case backend uses snake_case):
+
+I can see clearly from the logs what's happening:
+
+The Problem is 100% on the Backend (Render):
+
+[API.getPulseFeed] Post 0: videoUrl=undefined, feedSurface=pulse
+VIDEO_URL [Pro]: https://res.cloudinary.com/doraffjvp/video/upload/v1770066484/posts/...
+Pro feed returns videoUrl correctly ✓
+Pulse feed returns feedSurface=pulse but videoUrl=undefined ✗
+The backend's /api/pulse/feed endpoint's SELECT query is missing the media_url column.
+
+Backend Fix Needed:
+
+In your Render backend's Pulse feed query, add the missing columns:
+
+-- Current query probably looks like:
+SELECT id, content, feed_surface, ... FROM feed_posts WHERE feed_surface = 'pulse'
+-- Needs to include:
+SELECT id, content, feed_surface, media_url, media_type, thumbnail_url, display_layout, ... FROM feed_posts WHERE feed_surface = 'pulse'
+Frontend changes I made (now ready):
+
+Added mediaUrl as fallback for videoUrl (in case backend uses snake_case)
+Added feedSurface as fallback for displayLayout
+Added debug logging to track exactly what backend returns
+Once you update the Render backend to return media_url in the Pulse feed response, the videos will play correctly and thumbnails will load.

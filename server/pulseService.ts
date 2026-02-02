@@ -453,6 +453,9 @@ export interface PulseFeedOptions {
 
 export interface PulseFeedPost extends FeedPost {
   pulseScore: number;
+  // Top-level fields for mobile frontend compatibility
+  videoUrl: string | null;
+  thumbnailUrl: string | null;
   author: {
     userId: string;
     username: string | null;
@@ -573,6 +576,9 @@ export async function getPulseFeed(options: PulseFeedOptions): Promise<PulseFeed
 
     enrichedPosts.push({
       ...post,
+      // Add top-level fields that mobile frontend expects
+      videoUrl: post.mediaUrl || post.imageUrl || null,
+      thumbnailUrl: post.thumbnailUrl || null,
       pulseScore: score,
       author: {
         userId: author.id,
