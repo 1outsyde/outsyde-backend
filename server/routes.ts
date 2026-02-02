@@ -12144,6 +12144,7 @@ export async function registerRoutes(
       const schema = z.object({
         content: z.string().max(2000).optional().default(""),
         imageUrl: z.string().optional(), // Legacy field, use media object for new posts
+        // Nested media object (web frontend format)
         media: z.object({
           url: z.string(),
           type: z.enum(['image', 'video']),
@@ -12152,6 +12153,12 @@ export async function registerRoutes(
           height: z.number().int().positive().optional(),
           aspectRatio: z.number().positive().optional(),
         }).optional(),
+        // Flat mobile app format (alternative to nested media object)
+        videoUrl: z.string().optional(), // Mobile app sends this for videos
+        mediaUrl: z.string().optional(), // Mobile app may send this for images
+        mediaType: z.enum(['image', 'video']).optional(), // Mobile app sends this at top level
+        thumbnailUrl: z.string().optional(), // Mobile app sends this at top level
+        mediaDuration: z.number().optional(), // Mobile app sends video duration
         taggedBusinessId: z.string().optional(),
         taggedPhotographerId: z.string().optional(),
         postType: z.enum(['text', 'product', 'service']).optional(),
@@ -12162,14 +12169,18 @@ export async function registerRoutes(
         serviceId: z.string().optional(),
         photographerServiceId: z.string().optional(),
       }).refine(data => {
+        // Normalize: check for media URL from either format (all possible fields)
+        const hasMediaUrl = data.media?.url || data.videoUrl || data.mediaUrl || data.imageUrl;
+        const mediaType = data.media?.type || data.mediaType;
+        
         // For Pulse posts with video, content is optional (caption)
-        if (data.feedSurface === 'pulse' && data.media?.type === 'video') {
+        if (data.feedSurface === 'pulse' && mediaType === 'video') {
           return true;
         }
         // For text posts without media, content is required
         if (!data.postType || data.postType === 'text') {
           // If there's media, content is optional
-          if (data.media?.url) {
+          if (hasMediaUrl) {
             return true;
           }
           return data.content && data.content.length > 0;
@@ -12290,9 +12301,24 @@ export async function registerRoutes(
 
       // NOTE: Global tagging requirement REMOVED - tagging is only required for review intent
 
+      // NORMALIZE: Support both nested media object (web) and flat fields (mobile app)
+      // Mobile sends: { videoUrl, mediaType, thumbnailUrl } or { mediaUrl, mediaType }
+      // Web sends: { media: { url, type, thumbnailUrl } }
+      const normalizedMediaUrl = data.media?.url || data.videoUrl || data.mediaUrl || data.imageUrl;
+      const normalizedMediaType = data.media?.type || data.mediaType;
+      const normalizedThumbnailUrl = data.media?.thumbnailUrl || data.thumbnailUrl;
+      
+      // Validate: Pulse video posts MUST have a media URL
+      if (data.feedSurface === 'pulse' && normalizedMediaType === 'video' && !normalizedMediaUrl) {
+        return res.status(400).json({
+          code: "MEDIA_URL_REQUIRED",
+          message: "Pulse video posts require a video URL"
+        });
+      }
+
       // LOG: Verify feedSurface is received and persisted correctly
       console.log(`[POST /api/feed] RAW REQ BODY:`, JSON.stringify(req.body, null, 2));
-      console.log(`[POST /api/feed] PARSED: feedSurface=${data.feedSurface}, mediaType=${data.media?.type}, mediaUrl=${data.media?.url?.substring(0, 50)}`);
+      console.log(`[POST /api/feed] NORMALIZED: feedSurface=${data.feedSurface}, mediaType=${normalizedMediaType}, mediaUrl=${normalizedMediaUrl?.substring(0, 50)}, thumbnailUrl=${normalizedThumbnailUrl?.substring(0, 50)}`);
       
       const insertData = {
         authorId: userId,
@@ -12302,10 +12328,10 @@ export async function registerRoutes(
         displayLayout: data.displayLayout, // 'pro' | 'pulse' - optional, null if not specified (legacy)
         feedSurface: data.feedSurface, // SOURCE OF TRUTH: 'pulse' | 'pro' - persisted exactly as sent
         content: data.content,
-        imageUrl: data.imageUrl || data.media?.url, // Backwards compat: populate legacy field
-        mediaUrl: data.media?.url,
-        mediaType: data.media?.type,
-        thumbnailUrl: data.media?.thumbnailUrl,
+        imageUrl: normalizedMediaUrl, // Backwards compat: populate legacy field
+        mediaUrl: normalizedMediaUrl,
+        mediaType: normalizedMediaType,
+        thumbnailUrl: normalizedThumbnailUrl,
         mediaWidth: data.media?.width,
         mediaHeight: data.media?.height,
         aspectRatio: data.media?.aspectRatio,
