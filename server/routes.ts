@@ -12147,6 +12147,7 @@ export async function registerRoutes(
         media: z.object({
           url: z.string(),
           type: z.enum(['image', 'video']),
+          thumbnailUrl: z.string().optional(), // Video poster image
           width: z.number().int().positive().optional(),
           height: z.number().int().positive().optional(),
           aspectRatio: z.number().positive().optional(),
@@ -12295,6 +12296,7 @@ export async function registerRoutes(
         imageUrl: data.imageUrl || data.media?.url, // Backwards compat: populate legacy field
         mediaUrl: data.media?.url,
         mediaType: data.media?.type,
+        thumbnailUrl: data.media?.thumbnailUrl,
         mediaWidth: data.media?.width,
         mediaHeight: data.media?.height,
         aspectRatio: data.media?.aspectRatio,

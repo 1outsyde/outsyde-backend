@@ -57,6 +57,9 @@ interface FeedPostProps {
   taggedBusinessName?: string;
   taggedPhotographerName?: string;
   postImage?: string;
+  mediaUrl?: string;
+  mediaType?: "image" | "video";
+  thumbnailUrl?: string;
   content: string;
   likes: number;
   comments: number;
@@ -89,6 +92,9 @@ export default function FeedPost({
   taggedBusinessName,
   taggedPhotographerName,
   postImage,
+  mediaUrl,
+  mediaType,
+  thumbnailUrl,
   content,
   likes,
   comments,
@@ -259,14 +265,27 @@ export default function FeedPost({
         )}
       </div>
 
-      {/* Regular post image */}
-      {postType === "text" && postImage && (
+      {/* Regular post media (image or video) */}
+      {postType === "text" && (mediaUrl || postImage) && (
         <div className="aspect-[4/3] overflow-hidden">
-          <img
-            src={postImage}
-            alt="Post"
-            className="w-full h-full object-cover"
-          />
+          {mediaType === "video" ? (
+            <video
+              src={mediaUrl}
+              poster={thumbnailUrl || undefined}
+              controls
+              playsInline
+              preload="metadata"
+              className="w-full h-full object-cover"
+              data-testid={`video-post-${id}`}
+            />
+          ) : (
+            <img
+              src={mediaUrl || postImage}
+              alt="Post"
+              className="w-full h-full object-cover"
+              data-testid={`img-post-${id}`}
+            />
+          )}
         </div>
       )}
 

@@ -1454,6 +1454,7 @@ export const feedPosts = pgTable("feed_posts", {
 
   mediaUrl: text("media_url"),
   mediaType: text("media_type"), // 'image' | 'video'
+  thumbnailUrl: text("thumbnail_url"), // Video poster image
   mediaWidth: integer("media_width"),
   mediaHeight: integer("media_height"),
   aspectRatio: doublePrecision("aspect_ratio"),

@@ -4911,6 +4911,7 @@ export class DatabaseStorage implements IStorage {
         imageUrl: data.imageUrl || null,
         mediaUrl: data.mediaUrl || null,
         mediaType: data.mediaType || null,
+        thumbnailUrl: data.thumbnailUrl || null,
         mediaWidth: data.mediaWidth || null,
         mediaHeight: data.mediaHeight || null,
         aspectRatio: data.aspectRatio || null,

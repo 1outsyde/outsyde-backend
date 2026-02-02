@@ -28,6 +28,9 @@ interface FeedPostData {
   postType?: "text" | "product" | "service";
   content: string;
   imageUrl?: string;
+  mediaUrl?: string;
+  mediaType?: "image" | "video";
+  thumbnailUrl?: string;
   taggedBusinessId?: string;
   taggedPhotographerId?: string;
   productId?: string;
@@ -315,6 +318,9 @@ export default function HomePage({ onViewBusiness, onViewPhotographer, onLoginRe
                 taggedBusinessName={post.taggedBusiness?.name}
                 taggedPhotographerName={post.taggedPhotographer?.displayName}
                 postImage={post.imageUrl}
+                mediaUrl={post.mediaUrl}
+                mediaType={post.mediaType}
+                thumbnailUrl={post.thumbnailUrl}
                 content={post.content}
                 likes={post.likesCount}
                 comments={post.commentsCount}
