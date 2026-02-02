@@ -4904,12 +4904,21 @@ export class DatabaseStorage implements IStorage {
         authorId: data.authorId,
         authorType: data.authorType,
         postType: data.postType || 'text',
+        postIntent: data.postIntent || null,
+        displayLayout: data.displayLayout || null,
+        feedSurface: data.feedSurface || null,
         content: data.content,
         imageUrl: data.imageUrl || null,
+        mediaUrl: data.mediaUrl || null,
+        mediaType: data.mediaType || null,
+        mediaWidth: data.mediaWidth || null,
+        mediaHeight: data.mediaHeight || null,
+        aspectRatio: data.aspectRatio || null,
         taggedBusinessId: data.taggedBusinessId || null,
         taggedPhotographerId: data.taggedPhotographerId || null,
         productId: data.productId || null,
         serviceId: data.serviceId || null,
+        photographerServiceId: data.photographerServiceId || null,
       })
       .returning();
     return post;
