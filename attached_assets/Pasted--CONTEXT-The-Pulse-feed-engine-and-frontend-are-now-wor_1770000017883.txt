@@ -1,0 +1,131 @@
+📌 CONTEXT
+
+The Pulse feed engine and frontend are now working correctly.
+
+Frontend now explicitly sends a feedSurface field when creating posts:
+
+"pulse" when the user selects Pulse
+
+"pro" when the user selects Pro
+
+However, Pulse videos created before this change do not appear in the Pulse feed because their feedSurface field is NULL.
+
+We need to:
+
+Persist feedSurface correctly going forward
+
+Migrate legacy Pulse-eligible posts once
+
+1️⃣ SOURCE OF TRUTH (MANDATORY)
+
+Confirm that the posts table includes:
+
+feedSurface: 'pulse' | 'pro'
+
+
+This field is the only authority for which feed a post belongs to.
+
+2️⃣ POST CREATION — WRITE PATH (CRITICAL)
+
+In the post creation endpoint (e.g. POST /api/feed):
+
+Accept feedSurface from the request body
+
+Persist it exactly as sent
+
+Do NOT infer it
+
+Do NOT override it
+
+Do NOT default it to 'pro'
+
+If the request includes:
+
+{ "feedSurface": "pulse" }
+
+
+Then the database row must store:
+
+feedSurface = 'pulse'
+
+
+Add temporary logging to verify this during testing.
+
+3️⃣ ONE-TIME LEGACY DATA MIGRATION (OPTION A)
+
+Run a one-time migration to fix posts created before feedSurface existed.
+
+Migration rule:
+
+Any existing public video post with feedSurface IS NULL should be treated as Pulse content.
+
+SQL (example):
+UPDATE posts
+SET feedSurface = 'pulse'
+WHERE feedSurface IS NULL
+  AND mediaType = 'video'
+  AND visibility = 'public';
+
+
+This migration should be:
+
+Executed once
+
+Safe
+
+Idempotent (can be run again without harm)
+
+4️⃣ PULSE FEED QUERY — READ PATH (CONFIRM)
+
+Ensure /api/pulse/feed queries only:
+
+WHERE feedSurface = 'pulse'
+  AND mediaType = 'video'
+  AND visibility = 'public'
+
+
+❌ Do NOT filter by postIntent
+❌ Do NOT infer Pulse from other fields
+❌ Do NOT add fallback logic once migration is complete
+
+5️⃣ GUARANTEED VISIBILITY CONTRACT
+
+After this change:
+
+If:
+
+A user selects Pulse
+
+Posts a video
+
+Post creation succeeds
+
+Then:
+
+That post must immediately appear in /api/pulse/feed.
+
+Cold-start ranking happens after inclusion, not before.
+
+🚫 HARD CONSTRAINTS
+
+Do NOT require postIntent for Pulse
+
+Do NOT auto-downgrade Pulse posts
+
+Do NOT mix Pro logic into Pulse
+
+Do NOT change frontend behavior
+
+Do NOT change Pulse ranking weights
+
+🎯 EXPECTED RESULT
+
+New Pulse videos persist with feedSurface = 'pulse'
+
+Existing legacy videos appear in Pulse feed
+
+Pulse feed no longer shows empty state incorrectly
+
+TikTok-style engine finally receives data
+
+Pro feed remains unchanged
