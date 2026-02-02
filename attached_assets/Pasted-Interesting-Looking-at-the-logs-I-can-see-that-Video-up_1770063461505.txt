@@ -1,0 +1,42 @@
+Interesting! Looking at the logs, I can see that:
+
+Video upload IS succeeding - Cloudinary returns a valid URL
+Post IS being created successfully with feedSurface: pulse
+But /api/pulse/feed returns 0 posts
+The real issue is the backend's Pulse feed endpoint not returning posts. Let me check the API and how the pulse posts appear on the profile:
+
+Let me check how the Pulse posts are rendered on the profile to understand why they show as blank cards:
+
+Let me check what data is actually being returned from the backend for these posts:
+
+Let me focus on fixing the core issues. Since Expo Go doesn't have native video compression, I'll use expo-image-picker's built-in quality controls and add proper error handling:
+
+I've implemented the fixes you requested. Here's what I changed:
+
+1. Video Compression via Picker Settings:
+
+Reduced max duration from 60s to 15 seconds for Pulse videos
+Set video quality to Medium (iOS compression)
+Set overall quality to 0.5 for smaller file sizes
+2. Upload Validation & Error Prevention:
+
+Added strict validation that Cloudinary URL must be valid before creating post
+Posts are NOT created unless upload succeeds with a proper video URL
+"Post Shared" message only appears if the post is actually created successfully
+Clear error messages if upload fails
+Important Finding from the Logs:
+
+Looking at the logs, I discovered the uploads are actually succeeding - Cloudinary returns valid video URLs like:
+
+https://res.cloudinary.com/doraffjvp/video/upload/v1770057867/posts/dpmpidao1bx045yr3mrs.mp4
+The real issue is on the backend side:
+
+Pulse feed returns 0 posts - The /api/pulse/feed endpoint is returning no posts, even though posts are being created with feedSurface: "pulse". This means the backend's Pulse feed query isn't filtering correctly.
+
+Blank thumbnails on profile - The posts appear in your profile's Pulse row but show as blank white cards. This suggests the backend isn't returning the videoUrl field when you fetch posts from /api/feed.
+
+What needs fixing on the backend:
+
+Ensure /api/pulse/feed returns posts where feedSurface = "pulse"
+Ensure posts returned from /api/feed include the videoUrl field
+The frontend is now properly uploading compressed videos directly to Cloudinary and validating URLs before creating posts. Would you like me to add more debug logging to help troubleshoot what data the backend is returning?
