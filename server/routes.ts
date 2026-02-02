@@ -12291,9 +12291,10 @@ export async function registerRoutes(
       // NOTE: Global tagging requirement REMOVED - tagging is only required for review intent
 
       // LOG: Verify feedSurface is received and persisted correctly
-      console.log(`[POST /api/feed] Creating post with feedSurface=${data.feedSurface}, displayLayout=${data.displayLayout}, mediaType=${data.media?.type}`);
+      console.log(`[POST /api/feed] RAW REQ BODY:`, JSON.stringify(req.body, null, 2));
+      console.log(`[POST /api/feed] PARSED: feedSurface=${data.feedSurface}, mediaType=${data.media?.type}, mediaUrl=${data.media?.url?.substring(0, 50)}`);
       
-      const post = await storage.createFeedPost({
+      const insertData = {
         authorId: userId,
         authorType,
         postType: data.postType || 'text',
@@ -12313,7 +12314,11 @@ export async function registerRoutes(
         productId: data.productId,
         serviceId: data.serviceId,
         photographerServiceId: data.photographerServiceId,
-      });
+      };
+      console.log(`[POST /api/feed] INSERT DATA:`, JSON.stringify(insertData, null, 2));
+      
+      const post = await storage.createFeedPost(insertData as any);
+      console.log(`[POST /api/feed] CREATED POST ID=${post.id}, feedSurface=${post.feedSurface}, mediaType=${post.mediaType}`);
 
       // Build canonical author object
       let authorBusinessId: string | null = null;
