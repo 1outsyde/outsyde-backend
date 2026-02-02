@@ -487,7 +487,8 @@ export async function getPulseFeed(options: PulseFeedOptions): Promise<PulseFeed
   }
 
   // Get posts with distribution data that are eligible for Pulse
-  // Pulse eligibility: displayLayout = 'pulse' OR (no displayLayout AND has video)
+  // SOURCE OF TRUTH: feedSurface = 'pulse' is the ONLY authority for which feed a post belongs to
+  // No inference from postIntent or displayLayout - feedSurface is explicit
   const eligiblePosts = await db
     .select({
       post: feedPosts,
@@ -497,16 +498,10 @@ export async function getPulseFeed(options: PulseFeedOptions): Promise<PulseFeed
     .leftJoin(postDistribution, eq(feedPosts.id, postDistribution.postId))
     .where(and(
       eq(feedPosts.isActive, true),
-      // Pulse content: explicit pulse layout OR video content
-      or(
-        eq(feedPosts.displayLayout, 'pulse'),
-        and(
-          isNull(feedPosts.displayLayout),
-          eq(feedPosts.mediaType, 'video')
-        )
-      ),
-      // Exclude promotional/business intent (Pro content)
-      ne(feedPosts.postIntent, 'promotion'),
+      // SOURCE OF TRUTH: Only posts explicitly marked for Pulse feed
+      eq(feedPosts.feedSurface, 'pulse'),
+      // Video content only for Pulse
+      eq(feedPosts.mediaType, 'video'),
       // Exclude already seen posts if provided
       options.excludePostIds && options.excludePostIds.length > 0
         ? sql`${feedPosts.id} NOT IN (${sql.join(options.excludePostIds.map(id => sql`${id}`), sql`, `)})`
