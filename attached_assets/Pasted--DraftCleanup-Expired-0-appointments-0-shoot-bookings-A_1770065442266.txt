@@ -1,0 +1,82 @@
+[DraftCleanup] Expired 0 appointments, 0 shoot bookings
+[AUTH_DEBUG] GET /conversations | userId: 0d4ce8b5-3fc8-4613-a6e8-7b9b9c98cdd2 | role: consumer | isVendor: false | isPhotographer: true
+8:39:59 PM [express] GET /api/conversations 200 in 1026ms :: {"conversations":[{"id":"a4d65ec1-e43c-…
+[AUTH_DEBUG] GET /pulse/feed | userId: 0d4ce8b5-3fc8-4613-a6e8-7b9b9c98cdd2 | role: consumer | isVendor: false | isPhotographer: true
+[AUTH_DEBUG] GET /feed | userId: 0d4ce8b5-3fc8-4613-a6e8-7b9b9c98cdd2 | role: consumer | isVendor: false | isPhotographer: true
+[AUTH_DEBUG] GET /auth/me | userId: 0d4ce8b5-3fc8-4613-a6e8-7b9b9c98cdd2 | role: consumer | isVendor: false | isPhotographer: true
+[AUTH_DEBUG] GET /feed | userId: 0d4ce8b5-3fc8-4613-a6e8-7b9b9c98cdd2 | role: consumer | isVendor: false | isPhotographer: true
+8:40:05 PM [express] GET /api/pulse/feed 304 in 683ms :: {"posts":[],"hasMore":false,"nextOffset":0}
+[AUTH_ME] Session verified for userId: 0d4ce8b5-3fc8-4613-a6e8-7b9b9c98cdd2 | isVendor: false | isPhotographer: true
+8:40:05 PM [express] GET /api/auth/me 200 in 1004ms :: {"authenticated":true,"userId":"0d4ce8b5-3fc8…
+[AUTH_DEBUG] GET /conversations | userId: 0d4ce8b5-3fc8-4613-a6e8-7b9b9c98cdd2 | role: consumer | isVendor: false | isPhotographer: true
+8:40:06 PM [express] GET /api/conversations 200 in 389ms :: {"conversations":[{"id":"a4d65ec1-e43c-4…
+8:40:06 PM [express] GET /api/feed 200 in 2448ms :: {"posts":[{"id":"3bffdfe1-fe61-4335-9067-a099a49…
+8:40:07 PM [express] GET /api/feed 200 in 2546ms :: {"posts":[{"id":"3bffdfe1-fe61-4335-9067-a099a49…
+[AUTH_DEBUG] GET /photographers/me | userId: 0d4ce8b5-3fc8-4613-a6e8-7b9b9c98cdd2 | role: consumer | isVendor: false | isPhotographer: true
+8:40:11 PM [express] GET /api/photographers/me 200 in 260ms :: {"id":"a64630d4-31a5-4cab-a6b1-abb766…
+[AUTH_DEBUG] GET /photographers/me/weekly-availability | userId: 0d4ce8b5-3fc8-4613-a6e8-7b9b9c98cdd2 | role: consumer | isVendor: false | isPhotographer: true
+[AUTH_DEBUG] GET /photographers/me/availability | userId: 0d4ce8b5-3fc8-4613-a6e8-7b9b9c98cdd2 | role: consumer | isVendor: false | isPhotographer: true
+8:40:11 PM [express] GET /api/photographers/me/weekly-availability 304 in 259ms :: {"availability":[…
+8:40:11 PM [express] GET /api/photographers/me/availability 304 in 452ms :: {"hoursOfOperation":{"fr…
+[AUTH_DEBUG] GET /photographers/a64630d4-31a5-4cab-a6b1-abb7663b6074/services | userId: 0d4ce8b5-3fc8-4613-a6e8-7b9b9c98cdd2 | role: consumer | isVendor: false | isPhotographer: true
+8:40:12 PM [express] GET /api/photographers/a64630d4-31a5-4cab-a6b1-abb7663b6074/services 200 in 195…
+[AUTH_DEBUG] GET /feed | userId: 0d4ce8b5-3fc8-4613-a6e8-7b9b9c98cdd2 | role: consumer | isVendor: false | isPhotographer: true
+8:40:14 PM [express] GET /api/feed 200 in 1782ms :: {"posts":[{"id":"3bffdfe1-fe61-4335-9067-a099a49…
+[DraftCleanup] Expired 0 appointments, 0 shoot bookings
+[AUTH_DEBUG] POST /feed | userId: 0d4ce8b5-3fc8-4613-a6e8-7b9b9c98cdd2 | role: consumer | isVendor: false | isPhotographer: true
+[POST /api/feed] RAW REQ BODY: {
+  "content": "Pulse video after debug",
+  "displayLayout": "pulse",
+  "feedSurface": "pulse",
+  "mediaType": "video",
+  "videoUrl": "https://res.cloudinary.com/doraffjvp/video/upload/v1770064841/posts/kog5hyvpmwy1wsil7d0c.mp4",
+  "thumbnailUrl": "https://res.cloudinary.com/doraffjvp/video/upload/so_0,f_jpg,w_400/v1770064841/posts/kog5hyvpmwy1wsil7d0c.jpg",
+  "mediaDuration": 12.866667
+}
+[POST /api/feed] PARSED: feedSurface=pulse, mediaType=undefined, mediaUrl=undefined
+[POST /api/feed] INSERT DATA: {
+  "authorId": "0d4ce8b5-3fc8-4613-a6e8-7b9b9c98cdd2",
+  "authorType": "photographer",
+  "postType": "text",
+  "postIntent": "social",
+  "displayLayout": "pulse",
+  "feedSurface": "pulse",
+  "content": "Pulse video after debug"
+}
+[POST /api/feed] CREATED POST ID=d3a0e000-3828-435b-a421-2e06ee5cfb55, feedSurface=pulse, mediaType=null
+8:40:43 PM [express] POST /api/feed 200 in 1047ms :: {"success":true,"post":{"id":"d3a0e000-3828-435…
+[AUTH_DEBUG] GET /pulse/feed | userId: 0d4ce8b5-3fc8-4613-a6e8-7b9b9c98cdd2 | role: consumer | isVendor: false | isPhotographer: true
+8:40:44 PM [express] GET /api/pulse/feed 304 in 248ms :: {"posts":[],"hasMore":false,"nextOffset":0}
+[AUTH_DEBUG] GET /profiles/a64630d4-31a5-4cab-a6b1-abb7663b6074/posts | userId: 0d4ce8b5-3fc8-4613-a6e8-7b9b9c98cdd2 | role: consumer | isVendor: false | isPhotographer: true
+8:41:06 PM [express] GET /api/profiles/a64630d4-31a5-4cab-a6b1-abb7663b6074/posts 404 in 474ms
+[AUTH_DEBUG] GET /profiles/a64630d4-31a5-4cab-a6b1-abb7663b6074/posts | userId: 0d4ce8b5-3fc8-4613-a6e8-7b9b9c98cdd2 | role: consumer | isVendor: false | isPhotographer: true
+8:41:07 PM [express] GET /api/profiles/a64630d4-31a5-4cab-a6b1-abb7663b6074/posts 404 in 119ms
+[AUTH_DEBUG] GET /feed | userId: 0d4ce8b5-3fc8-4613-a6e8-7b9b9c98cdd2 | role: consumer | isVendor: false | isPhotographer: true
+8:41:21 PM [express] GET /api/feed 200 in 2528ms :: {"posts":[{"id":"d3a0e000-3828-435b-a421-2e06ee5…
+[AUTH_DEBUG] GET /profiles/a64630d4-31a5-4cab-a6b1-abb7663b6074/posts | userId: 0d4ce8b5-3fc8-4613-a6e8-7b9b9c98cdd2 | role: consumer | isVendor: false | isPhotographer: true
+8:41:35 PM [express] GET /api/profiles/a64630d4-31a5-4cab-a6b1-abb7663b6074/posts 404 in 521ms
+[AUTH_DEBUG] GET /profiles/a64630d4-31a5-4cab-a6b1-abb7663b6074/posts | userId: 0d4ce8b5-3fc8-4613-a6e8-7b9b9c98cdd2 | role: consumer | isVendor: false | isPhotographer: true
+8:41:35 PM [express] GET /api/profiles/a64630d4-31a5-4cab-a6b1-abb7663b6074/posts 404 in 131ms
+[DraftCleanup] Expired 0 appointments, 0 shoot bookings
+8:41:50 PM [express] GET /api/pulse/feed 304 in 198ms :: {"posts":[],"hasMore":false,"nextOffset":0}
+8:41:52 PM [express] GET /api/feed 200 in 1958ms :: {"posts":[{"id":"d3a0e000-3828-435b-a421-2e06ee5…
+Menu
+8:42:00 PM [express] GET /api/pulse/feed 304 in 197ms :: {"posts":[],"hasMore":false,"nextOffset":0}
+8:42:02 PM [express] GET /api/feed 304 in 2013ms :: {"posts":[{"id":"d3a0e000-3828-435b-a421-2e06ee5…
+[AUTH_DEBUG] GET /conversations | userId: 0d4ce8b5-3fc8-4613-a6e8-7b9b9c98cdd2 | role: consumer | isVendor: false | isPhotographer: true
+8:42:17 PM [express] GET /api/conversations 200 in 989ms :: {"conversations":[{"id":"a4d65ec1-e43c-4…
+8:42:38 PM [express] GET /api/pulse/feed 304 in 63ms :: {"posts":[],"hasMore":false,"nextOffset":0}
+8:42:40 PM [express] GET /api/feed 304 in 1904ms :: {"posts":[{"id":"d3a0e000-3828-435b-a421-2e06ee5…
+[DraftCleanup] Expired 0 appointments, 0 shoot bookings
+8:42:45 PM [express] GET /api/pulse/feed 304 in 260ms :: {"posts":[],"hasMore":false,"nextOffset":0}
+8:42:46 PM [express] GET /api/feed 304 in 1846ms :: {"posts":[{"id":"d3a0e000-3828-435b-a421-2e06ee5…
+8:42:57 PM [express] GET /api/pulse/feed 304 in 187ms :: {"posts":[],"hasMore":false,"nextOffset":0}
+8:42:59 PM [express] GET /api/feed 304 in 1759ms :: {"posts":[{"id":"d3a0e000-3828-435b-a421-2e06ee5…
+8:43:12 PM [express] GET /api/pulse/feed 304 in 183ms :: {"posts":[],"hasMore":false,"nextOffset":0}
+8:43:13 PM [express] GET /api/feed 304 in 1780ms :: {"posts":[{"id":"d3a0e000-3828-435b-a421-2e06ee5…
+8:43:26 PM [express] GET /api/pulse/feed 304 in 63ms :: {"posts":[],"hasMore":false,"nextOffset":0}
+8:43:27 PM [express] GET /api/feed 304 in 1869ms :: {"posts":[{"id":"d3a0e000-3828-435b-a421-2e06ee5…
+[DraftCleanup] Expired 0 appointments, 0 shoot bookings
+[DraftCleanup] Expired 0 appointments, 0 shoot bookings
+[DraftCleanup] Expired 0 appointments, 0 shoot bookings
+[DraftCleanup] Expired 0 appointments, 0 shoot bookings
