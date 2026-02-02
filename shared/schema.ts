@@ -1446,7 +1446,8 @@ export const feedPosts = pgTable("feed_posts", {
 
   postType: text("post_type").default("text").notNull(), // 'text', 'product', 'service'
   postIntent: text("post_intent").default("social").notNull(), // 'social', 'review', 'promotion'
-  displayLayout: text("display_layout"), // 'pro' | 'pulse' - optional, null if not specified
+  displayLayout: text("display_layout"), // 'pro' | 'pulse' - optional, null if not specified (legacy)
+  feedSurface: text("feed_surface"), // 'pulse' | 'pro' - SOURCE OF TRUTH for which feed post belongs to
 
   content: text("content").notNull(),
   imageUrl: text("image_url"), // Legacy field, use mediaUrl for new posts

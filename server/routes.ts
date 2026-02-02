@@ -12155,7 +12155,8 @@ export async function registerRoutes(
         taggedPhotographerId: z.string().optional(),
         postType: z.enum(['text', 'product', 'service']).optional(),
         postIntent: z.enum(['social', 'review', 'promotion']).optional().default('social'), // Default to social for legacy clients
-        displayLayout: z.enum(['pro', 'pulse']).optional(), // Optional layout hint for frontend display
+        displayLayout: z.enum(['pro', 'pulse']).optional(), // Optional layout hint for frontend display (legacy)
+        feedSurface: z.enum(['pulse', 'pro']).optional(), // SOURCE OF TRUTH: which feed the post belongs to
         productId: z.string().optional(),
         serviceId: z.string().optional(),
         photographerServiceId: z.string().optional(),
@@ -12280,12 +12281,16 @@ export async function registerRoutes(
 
       // NOTE: Global tagging requirement REMOVED - tagging is only required for review intent
 
+      // LOG: Verify feedSurface is received and persisted correctly
+      console.log(`[POST /api/feed] Creating post with feedSurface=${data.feedSurface}, displayLayout=${data.displayLayout}, mediaType=${data.media?.type}`);
+      
       const post = await storage.createFeedPost({
         authorId: userId,
         authorType,
         postType: data.postType || 'text',
         postIntent: data.postIntent, // 'social' | 'review' | 'promotion'
-        displayLayout: data.displayLayout, // 'pro' | 'pulse' - optional, null if not specified
+        displayLayout: data.displayLayout, // 'pro' | 'pulse' - optional, null if not specified (legacy)
+        feedSurface: data.feedSurface, // SOURCE OF TRUTH: 'pulse' | 'pro' - persisted exactly as sent
         content: data.content,
         imageUrl: data.imageUrl || data.media?.url, // Backwards compat: populate legacy field
         mediaUrl: data.media?.url,
