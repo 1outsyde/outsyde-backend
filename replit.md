@@ -73,7 +73,11 @@ Outsyde is built as a monorepo, using a React frontend, an Express (TypeScript) 
 -   **Pulse Feed System (TikTok 2020-style Discovery):**
     - **Philosophy:** Pure discovery/culture feed. Rank individual posts, NOT creators. Followers don't influence ranking. All user roles treated equally.
     - **Separate from Pro Feed:** Pulse is entertainment + discovery. Pro is business + intent. Completely separate pipelines.
-    - **Content Eligibility:** Short-form vertical videos (priority), photos (lower priority). Excludes ads, sponsored posts, promotional intent.
+    - **Source of Truth (Jan 2026):** `feedSurface` column is the ONLY authority for which feed a post belongs to:
+      - `feedSurface = 'pulse'` → Post appears in Pulse feed
+      - `feedSurface = 'pro'` → Post appears in Pro feed
+      - No inference from postIntent, displayLayout, or mediaType. Frontend explicitly sends feedSurface when creating posts.
+    - **Content Eligibility:** Short-form vertical videos with `feedSurface = 'pulse'` and `mediaType = 'video'`.
     - **Ranking Signals (TikTok weights):**
       - Primary: avg_watch_time (30%), completion_rate (25%), rewatch_rate (20%)
       - Secondary: share_rate (12%), save_rate (8%), comment_rate (4%), like_rate (1%)
