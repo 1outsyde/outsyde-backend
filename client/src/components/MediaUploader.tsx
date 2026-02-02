@@ -2,7 +2,7 @@ import { useState, useCallback, useRef } from "react";
 import type { ReactNode } from "react";
 import { Button } from "@/components/ui/button";
 import { Camera, Upload, Loader2, Video, X, Film } from "lucide-react";
-import { apiRequest } from "@/lib/queryClient";
+import { uploadToCloudinary } from "@/lib/cloudinaryUpload";
 import {
   Dialog,
   DialogContent,
@@ -10,9 +10,10 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Progress } from "@/components/ui/progress";
 
 interface MediaUploaderProps {
-  onUploadComplete: (mediaUrl: string, mediaType: "image" | "video") => void;
+  onUploadComplete: (mediaUrl: string, mediaType: "image" | "video", thumbnailUrl?: string) => void;
   maxImageSize?: number;
   maxVideoSize?: number;
   maxVideoDuration?: number;
@@ -38,6 +39,7 @@ export function MediaUploader({
 }: MediaUploaderProps) {
   const [showModal, setShowModal] = useState(false);
   const [isUploading, setIsUploading] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState(0);
   const [preview, setPreview] = useState<string | null>(null);
   const [previewType, setPreviewType] = useState<"image" | "video">("image");
   const [error, setError] = useState<string | null>(null);
@@ -45,12 +47,15 @@ export function MediaUploader({
   const [videoDuration, setVideoDuration] = useState<number | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
+  const selectedFileRef = useRef<File | null>(null);
 
   const resetState = () => {
     setPreview(null);
     setPreviewType("image");
     setError(null);
     setVideoDuration(null);
+    setUploadProgress(0);
+    selectedFileRef.current = null;
     if (fileInputRef.current) {
       fileInputRef.current.value = "";
     }
@@ -83,6 +88,8 @@ export function MediaUploader({
     setPreview(objectUrl);
     setPreviewType(isVideo ? "video" : "image");
 
+    selectedFileRef.current = file;
+    
     if (isVideo) {
       const video = document.createElement("video");
       video.preload = "metadata";
@@ -95,6 +102,7 @@ export function MediaUploader({
           setError(`Video too long. Maximum duration is ${maxVideoDuration} seconds. Your video is ${Math.round(duration)} seconds.`);
           URL.revokeObjectURL(objectUrl);
           setPreview(null);
+          selectedFileRef.current = null;
           return;
         }
         
@@ -108,35 +116,21 @@ export function MediaUploader({
 
   const uploadFile = async (file: File, objectUrl: string, type: "image" | "video") => {
     setIsUploading(true);
+    setUploadProgress(0);
 
     try {
-      const uploadResponse = await apiRequest("POST", "/api/objects/upload");
-      const { uploadURL } = await uploadResponse.json();
-
-      const putResponse = await fetch(uploadURL, {
-        method: "PUT",
-        body: file,
-        headers: {
-          "Content-Type": file.type,
-        },
+      const result = await uploadToCloudinary(file, (progress) => {
+        setUploadProgress(progress.percent);
       });
-
-      if (!putResponse.ok) {
-        throw new Error(`Upload failed with status ${putResponse.status}`);
-      }
-
-      const finalizeResponse = await apiRequest("POST", "/api/objects/finalize", {
-        uploadURL,
-      });
-      const { objectPath } = await finalizeResponse.json();
 
       URL.revokeObjectURL(objectUrl);
-      onUploadComplete(objectPath, type);
+      onUploadComplete(result.url, result.type, result.thumbnailUrl);
       setShowModal(false);
       resetState();
     } catch (err) {
       console.error("Upload error:", err);
-      setError("Failed to upload. Please try again.");
+      const errorMessage = err instanceof Error ? err.message : "Failed to upload. Please try again.";
+      setError(errorMessage);
       URL.revokeObjectURL(objectUrl);
       setPreview(null);
     } finally {
@@ -230,9 +224,10 @@ export function MediaUploader({
                 )}
                 {isUploading && (
                   <div className="absolute inset-0 bg-black/50 flex items-center justify-center rounded-lg">
-                    <div className="text-center">
+                    <div className="text-center w-3/4">
                       <Loader2 className="h-8 w-8 animate-spin text-white mx-auto" />
-                      <p className="text-white text-sm mt-2">Uploading...</p>
+                      <p className="text-white text-sm mt-2">Uploading... {uploadProgress}%</p>
+                      <Progress value={uploadProgress} className="mt-2 h-2" />
                     </div>
                   </div>
                 )}

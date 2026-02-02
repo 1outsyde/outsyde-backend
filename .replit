@@ -46,6 +46,8 @@ integrations = ["javascript_mem_db:1.0.0", "javascript_websocket:1.0.0", "stripe
 [userenv.shared]
 GOOGLE_OAUTH_CLIENT_ID = "315196435620-06bf0ng91lbqfdop97si4iaoldr2trjj.apps.googleusercontent.com"
 CLOUDINARY_CLOUD_NAME = "doraffjvp"
+VITE_CLOUDINARY_CLOUD_NAME = "doraffjvp"
+VITE_CLOUDINARY_UPLOAD_PRESET = "outsyde_unsigned"
 
 [userenv.development]
 PAYMENTS_ENABLED = "false"

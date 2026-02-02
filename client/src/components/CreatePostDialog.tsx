@@ -6,10 +6,12 @@ import { Textarea } from "@/components/ui/textarea";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Label } from "@/components/ui/label";
 import { useToast } from "@/hooks/use-toast";
-import { PenSquare, Image, Loader2 } from "lucide-react";
+import { PenSquare, Image, Loader2, X, Video } from "lucide-react";
 import { apiRequest } from "@/lib/queryClient";
 import type { User } from "@shared/schema";
 import { getQueryFn } from "@/lib/queryClient";
+import { MediaUploader } from "@/components/MediaUploader";
+import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 
 interface TaggableBusiness {
   id: string;
@@ -29,7 +31,10 @@ interface CreatePostDialogProps {
 export default function CreatePostDialog({ trigger }: CreatePostDialogProps) {
   const [open, setOpen] = useState(false);
   const [content, setContent] = useState("");
-  const [imageUrl, setImageUrl] = useState("");
+  const [mediaUrl, setMediaUrl] = useState("");
+  const [mediaType, setMediaType] = useState<"image" | "video" | null>(null);
+  const [thumbnailUrl, setThumbnailUrl] = useState<string | undefined>();
+  const [feedSurface, setFeedSurface] = useState<"pro" | "pulse">("pro");
   const [taggedBusinessId, setTaggedBusinessId] = useState<string>("");
   const [taggedPhotographerId, setTaggedPhotographerId] = useState<string>("");
   
@@ -57,16 +62,25 @@ export default function CreatePostDialog({ trigger }: CreatePostDialogProps) {
   });
 
   const createPostMutation = useMutation({
-    mutationFn: async (postData: { content: string; imageUrl?: string; taggedBusinessId?: string; taggedPhotographerId?: string }) => {
+    mutationFn: async (postData: { 
+      content: string; 
+      feedSurface: "pro" | "pulse";
+      media?: { url: string; type: "image" | "video"; thumbnailUrl?: string };
+      taggedBusinessId?: string; 
+      taggedPhotographerId?: string;
+    }) => {
       const res = await apiRequest("POST", "/api/feed", postData);
       return res.json();
     },
     onSuccess: () => {
       toast({
         title: "Post created",
-        description: "Your post has been shared with the community.",
+        description: feedSurface === "pulse" 
+          ? "Your Pulse video is now live!" 
+          : "Your post has been shared with the community.",
       });
       queryClient.invalidateQueries({ queryKey: ["/api/feed"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/pulse/feed"] });
       setOpen(false);
       resetForm();
     },
@@ -81,13 +95,25 @@ export default function CreatePostDialog({ trigger }: CreatePostDialogProps) {
 
   const resetForm = () => {
     setContent("");
-    setImageUrl("");
+    setMediaUrl("");
+    setMediaType(null);
+    setThumbnailUrl(undefined);
+    setFeedSurface("pro");
     setTaggedBusinessId("");
     setTaggedPhotographerId("");
   };
 
   const handleSubmit = () => {
-    if (!content.trim()) {
+    if (feedSurface === "pulse" && mediaType !== "video") {
+      toast({
+        title: "Video required",
+        description: "Pulse posts require a video. Please upload a video.",
+        variant: "destructive",
+      });
+      return;
+    }
+
+    if (feedSurface === "pro" && !content.trim()) {
       toast({
         title: "Content required",
         description: "Please write something before posting.",
@@ -105,12 +131,43 @@ export default function CreatePostDialog({ trigger }: CreatePostDialogProps) {
       return;
     }
 
-    createPostMutation.mutate({
+    const postData: {
+      content: string;
+      feedSurface: "pro" | "pulse";
+      media?: { url: string; type: "image" | "video"; thumbnailUrl?: string };
+      taggedBusinessId?: string;
+      taggedPhotographerId?: string;
+    } = {
       content: content.trim(),
-      imageUrl: imageUrl || undefined,
+      feedSurface,
       taggedBusinessId: taggedBusinessId || undefined,
       taggedPhotographerId: taggedPhotographerId || undefined,
-    });
+    };
+
+    if (mediaUrl && mediaType) {
+      postData.media = {
+        url: mediaUrl,
+        type: mediaType,
+        thumbnailUrl: thumbnailUrl,
+      };
+    }
+
+    createPostMutation.mutate(postData);
+  };
+
+  const handleMediaUpload = (url: string, type: "image" | "video", thumb?: string) => {
+    setMediaUrl(url);
+    setMediaType(type);
+    setThumbnailUrl(thumb);
+    if (type === "video") {
+      setFeedSurface("pulse");
+    }
+  };
+
+  const clearMedia = () => {
+    setMediaUrl("");
+    setMediaType(null);
+    setThumbnailUrl(undefined);
   };
 
   if (!user) {
@@ -137,18 +194,41 @@ export default function CreatePostDialog({ trigger }: CreatePostDialogProps) {
         </DialogHeader>
 
         <div className="space-y-4 pt-4">
+          <Tabs value={feedSurface} onValueChange={(v) => setFeedSurface(v as "pro" | "pulse")}>
+            <TabsList className="grid w-full grid-cols-2">
+              <TabsTrigger value="pro" className="flex items-center gap-2" data-testid="tab-pro-feed">
+                <Image className="h-4 w-4" />
+                Pro Feed
+              </TabsTrigger>
+              <TabsTrigger value="pulse" className="flex items-center gap-2" data-testid="tab-pulse-feed">
+                <Video className="h-4 w-4" />
+                Pulse
+              </TabsTrigger>
+            </TabsList>
+          </Tabs>
+
+          {feedSurface === "pulse" && (
+            <p className="text-sm text-muted-foreground bg-muted p-3 rounded-md">
+              Pulse is for short-form vertical videos. Upload a video (max 15s) to share on the discovery feed.
+            </p>
+          )}
+
           <div className="space-y-2">
-            <Label htmlFor="post-content">What's on your mind?</Label>
+            <Label htmlFor="post-content">
+              {feedSurface === "pulse" ? "Caption (optional)" : "What's on your mind?"}
+            </Label>
             <Textarea
               id="post-content"
               placeholder={
-                isCustomer 
-                  ? "Share your experience with a local business or photographer..."
-                  : "Share an update with your followers..."
+                feedSurface === "pulse"
+                  ? "Add a caption to your video..."
+                  : isCustomer 
+                    ? "Share your experience with a local business or photographer..."
+                    : "Share an update with your followers..."
               }
               value={content}
               onChange={(e) => setContent(e.target.value)}
-              className="min-h-[120px] resize-none"
+              className="min-h-[80px] resize-none"
               data-testid="input-post-content"
             />
             <p className="text-xs text-muted-foreground text-right">
@@ -157,21 +237,59 @@ export default function CreatePostDialog({ trigger }: CreatePostDialogProps) {
           </div>
 
           <div className="space-y-2">
-            <Label htmlFor="image-url">Image URL (optional)</Label>
-            <div className="flex gap-2">
-              <input
-                id="image-url"
-                type="text"
-                placeholder="https://example.com/image.jpg"
-                value={imageUrl}
-                onChange={(e) => setImageUrl(e.target.value)}
-                className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm transition-colors file:border-0 file:bg-transparent file:text-sm file:font-medium placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-                data-testid="input-post-image"
-              />
-              <Button size="icon" variant="outline" type="button">
-                <Image className="h-4 w-4" />
-              </Button>
-            </div>
+            <Label>{feedSurface === "pulse" ? "Video (required)" : "Media (optional)"}</Label>
+            {mediaUrl ? (
+              <div className="relative">
+                {mediaType === "video" ? (
+                  <video
+                    src={mediaUrl}
+                    poster={thumbnailUrl}
+                    className="w-full h-48 object-cover rounded-lg"
+                    controls
+                    muted
+                    data-testid="video-preview"
+                  />
+                ) : (
+                  <img
+                    src={mediaUrl}
+                    alt="Preview"
+                    className="w-full h-48 object-cover rounded-lg"
+                    data-testid="image-preview"
+                  />
+                )}
+                <Button
+                  type="button"
+                  size="icon"
+                  variant="secondary"
+                  className="absolute top-2 right-2"
+                  onClick={clearMedia}
+                  data-testid="button-remove-media"
+                >
+                  <X className="h-4 w-4" />
+                </Button>
+              </div>
+            ) : (
+              <MediaUploader
+                onUploadComplete={handleMediaUpload}
+                allowVideo={true}
+                allowImage={feedSurface === "pro"}
+                maxVideoDuration={15}
+                buttonVariant="outline"
+                buttonClassName="w-full"
+              >
+                {feedSurface === "pulse" ? (
+                  <>
+                    <Video className="h-4 w-4 mr-2" />
+                    Upload Video
+                  </>
+                ) : (
+                  <>
+                    <Image className="h-4 w-4 mr-2" />
+                    Upload Media
+                  </>
+                )}
+              </MediaUploader>
+            )}
           </div>
 
           {isCustomer && (
@@ -230,11 +348,16 @@ export default function CreatePostDialog({ trigger }: CreatePostDialogProps) {
             </Button>
             <Button 
               onClick={handleSubmit} 
-              disabled={createPostMutation.isPending || !content.trim() || (Boolean(isCustomer) && !hasTaggableEntities)}
+              disabled={
+                createPostMutation.isPending || 
+                (feedSurface === "pulse" && mediaType !== "video") ||
+                (feedSurface === "pro" && !content.trim()) ||
+                (Boolean(isCustomer) && !hasTaggableEntities)
+              }
               data-testid="button-submit-post"
             >
               {createPostMutation.isPending && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
-              Post
+              {feedSurface === "pulse" ? "Post to Pulse" : "Post"}
             </Button>
           </div>
         </div>

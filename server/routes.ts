@@ -12162,13 +12162,21 @@ export async function registerRoutes(
         serviceId: z.string().optional(),
         photographerServiceId: z.string().optional(),
       }).refine(data => {
-        // For text posts, content is required
+        // For Pulse posts with video, content is optional (caption)
+        if (data.feedSurface === 'pulse' && data.media?.type === 'video') {
+          return true;
+        }
+        // For text posts without media, content is required
         if (!data.postType || data.postType === 'text') {
+          // If there's media, content is optional
+          if (data.media?.url) {
+            return true;
+          }
           return data.content && data.content.length > 0;
         }
         // For product/service posts, content is optional
         return true;
-      }, { message: "Content is required for text posts" });
+      }, { message: "Content is required for text posts without media" });
 
       const data = schema.parse(req.body);
       const user = await storage.getUser(userId);
