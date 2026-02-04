@@ -227,6 +227,70 @@ export async function syncHoursOfOperationToWeeklyAvailability(
   }
 }
 
+/**
+ * Sync weeklyAvailability table to hoursOfOperation JSON field.
+ * This ensures all legacy read paths (profile banner, booking calendar) can read availability.
+ * 
+ * Called AFTER saving to weeklyAvailability table.
+ */
+export async function syncWeeklyAvailabilityToHoursOfOperation(
+  providerType: 'photographer' | 'business',
+  providerId: string
+): Promise<void> {
+  console.log("[AVAILABILITY_SYNC] Syncing weeklyAvailability to hoursOfOperation for", providerType, providerId);
+  
+  // Get all weekly availability rows for this provider
+  const slots = await db.select()
+    .from(weeklyAvailability)
+    .where(and(
+      eq(weeklyAvailability.providerType, providerType),
+      eq(weeklyAvailability.providerId, providerId),
+      isNull(weeklyAvailability.staffMemberId)
+    ));
+  
+  console.log("[AVAILABILITY_SYNC] Found", slots.length, "weeklyAvailability rows");
+  
+  // Build hoursOfOperation object in frontend format
+  // { sunday: { open: true, start: "09:00", end: "17:00" }, monday: { open: false }, ... }
+  const hoursOfOperation: Record<string, { open: boolean; start?: string; end?: string }> = {
+    sunday: { open: false },
+    monday: { open: false },
+    tuesday: { open: false },
+    wednesday: { open: false },
+    thursday: { open: false },
+    friday: { open: false },
+    saturday: { open: false },
+  };
+  
+  for (const slot of slots) {
+    if (!slot.isActive) continue;
+    
+    const dayKey = DAY_OF_WEEK_TO_KEY[slot.dayOfWeek];
+    if (!dayKey) continue;
+    
+    hoursOfOperation[dayKey] = {
+      open: true,
+      start: slot.startTime,
+      end: slot.endTime,
+    };
+  }
+  
+  console.log("[AVAILABILITY_SYNC] Built hoursOfOperation:", JSON.stringify(hoursOfOperation));
+  
+  // Update the provider's hoursOfOperation field
+  if (providerType === 'photographer') {
+    await db.update(photographers)
+      .set({ hoursOfOperation })
+      .where(eq(photographers.id, providerId));
+    console.log("[AVAILABILITY_SYNC] Updated photographer.hoursOfOperation for", providerId);
+  } else if (providerType === 'business') {
+    await db.update(businesses)
+      .set({ hoursOfOperation })
+      .where(eq(businesses.id, providerId));
+    console.log("[AVAILABILITY_SYNC] Updated business.hoursOfOperation for", providerId);
+  }
+}
+
 async function getWeeklyAvailabilityForDay(
   providerType: string,
   providerId: string,

@@ -82,7 +82,8 @@ import {
   calculateEndTime,
   AvailabilityError,
   AVAILABILITY_ERRORS,
-  syncHoursOfOperationToWeeklyAvailability
+  syncHoursOfOperationToWeeklyAvailability,
+  syncWeeklyAvailabilityToHoursOfOperation
 } from "./availabilityService";
 import { 
   transitionAppointmentState, 
@@ -3551,6 +3552,13 @@ export async function registerRoutes(
         staffMemberId
       );
 
+      // CRITICAL: Sync weekly_availability -> hoursOfOperation so legacy read paths work
+      // Only sync if not staff-specific (staff has separate availability)
+      if (!staffMemberId) {
+        await syncWeeklyAvailabilityToHoursOfOperation('business', business.id);
+        console.log("[AVAILABILITY_DEBUG] Synced business to hoursOfOperation");
+      }
+
       if (typeof autoAcceptBookings === 'boolean') {
         await storage.updateBusiness(business.id, { autoAcceptBookings });
       }
@@ -3622,6 +3630,11 @@ export async function registerRoutes(
 
       console.log("[AVAILABILITY_DEBUG] Saved with providerType=photographer, providerId=", photographer.id);
       console.log("[AVAILABILITY_DEBUG] Rows saved:", updated.length);
+
+      // CRITICAL: Sync weekly_availability -> hoursOfOperation so legacy read paths work
+      // This ensures profile banner, booking calendar, and availability tab all see the data
+      await syncWeeklyAvailabilityToHoursOfOperation('photographer', photographer.id);
+      console.log("[AVAILABILITY_DEBUG] Synced to hoursOfOperation");
 
       if (typeof autoAcceptBookings === 'boolean') {
         await storage.updatePhotographer(photographer.id, { autoAcceptBookings });
