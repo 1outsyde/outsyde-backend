@@ -58,18 +58,27 @@ Outsyde is built as a monorepo, using a React frontend, an Express (TypeScript) 
     - Error codes: OUTSIDE_HOURS, TIME_NOT_COMPATIBLE, SLOT_UNAVAILABLE, HOLD_EXPIRED, HOLD_NOT_FOUND, SERVICE_NOT_FOUND, INVALID_DATE
     - Endpoints: GET /availability/calendar, GET /availability/slots, POST /booking/validate, POST /booking/hold, POST /booking/confirm, DELETE /booking/hold/:holdId, GET /booking/holds
     - All money handled in cents (servicePriceCents)
--   **Availability Data Model & Migration:**
+-   **Availability Data Model & Bidirectional Sync (Verified Feb 2026):**
     - **Source of Truth:** `weekly_availability` table is the authoritative source for availability, slot generation, and booking logic
-    - **Legacy Field:** `hoursOfOperation` JSON field on photographers/businesses is legacy/derived data
-    - **Fallback Logic:** Calendar/slots endpoints fall back to `hoursOfOperation` JSON when `weekly_availability` is empty (temporary compatibility)
-    - **Sync Safety Net:** When `hoursOfOperation` is updated via API endpoints, data is automatically synced to `weekly_availability` table
-    - **Dashboard Integration:** Dashboard writes directly to `weekly_availability` via `PUT /api/photographers/me/weekly-availability`
-    - **Migration Path:** Once stable, remove fallback logic reading from `hoursOfOperation` (server/availabilityService.ts)
+    - **Bidirectional Sync (CONFIRMED WORKING):**
+      - Dashboard saves → `weekly_availability` table → auto-syncs to `hoursOfOperation` JSON via `syncWeeklyAvailabilityToHoursOfOperation()`
+      - Mobile API saves → `hoursOfOperation` JSON → auto-syncs to `weekly_availability` table via `syncHoursOfOperationToWeeklyAvailability()`
+      - Both directions call the appropriate sync function after successful writes
+    - **Sync Functions (server/availabilityService.ts):**
+      - `syncWeeklyAvailabilityToHoursOfOperation(providerType, providerId)` - Reads weekly_availability rows and updates photographer/business JSON field
+      - `syncHoursOfOperationToWeeklyAvailability(providerType, providerId, hoursOfOperation)` - Parses JSON and upserts weekly_availability rows
+    - **Dashboard Integration:** Dashboard writes directly to `weekly_availability` via `PUT /api/photographers/me/weekly-availability` and `PUT /api/businesses/me/weekly-availability`
     - **Day Mapping:** dayOfWeek integers (0=Sunday...6=Saturday) map to hoursOfOperation keys (sunday, monday, etc.)
     - **Hours Format (Aligned Jan 2026):** Backend accepts both frontend and legacy formats:
       - **Frontend format:** `{ open: true, start: "09:00", end: "17:00" }` or `{ open: false }` for closed days
       - **Legacy format:** `{ open: "09:00", close: "17:00", closed?: boolean }`
       - Internal `normalizeHoursEntry()` function converts both to canonical format for storage
+    - **Booking Slot Generation (CONFIRMED WORKING Feb 2026):**
+      - `generateAvailabilitySlots()` generates 15-minute increment slots from weekly availability windows
+      - Slot generation: windowStart to windowEnd, checks serviceDuration fits, excludes blocks/bookings/holds
+      - Example: 9am-5pm window with 60min service = 29 available slots per day
+      - `getWeeklyAvailabilityForDay()` reads from weekly_availability table with fallback to hoursOfOperation JSON
+      - `timeToMinutes()` converts "HH:MM" to minutes since midnight for slot math
 -   **Pulse Feed System (TikTok 2020-style Discovery):**
     - **Philosophy:** Pure discovery/culture feed. Rank individual posts, NOT creators. Followers don't influence ranking. All user roles treated equally.
     - **Separate from Pro Feed:** Pulse is entertainment + discovery. Pro is business + intent. Completely separate pipelines.
