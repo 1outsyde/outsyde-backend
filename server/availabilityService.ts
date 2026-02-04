@@ -938,6 +938,8 @@ export async function generateAvailabilitySlots(
   const dateObj = new Date(date + 'T00:00:00');
   const dayOfWeek = dateObj.getDay();
   
+  console.log("[SLOT_DEBUG] generateAvailabilitySlots:", { date, dayOfWeek, serviceDurationMinutes });
+  
   // 1. Get weekly availability windows
   const windows = await getWeeklyAvailabilityForDay(
     providerType,
@@ -946,7 +948,10 @@ export async function generateAvailabilitySlots(
     staffMemberId
   );
   
+  console.log("[SLOT_DEBUG] Windows found:", windows.length, windows);
+  
   if (windows.length === 0) {
+    console.log("[SLOT_DEBUG] No windows, returning empty");
     return [];
   }
   
@@ -981,9 +986,20 @@ export async function generateAvailabilitySlots(
     const windowStart = timeToMinutes(window.startTime);
     const windowEnd = timeToMinutes(window.endTime);
     
+    console.log("[SLOT_DEBUG] Processing window:", { 
+      startTime: window.startTime, 
+      endTime: window.endTime,
+      windowStart, 
+      windowEnd, 
+      serviceDurationMinutes,
+      willGenerateSlots: windowStart + serviceDurationMinutes <= windowEnd
+    });
+    
     let currentMinutes = windowStart;
+    let slotCount = 0;
     
     while (currentMinutes + serviceDurationMinutes <= windowEnd) {
+      slotCount++;
       const startHours = Math.floor(currentMinutes / 60);
       const startMins = currentMinutes % 60;
       const startTime = `${startHours.toString().padStart(2, '0')}:${startMins.toString().padStart(2, '0')}`;
@@ -1018,7 +1034,12 @@ export async function generateAvailabilitySlots(
       allSlots.push({ startTime, endTime, available: true });
       currentMinutes += 15; // 15-minute increments for slot starts
     }
+    
+    console.log("[SLOT_DEBUG] Window complete: generated", slotCount, "slots");
   }
+  
+  const availableSlots = allSlots.filter(s => s.available).length;
+  console.log("[SLOT_DEBUG] Total slots:", allSlots.length, "Available:", availableSlots);
   
   return allSlots;
 }
