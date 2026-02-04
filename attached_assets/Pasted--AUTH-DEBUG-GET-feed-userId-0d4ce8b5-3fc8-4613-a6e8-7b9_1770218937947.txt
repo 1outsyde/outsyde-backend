@@ -1,0 +1,97 @@
+[AUTH_DEBUG] GET /feed | userId: 0d4ce8b5-3fc8-4613-a6e8-7b9b9c98cdd2 | role: consumer | isVendor: false | isPhotographer: true
+[AUTH_DEBUG] GET /feed | userId: 0d4ce8b5-3fc8-4613-a6e8-7b9b9c98cdd2 | role: consumer | isVendor: false | isPhotographer: true
+[AUTH_DEBUG] GET /pulse/feed | userId: 0d4ce8b5-3fc8-4613-a6e8-7b9b9c98cdd2 | role: consumer | isVendor: false | isPhotographer: true
+[AUTH_DEBUG] GET /auth/me | userId: 0d4ce8b5-3fc8-4613-a6e8-7b9b9c98cdd2 | role: consumer | isVendor: false | isPhotographer: true
+[AUTH_ME] Session verified for userId: 0d4ce8b5-3fc8-4613-a6e8-7b9b9c98cdd2 | isVendor: false | isPhotographer: true
+3:27:28 PM [express] GET /api/auth/me 200 in 934ms :: {"authenticated":true,"userId":"0d4ce8b5-3fc8-…
+3:27:28 PM [express] GET /api/pulse/feed 200 in 994ms :: {"posts":[{"id":"5ab91dd7-ec15-47a0-aff2-83…
+[AUTH_DEBUG] GET /conversations | userId: 0d4ce8b5-3fc8-4613-a6e8-7b9b9c98cdd2 | role: consumer | isVendor: false | isPhotographer: true
+3:27:28 PM [express] GET /api/conversations 304 in 351ms :: {"conversations":[{"id":"a4d65ec1-e43c-4…
+[DraftCleanup] Expired 0 appointments, 0 shoot bookings
+3:27:30 PM [express] GET /api/feed 304 in 2841ms :: {"posts":[{"id":"5ab91dd7-ec15-47a0-aff2-8375e34…
+3:27:30 PM [express] GET /api/feed 200 in 2792ms :: {"posts":[{"id":"5ab91dd7-ec15-47a0-aff2-8375e34…
+[AUTH_DEBUG] GET /photographers/me | userId: 0d4ce8b5-3fc8-4613-a6e8-7b9b9c98cdd2 | role: consumer | isVendor: false | isPhotographer: true
+3:27:51 PM [express] GET /api/photographers/me 200 in 835ms :: {"id":"a64630d4-31a5-4cab-a6b1-abb766…
+[AUTH_DEBUG] GET /photographers/me/weekly-availability | userId: 0d4ce8b5-3fc8-4613-a6e8-7b9b9c98cdd2 | role: consumer | isVendor: false | isPhotographer: true
+[AUTH_DEBUG] GET /photographers/me/availability | userId: 0d4ce8b5-3fc8-4613-a6e8-7b9b9c98cdd2 | role: consumer | isVendor: false | isPhotographer: true
+3:27:52 PM [express] GET /api/photographers/me/weekly-availability 200 in 271ms :: {"availability":[…
+3:27:52 PM [express] GET /api/photographers/me/availability 304 in 303ms :: {"hoursOfOperation":{"fr…
+[AUTH_DEBUG] GET /photographers/a64630d4-31a5-4cab-a6b1-abb7663b6074/services | userId: 0d4ce8b5-3fc8-4613-a6e8-7b9b9c98cdd2 | role: consumer | isVendor: false | isPhotographer: true
+3:27:52 PM [express] GET /api/photographers/a64630d4-31a5-4cab-a6b1-abb7663b6074/services 304 in 178…
+[AUTH_DEBUG] GET /feed | userId: 0d4ce8b5-3fc8-4613-a6e8-7b9b9c98cdd2 | role: consumer | isVendor: false | isPhotographer: true
+3:27:54 PM [express] GET /api/feed 304 in 1782ms :: {"posts":[{"id":"5ab91dd7-ec15-47a0-aff2-8375e34…
+[AUTH_DEBUG] GET /photographers/me | userId: 0d4ce8b5-3fc8-4613-a6e8-7b9b9c98cdd2 | role: consumer | isVendor: false | isPhotographer: true
+3:27:58 PM [express] GET /api/photographers/me 200 in 237ms :: {"id":"a64630d4-31a5-4cab-a6b1-abb766…
+[AUTH_DEBUG] GET /users/identity/status | userId: 0d4ce8b5-3fc8-4613-a6e8-7b9b9c98cdd2 | role: consumer | isVendor: false | isPhotographer: true
+3:27:58 PM [express] GET /api/users/identity/status 200 in 179ms :: {"username":{"current":null,"can…
+[AUTH_DEBUG] GET /photographers/me/bookings | userId: 0d4ce8b5-3fc8-4613-a6e8-7b9b9c98cdd2 | role: consumer | isVendor: false | isPhotographer: true
+3:27:59 PM [express] GET /api/photographers/me/bookings 200 in 297ms :: {"bookings":[{"recordId":"f8…
+[AUTH_DEBUG] GET /photographers/me/services | userId: 0d4ce8b5-3fc8-4613-a6e8-7b9b9c98cdd2 | role: consumer | isVendor: false | isPhotographer: true
+3:27:59 PM [express] GET /api/photographers/me/services 200 in 296ms :: {"services":[{"id":"0e2fb524…
+[AUTH_DEBUG] GET /photographers/me/availability | userId: 0d4ce8b5-3fc8-4613-a6e8-7b9b9c98cdd2 | role: consumer | isVendor: false | isPhotographer: true
+3:28:00 PM [express] GET /api/photographers/me/availability 304 in 295ms :: {"hoursOfOperation":{"fr…
+[AUTH_DEBUG] GET /photographers/me/blocks | userId: 0d4ce8b5-3fc8-4613-a6e8-7b9b9c98cdd2 | role: consumer | isVendor: false | isPhotographer: true
+3:28:00 PM [express] GET /api/photographers/me/blocks 304 in 236ms :: {"blocks":[]}
+[AUTH_DEBUG] PUT /photographers/me/weekly-availability | userId: 0d4ce8b5-3fc8-4613-a6e8-7b9b9c98cdd2 | role: consumer | isVendor: false | isPhotographer: true
+[AVAILABILITY_DEBUG] PUT /api/photographers/me/weekly-availability
+[AVAILABILITY_DEBUG] userId: 0d4ce8b5-3fc8-4613-a6e8-7b9b9c98cdd2
+[AVAILABILITY_DEBUG] photographer.id: a64630d4-31a5-4cab-a6b1-abb7663b6074
+[AVAILABILITY_DEBUG] photographer.userId: 0d4ce8b5-3fc8-4613-a6e8-7b9b9c98cdd2
+[AVAILABILITY_DEBUG] slots received: [
+  {
+    "dayOfWeek": 1,
+    "startTime": "08:00",
+    "endTime": "17:00",
+    "isActive": true
+  },
+  {
+    "dayOfWeek": 2,
+    "startTime": "09:00",
+    "endTime": "17:00",
+    "isActive": true
+  },
+  {
+    "dayOfWeek": 3,
+    "startTime": "09:00",
+    "endTime": "17:00",
+    "isActive": true
+  },
+  {
+    "dayOfWeek": 4,
+    "startTime": "09:00",
+    "endTime": "17:00",
+    "isActive": true
+  },
+  {
+    "dayOfWeek": 5,
+    "startTime": "09:00",
+    "endTime": "17:00",
+    "isActive": true
+  }
+]
+[AVAILABILITY_DEBUG] slots count: 5
+[AVAILABILITY_DEBUG] Saved with providerType=photographer, providerId= a64630d4-31a5-4cab-a6b1-abb7663b6074
+[AVAILABILITY_DEBUG] Rows saved: 5
+[AVAILABILITY_SYNC] Syncing weeklyAvailability to hoursOfOperation for photographer a64630d4-31a5-4cab-a6b1-abb7663b6074
+[AVAILABILITY_SYNC] Found 5 weeklyAvailability rows
+[AVAILABILITY_SYNC] Built hoursOfOperation: {"sunday":{"open":false},"monday":{"open":true,"start":"08:00","end":"17:00"},"tuesday":{"open":true,"start":"09:00","end":"17:00"},"wednesday":{"open":true,"start":"09:00","end":"17:00"},"thursday":{"open":true,"start":"09:00","end":"17:00"},"friday":{"open":true,"start":"09:00","end":"17:00"},"saturday":{"open":false}}
+[AVAILABILITY_SYNC] Updated photographer.hoursOfOperation for a64630d4-31a5-4cab-a6b1-abb7663b6074
+[AVAILABILITY_DEBUG] Synced to hoursOfOperation
+3:28:08 PM [express] PUT /api/photographers/me/weekly-availability 200 in 648ms :: {"availability":[…
+[AUTH_DEBUG] PUT /photographer/profile | userId: 0d4ce8b5-3fc8-4613-a6e8-7b9b9c98cdd2 | role: consumer | isVendor: false | isPhotographer: true
+3:28:08 PM [express] PUT /api/photographer/profile 404 in 119ms
+[AUTH_DEBUG] GET /photographers/me/weekly-availability | userId: 0d4ce8b5-3fc8-4613-a6e8-7b9b9c98cdd2 | role: consumer | isVendor: false | isPhotographer: true
+3:28:08 PM [express] GET /api/photographers/me/weekly-availability 200 in 238ms :: {"availability":[…
+[AUTH_DEBUG] GET /photographers/me | userId: 0d4ce8b5-3fc8-4613-a6e8-7b9b9c98cdd2 | role: consumer | isVendor: false | isPhotographer: true
+3:28:09 PM [express] GET /api/photographers/me 200 in 590ms :: {"id":"a64630d4-31a5-4cab-a6b1-abb766…
+[AUTH_DEBUG] GET /users/identity/status | userId: 0d4ce8b5-3fc8-4613-a6e8-7b9b9c98cdd2 | role: consumer | isVendor: false | isPhotographer: true
+3:28:09 PM [express] GET /api/users/identity/status 200 in 177ms :: {"username":{"current":null,"can…
+[AUTH_DEBUG] GET /photographers/me/bookings | userId: 0d4ce8b5-3fc8-4613-a6e8-7b9b9c98cdd2 | role: consumer | isVendor: false | isPhotographer: true
+3:28:10 PM [express] GET /api/photographers/me/bookings 200 in 295ms :: {"bookings":[{"recordId":"f8…
+[AUTH_DEBUG] GET /photographers/me/services | userId: 0d4ce8b5-3fc8-4613-a6e8-7b9b9c98cdd2 | role: consumer | isVendor: false | isPhotographer: true
+3:28:10 PM [express] GET /api/photographers/me/services 200 in 295ms :: {"services":[{"id":"0e2fb524…
+[AUTH_DEBUG] GET /photographers/me/availability | userId: 0d4ce8b5-3fc8-4613-a6e8-7b9b9c98cdd2 | role: consumer | isVendor: false | isPhotographer: true
+3:28:11 PM [express] GET /api/photographers/me/availability 200 in 389ms :: {"hoursOfOperation":{"fr…
+[AUTH_DEBUG] GET /photographers/me/blocks | userId: 0d4ce8b5-3fc8-4613-a6e8-7b9b9c98cdd2 | role: consumer | isVendor: false | isPhotographer: true
+3:28:11 PM [express] GET /api/photographers/me/blocks 304 in 236ms :: {"blocks":[]}
+Nee
