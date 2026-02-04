@@ -1,0 +1,252 @@
+///////////////////////
+[AVAILABILITY_DEBUG]   providerType: photographer providerId: a64630d4-31a5-4cab-a6b1-abb7663b6074 dayOfWeek: 2
+Menu
+[AVAILABILITY_DEBUG]   weeklyAvailability table slots found: 1
+[SLOT_DEBUG] Windows found: 1 [ { startTime: '09:00', endTime: '17:00' } ]
+[SLOT_DEBUG] Processing window: {
+  startTime: '09:00',
+  endTime: '17:00',
+  windowStart: 540,
+  windowEnd: 1020,
+  serviceDurationMinutes: 60,
+  willGenerateSlots: true
+}
+[SLOT_DEBUG] Window complete: generated 29 slots
+[SLOT_DEBUG] Total slots: 29 Available: 29
+[SLOT_DEBUG] generateAvailabilitySlots: { date: '2026-02-11', dayOfWeek: 3, serviceDurationMinutes: 60 }
+[AVAILABILITY_DEBUG] getWeeklyAvailabilityForDay:
+[AVAILABILITY_DEBUG]   providerType: photographer providerId: a64630d4-31a5-4cab-a6b1-abb7663b6074 dayOfWeek: 3
+[AVAILABILITY_DEBUG]   weeklyAvailability table slots found: 1
+[SLOT_DEBUG] Windows found: 1 [ { startTime: '07:00', endTime: '17:00' } ]
+[SLOT_DEBUG] Processing window: {
+  startTime: '07:00',
+  endTime: '17:00',
+  windowStart: 420,
+  windowEnd: 1020,
+  serviceDurationMinutes: 60,
+  willGenerateSlots: true
+}
+[SLOT_DEBUG] Window complete: generated 37 slots
+[SLOT_DEBUG] Total slots: 37 Available: 37
+[SLOT_DEBUG] generateAvailabilitySlots: { date: '2026-02-12', dayOfWeek: 4, serviceDurationMinutes: 60 }
+[AVAILABILITY_DEBUG] getWeeklyAvailabilityForDay:
+[AVAILABILITY_DEBUG]   providerType: photographer providerId: a64630d4-31a5-4cab-a6b1-abb7663b6074 dayOfWeek: 4
+[AVAILABILITY_DEBUG]   weeklyAvailability table slots found: 1
+[SLOT_DEBUG] Windows found: 1 [ { startTime: '09:00', endTime: '17:00' } ]
+[SLOT_DEBUG] Processing window: {
+  startTime: '09:00',
+  endTime: '17:00',
+  windowStart: 540,
+  windowEnd: 1020,
+  serviceDurationMinutes: 60,
+  willGenerateSlots: true
+}
+[SLOT_DEBUG] Window complete: generated 29 slots
+[SLOT_DEBUG] Total slots: 29 Available: 29
+[SLOT_DEBUG] generateAvailabilitySlots: { date: '2026-02-13', dayOfWeek: 5, serviceDurationMinutes: 60 }
+[AVAILABILITY_DEBUG] getWeeklyAvailabilityForDay:
+[AVAILABILITY_DEBUG]   providerType: photographer providerId: a64630d4-31a5-4cab-a6b1-abb7663b6074 dayOfWeek: 5
+[AVAILABILITY_DEBUG]   weeklyAvailability table slots found: 1
+[SLOT_DEBUG] Windows found: 1 [ { startTime: '09:00', endTime: '17:00' } ]
+[SLOT_DEBUG] Processing window: {
+  startTime: '09:00',
+  endTime: '17:00',
+  windowStart: 540,
+  windowEnd: 1020,
+  serviceDurationMinutes: 60,
+  willGenerateSlots: true
+}
+[SLOT_DEBUG] Window complete: generated 29 slots
+[SLOT_DEBUG] Total slots: 29 Available: 29
+[SLOT_DEBUG] generateAvailabilitySlots: { date: '2026-02-14', dayOfWeek: 6, serviceDurationMinutes: 60 }
+[AVAILABILITY_DEBUG] getWeeklyAvailabilityForDay:
+[AVAILABILITY_DEBUG]   providerType: photographer providerId: a64630d4-31a5-4cab-a6b1-abb7663b6074 dayOfWeek: 6
+[AVAILABILITY_DEBUG]   weeklyAvailability table slots found: 0
+[AVAILABILITY_DEBUG]   Fallback to photographer.hoursOfOperation: {"friday":{"end":"17:00","open":true,"start":"09:00"},"monday":{"end":"17:00","open":true,"start":"08:00"},"sunday":{"open":false},"tuesday":{"end":"17:00","open":true,"start":"09:00"},"saturday":{"open":false},"thursday":{"end":"17:00","open":true,"start":"09:00"},"wednesday":{"end":"17:00","open":true,"start":"07:00"}}
+[AVAILABILITY_DEBUG]   No availability found for day 6
+[SLOT_DEBUG] Windows found: 0 []
+[SLOT_DEBUG] No windows, returning empty
+[SLOT_DEBUG] generateAvailabilitySlots: { date: '2026-02-15', dayOfWeek: 0, serviceDurationMinutes: 60 }
+[AVAILABILITY_DEBUG] getWeeklyAvailabilityForDay:
+[AVAILABILITY_DEBUG]   providerType: photographer providerId: a64630d4-31a5-4cab-a6b1-abb7663b6074 dayOfWeek: 0
+[AVAILABILITY_DEBUG]   weeklyAvailability table slots found: 0
+[AVAILABILITY_DEBUG]   Fallback to photographer.hoursOfOperation: {"friday":{"end":"17:00","open":true,"start":"09:00"},"monday":{"end":"17:00","open":true,"start":"08:00"},"sunday":{"open":false},"tuesday":{"end":"17:00","open":true,"start":"09:00"},"saturday":{"open":false},"thursday":{"end":"17:00","open":true,"start":"09:00"},"wednesday":{"end":"17:00","open":true,"start":"07:00"}}
+[AVAILABILITY_DEBUG]   No availability found for day 0
+[SLOT_DEBUG] Windows found: 0 []
+[SLOT_DEBUG] No windows, returning empty
+[SLOT_DEBUG] generateAvailabilitySlots: { date: '2026-02-16', dayOfWeek: 1, serviceDurationMinutes: 60 }
+[AVAILABILITY_DEBUG] getWeeklyAvailabilityForDay:
+[AVAILABILITY_DEBUG]   providerType: photographer providerId: a64630d4-31a5-4cab-a6b1-abb7663b6074 dayOfWeek: 1
+[AVAILABILITY_DEBUG]   weeklyAvailability table slots found: 1
+[SLOT_DEBUG] Windows found: 1 [ { startTime: '08:00', endTime: '17:00' } ]
+[SLOT_DEBUG] Processing window: {
+  startTime: '08:00',
+  endTime: '17:00',
+  windowStart: 480,
+  windowEnd: 1020,
+  serviceDurationMinutes: 60,
+  willGenerateSlots: true
+}
+[SLOT_DEBUG] Window complete: generated 33 slots
+[SLOT_DEBUG] Total slots: 33 Available: 33
+[SLOT_DEBUG] generateAvailabilitySlots: { date: '2026-02-17', dayOfWeek: 2, serviceDurationMinutes: 60 }
+[AVAILABILITY_DEBUG] getWeeklyAvailabilityForDay:
+[AVAILABILITY_DEBUG]   providerType: photographer providerId: a64630d4-31a5-4cab-a6b1-abb7663b6074 dayOfWeek: 2
+[AVAILABILITY_DEBUG]   weeklyAvailability table slots found: 1
+[SLOT_DEBUG] Windows found: 1 [ { startTime: '09:00', endTime: '17:00' } ]
+[SLOT_DEBUG] Processing window: {
+  startTime: '09:00',
+  endTime: '17:00',
+  windowStart: 540,
+  windowEnd: 1020,
+  serviceDurationMinutes: 60,
+  willGenerateSlots: true
+}
+[SLOT_DEBUG] Window complete: generated 29 slots
+[SLOT_DEBUG] Total slots: 29 Available: 29
+[SLOT_DEBUG] generateAvailabilitySlots: { date: '2026-02-18', dayOfWeek: 3, serviceDurationMinutes: 60 }
+[AVAILABILITY_DEBUG] getWeeklyAvailabilityForDay:
+[AVAILABILITY_DEBUG]   providerType: photographer providerId: a64630d4-31a5-4cab-a6b1-abb7663b6074 dayOfWeek: 3
+[AVAILABILITY_DEBUG]   weeklyAvailability table slots found: 1
+[SLOT_DEBUG] Windows found: 1 [ { startTime: '07:00', endTime: '17:00' } ]
+[SLOT_DEBUG] Processing window: {
+  startTime: '07:00',
+  endTime: '17:00',
+  windowStart: 420,
+  windowEnd: 1020,
+  serviceDurationMinutes: 60,
+  willGenerateSlots: true
+}
+[SLOT_DEBUG] Window complete: generated 37 slots
+[SLOT_DEBUG] Total slots: 37 Available: 37
+[SLOT_DEBUG] generateAvailabilitySlots: { date: '2026-02-19', dayOfWeek: 4, serviceDurationMinutes: 60 }
+[AVAILABILITY_DEBUG] getWeeklyAvailabilityForDay:
+[AVAILABILITY_DEBUG]   providerType: photographer providerId: a64630d4-31a5-4cab-a6b1-abb7663b6074 dayOfWeek: 4
+[AVAILABILITY_DEBUG]   weeklyAvailability table slots found: 1
+[SLOT_DEBUG] Windows found: 1 [ { startTime: '09:00', endTime: '17:00' } ]
+[SLOT_DEBUG] Processing window: {
+  startTime: '09:00',
+  endTime: '17:00',
+  windowStart: 540,
+  windowEnd: 1020,
+  serviceDurationMinutes: 60,
+  willGenerateSlots: true
+}
+[SLOT_DEBUG] Window complete: generated 29 slots
+[SLOT_DEBUG] Total slots: 29 Available: 29
+[SLOT_DEBUG] generateAvailabilitySlots: { date: '2026-02-20', dayOfWeek: 5, serviceDurationMinutes: 60 }
+[AVAILABILITY_DEBUG] getWeeklyAvailabilityForDay:
+[AVAILABILITY_DEBUG]   providerType: photographer providerId: a64630d4-31a5-4cab-a6b1-abb7663b6074 dayOfWeek: 5
+[AVAILABILITY_DEBUG]   weeklyAvailability table slots found: 1
+[SLOT_DEBUG] Windows found: 1 [ { startTime: '09:00', endTime: '17:00' } ]
+[SLOT_DEBUG] Processing window: {
+  startTime: '09:00',
+  endTime: '17:00',
+  windowStart: 540,
+  windowEnd: 1020,
+  serviceDurationMinutes: 60,
+  willGenerateSlots: true
+}
+[SLOT_DEBUG] Window complete: generated 29 slots
+[SLOT_DEBUG] Total slots: 29 Available: 29
+[SLOT_DEBUG] generateAvailabilitySlots: { date: '2026-02-21', dayOfWeek: 6, serviceDurationMinutes: 60 }
+[AVAILABILITY_DEBUG] getWeeklyAvailabilityForDay:
+[AVAILABILITY_DEBUG]   providerType: photographer providerId: a64630d4-31a5-4cab-a6b1-abb7663b6074 dayOfWeek: 6
+[AVAILABILITY_DEBUG]   weeklyAvailability table slots found: 0
+[AVAILABILITY_DEBUG]   Fallback to photographer.hoursOfOperation: {"friday":{"end":"17:00","open":true,"start":"09:00"},"monday":{"end":"17:00","open":true,"start":"08:00"},"sunday":{"open":false},"tuesday":{"end":"17:00","open":true,"start":"09:00"},"saturday":{"open":false},"thursday":{"end":"17:00","open":true,"start":"09:00"},"wednesday":{"end":"17:00","open":true,"start":"07:00"}}
+[AVAILABILITY_DEBUG]   No availability found for day 6
+[SLOT_DEBUG] Windows found: 0 []
+[SLOT_DEBUG] No windows, returning empty
+[SLOT_DEBUG] generateAvailabilitySlots: { date: '2026-02-22', dayOfWeek: 0, serviceDurationMinutes: 60 }
+[AVAILABILITY_DEBUG] getWeeklyAvailabilityForDay:
+[AVAILABILITY_DEBUG]   providerType: photographer providerId: a64630d4-31a5-4cab-a6b1-abb7663b6074 dayOfWeek: 0
+[AVAILABILITY_DEBUG]   weeklyAvailability table slots found: 0
+[AVAILABILITY_DEBUG]   Fallback to photographer.hoursOfOperation: {"friday":{"end":"17:00","open":true,"start":"09:00"},"monday":{"end":"17:00","open":true,"start":"08:00"},"sunday":{"open":false},"tuesday":{"end":"17:00","open":true,"start":"09:00"},"saturday":{"open":false},"thursday":{"end":"17:00","open":true,"start":"09:00"},"wednesday":{"end":"17:00","open":true,"start":"07:00"}}
+[AVAILABILITY_DEBUG]   No availability found for day 0
+[SLOT_DEBUG] Windows found: 0 []
+[SLOT_DEBUG] No windows, returning empty
+[SLOT_DEBUG] generateAvailabilitySlots: { date: '2026-02-23', dayOfWeek: 1, serviceDurationMinutes: 60 }
+[AVAILABILITY_DEBUG] getWeeklyAvailabilityForDay:
+[AVAILABILITY_DEBUG]   providerType: photographer providerId: a64630d4-31a5-4cab-a6b1-abb7663b6074 dayOfWeek: 1
+[AVAILABILITY_DEBUG]   weeklyAvailability table slots found: 1
+[SLOT_DEBUG] Windows found: 1 [ { startTime: '08:00', endTime: '17:00' } ]
+[SLOT_DEBUG] Processing window: {
+  startTime: '08:00',
+  endTime: '17:00',
+  windowStart: 480,
+  windowEnd: 1020,
+  serviceDurationMinutes: 60,
+  willGenerateSlots: true
+}
+[SLOT_DEBUG] Window complete: generated 33 slots
+[SLOT_DEBUG] Total slots: 33 Available: 33
+[SLOT_DEBUG] generateAvailabilitySlots: { date: '2026-02-24', dayOfWeek: 2, serviceDurationMinutes: 60 }
+[AVAILABILITY_DEBUG] getWeeklyAvailabilityForDay:
+[AVAILABILITY_DEBUG]   providerType: photographer providerId: a64630d4-31a5-4cab-a6b1-abb7663b6074 dayOfWeek: 2
+[AVAILABILITY_DEBUG]   weeklyAvailability table slots found: 1
+[SLOT_DEBUG] Windows found: 1 [ { startTime: '09:00', endTime: '17:00' } ]
+[SLOT_DEBUG] Processing window: {
+  startTime: '09:00',
+  endTime: '17:00',
+  windowStart: 540,
+  windowEnd: 1020,
+  serviceDurationMinutes: 60,
+  willGenerateSlots: true
+}
+[SLOT_DEBUG] Window complete: generated 29 slots
+[SLOT_DEBUG] Total slots: 29 Available: 29
+[SLOT_DEBUG] generateAvailabilitySlots: { date: '2026-02-25', dayOfWeek: 3, serviceDurationMinutes: 60 }
+[AVAILABILITY_DEBUG] getWeeklyAvailabilityForDay:
+[AVAILABILITY_DEBUG]   providerType: photographer providerId: a64630d4-31a5-4cab-a6b1-abb7663b6074 dayOfWeek: 3
+[AVAILABILITY_DEBUG]   weeklyAvailability table slots found: 1
+[SLOT_DEBUG] Windows found: 1 [ { startTime: '07:00', endTime: '17:00' } ]
+[SLOT_DEBUG] Processing window: {
+  startTime: '07:00',
+  endTime: '17:00',
+  windowStart: 420,
+  windowEnd: 1020,
+  serviceDurationMinutes: 60,
+  willGenerateSlots: true
+}
+[SLOT_DEBUG] Window complete: generated 37 slots
+[SLOT_DEBUG] Total slots: 37 Available: 37
+[SLOT_DEBUG] generateAvailabilitySlots: { date: '2026-02-26', dayOfWeek: 4, serviceDurationMinutes: 60 }
+[AVAILABILITY_DEBUG] getWeeklyAvailabilityForDay:
+[AVAILABILITY_DEBUG]   providerType: photographer providerId: a64630d4-31a5-4cab-a6b1-abb7663b6074 dayOfWeek: 4
+[AVAILABILITY_DEBUG]   weeklyAvailability table slots found: 1
+[SLOT_DEBUG] Windows found: 1 [ { startTime: '09:00', endTime: '17:00' } ]
+[SLOT_DEBUG] Processing window: {
+  startTime: '09:00',
+  endTime: '17:00',
+  windowStart: 540,
+  windowEnd: 1020,
+  serviceDurationMinutes: 60,
+  willGenerateSlots: true
+}
+[SLOT_DEBUG] Window complete: generated 29 slots
+[SLOT_DEBUG] Total slots: 29 Available: 29
+[SLOT_DEBUG] generateAvailabilitySlots: { date: '2026-02-27', dayOfWeek: 5, serviceDurationMinutes: 60 }
+[AVAILABILITY_DEBUG] getWeeklyAvailabilityForDay:
+[AVAILABILITY_DEBUG]   providerType: photographer providerId: a64630d4-31a5-4cab-a6b1-abb7663b6074 dayOfWeek: 5
+[AVAILABILITY_DEBUG]   weeklyAvailability table slots found: 1
+[SLOT_DEBUG] Windows found: 1 [ { startTime: '09:00', endTime: '17:00' } ]
+[SLOT_DEBUG] Processing window: {
+  startTime: '09:00',
+  endTime: '17:00',
+  windowStart: 540,
+  windowEnd: 1020,
+  serviceDurationMinutes: 60,
+  willGenerateSlots: true
+}
+[SLOT_DEBUG] Window complete: generated 29 slots
+[SLOT_DEBUG] Total slots: 29 Available: 29
+[SLOT_DEBUG] generateAvailabilitySlots: { date: '2026-02-28', dayOfWeek: 6, serviceDurationMinutes: 60 }
+[AVAILABILITY_DEBUG] getWeeklyAvailabilityForDay:
+[AVAILABILITY_DEBUG]   providerType: photographer providerId: a64630d4-31a5-4cab-a6b1-abb7663b6074 dayOfWeek: 6
+[AVAILABILITY_DEBUG]   weeklyAvailability table slots found: 0
+[AVAILABILITY_DEBUG]   Fallback to photographer.hoursOfOperation: {"friday":{"end":"17:00","open":true,"start":"09:00"},"monday":{"end":"17:00","open":true,"start":"08:00"},"sunday":{"open":false},"tuesday":{"end":"17:00","open":true,"start":"09:00"},"saturday":{"open":false},"thursday":{"end":"17:00","open":true,"start":"09:00"},"wednesday":{"end":"17:00","open":true,"start":"07:00"}}
+[AVAILABILITY_DEBUG]   No availability found for day 6
+[SLOT_DEBUG] Windows found: 0 []
+[SLOT_DEBUG] No windows, returning empty
+[AVAILABILITY_DEBUG] Calendar result: total days = 28 available days = 0
+4:28:15 PM [express] GET /api/availability/calendar 200 in 5325ms :: {"days":[{"date":"2026-02-01","…
