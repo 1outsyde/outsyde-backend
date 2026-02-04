@@ -1,0 +1,148 @@
+IMPORTANT: This is a BACKEND-ONLY task. Do not modify UI components. Do not add frontend conditionals. Fix data persistence and propagation only.
+
+🎯 Problem Statement
+
+Base Availability saves successfully via
+PUT /api/photographers/me/weekly-availability
+and returns a success response, but the saved base hours are NOT persisted in any account-level or derived availability source.
+
+After saving:
+
+Profile banner still shows “Availability not set”
+
+Booking calendar returns 0 min
+
+Availability calendar is empty
+
+Base hours only appear when reopening the Base Availability editor
+
+This means the data is not being consumed or normalized beyond the editor view.
+
+🔍 Required Investigation (MANDATORY)
+
+Trace the full write path of:
+
+PUT /api/photographers/me/weekly-availability
+
+Confirm exactly where the data is written:
+
+Table name(s)
+
+Columns written
+
+Trace all read paths that power:
+
+Profile availability banner
+
+Booking calendar (/api/availability/slots)
+
+Availability tab
+
+Add logging to confirm whether:
+
+weekly_availability rows exist after save
+
+they are queried by downstream endpoints
+
+they are filtered out due to validation logic
+
+🛠️ REQUIRED FIX (DO NOT SKIP)
+
+When base availability is saved:
+
+1️⃣ Persist Weekly Availability (Already Exists — Verify)
+
+Ensure rows are written with:
+
+correct providerId
+
+correct providerType
+
+correct dayOfWeek mapping (0=Sunday … 6=Saturday)
+
+isActive = true
+
+2️⃣ Normalize Availability into Canonical Source (NEW)
+
+Immediately after saving weekly availability:
+
+Ensure availability is discoverable by all account endpoints
+
+If a legacy field exists (hoursOfOperation), populate it
+
+If /api/availability/slots expects derived data, ensure it can read weekly availability without fallback failure
+
+Example (conceptual):
+
+afterSaveWeeklyAvailability(providerId) {
+  const weekly = getWeeklyAvailability(providerId);
+
+  if (!weekly || weekly.length === 0) {
+    throw new Error("Weekly availability missing after save");
+  }
+
+  syncHoursOfOperation(providerId, weekly); // if legacy required
+}
+
+3️⃣ Fix Slot Generation Failure (CRITICAL)
+
+Inside /api/availability/slots:
+
+Log:
+
+{
+  providerId,
+  date,
+  dayOfWeek,
+  weeklyAvailabilityForDay,
+  isActive,
+  startTime,
+  endTime
+}
+
+
+Ensure:
+
+The correct day is matched
+
+Inactive days are not falsely returned
+
+Valid time windows generate at least one slot
+
+If weekly availability exists for the day, slots must be generated.
+
+🧪 Required Verification (DO NOT CLAIM DONE WITHOUT THIS)
+
+After fix, confirm:
+
+Save base availability
+
+Refresh profile
+
+Profile banner updates immediately
+
+Availability tab shows weekly hours
+
+Booking calendar shows selectable time slots (not 0 min)
+
+Log output confirms weekly availability is being read by /availability/slots
+
+🚫 Explicit Constraints
+
+❌ Do NOT modify frontend UI
+
+❌ Do NOT hardcode availability
+
+❌ Do NOT bypass slot generation
+
+❌ Do NOT rely on editor-only state
+
+✅ Completion Criteria
+
+This task is complete only when base availability is persisted and consumed by all availability-dependent features:
+
+Banner
+
+Booking calendar
+
+Availability calendar
