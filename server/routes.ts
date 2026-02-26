@@ -1035,7 +1035,7 @@ export async function registerRoutes(
         accessToken,
         refreshToken,
         userId: user.id,
-        email: user.email,
+        email: user.email || '',
       });
       
       // Include user profile data
@@ -1230,7 +1230,7 @@ export async function registerRoutes(
       // ============================================================
       if (req.session) {
         req.session.userId = user.id;
-        req.session.role = user.role || "consumer";
+        req.session.role = user.isAdmin ? "admin" : user.isVendor ? "vendor" : user.isPhotographer ? "photographer" : "consumer";
         req.session.isPhotographer = user.isPhotographer || false;
         req.session.isVendor = user.isVendor || false;
         
@@ -1400,7 +1400,7 @@ export async function registerRoutes(
         username: user.username,
         displayName: user.name,
         email: user.email,
-        profilePhotoUrl: user.profilePhoto,
+        profilePhotoUrl: user.profileImageUrl,
         isVendor: false as boolean,
         isPhotographer: false as boolean,
         businessId: null as string | null,
@@ -1905,10 +1905,11 @@ export async function registerRoutes(
   // ==================== FOLLOWS (Private) ====================
 
   // Follow a user - requires authentication (JWT or session only, no body/query spoofing)
-  app.post("/api/follows", optionalAuthMiddleware, async (req: AuthenticatedRequest, res) => {
+  app.post("/api/follows", optionalAuthMiddleware, async (req, res) => {
+    const authReq = req as AuthenticatedRequest;
     try {
       // SECURITY: Only accept userId from verified auth context (JWT or session)
-      const followerUserId = req.user?.userId || req.session?.userId;
+      const followerUserId = authReq.user?.userId || req.session?.userId;
       if (!followerUserId) {
         return res.status(401).json({ success: false, error: "Authentication required" });
       }
@@ -1957,10 +1958,11 @@ export async function registerRoutes(
   });
 
   // Unfollow a user - requires authentication (JWT or session only)
-  app.delete("/api/follows/:targetUserId", optionalAuthMiddleware, async (req: AuthenticatedRequest, res) => {
+  app.delete("/api/follows/:targetUserId", optionalAuthMiddleware, async (req, res) => {
+    const authReq = req as AuthenticatedRequest;
     try {
       // SECURITY: Only accept userId from verified auth context (JWT or session)
-      const followerUserId = req.user?.userId || req.session?.userId;
+      const followerUserId = authReq.user?.userId || req.session?.userId;
       if (!followerUserId) {
         return res.status(401).json({ success: false, error: "Authentication required" });
       }
@@ -1987,10 +1989,11 @@ export async function registerRoutes(
   });
 
   // Check if following a user - requires authentication (JWT or session only)
-  app.get("/api/follows/check/:targetUserId", optionalAuthMiddleware, async (req: AuthenticatedRequest, res) => {
+  app.get("/api/follows/check/:targetUserId", optionalAuthMiddleware, async (req, res) => {
+    const authReq = req as AuthenticatedRequest;
     try {
       // SECURITY: Only accept userId from verified auth context (JWT or session)
-      const followerUserId = req.user?.userId || req.session?.userId;
+      const followerUserId = authReq.user?.userId || req.session?.userId;
       if (!followerUserId) {
         return res.status(401).json({ success: false, error: "Authentication required" });
       }
@@ -2009,9 +2012,10 @@ export async function registerRoutes(
   });
 
   // Get current user's following list
-  app.get("/api/users/me/following", optionalAuthMiddleware, async (req: AuthenticatedRequest, res) => {
+  app.get("/api/users/me/following", optionalAuthMiddleware, async (req, res) => {
+    const authReq = req as AuthenticatedRequest;
     try {
-      const userId = req.user?.userId || req.session?.userId;
+      const userId = authReq.user?.userId || req.session?.userId;
       if (!userId) {
         return res.status(401).json({ success: false, error: "Authentication required" });
       }
@@ -2044,9 +2048,10 @@ export async function registerRoutes(
   });
 
   // Get current user's followers list
-  app.get("/api/users/me/followers", optionalAuthMiddleware, async (req: AuthenticatedRequest, res) => {
+  app.get("/api/users/me/followers", optionalAuthMiddleware, async (req, res) => {
+    const authReq = req as AuthenticatedRequest;
     try {
-      const userId = req.user?.userId || req.session?.userId;
+      const userId = authReq.user?.userId || req.session?.userId;
       if (!userId) {
         return res.status(401).json({ success: false, error: "Authentication required" });
       }
@@ -3066,7 +3071,7 @@ export async function registerRoutes(
         photographer: photographerDetails ? {
           id: photographerDetails.id,
           displayName: photographerDetails.displayName,
-          profileImageUrl: photographerDetails.profileImageUrl,
+          profileImageUrl: photographerDetails.logoImage,
         } : null,
       });
     } catch (error) {
@@ -3123,12 +3128,12 @@ export async function registerRoutes(
         if (service.photographerId !== photographerId) {
           return res.status(400).json({ error: "Service does not belong to this photographer" });
         }
-        effectiveDurationHours = service.durationMinutes ? Math.ceil(service.durationMinutes / 60) : undefined;
+        effectiveDurationHours = service.estimatedDurationMinutes ? Math.ceil(service.estimatedDurationMinutes / 60) : undefined;
         serviceInfo = {
           id: service.id,
           name: service.name,
-          durationMinutes: service.durationMinutes,
-          basePrice: service.basePrice,
+          durationMinutes: service.estimatedDurationMinutes,
+          basePrice: service.priceCents,
         };
       } else if (durationHours) {
         effectiveDurationHours = parseInt(durationHours as string, 10);
@@ -3238,7 +3243,7 @@ export async function registerRoutes(
       );
 
       // DEBUG: Log result
-      const availableDays = calendar.filter(d => d.availableSlots > 0).length;
+      const availableDays = calendar.filter(d => (d.totalSlots ?? 0) > 0).length;
       console.log("[AVAILABILITY_DEBUG] Calendar result: total days =", calendar.length, "available days =", availableDays);
 
       res.json({ days: calendar });
@@ -4032,10 +4037,10 @@ export async function registerRoutes(
         const newPrice = validated.priceCents ?? validated.hourlyRateCents;
         const oldPrice = service.priceCents ?? service.hourlyRateCents;
         
-        if (newPrice !== undefined && newPrice !== oldPrice && service.stripeConnectedPriceId) {
+        if (newPrice != null && newPrice !== oldPrice && service.stripeConnectedPriceId) {
           // Create new price on connected account
           const newStripePrice = await stripeService.createStripePrice({
-            productId: service.stripeConnectedProductId,
+            productId: service.stripeConnectedProductId!,
             unitAmountCents: newPrice,
             metadata: {
               photographerServiceId: service.id,
@@ -4593,7 +4598,7 @@ export async function registerRoutes(
           providerId: appointment.businessId,
           serviceId: appointment.serviceId,
         },
-        description: `Appointment booking at ${business.businessName}`,
+        description: `Appointment booking at ${business.name}`,
       });
 
       // Update appointment with payment details and transition to pending_payment if still draft
@@ -4785,7 +4790,7 @@ export async function registerRoutes(
       // Check if user is the business owner or admin
       const business = await storage.getBusiness(appointment.businessId);
       const user = await storage.getUser(userId);
-      if (!business || (business.ownerId !== userId && user?.role !== 'admin')) {
+      if (!business || (business.ownerId !== userId && !user?.isAdmin)) {
         return res.status(403).json({ error: "Not authorized to refund this booking" });
       }
 
@@ -4870,7 +4875,7 @@ export async function registerRoutes(
 
       // Reverse points if applicable
       try {
-        await storage.reversePoints(appointment.clientId, 'appointment', appointmentId, 'Booking refunded');
+        await storage.reversePointsForRefund(appointment.clientId, 'appointment', appointmentId);
       } catch (pointsError) {
         console.error("Failed to reverse points:", pointsError);
       }
@@ -4911,7 +4916,7 @@ export async function registerRoutes(
       // Check if user is the photographer or admin
       const photographer = await storage.getPhotographer(booking.photographerId);
       const user = await storage.getUser(userId);
-      if (!photographer || (photographer.userId !== userId && user?.role !== 'admin')) {
+      if (!photographer || (photographer.userId !== userId && !user?.isAdmin)) {
         return res.status(403).json({ error: "Not authorized to refund this booking" });
       }
 
@@ -4995,7 +5000,7 @@ export async function registerRoutes(
 
       // Reverse points if applicable
       try {
-        await storage.reversePoints(booking.clientId, 'shoot_booking', bookingId, 'Booking refunded');
+        await storage.reversePointsForRefund(booking.clientId, 'shoot_booking', bookingId);
       } catch (pointsError) {
         console.error("Failed to reverse points:", pointsError);
       }
@@ -5247,9 +5252,9 @@ export async function registerRoutes(
 
         // Create Stripe checkout session with destination charge
         const checkoutSession = await stripeService.createAppointmentCheckout({
-          connectedAccountId: business.stripeAccountId,
+          connectedAccountId: business.stripeAccountId!,
           amountInCents: booking.totalPrice,
-          platformFeeInCents: booking.platformFee,
+          platformFeeInCents: booking.platformFee ?? 0,
           serviceName: service?.name || 'Service Booking',
           successUrl: `${successUrl}?session_id={CHECKOUT_SESSION_ID}`,
           cancelUrl,
@@ -5311,9 +5316,9 @@ export async function registerRoutes(
 
         // Create Stripe checkout session with destination charge
         const checkoutSession = await stripeService.createPhotographerBookingCheckout({
-          connectedAccountId: photographer.stripeAccountId,
+          connectedAccountId: photographer.stripeAccountId!,
           amountInCents: booking.totalPrice,
-          platformFeeInCents: booking.platformFee,
+          platformFeeInCents: booking.platformFee ?? 0,
           serviceName: `${booking.shootType} Photography Session`,
           successUrl: `${successUrl}?session_id={CHECKOUT_SESSION_ID}`,
           cancelUrl,
@@ -8601,7 +8606,7 @@ export async function registerRoutes(
         otherParticipant: {
           id: convo.otherParticipant.id,
           displayName: convo.otherParticipant.name || convo.otherParticipant.username,
-          avatar: convo.otherParticipant.profilePhoto,
+          avatar: convo.otherParticipant.profileImageUrl,
         },
         unreadCount: unreadCounts.get(convo.id) || 0,
       }));
@@ -8650,7 +8655,7 @@ export async function registerRoutes(
         otherUserId = photographer.userId;
         console.log("DEBUG - Photographer found, userId:", photographer.userId);
         const photographerUser = await storage.getUser(photographer.userId);
-        otherUserName = photographerUser?.name || photographer.businessName || "Photographer";
+        otherUserName = photographerUser?.name || photographer.displayName || "Photographer";
       } else if (participantType === "vendor" || participantType === "business") {
         console.log("DEBUG - Entering vendor/business lookup branch");
         // participantId is a business entity ID - look up the business to get the owner's userId
@@ -10027,7 +10032,7 @@ export async function registerRoutes(
         businessName: business.name,
         businessCategory: business.category,
         ownerName: owner.name || 'Unknown',
-        ownerEmail: owner.email,
+        ownerEmail: owner.email || '',
         city: business.city,
         state: business.state,
       });
@@ -10139,8 +10144,8 @@ export async function registerRoutes(
       if (owner) {
         await NotificationTriggers.vendorApplicationApproved({
           ownerId: owner.id,
-          ownerName: owner.name || owner.email,
-          ownerEmail: owner.email,
+          ownerName: owner.name || owner.email || 'Unknown',
+          ownerEmail: owner.email || '',
           businessId: business.id,
           businessName: business.name,
           stripeOnboardingUrl: null, // They can initiate from their dashboard
@@ -10199,8 +10204,8 @@ export async function registerRoutes(
       if (owner) {
         await NotificationTriggers.vendorApplicationRejected({
           ownerId: owner.id,
-          ownerName: owner.name || owner.email,
-          ownerEmail: owner.email,
+          ownerName: owner.name || owner.email || 'Unknown',
+          ownerEmail: owner.email || '',
           businessId: business.id,
           businessName: business.name,
           rejectionReason: notes,
@@ -11497,7 +11502,7 @@ export async function registerRoutes(
           id: owner.id,
           email: owner.email,
           name: owner.name,
-          profileImage: owner.profileImage,
+          profileImage: owner.profileImageUrl,
           phone: owner.phone,
         } : null,
         products,
@@ -11584,8 +11589,8 @@ export async function registerRoutes(
       if (owner) {
         await NotificationTriggers.vendorApplicationApproved({
           ownerId: owner.id,
-          ownerName: owner.name || owner.email,
-          ownerEmail: owner.email,
+          ownerName: owner.name || owner.email || 'Unknown',
+          ownerEmail: owner.email || '',
           businessId: business.id,
           businessName: business.name,
           stripeOnboardingUrl: null,
@@ -11645,11 +11650,11 @@ export async function registerRoutes(
       if (owner) {
         await NotificationTriggers.vendorApplicationRejected({
           ownerId: owner.id,
-          ownerName: owner.name || owner.email,
-          ownerEmail: owner.email,
+          ownerName: owner.name || owner.email || 'Unknown',
+          ownerEmail: owner.email || '',
           businessId: business.id,
           businessName: business.name,
-          reason: rejectionReason,
+          rejectionReason: rejectionReason,
         });
       }
 
@@ -12132,8 +12137,8 @@ export async function registerRoutes(
             id: photographerService.id,
             name: photographerService.name,
             description: photographerService.description,
-            basePrice: photographerService.basePrice,
-            durationMinutes: photographerService.durationMinutes,
+            basePrice: photographerService.priceCents,
+            durationMinutes: photographerService.estimatedDurationMinutes,
             photographerId: photographerService.photographerId,
           } : null,
         });
@@ -13181,12 +13186,12 @@ export async function registerRoutes(
         id: newAppointmentId,
         businessId: testBusinessId,
         clientId: testClientId,
-        serviceId: testServiceId,
+        serviceId: testServiceId || '',
         status: BOOKING_STATES.DRAFT,
         totalPrice: testTotalPrice,
-        scheduledDate: scheduledDate,
-        duration: 30,
-        notes: "TEST APPOINTMENT - Created via /api/dev/test-appointment endpoint",
+        appointmentDate: scheduledDate.toISOString().split('T')[0],
+        appointmentTime: '10:00',
+        durationMinutes: 30,
         createdAt: now,
         updatedAt: now,
         draftExpiresAt: new Date(now.getTime() + 10 * 60 * 1000)

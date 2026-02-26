@@ -60,7 +60,8 @@ export function verifyRefreshToken(token: string): TokenPayload | null {
   }
 }
 
-export function authMiddleware(req: AuthenticatedRequest, res: Response, next: NextFunction) {
+export function authMiddleware(req: Request, res: Response, next: NextFunction) {
+  const authReq = req as AuthenticatedRequest;
   const authHeader = req.headers.authorization;
   
   if (!authHeader || !authHeader.startsWith("Bearer ")) {
@@ -86,18 +87,19 @@ export function authMiddleware(req: AuthenticatedRequest, res: Response, next: N
     });
   }
   
-  req.user = payload;
+  authReq.user = payload;
   next();
 }
 
-export function optionalAuthMiddleware(req: AuthenticatedRequest, res: Response, next: NextFunction) {
+export function optionalAuthMiddleware(req: Request, res: Response, next: NextFunction) {
+  const authReq = req as AuthenticatedRequest;
   const authHeader = req.headers.authorization;
   
   if (authHeader && authHeader.startsWith("Bearer ")) {
     const token = authHeader.substring(7);
     const payload = verifyAccessToken(token);
     if (payload) {
-      req.user = payload;
+      authReq.user = payload;
     }
   }
   
@@ -112,7 +114,8 @@ export function optionalAuthMiddleware(req: AuthenticatedRequest, res: Response,
  * If no JWT, falls back to existing session-based auth
  * Returns 401 only if NEITHER JWT nor session is valid
  */
-export function hybridAuthMiddleware(req: AuthenticatedRequest, res: Response, next: NextFunction) {
+export function hybridAuthMiddleware(req: Request, res: Response, next: NextFunction) {
+  const authReq = req as AuthenticatedRequest;
   const authHeader = req.headers.authorization;
   
   // First try JWT authentication
@@ -120,7 +123,7 @@ export function hybridAuthMiddleware(req: AuthenticatedRequest, res: Response, n
     const token = authHeader.substring(7);
     const payload = verifyAccessToken(token);
     if (payload) {
-      req.user = payload;
+      authReq.user = payload;
       // Also set session userId for compatibility with existing code
       if (req.session) {
         req.session.userId = payload.userId;

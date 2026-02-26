@@ -1054,17 +1054,19 @@ export class WebhookHandlers {
 
       console.log(`[Stripe] Appointment ${appointmentId} confirmed successfully`);
 
-      // Send booking confirmation notification (async, non-blocking)
-      if (clientId) {
-        NotificationTriggers.bookingConfirmed({
-          userId: clientId,
-          bookingType: 'appointment',
-          bookingId: appointmentId,
-        }).catch(err => console.error("[Stripe] Failed to send booking notification:", err));
-      }
-
       // Award points for the booking
       const [appointment] = await db.select().from(appointments).where(eq(appointments.id, appointmentId));
+
+      // Send payment confirmation notification (async, non-blocking)
+      if (clientId && appointment) {
+        NotificationTriggers.paymentSucceeded({
+          userId: clientId,
+          amount: appointment.totalPrice,
+          referenceType: 'appointment',
+          referenceId: appointmentId,
+          description: 'Appointment booking confirmed',
+        }).catch(err => console.error("[Stripe] Failed to send booking notification:", err));
+      }
       if (appointment && clientId) {
         await storage.earnPoints({
           userId: clientId,
@@ -1128,17 +1130,22 @@ export class WebhookHandlers {
 
       console.log(`[Stripe] Shoot booking ${shootBookingId} confirmed successfully`);
 
-      // Send booking confirmation notification (async, non-blocking)
-      if (clientId) {
-        NotificationTriggers.bookingConfirmed({
-          userId: clientId,
-          bookingType: 'shoot_booking',
-          bookingId: shootBookingId,
-        }).catch(err => console.error("[Stripe] Failed to send booking notification:", err));
-      }
-
       // Award points for the booking
       const [booking] = await db.select().from(shootBookings).where(eq(shootBookings.id, shootBookingId));
+
+      // Send booking confirmation notification (async, non-blocking)
+      if (clientId && booking) {
+        const photographer = await storage.getPhotographer(booking.photographerId);
+        NotificationTriggers.bookingConfirmed({
+          customerId: clientId,
+          photographerId: booking.photographerId,
+          bookingId: shootBookingId,
+          photographerName: photographer?.displayName || 'Photographer',
+          shootType: booking.shootType,
+          date: booking.date,
+          time: booking.startTime,
+        }).catch(err => console.error("[Stripe] Failed to send booking notification:", err));
+      }
       if (booking && clientId) {
         await storage.earnPoints({
           userId: clientId,
