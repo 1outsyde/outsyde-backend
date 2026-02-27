@@ -233,12 +233,14 @@ export async function registerRoutes(
   app.get("/api/search", optionalAuthMiddleware, async (req, res) => {
     const authReq = req as AuthenticatedRequest;
     try {
-      const { 
-        q, 
-        scope = 'all', 
+      const {
+        q,
+        scope = 'all',
         viewerUserId,
         limit = '50',
-        offset = '0'
+        offset = '0',
+        lat,
+        lng,
       } = req.query;
 
       // Validate scope
@@ -250,10 +252,19 @@ export async function registerRoutes(
 
       // Check if current user is admin for demo data visibility
       let isAdmin = false;
+      let userLatitude: number | undefined;
+      let userLongitude: number | undefined;
       if (authReq.session?.userId) {
         const user = await storage.getUser(authReq.session.userId);
         isAdmin = user?.isAdmin || false;
+        // Fall back to user's stored location if lat/lng not provided in query
+        if (!lat && !lng && user?.latitude && user?.longitude) {
+          userLatitude = user.latitude;
+          userLongitude = user.longitude;
+        }
       }
+      if (lat) userLatitude = parseFloat(lat as string);
+      if (lng) userLongitude = parseFloat(lng as string);
 
       const results = await storage.unifiedSearchWithScope({
         q: (q as string) || '',
@@ -262,6 +273,8 @@ export async function registerRoutes(
         limit: Math.min(100, parseInt(limit as string) || 50),
         offset: parseInt(offset as string) || 0,
         isAdmin,
+        userLatitude,
+        userLongitude,
       });
 
       res.json(results);

@@ -157,7 +157,7 @@ import {
   isValidBookingTransition
 } from "@shared/schema";
 import { db } from "./db";
-import { eq, ilike, or, and, sql, isNull, desc, asc, gte, lte, ne } from "drizzle-orm";
+import { eq, ilike, or, and, sql, isNull, desc, asc, gte, lte, ne, inArray } from "drizzle-orm";
 import { randomUUID, createHash } from "crypto";
 
 // Input type for creating a photographer (no need for InsertPhotographer in schema)
@@ -702,6 +702,8 @@ export interface UnifiedSearchParams {
   limit?: number;
   offset?: number;
   isAdmin?: boolean;
+  userLatitude?: number;
+  userLongitude?: number;
 }
 
 export interface UnifiedSearchResult {
@@ -2914,14 +2916,27 @@ export class DatabaseStorage implements IStorage {
     if (userPreferences && results.length > 0) {
       const allNiches: string[] = [];
       const allIndustries = (userPreferences.selectedIndustries || []).map(i => i.toLowerCase());
-      
+
       // Flatten all niches from industryNiches map
       if (userPreferences.industryNiches) {
         for (const niches of Object.values(userPreferences.industryNiches)) {
           allNiches.push(...niches.map(n => n.toLowerCase()));
         }
       }
-      
+
+      // Industry → category keyword mapping (bidirectional niche matching)
+      const INDUSTRY_CATEGORY_KEYWORDS: Record<string, string[]> = {
+        'food': ['restaurant', 'cafe', 'bakery', 'bar', 'dining', 'food', 'pizza', 'sushi', 'catering', 'diner', 'bistro', 'eatery', 'grill', 'burger', 'chicken', 'seafood', 'steakhouse', 'bbq', 'brunch', 'breakfast', 'dessert', 'smoothie', 'juice'],
+        'food & drinks': ['restaurant', 'cafe', 'bakery', 'bar', 'dining', 'food', 'pizza', 'sushi', 'catering', 'diner', 'bistro', 'eatery', 'grill', 'burger', 'chicken', 'seafood', 'steakhouse', 'bbq', 'brunch', 'breakfast', 'dessert', 'smoothie', 'juice'],
+        'beauty': ['salon', 'spa', 'barber', 'barbershop', 'hair', 'nail', 'makeup', 'cosmetic', 'beauty', 'tattoo', 'piercing', 'lash', 'eyebrow', 'wax', 'skincare', 'esthetics', 'microblading'],
+        'health': ['gym', 'fitness', 'yoga', 'wellness', 'health', 'medical', 'dental', 'therapy', 'chiropractic', 'physical therapy', 'mental health', 'nutrition', 'pilates', 'crossfit'],
+        'shopping': ['retail', 'boutique', 'clothing', 'fashion', 'store', 'shop', 'accessories', 'jewelry', 'apparel', 'shoes', 'footwear', 'thrift', 'vintage'],
+        'entertainment': ['entertainment', 'nightclub', 'music', 'comedy', 'club', 'lounge', 'arcade', 'theater', 'cinema', 'bowling', 'karaoke', 'events', 'venue'],
+        'photography': ['photo', 'photography', 'video', 'film', 'videography', 'media', 'studio', 'portraits', 'wedding'],
+        'hair': ['hair', 'salon', 'barbershop', 'barber', 'locs', 'braids', 'weave', 'extensions'],
+        'nails': ['nail', 'nails', 'manicure', 'pedicure', 'gel', 'acrylic'],
+      };
+
       if (allNiches.length > 0 || allIndustries.length > 0) {
         // Calculate preference score for each result
         const scoredResults = results.map(result => {
@@ -2929,41 +2944,47 @@ export class DatabaseStorage implements IStorage {
           const category = (result.category || '').toLowerCase();
           const name = (result.name || '').toLowerCase();
           const description = (result.description || '').toLowerCase();
-          
-          // Score 2 for matching a specific niche (in category or name)
+
+          // Score 3 for bidirectional niche match in category or name (e.g. "restaurant" vs "restaurants")
           for (const niche of allNiches) {
-            if (category.includes(niche) || name.includes(niche)) {
-              score = Math.max(score, 2);
+            if (category.includes(niche) || niche.includes(category) || name.includes(niche)) {
+              score = Math.max(score, 3);
             } else if (description.includes(niche)) {
               score = Math.max(score, 1);
             }
           }
-          
-          // Score 1 for matching industry (if no higher score already)
-          if (score < 2) {
+
+          // Score 2 for industry keyword mapping match (e.g. "Food & Drinks" → "restaurant" category)
+          if (score < 3) {
             for (const industry of allIndustries) {
               if (category.includes(industry)) {
-                score = Math.max(score, 1);
+                score = Math.max(score, 2);
+                break;
+              }
+              const keywords = INDUSTRY_CATEGORY_KEYWORDS[industry] || [];
+              for (const kw of keywords) {
+                if (category.includes(kw) || name.includes(kw)) {
+                  score = Math.max(score, 2);
+                  break;
+                }
               }
             }
           }
-          
+
           return { ...result, _preferenceScore: score };
         });
-        
+
         // Sort by preference score first, then maintain original ordering within same score
         scoredResults.sort((a, b) => {
           if (b._preferenceScore !== a._preferenceScore) {
             return b._preferenceScore - a._preferenceScore;
           }
-          // Maintain original SQL ordering for same preference score
           return 0;
         });
-        
+
         // Remove internal score field and apply limit
         results = scoredResults.slice(0, limit).map(({ _preferenceScore, ...rest }) => rest) as SearchIndexEntry[];
       } else {
-        // No preferences to apply, just limit
         results = results.slice(0, limit);
       }
     }
@@ -5329,9 +5350,9 @@ export class DatabaseStorage implements IStorage {
   // =========================
 
   async unifiedSearchWithScope(params: UnifiedSearchParams): Promise<UnifiedSearchResponse> {
-    const { q, scope, viewerUserId, limit = 50, offset = 0, isAdmin = false } = params;
+    const { q, scope, viewerUserId, limit = 50, offset = 0, isAdmin = false, userLatitude, userLongitude } = params;
     const query = q.trim().toLowerCase();
-    
+
     if (!query) {
       return { results: [], total: 0, limit, offset };
     }
@@ -5340,8 +5361,8 @@ export class DatabaseStorage implements IStorage {
     let viewerPreferences: { selectedIndustries?: string[]; industryNiches?: Record<string, string[]> } | null = null;
     let followedUserIds: Set<string> = new Set();
 
-    // Load viewer preferences for personalization (scope=all only)
-    if (viewerUserId && scope === 'all') {
+    // Load viewer preferences for personalization (always, not just scope=all)
+    if (viewerUserId) {
       const viewer = await this.getUser(viewerUserId);
       if (viewer) {
         viewerPreferences = {
@@ -5354,74 +5375,147 @@ export class DatabaseStorage implements IStorage {
       followedUserIds = new Set(following.map(u => u.id));
     }
 
+    // ==================== INDUSTRY → CATEGORY KEYWORD MAPPING ====================
+    // Allows "Food & Drinks" niche to match "Restaurant", "Cafe", "Bakery" categories
+    const INDUSTRY_CATEGORY_KEYWORDS: Record<string, string[]> = {
+      'food': ['restaurant', 'cafe', 'bakery', 'bar', 'dining', 'food', 'pizza', 'sushi', 'catering', 'diner', 'bistro', 'eatery', 'grill', 'burger', 'chicken', 'seafood', 'steakhouse', 'bbq', 'brunch', 'breakfast', 'lunch', 'dinner', 'dessert', 'ice cream', 'smoothie', 'juice'],
+      'food & drinks': ['restaurant', 'cafe', 'bakery', 'bar', 'dining', 'food', 'pizza', 'sushi', 'catering', 'diner', 'bistro', 'eatery', 'grill', 'burger', 'chicken', 'seafood', 'steakhouse', 'bbq', 'brunch', 'breakfast', 'lunch', 'dinner', 'dessert', 'ice cream', 'smoothie', 'juice'],
+      'beauty': ['salon', 'spa', 'barber', 'barbershop', 'hair', 'nail', 'makeup', 'cosmetic', 'beauty', 'tattoo', 'piercing', 'lash', 'eyebrow', 'wax', 'skincare', 'esthetics', 'microblading'],
+      'health': ['gym', 'fitness', 'yoga', 'wellness', 'health', 'medical', 'dental', 'therapy', 'chiropractic', 'physical therapy', 'mental health', 'nutrition', 'pilates', 'crossfit'],
+      'shopping': ['retail', 'boutique', 'clothing', 'fashion', 'store', 'shop', 'accessories', 'jewelry', 'apparel', 'shoes', 'footwear', 'handbag', 'thrift', 'vintage'],
+      'entertainment': ['entertainment', 'nightclub', 'music', 'comedy', 'club', 'lounge', 'arcade', 'theater', 'cinema', 'bowling', 'escape room', 'karaoke', 'events', 'venue'],
+      'photography': ['photo', 'photography', 'video', 'film', 'videography', 'media', 'studio', 'portraits', 'wedding'],
+      'services': ['service', 'consulting', 'repair', 'cleaning', 'plumbing', 'electric', 'moving', 'landscaping', 'construction', 'auto'],
+      'hair': ['hair', 'salon', 'barbershop', 'barber', 'locs', 'braids', 'weave', 'extensions', 'color', 'highlights'],
+      'nails': ['nail', 'nails', 'manicure', 'pedicure', 'gel', 'acrylic'],
+    };
+
+    // Compute all niche/industry keywords the user cares about
+    const userNicheKeywords: string[] = [];
+    const userIndustryKeywords: string[] = [];
+    if (viewerPreferences) {
+      const industries = (viewerPreferences.selectedIndustries || []).map(i => i.toLowerCase());
+      const allNiches: string[] = [];
+      if (viewerPreferences.industryNiches) {
+        for (const niches of Object.values(viewerPreferences.industryNiches)) {
+          allNiches.push(...niches.map(n => n.toLowerCase()));
+        }
+      }
+      userNicheKeywords.push(...allNiches);
+      userIndustryKeywords.push(...industries);
+    }
+
+    // Helper: check if a category matches user's preferred niche/industry
+    const getNicheScore = (category: string | null, extraText?: string | null): number => {
+      if (!viewerPreferences) return 0;
+      if (!category && !extraText) return 0;
+      const cat = (category || '').toLowerCase();
+      const extra = (extraText || '').toLowerCase();
+
+      // Check direct niche match (bidirectional partial): "restaurant" vs "restaurants"
+      for (const niche of userNicheKeywords) {
+        if (cat.includes(niche) || niche.includes(cat) || extra.includes(niche)) {
+          return 50; // Strong niche match
+        }
+      }
+
+      // Check industry keyword mapping
+      for (const industry of userIndustryKeywords) {
+        // Direct industry label in category
+        if (cat.includes(industry)) return 40;
+        // Industry keyword mapping
+        const keywords = INDUSTRY_CATEGORY_KEYWORDS[industry] || [];
+        for (const kw of keywords) {
+          if (cat.includes(kw) || extra.includes(kw)) {
+            return 35;
+          }
+        }
+      }
+
+      return 0;
+    };
+
     // Helper to calculate base text relevance score
     const calculateBaseScore = (fields: (string | null | undefined)[]): number => {
       let score = 0;
       for (const field of fields) {
         if (!field) continue;
         const lower = field.toLowerCase();
-        // Exact match gets highest score
         if (lower === query) score = Math.max(score, 100);
-        // Starts with query
         else if (lower.startsWith(query)) score = Math.max(score, 80);
-        // Contains query as word
         else if (lower.includes(` ${query}`) || lower.includes(`${query} `)) score = Math.max(score, 60);
-        // Contains query
         else if (lower.includes(query)) score = Math.max(score, 40);
       }
       return score;
     };
 
-    // Helper to calculate personalization score
+    // Helper: haversine distance in km (returns null if coords unavailable)
+    const distanceKm = (lat: number | null | undefined, lng: number | null | undefined): number => {
+      if (!userLatitude || !userLongitude || lat == null || lng == null) return 99999;
+      const R = 6371;
+      const dLat = (lat - userLatitude) * Math.PI / 180;
+      const dLng = (lng - userLongitude) * Math.PI / 180;
+      const a = Math.sin(dLat / 2) ** 2 +
+        Math.cos(userLatitude * Math.PI / 180) * Math.cos(lat * Math.PI / 180) * Math.sin(dLng / 2) ** 2;
+      return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+    };
+
+    // Helper to calculate full personalization score
     const calculatePersonalizationScore = (
       category: string | null,
       providerId: string | null,
-      rating: number | null
+      rating: number | null,
+      lat?: number | null,
+      lng?: number | null,
+      extraText?: string | null
     ): number => {
-      if (!viewerPreferences) return 0;
       let score = 0;
-      
+
       // Followed provider boost
       if (providerId && followedUserIds.has(providerId)) {
         score += 30;
       }
-      
-      // Category preference match
-      if (category) {
-        const catLower = category.toLowerCase();
-        const industries = (viewerPreferences.selectedIndustries || []).map(i => i.toLowerCase());
-        for (const ind of industries) {
-          if (catLower.includes(ind)) {
-            score += 20;
-            break;
-          }
-        }
-        // Niche match is higher
-        const allNiches: string[] = [];
-        if (viewerPreferences.industryNiches) {
-          for (const niches of Object.values(viewerPreferences.industryNiches)) {
-            allNiches.push(...niches.map(n => n.toLowerCase()));
-          }
-        }
-        for (const niche of allNiches) {
-          if (catLower.includes(niche)) {
-            score += 25;
-            break;
-          }
-        }
-      }
-      
-      // Rating boost (0-10 points based on rating 0-50)
-      if (rating !== null && rating > 0) {
+
+      // Niche/industry category match (using the improved mapping)
+      score += getNicheScore(category, extraText);
+
+      // Rating boost (0-10 points)
+      if (rating !== null && rating != null && rating > 0) {
         score += Math.min(10, rating / 5);
       }
-      
+
+      // Proximity boost: closer businesses rank higher when user location is available
+      if (userLatitude && userLongitude) {
+        const km = distanceKm(lat, lng);
+        if (km < 5) score += 20;
+        else if (km < 15) score += 12;
+        else if (km < 30) score += 6;
+        else if (km < 80) score += 2;
+      }
+
       return score;
     };
 
+    // ==================== CITY QUERY DETECTION ====================
+    // Check if the query matches a city name so we can apply city-mode ranking
+    let isCityQuery = false;
+    let cityQueryName = '';
+    if (query.length >= 3) {
+      const cityCheck = await db.select({ city: businesses.city })
+        .from(businesses)
+        .where(and(
+          eq(businesses.approvalStatus, 'approved'),
+          ilike(businesses.city, `${query}%`)
+        ))
+        .limit(1);
+      if (cityCheck.length > 0 && cityCheck[0].city) {
+        isCityQuery = true;
+        cityQueryName = cityCheck[0].city;
+      }
+    }
+
     // ==================== SEARCH CONSUMERS ====================
     if (scope === 'all' || scope === 'consumers') {
-      // Search users who are NOT vendors and NOT photographers (regular consumers)
       const consumerResults = await db.select().from(users)
         .where(and(
           eq(users.isVendor, false),
@@ -5432,7 +5526,6 @@ export class DatabaseStorage implements IStorage {
             ilike(users.firstName, `%${query}%`),
             ilike(users.lastName, `%${query}%`)
           ),
-          // Hide demo users from non-admins
           isAdmin ? undefined : sql`NOT (${users.id}::text ILIKE '%demo%')`
         ))
         .limit(limit * 2);
@@ -5441,7 +5534,7 @@ export class DatabaseStorage implements IStorage {
         const displayName = user.name || `${user.firstName || ''} ${user.lastName || ''}`.trim() || user.username || 'User';
         const baseScore = calculateBaseScore([user.username, user.name, user.firstName, user.lastName]);
         const personalizationScore = calculatePersonalizationScore(null, user.id, null);
-        
+
         allResults.push({
           id: user.id,
           type: 'consumer',
@@ -5453,7 +5546,7 @@ export class DatabaseStorage implements IStorage {
           category: null,
           providerUserId: user.id,
           baseScore,
-          personalizationScore: scope === 'all' ? personalizationScore : 0,
+          personalizationScore,
         });
       }
     }
@@ -5471,18 +5564,16 @@ export class DatabaseStorage implements IStorage {
             ilike(photographers.displayName, `%${query}%`),
             ilike(photographers.bio, `%${query}%`),
             sql`array_to_string(${photographers.specialties}, ' ') ILIKE ${'%' + query + '%'}`,
-            // Also search by owner's username and name
             ilike(users.username, `%${query}%`),
             ilike(users.name, `%${query}%`)
           ),
-          // Hide demo data from non-admins
           isAdmin ? undefined : sql`NOT (${photographers.userId}::text ILIKE '%demo%')`,
-          // Only show public photographers in search (admins see all)
           isAdmin ? undefined : eq(photographers.visibilityStatus, 'public')
         ))
         .limit(limit * 2);
 
       for (const { photographer, user } of photographerResults) {
+        const specialtiesText = (photographer.specialties || []).join(' ');
         const baseScore = calculateBaseScore([
           photographer.displayName,
           photographer.bio,
@@ -5491,105 +5582,168 @@ export class DatabaseStorage implements IStorage {
         const personalizationScore = calculatePersonalizationScore(
           photographer.specialties?.[0] || null,
           photographer.userId,
-          photographer.rating
+          photographer.rating,
+          photographer.latitude,
+          photographer.longitude,
+          specialtiesText
         );
-        
+
         allResults.push({
           id: photographer.id,
           type: 'photographer',
           title: photographer.displayName || user?.name || 'Photographer',
           subtitle: photographer.city ? `${photographer.city}${photographer.state ? `, ${photographer.state}` : ''}` : null,
           imageUrl: photographer.logoImage || photographer.coverImage || user?.profileImageUrl || null,
-          ratingAvg: photographer.rating ? photographer.rating / 10 : null, // Convert to 0-5 scale
+          ratingAvg: photographer.rating ? photographer.rating / 10 : null,
           ratingCount: photographer.reviewCount,
           category: photographer.specialties?.[0] || 'Photography',
           providerUserId: photographer.userId,
           baseScore,
-          personalizationScore: scope === 'all' ? personalizationScore : 0,
+          personalizationScore,
         });
       }
     }
 
     // ==================== SEARCH BUSINESSES ====================
     if (scope === 'all' || scope === 'businesses') {
-      // Business visibility helper (equivalent to isBusinessVisibleToPublic)
-      // - Must be approved
-      // - Must not be demo data
-      // - Must have active subscription
-      // - Must have completed Stripe onboarding if monetization features enabled
+      // In city-query mode, we look for all businesses in that city.
+      // In normal mode, we match the query against business fields + their services/products.
+      const businessWhere = isCityQuery
+        ? and(
+            eq(businesses.approvalStatus, 'approved'),
+            eq(businesses.subscriptionActive, true),
+            ilike(businesses.city, `${query}%`),
+            isAdmin ? undefined : sql`NOT (${businesses.ownerId}::text ILIKE '%demo%')`
+          )
+        : and(
+            eq(businesses.approvalStatus, 'approved'),
+            eq(businesses.subscriptionActive, true),
+            or(
+              ilike(businesses.name, `%${query}%`),
+              ilike(businesses.category, `%${query}%`),
+              ilike(businesses.description, `%${query}%`),
+              ilike(businesses.tagline, `%${query}%`),
+              sql`${businesses.knownFor}::text ILIKE ${'%' + query + '%'}`,
+              ilike(users.username, `%${query}%`),
+              ilike(users.name, `%${query}%`)
+            ),
+            isAdmin ? undefined : sql`NOT (${businesses.ownerId}::text ILIKE '%demo%')`
+          );
+
       const businessResults = await db.select({
         business: businesses,
         user: users,
       })
         .from(businesses)
         .leftJoin(users, eq(businesses.ownerId, users.id))
-        .where(and(
-          eq(businesses.approvalStatus, 'approved'),
-          eq(businesses.subscriptionActive, true), // Must have active subscription
-          or(
-            ilike(businesses.name, `%${query}%`),
-            ilike(businesses.category, `%${query}%`),
-            ilike(businesses.description, `%${query}%`),
-            ilike(businesses.tagline, `%${query}%`),
-            // Also search by owner's username and name
-            ilike(users.username, `%${query}%`),
-            ilike(users.name, `%${query}%`)
-          ),
-          // Hide demo data from non-admins
-          isAdmin ? undefined : sql`NOT (${businesses.ownerId}::text ILIKE '%demo%')`
-        ))
-        .limit(limit * 2);
+        .where(businessWhere)
+        .limit(isCityQuery ? limit * 4 : limit * 2);
 
-      for (const { business } of businessResults) {
-        // Additional visibility check: Stripe onboarding required if monetization features enabled
+      // Track which business IDs we've already added
+      const addedBusinessIds = new Set<string>();
+
+      const addBusiness = (business: typeof businessResults[0]['business'], baseScoreOverride?: number) => {
+        if (addedBusinessIds.has(business.id)) return;
         const needsStripe = business.hasProducts || business.hasServices;
-        if (!isAdmin && needsStripe && !business.stripeOnboardingComplete) {
-          continue; // Skip businesses that need Stripe but haven't completed onboarding
-        }
-        const baseScore = calculateBaseScore([
+        if (!isAdmin && needsStripe && !business.stripeOnboardingComplete) return;
+        addedBusinessIds.add(business.id);
+
+        const knownForText = Array.isArray(business.knownFor) ? (business.knownFor as string[]).join(' ') : '';
+        const baseScore = baseScoreOverride ?? calculateBaseScore([
           business.name,
           business.category,
           business.description,
-          business.tagline
+          business.tagline,
+          knownForText,
         ]);
         const personalizationScore = calculatePersonalizationScore(
           business.category,
           business.ownerId,
-          business.rating
+          business.rating,
+          business.latitude,
+          business.longitude,
+          knownForText
         );
-        
+
         allResults.push({
           id: business.id,
           type: 'business',
           title: business.name,
           subtitle: business.city ? `${business.category} · ${business.city}, ${business.state || ''}` : business.category,
           imageUrl: business.logoImage || business.coverImage,
-          ratingAvg: business.rating ? business.rating / 10 : null, // Convert to 0-5 scale
+          ratingAvg: business.rating ? business.rating / 10 : null,
           ratingCount: business.reviewCount,
           category: business.category,
           providerUserId: business.ownerId,
           baseScore,
-          personalizationScore: scope === 'all' ? personalizationScore : 0,
+          personalizationScore,
         });
+      };
+
+      for (const { business } of businessResults) {
+        addBusiness(business);
+      }
+
+      // ---- Service/Product → Business Discovery ----
+      // When NOT in city-query mode, also surface businesses whose services/products match the query.
+      // This makes businesses discoverable even if only their service name matches (e.g., search "haircut").
+      if (!isCityQuery) {
+        const serviceMatchRows = await db
+          .select({ parentId: searchIndex.parentId })
+          .from(searchIndex)
+          .where(and(
+            or(
+              eq(searchIndex.entityType, 'service'),
+              eq(searchIndex.entityType, 'product')
+            ),
+            eq(searchIndex.parentType, 'business'),
+            eq(searchIndex.isActive, true),
+            eq(searchIndex.hasActiveSubscription, true),
+            or(
+              ilike(searchIndex.name, `%${query}%`),
+              ilike(searchIndex.description, `%${query}%`),
+              ilike(searchIndex.category, `%${query}%`),
+              sql`array_to_string(${searchIndex.tags}, ' ') ILIKE ${'%' + query + '%'}`
+            ),
+            isAdmin ? undefined : eq(searchIndex.isDemo, false)
+          ))
+          .limit(50);
+
+        const newParentIds = [
+          ...new Set(serviceMatchRows.map(r => r.parentId).filter((id): id is string => !!id && !addedBusinessIds.has(id)))
+        ];
+
+        if (newParentIds.length > 0) {
+          const extraBusinesses = await db.select({ business: businesses })
+            .from(businesses)
+            .where(and(
+              inArray(businesses.id, newParentIds),
+              eq(businesses.approvalStatus, 'approved'),
+              eq(businesses.subscriptionActive, true),
+              isAdmin ? undefined : sql`NOT (${businesses.ownerId}::text ILIKE '%demo%')`
+            ));
+
+          for (const { business } of extraBusinesses) {
+            // Base score of 45: found via service match — high enough to surface but below a direct name match
+            addBusiness(business, 45);
+          }
+        }
       }
     }
 
     // ==================== SEARCH PRODUCTS ====================
     if (scope === 'all' || scope === 'products') {
-      // Use search index for products, but also check if parent business is visible
-      // Join with search index that has hasActiveSubscription flag
       const productResults = await db.select().from(searchIndex)
         .where(and(
           eq(searchIndex.entityType, 'product'),
           eq(searchIndex.isActive, true),
-          eq(searchIndex.hasActiveSubscription, true), // Parent business must have active subscription
+          eq(searchIndex.hasActiveSubscription, true),
           or(
             ilike(searchIndex.name, `%${query}%`),
             ilike(searchIndex.description, `%${query}%`),
             ilike(searchIndex.category, `%${query}%`),
             sql`array_to_string(${searchIndex.tags}, ' ') ILIKE ${'%' + query + '%'}`
           ),
-          // Hide demo data from non-admins
           isAdmin ? undefined : eq(searchIndex.isDemo, false)
         ))
         .limit(limit * 2);
@@ -5604,9 +5758,11 @@ export class DatabaseStorage implements IStorage {
         const personalizationScore = calculatePersonalizationScore(
           product.category,
           product.userId,
-          product.rating
+          product.rating,
+          product.latitude,
+          product.longitude
         );
-        
+
         allResults.push({
           id: product.entityId,
           type: 'product',
@@ -5618,25 +5774,20 @@ export class DatabaseStorage implements IStorage {
           category: product.category,
           providerUserId: product.userId,
           baseScore,
-          personalizationScore: scope === 'all' ? personalizationScore : 0,
+          personalizationScore,
         });
       }
     }
 
     // ==================== SEARCH SERVICES ====================
     if (scope === 'all' || scope === 'services') {
-      // Use search index for services (both business services and photographer services)
-      // Business services require parent business to have active subscription
-      // Photographer services are always visible if active
       const serviceResults = await db.select().from(searchIndex)
         .where(and(
           or(
-            // Business services: require active subscription
             and(
               eq(searchIndex.entityType, 'service'),
               eq(searchIndex.hasActiveSubscription, true)
             ),
-            // Photographer services: no subscription required
             eq(searchIndex.entityType, 'photographer_service')
           ),
           eq(searchIndex.isActive, true),
@@ -5645,7 +5796,6 @@ export class DatabaseStorage implements IStorage {
             ilike(searchIndex.description, `%${query}%`),
             ilike(searchIndex.category, `%${query}%`)
           ),
-          // Hide demo data from non-admins
           isAdmin ? undefined : eq(searchIndex.isDemo, false)
         ))
         .limit(limit * 2);
@@ -5659,9 +5809,11 @@ export class DatabaseStorage implements IStorage {
         const personalizationScore = calculatePersonalizationScore(
           service.category,
           service.userId,
-          service.rating
+          service.rating,
+          service.latitude,
+          service.longitude
         );
-        
+
         allResults.push({
           id: service.entityId,
           type: 'service',
@@ -5673,25 +5825,29 @@ export class DatabaseStorage implements IStorage {
           category: service.category,
           providerUserId: service.userId,
           baseScore,
-          personalizationScore: scope === 'all' ? personalizationScore : 0,
+          personalizationScore,
         });
       }
     }
 
     // ==================== SORTING ====================
-    if (scope === 'all') {
-      // Sort by personalization score (higher is better), then base score
-      allResults.sort((a, b) => {
-        const totalA = a.personalizationScore + a.baseScore;
-        const totalB = b.personalizationScore + b.baseScore;
-        return totalB - totalA;
-      });
-    } else {
-      // Sort by base score only (text relevance)
-      allResults.sort((a, b) => b.baseScore - a.baseScore);
-    }
+    // City-query mode: sort businesses by niche match first (personalization), then rating
+    // Normal mode: sort by combined personalization + base score
+    allResults.sort((a, b) => {
+      if (isCityQuery) {
+        // In city mode: niche priority first, then rating
+        const nicheDiff = b.personalizationScore - a.personalizationScore;
+        if (nicheDiff !== 0) return nicheDiff;
+        const ratingA = a.ratingAvg ?? 0;
+        const ratingB = b.ratingAvg ?? 0;
+        return ratingB - ratingA;
+      }
+      // Normal mode: combined score (personalization wins ties, then text relevance)
+      const totalA = a.personalizationScore + a.baseScore;
+      const totalB = b.personalizationScore + b.baseScore;
+      return totalB - totalA;
+    });
 
-    // Apply pagination
     const total = allResults.length;
     const paginatedResults = allResults.slice(offset, offset + limit);
 
