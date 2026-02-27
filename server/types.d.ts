@@ -7,5 +7,7 @@ declare module "express-session" {
     isPhotographer?: boolean;
     businessId?: string;
     photographerId?: string;
+    role?: string;
+    userRole?: string;
   }
 }

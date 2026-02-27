@@ -92,6 +92,7 @@ import {
   type InsertSearchIndexEntry,
   type Follow,
   type InsertFollow,
+  type HoursOfOperation,
   type WeeklyAvailability,
   type InsertWeeklyAvailability,
   type ProviderBlock,
@@ -421,6 +422,7 @@ export interface IStorage {
   // Vendor Storefront - Services
   getVendorServicesByBusiness(businessId: string): Promise<VendorService[]>;
   getVendorService(id: string): Promise<VendorService | undefined>;
+  getServices(): Promise<VendorService[]>;
   createVendorService(data: InsertVendorService): Promise<VendorService>;
   updateVendorService(id: string, updates: Partial<VendorService>): Promise<VendorService | undefined>;
   deleteVendorService(id: string): Promise<void>;
@@ -4188,7 +4190,7 @@ export class DatabaseStorage implements IStorage {
       compareAtPrice: data.compareAtPrice ?? undefined,
       category: data.category ?? undefined,
       imageUrl: data.imageUrl ?? undefined,
-      images: data.images ?? undefined,
+      images: data.images ? [...data.images] : undefined,
       isActive: data.isActive ?? undefined,
       isFeatured: data.isFeatured ?? undefined,
       status: data.status ?? undefined,
@@ -4229,6 +4231,10 @@ export class DatabaseStorage implements IStorage {
       .from(vendorServices)
       .where(eq(vendorServices.id, id));
     return service;
+  }
+
+  async getServices(): Promise<VendorService[]> {
+    return db.select().from(vendorServices);
   }
 
   async createVendorService(data: InsertVendorService): Promise<VendorService> {
@@ -4524,24 +4530,25 @@ export class DatabaseStorage implements IStorage {
   // =========================
 
   async createStaffMember(data: InsertStaffMember): Promise<StaffMember> {
+    const insertData: typeof staffMembers.$inferInsert = {
+      businessId: data.businessId,
+      displayName: data.displayName,
+      userId: data.userId ?? undefined,
+      bio: data.bio ?? undefined,
+      profileImageUrl: data.profileImageUrl ?? undefined,
+      phone: data.phone ?? undefined,
+      email: data.email ?? undefined,
+      serviceIds: data.serviceIds ? [...data.serviceIds] : undefined,
+      specialties: data.specialties ?? undefined,
+      role: data.role ?? undefined,
+      status: data.status ?? undefined,
+      stripeAccountId: data.stripeAccountId ?? undefined,
+      stripeOnboardingComplete: data.stripeOnboardingComplete ?? undefined,
+      stripeOnboardingUrl: data.stripeOnboardingUrl ?? undefined,
+      hoursOfOperation: (data.hoursOfOperation as HoursOfOperation) ?? undefined,
+    };
     const [staff] = await db.insert(staffMembers)
-      .values({
-        businessId: data.businessId,
-        userId: data.userId ?? undefined,
-        displayName: data.displayName,
-        bio: data.bio ?? undefined,
-        profileImageUrl: data.profileImageUrl ?? undefined,
-        phone: data.phone ?? undefined,
-        email: data.email ?? undefined,
-        serviceIds: data.serviceIds ?? undefined,
-        specialties: data.specialties ?? undefined,
-        role: data.role ?? undefined,
-        status: data.status ?? undefined,
-        stripeAccountId: data.stripeAccountId ?? undefined,
-        stripeOnboardingComplete: data.stripeOnboardingComplete ?? undefined,
-        stripeOnboardingUrl: data.stripeOnboardingUrl ?? undefined,
-        hoursOfOperation: data.hoursOfOperation ?? undefined,
-      })
+      .values(insertData)
       .returning();
     return staff;
   }
@@ -4904,22 +4911,22 @@ export class DatabaseStorage implements IStorage {
         authorId: data.authorId,
         authorType: data.authorType,
         postType: data.postType || 'text',
-        postIntent: data.postIntent || null,
-        displayLayout: data.displayLayout || null,
-        feedSurface: data.feedSurface || null,
+        postIntent: data.postIntent || undefined,
+        displayLayout: data.displayLayout || undefined,
+        feedSurface: data.feedSurface || undefined,
         content: data.content,
-        imageUrl: data.imageUrl || null,
-        mediaUrl: data.mediaUrl || null,
-        mediaType: data.mediaType || null,
-        thumbnailUrl: data.thumbnailUrl || null,
-        mediaWidth: data.mediaWidth || null,
-        mediaHeight: data.mediaHeight || null,
-        aspectRatio: data.aspectRatio || null,
-        taggedBusinessId: data.taggedBusinessId || null,
-        taggedPhotographerId: data.taggedPhotographerId || null,
-        productId: data.productId || null,
-        serviceId: data.serviceId || null,
-        photographerServiceId: data.photographerServiceId || null,
+        imageUrl: data.imageUrl || undefined,
+        mediaUrl: data.mediaUrl || undefined,
+        mediaType: data.mediaType || undefined,
+        thumbnailUrl: data.thumbnailUrl || undefined,
+        mediaWidth: data.mediaWidth || undefined,
+        mediaHeight: data.mediaHeight || undefined,
+        aspectRatio: data.aspectRatio || undefined,
+        taggedBusinessId: data.taggedBusinessId || undefined,
+        taggedPhotographerId: data.taggedPhotographerId || undefined,
+        productId: data.productId || undefined,
+        serviceId: data.serviceId || undefined,
+        photographerServiceId: data.photographerServiceId || undefined,
       })
       .returning();
     return post;
@@ -5492,7 +5499,7 @@ export class DatabaseStorage implements IStorage {
           type: 'photographer',
           title: photographer.displayName || user?.name || 'Photographer',
           subtitle: photographer.city ? `${photographer.city}${photographer.state ? `, ${photographer.state}` : ''}` : null,
-          imageUrl: photographer.logoImage || photographer.coverImage || user?.profileImageUrl,
+          imageUrl: photographer.logoImage || photographer.coverImage || user?.profileImageUrl || null,
           ratingAvg: photographer.rating ? photographer.rating / 10 : null, // Convert to 0-5 scale
           ratingCount: photographer.reviewCount,
           category: photographer.specialties?.[0] || 'Photography',
