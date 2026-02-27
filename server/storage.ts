@@ -704,6 +704,8 @@ export interface UnifiedSearchParams {
   isAdmin?: boolean;
   userLatitude?: number;
   userLongitude?: number;
+  city?: string;       // Explicit city filter (e.g. from Explore page)
+  category?: string;  // Explicit category filter
 }
 
 export interface UnifiedSearchResult {
@@ -5350,7 +5352,7 @@ export class DatabaseStorage implements IStorage {
   // =========================
 
   async unifiedSearchWithScope(params: UnifiedSearchParams): Promise<UnifiedSearchResponse> {
-    const { q, scope, viewerUserId, limit = 50, offset = 0, isAdmin = false, userLatitude, userLongitude } = params;
+    const { q, scope, viewerUserId, limit = 50, offset = 0, isAdmin = false, userLatitude, userLongitude, city: cityFilter, category: categoryFilter } = params;
     const query = q.trim().toLowerCase();
 
     if (!query) {
@@ -5497,10 +5499,17 @@ export class DatabaseStorage implements IStorage {
     };
 
     // ==================== CITY QUERY DETECTION ====================
-    // Check if the query matches a city name so we can apply city-mode ranking
+    // City-mode activates when:
+    //   (a) caller explicitly passed ?city=Atlanta (Explore page), OR
+    //   (b) the query string itself matches a city prefix (e.g. user typed "chicago")
     let isCityQuery = false;
-    let cityQueryName = '';
-    if (query.length >= 3) {
+    let resolvedCity = cityFilter || '';  // the city to filter by in city-mode
+
+    if (cityFilter) {
+      // Explicit city param → always city-mode
+      isCityQuery = true;
+    } else if (query.length >= 3) {
+      // Detect city from query string
       const cityCheck = await db.select({ city: businesses.city })
         .from(businesses)
         .where(and(
@@ -5510,7 +5519,7 @@ export class DatabaseStorage implements IStorage {
         .limit(1);
       if (cityCheck.length > 0 && cityCheck[0].city) {
         isCityQuery = true;
-        cityQueryName = cityCheck[0].city;
+        resolvedCity = cityCheck[0].city;
       }
     }
 
@@ -5560,17 +5569,28 @@ export class DatabaseStorage implements IStorage {
         .from(photographers)
         .leftJoin(users, eq(photographers.userId, users.id))
         .where(and(
-          or(
-            ilike(photographers.displayName, `%${query}%`),
-            ilike(photographers.bio, `%${query}%`),
-            sql`array_to_string(${photographers.specialties}, ' ') ILIKE ${'%' + query + '%'}`,
-            ilike(users.username, `%${query}%`),
-            ilike(users.name, `%${query}%`)
-          ),
+          isCityQuery
+            // City-mode: filter by city, optionally filter by query text too
+            ? and(
+                ilike(photographers.city, `%${resolvedCity}%`),
+                query && !cityFilter ? or(
+                  ilike(photographers.displayName, `%${query}%`),
+                  ilike(photographers.bio, `%${query}%`),
+                  sql`array_to_string(${photographers.specialties}, ' ') ILIKE ${'%' + query + '%'}`,
+                ) : undefined
+              )
+            // Normal mode: text match
+            : or(
+                ilike(photographers.displayName, `%${query}%`),
+                ilike(photographers.bio, `%${query}%`),
+                sql`array_to_string(${photographers.specialties}, ' ') ILIKE ${'%' + query + '%'}`,
+                ilike(users.username, `%${query}%`),
+                ilike(users.name, `%${query}%`)
+              ),
           isAdmin ? undefined : sql`NOT (${photographers.userId}::text ILIKE '%demo%')`,
           isAdmin ? undefined : eq(photographers.visibilityStatus, 'public')
         ))
-        .limit(limit * 2);
+        .limit(isCityQuery ? limit * 4 : limit * 2);
 
       for (const { photographer, user } of photographerResults) {
         const specialtiesText = (photographer.specialties || []).join(' ');
@@ -5612,7 +5632,15 @@ export class DatabaseStorage implements IStorage {
         ? and(
             eq(businesses.approvalStatus, 'approved'),
             eq(businesses.subscriptionActive, true),
-            ilike(businesses.city, `${query}%`),
+            ilike(businesses.city, `%${resolvedCity}%`),
+            // When an explicit category filter is set (e.g. Explore → "Beauty"), apply it
+            categoryFilter ? ilike(businesses.category, `%${categoryFilter}%`) : undefined,
+            // If there's also a non-city text query, apply it as an additional filter
+            query && !cityFilter ? or(
+              ilike(businesses.name, `%${query}%`),
+              ilike(businesses.category, `%${query}%`),
+              ilike(businesses.description, `%${query}%`),
+            ) : undefined,
             isAdmin ? undefined : sql`NOT (${businesses.ownerId}::text ILIKE '%demo%')`
           )
         : and(
@@ -5627,6 +5655,7 @@ export class DatabaseStorage implements IStorage {
               ilike(users.username, `%${query}%`),
               ilike(users.name, `%${query}%`)
             ),
+            categoryFilter ? ilike(businesses.category, `%${categoryFilter}%`) : undefined,
             isAdmin ? undefined : sql`NOT (${businesses.ownerId}::text ILIKE '%demo%')`
           );
 

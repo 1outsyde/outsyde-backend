@@ -241,6 +241,8 @@ export async function registerRoutes(
         offset = '0',
         lat,
         lng,
+        city,
+        category,
       } = req.query;
 
       // Validate scope
@@ -275,6 +277,8 @@ export async function registerRoutes(
         isAdmin,
         userLatitude,
         userLongitude,
+        city: city as string | undefined,
+        category: category as string | undefined,
       });
 
       res.json(results);
