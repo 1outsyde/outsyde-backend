@@ -1926,8 +1926,9 @@ export class DatabaseStorage implements IStorage {
     return user?.loyaltyPoints || 0;
   }
 
-  // Platform fee percentage for loyalty point calculation (matches server/fees.ts)
-  private readonly PLATFORM_FEE_PERCENT = 12; // Universal 12% platform fee
+  // Platform fee percentages for loyalty point calculation (matches server/fees.ts)
+  private readonly BOOKING_FEE_PERCENT = 12; // 12% platform fee on service bookings
+  private readonly PRODUCT_FEE_PERCENT = 4; // 4% platform fee on product purchases
   private readonly POINTS_REWARD_PERCENT = 10; // 10% of platform profit awarded as points
   private readonly MAX_POINTS_PER_TRANSACTION = 5000; // Hard cap per transaction
 
@@ -1949,9 +1950,17 @@ export class DatabaseStorage implements IStorage {
     let pointsEarned: number;
     let isCapped = false;
     
-    if (data.transactionType === 'photographer_booking' || data.transactionType === 'business_transaction') {
-      // Universal 12% platform fee for all marketplace transactions
-      platformProfitCents = Math.floor(data.dollarAmountCents * this.PLATFORM_FEE_PERCENT / 100);
+    if (data.transactionType === 'photographer_booking') {
+      // 12% booking fee on photographer service bookings
+      platformProfitCents = Math.floor(data.dollarAmountCents * this.BOOKING_FEE_PERCENT / 100);
+      const rawPoints = Math.floor(platformProfitCents * this.POINTS_REWARD_PERCENT / 100);
+      pointsEarned = Math.floor(rawPoints / 100) * 100;
+    } else if (data.transactionType === 'business_transaction') {
+      // 4% product fee on business product purchases, 12% on service bookings
+      // Business transactions use BOOKING_FEE for service appointments and PRODUCT_FEE for orders
+      // Since transactionType doesn't distinguish, use booking fee (most business transactions are bookings)
+      const feePercent = data.referenceType === 'order' ? this.PRODUCT_FEE_PERCENT : this.BOOKING_FEE_PERCENT;
+      platformProfitCents = Math.floor(data.dollarAmountCents * feePercent / 100);
       // 10% of profit as points, rounded down to nearest 100
       const rawPoints = Math.floor(platformProfitCents * this.POINTS_REWARD_PERCENT / 100);
       pointsEarned = Math.floor(rawPoints / 100) * 100;

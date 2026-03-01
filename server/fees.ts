@@ -1,16 +1,28 @@
 /**
  * Outsyde Platform Fee Configuration
  *
- * Universal 12% booking/transaction fee applied to all marketplace transactions.
- * This fee is collected via Stripe's `application_fee_amount` on destination charges.
+ * Product fee:  4% on product purchases (orders, a la carte product purchases)
+ * Booking fee: 12% on service bookings (appointments, photographer shoots, a la carte services)
+ *
+ * Fees are collected via Stripe's `application_fee_amount` on destination charges.
  */
 
-export const PLATFORM_FEE_PERCENT = 12;
-export const PLATFORM_FEE_RATE = 0.12;
+export const PRODUCT_FEE_PERCENT = 4;
+export const PRODUCT_FEE_RATE = 0.04;
+
+export const BOOKING_FEE_PERCENT = 12;
+export const BOOKING_FEE_RATE = 0.12;
 
 /**
- * Calculate the platform fee in cents for a given transaction amount.
+ * Calculate the platform fee for a product purchase.
  */
-export function calculatePlatformFee(amountCents: number): number {
-  return Math.round(amountCents * PLATFORM_FEE_RATE);
+export function calculateProductFee(amountCents: number): number {
+  return Math.round(amountCents * PRODUCT_FEE_RATE);
+}
+
+/**
+ * Calculate the platform fee for a service booking.
+ */
+export function calculateBookingFee(amountCents: number): number {
+  return Math.round(amountCents * BOOKING_FEE_RATE);
 }

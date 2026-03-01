@@ -90,7 +90,7 @@ import {
   transitionShootBookingState,
   getDraftExpiryTime
 } from "./bookingStateMachine";
-import { calculatePlatformFee } from "./fees";
+import { calculateProductFee, calculateBookingFee } from "./fees";
 import { 
   appointments, 
   shootBookings,
@@ -2718,8 +2718,8 @@ export async function registerRoutes(
         });
       }
 
-      // Calculate pricing (universal 12% Outsyde platform fee)
-      const platformFee = calculatePlatformFee(priceCents);
+      // Calculate pricing (12% Outsyde booking fee)
+      const platformFee = calculateBookingFee(priceCents);
       const vendorNet = priceCents - platformFee;
 
       // Set draft expiry (10 minutes from now)
@@ -2869,8 +2869,8 @@ export async function registerRoutes(
         });
       }
 
-      // Calculate fees (universal 12% Outsyde platform fee)
-      const platformFee = calculatePlatformFee(data.totalPriceCents);
+      // Calculate fees (12% Outsyde booking fee)
+      const platformFee = calculateBookingFee(data.totalPriceCents);
       const vendorNet = data.totalPriceCents - platformFee;
 
       // Create booking with "awaiting_payment" status
@@ -4576,8 +4576,8 @@ export async function registerRoutes(
       // Determine capture method based on autoAcceptBookings
       const captureMethod = business.autoAcceptBookings === false ? 'manual' : 'automatic';
       
-      // Calculate platform fee (universal 12% Outsyde platform fee)
-      const platformFeeAmount = calculatePlatformFee(appointment.totalPrice);
+      // Calculate platform fee (12% Outsyde booking fee)
+      const platformFeeAmount = calculateBookingFee(appointment.totalPrice);
 
       // Get or create Stripe customer for the user
       const user = await storage.getUser(userId);
@@ -4710,8 +4710,8 @@ export async function registerRoutes(
       // Determine capture method based on autoAcceptBookings
       const captureMethod = photographer.autoAcceptBookings === false ? 'manual' : 'automatic';
       
-      // Calculate platform fee (universal 12% Outsyde platform fee)
-      const platformFeeAmount = calculatePlatformFee(booking.totalPrice);
+      // Calculate platform fee (12% Outsyde booking fee)
+      const platformFeeAmount = calculateBookingFee(booking.totalPrice);
 
       // Get user for Stripe customer
       const user = await storage.getUser(userId);
@@ -5064,9 +5064,9 @@ export async function registerRoutes(
         }
       }
 
-      // Calculate fees (universal 12% Outsyde platform fee)
+      // Calculate fees (12% Outsyde booking fee)
       const totalPrice = service.price || 0;
-      const platformFee = calculatePlatformFee(totalPrice);
+      const platformFee = calculateBookingFee(totalPrice);
       const vendorNet = totalPrice - platformFee;
 
       // Create draft booking with 10-minute TTL
@@ -5152,9 +5152,9 @@ export async function registerRoutes(
         return res.status(404).json({ error: "Photographer not found" });
       }
 
-      // Calculate price (universal 12% Outsyde platform fee)
+      // Calculate price (12% Outsyde booking fee)
       const totalPrice = photographer.hourlyRate * data.durationHours * 100; // Convert to cents
-      const platformFee = calculatePlatformFee(totalPrice);
+      const platformFee = calculateBookingFee(totalPrice);
       const vendorNet = totalPrice - platformFee;
 
       // Create draft with 10-minute TTL
@@ -5514,8 +5514,8 @@ export async function registerRoutes(
         });
       }
 
-      // Calculate fees (universal 12% Outsyde platform fee)
-      const platformFee = calculatePlatformFee(data.totalPriceCents);
+      // Calculate fees (12% Outsyde booking fee)
+      const platformFee = calculateBookingFee(data.totalPriceCents);
       const vendorNet = data.totalPriceCents - platformFee;
       
       // If staff member is assigned, they get 100% of vendorNet (minus platform fee)
@@ -6325,8 +6325,8 @@ export async function registerRoutes(
         return res.status(404).json({ error: "Service not found" });
       }
 
-      // Platform fee (universal 12% Outsyde platform fee)
-      const platformFeeInCents = calculatePlatformFee(pricing.finalPriceCents);
+      // Platform fee (12% Outsyde booking fee for service purchases)
+      const platformFeeInCents = calculateBookingFee(pricing.finalPriceCents);
 
       // Create the purchase record first
       const purchase = await storage.createAlaCartePurchase({
@@ -9606,8 +9606,8 @@ export async function registerRoutes(
 
         totalAmountInCents += vendorTotalInCents;
 
-        // Platform fee (universal 12% Outsyde platform fee)
-        const platformFeeInCents = calculatePlatformFee(vendorTotalInCents);
+        // Platform fee (4% Outsyde product fee)
+        const platformFeeInCents = calculateProductFee(vendorTotalInCents);
         totalPlatformFeeInCents += platformFeeInCents;
         const vendorNet = vendorTotalInCents - platformFeeInCents;
 
