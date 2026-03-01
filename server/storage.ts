@@ -1926,9 +1926,8 @@ export class DatabaseStorage implements IStorage {
     return user?.loyaltyPoints || 0;
   }
 
-  // Platform fee percentages for loyalty point calculation
-  private readonly PHOTOGRAPHER_FEE_PERCENT = 10; // 10% platform fee on photographer bookings
-  private readonly BUSINESS_FEE_PERCENT = 4; // 4% platform fee on business transactions
+  // Platform fee percentage for loyalty point calculation (matches server/fees.ts)
+  private readonly PLATFORM_FEE_PERCENT = 12; // Universal 12% platform fee
   private readonly POINTS_REWARD_PERCENT = 10; // 10% of platform profit awarded as points
   private readonly MAX_POINTS_PER_TRANSACTION = 5000; // Hard cap per transaction
 
@@ -1950,15 +1949,9 @@ export class DatabaseStorage implements IStorage {
     let pointsEarned: number;
     let isCapped = false;
     
-    if (data.transactionType === 'photographer_booking') {
-      // Photographer: 10% platform fee
-      platformProfitCents = Math.floor(data.dollarAmountCents * this.PHOTOGRAPHER_FEE_PERCENT / 100);
-      // 10% of profit as points, rounded down to nearest 100
-      const rawPoints = Math.floor(platformProfitCents * this.POINTS_REWARD_PERCENT / 100);
-      pointsEarned = Math.floor(rawPoints / 100) * 100;
-    } else if (data.transactionType === 'business_transaction') {
-      // Business: 4% platform fee
-      platformProfitCents = Math.floor(data.dollarAmountCents * this.BUSINESS_FEE_PERCENT / 100);
+    if (data.transactionType === 'photographer_booking' || data.transactionType === 'business_transaction') {
+      // Universal 12% platform fee for all marketplace transactions
+      platformProfitCents = Math.floor(data.dollarAmountCents * this.PLATFORM_FEE_PERCENT / 100);
       // 10% of profit as points, rounded down to nearest 100
       const rawPoints = Math.floor(platformProfitCents * this.POINTS_REWARD_PERCENT / 100);
       pointsEarned = Math.floor(rawPoints / 100) * 100;

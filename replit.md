@@ -15,7 +15,7 @@ Outsyde is built as a monorepo, using a React frontend, an Express (TypeScript) 
 -   **Authentication:** Session-based for web, JWT-based for mobile (1hr access, 7-day refresh), and OAuth via Replit Auth. Passwords are secured using bcrypt.
 -   **Database:** PostgreSQL with Drizzle ORM.
 -   **Real-time Communication:** WebSockets for features like chat.
--   **Monetization:** Tiered transaction fees (10% for photographers, 4% for businesses) plus subscription fees.
+-   **Monetization:** Universal 12% platform booking fee on all marketplace transactions, plus subscription fees.
 -   **Outsyde Points System (Loyalty):** Profit-based rewards with earning, redemption tiers, guardrails, and referral bonuses.
 -   **Core Features:** Multi-step onboarding, verified reviews, and a referral program.
 -   **Cart & Checkout:** Supports database-backed carts for authenticated users, `localStorage` for guests, and multi-vendor checkout.
