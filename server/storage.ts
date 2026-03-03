@@ -1927,8 +1927,8 @@ export class DatabaseStorage implements IStorage {
   }
 
   // Platform fee percentages for loyalty point calculation (matches server/fees.ts)
-  private readonly BOOKING_FEE_PERCENT = 12; // 12% platform fee on service bookings
-  private readonly PRODUCT_FEE_PERCENT = 4; // 4% platform fee on product purchases
+  private readonly BOOKING_FEE_PERCENT = 10; // 10% platform fee on service bookings
+  private readonly PRODUCT_FEE_PERCENT = 8; // 8% platform fee on product purchases
   private readonly POINTS_REWARD_PERCENT = 10; // 10% of platform profit awarded as points
   private readonly MAX_POINTS_PER_TRANSACTION = 5000; // Hard cap per transaction
 

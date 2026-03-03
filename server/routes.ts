@@ -2718,7 +2718,7 @@ export async function registerRoutes(
         });
       }
 
-      // Calculate pricing (12% Outsyde booking fee)
+      // Calculate pricing (10% Outsyde booking fee)
       const platformFee = calculateBookingFee(priceCents);
       const vendorNet = priceCents - platformFee;
 
@@ -2869,7 +2869,7 @@ export async function registerRoutes(
         });
       }
 
-      // Calculate fees (12% Outsyde booking fee)
+      // Calculate fees (10% Outsyde booking fee)
       const platformFee = calculateBookingFee(data.totalPriceCents);
       const vendorNet = data.totalPriceCents - platformFee;
 
@@ -4576,7 +4576,7 @@ export async function registerRoutes(
       // Determine capture method based on autoAcceptBookings
       const captureMethod = business.autoAcceptBookings === false ? 'manual' : 'automatic';
       
-      // Calculate platform fee (12% Outsyde booking fee)
+      // Calculate platform fee (10% Outsyde booking fee)
       const platformFeeAmount = calculateBookingFee(appointment.totalPrice);
 
       // Get or create Stripe customer for the user
@@ -4710,7 +4710,7 @@ export async function registerRoutes(
       // Determine capture method based on autoAcceptBookings
       const captureMethod = photographer.autoAcceptBookings === false ? 'manual' : 'automatic';
       
-      // Calculate platform fee (12% Outsyde booking fee)
+      // Calculate platform fee (10% Outsyde booking fee)
       const platformFeeAmount = calculateBookingFee(booking.totalPrice);
 
       // Get user for Stripe customer
@@ -5064,7 +5064,7 @@ export async function registerRoutes(
         }
       }
 
-      // Calculate fees (12% Outsyde booking fee)
+      // Calculate fees (10% Outsyde booking fee)
       const totalPrice = service.price || 0;
       const platformFee = calculateBookingFee(totalPrice);
       const vendorNet = totalPrice - platformFee;
@@ -5152,7 +5152,7 @@ export async function registerRoutes(
         return res.status(404).json({ error: "Photographer not found" });
       }
 
-      // Calculate price (12% Outsyde booking fee)
+      // Calculate price (10% Outsyde booking fee)
       const totalPrice = photographer.hourlyRate * data.durationHours * 100; // Convert to cents
       const platformFee = calculateBookingFee(totalPrice);
       const vendorNet = totalPrice - platformFee;
@@ -5514,7 +5514,7 @@ export async function registerRoutes(
         });
       }
 
-      // Calculate fees (12% Outsyde booking fee)
+      // Calculate fees (10% Outsyde booking fee)
       const platformFee = calculateBookingFee(data.totalPriceCents);
       const vendorNet = data.totalPriceCents - platformFee;
       
@@ -6325,7 +6325,7 @@ export async function registerRoutes(
         return res.status(404).json({ error: "Service not found" });
       }
 
-      // Platform fee (12% Outsyde booking fee for service purchases)
+      // Platform fee (10% Outsyde booking fee for service purchases)
       const platformFeeInCents = calculateBookingFee(pricing.finalPriceCents);
 
       // Create the purchase record first
