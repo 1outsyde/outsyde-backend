@@ -59,6 +59,7 @@ import {
   optionalAuthMiddleware,
   getUserIdFromRequest,
   ACCESS_TOKEN_EXPIRY_SECONDS,
+  REFRESH_TOKEN_EXPIRY_MS,
   type AuthenticatedRequest,
   type TokenPayload,
 } from "./auth";
@@ -712,6 +713,52 @@ export async function registerRoutes(
     }
   });
 
+  // PATCH alias for onboarding (matches frontend expectation)
+  app.patch("/api/users/onboarding", optionalAuthMiddleware, async (req, res) => {
+    const authReq = req as AuthenticatedRequest;
+    const userId = authReq.user?.userId || req.session?.userId;
+    if (!userId) {
+      return res.status(401).json({ success: false, message: "Authentication required" });
+    }
+
+    try {
+      const { userType, preferences, selectedIndustries, industryNiches, industryValues } = req.body;
+
+      const updates: Record<string, any> = {};
+
+      if (userType) {
+        if (userType === 'vendor' || userType === 'seller') {
+          updates.isVendor = true;
+          updates.wantsToSellProducts = true;
+        } else if (userType === 'photographer') {
+          updates.isPhotographer = true;
+        } else {
+          updates.isVendor = false;
+          updates.isPhotographer = false;
+        }
+      }
+
+      if (selectedIndustries || preferences?.selectedIndustries) updates.selectedIndustries = selectedIndustries || preferences?.selectedIndustries;
+      if (industryNiches || preferences?.industryNiches) updates.industryNiches = industryNiches || preferences?.industryNiches;
+      if (industryValues || preferences?.industryValues) updates.industryValues = industryValues || preferences?.industryValues;
+
+      await storage.updateUser(userId, updates);
+      const user = await storage.getUser(userId);
+      if (!user) return res.status(404).json({ success: false, message: "User not found" });
+
+      if (req.session) {
+        req.session.isVendor = user.isVendor;
+        req.session.isPhotographer = user.isPhotographer;
+      }
+
+      const safeUser = sanitizeUserForResponse(user, { includeOwnData: true });
+      res.json({ success: true, message: "Onboarding complete", data: safeUser });
+    } catch (error) {
+      console.error("Onboarding error:", error);
+      res.status(500).json({ success: false, message: "Failed to complete onboarding" });
+    }
+  });
+
   // ==================== MOBILE AUTH (JWT) ====================
 
   // Mobile Google OAuth - Verify Google ID token and return JWT tokens
@@ -850,7 +897,7 @@ export async function registerRoutes(
       const refreshToken = generateRefreshToken(tokenPayload);
 
       // Store refresh token in database
-      await storage.storeRefreshToken(user.id, refreshToken, new Date(Date.now() + 7 * 24 * 60 * 60 * 1000));
+      await storage.storeRefreshToken(user.id, refreshToken, new Date(Date.now() + REFRESH_TOKEN_EXPIRY_MS));
 
       // Return user data and tokens
       const safeUser = sanitizeUserForResponse(user, { includeOwnData: true });
@@ -1120,8 +1167,8 @@ export async function registerRoutes(
       const accessToken = generateAccessToken(tokenPayload);
       const refreshToken = generateRefreshToken(tokenPayload);
 
-      // Store refresh token in database (7 day expiry)
-      await storage.storeRefreshToken(user.id, refreshToken, new Date(Date.now() + 7 * 24 * 60 * 60 * 1000));
+      // Store refresh token in database (30-day expiry)
+      await storage.storeRefreshToken(user.id, refreshToken, new Date(Date.now() + REFRESH_TOKEN_EXPIRY_MS));
 
       // Build success redirect URL with tokens and user data
       const redirectParams = new URLSearchParams({
@@ -1238,7 +1285,7 @@ export async function registerRoutes(
 
       // Revoke old refresh token and store new one
       await storage.revokeRefreshToken(tokenRecord.tokenId);
-      await storage.storeRefreshToken(user.id, newRefreshToken, new Date(Date.now() + 7 * 24 * 60 * 60 * 1000));
+      await storage.storeRefreshToken(user.id, newRefreshToken, new Date(Date.now() + REFRESH_TOKEN_EXPIRY_MS));
 
       res.json({
         success: true,
@@ -1293,7 +1340,7 @@ export async function registerRoutes(
       const newAccessToken = generateAccessToken(tokenPayload);
       const newRefreshToken = generateRefreshToken(tokenPayload);
       await storage.revokeRefreshToken(tokenRecord.tokenId);
-      await storage.storeRefreshToken(user.id, newRefreshToken, new Date(Date.now() + 7 * 24 * 60 * 60 * 1000));
+      await storage.storeRefreshToken(user.id, newRefreshToken, new Date(Date.now() + REFRESH_TOKEN_EXPIRY_MS));
       res.json({ success: true, accessToken: newAccessToken, refreshToken: newRefreshToken, expiresIn: ACCESS_TOKEN_EXPIRY_SECONDS });
     } catch (error) {
       console.error("Token refresh error:", error);
@@ -1360,7 +1407,7 @@ export async function registerRoutes(
       const refreshToken = generateRefreshToken(tokenPayload);
 
       // Store refresh token
-      await storage.storeRefreshToken(user.id, refreshToken, new Date(Date.now() + 7 * 24 * 60 * 60 * 1000));
+      await storage.storeRefreshToken(user.id, refreshToken, new Date(Date.now() + REFRESH_TOKEN_EXPIRY_MS));
 
       // ============================================================
       // CRITICAL: Establish session for ALL user types (consumers, photographers, vendors)
