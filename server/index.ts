@@ -20,38 +20,38 @@ function isOnReplit(): boolean {
 const app = express();
 const httpServer = createServer(app);
 
-// CORS configuration - mobile apps use JWT auth (no cookies needed)
-// Web clients on same origin don't need CORS, mobile apps use Authorization headers
-const allowedOrigins = [
-  // Replit dev/preview domains
-  /\.replit\.dev$/,
-  /\.replit\.app$/,
-  /\.janeway\.replit\.dev$/,
-  // Local development
-  'http://localhost:5000',
-  'http://localhost:3000',
-  'http://localhost:8081', // Expo
-];
+// CORS configuration — locked down in production, permissive in development
+const allowedOrigins: (string | RegExp)[] = [];
+
+if (process.env.NODE_ENV === 'production') {
+  if (process.env.FRONTEND_URL) allowedOrigins.push(process.env.FRONTEND_URL);
+  if (process.env.API_BASE_URL) allowedOrigins.push(process.env.API_BASE_URL);
+} else {
+  // Development origins
+  allowedOrigins.push(
+    /\.replit\.dev$/,
+    /\.replit\.app$/,
+    /\.janeway\.replit\.dev$/,
+    `http://localhost:${process.env.PORT || 5000}`,
+    'http://localhost:3000',
+    'http://localhost:8081', // Expo
+  );
+  if (process.env.EXPO_DEV_URL) allowedOrigins.push(process.env.EXPO_DEV_URL);
+  if (process.env.FRONTEND_URL) allowedOrigins.push(process.env.FRONTEND_URL);
+}
 
 app.use(cors({
   origin: function (origin, callback) {
     // Allow requests with no origin (mobile apps, Postman, curl, server-to-server)
-    // Mobile apps using JWT don't send cookies, so CSRF is not a concern
     if (!origin) return callback(null, true);
-    
-    // Check against allowed origins (strings and regexes)
+
     const isAllowed = allowedOrigins.some(allowed => {
-      if (allowed instanceof RegExp) {
-        return allowed.test(origin);
-      }
+      if (allowed instanceof RegExp) return allowed.test(origin);
       return allowed === origin;
     });
-    
-    if (isAllowed) {
-      return callback(null, true);
-    }
-    
-    // Reject unknown origins
+
+    if (isAllowed) return callback(null, true);
+
     callback(new Error('CORS not allowed'), false);
   },
   credentials: true,
@@ -196,6 +196,22 @@ async function initStripe() {
 }
 
 // =======================
+// Production Environment Validation
+// =======================
+if (process.env.NODE_ENV === 'production') {
+  const required = ['DATABASE_URL', 'STRIPE_SECRET_KEY', 'STRIPE_WEBHOOK_SECRET', 'JWT_SECRET'];
+  const missing = required.filter(key => !process.env[key]);
+  if (missing.length > 0) {
+    console.error(`[FATAL] Missing required environment variables for production: ${missing.join(', ')}`);
+    process.exit(1);
+  }
+  if (!process.env.FRONTEND_URL) {
+    console.error('[FATAL] FRONTEND_URL must be set in production for CORS security');
+    process.exit(1);
+  }
+}
+
+// =======================
 // App Bootstrap
 // =======================
 (async () => {
@@ -256,7 +272,16 @@ async function initStripe() {
 
   app.use((err: any, _req: Request, res: Response, _next: NextFunction) => {
     const status = err.status || err.statusCode || 500;
-    res.status(status).json({ message: err.message || "Internal Server Error" });
+    console.error(`[ERROR] ${err.message || 'Unknown error'}`, err.stack || '');
+    res.status(status).json({
+      success: false,
+      error: {
+        code: 'SERVER_ERROR',
+        message: process.env.NODE_ENV === 'production'
+          ? 'An unexpected error occurred'
+          : (err.message || 'Internal Server Error'),
+      },
+    });
   });
 
   // =======================

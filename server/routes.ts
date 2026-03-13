@@ -1012,9 +1012,9 @@ export async function registerRoutes(
       // Get environment variables
       const clientId = process.env.GOOGLE_OAUTH_CLIENT_ID;
       const clientSecret = process.env.GOOGLE_CLIENT_SECRET;
-      // Use environment variable for redirect URI, fallback to Render URL
-      const redirectUri = process.env.GOOGLE_OAUTH_REDIRECT_URI || 
-        "https://outsyde-backend.onrender.com/api/auth/mobile/google/callback";
+      // Use environment variable for redirect URI, fallback to auto-detect from request
+      const redirectUri = process.env.GOOGLE_OAUTH_REDIRECT_URI ||
+        `${req.protocol}://${req.get('host')}/api/auth/mobile/google/callback`;
 
       if (!clientId || !clientSecret) {
         console.error("Missing Google OAuth configuration");
@@ -3200,7 +3200,7 @@ export async function registerRoutes(
       );
 
       // Create Stripe checkout session with destination charges
-      const baseUrl = `https://${process.env.REPLIT_DOMAINS?.split(',')[0]}`;
+      const baseUrl = process.env.API_BASE_URL || `https://${process.env.REPLIT_DOMAINS?.split(',')[0] || 'localhost:5000'}`;
       const photographerName = photographer.displayName || 'Photographer';
       
       const session = await stripeService.createPhotographerBookingCheckout({
@@ -5994,7 +5994,7 @@ export async function registerRoutes(
 
       const customer = await stripeService.createCustomer(user.email!, userId, user.name!);
 
-      const baseUrl = `https://${process.env.REPLIT_DOMAINS?.split(',')[0]}`;
+      const baseUrl = process.env.API_BASE_URL || `https://${process.env.REPLIT_DOMAINS?.split(',')[0] || 'localhost:5000'}`;
       const session = await stripeService.createTierSubscriptionCheckout(
         customer.id,
         tierId,
@@ -6204,7 +6204,7 @@ export async function registerRoutes(
     }
 
     try {
-      const baseUrl = `https://${process.env.REPLIT_DOMAINS?.split(',')[0]}`;
+      const baseUrl = process.env.API_BASE_URL || `https://${process.env.REPLIT_DOMAINS?.split(',')[0] || 'localhost:5000'}`;
       
       if (req.session?.isVendor) {
         const business = await storage.getBusinessByOwnerId(userId);
@@ -6333,7 +6333,7 @@ export async function registerRoutes(
         return res.status(400).json({ error: "User email required for Stripe onboarding" });
       }
 
-      const baseUrl = `https://${process.env.REPLIT_DOMAINS?.split(',')[0]}`;
+      const baseUrl = process.env.API_BASE_URL || `https://${process.env.REPLIT_DOMAINS?.split(',')[0] || 'localhost:5000'}`;
       
       if (req.session?.isVendor) {
         const business = await storage.getBusinessByOwnerId(userId);
@@ -9835,7 +9835,7 @@ export async function registerRoutes(
 
   // Cart checkout - create single Stripe checkout session for all cart items (supports multi-vendor)
   // For multi-vendor carts, payment is collected once and then split between vendors via transfers
-  app.post("/api/cart/checkout", async (req, res) => {
+  app.post("/api/cart/checkout", authRateLimiter, async (req, res) => {
     const userId = req.session?.userId;
     if (!userId) {
       return res.status(401).json({ error: "Not authenticated" });
@@ -9931,7 +9931,7 @@ export async function registerRoutes(
         await storage.updateUser(userId, { stripeCustomerId: customer.id });
       }
 
-      const baseUrl = `https://${process.env.REPLIT_DOMAINS?.split(',')[0]}`;
+      const baseUrl = process.env.API_BASE_URL || `https://${process.env.REPLIT_DOMAINS?.split(',')[0] || 'localhost:5000'}`;
 
       // Group cart items by vendor
       const itemsByVendor = new Map<string, typeof cartItems>();
@@ -10169,7 +10169,7 @@ export async function registerRoutes(
       }
 
       const business = await storage.getBusiness(nextOrder.businessId);
-      const baseUrl = `https://${process.env.REPLIT_DOMAINS?.split(',')[0]}`;
+      const baseUrl = process.env.API_BASE_URL || `https://${process.env.REPLIT_DOMAINS?.split(',')[0] || 'localhost:5000'}`;
 
       // We need to create a new session for the next order since sessions expire
       // Get products from the order items to rebuild the checkout
