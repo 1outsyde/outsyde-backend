@@ -12536,15 +12536,24 @@ export async function registerRoutes(
   // ==================== FEED POSTS ROUTES ====================
 
   // Get feed posts (public, algorithmic for authenticated users)
+  // Location is optional — if lat/lng are missing, feed falls back to recency + popularity
   app.get("/api/feed", async (req, res) => {
     try {
       const limit = parseInt(req.query.limit as string) || 50;
       const offset = parseInt(req.query.offset as string) || 0;
       const userId = req.session?.userId || getUserIdFromRequest(req);
-      
-      // Use algorithmic feed - works for both authenticated and anonymous users
-      // For authenticated users, personalizes based on preferences and location
-      // For anonymous users, ranks by engagement and recency
+
+      // Parse optional location from query params (client may not have permission)
+      const lat = req.query.lat ? parseFloat(req.query.lat as string) : undefined;
+      const lng = req.query.lng ? parseFloat(req.query.lng as string) : undefined;
+
+      // If client sends lat/lng, temporarily store on user for algorithmic feed to pick up
+      if (userId && lat !== undefined && lng !== undefined && !isNaN(lat) && !isNaN(lng)) {
+        try {
+          await storage.updateUser(userId, { latitude: lat, longitude: lng });
+        } catch (_) { /* non-fatal */ }
+      }
+
       const posts = await storage.getAlgorithmicFeed(userId || null, limit, offset);
       
       // Filter out posts from vendors with inactive subscriptions
@@ -12669,10 +12678,10 @@ export async function registerRoutes(
         });
       }
       
-      res.json({ posts: enrichedPosts });
+      res.json({ success: true, posts: enrichedPosts, data: enrichedPosts });
     } catch (error) {
       console.error("Get feed error:", error);
-      res.status(500).json({ error: "Failed to get feed" });
+      res.status(500).json({ success: false, message: "Failed to get feed", posts: [], data: [] });
     }
   });
 
@@ -13136,9 +13145,10 @@ export async function registerRoutes(
   // =====================================================
 
   // Get Pulse feed - separate from Pro feed, purely discovery-based
+  // Location is optional — Pulse ranking is engagement-based, not location-based
   app.get("/api/pulse/feed", async (req, res) => {
     try {
-      const userId = req.session?.userId; // Optional - used for personalization
+      const userId = req.session?.userId || getUserIdFromRequest(req) || undefined;
       const limit = Math.min(parseInt(req.query.limit as string) || 10, 50);
       const offset = parseInt(req.query.offset as string) || 0;
       const excludeIds = req.query.excludeIds 
@@ -13155,13 +13165,15 @@ export async function registerRoutes(
       });
 
       res.json({
+        success: true,
         posts,
+        data: posts,
         hasMore: posts.length === limit,
         nextOffset: offset + posts.length,
       });
     } catch (error) {
       console.error("Get Pulse feed error:", error);
-      res.status(500).json({ error: "Failed to get Pulse feed" });
+      res.status(500).json({ success: false, message: "Failed to get Pulse feed", posts: [], data: [] });
     }
   });
 
