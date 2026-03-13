@@ -14115,5 +14115,9 @@ export async function registerRoutes(
 
   /* END TEMP / TEST ONLY */
 
+  // ==================== PHASE 3 ROUTES ====================
+  const { registerPhase3Routes } = await import("./phase3Routes");
+  registerPhase3Routes(app, requireAdmin);
+
   return httpServer;
 }

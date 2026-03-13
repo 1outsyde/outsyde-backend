@@ -2700,3 +2700,81 @@ export function toVendorSafeUser(user: User): VendorSafeUser {
     gender: user.gender,
   };
 }
+
+/* =====================================================
+   PHASE 3 — FEED ENGAGEMENT TRACKING
+===================================================== */
+export const feedEngagementEvents = pgTable("feed_engagement_events", {
+  id: varchar("id", { length: 36 }).primaryKey().default(sql`gen_random_uuid()`),
+  userId: varchar("user_id", { length: 36 }).notNull().references(() => users.id),
+  postId: varchar("post_id", { length: 36 }).notNull().references(() => feedPosts.id),
+  eventType: text("event_type").notNull(), // 'audio_unmute' | 'audio_mute' | 'cta_click' | 'share' | 'view'
+  metadata: jsonb("metadata").$type<Record<string, string>>(),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+}, (table) => ({
+  idxEngagementPost: index("idx_feed_engagement_post").on(table.postId, table.eventType),
+  idxEngagementUser: index("idx_feed_engagement_user").on(table.userId, table.postId),
+}));
+
+export const userSavedPosts = pgTable("user_saved_posts", {
+  id: varchar("id", { length: 36 }).primaryKey().default(sql`gen_random_uuid()`),
+  userId: varchar("user_id", { length: 36 }).notNull().references(() => users.id),
+  postId: varchar("post_id", { length: 36 }).notNull().references(() => feedPosts.id),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+}, (table) => ({
+  idxSavedUnique: unique("idx_user_saved_posts_unique").on(table.userId, table.postId),
+}));
+
+/* =====================================================
+   PHASE 3 — SPONSORED POSTS
+===================================================== */
+export const sponsoredPosts = pgTable("sponsored_posts", {
+  id: varchar("id", { length: 36 }).primaryKey().default(sql`gen_random_uuid()`),
+  vendorId: varchar("vendor_id", { length: 36 }).notNull().references(() => users.id),
+  postId: varchar("post_id", { length: 36 }).notNull().references(() => feedPosts.id),
+  budgetCents: integer("budget_cents").notNull(),
+  spentCents: integer("spent_cents").default(0).notNull(),
+  cpm: integer("cpm").notNull(), // cost per 1000 impressions in cents
+  impressions: integer("impressions").default(0).notNull(),
+  clicks: integer("clicks").default(0).notNull(),
+  startDate: timestamp("start_date").notNull(),
+  endDate: timestamp("end_date").notNull(),
+  status: text("status").default("active").notNull(), // 'active' | 'paused' | 'ended'
+  stripePaymentIntentId: text("stripe_payment_intent_id"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+}, (table) => ({
+  idxSponsoredStatus: index("idx_sponsored_status").on(table.status, table.startDate, table.endDate),
+}));
+
+/* =====================================================
+   PHASE 3 — VENDOR ONBOARDING EMAIL SEQUENCE
+===================================================== */
+export const vendorEmailSequence = pgTable("vendor_email_sequence", {
+  id: varchar("id", { length: 36 }).primaryKey().default(sql`gen_random_uuid()`),
+  vendorId: varchar("vendor_id", { length: 36 }).notNull().references(() => users.id),
+  sequenceStep: integer("sequence_step").default(0).notNull(),
+  lastSentAt: timestamp("last_sent_at"),
+  completed: boolean("completed").default(false).notNull(),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+});
+
+/* =====================================================
+   PHASE 3 — CONTENT MODERATION QUEUE
+===================================================== */
+export const moderationQueue = pgTable("moderation_queue", {
+  id: varchar("id", { length: 36 }).primaryKey().default(sql`gen_random_uuid()`),
+  reporterId: varchar("reporter_id", { length: 36 }).notNull().references(() => users.id),
+  targetId: varchar("target_id", { length: 36 }).notNull(),
+  targetType: text("target_type").notNull(), // 'post' | 'user'
+  reason: text("reason").notNull(),
+  status: text("status").default("pending").notNull(), // 'pending' | 'reviewed' | 'actioned'
+  adminAction: text("admin_action"), // 'remove' | 'warn' | 'ban' | 'dismiss'
+  adminNotes: text("admin_notes"),
+  reviewedBy: varchar("reviewed_by", { length: 36 }),
+  reviewedAt: timestamp("reviewed_at"),
+  flagCount: integer("flag_count").default(1).notNull(),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+}, (table) => ({
+  idxModerationStatus: index("idx_moderation_status").on(table.status, table.flagCount),
+}));
