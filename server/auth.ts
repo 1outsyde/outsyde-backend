@@ -11,8 +11,9 @@ const JWT_SECRET: string = (() => {
 })();
 const JWT_REFRESH_SECRET = process.env.JWT_REFRESH_SECRET || JWT_SECRET + "-refresh";
 
-const ACCESS_TOKEN_EXPIRY = "1h";
+const ACCESS_TOKEN_EXPIRY = "15m";
 const REFRESH_TOKEN_EXPIRY = "7d";
+export const ACCESS_TOKEN_EXPIRY_SECONDS = 900; // 15 minutes
 
 export interface TokenPayload {
   userId: string;

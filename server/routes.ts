@@ -58,9 +58,11 @@ import {
   authMiddleware,
   optionalAuthMiddleware,
   getUserIdFromRequest,
+  ACCESS_TOKEN_EXPIRY_SECONDS,
   type AuthenticatedRequest,
   type TokenPayload,
 } from "./auth";
+import rateLimit from "express-rate-limit";
 import { stripeService } from "./stripe/stripeService";
 import { getStripePublishableKey, getUncachableStripeClient } from "./stripe/stripeClient";
 import { ObjectStorageService, ObjectNotFoundError } from "./objectStorage";
@@ -317,8 +319,24 @@ export async function registerRoutes(
 
   // ==================== AUTH ROUTES ====================
 
+  const authRateLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000, // 15 minutes
+    max: 20,
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: { success: false, message: "Too many requests, please try again later" },
+  });
+
+  const strictAuthRateLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000,
+    max: 5,
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: { success: false, message: "Too many attempts, please try again later" },
+  });
+
   // Customer signup
-  app.post("/api/auth/customer/signup", async (req, res) => {
+  app.post("/api/auth/customer/signup", authRateLimiter, async (req, res) => {
     try {
       const data = customerSignupSchema.parse(req.body);
 
@@ -368,7 +386,7 @@ export async function registerRoutes(
   });
 
   // Vendor signup
-  app.post("/api/auth/vendor/signup", async (req, res) => {
+  app.post("/api/auth/vendor/signup", authRateLimiter, async (req, res) => {
     try {
       const data = vendorSignupSchema.parse(req.body);
 
@@ -447,7 +465,7 @@ export async function registerRoutes(
   });
 
   // Photographer signup
-  app.post("/api/auth/photographer/signup", async (req, res) => {
+  app.post("/api/auth/photographer/signup", authRateLimiter, async (req, res) => {
     try {
       const data = photographerSignupSchema.parse(req.body);
       const skipStripe = req.body.skipStripe === true;
@@ -558,7 +576,7 @@ export async function registerRoutes(
   });
 
   // Login (supports both legacy base64 and new bcrypt passwords)
-  app.post("/api/auth/login", async (req, res) => {
+  app.post("/api/auth/login", strictAuthRateLimiter, async (req, res) => {
     try {
       const data = loginSchema.parse(req.body);
 
@@ -642,11 +660,63 @@ export async function registerRoutes(
     }
   });
 
+  // Complete onboarding — persist user type selection
+  app.post("/api/auth/onboarding/complete", optionalAuthMiddleware, async (req, res) => {
+    const authReq = req as AuthenticatedRequest;
+    const userId = authReq.user?.userId || req.session?.userId;
+    if (!userId) {
+      return res.status(401).json({ success: false, message: "Authentication required" });
+    }
+
+    try {
+      const { userType, selectedIndustries, industryNiches, industryValues } = req.body;
+
+      if (!userType || !['shopper', 'vendor', 'photographer', 'consumer'].includes(userType)) {
+        return res.status(400).json({ success: false, message: "Valid userType is required (shopper, vendor, photographer, consumer)" });
+      }
+
+      const updates: Record<string, any> = {};
+
+      if (userType === 'vendor') {
+        updates.isVendor = true;
+        updates.wantsToSellProducts = true;
+      } else if (userType === 'photographer') {
+        updates.isPhotographer = true;
+      } else {
+        // shopper / consumer
+        updates.isVendor = false;
+        updates.isPhotographer = false;
+      }
+
+      if (selectedIndustries) updates.selectedIndustries = selectedIndustries;
+      if (industryNiches) updates.industryNiches = industryNiches;
+      if (industryValues) updates.industryValues = industryValues;
+
+      await storage.updateUser(userId, updates);
+      const user = await storage.getUser(userId);
+      if (!user) {
+        return res.status(404).json({ success: false, message: "User not found" });
+      }
+
+      // Update session
+      if (req.session) {
+        req.session.isVendor = user.isVendor;
+        req.session.isPhotographer = user.isPhotographer;
+      }
+
+      const safeUser = sanitizeUserForResponse(user, { includeOwnData: true });
+      res.json({ success: true, user: safeUser });
+    } catch (error) {
+      console.error("Onboarding complete error:", error);
+      res.status(500).json({ success: false, message: "Failed to complete onboarding" });
+    }
+  });
+
   // ==================== MOBILE AUTH (JWT) ====================
 
   // Mobile Google OAuth - Verify Google ID token and return JWT tokens
   // Used by Expo app via expo-auth-session
-  app.post("/api/auth/mobile/google", async (req, res) => {
+  app.post("/api/auth/mobile/google", authRateLimiter, async (req, res) => {
     try {
       const { idToken, clientId } = req.body;
 
@@ -790,7 +860,7 @@ export async function registerRoutes(
         user: safeUser,
         accessToken,
         refreshToken,
-        expiresIn: 3600, // 1 hour in seconds
+        expiresIn: ACCESS_TOKEN_EXPIRY_SECONDS,
       });
 
     } catch (error) {
@@ -816,9 +886,9 @@ export async function registerRoutes(
 
   // Mobile Google OAuth Preflight - Generate and store OAuth state
   // Called before initiating Google OAuth from the mobile app
-  app.post("/api/auth/mobile/google/preflight", async (req, res) => {
+  app.post("/api/auth/mobile/google/preflight", authRateLimiter, async (req, res) => {
     try {
-      const { deviceId } = req.body; // Optional device identifier for additional security
+      const { deviceId, redirectUri: clientRedirectUri } = req.body;
       
       // Generate a random state token
       const state = randomUUID();
@@ -827,23 +897,25 @@ export async function registerRoutes(
       // Store the state in database
       await storage.createOAuthState(state, expiresAt, deviceId);
       
-      // Get OAuth configuration
+      // Get OAuth configuration — redirect URI must match exactly what's registered in Google Cloud Console
       const clientId = process.env.GOOGLE_OAUTH_CLIENT_ID;
-      const redirectUri = process.env.GOOGLE_OAUTH_REDIRECT_URI || 
-        "https://outsyde-backend.onrender.com/api/auth/mobile/google/callback";
+      const redirectUri = clientRedirectUri
+        || process.env.GOOGLE_OAUTH_REDIRECT_URI
+        || `${req.protocol}://${req.get('host')}/api/auth/mobile/google/callback`;
 
       if (!clientId) {
         return res.status(500).json({
           success: false,
-          error: { code: "MISSING_CONFIG", message: "OAuth client ID not configured" }
+          message: "OAuth client ID not configured"
         });
       }
 
       res.json({
         success: true,
         state,
-        authUrl: `https://accounts.google.com/o/oauth2/v2/auth?client_id=${encodeURIComponent(clientId)}&redirect_uri=${encodeURIComponent(redirectUri)}&response_type=code&scope=openid%20email%20profile&state=${encodeURIComponent(state)}`,
-        expiresIn: OAUTH_STATE_TTL / 1000, // seconds
+        redirectUri,
+        authUrl: `https://accounts.google.com/o/oauth2/v2/auth?client_id=${encodeURIComponent(clientId)}&redirect_uri=${encodeURIComponent(redirectUri)}&response_type=code&scope=openid%20email%20profile&state=${encodeURIComponent(state)}&access_type=offline&prompt=consent`,
+        expiresIn: OAUTH_STATE_TTL / 1000,
       });
 
     } catch (error) {
@@ -1101,7 +1173,7 @@ export async function registerRoutes(
   });
 
   // Mobile token refresh endpoint
-  app.post("/api/auth/mobile/refresh", async (req, res) => {
+  app.post("/api/auth/mobile/refresh", authRateLimiter, async (req, res) => {
     try {
       const { refreshToken } = req.body;
 
@@ -1172,7 +1244,7 @@ export async function registerRoutes(
         success: true,
         accessToken: newAccessToken,
         refreshToken: newRefreshToken,
-        expiresIn: 3600,
+        expiresIn: ACCESS_TOKEN_EXPIRY_SECONDS,
       });
 
     } catch (error) {
@@ -1184,8 +1256,53 @@ export async function registerRoutes(
     }
   });
 
+  // Alias for /api/auth/mobile/refresh — used by frontend/mobile clients
+  // Uses the same refresh token rotation logic
+  app.post("/api/auth/refresh", authRateLimiter, async (req, res) => {
+    try {
+      const { refreshToken } = req.body;
+      if (!refreshToken || typeof refreshToken !== 'string') {
+        return res.status(400).json({ success: false, message: "refreshToken is required" });
+      }
+      const payload = verifyRefreshToken(refreshToken);
+      if (!payload) {
+        return res.status(401).json({ success: false, message: "Invalid or expired refresh token" });
+      }
+      const tokenRecord = await storage.validateRefreshToken(refreshToken);
+      if (!tokenRecord) {
+        return res.status(401).json({ success: false, message: "Refresh token has been revoked" });
+      }
+      const user = await storage.getUser(payload.userId);
+      if (!user) {
+        return res.status(401).json({ success: false, message: "User not found" });
+      }
+      const tokenPayload: TokenPayload = {
+        userId: user.id,
+        isVendor: user.isVendor || false,
+        isPhotographer: user.isPhotographer || false,
+        isAdmin: user.isAdmin || false,
+      };
+      if (user.isVendor) {
+        const business = await storage.getBusinessByOwnerId(user.id);
+        if (business) tokenPayload.businessId = business.id;
+      }
+      if (user.isPhotographer) {
+        const photographer = await storage.getPhotographerByUserId(user.id);
+        if (photographer) tokenPayload.photographerId = photographer.id;
+      }
+      const newAccessToken = generateAccessToken(tokenPayload);
+      const newRefreshToken = generateRefreshToken(tokenPayload);
+      await storage.revokeRefreshToken(tokenRecord.tokenId);
+      await storage.storeRefreshToken(user.id, newRefreshToken, new Date(Date.now() + 7 * 24 * 60 * 60 * 1000));
+      res.json({ success: true, accessToken: newAccessToken, refreshToken: newRefreshToken, expiresIn: ACCESS_TOKEN_EXPIRY_SECONDS });
+    } catch (error) {
+      console.error("Token refresh error:", error);
+      res.status(500).json({ success: false, message: "Token refresh failed" });
+    }
+  });
+
   // Mobile login with email/password - returns JWT tokens
-  app.post("/api/auth/mobile/login", async (req, res) => {
+  app.post("/api/auth/mobile/login", strictAuthRateLimiter, async (req, res) => {
     try {
       const data = loginSchema.parse(req.body);
 
@@ -1282,7 +1399,7 @@ export async function registerRoutes(
         user: safeUser,
         accessToken,
         refreshToken,
-        expiresIn: 3600,
+        expiresIn: ACCESS_TOKEN_EXPIRY_SECONDS,
       });
 
     } catch (error) {
@@ -1461,6 +1578,121 @@ export async function registerRoutes(
         error: "Failed to verify session",
         code: "SERVER_ERROR"
       });
+    }
+  });
+
+  // ==================== PASSWORD RESET ====================
+
+  app.post("/api/auth/forgot-password", strictAuthRateLimiter, async (req, res) => {
+    try {
+      const { email } = req.body;
+      if (!email || typeof email !== 'string') {
+        return res.status(400).json({ success: false, message: "Email is required" });
+      }
+
+      const user = await storage.getUserByEmail(email.toLowerCase().trim());
+
+      // Always return success to prevent email enumeration
+      if (!user) {
+        return res.json({ success: true, message: "If an account with that email exists, a reset link has been sent" });
+      }
+
+      // Generate reset token
+      const { randomBytes, createHash } = await import('crypto');
+      const rawToken = randomBytes(32).toString('hex');
+      const tokenHash = createHash('sha256').update(rawToken).digest('hex');
+      const expiresAt = new Date(Date.now() + 60 * 60 * 1000); // 1 hour
+
+      await storage.updateUser(user.id, {
+        resetTokenHash: tokenHash,
+        resetTokenExpiresAt: expiresAt,
+      });
+
+      // Build reset deep link for mobile app
+      const resetLink = `outsyde://reset-password?token=${rawToken}&email=${encodeURIComponent(email)}`;
+      const webResetLink = `${req.protocol}://${req.get('host')}/reset-password?token=${rawToken}&email=${encodeURIComponent(email)}`;
+
+      // Send email via Resend if configured
+      try {
+        const { Resend } = await import('resend');
+        const resendApiKey = process.env.RESEND_API_KEY;
+        if (resendApiKey) {
+          const resend = new Resend(resendApiKey);
+          await resend.emails.send({
+            from: process.env.RESEND_FROM_EMAIL || 'noreply@outsyde.com',
+            to: email,
+            subject: 'Reset your Outsyde password',
+            html: `
+              <h2>Password Reset</h2>
+              <p>You requested a password reset for your Outsyde account.</p>
+              <p><a href="${webResetLink}" style="background: #f59e0b; color: white; padding: 12px 24px; text-decoration: none; border-radius: 8px; display: inline-block;">Reset Password</a></p>
+              <p>Or open this link on your phone: <a href="${resetLink}">${resetLink}</a></p>
+              <p>This link expires in 1 hour.</p>
+              <p>If you didn't request this, ignore this email.</p>
+            `,
+          });
+          console.log(`[Auth] Password reset email sent to ${email}`);
+        } else {
+          console.log(`[Auth] RESEND_API_KEY not configured. Reset token for ${email}: ${rawToken}`);
+        }
+      } catch (emailError) {
+        console.error("Failed to send reset email:", emailError);
+      }
+
+      res.json({ success: true, message: "If an account with that email exists, a reset link has been sent" });
+    } catch (error) {
+      console.error("Forgot password error:", error);
+      res.status(500).json({ success: false, message: "Failed to process password reset request" });
+    }
+  });
+
+  app.post("/api/auth/reset-password", strictAuthRateLimiter, async (req, res) => {
+    try {
+      const { token, email, newPassword } = req.body;
+
+      if (!token || !email || !newPassword) {
+        return res.status(400).json({ success: false, message: "Token, email, and newPassword are required" });
+      }
+
+      if (typeof newPassword !== 'string' || newPassword.length < 6) {
+        return res.status(400).json({ success: false, message: "Password must be at least 6 characters" });
+      }
+
+      const user = await storage.getUserByEmail(email.toLowerCase().trim());
+      if (!user) {
+        return res.status(400).json({ success: false, message: "Invalid or expired reset token" });
+      }
+
+      // Verify token hash
+      const { createHash } = await import('crypto');
+      const tokenHash = createHash('sha256').update(token).digest('hex');
+
+      if (!user.resetTokenHash || user.resetTokenHash !== tokenHash) {
+        return res.status(400).json({ success: false, message: "Invalid or expired reset token" });
+      }
+
+      // Check expiry
+      const expiresAt = user.resetTokenExpiresAt ? new Date(user.resetTokenExpiresAt) : null;
+      if (!expiresAt || expiresAt < new Date()) {
+        return res.status(400).json({ success: false, message: "Invalid or expired reset token" });
+      }
+
+      // Hash new password and clear reset token
+      const hashedPassword = await hashPassword(newPassword);
+      await storage.updateUser(user.id, {
+        password: hashedPassword,
+        resetTokenHash: null,
+        resetTokenExpiresAt: null,
+      });
+
+      // Revoke all existing refresh tokens for security
+      await storage.revokeAllUserRefreshTokens(user.id);
+
+      console.log(`[Auth] Password reset completed for ${email}`);
+      res.json({ success: true, message: "Password has been reset successfully" });
+    } catch (error) {
+      console.error("Reset password error:", error);
+      res.status(500).json({ success: false, message: "Failed to reset password" });
     }
   });
 

@@ -212,6 +212,10 @@ export const users = pgTable("users", {
   usernameLastChangedAt: timestamp("username_last_changed_at"),
   displayNameLastChangedAt: timestamp("display_name_last_changed_at"),
 
+  // Password reset
+  resetTokenHash: text("reset_token_hash"),
+  resetTokenExpiresAt: timestamp("reset_token_expires_at"),
+
   createdAt: timestamp("created_at").defaultNow().notNull(),
 });
 
