@@ -1310,8 +1310,8 @@ export interface HoldResult {
 
 export async function createBookingHold(params: CreateHoldParams): Promise<HoldResult> {
   const holdDuration = params.holdDurationMinutes || DEFAULT_HOLD_DURATION_MINUTES;
-  
-  // Validate slot first
+
+  // Validate slot first (lightweight check before locking)
   const validation = await validateBookingSlot(
     params.providerType,
     params.providerId,
@@ -1320,50 +1320,106 @@ export async function createBookingHold(params: CreateHoldParams): Promise<HoldR
     params.startTime,
     params.staffMemberId
   );
-  
+
   if (!validation.valid) {
     throw new AvailabilityError(
       validation.errorCode || AVAILABILITY_ERRORS.SLOT_UNAVAILABLE,
       validation.errorMessage || 'Slot not available'
     );
   }
-  
+
   const endTime = calculateEndTime(params.startTime, validation.serviceDurationMinutes!);
   const expiresAt = new Date(Date.now() + holdDuration * 60 * 1000);
-  
-  // Create timestamps for overlap indexing
   const startAt = parseDateWithTime(params.date, params.startTime);
   const endAt = parseDateWithTime(params.date, endTime);
-  
-  // Insert hold
-  const [hold] = await db.insert(bookingHolds).values({
-    providerType: params.providerType,
-    providerId: params.providerId,
-    staffMemberId: params.staffMemberId,
-    userId: params.userId,
-    serviceId: params.serviceId,
-    serviceName: validation.serviceName!,
-    servicePriceCents: validation.servicePriceCents!,
-    durationMinutes: validation.serviceDurationMinutes!,
-    holdDate: params.date,
-    startTime: params.startTime,
-    endTime,
-    startAt,
-    endAt,
-    expiresAt,
-  }).returning();
-  
-  console.log(`[BookingHold] Created hold ${hold.id} for user ${params.userId}, expires at ${expiresAt.toISOString()}`);
-  
-  return {
-    holdId: hold.id,
-    expiresAt,
-    serviceName: validation.serviceName!,
-    servicePriceCents: validation.servicePriceCents!,
-    durationMinutes: validation.serviceDurationMinutes!,
-    startTime: params.startTime,
-    endTime,
-  };
+
+  // Use a serializable transaction with SELECT FOR UPDATE to prevent race conditions.
+  // Two concurrent requests for the same slot: the second will block on the row lock
+  // until the first commits, then see the hold and fail gracefully.
+  try {
+    const result = await db.transaction(async (tx) => {
+      // Lock any existing active holds for this provider+date range to prevent races
+      const conflictingHolds = await tx.select()
+        .from(bookingHolds)
+        .where(and(
+          eq(bookingHolds.providerType, params.providerType),
+          eq(bookingHolds.providerId, params.providerId),
+          eq(bookingHolds.holdDate, params.date),
+          eq(bookingHolds.status, 'active'),
+          gte(bookingHolds.expiresAt, new Date()),
+          params.staffMemberId ? eq(bookingHolds.staffMemberId, params.staffMemberId) : sql`1=1`
+        ))
+        .for('update');
+
+      // Re-check for overlap within the locked set
+      const hasConflict = conflictingHolds.some(h =>
+        doTimesOverlap(params.startTime, endTime, h.startTime, h.endTime)
+      );
+
+      if (hasConflict) {
+        throw new AvailabilityError(
+          AVAILABILITY_ERRORS.SLOT_UNAVAILABLE,
+          'This slot was just booked. Please choose another time.'
+        );
+      }
+
+      // Also re-check confirmed bookings within the transaction
+      const bookings = await getConfirmedBookingsForDate(
+        params.providerType, params.providerId, params.date, params.staffMemberId
+      );
+      const bookingConflict = bookings.find(b =>
+        doTimesOverlap(params.startTime, endTime, b.startTime, b.endTime)
+      );
+      if (bookingConflict) {
+        throw new AvailabilityError(
+          AVAILABILITY_ERRORS.SLOT_UNAVAILABLE,
+          'Slot is already booked'
+        );
+      }
+
+      // Insert hold within the transaction
+      const [hold] = await tx.insert(bookingHolds).values({
+        providerType: params.providerType,
+        providerId: params.providerId,
+        staffMemberId: params.staffMemberId,
+        userId: params.userId,
+        serviceId: params.serviceId,
+        serviceName: validation.serviceName!,
+        servicePriceCents: validation.servicePriceCents!,
+        durationMinutes: validation.serviceDurationMinutes!,
+        holdDate: params.date,
+        startTime: params.startTime,
+        endTime,
+        startAt,
+        endAt,
+        expiresAt,
+      }).returning();
+
+      return hold;
+    });
+
+    console.log(`[BookingHold] Created hold ${result.id} for user ${params.userId}, expires at ${expiresAt.toISOString()}`);
+
+    return {
+      holdId: result.id,
+      expiresAt,
+      serviceName: validation.serviceName!,
+      servicePriceCents: validation.servicePriceCents!,
+      durationMinutes: validation.serviceDurationMinutes!,
+      startTime: params.startTime,
+      endTime,
+    };
+  } catch (err) {
+    if (err instanceof AvailabilityError) throw err;
+    // PostgreSQL unique violation (duplicate slot) is a second layer of protection
+    if ((err as any)?.code === '23505') {
+      throw new AvailabilityError(
+        AVAILABILITY_ERRORS.SLOT_UNAVAILABLE,
+        'This slot was just booked. Please choose another time.'
+      );
+    }
+    throw err;
+  }
 }
 
 // ============================================

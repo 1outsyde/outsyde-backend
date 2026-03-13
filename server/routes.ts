@@ -9643,6 +9643,28 @@ export async function registerRoutes(
     }
   });
 
+  // Register Expo push token for mobile notifications
+  app.post("/api/push/expo-token", optionalAuthMiddleware, async (req, res) => {
+    const authReq = req as AuthenticatedRequest;
+    const userId = authReq.user?.userId || req.session?.userId;
+    if (!userId) {
+      return res.status(401).json({ success: false, message: "Authentication required" });
+    }
+
+    try {
+      const { expoPushToken } = req.body;
+      if (!expoPushToken || typeof expoPushToken !== 'string') {
+        return res.status(400).json({ success: false, message: "expoPushToken is required" });
+      }
+
+      await storage.updateUser(userId, { expoPushToken });
+      res.json({ success: true, message: "Push token registered" });
+    } catch (error) {
+      console.error("Register Expo token error:", error);
+      res.status(500).json({ success: false, message: "Failed to register push token" });
+    }
+  });
+
   // ==================== CART MANAGEMENT ====================
 
   app.get("/api/cart", async (req, res) => {

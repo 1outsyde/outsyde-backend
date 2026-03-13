@@ -62,6 +62,7 @@
     "drizzle-orm": "^0.39.1",
     "drizzle-zod": "^0.7.0",
     "embla-carousel-react": "^8.6.0",
+    "expo-server-sdk": "^6.1.0",
     "express": "^4.21.2",
     "express-rate-limit": "^8.3.1",
     "express-session": "^1.18.1",
