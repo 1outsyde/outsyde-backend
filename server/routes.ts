@@ -91,6 +91,19 @@ import {
   getDraftExpiryTime
 } from "./bookingStateMachine";
 import { calculateProductFee, calculateBookingFee } from "./fees";
+import {
+  trackLinkClick,
+  recordAttribution,
+  trackAttributedSignup,
+  trackAttributedPurchase,
+  getInfluencerLeaderboard,
+  getInfluencerDashboardData,
+  getInfluencerStatsById,
+  clearTierChangeFlag,
+  generateReferralLink,
+  generateDeepLink,
+  seedInfluencerTiersAndConfig,
+} from "./influencerTrackingService";
 import { 
   appointments, 
   shootBookings,
@@ -138,6 +151,13 @@ function legacyVerifyPassword(password: string, hash: string): boolean {
 // Check if password is legacy (base64) or new (bcrypt)
 function isLegacyHash(hash: string): boolean {
   return !hash.startsWith("$2");
+}
+
+function detectDeviceFromRequest(req: any): string {
+  const ua = (req.headers['user-agent'] || '').toLowerCase();
+  if (/tablet|ipad/.test(ua)) return 'tablet';
+  if (/mobile|iphone|android/.test(ua)) return 'mobile';
+  return 'desktop';
 }
 
 export async function registerRoutes(
@@ -11211,6 +11231,278 @@ export async function registerRoutes(
     } catch (error) {
       console.error("Initiate influencer payout error:", error);
       res.status(500).json({ error: "Failed to initiate payout" });
+    }
+  });
+
+  // ==================== INFLUENCER TRACKING ROUTES ====================
+
+  // Referral link redirect — tracks click + sets attribution cookie
+  app.get("/ref/:refCode", async (req, res) => {
+    try {
+      const { refCode } = req.params;
+      const { utm_source, utm_medium, utm_campaign, product, service, business } = req.query;
+
+      await trackLinkClick(refCode, {
+        userAgent: req.headers['user-agent'],
+        ipAddress: req.ip,
+        utmSource: utm_source as string,
+        utmMedium: utm_medium as string,
+        utmCampaign: utm_campaign as string,
+      });
+
+      // Build redirect URL — preserve ref code for attribution on signup
+      const redirectUrl = new URL('/', `${req.protocol}://${req.get('host')}`);
+      redirectUrl.searchParams.set('ref', refCode);
+      if (product) redirectUrl.searchParams.set('product', product as string);
+      if (service) redirectUrl.searchParams.set('service', service as string);
+      if (business) redirectUrl.searchParams.set('business', business as string);
+
+      // Set attribution cookie (30-day window, first-click only)
+      res.cookie('outsyde_ref', refCode, {
+        maxAge: 30 * 24 * 60 * 60 * 1000,
+        httpOnly: true,
+        sameSite: 'lax',
+      });
+
+      res.redirect(302, redirectUrl.toString());
+    } catch (error) {
+      console.error("Referral redirect error:", error);
+      res.redirect('/');
+    }
+  });
+
+  // Record attribution (called by client after signup with ref param/cookie)
+  app.post("/api/influencer-tracking/attribute", optionalAuthMiddleware, async (req, res) => {
+    const authReq = req as AuthenticatedRequest;
+    try {
+      const userId = authReq.user?.userId || req.session?.userId;
+      if (!userId) {
+        return res.status(401).json({ error: "Authentication required" });
+      }
+
+      const { refCode, utm_source, utm_medium, utm_campaign } = req.body;
+      if (!refCode) {
+        return res.status(400).json({ error: "refCode is required" });
+      }
+
+      const attribution = await recordAttribution(userId, refCode, {
+        utm_source, utm_medium, utm_campaign,
+      });
+
+      if (attribution) {
+        await trackAttributedSignup(userId);
+      }
+
+      res.json({ success: true, attributed: !!attribution });
+    } catch (error) {
+      console.error("Attribution error:", error);
+      res.status(500).json({ error: "Failed to record attribution" });
+    }
+  });
+
+  // Track app download event (called by mobile client on first launch with ref)
+  app.post("/api/influencer-tracking/download", async (req, res) => {
+    try {
+      const { refCode, deviceType, platform } = req.body;
+      if (!refCode) {
+        return res.status(400).json({ error: "refCode is required" });
+      }
+
+      const profile = await storage.getInfluencerProfileByPromoCode(refCode);
+      if (!profile) {
+        return res.status(404).json({ error: "Invalid referral code" });
+      }
+
+      const { trackEvent } = await import("./influencerTrackingService");
+      await trackEvent({
+        influencerId: profile.id,
+        eventType: 'app_download',
+        refCode,
+        deviceType: deviceType || detectDeviceFromRequest(req),
+        platform: platform || 'unknown',
+        userAgent: req.headers['user-agent'],
+        ipAddress: req.ip,
+      });
+
+      res.json({ success: true });
+    } catch (error) {
+      console.error("Download tracking error:", error);
+      res.status(500).json({ error: "Failed to track download" });
+    }
+  });
+
+  // Influencer: Get own tracking dashboard
+  app.get("/api/influencer/tracking", async (req, res) => {
+    const userId = req.session?.userId;
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    try {
+      const profile = await storage.getInfluencerProfileByUserId(userId);
+      if (!profile) {
+        return res.status(403).json({ error: "Not an influencer" });
+      }
+
+      const dashboard = await getInfluencerDashboardData(profile.id);
+
+      res.json({
+        referralLink: dashboard.referralLink,
+        deepLink: generateDeepLink(profile.promoCode || profile.id),
+        stats: dashboard.stats ? {
+          totalClicks: dashboard.stats.totalClicks,
+          totalDownloads: dashboard.stats.totalDownloads,
+          totalSignups: dashboard.stats.totalSignups,
+          totalPurchases: dashboard.stats.totalPurchases,
+          totalRevenueCents: dashboard.stats.totalRevenueCents,
+          totalPoints: dashboard.stats.totalPoints,
+          conversionRate: dashboard.stats.conversionRate,
+          rollingAvgConversionRate: dashboard.stats.rollingAvgConversionRate,
+          totalCommissionEarnedCents: dashboard.stats.totalCommissionEarnedCents,
+          pendingCommissionCents: dashboard.stats.pendingCommissionCents,
+        } : null,
+        tier: dashboard.tier ? {
+          name: dashboard.tier.name,
+          displayName: dashboard.tier.displayName,
+          commissionPercent: dashboard.tier.commissionBps / 100,
+        } : null,
+        nextTier: dashboard.nextTier ? {
+          name: dashboard.nextTier.name,
+          displayName: dashboard.nextTier.displayName,
+          minConversionRate: dashboard.nextTier.minConversionRate,
+          conversionNeeded: dashboard.conversionNeededForNextTier,
+        } : null,
+      });
+    } catch (error) {
+      console.error("Influencer tracking dashboard error:", error);
+      res.status(500).json({ error: "Failed to get tracking data" });
+    }
+  });
+
+  // Influencer: Generate custom referral link with UTM params
+  app.post("/api/influencer/tracking/link", async (req, res) => {
+    const userId = req.session?.userId;
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    try {
+      const profile = await storage.getInfluencerProfileByUserId(userId);
+      if (!profile) {
+        return res.status(403).json({ error: "Not an influencer" });
+      }
+
+      const { utm_source, utm_medium, utm_campaign, productId, serviceId } = req.body;
+      const refCode = profile.promoCode || profile.id;
+      const origin = `${req.protocol}://${req.get('host')}`;
+
+      const referralLink = generateReferralLink(refCode, origin, {
+        utm_source, utm_medium, utm_campaign, productId, serviceId,
+      });
+
+      const deepLink = generateDeepLink(refCode, { productId, serviceId }, {
+        utm_source, utm_medium, utm_campaign,
+      });
+
+      res.json({ referralLink, deepLink, refCode });
+    } catch (error) {
+      console.error("Generate referral link error:", error);
+      res.status(500).json({ error: "Failed to generate link" });
+    }
+  });
+
+  // Admin: Get influencer leaderboard with tracking stats
+  app.get("/api/admin/influencer-tracking", requireAdmin, async (req, res) => {
+    try {
+      const { tierId, startDate, endDate, utmSource, tierChangeOnly, limit, offset } = req.query;
+
+      const result = await getInfluencerLeaderboard({
+        tierId: tierId as string,
+        startDate: startDate ? new Date(startDate as string) : undefined,
+        endDate: endDate ? new Date(endDate as string) : undefined,
+        utmSource: utmSource as string,
+        tierChangeOnly: tierChangeOnly === 'true',
+        limit: limit ? parseInt(limit as string) : 50,
+        offset: offset ? parseInt(offset as string) : 0,
+      });
+
+      res.json(result);
+    } catch (error) {
+      console.error("Admin influencer tracking error:", error);
+      res.status(500).json({ error: "Failed to get influencer tracking data" });
+    }
+  });
+
+  // Admin: Acknowledge tier change flag
+  app.post("/api/admin/influencer-tracking/:influencerId/acknowledge-tier-change", requireAdmin, async (req, res) => {
+    try {
+      const { influencerId } = req.params;
+      await clearTierChangeFlag(influencerId);
+      res.json({ success: true });
+    } catch (error) {
+      console.error("Acknowledge tier change error:", error);
+      res.status(500).json({ error: "Failed to acknowledge tier change" });
+    }
+  });
+
+  // Admin: Get all tiers (configurable)
+  app.get("/api/admin/influencer-tiers", requireAdmin, async (req, res) => {
+    try {
+      const { influencerTiers: tiersTable } = await import("@shared/schema");
+      const tiers = await db.select().from(tiersTable).orderBy(tiersTable.sortOrder);
+      res.json({ tiers });
+    } catch (error) {
+      console.error("Get tiers error:", error);
+      res.status(500).json({ error: "Failed to get tiers" });
+    }
+  });
+
+  // Admin: Update tier commission/points (configurable without code changes)
+  app.patch("/api/admin/influencer-tiers/:tierId", requireAdmin, async (req, res) => {
+    try {
+      const { tierId } = req.params;
+      const { commissionBps, pointMultiplier, displayName } = req.body;
+      const { influencerTiers: tiersTable } = await import("@shared/schema");
+
+      const updates: any = { };
+      if (commissionBps !== undefined) updates.commissionBps = commissionBps;
+      if (pointMultiplier !== undefined) updates.pointMultiplier = pointMultiplier;
+      if (displayName !== undefined) updates.displayName = displayName;
+
+      const [updated] = await db.update(tiersTable).set(updates).where(eq(tiersTable.id, tierId)).returning();
+      res.json({ success: true, tier: updated });
+    } catch (error) {
+      console.error("Update tier error:", error);
+      res.status(500).json({ error: "Failed to update tier" });
+    }
+  });
+
+  // Admin: Get/update point config
+  app.get("/api/admin/influencer-point-config", requireAdmin, async (req, res) => {
+    try {
+      const { influencerPointConfig: configTable } = await import("@shared/schema");
+      const config = await db.select().from(configTable);
+      res.json({ config });
+    } catch (error) {
+      console.error("Get point config error:", error);
+      res.status(500).json({ error: "Failed to get point config" });
+    }
+  });
+
+  app.patch("/api/admin/influencer-point-config/:eventType", requireAdmin, async (req, res) => {
+    try {
+      const { eventType } = req.params;
+      const { pointsAwarded } = req.body;
+      const { influencerPointConfig: configTable } = await import("@shared/schema");
+
+      const [updated] = await db.update(configTable)
+        .set({ pointsAwarded, updatedAt: new Date() })
+        .where(eq(configTable.eventType, eventType))
+        .returning();
+      res.json({ success: true, config: updated });
+    } catch (error) {
+      console.error("Update point config error:", error);
+      res.status(500).json({ error: "Failed to update point config" });
     }
   });
 

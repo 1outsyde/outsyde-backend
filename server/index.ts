@@ -201,6 +201,11 @@ async function initStripe() {
 (async () => {
   await storage.seedInitialData();
   await storage.cleanupExpiredTokens();
+
+  // Seed influencer tiers and point config if not already present
+  const { seedInfluencerTiersAndConfig } = await import("./influencerTrackingService");
+  await seedInfluencerTiersAndConfig();
+
   await initStripe();
 
   // Conditionally setup auth based on platform

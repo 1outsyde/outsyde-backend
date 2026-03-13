@@ -2407,6 +2407,150 @@ export type InfluencerPayout = typeof influencerPayouts.$inferSelect;
 export type InsertInfluencerPayout = z.infer<typeof insertInfluencerPayoutSchema>;
 
 /* =====================================================
+   INFLUENCER TRACKING — LINK CLICKS & ATTRIBUTION EVENTS
+===================================================== */
+export const influencerTrackingEvents = pgTable("influencer_tracking_events", {
+  id: varchar("id", { length: 36 }).primaryKey().default(sql`gen_random_uuid()`),
+
+  influencerId: varchar("influencer_id", { length: 36 }).notNull().references(() => influencerProfiles.id),
+  campaignId: varchar("campaign_id", { length: 36 }),
+
+  eventType: text("event_type").notNull(), // 'link_click' | 'app_download' | 'signup' | 'first_purchase' | 'repeat_purchase'
+
+  // Attribution context
+  attributedUserId: varchar("attributed_user_id", { length: 36 }), // user who performed the action
+  orderId: varchar("order_id", { length: 36 }),
+  orderTotalCents: integer("order_total_cents"),
+
+  // Source tracking
+  utmSource: text("utm_source"), // instagram, tiktok, twitter, youtube
+  utmMedium: text("utm_medium"),
+  utmCampaign: text("utm_campaign"),
+  refCode: text("ref_code"), // the influencer's unique referral code used
+
+  // Device / platform
+  deviceType: text("device_type"), // mobile, desktop, tablet
+  platform: text("platform"), // ios, android, web
+  userAgent: text("user_agent"),
+  ipAddress: text("ip_address"),
+
+  // Points awarded for this event
+  pointsAwarded: integer("points_awarded").default(0),
+
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+});
+
+export const insertInfluencerTrackingEventSchema = createInsertSchema(influencerTrackingEvents).omit({ id: true, createdAt: true });
+export type InfluencerTrackingEvent = typeof influencerTrackingEvents.$inferSelect;
+export type InsertInfluencerTrackingEvent = z.infer<typeof insertInfluencerTrackingEventSchema>;
+
+/* =====================================================
+   INFLUENCER TRACKING — ATTRIBUTION WINDOW (first-click, 30-day)
+===================================================== */
+export const influencerAttributions = pgTable("influencer_attributions", {
+  id: varchar("id", { length: 36 }).primaryKey().default(sql`gen_random_uuid()`),
+
+  userId: varchar("user_id", { length: 36 }).notNull().references(() => users.id),
+  influencerId: varchar("influencer_id", { length: 36 }).notNull().references(() => influencerProfiles.id),
+  refCode: text("ref_code").notNull(),
+
+  utmSource: text("utm_source"),
+  utmMedium: text("utm_medium"),
+  utmCampaign: text("utm_campaign"),
+
+  firstClickAt: timestamp("first_click_at").defaultNow().notNull(),
+  expiresAt: timestamp("expires_at").notNull(), // 30-day attribution window
+
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+});
+
+export const insertInfluencerAttributionSchema = createInsertSchema(influencerAttributions).omit({ id: true, createdAt: true });
+export type InfluencerAttribution = typeof influencerAttributions.$inferSelect;
+export type InsertInfluencerAttribution = z.infer<typeof insertInfluencerAttributionSchema>;
+
+/* =====================================================
+   INFLUENCER TIERS — Configurable tier + commission table
+===================================================== */
+export const influencerTiers = pgTable("influencer_tiers", {
+  id: varchar("id", { length: 36 }).primaryKey().default(sql`gen_random_uuid()`),
+
+  name: text("name").notNull().unique(), // bronze, silver, gold, elite
+  displayName: text("display_name").notNull(),
+
+  minConversionRate: doublePrecision("min_conversion_rate").notNull(), // e.g. 0.0 for bronze
+  maxConversionRate: doublePrecision("max_conversion_rate"), // null = unlimited (elite)
+
+  commissionBps: integer("commission_bps").notNull(), // basis points, e.g. 500 = 5%
+  pointMultiplier: doublePrecision("point_multiplier").default(1.0), // tier-based point boost
+
+  sortOrder: integer("sort_order").default(0),
+  isActive: boolean("is_active").default(true),
+
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+});
+
+export const insertInfluencerTierSchema = createInsertSchema(influencerTiers).omit({ id: true, createdAt: true });
+export type InfluencerTier = typeof influencerTiers.$inferSelect;
+export type InsertInfluencerTier = z.infer<typeof insertInfluencerTierSchema>;
+
+/* =====================================================
+   INFLUENCER STATS — Per-influencer aggregate + tier assignment
+===================================================== */
+export const influencerStats = pgTable("influencer_stats", {
+  id: varchar("id", { length: 36 }).primaryKey().default(sql`gen_random_uuid()`),
+
+  influencerId: varchar("influencer_id", { length: 36 }).notNull().unique().references(() => influencerProfiles.id),
+
+  totalClicks: integer("total_clicks").default(0).notNull(),
+  totalDownloads: integer("total_downloads").default(0).notNull(),
+  totalSignups: integer("total_signups").default(0).notNull(),
+  totalFirstPurchases: integer("total_first_purchases").default(0).notNull(),
+  totalRepeatPurchases: integer("total_repeat_purchases").default(0).notNull(),
+  totalPurchases: integer("total_purchases").default(0).notNull(),
+  totalRevenueCents: integer("total_revenue_cents").default(0).notNull(),
+
+  // Conversion metrics
+  conversionRate: doublePrecision("conversion_rate").default(0).notNull(), // (purchases / clicks) * 100
+  rollingAvgConversionRate: doublePrecision("rolling_avg_conversion_rate").default(0).notNull(),
+  rollingWindowPostCount: integer("rolling_window_post_count").default(0).notNull(), // posts in current window
+  rollingWindowStartDate: timestamp("rolling_window_start_date"),
+
+  // Points & commission
+  totalPoints: integer("total_points").default(0).notNull(),
+  totalCommissionEarnedCents: integer("total_commission_earned_cents").default(0).notNull(),
+  pendingCommissionCents: integer("pending_commission_cents").default(0).notNull(),
+
+  // Current tier
+  tierId: varchar("tier_id", { length: 36 }).references(() => influencerTiers.id),
+  tierChangedAt: timestamp("tier_changed_at"),
+  previousTierId: varchar("previous_tier_id", { length: 36 }),
+  tierChangeFlag: boolean("tier_change_flag").default(false), // flag for admin review
+
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+
+export const insertInfluencerStatsSchema = createInsertSchema(influencerStats).omit({ id: true, updatedAt: true });
+export type InfluencerStats = typeof influencerStats.$inferSelect;
+export type InsertInfluencerStats = z.infer<typeof insertInfluencerStatsSchema>;
+
+/* =====================================================
+   INFLUENCER POINT CONFIG — Configurable point values per event
+===================================================== */
+export const influencerPointConfig = pgTable("influencer_point_config", {
+  id: varchar("id", { length: 36 }).primaryKey().default(sql`gen_random_uuid()`),
+
+  eventType: text("event_type").notNull().unique(), // app_download, signup, first_purchase, repeat_purchase
+  pointsAwarded: integer("points_awarded").notNull(),
+  description: text("description"),
+
+  isActive: boolean("is_active").default(true),
+
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+
+export type InfluencerPointConfig = typeof influencerPointConfig.$inferSelect;
+
+/* =====================================================
    ORDER STATE MACHINE - Valid Transitions
 ===================================================== */
 export const ORDER_STATUS_TRANSITIONS: Record<string, string[]> = {
