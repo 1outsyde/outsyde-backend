@@ -13230,22 +13230,28 @@ export async function registerRoutes(
 
   // Get Pulse feed - separate from Pro feed, purely discovery-based
   // Location is optional — if missing, falls back to recency/popularity ranking
-  // lat/lng are accepted but never required; missing location never causes an error
+  // Supports offset or cursor-based pagination; hard limit 10 per page (max 50)
   app.get("/api/pulse/feed", async (req, res) => {
     try {
       const userId = req.session?.userId || getUserIdFromRequest(req) || undefined;
       const limit = Math.min(parseInt(req.query.limit as string) || 10, 50);
-      const offset = parseInt(req.query.offset as string) || 0;
+
+      // Support both cursor and offset pagination
+      const cursor = req.query.cursor as string | undefined;
+      const offset = cursor ? parseInt(Buffer.from(cursor, 'base64').toString(), 10) || 0
+        : parseInt(req.query.offset as string) || 0;
+
       const excludeIds = req.query.excludeIds 
         ? (req.query.excludeIds as string).split(',').filter(Boolean)
         : [];
 
-      // Parse optional location — never required, never causes an error
+      // Location is optional — never required, never causes an error
       const lat = req.query.lat ? parseFloat(req.query.lat as string) : undefined;
       const lng = req.query.lng ? parseFloat(req.query.lng as string) : undefined;
       const city = (req.query.city as string) || undefined;
 
       const { getPulseFeed } = await import('./pulseService');
+      const { formatVideoCards } = await import('./feedSerializer');
       
       const posts = await getPulseFeed({
         userId,
@@ -13257,28 +13263,25 @@ export async function registerRoutes(
         lng: (lng !== undefined && !isNaN(lng)) ? lng : undefined,
       });
 
-      // Normalize response: every item has guaranteed fields, filter out broken records
-      const data = posts
-        .filter(p => p.videoUrl)
-        .map(p => ({
-          ...p,
-          videoUrl: p.videoUrl!,
-          thumbnailUrl: p.thumbnailUrl || null,
-          businessId: p.taggedBusinessId || null,
-          likes: p.likesCount || 0,
-          saves: 0,
-        }));
+      // Serialize through VideoCard contract — guaranteed shape, no nulls on required fields
+      const videos = formatVideoCards(posts);
+      const nextOffset = offset + videos.length;
+      const hasMore = videos.length === limit;
+      const nextCursor = hasMore ? Buffer.from(String(nextOffset)).toString('base64') : null;
 
       res.json({
         success: true,
-        posts: data,
-        data,
-        hasMore: data.length === limit,
-        nextOffset: offset + data.length,
+        data: {
+          videos,
+          nextCursor,
+          hasMore,
+          nextOffset,
+          pageSize: limit,
+        },
       });
     } catch (error) {
       console.error("Get Pulse feed error:", error);
-      res.status(500).json({ success: false, message: "Failed to get Pulse feed", posts: [], data: [] });
+      res.status(500).json({ success: false, message: "Failed to get Pulse feed", data: { videos: [], nextCursor: null, hasMore: false } });
     }
   });
 
