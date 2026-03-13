@@ -3213,8 +3213,8 @@ export async function registerRoutes(
         successUrl: `${baseUrl}/booking-success?bookingId=${booking.id}&type=photographer`,
         cancelUrl: `${baseUrl}/photographer/${photographer.id}?cancelled=true`,
         metadata: {
-          type: 'photographer_booking',
-          bookingId: booking.id,
+          type: 'shoot_booking',
+          shootBookingId: booking.id,
           photographerId: photographer.id,
           clientId: userId,
           serviceId: data.serviceId || '',
@@ -10814,6 +10814,45 @@ export async function registerRoutes(
       }
 
       if (data.status === 'approved') {
+        // Issue Stripe refund for the actual payment
+        let stripeRefundId: string | null = null;
+        if (request.targetId) {
+          try {
+            let paymentIntentId: string | null = null;
+            if (request.targetType === 'order') {
+              const order = await storage.getOrder(request.targetId);
+              paymentIntentId = order?.stripePaymentIntentId || null;
+            } else if (request.targetType === 'shoot_booking') {
+              const booking = await storage.getShootBooking(request.targetId);
+              paymentIntentId = booking?.stripePaymentIntentId || null;
+            } else if (request.targetType === 'appointment') {
+              const appointment = await storage.getAppointment(request.targetId);
+              paymentIntentId = appointment?.stripePaymentIntentId || null;
+            }
+
+            if (paymentIntentId) {
+              const refund = await stripeService.createBookingRefund({
+                paymentIntentId,
+                amountCents: request.amount,
+                reason: 'requested_by_customer',
+                metadata: {
+                  refundRequestId: id,
+                  targetType: request.targetType || '',
+                  targetId: request.targetId,
+                  approvedBy: adminUser.id,
+                },
+              });
+              stripeRefundId = refund.id;
+              console.log(`[Refund] Stripe refund ${refund.id} issued for ${request.targetType} ${request.targetId}: ${request.amount}¢`);
+            } else {
+              console.warn(`[Refund] No Stripe payment found for ${request.targetType} ${request.targetId} — skipping Stripe refund`);
+            }
+          } catch (stripeError: any) {
+            console.error(`[Refund] Stripe refund failed for ${request.targetType} ${request.targetId}:`, stripeError.message);
+            return res.status(402).json({ success: false, message: `Stripe refund failed: ${stripeError.message}` });
+          }
+        }
+
         // Update order/booking status to refunded with state machine validation
         if (request.targetType === 'order' && request.targetId) {
           const orderResult = await storage.updateOrderWithValidation(
@@ -10833,10 +10872,8 @@ export async function registerRoutes(
           if (!bookingResult.success) {
             console.warn('Failed to update booking status to refunded:', bookingResult.error);
           }
-          // Release photographer availability slot
           await storage.releasePhotographerSlot(request.targetId);
         } else if (request.targetType === 'appointment' && request.targetId) {
-          // Release business availability slot
           await storage.releaseBusinessSlot(request.targetId);
         }
 
