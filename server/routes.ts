@@ -46,7 +46,7 @@ function sanitizeUserForResponse(user: User, options: { includeOwnData?: boolean
     ageRange: calculateAgeRange(dateOfBirth),
   };
 }
-import { eq, desc } from "drizzle-orm";
+import { eq, desc, sql, gte, or } from "drizzle-orm";
 import { z } from "zod";
 import {
   hashPassword,
@@ -108,7 +108,8 @@ import {
   seedInfluencerTiersAndConfig,
 } from "./influencerTrackingService";
 import { 
-  appointments, 
+  appointments,
+  orders,
   shootBookings,
   photographerAvailability,
   photographerBlackoutDates,
@@ -117,7 +118,7 @@ import {
   updatePhotographerAvailabilitySettingsSchema,
   BOOKING_STATES
 } from "@shared/schema";
-import { and } from "drizzle-orm";
+import { and, ilike } from "drizzle-orm";
 
 // ✅ CORRECT IMPORT (default export)
 import { photographersRouter } from "./Photographers/photographers.routes";
@@ -12695,28 +12696,120 @@ export async function registerRoutes(
     }
   });
 
+  // ==================== VENDOR ANALYTICS DASHBOARD ====================
+
+  app.get("/api/dashboard/analytics", optionalAuthMiddleware, async (req, res) => {
+    const authReq = req as AuthenticatedRequest;
+    const userId = authReq.user?.userId || req.session?.userId;
+    if (!userId) {
+      return res.status(401).json({ success: false, error: { code: 'AUTH_REQUIRED', message: 'Authentication required' } });
+    }
+
+    try {
+      const period = (req.query.period as string) || '30d';
+      const periodDays = period === '7d' ? 7 : period === '90d' ? 90 : period === 'all' ? 3650 : 30;
+      const periodStart = new Date(Date.now() - periodDays * 24 * 60 * 60 * 1000);
+      const periodEnd = new Date();
+
+      const business = await storage.getBusinessByOwnerId(userId);
+      const photographer = await storage.getPhotographerByUserId(userId);
+
+      if (!business && !photographer) {
+        return res.status(403).json({ success: false, error: { code: 'FORBIDDEN', message: 'Vendor or photographer account required' } });
+      }
+
+      let totalRevenue = 0;
+      let totalBookings = 0;
+      let totalOrders = 0;
+      let platformFeesCollected = 0;
+
+      if (business) {
+        // Revenue from orders (SQL aggregation)
+        const orderStats = await db.select({
+          revenue: sql<number>`COALESCE(SUM(${orders.totalAmount}), 0)`,
+          count: sql<number>`COUNT(*)`,
+          fees: sql<number>`COALESCE(SUM(${orders.platformFee}), 0)`,
+        }).from(orders).where(and(
+          eq(orders.businessId, business.id),
+          or(eq(orders.status, 'paid'), eq(orders.status, 'shipped'), eq(orders.status, 'delivered')),
+          gte(orders.createdAt, periodStart),
+        ));
+        totalOrders = Number(orderStats[0]?.count || 0);
+        totalRevenue += Number(orderStats[0]?.revenue || 0);
+        platformFeesCollected += Number(orderStats[0]?.fees || 0);
+
+        // Revenue from appointments (SQL aggregation)
+        const apptStats = await db.select({
+          revenue: sql<number>`COALESCE(SUM(${appointments.totalPrice}), 0)`,
+          count: sql<number>`COUNT(*)`,
+          fees: sql<number>`COALESCE(SUM(${appointments.platformFee}), 0)`,
+        }).from(appointments).where(and(
+          eq(appointments.businessId, business.id),
+          or(eq(appointments.status, 'confirmed'), eq(appointments.status, 'completed')),
+          gte(appointments.createdAt, periodStart),
+        ));
+        totalBookings += Number(apptStats[0]?.count || 0);
+        totalRevenue += Number(apptStats[0]?.revenue || 0);
+        platformFeesCollected += Number(apptStats[0]?.fees || 0);
+      }
+
+      if (photographer) {
+        // Revenue from shoot bookings (SQL aggregation)
+        const shootStats = await db.select({
+          revenue: sql<number>`COALESCE(SUM(${shootBookings.totalPrice}), 0)`,
+          count: sql<number>`COUNT(*)`,
+          fees: sql<number>`COALESCE(SUM(${shootBookings.platformFee}), 0)`,
+        }).from(shootBookings).where(and(
+          eq(shootBookings.photographerId, photographer.id),
+          or(eq(shootBookings.status, 'confirmed'), eq(shootBookings.status, 'completed')),
+          gte(shootBookings.createdAt, periodStart),
+        ));
+        totalBookings += Number(shootStats[0]?.count || 0);
+        totalRevenue += Number(shootStats[0]?.revenue || 0);
+        platformFeesCollected += Number(shootStats[0]?.fees || 0);
+      }
+
+      res.json({
+        success: true,
+        data: {
+          totalRevenue,
+          totalBookings,
+          totalOrders,
+          platformFeesCollected,
+          netPayout: totalRevenue - platformFeesCollected,
+          periodStart: periodStart.toISOString(),
+          periodEnd: periodEnd.toISOString(),
+        },
+      });
+    } catch (error) {
+      console.error("Dashboard analytics error:", error);
+      res.status(500).json({ success: false, error: { code: 'SERVER_ERROR', message: 'Failed to load analytics' } });
+    }
+  });
+
   // ==================== FEED POSTS ROUTES ====================
 
   // Get feed posts (public, algorithmic for authenticated users)
-  // Location is optional — if lat/lng are missing, feed falls back to recency + popularity
+  // Supports: ?city= (case-insensitive filter), ?cursor= or ?offset=, ?lat=&lng= (optional)
   app.get("/api/feed", async (req, res) => {
     try {
-      const limit = parseInt(req.query.limit as string) || 50;
-      const offset = parseInt(req.query.offset as string) || 0;
+      const limit = Math.min(parseInt(req.query.limit as string) || 20, 50);
+      const cursor = req.query.cursor as string | undefined;
+      const offset = cursor ? parseInt(Buffer.from(cursor, 'base64').toString(), 10) || 0
+        : parseInt(req.query.offset as string) || 0;
       const userId = req.session?.userId || getUserIdFromRequest(req);
+      const city = req.query.city ? (req.query.city as string).trim() : undefined;
 
-      // Parse optional location from query params (client may not have permission)
       const lat = req.query.lat ? parseFloat(req.query.lat as string) : undefined;
       const lng = req.query.lng ? parseFloat(req.query.lng as string) : undefined;
 
-      // If client sends lat/lng, temporarily store on user for algorithmic feed to pick up
       if (userId && lat !== undefined && lng !== undefined && !isNaN(lat) && !isNaN(lng)) {
         try {
           await storage.updateUser(userId, { latitude: lat, longitude: lng });
         } catch (_) { /* non-fatal */ }
       }
 
-      const posts = await storage.getAlgorithmicFeed(userId || null, limit, offset);
+      const posts = await storage.getAlgorithmicFeed(userId || null, limit, offset, city);
       
       // Filter out posts from vendors with inactive subscriptions
       const activePosts = [];
@@ -12840,10 +12933,18 @@ export async function registerRoutes(
         });
       }
       
-      res.json({ success: true, posts: enrichedPosts, data: enrichedPosts });
+      const nextOffset = offset + enrichedPosts.length;
+      const hasMore = enrichedPosts.length === limit;
+      const nextCursor = hasMore ? Buffer.from(String(nextOffset)).toString('base64') : null;
+
+      res.json({
+        success: true,
+        data: { posts: enrichedPosts, nextCursor, hasMore, nextOffset },
+        posts: enrichedPosts,
+      });
     } catch (error) {
       console.error("Get feed error:", error);
-      res.status(500).json({ success: false, message: "Failed to get feed", posts: [], data: [] });
+      res.status(500).json({ success: false, message: "Failed to get feed", data: { posts: [], nextCursor: null, hasMore: false } });
     }
   });
 

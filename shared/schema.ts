@@ -208,8 +208,9 @@ export const users = pgTable("users", {
   // Stripe customer ID for checkout (not connected account - that's on business/photographer)
   stripeCustomerId: text("stripe_customer_id"),
 
-  // Expo push token for mobile notifications
+  // Push notifications for mobile
   expoPushToken: text("expo_push_token"),
+  pushTokenType: text("push_token_type"), // 'expo' | 'apns' | 'fcm'
 
   // Identity change tracking (rate limiting)
   usernameLastChangedAt: timestamp("username_last_changed_at"),

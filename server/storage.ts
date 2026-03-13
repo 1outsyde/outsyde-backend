@@ -503,7 +503,7 @@ export interface IStorage {
   createFeedPost(data: InsertFeedPost): Promise<FeedPost>;
   getFeedPost(id: string): Promise<FeedPost | undefined>;
   getFeedPosts(limit?: number, offset?: number): Promise<FeedPost[]>;
-  getAlgorithmicFeed(userId: string | null, limit?: number, offset?: number): Promise<FeedPost[]>;
+  getAlgorithmicFeed(userId: string | null, limit?: number, offset?: number, city?: string): Promise<FeedPost[]>;
   getUserFeedPosts(authorId: string): Promise<FeedPost[]>;
   getUserFeedPostsByIntent(authorId: string, postIntent: 'social' | 'promotion', limit?: number): Promise<FeedPost[]>;
   getBusinessFeedPosts(businessId: string): Promise<FeedPost[]>;
@@ -4950,7 +4950,7 @@ export class DatabaseStorage implements IStorage {
       .offset(offset);
   }
 
-  async getAlgorithmicFeed(userId: string | null, limit = 50, offset = 0): Promise<FeedPost[]> {
+  async getAlgorithmicFeed(userId: string | null, limit = 50, offset = 0, city?: string): Promise<FeedPost[]> {
     // Get user preferences if authenticated
     let userPreferences: { 
       selectedIndustries?: string[]; 
@@ -5001,7 +5001,13 @@ export class DatabaseStorage implements IStorage {
     .from(feedPosts)
     .leftJoin(businesses, eq(feedPosts.taggedBusinessId, businesses.id))
     .leftJoin(photographers, eq(feedPosts.taggedPhotographerId, photographers.id))
-    .where(eq(feedPosts.isActive, true))
+    .where(and(
+      eq(feedPosts.isActive, true),
+      city ? or(
+        ilike(businesses.city, city.trim()),
+        ilike(photographers.city, city.trim())
+      ) : undefined,
+    ))
     .orderBy(sql`${feedPosts.createdAt} DESC`)
     .limit(fetchLimit);
 
