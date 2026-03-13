@@ -9688,7 +9688,22 @@ export async function registerRoutes(
       if (data.businessId) {
         const subStatus = await storage.isBusinessSubscriptionActive(data.businessId);
         if (!subStatus.active) {
-          return res.status(403).json({ error: "This business is currently unavailable for purchases" });
+          return res.status(403).json({ success: false, error: { code: 'VENDOR_UNAVAILABLE', message: 'This business is currently unavailable for purchases' } });
+        }
+      }
+
+      // Check stock before adding to cart
+      const product = await storage.getVendorProduct(data.productId);
+      if (product?.trackInventory) {
+        const currentCart = await storage.getCartItems(userId);
+        const existingQty = currentCart.find(i => i.productId === data.productId)?.quantity || 0;
+        const totalRequested = existingQty + data.quantity;
+        const available = product.inventory ?? 0;
+        if (available <= 0) {
+          return res.status(400).json({ success: false, error: { code: 'OUT_OF_STOCK', message: `${product.name} is out of stock` } });
+        }
+        if (totalRequested > available) {
+          return res.status(400).json({ success: false, error: { code: 'INSUFFICIENT_STOCK', message: `Only ${available} units available (${existingQty} already in cart)` } });
         }
       }
 
@@ -9715,13 +9730,36 @@ export async function registerRoutes(
   app.patch("/api/cart/:id", async (req, res) => {
     const userId = req.session?.userId;
     if (!userId) {
-      return res.status(401).json({ error: "Not authenticated" });
+      return res.status(401).json({ success: false, error: { code: 'UNAUTHORIZED', message: 'Not authenticated' } });
     }
 
     try {
       const { quantity } = req.body;
-      if (typeof quantity !== 'number') {
-        return res.status(400).json({ error: "Quantity required" });
+      if (typeof quantity !== 'number' || !Number.isInteger(quantity)) {
+        return res.status(400).json({ success: false, error: { code: 'INVALID_INPUT', message: 'Integer quantity required' } });
+      }
+      if (quantity < 0) {
+        return res.status(400).json({ success: false, error: { code: 'INVALID_INPUT', message: 'Quantity cannot be negative' } });
+      }
+
+      // quantity 0 = remove item
+      if (quantity === 0) {
+        await storage.removeCartItem(req.params.id);
+        const items = await storage.getCartItems(userId);
+        return res.json({ success: true, item: null, itemCount: items.reduce((sum, i) => sum + i.quantity, 0) });
+      }
+
+      // Check stock if product tracks inventory
+      const existingItems = await storage.getCartItems(userId);
+      const cartItem = existingItems.find(i => i.id === req.params.id);
+      if (cartItem) {
+        const product = await storage.getVendorProduct(cartItem.productId);
+        if (product?.trackInventory && product.inventory !== null && quantity > (product.inventory ?? 0)) {
+          return res.status(400).json({
+            success: false,
+            error: { code: 'INSUFFICIENT_STOCK', message: `Only ${product.inventory} units available` }
+          });
+        }
       }
 
       const item = await storage.updateCartItemQuantity(req.params.id, quantity);
@@ -9734,7 +9772,7 @@ export async function registerRoutes(
       });
     } catch (error) {
       console.error("Update cart error:", error);
-      res.status(500).json({ error: "Failed to update cart item" });
+      res.status(500).json({ success: false, error: { code: 'SERVER_ERROR', message: 'Failed to update cart item' } });
     }
   });
 
@@ -9793,23 +9831,41 @@ export async function registerRoutes(
         return res.status(400).json({ error: "Cart is empty" });
       }
 
-      // Get products for each cart item and validate they're live
+      // Get products for each cart item, validate they're live, and check stock
       const productMap = new Map<string, any>();
       const businessIds = new Set<string>();
+      const unavailableItems: Array<{ productId: string; name: string; requested: number; available: number }> = [];
       
       for (const item of cartItems) {
         const product = await storage.getVendorProduct(item.productId);
         if (!product) {
-          return res.status(400).json({ error: `Product not found: ${item.productId}` });
+          return res.status(400).json({ success: false, error: { code: 'PRODUCT_NOT_FOUND', message: `Product not found: ${item.productId}` } });
         }
         if (product.status !== 'live') {
-          return res.status(400).json({ error: `Product is not available: ${product.name}` });
+          return res.status(400).json({ success: false, error: { code: 'PRODUCT_UNAVAILABLE', message: `Product is not available: ${product.name}` } });
         }
         if (!product.stripePriceId) {
-          return res.status(400).json({ error: `Product is not ready for checkout: ${product.name}` });
+          return res.status(400).json({ success: false, error: { code: 'PRODUCT_NOT_READY', message: `Product is not ready for checkout: ${product.name}` } });
+        }
+        // Stock validation
+        if (product.trackInventory && product.inventory !== null && item.quantity > (product.inventory ?? 0)) {
+          unavailableItems.push({
+            productId: product.id,
+            name: product.name,
+            requested: item.quantity,
+            available: product.inventory ?? 0,
+          });
         }
         productMap.set(product.id, product);
         businessIds.add(product.businessId);
+      }
+
+      // Reject checkout if any items are out of stock
+      if (unavailableItems.length > 0) {
+        return res.status(400).json({
+          success: false,
+          error: { code: 'ITEMS_UNAVAILABLE', message: 'One or more items are out of stock', items: unavailableItems }
+        });
       }
 
       // Validate all businesses exist, have active subscriptions, and completed Stripe onboarding
@@ -9825,7 +9881,7 @@ export async function registerRoutes(
         }
         // Ensure vendor has completed Stripe onboarding
         if (!business.stripeAccountId || !business.stripeOnboardingComplete) {
-          return res.status(403).json({ error: `${business.name} has not enabled payments yet` });
+          return res.status(403).json({ success: false, error: { code: 'VENDOR_NOT_ONBOARDED', message: `${business.name} cannot accept payments yet` } });
         }
         
         // Verify Stripe account is enabled for charges and payouts via Stripe API

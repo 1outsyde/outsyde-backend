@@ -569,6 +569,22 @@ export class WebhookHandlers {
       stripePaymentIntentId: session.payment_intent,
     });
 
+    // Decrement inventory for purchased items
+    if (order.items && Array.isArray(order.items)) {
+      for (const item of order.items) {
+        try {
+          const product = await storage.getVendorProduct(item.productId);
+          if (product?.trackInventory && product.inventory !== null) {
+            const newInventory = Math.max(0, (product.inventory ?? 0) - item.quantity);
+            await storage.updateVendorProduct(item.productId, { inventory: newInventory });
+            console.log(`[Inventory] Decremented ${item.productId}: ${product.inventory} → ${newInventory} (ordered: ${item.quantity})`);
+          }
+        } catch (invError) {
+          console.error(`[Inventory] Failed to decrement ${item.productId}:`, invError);
+        }
+      }
+    }
+
     // Clear the user's cart
     if (userId) {
       await storage.clearCart(userId);
@@ -586,7 +602,6 @@ export class WebhookHandlers {
         description: "Points earned from purchase",
       });
 
-      // Complete referral bonus if this is the user's first transaction
       await this.tryCompleteReferral(user.id, orderId, 'cart_order');
     }
 
@@ -605,7 +620,7 @@ export class WebhookHandlers {
       });
     }
 
-    console.log(`Cart checkout completed: Order ${orderId} marked as paid`);
+    console.log(`[Stripe] Cart checkout completed: Order ${orderId} marked as paid`);
   }
 
   /* =====================================================
@@ -636,6 +651,22 @@ export class WebhookHandlers {
         status: 'paid',
         stripePaymentIntentId: session.payment_intent,
       });
+
+      // Decrement inventory for purchased items
+      if (order.items && Array.isArray(order.items)) {
+        for (const item of order.items) {
+          try {
+            const product = await storage.getVendorProduct(item.productId);
+            if (product?.trackInventory && product.inventory !== null) {
+              const newInventory = Math.max(0, (product.inventory ?? 0) - item.quantity);
+              await storage.updateVendorProduct(item.productId, { inventory: newInventory });
+              console.log(`[Inventory] Decremented ${item.productId}: ${product.inventory} → ${newInventory} (ordered: ${item.quantity})`);
+            }
+          } catch (invError) {
+            console.error(`[Inventory] Failed to decrement ${item.productId}:`, invError);
+          }
+        }
+      }
 
       // Get the vendor's connected account for transfer (from business, not user)
       const business = await storage.getBusiness(businessId);
