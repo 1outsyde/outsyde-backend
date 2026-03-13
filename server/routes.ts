@@ -13145,7 +13145,8 @@ export async function registerRoutes(
   // =====================================================
 
   // Get Pulse feed - separate from Pro feed, purely discovery-based
-  // Location is optional — Pulse ranking is engagement-based, not location-based
+  // Location is optional — if missing, falls back to recency/popularity ranking
+  // lat/lng are accepted but never required; missing location never causes an error
   app.get("/api/pulse/feed", async (req, res) => {
     try {
       const userId = req.session?.userId || getUserIdFromRequest(req) || undefined;
@@ -13155,6 +13156,11 @@ export async function registerRoutes(
         ? (req.query.excludeIds as string).split(',').filter(Boolean)
         : [];
 
+      // Parse optional location — never required, never causes an error
+      const lat = req.query.lat ? parseFloat(req.query.lat as string) : undefined;
+      const lng = req.query.lng ? parseFloat(req.query.lng as string) : undefined;
+      const city = (req.query.city as string) || undefined;
+
       const { getPulseFeed } = await import('./pulseService');
       
       const posts = await getPulseFeed({
@@ -13162,14 +13168,29 @@ export async function registerRoutes(
         limit,
         offset,
         excludePostIds: excludeIds,
+        city,
+        lat: (lat !== undefined && !isNaN(lat)) ? lat : undefined,
+        lng: (lng !== undefined && !isNaN(lng)) ? lng : undefined,
       });
+
+      // Normalize response: every item has guaranteed fields, filter out broken records
+      const data = posts
+        .filter(p => p.videoUrl)
+        .map(p => ({
+          ...p,
+          videoUrl: p.videoUrl!,
+          thumbnailUrl: p.thumbnailUrl || null,
+          businessId: p.taggedBusinessId || null,
+          likes: p.likesCount || 0,
+          saves: 0,
+        }));
 
       res.json({
         success: true,
-        posts,
-        data: posts,
-        hasMore: posts.length === limit,
-        nextOffset: offset + posts.length,
+        posts: data,
+        data,
+        hasMore: data.length === limit,
+        nextOffset: offset + data.length,
       });
     } catch (error) {
       console.error("Get Pulse feed error:", error);

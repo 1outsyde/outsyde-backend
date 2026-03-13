@@ -1477,7 +1477,12 @@ export const feedPosts = pgTable("feed_posts", {
 
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
-});
+}, (table) => ({
+  idxFeedActive: index("idx_feed_posts_active").on(table.isActive, table.createdAt),
+  idxFeedSurface: index("idx_feed_posts_surface").on(table.feedSurface, table.isActive, table.createdAt),
+  idxFeedAuthor: index("idx_feed_posts_author").on(table.authorId, table.createdAt),
+  idxFeedMediaType: index("idx_feed_posts_media_type").on(table.mediaType, table.feedSurface, table.isActive),
+}));
 
 export const postLikes = pgTable("post_likes", {
   id: varchar("id", { length: 36 }).primaryKey().default(sql`gen_random_uuid()`),
