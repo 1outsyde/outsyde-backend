@@ -317,10 +317,14 @@ export const businesses = pgTable("businesses", {
   isDemo: boolean("is_demo").default(false).notNull(),
 
   // Booking settings
-  autoAcceptBookings: boolean("auto_accept_bookings").default(true).notNull(), // If false, bookings require provider approval within 24h
+  autoAcceptBookings: boolean("auto_accept_bookings").default(true).notNull(),
 
   createdAt: timestamp("created_at").defaultNow().notNull(),
-});
+}, (table) => ({
+  idxBusinessOwner: index("idx_businesses_owner").on(table.ownerId),
+  idxBusinessCity: index("idx_businesses_city").on(table.city),
+  idxBusinessApproval: index("idx_businesses_approval").on(table.approvalStatus),
+}));
 
 /* =====================================================
    VENDOR PRODUCTS
@@ -843,7 +847,11 @@ export const orders = pgTable("orders", {
 
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
-});
+}, (table) => ({
+  idxOrderCustomer: index("idx_orders_customer").on(table.customerId, table.createdAt),
+  idxOrderBusiness: index("idx_orders_business").on(table.businessId, table.status),
+  idxOrderStatus: index("idx_orders_status").on(table.status, table.createdAt),
+}));
 
 /* =====================================================
    REVIEWS
@@ -1051,7 +1059,9 @@ export const cartItems = pgTable("cart_items", {
 
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
-});
+}, (table) => ({
+  idxCartUser: index("idx_cart_items_user").on(table.userId),
+}));
 
 /* =====================================================
    SUBSCRIPTION TIERS

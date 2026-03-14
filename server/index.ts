@@ -1,6 +1,8 @@
 import express, { type Request, Response, NextFunction } from "express";
 import { createServer } from "http";
 import cors from "cors";
+import helmet from "helmet";
+import compression from "compression";
 import { storage } from "./storage";
 import { registerRoutes } from "./routes";
 import { runMigrations } from "stripe-replit-sync";
@@ -13,12 +15,41 @@ import { initializePushService, sendCartReminderNotifications, isPushConfigured 
 import { startDraftCleanupJob } from "./bookingStateMachine";
 import passport from "passport";
 
+// Global error handlers — prevent silent crashes
+process.on('unhandledRejection', (reason) => {
+  console.error('[FATAL] Unhandled promise rejection:', reason);
+});
+process.on('uncaughtException', (error) => {
+  console.error('[FATAL] Uncaught exception:', error);
+  process.exit(1);
+});
+
 function isOnReplit(): boolean {
   return !!(process.env.REPL_IDENTITY || process.env.WEB_REPL_RENEWAL || process.env.REPL_ID);
 }
 
 const app = express();
 const httpServer = createServer(app);
+
+// Security headers
+if (process.env.NODE_ENV === 'production') {
+  app.use(helmet());
+} else {
+  app.use(helmet({ contentSecurityPolicy: false, crossOriginEmbedderPolicy: false }));
+}
+
+// Gzip compression
+app.use(compression());
+
+// Health check — must be before auth/CORS for load balancer access
+app.get("/api/health", async (_req, res) => {
+  try {
+    await storage.getAllUsers().then(u => u.length); // lightweight DB check
+    res.json({ status: 'ok', timestamp: new Date().toISOString(), version: '1.0.0', environment: process.env.NODE_ENV || 'development' });
+  } catch {
+    res.status(503).json({ status: 'error', message: 'Database unreachable' });
+  }
+});
 
 // CORS configuration — locked down in production, permissive in development
 const allowedOrigins: (string | RegExp)[] = [];
@@ -299,4 +330,19 @@ if (process.env.NODE_ENV === 'production') {
   httpServer.listen({ port, host: "0.0.0.0" }, () => {
     log(`serving on port ${port}`);
   });
+
+  // Graceful shutdown — required for zero-downtime deploys
+  const shutdown = (signal: string) => {
+    log(`${signal} received — shutting down gracefully`);
+    httpServer.close(() => {
+      log('HTTP server closed');
+      process.exit(0);
+    });
+    setTimeout(() => {
+      console.error('Forced shutdown after 10s timeout');
+      process.exit(1);
+    }, 10000);
+  };
+  process.on('SIGTERM', () => shutdown('SIGTERM'));
+  process.on('SIGINT', () => shutdown('SIGINT'));
 })();
