@@ -1,6 +1,8 @@
 import express, { type Request, Response, NextFunction } from "express";
 import { createServer } from "http";
 import cors from "cors";
+import helmet from "helmet";
+import compression from "compression";
 import { storage } from "./storage";
 import { registerRoutes } from "./routes";
 import { runMigrations } from "stripe-replit-sync";
@@ -13,6 +15,15 @@ import { initializePushService, sendCartReminderNotifications, isPushConfigured 
 import { startDraftCleanupJob } from "./bookingStateMachine";
 import passport from "passport";
 
+// Global error handlers — prevent silent crashes
+process.on('unhandledRejection', (reason) => {
+  console.error('[FATAL] Unhandled promise rejection:', reason);
+});
+process.on('uncaughtException', (error) => {
+  console.error('[FATAL] Uncaught exception:', error);
+  process.exit(1);
+});
+
 function isOnReplit(): boolean {
   return !!(process.env.REPL_IDENTITY || process.env.WEB_REPL_RENEWAL || process.env.REPL_ID);
 }
@@ -20,38 +31,58 @@ function isOnReplit(): boolean {
 const app = express();
 const httpServer = createServer(app);
 
-// CORS configuration - mobile apps use JWT auth (no cookies needed)
-// Web clients on same origin don't need CORS, mobile apps use Authorization headers
-const allowedOrigins = [
-  // Replit dev/preview domains
-  /\.replit\.dev$/,
-  /\.replit\.app$/,
-  /\.janeway\.replit\.dev$/,
-  // Local development
-  'http://localhost:5000',
-  'http://localhost:3000',
-  'http://localhost:8081', // Expo
-];
+// Security headers
+if (process.env.NODE_ENV === 'production') {
+  app.use(helmet());
+} else {
+  app.use(helmet({ contentSecurityPolicy: false, crossOriginEmbedderPolicy: false }));
+}
+
+// Gzip compression
+app.use(compression());
+
+// Health check — must be before auth/CORS for load balancer access
+app.get("/api/health", async (_req, res) => {
+  try {
+    await storage.getAllUsers().then(u => u.length); // lightweight DB check
+    res.json({ status: 'ok', timestamp: new Date().toISOString(), version: '1.0.0', environment: process.env.NODE_ENV || 'development' });
+  } catch {
+    res.status(503).json({ status: 'error', message: 'Database unreachable' });
+  }
+});
+
+// CORS configuration — locked down in production, permissive in development
+const allowedOrigins: (string | RegExp)[] = [];
+
+if (process.env.NODE_ENV === 'production') {
+  if (process.env.FRONTEND_URL) allowedOrigins.push(process.env.FRONTEND_URL);
+  if (process.env.API_BASE_URL) allowedOrigins.push(process.env.API_BASE_URL);
+} else {
+  // Development origins
+  allowedOrigins.push(
+    /\.replit\.dev$/,
+    /\.replit\.app$/,
+    /\.janeway\.replit\.dev$/,
+    `http://localhost:${process.env.PORT || 5000}`,
+    'http://localhost:3000',
+    'http://localhost:8081', // Expo
+  );
+  if (process.env.EXPO_DEV_URL) allowedOrigins.push(process.env.EXPO_DEV_URL);
+  if (process.env.FRONTEND_URL) allowedOrigins.push(process.env.FRONTEND_URL);
+}
 
 app.use(cors({
   origin: function (origin, callback) {
     // Allow requests with no origin (mobile apps, Postman, curl, server-to-server)
-    // Mobile apps using JWT don't send cookies, so CSRF is not a concern
     if (!origin) return callback(null, true);
-    
-    // Check against allowed origins (strings and regexes)
+
     const isAllowed = allowedOrigins.some(allowed => {
-      if (allowed instanceof RegExp) {
-        return allowed.test(origin);
-      }
+      if (allowed instanceof RegExp) return allowed.test(origin);
       return allowed === origin;
     });
-    
-    if (isAllowed) {
-      return callback(null, true);
-    }
-    
-    // Reject unknown origins
+
+    if (isAllowed) return callback(null, true);
+
     callback(new Error('CORS not allowed'), false);
   },
   credentials: true,
@@ -196,11 +227,32 @@ async function initStripe() {
 }
 
 // =======================
+// Production Environment Validation
+// =======================
+if (process.env.NODE_ENV === 'production') {
+  const required = ['DATABASE_URL', 'STRIPE_SECRET_KEY', 'STRIPE_WEBHOOK_SECRET', 'JWT_SECRET'];
+  const missing = required.filter(key => !process.env[key]);
+  if (missing.length > 0) {
+    console.error(`[FATAL] Missing required environment variables for production: ${missing.join(', ')}`);
+    process.exit(1);
+  }
+  if (!process.env.FRONTEND_URL) {
+    console.error('[FATAL] FRONTEND_URL must be set in production for CORS security');
+    process.exit(1);
+  }
+}
+
+// =======================
 // App Bootstrap
 // =======================
 (async () => {
   await storage.seedInitialData();
   await storage.cleanupExpiredTokens();
+
+  // Seed influencer tiers and point config if not already present
+  const { seedInfluencerTiersAndConfig } = await import("./influencerTrackingService");
+  await seedInfluencerTiersAndConfig();
+
   await initStripe();
 
   // Conditionally setup auth based on platform
@@ -251,7 +303,16 @@ async function initStripe() {
 
   app.use((err: any, _req: Request, res: Response, _next: NextFunction) => {
     const status = err.status || err.statusCode || 500;
-    res.status(status).json({ message: err.message || "Internal Server Error" });
+    console.error(`[ERROR] ${err.message || 'Unknown error'}`, err.stack || '');
+    res.status(status).json({
+      success: false,
+      error: {
+        code: 'SERVER_ERROR',
+        message: process.env.NODE_ENV === 'production'
+          ? 'An unexpected error occurred'
+          : (err.message || 'Internal Server Error'),
+      },
+    });
   });
 
   // =======================
@@ -269,4 +330,19 @@ async function initStripe() {
   httpServer.listen({ port, host: "0.0.0.0" }, () => {
     log(`serving on port ${port}`);
   });
+
+  // Graceful shutdown — required for zero-downtime deploys
+  const shutdown = (signal: string) => {
+    log(`${signal} received — shutting down gracefully`);
+    httpServer.close(() => {
+      log('HTTP server closed');
+      process.exit(0);
+    });
+    setTimeout(() => {
+      console.error('Forced shutdown after 10s timeout');
+      process.exit(1);
+    }, 10000);
+  };
+  process.on('SIGTERM', () => shutdown('SIGTERM'));
+  process.on('SIGINT', () => shutdown('SIGINT'));
 })();

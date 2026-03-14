@@ -449,6 +449,9 @@ export interface PulseFeedOptions {
   limit?: number;
   offset?: number;
   excludePostIds?: string[];
+  city?: string;
+  lat?: number;
+  lng?: number;
 }
 
 export interface PulseFeedPost extends FeedPost {
@@ -489,9 +492,21 @@ export async function getPulseFeed(options: PulseFeedOptions): Promise<PulseFeed
     }
   }
 
-  // Get posts with distribution data that are eligible for Pulse
-  // SOURCE OF TRUTH: feedSurface = 'pulse' is the ONLY authority for which feed a post belongs to
-  // No inference from postIntent or displayLayout - feedSurface is explicit
+  // Build conditions — location is never required
+  const conditions = [
+    eq(feedPosts.isActive, true),
+    eq(feedPosts.feedSurface, 'pulse'),
+    eq(feedPosts.mediaType, 'video'),
+    // Only return posts that have a valid media URL (never return broken records)
+    sql`(${feedPosts.mediaUrl} IS NOT NULL AND ${feedPosts.mediaUrl} != '')`,
+  ];
+
+  if (options.excludePostIds && options.excludePostIds.length > 0) {
+    conditions.push(
+      sql`${feedPosts.id} NOT IN (${sql.join(options.excludePostIds.map(id => sql`${id}`), sql`, `)})`
+    );
+  }
+
   const eligiblePosts = await db
     .select({
       post: feedPosts,
@@ -499,19 +514,9 @@ export async function getPulseFeed(options: PulseFeedOptions): Promise<PulseFeed
     })
     .from(feedPosts)
     .leftJoin(postDistribution, eq(feedPosts.id, postDistribution.postId))
-    .where(and(
-      eq(feedPosts.isActive, true),
-      // SOURCE OF TRUTH: Only posts explicitly marked for Pulse feed
-      eq(feedPosts.feedSurface, 'pulse'),
-      // Video content only for Pulse
-      eq(feedPosts.mediaType, 'video'),
-      // Exclude already seen posts if provided
-      options.excludePostIds && options.excludePostIds.length > 0
-        ? sql`${feedPosts.id} NOT IN (${sql.join(options.excludePostIds.map(id => sql`${id}`), sql`, `)})`
-        : sql`1=1`
-    ))
+    .where(and(...conditions))
     .orderBy(desc(feedPosts.createdAt))
-    .limit(limit * 3); // Get more than needed for scoring
+    .limit(limit * 3);
 
   // Calculate scores and rank
   const scoredPosts = eligiblePosts.map(({ post, dist }) => {

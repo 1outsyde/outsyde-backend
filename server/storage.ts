@@ -503,7 +503,7 @@ export interface IStorage {
   createFeedPost(data: InsertFeedPost): Promise<FeedPost>;
   getFeedPost(id: string): Promise<FeedPost | undefined>;
   getFeedPosts(limit?: number, offset?: number): Promise<FeedPost[]>;
-  getAlgorithmicFeed(userId: string | null, limit?: number, offset?: number): Promise<FeedPost[]>;
+  getAlgorithmicFeed(userId: string | null, limit?: number, offset?: number, city?: string): Promise<FeedPost[]>;
   getUserFeedPosts(authorId: string): Promise<FeedPost[]>;
   getUserFeedPostsByIntent(authorId: string, postIntent: 'social' | 'promotion', limit?: number): Promise<FeedPost[]>;
   getBusinessFeedPosts(businessId: string): Promise<FeedPost[]>;
@@ -1926,9 +1926,9 @@ export class DatabaseStorage implements IStorage {
     return user?.loyaltyPoints || 0;
   }
 
-  // Platform fee percentages for loyalty point calculation
-  private readonly PHOTOGRAPHER_FEE_PERCENT = 10; // 10% platform fee on photographer bookings
-  private readonly BUSINESS_FEE_PERCENT = 4; // 4% platform fee on business transactions
+  // Platform fee percentages for loyalty point calculation (matches server/fees.ts)
+  private readonly BOOKING_FEE_PERCENT = 10; // 10% platform fee on service bookings
+  private readonly PRODUCT_FEE_PERCENT = 8; // 8% platform fee on product purchases
   private readonly POINTS_REWARD_PERCENT = 10; // 10% of platform profit awarded as points
   private readonly MAX_POINTS_PER_TRANSACTION = 5000; // Hard cap per transaction
 
@@ -1951,14 +1951,16 @@ export class DatabaseStorage implements IStorage {
     let isCapped = false;
     
     if (data.transactionType === 'photographer_booking') {
-      // Photographer: 10% platform fee
-      platformProfitCents = Math.floor(data.dollarAmountCents * this.PHOTOGRAPHER_FEE_PERCENT / 100);
-      // 10% of profit as points, rounded down to nearest 100
+      // 12% booking fee on photographer service bookings
+      platformProfitCents = Math.floor(data.dollarAmountCents * this.BOOKING_FEE_PERCENT / 100);
       const rawPoints = Math.floor(platformProfitCents * this.POINTS_REWARD_PERCENT / 100);
       pointsEarned = Math.floor(rawPoints / 100) * 100;
     } else if (data.transactionType === 'business_transaction') {
-      // Business: 4% platform fee
-      platformProfitCents = Math.floor(data.dollarAmountCents * this.BUSINESS_FEE_PERCENT / 100);
+      // 4% product fee on business product purchases, 12% on service bookings
+      // Business transactions use BOOKING_FEE for service appointments and PRODUCT_FEE for orders
+      // Since transactionType doesn't distinguish, use booking fee (most business transactions are bookings)
+      const feePercent = data.referenceType === 'order' ? this.PRODUCT_FEE_PERCENT : this.BOOKING_FEE_PERCENT;
+      platformProfitCents = Math.floor(data.dollarAmountCents * feePercent / 100);
       // 10% of profit as points, rounded down to nearest 100
       const rawPoints = Math.floor(platformProfitCents * this.POINTS_REWARD_PERCENT / 100);
       pointsEarned = Math.floor(rawPoints / 100) * 100;
@@ -4948,7 +4950,7 @@ export class DatabaseStorage implements IStorage {
       .offset(offset);
   }
 
-  async getAlgorithmicFeed(userId: string | null, limit = 50, offset = 0): Promise<FeedPost[]> {
+  async getAlgorithmicFeed(userId: string | null, limit = 50, offset = 0, city?: string): Promise<FeedPost[]> {
     // Get user preferences if authenticated
     let userPreferences: { 
       selectedIndustries?: string[]; 
@@ -4999,7 +5001,13 @@ export class DatabaseStorage implements IStorage {
     .from(feedPosts)
     .leftJoin(businesses, eq(feedPosts.taggedBusinessId, businesses.id))
     .leftJoin(photographers, eq(feedPosts.taggedPhotographerId, photographers.id))
-    .where(eq(feedPosts.isActive, true))
+    .where(and(
+      eq(feedPosts.isActive, true),
+      city ? or(
+        ilike(businesses.city, city.trim()),
+        ilike(photographers.city, city.trim())
+      ) : undefined,
+    ))
     .orderBy(sql`${feedPosts.createdAt} DESC`)
     .limit(fetchLimit);
 

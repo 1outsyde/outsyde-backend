@@ -46,7 +46,7 @@ function sanitizeUserForResponse(user: User, options: { includeOwnData?: boolean
     ageRange: calculateAgeRange(dateOfBirth),
   };
 }
-import { eq, desc } from "drizzle-orm";
+import { eq, desc, sql, gte, or } from "drizzle-orm";
 import { z } from "zod";
 import {
   hashPassword,
@@ -58,9 +58,12 @@ import {
   authMiddleware,
   optionalAuthMiddleware,
   getUserIdFromRequest,
+  ACCESS_TOKEN_EXPIRY_SECONDS,
+  REFRESH_TOKEN_EXPIRY_MS,
   type AuthenticatedRequest,
   type TokenPayload,
 } from "./auth";
+import rateLimit from "express-rate-limit";
 import { stripeService } from "./stripe/stripeService";
 import { getStripePublishableKey, getUncachableStripeClient } from "./stripe/stripeClient";
 import { ObjectStorageService, ObjectNotFoundError } from "./objectStorage";
@@ -90,8 +93,23 @@ import {
   transitionShootBookingState,
   getDraftExpiryTime
 } from "./bookingStateMachine";
+import { calculateProductFee, calculateBookingFee } from "./fees";
+import {
+  trackLinkClick,
+  recordAttribution,
+  trackAttributedSignup,
+  trackAttributedPurchase,
+  getInfluencerLeaderboard,
+  getInfluencerDashboardData,
+  getInfluencerStatsById,
+  clearTierChangeFlag,
+  generateReferralLink,
+  generateDeepLink,
+  seedInfluencerTiersAndConfig,
+} from "./influencerTrackingService";
 import { 
-  appointments, 
+  appointments,
+  orders,
   shootBookings,
   photographerAvailability,
   photographerBlackoutDates,
@@ -100,7 +118,7 @@ import {
   updatePhotographerAvailabilitySettingsSchema,
   BOOKING_STATES
 } from "@shared/schema";
-import { and } from "drizzle-orm";
+import { and, ilike } from "drizzle-orm";
 
 // ✅ CORRECT IMPORT (default export)
 import { photographersRouter } from "./Photographers/photographers.routes";
@@ -137,6 +155,13 @@ function legacyVerifyPassword(password: string, hash: string): boolean {
 // Check if password is legacy (base64) or new (bcrypt)
 function isLegacyHash(hash: string): boolean {
   return !hash.startsWith("$2");
+}
+
+function detectDeviceFromRequest(req: any): string {
+  const ua = (req.headers['user-agent'] || '').toLowerCase();
+  if (/tablet|ipad/.test(ua)) return 'tablet';
+  if (/mobile|iphone|android/.test(ua)) return 'mobile';
+  return 'desktop';
 }
 
 export async function registerRoutes(
@@ -296,8 +321,24 @@ export async function registerRoutes(
 
   // ==================== AUTH ROUTES ====================
 
+  const authRateLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000, // 15 minutes
+    max: 20,
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: { success: false, message: "Too many requests, please try again later" },
+  });
+
+  const strictAuthRateLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000,
+    max: 5,
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: { success: false, message: "Too many attempts, please try again later" },
+  });
+
   // Customer signup
-  app.post("/api/auth/customer/signup", async (req, res) => {
+  app.post("/api/auth/customer/signup", authRateLimiter, async (req, res) => {
     try {
       const data = customerSignupSchema.parse(req.body);
 
@@ -347,7 +388,7 @@ export async function registerRoutes(
   });
 
   // Vendor signup
-  app.post("/api/auth/vendor/signup", async (req, res) => {
+  app.post("/api/auth/vendor/signup", authRateLimiter, async (req, res) => {
     try {
       const data = vendorSignupSchema.parse(req.body);
 
@@ -426,7 +467,7 @@ export async function registerRoutes(
   });
 
   // Photographer signup
-  app.post("/api/auth/photographer/signup", async (req, res) => {
+  app.post("/api/auth/photographer/signup", authRateLimiter, async (req, res) => {
     try {
       const data = photographerSignupSchema.parse(req.body);
       const skipStripe = req.body.skipStripe === true;
@@ -537,7 +578,7 @@ export async function registerRoutes(
   });
 
   // Login (supports both legacy base64 and new bcrypt passwords)
-  app.post("/api/auth/login", async (req, res) => {
+  app.post("/api/auth/login", strictAuthRateLimiter, async (req, res) => {
     try {
       const data = loginSchema.parse(req.body);
 
@@ -621,11 +662,109 @@ export async function registerRoutes(
     }
   });
 
+  // Complete onboarding — persist user type selection
+  app.post("/api/auth/onboarding/complete", optionalAuthMiddleware, async (req, res) => {
+    const authReq = req as AuthenticatedRequest;
+    const userId = authReq.user?.userId || req.session?.userId;
+    if (!userId) {
+      return res.status(401).json({ success: false, message: "Authentication required" });
+    }
+
+    try {
+      const { userType, selectedIndustries, industryNiches, industryValues } = req.body;
+
+      if (!userType || !['shopper', 'vendor', 'photographer', 'consumer'].includes(userType)) {
+        return res.status(400).json({ success: false, message: "Valid userType is required (shopper, vendor, photographer, consumer)" });
+      }
+
+      const updates: Record<string, any> = {};
+
+      if (userType === 'vendor') {
+        updates.isVendor = true;
+        updates.wantsToSellProducts = true;
+      } else if (userType === 'photographer') {
+        updates.isPhotographer = true;
+      } else {
+        // shopper / consumer
+        updates.isVendor = false;
+        updates.isPhotographer = false;
+      }
+
+      if (selectedIndustries) updates.selectedIndustries = selectedIndustries;
+      if (industryNiches) updates.industryNiches = industryNiches;
+      if (industryValues) updates.industryValues = industryValues;
+
+      await storage.updateUser(userId, updates);
+      const user = await storage.getUser(userId);
+      if (!user) {
+        return res.status(404).json({ success: false, message: "User not found" });
+      }
+
+      // Update session
+      if (req.session) {
+        req.session.isVendor = user.isVendor;
+        req.session.isPhotographer = user.isPhotographer;
+      }
+
+      const safeUser = sanitizeUserForResponse(user, { includeOwnData: true });
+      res.json({ success: true, user: safeUser });
+    } catch (error) {
+      console.error("Onboarding complete error:", error);
+      res.status(500).json({ success: false, message: "Failed to complete onboarding" });
+    }
+  });
+
+  // PATCH alias for onboarding (matches frontend expectation)
+  app.patch("/api/users/onboarding", optionalAuthMiddleware, async (req, res) => {
+    const authReq = req as AuthenticatedRequest;
+    const userId = authReq.user?.userId || req.session?.userId;
+    if (!userId) {
+      return res.status(401).json({ success: false, message: "Authentication required" });
+    }
+
+    try {
+      const { userType, preferences, selectedIndustries, industryNiches, industryValues } = req.body;
+
+      const updates: Record<string, any> = {};
+
+      if (userType) {
+        if (userType === 'vendor' || userType === 'seller') {
+          updates.isVendor = true;
+          updates.wantsToSellProducts = true;
+        } else if (userType === 'photographer') {
+          updates.isPhotographer = true;
+        } else {
+          updates.isVendor = false;
+          updates.isPhotographer = false;
+        }
+      }
+
+      if (selectedIndustries || preferences?.selectedIndustries) updates.selectedIndustries = selectedIndustries || preferences?.selectedIndustries;
+      if (industryNiches || preferences?.industryNiches) updates.industryNiches = industryNiches || preferences?.industryNiches;
+      if (industryValues || preferences?.industryValues) updates.industryValues = industryValues || preferences?.industryValues;
+
+      await storage.updateUser(userId, updates);
+      const user = await storage.getUser(userId);
+      if (!user) return res.status(404).json({ success: false, message: "User not found" });
+
+      if (req.session) {
+        req.session.isVendor = user.isVendor;
+        req.session.isPhotographer = user.isPhotographer;
+      }
+
+      const safeUser = sanitizeUserForResponse(user, { includeOwnData: true });
+      res.json({ success: true, message: "Onboarding complete", data: safeUser });
+    } catch (error) {
+      console.error("Onboarding error:", error);
+      res.status(500).json({ success: false, message: "Failed to complete onboarding" });
+    }
+  });
+
   // ==================== MOBILE AUTH (JWT) ====================
 
   // Mobile Google OAuth - Verify Google ID token and return JWT tokens
   // Used by Expo app via expo-auth-session
-  app.post("/api/auth/mobile/google", async (req, res) => {
+  app.post("/api/auth/mobile/google", authRateLimiter, async (req, res) => {
     try {
       const { idToken, clientId } = req.body;
 
@@ -759,7 +898,7 @@ export async function registerRoutes(
       const refreshToken = generateRefreshToken(tokenPayload);
 
       // Store refresh token in database
-      await storage.storeRefreshToken(user.id, refreshToken, new Date(Date.now() + 7 * 24 * 60 * 60 * 1000));
+      await storage.storeRefreshToken(user.id, refreshToken, new Date(Date.now() + REFRESH_TOKEN_EXPIRY_MS));
 
       // Return user data and tokens
       const safeUser = sanitizeUserForResponse(user, { includeOwnData: true });
@@ -769,7 +908,7 @@ export async function registerRoutes(
         user: safeUser,
         accessToken,
         refreshToken,
-        expiresIn: 3600, // 1 hour in seconds
+        expiresIn: ACCESS_TOKEN_EXPIRY_SECONDS,
       });
 
     } catch (error) {
@@ -795,9 +934,9 @@ export async function registerRoutes(
 
   // Mobile Google OAuth Preflight - Generate and store OAuth state
   // Called before initiating Google OAuth from the mobile app
-  app.post("/api/auth/mobile/google/preflight", async (req, res) => {
+  app.post("/api/auth/mobile/google/preflight", authRateLimiter, async (req, res) => {
     try {
-      const { deviceId } = req.body; // Optional device identifier for additional security
+      const { deviceId, redirectUri: clientRedirectUri } = req.body;
       
       // Generate a random state token
       const state = randomUUID();
@@ -806,23 +945,25 @@ export async function registerRoutes(
       // Store the state in database
       await storage.createOAuthState(state, expiresAt, deviceId);
       
-      // Get OAuth configuration
+      // Get OAuth configuration — redirect URI must match exactly what's registered in Google Cloud Console
       const clientId = process.env.GOOGLE_OAUTH_CLIENT_ID;
-      const redirectUri = process.env.GOOGLE_OAUTH_REDIRECT_URI || 
-        "https://outsyde-backend.onrender.com/api/auth/mobile/google/callback";
+      const redirectUri = clientRedirectUri
+        || process.env.GOOGLE_OAUTH_REDIRECT_URI
+        || `${req.protocol}://${req.get('host')}/api/auth/mobile/google/callback`;
 
       if (!clientId) {
         return res.status(500).json({
           success: false,
-          error: { code: "MISSING_CONFIG", message: "OAuth client ID not configured" }
+          message: "OAuth client ID not configured"
         });
       }
 
       res.json({
         success: true,
         state,
-        authUrl: `https://accounts.google.com/o/oauth2/v2/auth?client_id=${encodeURIComponent(clientId)}&redirect_uri=${encodeURIComponent(redirectUri)}&response_type=code&scope=openid%20email%20profile&state=${encodeURIComponent(state)}`,
-        expiresIn: OAUTH_STATE_TTL / 1000, // seconds
+        redirectUri,
+        authUrl: `https://accounts.google.com/o/oauth2/v2/auth?client_id=${encodeURIComponent(clientId)}&redirect_uri=${encodeURIComponent(redirectUri)}&response_type=code&scope=openid%20email%20profile&state=${encodeURIComponent(state)}&access_type=offline&prompt=consent`,
+        expiresIn: OAUTH_STATE_TTL / 1000,
       });
 
     } catch (error) {
@@ -872,9 +1013,9 @@ export async function registerRoutes(
       // Get environment variables
       const clientId = process.env.GOOGLE_OAUTH_CLIENT_ID;
       const clientSecret = process.env.GOOGLE_CLIENT_SECRET;
-      // Use environment variable for redirect URI, fallback to Render URL
-      const redirectUri = process.env.GOOGLE_OAUTH_REDIRECT_URI || 
-        "https://outsyde-backend.onrender.com/api/auth/mobile/google/callback";
+      // Use environment variable for redirect URI, fallback to auto-detect from request
+      const redirectUri = process.env.GOOGLE_OAUTH_REDIRECT_URI ||
+        `${req.protocol}://${req.get('host')}/api/auth/mobile/google/callback`;
 
       if (!clientId || !clientSecret) {
         console.error("Missing Google OAuth configuration");
@@ -1027,8 +1168,8 @@ export async function registerRoutes(
       const accessToken = generateAccessToken(tokenPayload);
       const refreshToken = generateRefreshToken(tokenPayload);
 
-      // Store refresh token in database (7 day expiry)
-      await storage.storeRefreshToken(user.id, refreshToken, new Date(Date.now() + 7 * 24 * 60 * 60 * 1000));
+      // Store refresh token in database (30-day expiry)
+      await storage.storeRefreshToken(user.id, refreshToken, new Date(Date.now() + REFRESH_TOKEN_EXPIRY_MS));
 
       // Build success redirect URL with tokens and user data
       const redirectParams = new URLSearchParams({
@@ -1080,7 +1221,7 @@ export async function registerRoutes(
   });
 
   // Mobile token refresh endpoint
-  app.post("/api/auth/mobile/refresh", async (req, res) => {
+  app.post("/api/auth/mobile/refresh", authRateLimiter, async (req, res) => {
     try {
       const { refreshToken } = req.body;
 
@@ -1145,13 +1286,13 @@ export async function registerRoutes(
 
       // Revoke old refresh token and store new one
       await storage.revokeRefreshToken(tokenRecord.tokenId);
-      await storage.storeRefreshToken(user.id, newRefreshToken, new Date(Date.now() + 7 * 24 * 60 * 60 * 1000));
+      await storage.storeRefreshToken(user.id, newRefreshToken, new Date(Date.now() + REFRESH_TOKEN_EXPIRY_MS));
 
       res.json({
         success: true,
         accessToken: newAccessToken,
         refreshToken: newRefreshToken,
-        expiresIn: 3600,
+        expiresIn: ACCESS_TOKEN_EXPIRY_SECONDS,
       });
 
     } catch (error) {
@@ -1163,8 +1304,53 @@ export async function registerRoutes(
     }
   });
 
+  // Alias for /api/auth/mobile/refresh — used by frontend/mobile clients
+  // Uses the same refresh token rotation logic
+  app.post("/api/auth/refresh", authRateLimiter, async (req, res) => {
+    try {
+      const { refreshToken } = req.body;
+      if (!refreshToken || typeof refreshToken !== 'string') {
+        return res.status(400).json({ success: false, message: "refreshToken is required" });
+      }
+      const payload = verifyRefreshToken(refreshToken);
+      if (!payload) {
+        return res.status(401).json({ success: false, message: "Invalid or expired refresh token" });
+      }
+      const tokenRecord = await storage.validateRefreshToken(refreshToken);
+      if (!tokenRecord) {
+        return res.status(401).json({ success: false, message: "Refresh token has been revoked" });
+      }
+      const user = await storage.getUser(payload.userId);
+      if (!user) {
+        return res.status(401).json({ success: false, message: "User not found" });
+      }
+      const tokenPayload: TokenPayload = {
+        userId: user.id,
+        isVendor: user.isVendor || false,
+        isPhotographer: user.isPhotographer || false,
+        isAdmin: user.isAdmin || false,
+      };
+      if (user.isVendor) {
+        const business = await storage.getBusinessByOwnerId(user.id);
+        if (business) tokenPayload.businessId = business.id;
+      }
+      if (user.isPhotographer) {
+        const photographer = await storage.getPhotographerByUserId(user.id);
+        if (photographer) tokenPayload.photographerId = photographer.id;
+      }
+      const newAccessToken = generateAccessToken(tokenPayload);
+      const newRefreshToken = generateRefreshToken(tokenPayload);
+      await storage.revokeRefreshToken(tokenRecord.tokenId);
+      await storage.storeRefreshToken(user.id, newRefreshToken, new Date(Date.now() + REFRESH_TOKEN_EXPIRY_MS));
+      res.json({ success: true, accessToken: newAccessToken, refreshToken: newRefreshToken, expiresIn: ACCESS_TOKEN_EXPIRY_SECONDS });
+    } catch (error) {
+      console.error("Token refresh error:", error);
+      res.status(500).json({ success: false, message: "Token refresh failed" });
+    }
+  });
+
   // Mobile login with email/password - returns JWT tokens
-  app.post("/api/auth/mobile/login", async (req, res) => {
+  app.post("/api/auth/mobile/login", strictAuthRateLimiter, async (req, res) => {
     try {
       const data = loginSchema.parse(req.body);
 
@@ -1222,7 +1408,7 @@ export async function registerRoutes(
       const refreshToken = generateRefreshToken(tokenPayload);
 
       // Store refresh token
-      await storage.storeRefreshToken(user.id, refreshToken, new Date(Date.now() + 7 * 24 * 60 * 60 * 1000));
+      await storage.storeRefreshToken(user.id, refreshToken, new Date(Date.now() + REFRESH_TOKEN_EXPIRY_MS));
 
       // ============================================================
       // CRITICAL: Establish session for ALL user types (consumers, photographers, vendors)
@@ -1261,7 +1447,7 @@ export async function registerRoutes(
         user: safeUser,
         accessToken,
         refreshToken,
-        expiresIn: 3600,
+        expiresIn: ACCESS_TOKEN_EXPIRY_SECONDS,
       });
 
     } catch (error) {
@@ -1440,6 +1626,121 @@ export async function registerRoutes(
         error: "Failed to verify session",
         code: "SERVER_ERROR"
       });
+    }
+  });
+
+  // ==================== PASSWORD RESET ====================
+
+  app.post("/api/auth/forgot-password", strictAuthRateLimiter, async (req, res) => {
+    try {
+      const { email } = req.body;
+      if (!email || typeof email !== 'string') {
+        return res.status(400).json({ success: false, message: "Email is required" });
+      }
+
+      const user = await storage.getUserByEmail(email.toLowerCase().trim());
+
+      // Always return success to prevent email enumeration
+      if (!user) {
+        return res.json({ success: true, message: "If an account with that email exists, a reset link has been sent" });
+      }
+
+      // Generate reset token
+      const { randomBytes, createHash } = await import('crypto');
+      const rawToken = randomBytes(32).toString('hex');
+      const tokenHash = createHash('sha256').update(rawToken).digest('hex');
+      const expiresAt = new Date(Date.now() + 60 * 60 * 1000); // 1 hour
+
+      await storage.updateUser(user.id, {
+        resetTokenHash: tokenHash,
+        resetTokenExpiresAt: expiresAt,
+      });
+
+      // Build reset deep link for mobile app
+      const resetLink = `outsyde://reset-password?token=${rawToken}&email=${encodeURIComponent(email)}`;
+      const webResetLink = `${req.protocol}://${req.get('host')}/reset-password?token=${rawToken}&email=${encodeURIComponent(email)}`;
+
+      // Send email via Resend if configured
+      try {
+        const { Resend } = await import('resend');
+        const resendApiKey = process.env.RESEND_API_KEY;
+        if (resendApiKey) {
+          const resend = new Resend(resendApiKey);
+          await resend.emails.send({
+            from: process.env.RESEND_FROM_EMAIL || 'noreply@outsyde.com',
+            to: email,
+            subject: 'Reset your Outsyde password',
+            html: `
+              <h2>Password Reset</h2>
+              <p>You requested a password reset for your Outsyde account.</p>
+              <p><a href="${webResetLink}" style="background: #f59e0b; color: white; padding: 12px 24px; text-decoration: none; border-radius: 8px; display: inline-block;">Reset Password</a></p>
+              <p>Or open this link on your phone: <a href="${resetLink}">${resetLink}</a></p>
+              <p>This link expires in 1 hour.</p>
+              <p>If you didn't request this, ignore this email.</p>
+            `,
+          });
+          console.log(`[Auth] Password reset email sent to ${email}`);
+        } else {
+          console.log(`[Auth] RESEND_API_KEY not configured. Reset token for ${email}: ${rawToken}`);
+        }
+      } catch (emailError) {
+        console.error("Failed to send reset email:", emailError);
+      }
+
+      res.json({ success: true, message: "If an account with that email exists, a reset link has been sent" });
+    } catch (error) {
+      console.error("Forgot password error:", error);
+      res.status(500).json({ success: false, message: "Failed to process password reset request" });
+    }
+  });
+
+  app.post("/api/auth/reset-password", strictAuthRateLimiter, async (req, res) => {
+    try {
+      const { token, email, newPassword } = req.body;
+
+      if (!token || !email || !newPassword) {
+        return res.status(400).json({ success: false, message: "Token, email, and newPassword are required" });
+      }
+
+      if (typeof newPassword !== 'string' || newPassword.length < 6) {
+        return res.status(400).json({ success: false, message: "Password must be at least 6 characters" });
+      }
+
+      const user = await storage.getUserByEmail(email.toLowerCase().trim());
+      if (!user) {
+        return res.status(400).json({ success: false, message: "Invalid or expired reset token" });
+      }
+
+      // Verify token hash
+      const { createHash } = await import('crypto');
+      const tokenHash = createHash('sha256').update(token).digest('hex');
+
+      if (!user.resetTokenHash || user.resetTokenHash !== tokenHash) {
+        return res.status(400).json({ success: false, message: "Invalid or expired reset token" });
+      }
+
+      // Check expiry
+      const expiresAt = user.resetTokenExpiresAt ? new Date(user.resetTokenExpiresAt) : null;
+      if (!expiresAt || expiresAt < new Date()) {
+        return res.status(400).json({ success: false, message: "Invalid or expired reset token" });
+      }
+
+      // Hash new password and clear reset token
+      const hashedPassword = await hashPassword(newPassword);
+      await storage.updateUser(user.id, {
+        password: hashedPassword,
+        resetTokenHash: null,
+        resetTokenExpiresAt: null,
+      });
+
+      // Revoke all existing refresh tokens for security
+      await storage.revokeAllUserRefreshTokens(user.id);
+
+      console.log(`[Auth] Password reset completed for ${email}`);
+      res.json({ success: true, message: "Password has been reset successfully" });
+    } catch (error) {
+      console.error("Reset password error:", error);
+      res.status(500).json({ success: false, message: "Failed to reset password" });
     }
   });
 
@@ -2717,8 +3018,8 @@ export async function registerRoutes(
         });
       }
 
-      // Calculate pricing (10% Outsyde fee for photographers)
-      const platformFee = Math.round(priceCents * 0.10);
+      // Calculate pricing (10% Outsyde booking fee)
+      const platformFee = calculateBookingFee(priceCents);
       const vendorNet = priceCents - platformFee;
 
       // Set draft expiry (10 minutes from now)
@@ -2868,8 +3169,8 @@ export async function registerRoutes(
         });
       }
 
-      // Calculate fees (10% Outsyde platform fee for photographers)
-      const platformFee = Math.round(data.totalPriceCents * 0.10);
+      // Calculate fees (10% Outsyde booking fee)
+      const platformFee = calculateBookingFee(data.totalPriceCents);
       const vendorNet = data.totalPriceCents - platformFee;
 
       // Create booking with "awaiting_payment" status
@@ -2900,7 +3201,7 @@ export async function registerRoutes(
       );
 
       // Create Stripe checkout session with destination charges
-      const baseUrl = `https://${process.env.REPLIT_DOMAINS?.split(',')[0]}`;
+      const baseUrl = process.env.API_BASE_URL || `https://${process.env.REPLIT_DOMAINS?.split(',')[0] || 'localhost:5000'}`;
       const photographerName = photographer.displayName || 'Photographer';
       
       const session = await stripeService.createPhotographerBookingCheckout({
@@ -2913,8 +3214,8 @@ export async function registerRoutes(
         successUrl: `${baseUrl}/booking-success?bookingId=${booking.id}&type=photographer`,
         cancelUrl: `${baseUrl}/photographer/${photographer.id}?cancelled=true`,
         metadata: {
-          type: 'photographer_booking',
-          bookingId: booking.id,
+          type: 'shoot_booking',
+          shootBookingId: booking.id,
           photographerId: photographer.id,
           clientId: userId,
           serviceId: data.serviceId || '',
@@ -4575,8 +4876,8 @@ export async function registerRoutes(
       // Determine capture method based on autoAcceptBookings
       const captureMethod = business.autoAcceptBookings === false ? 'manual' : 'automatic';
       
-      // Calculate platform fee (4% for businesses)
-      const platformFeeAmount = Math.round(appointment.totalPrice * 0.04);
+      // Calculate platform fee (10% Outsyde booking fee)
+      const platformFeeAmount = calculateBookingFee(appointment.totalPrice);
 
       // Get or create Stripe customer for the user
       const user = await storage.getUser(userId);
@@ -4709,8 +5010,8 @@ export async function registerRoutes(
       // Determine capture method based on autoAcceptBookings
       const captureMethod = photographer.autoAcceptBookings === false ? 'manual' : 'automatic';
       
-      // Calculate platform fee (10% for photographers)
-      const platformFeeAmount = Math.round(booking.totalPrice * 0.10);
+      // Calculate platform fee (10% Outsyde booking fee)
+      const platformFeeAmount = calculateBookingFee(booking.totalPrice);
 
       // Get user for Stripe customer
       const user = await storage.getUser(userId);
@@ -5063,9 +5364,9 @@ export async function registerRoutes(
         }
       }
 
-      // Calculate fees (4% platform fee)
+      // Calculate fees (10% Outsyde booking fee)
       const totalPrice = service.price || 0;
-      const platformFee = Math.round(totalPrice * 0.04);
+      const platformFee = calculateBookingFee(totalPrice);
       const vendorNet = totalPrice - platformFee;
 
       // Create draft booking with 10-minute TTL
@@ -5151,9 +5452,9 @@ export async function registerRoutes(
         return res.status(404).json({ error: "Photographer not found" });
       }
 
-      // Calculate price (10% platform fee for photographers)
+      // Calculate price (10% Outsyde booking fee)
       const totalPrice = photographer.hourlyRate * data.durationHours * 100; // Convert to cents
-      const platformFee = Math.round(totalPrice * 0.10);
+      const platformFee = calculateBookingFee(totalPrice);
       const vendorNet = totalPrice - platformFee;
 
       // Create draft with 10-minute TTL
@@ -5513,8 +5814,8 @@ export async function registerRoutes(
         });
       }
 
-      // Calculate fees (4% Outsyde platform fee for businesses and staff)
-      const platformFee = Math.round(data.totalPriceCents * 0.04);
+      // Calculate fees (10% Outsyde booking fee)
+      const platformFee = calculateBookingFee(data.totalPriceCents);
       const vendorNet = data.totalPriceCents - platformFee;
       
       // If staff member is assigned, they get 100% of vendorNet (minus platform fee)
@@ -5694,7 +5995,7 @@ export async function registerRoutes(
 
       const customer = await stripeService.createCustomer(user.email!, userId, user.name!);
 
-      const baseUrl = `https://${process.env.REPLIT_DOMAINS?.split(',')[0]}`;
+      const baseUrl = process.env.API_BASE_URL || `https://${process.env.REPLIT_DOMAINS?.split(',')[0] || 'localhost:5000'}`;
       const session = await stripeService.createTierSubscriptionCheckout(
         customer.id,
         tierId,
@@ -5904,7 +6205,7 @@ export async function registerRoutes(
     }
 
     try {
-      const baseUrl = `https://${process.env.REPLIT_DOMAINS?.split(',')[0]}`;
+      const baseUrl = process.env.API_BASE_URL || `https://${process.env.REPLIT_DOMAINS?.split(',')[0] || 'localhost:5000'}`;
       
       if (req.session?.isVendor) {
         const business = await storage.getBusinessByOwnerId(userId);
@@ -6033,7 +6334,7 @@ export async function registerRoutes(
         return res.status(400).json({ error: "User email required for Stripe onboarding" });
       }
 
-      const baseUrl = `https://${process.env.REPLIT_DOMAINS?.split(',')[0]}`;
+      const baseUrl = process.env.API_BASE_URL || `https://${process.env.REPLIT_DOMAINS?.split(',')[0] || 'localhost:5000'}`;
       
       if (req.session?.isVendor) {
         const business = await storage.getBusinessByOwnerId(userId);
@@ -6324,8 +6625,8 @@ export async function registerRoutes(
         return res.status(404).json({ error: "Service not found" });
       }
 
-      // Platform fee is 4% Outsyde fee of the final price
-      const platformFeeInCents = Math.round(pricing.finalPriceCents * 0.04);
+      // Platform fee (10% Outsyde booking fee for service purchases)
+      const platformFeeInCents = calculateBookingFee(pricing.finalPriceCents);
 
       // Create the purchase record first
       const purchase = await storage.createAlaCartePurchase({
@@ -9343,6 +9644,28 @@ export async function registerRoutes(
     }
   });
 
+  // Register Expo push token for mobile notifications
+  app.post("/api/push/expo-token", optionalAuthMiddleware, async (req, res) => {
+    const authReq = req as AuthenticatedRequest;
+    const userId = authReq.user?.userId || req.session?.userId;
+    if (!userId) {
+      return res.status(401).json({ success: false, message: "Authentication required" });
+    }
+
+    try {
+      const { expoPushToken } = req.body;
+      if (!expoPushToken || typeof expoPushToken !== 'string') {
+        return res.status(400).json({ success: false, message: "expoPushToken is required" });
+      }
+
+      await storage.updateUser(userId, { expoPushToken });
+      res.json({ success: true, message: "Push token registered" });
+    } catch (error) {
+      console.error("Register Expo token error:", error);
+      res.status(500).json({ success: false, message: "Failed to register push token" });
+    }
+  });
+
   // ==================== CART MANAGEMENT ====================
 
   app.get("/api/cart", async (req, res) => {
@@ -9388,7 +9711,22 @@ export async function registerRoutes(
       if (data.businessId) {
         const subStatus = await storage.isBusinessSubscriptionActive(data.businessId);
         if (!subStatus.active) {
-          return res.status(403).json({ error: "This business is currently unavailable for purchases" });
+          return res.status(403).json({ success: false, error: { code: 'VENDOR_UNAVAILABLE', message: 'This business is currently unavailable for purchases' } });
+        }
+      }
+
+      // Check stock before adding to cart
+      const product = await storage.getVendorProduct(data.productId);
+      if (product?.trackInventory) {
+        const currentCart = await storage.getCartItems(userId);
+        const existingQty = currentCart.find(i => i.productId === data.productId)?.quantity || 0;
+        const totalRequested = existingQty + data.quantity;
+        const available = product.inventory ?? 0;
+        if (available <= 0) {
+          return res.status(400).json({ success: false, error: { code: 'OUT_OF_STOCK', message: `${product.name} is out of stock` } });
+        }
+        if (totalRequested > available) {
+          return res.status(400).json({ success: false, error: { code: 'INSUFFICIENT_STOCK', message: `Only ${available} units available (${existingQty} already in cart)` } });
         }
       }
 
@@ -9415,13 +9753,36 @@ export async function registerRoutes(
   app.patch("/api/cart/:id", async (req, res) => {
     const userId = req.session?.userId;
     if (!userId) {
-      return res.status(401).json({ error: "Not authenticated" });
+      return res.status(401).json({ success: false, error: { code: 'UNAUTHORIZED', message: 'Not authenticated' } });
     }
 
     try {
       const { quantity } = req.body;
-      if (typeof quantity !== 'number') {
-        return res.status(400).json({ error: "Quantity required" });
+      if (typeof quantity !== 'number' || !Number.isInteger(quantity)) {
+        return res.status(400).json({ success: false, error: { code: 'INVALID_INPUT', message: 'Integer quantity required' } });
+      }
+      if (quantity < 0) {
+        return res.status(400).json({ success: false, error: { code: 'INVALID_INPUT', message: 'Quantity cannot be negative' } });
+      }
+
+      // quantity 0 = remove item
+      if (quantity === 0) {
+        await storage.removeCartItem(req.params.id);
+        const items = await storage.getCartItems(userId);
+        return res.json({ success: true, item: null, itemCount: items.reduce((sum, i) => sum + i.quantity, 0) });
+      }
+
+      // Check stock if product tracks inventory
+      const existingItems = await storage.getCartItems(userId);
+      const cartItem = existingItems.find(i => i.id === req.params.id);
+      if (cartItem) {
+        const product = await storage.getVendorProduct(cartItem.productId);
+        if (product?.trackInventory && product.inventory !== null && quantity > (product.inventory ?? 0)) {
+          return res.status(400).json({
+            success: false,
+            error: { code: 'INSUFFICIENT_STOCK', message: `Only ${product.inventory} units available` }
+          });
+        }
       }
 
       const item = await storage.updateCartItemQuantity(req.params.id, quantity);
@@ -9434,7 +9795,7 @@ export async function registerRoutes(
       });
     } catch (error) {
       console.error("Update cart error:", error);
-      res.status(500).json({ error: "Failed to update cart item" });
+      res.status(500).json({ success: false, error: { code: 'SERVER_ERROR', message: 'Failed to update cart item' } });
     }
   });
 
@@ -9475,7 +9836,7 @@ export async function registerRoutes(
 
   // Cart checkout - create single Stripe checkout session for all cart items (supports multi-vendor)
   // For multi-vendor carts, payment is collected once and then split between vendors via transfers
-  app.post("/api/cart/checkout", async (req, res) => {
+  app.post("/api/cart/checkout", authRateLimiter, async (req, res) => {
     const userId = req.session?.userId;
     if (!userId) {
       return res.status(401).json({ error: "Not authenticated" });
@@ -9493,23 +9854,41 @@ export async function registerRoutes(
         return res.status(400).json({ error: "Cart is empty" });
       }
 
-      // Get products for each cart item and validate they're live
+      // Get products for each cart item, validate they're live, and check stock
       const productMap = new Map<string, any>();
       const businessIds = new Set<string>();
+      const unavailableItems: Array<{ productId: string; name: string; requested: number; available: number }> = [];
       
       for (const item of cartItems) {
         const product = await storage.getVendorProduct(item.productId);
         if (!product) {
-          return res.status(400).json({ error: `Product not found: ${item.productId}` });
+          return res.status(400).json({ success: false, error: { code: 'PRODUCT_NOT_FOUND', message: `Product not found: ${item.productId}` } });
         }
         if (product.status !== 'live') {
-          return res.status(400).json({ error: `Product is not available: ${product.name}` });
+          return res.status(400).json({ success: false, error: { code: 'PRODUCT_UNAVAILABLE', message: `Product is not available: ${product.name}` } });
         }
         if (!product.stripePriceId) {
-          return res.status(400).json({ error: `Product is not ready for checkout: ${product.name}` });
+          return res.status(400).json({ success: false, error: { code: 'PRODUCT_NOT_READY', message: `Product is not ready for checkout: ${product.name}` } });
+        }
+        // Stock validation
+        if (product.trackInventory && product.inventory !== null && item.quantity > (product.inventory ?? 0)) {
+          unavailableItems.push({
+            productId: product.id,
+            name: product.name,
+            requested: item.quantity,
+            available: product.inventory ?? 0,
+          });
         }
         productMap.set(product.id, product);
         businessIds.add(product.businessId);
+      }
+
+      // Reject checkout if any items are out of stock
+      if (unavailableItems.length > 0) {
+        return res.status(400).json({
+          success: false,
+          error: { code: 'ITEMS_UNAVAILABLE', message: 'One or more items are out of stock', items: unavailableItems }
+        });
       }
 
       // Validate all businesses exist, have active subscriptions, and completed Stripe onboarding
@@ -9525,7 +9904,7 @@ export async function registerRoutes(
         }
         // Ensure vendor has completed Stripe onboarding
         if (!business.stripeAccountId || !business.stripeOnboardingComplete) {
-          return res.status(403).json({ error: `${business.name} has not enabled payments yet` });
+          return res.status(403).json({ success: false, error: { code: 'VENDOR_NOT_ONBOARDED', message: `${business.name} cannot accept payments yet` } });
         }
         
         // Verify Stripe account is enabled for charges and payouts via Stripe API
@@ -9553,7 +9932,7 @@ export async function registerRoutes(
         await storage.updateUser(userId, { stripeCustomerId: customer.id });
       }
 
-      const baseUrl = `https://${process.env.REPLIT_DOMAINS?.split(',')[0]}`;
+      const baseUrl = process.env.API_BASE_URL || `https://${process.env.REPLIT_DOMAINS?.split(',')[0] || 'localhost:5000'}`;
 
       // Group cart items by vendor
       const itemsByVendor = new Map<string, typeof cartItems>();
@@ -9605,8 +9984,8 @@ export async function registerRoutes(
 
         totalAmountInCents += vendorTotalInCents;
 
-        // Platform fee is 4% for businesses
-        const platformFeeInCents = Math.round(vendorTotalInCents * 0.04);
+        // Platform fee (4% Outsyde product fee)
+        const platformFeeInCents = calculateProductFee(vendorTotalInCents);
         totalPlatformFeeInCents += platformFeeInCents;
         const vendorNet = vendorTotalInCents - platformFeeInCents;
 
@@ -9791,7 +10170,7 @@ export async function registerRoutes(
       }
 
       const business = await storage.getBusiness(nextOrder.businessId);
-      const baseUrl = `https://${process.env.REPLIT_DOMAINS?.split(',')[0]}`;
+      const baseUrl = process.env.API_BASE_URL || `https://${process.env.REPLIT_DOMAINS?.split(',')[0] || 'localhost:5000'}`;
 
       // We need to create a new session for the next order since sessions expire
       // Get products from the order items to rebuild the checkout
@@ -10514,6 +10893,45 @@ export async function registerRoutes(
       }
 
       if (data.status === 'approved') {
+        // Issue Stripe refund for the actual payment
+        let stripeRefundId: string | null = null;
+        if (request.targetId) {
+          try {
+            let paymentIntentId: string | null = null;
+            if (request.targetType === 'order') {
+              const order = await storage.getOrder(request.targetId);
+              paymentIntentId = order?.stripePaymentIntentId || null;
+            } else if (request.targetType === 'shoot_booking') {
+              const booking = await storage.getShootBooking(request.targetId);
+              paymentIntentId = booking?.stripePaymentIntentId || null;
+            } else if (request.targetType === 'appointment') {
+              const appointment = await storage.getAppointment(request.targetId);
+              paymentIntentId = appointment?.stripePaymentIntentId || null;
+            }
+
+            if (paymentIntentId) {
+              const refund = await stripeService.createBookingRefund({
+                paymentIntentId,
+                amountCents: request.amount,
+                reason: 'requested_by_customer',
+                metadata: {
+                  refundRequestId: id,
+                  targetType: request.targetType || '',
+                  targetId: request.targetId,
+                  approvedBy: adminUser.id,
+                },
+              });
+              stripeRefundId = refund.id;
+              console.log(`[Refund] Stripe refund ${refund.id} issued for ${request.targetType} ${request.targetId}: ${request.amount}¢`);
+            } else {
+              console.warn(`[Refund] No Stripe payment found for ${request.targetType} ${request.targetId} — skipping Stripe refund`);
+            }
+          } catch (stripeError: any) {
+            console.error(`[Refund] Stripe refund failed for ${request.targetType} ${request.targetId}:`, stripeError.message);
+            return res.status(402).json({ success: false, message: `Stripe refund failed: ${stripeError.message}` });
+          }
+        }
+
         // Update order/booking status to refunded with state machine validation
         if (request.targetType === 'order' && request.targetId) {
           const orderResult = await storage.updateOrderWithValidation(
@@ -10533,10 +10951,8 @@ export async function registerRoutes(
           if (!bookingResult.success) {
             console.warn('Failed to update booking status to refunded:', bookingResult.error);
           }
-          // Release photographer availability slot
           await storage.releasePhotographerSlot(request.targetId);
         } else if (request.targetType === 'appointment' && request.targetId) {
-          // Release business availability slot
           await storage.releaseBusinessSlot(request.targetId);
         }
 
@@ -11210,6 +11626,278 @@ export async function registerRoutes(
     } catch (error) {
       console.error("Initiate influencer payout error:", error);
       res.status(500).json({ error: "Failed to initiate payout" });
+    }
+  });
+
+  // ==================== INFLUENCER TRACKING ROUTES ====================
+
+  // Referral link redirect — tracks click + sets attribution cookie
+  app.get("/ref/:refCode", async (req, res) => {
+    try {
+      const { refCode } = req.params;
+      const { utm_source, utm_medium, utm_campaign, product, service, business } = req.query;
+
+      await trackLinkClick(refCode, {
+        userAgent: req.headers['user-agent'],
+        ipAddress: req.ip,
+        utmSource: utm_source as string,
+        utmMedium: utm_medium as string,
+        utmCampaign: utm_campaign as string,
+      });
+
+      // Build redirect URL — preserve ref code for attribution on signup
+      const redirectUrl = new URL('/', `${req.protocol}://${req.get('host')}`);
+      redirectUrl.searchParams.set('ref', refCode);
+      if (product) redirectUrl.searchParams.set('product', product as string);
+      if (service) redirectUrl.searchParams.set('service', service as string);
+      if (business) redirectUrl.searchParams.set('business', business as string);
+
+      // Set attribution cookie (30-day window, first-click only)
+      res.cookie('outsyde_ref', refCode, {
+        maxAge: 30 * 24 * 60 * 60 * 1000,
+        httpOnly: true,
+        sameSite: 'lax',
+      });
+
+      res.redirect(302, redirectUrl.toString());
+    } catch (error) {
+      console.error("Referral redirect error:", error);
+      res.redirect('/');
+    }
+  });
+
+  // Record attribution (called by client after signup with ref param/cookie)
+  app.post("/api/influencer-tracking/attribute", optionalAuthMiddleware, async (req, res) => {
+    const authReq = req as AuthenticatedRequest;
+    try {
+      const userId = authReq.user?.userId || req.session?.userId;
+      if (!userId) {
+        return res.status(401).json({ error: "Authentication required" });
+      }
+
+      const { refCode, utm_source, utm_medium, utm_campaign } = req.body;
+      if (!refCode) {
+        return res.status(400).json({ error: "refCode is required" });
+      }
+
+      const attribution = await recordAttribution(userId, refCode, {
+        utm_source, utm_medium, utm_campaign,
+      });
+
+      if (attribution) {
+        await trackAttributedSignup(userId);
+      }
+
+      res.json({ success: true, attributed: !!attribution });
+    } catch (error) {
+      console.error("Attribution error:", error);
+      res.status(500).json({ error: "Failed to record attribution" });
+    }
+  });
+
+  // Track app download event (called by mobile client on first launch with ref)
+  app.post("/api/influencer-tracking/download", async (req, res) => {
+    try {
+      const { refCode, deviceType, platform } = req.body;
+      if (!refCode) {
+        return res.status(400).json({ error: "refCode is required" });
+      }
+
+      const profile = await storage.getInfluencerProfileByPromoCode(refCode);
+      if (!profile) {
+        return res.status(404).json({ error: "Invalid referral code" });
+      }
+
+      const { trackEvent } = await import("./influencerTrackingService");
+      await trackEvent({
+        influencerId: profile.id,
+        eventType: 'app_download',
+        refCode,
+        deviceType: deviceType || detectDeviceFromRequest(req),
+        platform: platform || 'unknown',
+        userAgent: req.headers['user-agent'],
+        ipAddress: req.ip,
+      });
+
+      res.json({ success: true });
+    } catch (error) {
+      console.error("Download tracking error:", error);
+      res.status(500).json({ error: "Failed to track download" });
+    }
+  });
+
+  // Influencer: Get own tracking dashboard
+  app.get("/api/influencer/tracking", async (req, res) => {
+    const userId = req.session?.userId;
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    try {
+      const profile = await storage.getInfluencerProfileByUserId(userId);
+      if (!profile) {
+        return res.status(403).json({ error: "Not an influencer" });
+      }
+
+      const dashboard = await getInfluencerDashboardData(profile.id);
+
+      res.json({
+        referralLink: dashboard.referralLink,
+        deepLink: generateDeepLink(profile.promoCode || profile.id),
+        stats: dashboard.stats ? {
+          totalClicks: dashboard.stats.totalClicks,
+          totalDownloads: dashboard.stats.totalDownloads,
+          totalSignups: dashboard.stats.totalSignups,
+          totalPurchases: dashboard.stats.totalPurchases,
+          totalRevenueCents: dashboard.stats.totalRevenueCents,
+          totalPoints: dashboard.stats.totalPoints,
+          conversionRate: dashboard.stats.conversionRate,
+          rollingAvgConversionRate: dashboard.stats.rollingAvgConversionRate,
+          totalCommissionEarnedCents: dashboard.stats.totalCommissionEarnedCents,
+          pendingCommissionCents: dashboard.stats.pendingCommissionCents,
+        } : null,
+        tier: dashboard.tier ? {
+          name: dashboard.tier.name,
+          displayName: dashboard.tier.displayName,
+          commissionPercent: dashboard.tier.commissionBps / 100,
+        } : null,
+        nextTier: dashboard.nextTier ? {
+          name: dashboard.nextTier.name,
+          displayName: dashboard.nextTier.displayName,
+          minConversionRate: dashboard.nextTier.minConversionRate,
+          conversionNeeded: dashboard.conversionNeededForNextTier,
+        } : null,
+      });
+    } catch (error) {
+      console.error("Influencer tracking dashboard error:", error);
+      res.status(500).json({ error: "Failed to get tracking data" });
+    }
+  });
+
+  // Influencer: Generate custom referral link with UTM params
+  app.post("/api/influencer/tracking/link", async (req, res) => {
+    const userId = req.session?.userId;
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    try {
+      const profile = await storage.getInfluencerProfileByUserId(userId);
+      if (!profile) {
+        return res.status(403).json({ error: "Not an influencer" });
+      }
+
+      const { utm_source, utm_medium, utm_campaign, productId, serviceId } = req.body;
+      const refCode = profile.promoCode || profile.id;
+      const origin = `${req.protocol}://${req.get('host')}`;
+
+      const referralLink = generateReferralLink(refCode, origin, {
+        utm_source, utm_medium, utm_campaign, productId, serviceId,
+      });
+
+      const deepLink = generateDeepLink(refCode, { productId, serviceId }, {
+        utm_source, utm_medium, utm_campaign,
+      });
+
+      res.json({ referralLink, deepLink, refCode });
+    } catch (error) {
+      console.error("Generate referral link error:", error);
+      res.status(500).json({ error: "Failed to generate link" });
+    }
+  });
+
+  // Admin: Get influencer leaderboard with tracking stats
+  app.get("/api/admin/influencer-tracking", requireAdmin, async (req, res) => {
+    try {
+      const { tierId, startDate, endDate, utmSource, tierChangeOnly, limit, offset } = req.query;
+
+      const result = await getInfluencerLeaderboard({
+        tierId: tierId as string,
+        startDate: startDate ? new Date(startDate as string) : undefined,
+        endDate: endDate ? new Date(endDate as string) : undefined,
+        utmSource: utmSource as string,
+        tierChangeOnly: tierChangeOnly === 'true',
+        limit: limit ? parseInt(limit as string) : 50,
+        offset: offset ? parseInt(offset as string) : 0,
+      });
+
+      res.json(result);
+    } catch (error) {
+      console.error("Admin influencer tracking error:", error);
+      res.status(500).json({ error: "Failed to get influencer tracking data" });
+    }
+  });
+
+  // Admin: Acknowledge tier change flag
+  app.post("/api/admin/influencer-tracking/:influencerId/acknowledge-tier-change", requireAdmin, async (req, res) => {
+    try {
+      const { influencerId } = req.params;
+      await clearTierChangeFlag(influencerId);
+      res.json({ success: true });
+    } catch (error) {
+      console.error("Acknowledge tier change error:", error);
+      res.status(500).json({ error: "Failed to acknowledge tier change" });
+    }
+  });
+
+  // Admin: Get all tiers (configurable)
+  app.get("/api/admin/influencer-tiers", requireAdmin, async (req, res) => {
+    try {
+      const { influencerTiers: tiersTable } = await import("@shared/schema");
+      const tiers = await db.select().from(tiersTable).orderBy(tiersTable.sortOrder);
+      res.json({ tiers });
+    } catch (error) {
+      console.error("Get tiers error:", error);
+      res.status(500).json({ error: "Failed to get tiers" });
+    }
+  });
+
+  // Admin: Update tier commission/points (configurable without code changes)
+  app.patch("/api/admin/influencer-tiers/:tierId", requireAdmin, async (req, res) => {
+    try {
+      const { tierId } = req.params;
+      const { commissionBps, pointMultiplier, displayName } = req.body;
+      const { influencerTiers: tiersTable } = await import("@shared/schema");
+
+      const updates: any = { };
+      if (commissionBps !== undefined) updates.commissionBps = commissionBps;
+      if (pointMultiplier !== undefined) updates.pointMultiplier = pointMultiplier;
+      if (displayName !== undefined) updates.displayName = displayName;
+
+      const [updated] = await db.update(tiersTable).set(updates).where(eq(tiersTable.id, tierId)).returning();
+      res.json({ success: true, tier: updated });
+    } catch (error) {
+      console.error("Update tier error:", error);
+      res.status(500).json({ error: "Failed to update tier" });
+    }
+  });
+
+  // Admin: Get/update point config
+  app.get("/api/admin/influencer-point-config", requireAdmin, async (req, res) => {
+    try {
+      const { influencerPointConfig: configTable } = await import("@shared/schema");
+      const config = await db.select().from(configTable);
+      res.json({ config });
+    } catch (error) {
+      console.error("Get point config error:", error);
+      res.status(500).json({ error: "Failed to get point config" });
+    }
+  });
+
+  app.patch("/api/admin/influencer-point-config/:eventType", requireAdmin, async (req, res) => {
+    try {
+      const { eventType } = req.params;
+      const { pointsAwarded } = req.body;
+      const { influencerPointConfig: configTable } = await import("@shared/schema");
+
+      const [updated] = await db.update(configTable)
+        .set({ pointsAwarded, updatedAt: new Date() })
+        .where(eq(configTable.eventType, eventType))
+        .returning();
+      res.json({ success: true, config: updated });
+    } catch (error) {
+      console.error("Update point config error:", error);
+      res.status(500).json({ error: "Failed to update point config" });
     }
   });
 
@@ -12008,19 +12696,120 @@ export async function registerRoutes(
     }
   });
 
+  // ==================== VENDOR ANALYTICS DASHBOARD ====================
+
+  app.get("/api/dashboard/analytics", optionalAuthMiddleware, async (req, res) => {
+    const authReq = req as AuthenticatedRequest;
+    const userId = authReq.user?.userId || req.session?.userId;
+    if (!userId) {
+      return res.status(401).json({ success: false, error: { code: 'AUTH_REQUIRED', message: 'Authentication required' } });
+    }
+
+    try {
+      const period = (req.query.period as string) || '30d';
+      const periodDays = period === '7d' ? 7 : period === '90d' ? 90 : period === 'all' ? 3650 : 30;
+      const periodStart = new Date(Date.now() - periodDays * 24 * 60 * 60 * 1000);
+      const periodEnd = new Date();
+
+      const business = await storage.getBusinessByOwnerId(userId);
+      const photographer = await storage.getPhotographerByUserId(userId);
+
+      if (!business && !photographer) {
+        return res.status(403).json({ success: false, error: { code: 'FORBIDDEN', message: 'Vendor or photographer account required' } });
+      }
+
+      let totalRevenue = 0;
+      let totalBookings = 0;
+      let totalOrders = 0;
+      let platformFeesCollected = 0;
+
+      if (business) {
+        // Revenue from orders (SQL aggregation)
+        const orderStats = await db.select({
+          revenue: sql<number>`COALESCE(SUM(${orders.totalAmount}), 0)`,
+          count: sql<number>`COUNT(*)`,
+          fees: sql<number>`COALESCE(SUM(${orders.platformFee}), 0)`,
+        }).from(orders).where(and(
+          eq(orders.businessId, business.id),
+          or(eq(orders.status, 'paid'), eq(orders.status, 'shipped'), eq(orders.status, 'delivered')),
+          gte(orders.createdAt, periodStart),
+        ));
+        totalOrders = Number(orderStats[0]?.count || 0);
+        totalRevenue += Number(orderStats[0]?.revenue || 0);
+        platformFeesCollected += Number(orderStats[0]?.fees || 0);
+
+        // Revenue from appointments (SQL aggregation)
+        const apptStats = await db.select({
+          revenue: sql<number>`COALESCE(SUM(${appointments.totalPrice}), 0)`,
+          count: sql<number>`COUNT(*)`,
+          fees: sql<number>`COALESCE(SUM(${appointments.platformFee}), 0)`,
+        }).from(appointments).where(and(
+          eq(appointments.businessId, business.id),
+          or(eq(appointments.status, 'confirmed'), eq(appointments.status, 'completed')),
+          gte(appointments.createdAt, periodStart),
+        ));
+        totalBookings += Number(apptStats[0]?.count || 0);
+        totalRevenue += Number(apptStats[0]?.revenue || 0);
+        platformFeesCollected += Number(apptStats[0]?.fees || 0);
+      }
+
+      if (photographer) {
+        // Revenue from shoot bookings (SQL aggregation)
+        const shootStats = await db.select({
+          revenue: sql<number>`COALESCE(SUM(${shootBookings.totalPrice}), 0)`,
+          count: sql<number>`COUNT(*)`,
+          fees: sql<number>`COALESCE(SUM(${shootBookings.platformFee}), 0)`,
+        }).from(shootBookings).where(and(
+          eq(shootBookings.photographerId, photographer.id),
+          or(eq(shootBookings.status, 'confirmed'), eq(shootBookings.status, 'completed')),
+          gte(shootBookings.createdAt, periodStart),
+        ));
+        totalBookings += Number(shootStats[0]?.count || 0);
+        totalRevenue += Number(shootStats[0]?.revenue || 0);
+        platformFeesCollected += Number(shootStats[0]?.fees || 0);
+      }
+
+      res.json({
+        success: true,
+        data: {
+          totalRevenue,
+          totalBookings,
+          totalOrders,
+          platformFeesCollected,
+          netPayout: totalRevenue - platformFeesCollected,
+          periodStart: periodStart.toISOString(),
+          periodEnd: periodEnd.toISOString(),
+        },
+      });
+    } catch (error) {
+      console.error("Dashboard analytics error:", error);
+      res.status(500).json({ success: false, error: { code: 'SERVER_ERROR', message: 'Failed to load analytics' } });
+    }
+  });
+
   // ==================== FEED POSTS ROUTES ====================
 
   // Get feed posts (public, algorithmic for authenticated users)
+  // Supports: ?city= (case-insensitive filter), ?cursor= or ?offset=, ?lat=&lng= (optional)
   app.get("/api/feed", async (req, res) => {
     try {
-      const limit = parseInt(req.query.limit as string) || 50;
-      const offset = parseInt(req.query.offset as string) || 0;
+      const limit = Math.min(parseInt(req.query.limit as string) || 20, 50);
+      const cursor = req.query.cursor as string | undefined;
+      const offset = cursor ? parseInt(Buffer.from(cursor, 'base64').toString(), 10) || 0
+        : parseInt(req.query.offset as string) || 0;
       const userId = req.session?.userId || getUserIdFromRequest(req);
-      
-      // Use algorithmic feed - works for both authenticated and anonymous users
-      // For authenticated users, personalizes based on preferences and location
-      // For anonymous users, ranks by engagement and recency
-      const posts = await storage.getAlgorithmicFeed(userId || null, limit, offset);
+      const city = req.query.city ? (req.query.city as string).trim() : undefined;
+
+      const lat = req.query.lat ? parseFloat(req.query.lat as string) : undefined;
+      const lng = req.query.lng ? parseFloat(req.query.lng as string) : undefined;
+
+      if (userId && lat !== undefined && lng !== undefined && !isNaN(lat) && !isNaN(lng)) {
+        try {
+          await storage.updateUser(userId, { latitude: lat, longitude: lng });
+        } catch (_) { /* non-fatal */ }
+      }
+
+      const posts = await storage.getAlgorithmicFeed(userId || null, limit, offset, city);
       
       // Filter out posts from vendors with inactive subscriptions
       const activePosts = [];
@@ -12144,10 +12933,18 @@ export async function registerRoutes(
         });
       }
       
-      res.json({ posts: enrichedPosts });
+      const nextOffset = offset + enrichedPosts.length;
+      const hasMore = enrichedPosts.length === limit;
+      const nextCursor = hasMore ? Buffer.from(String(nextOffset)).toString('base64') : null;
+
+      res.json({
+        success: true,
+        data: { posts: enrichedPosts, nextCursor, hasMore, nextOffset },
+        posts: enrichedPosts,
+      });
     } catch (error) {
       console.error("Get feed error:", error);
-      res.status(500).json({ error: "Failed to get feed" });
+      res.status(500).json({ success: false, message: "Failed to get feed", data: { posts: [], nextCursor: null, hasMore: false } });
     }
   });
 
@@ -12611,32 +13408,59 @@ export async function registerRoutes(
   // =====================================================
 
   // Get Pulse feed - separate from Pro feed, purely discovery-based
+  // Location is optional — if missing, falls back to recency/popularity ranking
+  // Supports offset or cursor-based pagination; hard limit 10 per page (max 50)
   app.get("/api/pulse/feed", async (req, res) => {
     try {
-      const userId = req.session?.userId; // Optional - used for personalization
+      const userId = req.session?.userId || getUserIdFromRequest(req) || undefined;
       const limit = Math.min(parseInt(req.query.limit as string) || 10, 50);
-      const offset = parseInt(req.query.offset as string) || 0;
+
+      // Support both cursor and offset pagination
+      const cursor = req.query.cursor as string | undefined;
+      const offset = cursor ? parseInt(Buffer.from(cursor, 'base64').toString(), 10) || 0
+        : parseInt(req.query.offset as string) || 0;
+
       const excludeIds = req.query.excludeIds 
         ? (req.query.excludeIds as string).split(',').filter(Boolean)
         : [];
 
+      // Location is optional — never required, never causes an error
+      const lat = req.query.lat ? parseFloat(req.query.lat as string) : undefined;
+      const lng = req.query.lng ? parseFloat(req.query.lng as string) : undefined;
+      const city = (req.query.city as string) || undefined;
+
       const { getPulseFeed } = await import('./pulseService');
+      const { formatVideoCards } = await import('./feedSerializer');
       
       const posts = await getPulseFeed({
         userId,
         limit,
         offset,
         excludePostIds: excludeIds,
+        city,
+        lat: (lat !== undefined && !isNaN(lat)) ? lat : undefined,
+        lng: (lng !== undefined && !isNaN(lng)) ? lng : undefined,
       });
 
+      // Serialize through VideoCard contract — guaranteed shape, no nulls on required fields
+      const videos = formatVideoCards(posts);
+      const nextOffset = offset + videos.length;
+      const hasMore = videos.length === limit;
+      const nextCursor = hasMore ? Buffer.from(String(nextOffset)).toString('base64') : null;
+
       res.json({
-        posts,
-        hasMore: posts.length === limit,
-        nextOffset: offset + posts.length,
+        success: true,
+        data: {
+          videos,
+          nextCursor,
+          hasMore,
+          nextOffset,
+          pageSize: limit,
+        },
       });
     } catch (error) {
       console.error("Get Pulse feed error:", error);
-      res.status(500).json({ error: "Failed to get Pulse feed" });
+      res.status(500).json({ success: false, message: "Failed to get Pulse feed", data: { videos: [], nextCursor: null, hasMore: false } });
     }
   });
 
@@ -13290,6 +14114,10 @@ export async function registerRoutes(
   });
 
   /* END TEMP / TEST ONLY */
+
+  // ==================== PHASE 3 ROUTES ====================
+  const { registerPhase3Routes } = await import("./phase3Routes");
+  registerPhase3Routes(app, requireAdmin);
 
   return httpServer;
 }

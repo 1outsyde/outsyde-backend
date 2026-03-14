@@ -5,6 +5,11 @@ import { getUncachableStripeClient } from "./stripeClient";
 import { db } from "../db";
 import { subscriptionTiers } from "@shared/schema";
 import { asc, eq } from "drizzle-orm";
+import { randomUUID } from "crypto";
+
+function idempotencyKey(prefix: string): string {
+  return `${prefix}_${randomUUID()}`;
+}
 
 export class StripeService {
   // =========================
@@ -280,7 +285,7 @@ export class StripeService {
         },
       },
       metadata: params.metadata,
-    });
+    }, { idempotencyKey: idempotencyKey('checkout') });
   }
 
   // =========================
@@ -331,7 +336,9 @@ export class StripeService {
       paymentIntentData.customer = params.customerId;
     }
 
-    return stripe.paymentIntents.create(paymentIntentData);
+    return stripe.paymentIntents.create(paymentIntentData, {
+      idempotencyKey: idempotencyKey('pi'),
+    });
   }
 
   /**
@@ -647,7 +654,7 @@ export class StripeService {
         },
       },
       metadata: params.metadata,
-    });
+    }, { idempotencyKey: idempotencyKey('cart') });
   }
 
   /**
@@ -677,7 +684,7 @@ export class StripeService {
       success_url: params.successUrl,
       cancel_url: params.cancelUrl,
       metadata: params.metadata,
-    });
+    }, { idempotencyKey: idempotencyKey('cart_platform') });
   }
 
   // =========================
@@ -713,7 +720,7 @@ export class StripeService {
       success_url: params.successUrl,
       cancel_url: params.cancelUrl,
       metadata: params.metadata,
-    });
+    }, { idempotencyKey: idempotencyKey('multi_vendor') });
   }
 
   /**
@@ -732,7 +739,8 @@ export class StripeService {
     // Use transfer_group to link related transfers together for reporting
     const transferGroup = params.orderGroupId ? `order_group_${params.orderGroupId}` : `order_${params.orderId}`;
 
-    return stripe.transfers.create({
+    console.log(`[Stripe] Transferring ${params.amountInCents}¢ to ${params.connectedAccountId} for order ${params.orderId}`);
+    const transfer = await stripe.transfers.create({
       amount: params.amountInCents,
       currency: "usd",
       destination: params.connectedAccountId,
@@ -742,7 +750,9 @@ export class StripeService {
         orderGroupId: params.orderGroupId || '',
         type: 'multi_vendor_cart_transfer',
       },
-    });
+    }, { idempotencyKey: idempotencyKey(`transfer_${params.orderId}`) });
+    console.log(`[Stripe] Transfer ${transfer.id} completed: ${params.amountInCents}¢ → ${params.connectedAccountId}`);
+    return transfer;
   }
 
   /**
@@ -811,12 +821,14 @@ export class StripeService {
       sessionConfig.customer = params.customerId;
     }
 
-    return stripe.checkout.sessions.create(sessionConfig);
+    return stripe.checkout.sessions.create(sessionConfig, {
+      idempotencyKey: idempotencyKey('photo_booking'),
+    });
   }
 
   /**
    * Create a checkout session for business/staff appointment using destination charges.
-   * Application fee (4%) is deducted and sent to platform.
+   * Application fee (10%) is deducted and sent to platform.
    */
   async createAppointmentCheckout(params: {
     customerId?: string;
@@ -863,7 +875,9 @@ export class StripeService {
       sessionConfig.customer = params.customerId;
     }
 
-    return stripe.checkout.sessions.create(sessionConfig);
+    return stripe.checkout.sessions.create(sessionConfig, {
+      idempotencyKey: idempotencyKey('appt_booking'),
+    });
   }
 }
 

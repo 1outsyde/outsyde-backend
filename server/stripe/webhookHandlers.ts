@@ -6,6 +6,8 @@ import { sql, eq } from "drizzle-orm";
 import { NotificationTriggers } from "../notificationService";
 import { stripeService } from "./stripeService";
 import { transitionAppointmentState, transitionShootBookingState } from "../bookingStateMachine";
+import { markHoldAsConverted } from "../availabilityService";
+import { sendBookingConfirmationPush } from "../expoPushService";
 
 function isOnReplit(): boolean {
   return !!(process.env.REPL_IDENTITY || process.env.WEB_REPL_RENEWAL || process.env.REPL_ID);
@@ -569,6 +571,22 @@ export class WebhookHandlers {
       stripePaymentIntentId: session.payment_intent,
     });
 
+    // Decrement inventory for purchased items
+    if (order.items && Array.isArray(order.items)) {
+      for (const item of order.items) {
+        try {
+          const product = await storage.getVendorProduct(item.productId);
+          if (product?.trackInventory && product.inventory !== null) {
+            const newInventory = Math.max(0, (product.inventory ?? 0) - item.quantity);
+            await storage.updateVendorProduct(item.productId, { inventory: newInventory });
+            console.log(`[Inventory] Decremented ${item.productId}: ${product.inventory} → ${newInventory} (ordered: ${item.quantity})`);
+          }
+        } catch (invError) {
+          console.error(`[Inventory] Failed to decrement ${item.productId}:`, invError);
+        }
+      }
+    }
+
     // Clear the user's cart
     if (userId) {
       await storage.clearCart(userId);
@@ -586,7 +604,6 @@ export class WebhookHandlers {
         description: "Points earned from purchase",
       });
 
-      // Complete referral bonus if this is the user's first transaction
       await this.tryCompleteReferral(user.id, orderId, 'cart_order');
     }
 
@@ -605,7 +622,7 @@ export class WebhookHandlers {
       });
     }
 
-    console.log(`Cart checkout completed: Order ${orderId} marked as paid`);
+    console.log(`[Stripe] Cart checkout completed: Order ${orderId} marked as paid`);
   }
 
   /* =====================================================
@@ -636,6 +653,22 @@ export class WebhookHandlers {
         status: 'paid',
         stripePaymentIntentId: session.payment_intent,
       });
+
+      // Decrement inventory for purchased items
+      if (order.items && Array.isArray(order.items)) {
+        for (const item of order.items) {
+          try {
+            const product = await storage.getVendorProduct(item.productId);
+            if (product?.trackInventory && product.inventory !== null) {
+              const newInventory = Math.max(0, (product.inventory ?? 0) - item.quantity);
+              await storage.updateVendorProduct(item.productId, { inventory: newInventory });
+              console.log(`[Inventory] Decremented ${item.productId}: ${product.inventory} → ${newInventory} (ordered: ${item.quantity})`);
+            }
+          } catch (invError) {
+            console.error(`[Inventory] Failed to decrement ${item.productId}:`, invError);
+          }
+        }
+      }
 
       // Get the vendor's connected account for transfer (from business, not user)
       const business = await storage.getBusiness(businessId);
@@ -1054,18 +1087,55 @@ export class WebhookHandlers {
 
       console.log(`[Stripe] Appointment ${appointmentId} confirmed successfully`);
 
+      // Mark any associated hold as converted
+      const holdId = session.metadata?.holdId;
+      if (holdId) {
+        try {
+          await markHoldAsConverted(holdId, appointmentId, 'appointment');
+        } catch (holdErr) {
+          console.error(`[Stripe] Failed to convert hold ${holdId}:`, holdErr);
+        }
+      }
+
       // Award points for the booking
       const [appointment] = await db.select().from(appointments).where(eq(appointments.id, appointmentId));
 
-      // Send payment confirmation notification (async, non-blocking)
+      // Send booking confirmation notification (async, non-blocking)
       if (clientId && appointment) {
+        // Notify customer
+        const business = await storage.getBusiness(appointment.businessId);
         NotificationTriggers.paymentSucceeded({
           userId: clientId,
           amount: appointment.totalPrice,
           referenceType: 'appointment',
           referenceId: appointmentId,
-          description: 'Appointment booking confirmed',
+          description: `Booking confirmed at ${business?.name || 'business'}`,
         }).catch(err => console.error("[Stripe] Failed to send booking notification:", err));
+
+        // Notify business owner
+        if (business) {
+          const owner = await storage.getUserByBusinessOwnerId(appointment.businessId);
+          if (owner) {
+            const customer = await storage.getUser(clientId);
+            NotificationTriggers.paymentSucceeded({
+              userId: owner.id,
+              amount: appointment.totalPrice,
+              referenceType: 'appointment',
+              referenceId: appointmentId,
+              description: `New booking from ${customer?.name || 'customer'}`,
+            }).catch(err => console.error("[Stripe] Failed to send business notification:", err));
+
+            // Mobile push notification (Expo) — failures never crash the booking flow
+            sendBookingConfirmationPush({
+              customerId: clientId,
+              providerName: business.name,
+              date: appointment.appointmentDate,
+              time: appointment.appointmentTime,
+              businessOwnerId: owner.id,
+              customerName: customer?.name || undefined,
+            }).catch(err => console.error("[ExpoPush] Appointment push error:", err));
+          }
+        }
       }
       if (appointment && clientId) {
         await storage.earnPoints({
@@ -1130,6 +1200,16 @@ export class WebhookHandlers {
 
       console.log(`[Stripe] Shoot booking ${shootBookingId} confirmed successfully`);
 
+      // Mark any associated hold as converted
+      const holdId = session.metadata?.holdId;
+      if (holdId) {
+        try {
+          await markHoldAsConverted(holdId, shootBookingId, 'shoot_booking');
+        } catch (holdErr) {
+          console.error(`[Stripe] Failed to convert hold ${holdId}:`, holdErr);
+        }
+      }
+
       // Award points for the booking
       const [booking] = await db.select().from(shootBookings).where(eq(shootBookings.id, shootBookingId));
 
@@ -1145,6 +1225,16 @@ export class WebhookHandlers {
           date: booking.date,
           time: booking.startTime,
         }).catch(err => console.error("[Stripe] Failed to send booking notification:", err));
+
+        // Mobile push notification (Expo) — failures never crash the booking flow
+        sendBookingConfirmationPush({
+          customerId: clientId,
+          providerName: photographer?.displayName || 'Photographer',
+          date: booking.date,
+          time: booking.startTime,
+          businessOwnerId: photographer?.userId,
+          customerName: undefined,
+        }).catch(err => console.error("[ExpoPush] Shoot booking push error:", err));
       }
       if (booking && clientId) {
         await storage.earnPoints({
