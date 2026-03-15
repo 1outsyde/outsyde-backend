@@ -835,9 +835,25 @@ export const orders = pgTable("orders", {
   orderGroupId: varchar("order_group_id", { length: 36 }).references(() => orderGroups.id),
 
   items: jsonb("items").$type<{ productId: string; name: string; quantity: number; price: number }[]>().notNull(),
-  totalAmount: integer("total_amount").notNull(),
-  platformFee: integer("platform_fee").default(0),
-  vendorNet: integer("vendor_net").default(0),
+  totalAmount: integer("total_amount").notNull(), // subtotal (product prices × qty)
+  platformFee: integer("platform_fee").default(0), // 8% product fee (Outsyde revenue)
+  vendorNet: integer("vendor_net").default(0), // subtotal - platformFee - influencerCommission
+
+  // v2 fee breakdown (all in cents)
+  consumerServiceFee: integer("consumer_service_fee").default(0), // 3% charged to customer (Outsyde revenue)
+  influencerCommission: integer("influencer_commission").default(0), // 15% to influencer (NOT Outsyde revenue)
+  grossChargeAmount: integer("gross_charge_amount").default(0), // subtotal + consumerServiceFee + tax
+  outsydeGrossRevenue: integer("outsyde_gross_revenue").default(0), // consumerServiceFee + platformFee
+  stripeFeeAmount: integer("stripe_fee_amount").default(0), // estimated/actual Stripe processing fee
+  taxAmount: integer("tax_amount").default(0),
+
+  // Influencer attribution
+  attributedInfluencerId: varchar("attributed_influencer_id", { length: 36 }),
+  influencerCodeUsed: text("influencer_code_used"),
+  influencerTransferStatus: text("influencer_transfer_status"), // pending | approved | transfer_queued | transfer_sent | paid | reversed
+  commissionStatus: text("commission_status"), // pending | approved | transfer_queued | transfer_sent | paid | reversed
+
+  feeModelVersion: text("fee_model_version").default("v2"),
 
   stripePaymentIntentId: text("stripe_payment_intent_id"),
   stripeCheckoutSessionId: text("stripe_checkout_session_id"),
@@ -851,6 +867,7 @@ export const orders = pgTable("orders", {
   idxOrderCustomer: index("idx_orders_customer").on(table.customerId, table.createdAt),
   idxOrderBusiness: index("idx_orders_business").on(table.businessId, table.status),
   idxOrderStatus: index("idx_orders_status").on(table.status, table.createdAt),
+  idxOrderInfluencer: index("idx_orders_influencer").on(table.attributedInfluencerId),
 }));
 
 /* =====================================================
