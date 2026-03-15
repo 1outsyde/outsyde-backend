@@ -10609,7 +10609,7 @@ export async function registerRoutes(
         approvalNotes: notes || null,
         approvedAt: new Date(),
         approvedBy: adminUser.id,
-        subscriptionActive: true,
+        // subscriptionActive NOT set here — only set when real Stripe subscription activates
       });
 
       // Enable monetization on the business owner's user record
@@ -10639,7 +10639,7 @@ export async function registerRoutes(
           ownerEmail: owner.email || '',
           businessId: business.id,
           businessName: business.name,
-          stripeOnboardingUrl: null, // They can initiate from their dashboard
+          stripeOnboardingUrl: null,
         });
       }
       
@@ -12370,7 +12370,7 @@ export async function registerRoutes(
         approvalNotes: notes || null,
         approvedAt: new Date(),
         approvedBy: adminUser.id,
-        subscriptionActive: true,
+        // subscriptionActive NOT set here — only set when real Stripe subscription activates
       });
 
       // Enable monetization on the business owner's user record
