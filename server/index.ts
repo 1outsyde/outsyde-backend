@@ -253,6 +253,10 @@ if (process.env.NODE_ENV === 'production') {
   const { seedInfluencerTiersAndConfig } = await import("./influencerTrackingService");
   await seedInfluencerTiersAndConfig();
 
+  // Seed subscription tiers if not already present
+  const { seedSubscriptionTiers } = await import("./subscriptionSeeder");
+  await seedSubscriptionTiers();
+
   await initStripe();
 
   // Conditionally setup auth based on platform

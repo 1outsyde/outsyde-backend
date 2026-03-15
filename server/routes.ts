@@ -7380,6 +7380,76 @@ export async function registerRoutes(
     }
   });
 
+  // Vendor eligibility status — tells the frontend exactly what gates remain
+  app.get("/api/vendor/eligibility", optionalAuthMiddleware, async (req, res) => {
+    const authReq = req as AuthenticatedRequest;
+    const userId = authReq.user?.userId || req.session?.userId;
+    if (!userId) {
+      return res.status(401).json({ success: false, error: { code: 'AUTH_REQUIRED', message: 'Authentication required' } });
+    }
+
+    try {
+      const business = await storage.getBusinessByOwnerId(userId);
+      if (!business) {
+        return res.json({
+          success: true,
+          data: {
+            hasBusiness: false,
+            requiresApproval: false,
+            requiresSubscription: false,
+            requiresOnboarding: false,
+            canPublishProducts: false,
+            canPublishServices: false,
+            approvalStatus: null,
+            subscriptionStatus: null,
+            stripeOnboardingComplete: false,
+          },
+        });
+      }
+
+      const approvalStatus = (business as Record<string, unknown>).approvalStatus as string || 'pending';
+      const isApproved = approvalStatus === 'approved';
+
+      // Check Stripe onboarding
+      let stripeOnboardingComplete = business.stripeOnboardingComplete || false;
+      if (!stripeOnboardingComplete && business.stripeAccountId) {
+        stripeOnboardingComplete = await stripeService.syncOnboardingStatus({
+          entityType: 'business',
+          entityId: business.id,
+          stripeAccountId: business.stripeAccountId,
+          currentOnboardingComplete: false,
+          updateFn: (id: string, data: Record<string, unknown>) => storage.updateBusiness(id, data),
+        });
+      }
+
+      // Check subscription
+      const subStatus = await storage.isBusinessSubscriptionActive(business.id);
+
+      const canPublish = isApproved && subStatus.active && stripeOnboardingComplete;
+
+      res.json({
+        success: true,
+        data: {
+          hasBusiness: true,
+          businessId: business.id,
+          businessName: business.name,
+          requiresApproval: !isApproved,
+          requiresSubscription: !subStatus.active,
+          requiresOnboarding: !stripeOnboardingComplete,
+          canPublishProducts: canPublish,
+          canPublishServices: canPublish,
+          approvalStatus,
+          subscriptionStatus: subStatus.active ? 'active' : (subStatus.status || 'none'),
+          stripeOnboardingComplete,
+          hasStripeAccount: !!business.stripeAccountId,
+        },
+      });
+    } catch (error) {
+      console.error("Vendor eligibility error:", error);
+      res.status(500).json({ success: false, error: { code: 'SERVER_ERROR', message: 'Failed to check eligibility' } });
+    }
+  });
+
   // Get vendor's products
   app.get("/api/vendor/products", async (req, res) => {
     const userId = req.session?.userId;
