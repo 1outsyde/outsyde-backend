@@ -324,7 +324,11 @@ export function registerPhase3Routes(app: Express, requireAdmin: (req: Request, 
         try {
           const business = await storage.getBusiness(vendorId);
           if (business) {
-            await storage.updateBusiness(vendorId, { approvalStatus: 'approved' } as Record<string, unknown>);
+            await storage.updateBusiness(vendorId, { approvalStatus: 'approved', subscriptionActive: true } as Record<string, unknown>);
+            // Enable monetization on the owner
+            if ((business as Record<string, unknown>).ownerId) {
+              await storage.updateUser((business as Record<string, unknown>).ownerId as string, { canMonetize: true });
+            }
             results.push({ vendorId, status: 'approved' });
           } else {
             results.push({ vendorId, status: 'not_found' });

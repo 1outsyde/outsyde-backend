@@ -10609,8 +10609,15 @@ export async function registerRoutes(
         approvalNotes: notes || null,
         approvedAt: new Date(),
         approvedBy: adminUser.id,
-        subscriptionActive: true, // Activate upon approval
+        subscriptionActive: true,
       });
+
+      // Enable monetization on the business owner's user record
+      const ownerId = (business as any).ownerId;
+      if (ownerId) {
+        await storage.updateUser(ownerId, { canMonetize: true });
+        console.log(`[Admin] Enabled canMonetize for user ${ownerId} (business ${id} approved)`);
+      }
 
       // Create audit log
       await storage.createAuditLog({
@@ -12365,6 +12372,13 @@ export async function registerRoutes(
         approvedBy: adminUser.id,
         subscriptionActive: true,
       });
+
+      // Enable monetization on the business owner's user record
+      const ownerId = (business as any).ownerId;
+      if (ownerId) {
+        await storage.updateUser(ownerId, { canMonetize: true });
+        console.log(`[Admin] Enabled canMonetize for user ${ownerId} (business ${id} approved)`);
+      }
 
       // Create audit log
       await storage.createAuditLog({

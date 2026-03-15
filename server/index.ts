@@ -257,6 +257,22 @@ if (process.env.NODE_ENV === 'production') {
   const { seedSubscriptionTiers } = await import("./subscriptionSeeder");
   await seedSubscriptionTiers();
 
+  // Migration: ensure all approved business owners have canMonetize = true
+  try {
+    const allBusinesses = await storage.getAllBusinesses();
+    for (const biz of allBusinesses) {
+      if ((biz as Record<string, unknown>).approvalStatus === 'approved') {
+        const owner = await storage.getUser(biz.ownerId);
+        if (owner && !owner.canMonetize) {
+          await storage.updateUser(owner.id, { canMonetize: true });
+          console.log(`[Migration] Enabled canMonetize for user ${owner.id} (business ${biz.id})`);
+        }
+      }
+    }
+  } catch (migErr) {
+    console.error("[Migration] canMonetize sync error:", migErr);
+  }
+
   await initStripe();
 
   // Conditionally setup auth based on platform
