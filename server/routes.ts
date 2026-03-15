@@ -5967,7 +5967,8 @@ export async function registerRoutes(
   });
 
   // Create tier subscription checkout
-  app.post("/api/stripe/checkout/tier-subscription", requireMonetization, async (req, res) => {
+  // Tier subscription checkout — approved vendors can subscribe even without canMonetize flag
+  app.post("/api/stripe/checkout/tier-subscription", async (req, res) => {
     const userId = req.session?.userId;
     if (!userId) {
       return res.status(401).json({ error: "Not authenticated" });
@@ -7380,7 +7381,8 @@ export async function registerRoutes(
     }
   });
 
-  // Vendor eligibility status — tells the frontend exactly what gates remain
+  // Vendor eligibility — single source of truth for the frontend onboarding flow.
+  // Returns exactly which gates remain before products/services can go live.
   app.get("/api/vendor/eligibility", optionalAuthMiddleware, async (req, res) => {
     const authReq = req as AuthenticatedRequest;
     const userId = authReq.user?.userId || req.session?.userId;
@@ -7396,13 +7398,16 @@ export async function registerRoutes(
           data: {
             hasBusiness: false,
             requiresApproval: false,
-            requiresSubscription: false,
+            requiresPlanSelection: false,
             requiresOnboarding: false,
+            requiresSubscription: false,
             canPublishProducts: false,
             canPublishServices: false,
+            currentStep: 'no_business',
             approvalStatus: null,
             subscriptionStatus: null,
             stripeOnboardingComplete: false,
+            currentTier: null,
           },
         });
       }
@@ -7410,7 +7415,7 @@ export async function registerRoutes(
       const approvalStatus = (business as Record<string, unknown>).approvalStatus as string || 'pending';
       const isApproved = approvalStatus === 'approved';
 
-      // Check Stripe onboarding
+      // Check Stripe onboarding (self-healing sync with Stripe API)
       let stripeOnboardingComplete = business.stripeOnboardingComplete || false;
       if (!stripeOnboardingComplete && business.stripeAccountId) {
         stripeOnboardingComplete = await stripeService.syncOnboardingStatus({
@@ -7422,10 +7427,31 @@ export async function registerRoutes(
         });
       }
 
-      // Check subscription
+      // Check subscription via vendor_subscriptions table (NOT businesses.subscriptionActive)
+      const subscription = await storage.getVendorSubscriptionByBusinessId(business.id);
       const subStatus = await storage.isBusinessSubscriptionActive(business.id);
+      const hasPlanSelected = !!subscription; // vendor_subscriptions record exists
+      const isSubscriptionActive = subStatus.active; // status === 'active'
 
-      const canPublish = isApproved && subStatus.active && stripeOnboardingComplete;
+      const canPublish = isApproved && isSubscriptionActive && stripeOnboardingComplete;
+
+      // Determine current onboarding step for frontend routing
+      let currentStep = 'complete';
+      if (!isApproved) currentStep = 'awaiting_approval';
+      else if (!hasPlanSelected) currentStep = 'select_plan';
+      else if (!business.stripeAccountId) currentStep = 'stripe_onboarding';
+      else if (!stripeOnboardingComplete) currentStep = 'stripe_onboarding';
+      else if (!isSubscriptionActive) currentStep = 'subscription_pending';
+
+      // Get current tier info if subscription exists
+      let currentTier: { id: string; name: string; displayName: string; priceInCents: number } | null = null;
+      if (subscription?.tierId) {
+        const tiers = await stripeService.getSubscriptionTiers();
+        const tier = tiers.find((t: { id: string }) => t.id === subscription.tierId);
+        if (tier) {
+          currentTier = { id: tier.id, name: tier.name, displayName: tier.displayName, priceInCents: tier.priceInCents };
+        }
+      }
 
       res.json({
         success: true,
@@ -7433,15 +7459,24 @@ export async function registerRoutes(
           hasBusiness: true,
           businessId: business.id,
           businessName: business.name,
+
+          // Gates (ordered — frontend should check top to bottom)
           requiresApproval: !isApproved,
-          requiresSubscription: !subStatus.active,
-          requiresOnboarding: !stripeOnboardingComplete,
+          requiresPlanSelection: isApproved && !hasPlanSelected,
+          requiresOnboarding: isApproved && hasPlanSelected && !stripeOnboardingComplete,
+          requiresSubscription: isApproved && hasPlanSelected && stripeOnboardingComplete && !isSubscriptionActive,
           canPublishProducts: canPublish,
           canPublishServices: canPublish,
+
+          // Current step for frontend routing
+          currentStep,
+
+          // Raw status fields
           approvalStatus,
-          subscriptionStatus: subStatus.active ? 'active' : (subStatus.status || 'none'),
+          subscriptionStatus: isSubscriptionActive ? 'active' : (subscription?.status || 'none'),
           stripeOnboardingComplete,
           hasStripeAccount: !!business.stripeAccountId,
+          currentTier,
         },
       });
     } catch (error) {
