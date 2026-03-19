@@ -10162,6 +10162,7 @@ export async function registerRoutes(
             cancelUrl: `${baseUrl}/cart?cancelled=true`,
             connectedAccountId: singleBusiness.stripeAccountId,
             platformFeeInCents: totalPlatformFeeInCents,
+            consumerServiceFeeCents: totalConsumerServiceFeeCents,
             metadata: {
               type: 'cart_checkout',
               orderId: createdOrders[0].orderId,
@@ -10178,6 +10179,7 @@ export async function registerRoutes(
             lineItems: allLineItems,
             successUrl,
             cancelUrl: `${baseUrl}/cart?cancelled=true`,
+            consumerServiceFeeCents: totalConsumerServiceFeeCents,
             metadata: {
               type: 'cart_checkout',
               orderId: createdOrders[0].orderId,
@@ -10190,12 +10192,12 @@ export async function registerRoutes(
         }
       } else {
         // Multi-vendor: Single checkout session, platform collects payment
-        // Transfers to vendors happen via webhook after payment succeeds
         session = await stripeService.createMultiVendorCartCheckout({
           customerId: stripeCustomerId,
           lineItems: allLineItems,
           successUrl,
           cancelUrl: `${baseUrl}/cart?cancelled=true`,
+          consumerServiceFeeCents: totalConsumerServiceFeeCents,
           metadata: {
             type: 'multi_vendor_cart_checkout',
             orderGroupId: orderGroupId!,
@@ -10322,6 +10324,7 @@ export async function registerRoutes(
           cancelUrl: `${baseUrl}/cart?cancelled=true`,
           connectedAccountId: vendorBusiness.stripeAccountId,
           platformFeeInCents: nextOrder.platformFee || 0,
+          consumerServiceFeeCents: nextOrder.consumerServiceFee || 0,
           metadata: {
             type: 'cart_checkout',
             orderId: nextOrder.id,
@@ -10337,6 +10340,7 @@ export async function registerRoutes(
           lineItems,
           successUrl,
           cancelUrl: `${baseUrl}/cart?cancelled=true`,
+          consumerServiceFeeCents: nextOrder.consumerServiceFee || 0,
           metadata: {
             type: 'cart_checkout',
             orderId: nextOrder.id,

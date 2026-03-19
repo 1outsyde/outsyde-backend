@@ -633,22 +633,44 @@ export class StripeService {
     cancelUrl: string;
     connectedAccountId: string;
     platformFeeInCents: number;
+    consumerServiceFeeCents?: number;
     metadata: Record<string, string>;
   }) {
     const stripe = await getUncachableStripeClient();
+
+    // Build line items: product prices + consumer service fee
+    const checkoutLineItems: Array<Record<string, unknown>> = params.lineItems.map(item => ({
+      price: item.stripePriceId,
+      quantity: item.quantity,
+    }));
+
+    // Add consumer service fee as a separate visible line item
+    if (params.consumerServiceFeeCents && params.consumerServiceFeeCents > 0) {
+      checkoutLineItems.push({
+        price_data: {
+          currency: 'usd',
+          product_data: {
+            name: 'Outsyde Service Fee',
+            description: 'Platform service fee',
+          },
+          unit_amount: params.consumerServiceFeeCents,
+        },
+        quantity: 1,
+      });
+    }
+
+    // application_fee_amount = platformFee + consumerServiceFee (both stay with Outsyde)
+    const totalApplicationFee = params.platformFeeInCents + (params.consumerServiceFeeCents || 0);
 
     return stripe.checkout.sessions.create({
       customer: params.customerId,
       mode: "payment",
       payment_method_types: ["card"],
-      line_items: params.lineItems.map(item => ({
-        price: item.stripePriceId,
-        quantity: item.quantity,
-      })),
+      line_items: checkoutLineItems as any,
       success_url: params.successUrl,
       cancel_url: params.cancelUrl,
       payment_intent_data: {
-        application_fee_amount: params.platformFeeInCents,
+        application_fee_amount: totalApplicationFee,
         transfer_data: {
           destination: params.connectedAccountId,
         },
@@ -669,18 +691,35 @@ export class StripeService {
     }>;
     successUrl: string;
     cancelUrl: string;
+    consumerServiceFeeCents?: number;
     metadata: Record<string, string>;
   }) {
     const stripe = await getUncachableStripeClient();
+
+    const checkoutLineItems: Array<Record<string, unknown>> = params.lineItems.map(item => ({
+      price: item.stripePriceId,
+      quantity: item.quantity,
+    }));
+
+    if (params.consumerServiceFeeCents && params.consumerServiceFeeCents > 0) {
+      checkoutLineItems.push({
+        price_data: {
+          currency: 'usd',
+          product_data: {
+            name: 'Outsyde Service Fee',
+            description: 'Platform service fee',
+          },
+          unit_amount: params.consumerServiceFeeCents,
+        },
+        quantity: 1,
+      });
+    }
 
     return stripe.checkout.sessions.create({
       customer: params.customerId,
       mode: "payment",
       payment_method_types: ["card"],
-      line_items: params.lineItems.map(item => ({
-        price: item.stripePriceId,
-        quantity: item.quantity,
-      })),
+      line_items: checkoutLineItems as any,
       success_url: params.successUrl,
       cancel_url: params.cancelUrl,
       metadata: params.metadata,
@@ -704,19 +743,35 @@ export class StripeService {
     }>;
     successUrl: string;
     cancelUrl: string;
+    consumerServiceFeeCents?: number;
     metadata: Record<string, string>;
   }) {
     const stripe = await getUncachableStripeClient();
 
-    // For multi-vendor, we collect payment on the platform and distribute via transfers later
+    const checkoutLineItems: Array<Record<string, unknown>> = params.lineItems.map(item => ({
+      price: item.stripePriceId,
+      quantity: item.quantity,
+    }));
+
+    if (params.consumerServiceFeeCents && params.consumerServiceFeeCents > 0) {
+      checkoutLineItems.push({
+        price_data: {
+          currency: 'usd',
+          product_data: {
+            name: 'Outsyde Service Fee',
+            description: 'Platform service fee',
+          },
+          unit_amount: params.consumerServiceFeeCents,
+        },
+        quantity: 1,
+      });
+    }
+
     return stripe.checkout.sessions.create({
       customer: params.customerId,
       mode: "payment",
       payment_method_types: ["card"],
-      line_items: params.lineItems.map(item => ({
-        price: item.stripePriceId,
-        quantity: item.quantity,
-      })),
+      line_items: checkoutLineItems as any,
       success_url: params.successUrl,
       cancel_url: params.cancelUrl,
       metadata: params.metadata,

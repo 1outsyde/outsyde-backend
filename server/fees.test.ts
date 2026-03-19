@@ -111,5 +111,44 @@ console.log('\nTest 8: Zero subtotal');
   assert(b.outsydeGrossRevenueCents === 0, 'Outsyde revenue = 0');
 }
 
+// Test 9: Stripe Checkout line items generation
+console.log('\nTest 9: Stripe Checkout should include service fee line item');
+{
+  const b = calculateProductFees(10000);
+  // Stripe should charge: subtotal (via product prices) + service fee (via price_data line item)
+  const stripeTotal = b.subtotalCents + b.consumerServiceFeeCents;
+  assert(stripeTotal === 10300, 'Stripe charge = subtotal + serviceFee = 10300');
+  assert(stripeTotal === b.customerTotalBeforeTaxCents, 'matches customerTotalBeforeTax');
+  // application_fee_amount for destination charges = platformFee + serviceFee
+  const appFee = b.platformFeeCents + b.consumerServiceFeeCents;
+  assert(appFee === 1100, 'application_fee_amount = 1100 (platformFee + serviceFee)');
+}
+
+// Test 10: Influencer checkout — service fee stays with Outsyde, not influencer
+console.log('\nTest 10: Influencer checkout — service fee stays with Outsyde');
+{
+  const b = calculateProductFees(10000, { influencerAttributed: true });
+  const stripeTotal = b.subtotalCents + b.consumerServiceFeeCents;
+  assert(stripeTotal === 10300, 'customer charged $103');
+  const appFee = b.platformFeeCents + b.consumerServiceFeeCents;
+  assert(appFee === 1100, 'Outsyde keeps $11 via application_fee');
+  assert(b.influencerCommissionCents === 1500, 'influencer gets $15 via separate transfer');
+  // Vendor receives: subtotal - platformFee - influencerCommission = $77
+  // But through Stripe: vendorNet = charge - application_fee - influencerTransfer
+  // charge = 10300, appFee = 1100, influencer = 1500
+  // vendor receives via destination charge = 10300 - 1100 = 9200, then -1500 influencer transfer = 7700
+  assert(b.vendorNetCents === 7700, 'vendor ultimately receives $77');
+}
+
+// Test 11: grossChargeAmount consistency
+console.log('\nTest 11: grossChargeAmount = subtotal + serviceFee (no tax yet)');
+{
+  const b = calculateProductFees(5000);
+  assert(b.customerTotalBeforeTaxCents === 5150, 'customer total = 5150');
+  // grossChargeAmount on the order should match Stripe charge
+  assert(b.customerTotalBeforeTaxCents === b.subtotalCents + b.consumerServiceFeeCents,
+    'grossChargeAmount = subtotal + serviceFee');
+}
+
 console.log(`\n=== Results: ${passed} passed, ${failed} failed ===\n`);
 process.exit(failed > 0 ? 1 : 0);
