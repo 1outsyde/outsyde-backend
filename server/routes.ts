@@ -11069,11 +11069,8 @@ export async function registerRoutes(
 
           // Reverse influencer commission if applicable
           if (refundedOrder?.attributedInfluencerId && refundedOrder.influencerCommission && refundedOrder.influencerCommission > 0) {
-            await storage.updateOrder(request.targetId, {
-              influencerTransferStatus: 'reversed',
-              commissionStatus: 'reversed',
-            });
-            console.log(`[Refund] Reversed influencer commission ${refundedOrder.influencerCommission}¢ for order ${request.targetId}`);
+            const { reverseInfluencerCommission } = await import('./influencerPayoutService');
+            await reverseInfluencerCommission(request.targetId, request.amount, true);
           }
 
           const orderResult = await storage.updateOrderWithValidation(

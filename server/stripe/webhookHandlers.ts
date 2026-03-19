@@ -8,6 +8,7 @@ import { stripeService } from "./stripeService";
 import { transitionAppointmentState, transitionShootBookingState } from "../bookingStateMachine";
 import { markHoldAsConverted } from "../availabilityService";
 import { sendBookingConfirmationPush } from "../expoPushService";
+import { processInfluencerCommission, reverseInfluencerCommission } from "../influencerPayoutService";
 
 function isOnReplit(): boolean {
   return !!(process.env.REPL_IDENTITY || process.env.WEB_REPL_RENEWAL || process.env.REPL_ID);
@@ -571,35 +572,12 @@ export class WebhookHandlers {
       stripePaymentIntentId: session.payment_intent,
     });
 
-    // Handle influencer commission transfer if attributed
-    if (order.attributedInfluencerId && order.influencerCommission && order.influencerCommission > 0) {
+    // Process influencer commission if attributed (idempotent, handles transfer + logging)
+    if (order.influencerCodeUsed || order.attributedInfluencerId) {
       try {
-        const influencerProfile = await storage.getInfluencerProfile(order.attributedInfluencerId);
-        if (influencerProfile?.stripeAccountId) {
-          await stripeService.transferToVendor({
-            amountInCents: order.influencerCommission,
-            connectedAccountId: influencerProfile.stripeAccountId,
-            orderId,
-          });
-          await storage.updateOrder(orderId, {
-            influencerTransferStatus: 'transfer_sent',
-            commissionStatus: 'transfer_sent',
-          });
-          console.log(`[Influencer] Transferred ${order.influencerCommission}¢ to influencer ${order.attributedInfluencerId} for order ${orderId}`);
-        } else {
-          // Record as payable — no connected account yet
-          await storage.updateOrder(orderId, {
-            influencerTransferStatus: 'approved',
-            commissionStatus: 'approved',
-          });
-          console.log(`[Influencer] Commission ${order.influencerCommission}¢ recorded as payable for influencer ${order.attributedInfluencerId} (no Stripe account)`);
-        }
-      } catch (transferErr) {
-        console.error(`[Influencer] Transfer failed for order ${orderId}:`, transferErr);
-        await storage.updateOrder(orderId, {
-          influencerTransferStatus: 'pending',
-          commissionStatus: 'pending',
-        });
+        await processInfluencerCommission(orderId, session.payment_intent);
+      } catch (commErr) {
+        console.error(`[InfluencerPayout] Error processing commission for order ${orderId}:`, commErr);
       }
     }
 
@@ -686,23 +664,12 @@ export class WebhookHandlers {
         stripePaymentIntentId: session.payment_intent,
       });
 
-      // Handle influencer commission transfer if attributed
-      if (order.attributedInfluencerId && order.influencerCommission && order.influencerCommission > 0) {
+      // Process influencer commission if attributed
+      if (order.influencerCodeUsed || order.attributedInfluencerId) {
         try {
-          const influencerProfile = await storage.getInfluencerProfile(order.attributedInfluencerId);
-          if (influencerProfile?.stripeAccountId) {
-            await stripeService.transferToVendor({
-              amountInCents: order.influencerCommission,
-              connectedAccountId: influencerProfile.stripeAccountId,
-              orderId,
-            });
-            await storage.updateOrder(orderId, { influencerTransferStatus: 'transfer_sent', commissionStatus: 'transfer_sent' });
-            console.log(`[Influencer] Transferred ${order.influencerCommission}¢ to influencer for order ${orderId}`);
-          } else {
-            await storage.updateOrder(orderId, { influencerTransferStatus: 'approved', commissionStatus: 'approved' });
-          }
-        } catch (transferErr) {
-          console.error(`[Influencer] Transfer failed for order ${orderId}:`, transferErr);
+          await processInfluencerCommission(orderId, session.payment_intent);
+        } catch (commErr) {
+          console.error(`[InfluencerPayout] Error processing commission for order ${orderId}:`, commErr);
         }
       }
 
