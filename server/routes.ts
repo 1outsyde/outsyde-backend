@@ -10069,6 +10069,7 @@ export async function registerRoutes(
       const createdOrders: Array<{ orderId: string; businessId: string; businessName: string; vendorNet: number }> = [];
       let totalAmountInCents = 0;
       let totalPlatformFeeInCents = 0;
+      let totalConsumerServiceFeeCents = 0;
 
       // Create order records for each vendor (but single checkout session)
       for (const businessId of businessList) {
@@ -10089,19 +10090,37 @@ export async function registerRoutes(
 
         totalAmountInCents += vendorTotalInCents;
 
-        // Platform fee (4% Outsyde product fee)
-        const platformFeeInCents = calculateProductFee(vendorTotalInCents);
-        totalPlatformFeeInCents += platformFeeInCents;
-        const vendorNet = vendorTotalInCents - platformFeeInCents;
+        // Check influencer attribution for this customer
+        const { getActiveAttribution } = await import('./influencerTrackingService');
+        const attribution = await getActiveAttribution(userId);
+        const isInfluencerAttributed = !!attribution;
 
-        // Create order record (pending - will be marked paid after single payment succeeds)
+        // Calculate full fee breakdown using v2 engine
+        const { calculateProductFees } = await import('./fees');
+        const feeBreakdown = calculateProductFees(vendorTotalInCents, {
+          influencerAttributed: isInfluencerAttributed,
+        });
+
+        totalPlatformFeeInCents += feeBreakdown.platformFeeCents;
+        totalConsumerServiceFeeCents += feeBreakdown.consumerServiceFeeCents;
+
+        // Create order record with full fee snapshot
         const order = await storage.createOrder({
           customerId: userId,
           businessId,
           orderGroupId: orderGroupId || undefined,
           totalAmount: vendorTotalInCents,
-          platformFee: platformFeeInCents,
-          vendorNet,
+          platformFee: feeBreakdown.platformFeeCents,
+          vendorNet: feeBreakdown.vendorNetCents,
+          consumerServiceFee: feeBreakdown.consumerServiceFeeCents,
+          influencerCommission: feeBreakdown.influencerCommissionCents,
+          grossChargeAmount: feeBreakdown.customerTotalBeforeTaxCents,
+          outsydeGrossRevenue: feeBreakdown.outsydeGrossRevenueCents,
+          attributedInfluencerId: attribution?.influencerId || null,
+          influencerCodeUsed: attribution?.refCode || null,
+          commissionStatus: isInfluencerAttributed ? 'pending' : null,
+          influencerTransferStatus: isInfluencerAttributed ? 'pending' : null,
+          feeModelVersion: feeBreakdown.feeModelVersion,
           status: 'pending',
           items: vendorItems.map(item => ({
             productId: item.productId,
@@ -10115,7 +10134,7 @@ export async function registerRoutes(
           orderId: order.id,
           businessId,
           businessName: business?.name || 'Unknown',
-          vendorNet,
+          vendorNet: feeBreakdown.vendorNetCents,
         });
       }
 
@@ -11046,6 +11065,17 @@ export async function registerRoutes(
 
         // Update order/booking status to refunded with state machine validation
         if (request.targetType === 'order' && request.targetId) {
+          const refundedOrder = await storage.getOrder(request.targetId);
+
+          // Reverse influencer commission if applicable
+          if (refundedOrder?.attributedInfluencerId && refundedOrder.influencerCommission && refundedOrder.influencerCommission > 0) {
+            await storage.updateOrder(request.targetId, {
+              influencerTransferStatus: 'reversed',
+              commissionStatus: 'reversed',
+            });
+            console.log(`[Refund] Reversed influencer commission ${refundedOrder.influencerCommission}¢ for order ${request.targetId}`);
+          }
+
           const orderResult = await storage.updateOrderWithValidation(
             request.targetId,
             { status: 'refunded' },
