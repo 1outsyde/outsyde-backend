@@ -338,6 +338,25 @@ export async function registerRoutes(
     message: { success: false, message: "Too many attempts, please try again later" },
   });
 
+  // Username availability check (public, rate-limited)
+  const usernameCheckLimiter = rateLimit({ windowMs: 60 * 1000, max: 20, message: { success: false, message: "Too many requests" } });
+
+  app.get("/api/users/check-username/:username", usernameCheckLimiter, async (req, res) => {
+    try {
+      const { validateUsername: valUn } = await import('./usernameUtils');
+      const validation = valUn(req.params.username);
+      if (!validation.valid) {
+        return res.json({ available: false, reason: validation.reason });
+      }
+
+      const existing = await storage.getUserByUsername(validation.cleaned!);
+      res.json({ available: !existing });
+    } catch (error) {
+      console.error("Check username error:", error);
+      res.status(500).json({ available: false, reason: "Server error" });
+    }
+  });
+
   // Customer signup
   app.post("/api/auth/customer/signup", authRateLimiter, async (req, res) => {
     try {
@@ -578,32 +597,57 @@ export async function registerRoutes(
     }
   });
 
-  // Login (supports both legacy base64 and new bcrypt passwords)
+  // Login — supports email, username, or generic identifier + password
   app.post("/api/auth/login", strictAuthRateLimiter, async (req, res) => {
     try {
-      const data = loginSchema.parse(req.body);
+      const { email, username, identifier, password } = req.body;
 
-      const user = await storage.getUserByEmail(data.email);
+      if (!password || typeof password !== 'string') {
+        return res.status(400).json({ success: false, message: "Password is required" });
+      }
+
+      // Resolve user by email, username, or auto-detected identifier
+      let user = null;
+      if (email) {
+        user = await storage.getUserByEmail(email);
+      } else if (username) {
+        const { validateUsername: valUn } = await import('./usernameUtils');
+        const v = valUn(username);
+        if (v.valid && v.cleaned) user = await storage.getUserByUsername(v.cleaned);
+      } else if (identifier) {
+        const isEmail = identifier.includes('@') && identifier.includes('.');
+        if (isEmail) {
+          user = await storage.getUserByEmail(identifier);
+        } else {
+          const { validateUsername: valUn } = await import('./usernameUtils');
+          const v = valUn(identifier);
+          if (v.valid && v.cleaned) user = await storage.getUserByUsername(v.cleaned);
+        }
+      } else {
+        return res.status(400).json({ success: false, message: "Email, username, or identifier is required" });
+      }
+
       if (!user) {
-        return res
-          .status(401)
-          .json({ error: "Invalid email or password" });
+        return res.status(401).json({ success: false, message: "Invalid credentials" });
+      }
+
+      // Check if user has a password (might be Google/Apple-only)
+      if (!user.password) {
+        if (user.isOAuthUser || user.googleSub) {
+          return res.status(401).json({ success: false, message: "This account uses Google sign-in. Please continue with Google." });
+        }
+        return res.status(401).json({ success: false, message: "Invalid credentials" });
       }
 
       let isValidPassword = false;
-      if (!user.password) {
-        return res.status(401).json({ error: "Invalid email or password" });
-      }
       if (isLegacyHash(user.password)) {
-        isValidPassword = legacyVerifyPassword(data.password, user.password);
+        isValidPassword = legacyVerifyPassword(password, user.password);
       } else {
-        isValidPassword = await verifyPassword(data.password, user.password);
+        isValidPassword = await verifyPassword(password, user.password);
       }
 
       if (!isValidPassword) {
-        return res
-          .status(401)
-          .json({ error: "Invalid email or password" });
+        return res.status(401).json({ success: false, message: "Invalid credentials" });
       }
 
       if (req.session) {
@@ -904,12 +948,17 @@ export async function registerRoutes(
       // Return user data and tokens
       const safeUser = sanitizeUserForResponse(user, { includeOwnData: true });
 
+      // Flag new users who need to set a username before proceeding
+      const isNewUser = !user.username;
+
       res.json({
         success: true,
         user: safeUser,
         accessToken,
         refreshToken,
         expiresIn: ACCESS_TOKEN_EXPIRY_SECONDS,
+        isNewUser,
+        requiresUsername: isNewUser,
       });
 
     } catch (error) {
@@ -1350,37 +1399,56 @@ export async function registerRoutes(
     }
   });
 
-  // Mobile login with email/password - returns JWT tokens
+  // Mobile login — supports email, username, or identifier + password, returns JWT
   app.post("/api/auth/mobile/login", strictAuthRateLimiter, async (req, res) => {
     try {
-      const data = loginSchema.parse(req.body);
+      const { email, username, identifier, password } = req.body;
 
-      const user = await storage.getUserByEmail(data.email);
+      if (!password || typeof password !== 'string') {
+        return res.status(400).json({ success: false, error: { code: "INVALID_INPUT", message: "Password is required" } });
+      }
+
+      // Resolve user by email, username, or auto-detected identifier
+      let user = null;
+      if (email) {
+        user = await storage.getUserByEmail(email);
+      } else if (username) {
+        const { validateUsername: valUn } = await import('./usernameUtils');
+        const v = valUn(username);
+        if (v.valid && v.cleaned) user = await storage.getUserByUsername(v.cleaned);
+      } else if (identifier) {
+        const isEmail = identifier.includes('@') && identifier.includes('.');
+        if (isEmail) {
+          user = await storage.getUserByEmail(identifier);
+        } else {
+          const { validateUsername: valUn } = await import('./usernameUtils');
+          const v = valUn(identifier);
+          if (v.valid && v.cleaned) user = await storage.getUserByUsername(v.cleaned);
+        }
+      } else {
+        return res.status(400).json({ success: false, error: { code: "INVALID_INPUT", message: "Email, username, or identifier is required" } });
+      }
+
       if (!user) {
-        return res.status(401).json({
-          success: false,
-          error: { code: "INVALID_CREDENTIALS", message: "Invalid email or password" }
-        });
+        return res.status(401).json({ success: false, error: { code: "INVALID_CREDENTIALS", message: "Invalid credentials" } });
+      }
+
+      if (!user.password) {
+        if (user.isOAuthUser || user.googleSub) {
+          return res.status(401).json({ success: false, error: { code: "OAUTH_ONLY", message: "This account uses Google sign-in. Please continue with Google." } });
+        }
+        return res.status(401).json({ success: false, error: { code: "INVALID_CREDENTIALS", message: "Invalid credentials" } });
       }
 
       let isValidPassword = false;
-      if (!user.password) {
-        return res.status(401).json({
-          success: false,
-          error: { code: "INVALID_CREDENTIALS", message: "Invalid email or password" }
-        });
-      }
       if (isLegacyHash(user.password)) {
-        isValidPassword = legacyVerifyPassword(data.password, user.password);
+        isValidPassword = legacyVerifyPassword(password, user.password);
       } else {
-        isValidPassword = await verifyPassword(data.password, user.password);
+        isValidPassword = await verifyPassword(password, user.password);
       }
 
       if (!isValidPassword) {
-        return res.status(401).json({
-          success: false,
-          error: { code: "INVALID_CREDENTIALS", message: "Invalid email or password" }
-        });
+        return res.status(401).json({ success: false, error: { code: "INVALID_CREDENTIALS", message: "Invalid credentials" } });
       }
 
       // Generate JWT tokens with full role information
@@ -1780,7 +1848,7 @@ export async function registerRoutes(
   // ==================== USER IDENTITY (with rate limiting) ====================
   
   // Rate limits for identity changes (similar to major platforms)
-  const USERNAME_CHANGE_COOLDOWN_DAYS = 30;
+  const USERNAME_CHANGE_COOLDOWN_DAYS = 14;
   const DISPLAY_NAME_CHANGE_COOLDOWN_DAYS = 7;
   
   // Helper to check if enough time has passed since last change
