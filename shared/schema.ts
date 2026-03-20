@@ -185,7 +185,7 @@ export const users = pgTable("users", {
 
   billingAddress: jsonb("billing_address").$type<BillingAddress>(),
 
-  username: text("username").unique(),
+  username: text("username").notNull().unique(),
   dateOfBirth: timestamp("date_of_birth"),
   gender: text("gender"),
   ethnicity: text("ethnicity"),

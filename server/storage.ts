@@ -771,7 +771,7 @@ export class DatabaseStorage implements IStorage {
       state: insertUser.state || null,
       zipCode: insertUser.zipCode || null,
 
-      username: insertUser.username || null,
+      username: insertUser.username,
       dateOfBirth: insertUser.dateOfBirth || null,
       gender: insertUser.gender || null,
       ethnicity: insertUser.ethnicity || null,
@@ -809,6 +809,7 @@ export class DatabaseStorage implements IStorage {
         name: userData.firstName && userData.lastName 
           ? `${userData.firstName} ${userData.lastName}` 
           : userData.firstName || userData.email?.split('@')[0] || 'User',
+        username: userData.id.slice(0, 20), // temporary username from ID for upsert
         isOAuthUser: true,
       })
       .onConflictDoUpdate({
@@ -3077,14 +3078,14 @@ export class DatabaseStorage implements IStorage {
     console.log("Seeding database with initial data...");
 
     const demoUsers = [
-      { id: "demo-owner-1", email: "demo1@outsyde.com", password: "demo", name: "Demo Owner 1", isVendor: true },
-      { id: "demo-owner-2", email: "demo2@outsyde.com", password: "demo", name: "Demo Owner 2", isVendor: true },
-      { id: "demo-owner-3", email: "demo3@outsyde.com", password: "demo", name: "Demo Owner 3", isVendor: true },
-      { id: "demo-owner-4", email: "demo4@outsyde.com", password: "demo", name: "Demo Owner 4", isVendor: true },
-      { id: "demo-owner-5", email: "demo5@outsyde.com", password: "demo", name: "Demo Owner 5", isVendor: true },
-      { id: "demo-owner-6", email: "demo6@outsyde.com", password: "demo", name: "Demo Owner 6", isVendor: true },
-      { id: "demo-owner-7", email: "demo7@outsyde.com", password: "demo", name: "Demo Owner 7", isVendor: true },
-      { id: "demo-owner-8", email: "demo8@outsyde.com", password: "demo", name: "Demo Owner 8", isVendor: true },
+      { id: "demo-owner-1", email: "demo1@outsyde.com", password: "demo", name: "Demo Owner 1", username: "demo_owner_1", isVendor: true },
+      { id: "demo-owner-2", email: "demo2@outsyde.com", password: "demo", name: "Demo Owner 2", username: "demo_owner_2", isVendor: true },
+      { id: "demo-owner-3", email: "demo3@outsyde.com", password: "demo", name: "Demo Owner 3", username: "demo_owner_3", isVendor: true },
+      { id: "demo-owner-4", email: "demo4@outsyde.com", password: "demo", name: "Demo Owner 4", username: "demo_owner_4", isVendor: true },
+      { id: "demo-owner-5", email: "demo5@outsyde.com", password: "demo", name: "Demo Owner 5", username: "demo_owner_5", isVendor: true },
+      { id: "demo-owner-6", email: "demo6@outsyde.com", password: "demo", name: "Demo Owner 6", username: "demo_owner_6", isVendor: true },
+      { id: "demo-owner-7", email: "demo7@outsyde.com", password: "demo", name: "Demo Owner 7", username: "demo_owner_7", isVendor: true },
+      { id: "demo-owner-8", email: "demo8@outsyde.com", password: "demo", name: "Demo Owner 8", username: "demo_owner_8", isVendor: true },
     ];
 
     for (const demoUser of demoUsers) {
@@ -3093,6 +3094,7 @@ export class DatabaseStorage implements IStorage {
         email: demoUser.email,
         password: demoUser.password,
         name: demoUser.name,
+        username: demoUser.username,
         isVendor: demoUser.isVendor,
         selectedIndustries: [],
         industryNiches: {},

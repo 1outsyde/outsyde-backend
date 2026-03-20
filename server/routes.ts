@@ -362,6 +362,17 @@ export async function registerRoutes(
     try {
       const data = customerSignupSchema.parse(req.body);
 
+      // Validate username (mandatory)
+      const { validateUsername: valUn } = await import('./usernameUtils');
+      const unValidation = valUn(data.username);
+      if (!unValidation.valid) {
+        return res.status(400).json({ success: false, message: unValidation.reason });
+      }
+      const existingUsername = await storage.getUserByUsername(unValidation.cleaned!);
+      if (existingUsername) {
+        return res.status(409).json({ success: false, message: "Username is already taken" });
+      }
+
       const existing = await storage.getUserByEmail(data.email);
       if (existing) {
         return res.status(400).json({ error: "Email already registered" });
@@ -378,7 +389,7 @@ export async function registerRoutes(
         city: data.city,
         state: data.state,
         zipCode: data.zipCode,
-        username: data.username,
+        username: unValidation.cleaned!,
         dateOfBirth: data.dateOfBirth ? new Date(data.dateOfBirth) : undefined,
         gender: data.gender,
         ethnicity: data.ethnicity,
@@ -412,6 +423,17 @@ export async function registerRoutes(
     try {
       const data = vendorSignupSchema.parse(req.body);
 
+      // Validate username (mandatory)
+      const { validateUsername: valUnV } = await import('./usernameUtils');
+      const unV = valUnV(req.body.username);
+      if (!unV.valid) {
+        return res.status(400).json({ success: false, message: unV.reason || 'Username is required' });
+      }
+      const existingUn = await storage.getUserByUsername(unV.cleaned!);
+      if (existingUn) {
+        return res.status(409).json({ success: false, message: "Username is already taken" });
+      }
+
       const existing = await storage.getUserByEmail(data.email);
       if (existing) {
         return res.status(400).json({ error: "Email already registered" });
@@ -424,6 +446,7 @@ export async function registerRoutes(
         name: data.name,
         phone: data.phone,
         isVendor: true,
+        username: unV.cleaned!,
         address: data.address,
         city: data.city,
         state: data.state,
@@ -492,6 +515,17 @@ export async function registerRoutes(
       const data = photographerSignupSchema.parse(req.body);
       const skipStripe = req.body.skipStripe === true;
 
+      // Validate username (mandatory)
+      const { validateUsername: valUnP } = await import('./usernameUtils');
+      const unP = valUnP(req.body.username);
+      if (!unP.valid) {
+        return res.status(400).json({ success: false, message: unP.reason || 'Username is required' });
+      }
+      const existingUnP = await storage.getUserByUsername(unP.cleaned!);
+      if (existingUnP) {
+        return res.status(409).json({ success: false, message: "Username is already taken" });
+      }
+
       const existing = await storage.getUserByEmail(data.email);
       if (existing) {
         return res.status(400).json({ error: "Email already registered" });
@@ -503,6 +537,7 @@ export async function registerRoutes(
         password: hashedPassword,
         name: data.name,
         phone: data.phone,
+        username: unP.cleaned!,
         isVendor: false,
         isPhotographer: true,
         city: data.city,
@@ -886,22 +921,25 @@ export async function registerRoutes(
       const isAdminEmail = ALLOWED_ADMIN_EMAILS.includes(email.toLowerCase());
 
       if (!user) {
-        // Create new user
+        // Generate a temporary username from email prefix + random suffix
+        // User will be prompted to set a proper username via requiresUsername flag
+        const emailPrefix = email.split('@')[0].toLowerCase().replace(/[^a-z0-9_]/g, '').slice(0, 14);
+        const tempUsername = `${emailPrefix}_${Math.random().toString(36).slice(2, 7)}`;
+
         const newUser = await storage.createUser({
           email,
+          username: tempUsername,
           name: name || `${given_name || ''} ${family_name || ''}`.trim() || email.split('@')[0],
           firstName: given_name || null,
           lastName: family_name || null,
           profileImageUrl: picture || null,
           isOAuthUser: true,
-          isAdmin: isAdminEmail, // Auto-grant admin if email matches
+          isAdmin: isAdminEmail,
         });
         
-        // Link googleSub
         await storage.updateUser(newUser.id, { googleSub });
         user = await storage.getUser(newUser.id);
       } else {
-        // Update admin status if email is in admin list but not yet marked
         if (isAdminEmail && !user.isAdmin) {
           await storage.updateUser(user.id, { isAdmin: true });
           user = await storage.getUser(user.id);
@@ -915,7 +953,6 @@ export async function registerRoutes(
         });
       }
 
-      // Generate JWT tokens with full role information
       const tokenPayload: TokenPayload = {
         userId: user.id,
         isVendor: user.isVendor || false,
@@ -1153,9 +1190,13 @@ export async function registerRoutes(
       const isAdminEmail = ALLOWED_ADMIN_EMAILS.includes(email.toLowerCase());
 
       if (!user) {
-        // Create new user
+        // Generate temporary username — user will be prompted to set a proper one
+        const emailPrefix = email.split('@')[0].toLowerCase().replace(/[^a-z0-9_]/g, '').slice(0, 14);
+        const tempUsername = `${emailPrefix}_${Math.random().toString(36).slice(2, 7)}`;
+
         const newUser = await storage.createUser({
           email,
+          username: tempUsername,
           name: name || `${given_name || ''} ${family_name || ''}`.trim() || email.split('@')[0],
           firstName: given_name || null,
           lastName: family_name || null,
@@ -1164,11 +1205,9 @@ export async function registerRoutes(
           isAdmin: isAdminEmail,
         });
         
-        // Link googleSub
         await storage.updateUser(newUser.id, { googleSub });
         user = await storage.getUser(newUser.id);
       } else {
-        // Update admin status if email is in admin list but not yet marked
         if (isAdminEmail && !user.isAdmin) {
           await storage.updateUser(user.id, { isAdmin: true });
           user = await storage.getUser(user.id);
