@@ -301,6 +301,7 @@ export class StripeService {
    */
   async createBookingPaymentIntent(params: {
     amountCents: number;
+    consumerServiceFeeCents?: number;
     currency?: string;
     customerId?: string;
     connectedAccountId: string;
@@ -317,11 +318,16 @@ export class StripeService {
   }) {
     const stripe = await getUncachableStripeClient();
 
-    const paymentIntentData: any = {
-      amount: params.amountCents,
+    // Total charge = service subtotal + consumer service fee
+    const totalCharge = params.amountCents + (params.consumerServiceFeeCents || 0);
+    // application_fee = booking fee + consumer service fee (both stay with Outsyde)
+    const totalAppFee = params.applicationFeeAmount + (params.consumerServiceFeeCents || 0);
+
+    const paymentIntentData: Record<string, unknown> = {
+      amount: totalCharge,
       currency: params.currency || 'usd',
       capture_method: params.captureMethod,
-      application_fee_amount: params.applicationFeeAmount,
+      application_fee_amount: totalAppFee,
       transfer_data: {
         destination: params.connectedAccountId,
       },
@@ -336,7 +342,7 @@ export class StripeService {
       paymentIntentData.customer = params.customerId;
     }
 
-    return stripe.paymentIntents.create(paymentIntentData, {
+    return stripe.paymentIntents.create(paymentIntentData as any, {
       idempotencyKey: idempotencyKey('pi'),
     });
   }
@@ -835,6 +841,7 @@ export class StripeService {
     connectedAccountId: string;
     amountInCents: number;
     platformFeeInCents: number;
+    consumerServiceFeeCents?: number;
     serviceName: string;
     serviceDescription?: string;
     successUrl: string;
@@ -843,40 +850,48 @@ export class StripeService {
   }) {
     const stripe = await getUncachableStripeClient();
 
-    // Build checkout session config
-    const sessionConfig: any = {
+    const lineItems: Array<Record<string, unknown>> = [
+      {
+        price_data: {
+          currency: "usd",
+          product_data: { name: params.serviceName, description: params.serviceDescription },
+          unit_amount: params.amountInCents,
+        },
+        quantity: 1,
+      },
+    ];
+
+    if (params.consumerServiceFeeCents && params.consumerServiceFeeCents > 0) {
+      lineItems.push({
+        price_data: {
+          currency: "usd",
+          product_data: { name: "Outsyde Service Fee", description: "Platform service fee" },
+          unit_amount: params.consumerServiceFeeCents,
+        },
+        quantity: 1,
+      });
+    }
+
+    const totalApplicationFee = params.platformFeeInCents + (params.consumerServiceFeeCents || 0);
+
+    const sessionConfig: Record<string, unknown> = {
       mode: "payment",
       payment_method_types: ["card"],
-      line_items: [
-        {
-          price_data: {
-            currency: "usd",
-            product_data: {
-              name: params.serviceName,
-              description: params.serviceDescription,
-            },
-            unit_amount: params.amountInCents,
-          },
-          quantity: 1,
-        },
-      ],
+      line_items: lineItems,
       success_url: params.successUrl,
       cancel_url: params.cancelUrl,
       payment_intent_data: {
-        application_fee_amount: params.platformFeeInCents,
-        transfer_data: {
-          destination: params.connectedAccountId,
-        },
+        application_fee_amount: totalApplicationFee,
+        transfer_data: { destination: params.connectedAccountId },
       },
       metadata: params.metadata,
     };
 
-    // Associate with existing Stripe customer if available
     if (params.customerId) {
       sessionConfig.customer = params.customerId;
     }
 
-    return stripe.checkout.sessions.create(sessionConfig, {
+    return stripe.checkout.sessions.create(sessionConfig as any, {
       idempotencyKey: idempotencyKey('photo_booking'),
     });
   }
@@ -890,6 +905,7 @@ export class StripeService {
     connectedAccountId: string;
     amountInCents: number;
     platformFeeInCents: number;
+    consumerServiceFeeCents?: number;
     serviceName: string;
     serviceDescription?: string;
     successUrl: string;
@@ -898,39 +914,48 @@ export class StripeService {
   }) {
     const stripe = await getUncachableStripeClient();
 
-    const sessionConfig: any = {
+    const lineItems: Array<Record<string, unknown>> = [
+      {
+        price_data: {
+          currency: "usd",
+          product_data: { name: params.serviceName, description: params.serviceDescription },
+          unit_amount: params.amountInCents,
+        },
+        quantity: 1,
+      },
+    ];
+
+    if (params.consumerServiceFeeCents && params.consumerServiceFeeCents > 0) {
+      lineItems.push({
+        price_data: {
+          currency: "usd",
+          product_data: { name: "Outsyde Service Fee", description: "Platform service fee" },
+          unit_amount: params.consumerServiceFeeCents,
+        },
+        quantity: 1,
+      });
+    }
+
+    const totalApplicationFee = params.platformFeeInCents + (params.consumerServiceFeeCents || 0);
+
+    const sessionConfig: Record<string, unknown> = {
       mode: "payment",
       payment_method_types: ["card"],
-      line_items: [
-        {
-          price_data: {
-            currency: "usd",
-            product_data: {
-              name: params.serviceName,
-              description: params.serviceDescription,
-            },
-            unit_amount: params.amountInCents,
-          },
-          quantity: 1,
-        },
-      ],
+      line_items: lineItems,
       success_url: params.successUrl,
       cancel_url: params.cancelUrl,
       payment_intent_data: {
-        application_fee_amount: params.platformFeeInCents,
-        transfer_data: {
-          destination: params.connectedAccountId,
-        },
+        application_fee_amount: totalApplicationFee,
+        transfer_data: { destination: params.connectedAccountId },
       },
       metadata: params.metadata,
     };
 
-    // Associate with existing Stripe customer if available
     if (params.customerId) {
       sessionConfig.customer = params.customerId;
     }
 
-    return stripe.checkout.sessions.create(sessionConfig, {
+    return stripe.checkout.sessions.create(sessionConfig as any, {
       idempotencyKey: idempotencyKey('appt_booking'),
     });
   }

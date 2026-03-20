@@ -9,6 +9,7 @@ import {
   calculateBookingFee,
   calculateConsumerServiceFee,
   calculateInfluencerCommission,
+  calculateRefundAdjustments,
   FEE_MODEL_VERSION,
 } from './fees';
 
@@ -148,6 +149,39 @@ console.log('\nTest 11: grossChargeAmount = subtotal + serviceFee (no tax yet)')
   // grossChargeAmount on the order should match Stripe charge
   assert(b.customerTotalBeforeTaxCents === b.subtotalCents + b.consumerServiceFeeCents,
     'grossChargeAmount = subtotal + serviceFee');
+}
+
+// Test 12: Full refund proration
+console.log('\nTest 12: Full refund — all fees reversed');
+{
+  const r = calculateRefundAdjustments({
+    originalSubtotalCents: 10000,
+    refundAmountCents: 10000,
+    originalConsumerServiceFeeCents: 300,
+    originalPlatformFeeCents: 800,
+    originalInfluencerCommissionCents: 1500,
+  });
+  assert(r.isFullRefund === true, 'is full refund');
+  assert(r.consumerServiceFeeReversalCents === 300, 'service fee fully reversed');
+  assert(r.platformFeeReversalCents === 800, 'platform fee fully reversed');
+  assert(r.influencerCommissionReversalCents === 1500, 'influencer commission fully reversed');
+  assert(r.outsydeRevenueReductionCents === 1100, 'Outsyde revenue reduction = 1100');
+}
+
+// Test 13: 50% partial refund
+console.log('\nTest 13: 50% partial refund — fees prorated');
+{
+  const r = calculateRefundAdjustments({
+    originalSubtotalCents: 10000,
+    refundAmountCents: 5000,
+    originalConsumerServiceFeeCents: 300,
+    originalPlatformFeeCents: 800,
+    originalInfluencerCommissionCents: 1500,
+  });
+  assert(r.isFullRefund === false, 'is partial refund');
+  assert(r.consumerServiceFeeReversalCents === 150, 'service fee 50% reversed = 150');
+  assert(r.platformFeeReversalCents === 400, 'platform fee 50% reversed = 400');
+  assert(r.influencerCommissionReversalCents === 750, 'influencer 50% reversed = 750');
 }
 
 console.log(`\n=== Results: ${passed} passed, ${failed} failed ===\n`);

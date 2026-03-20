@@ -145,3 +145,57 @@ export const COMMISSION_STATUS = {
 } as const;
 
 export type CommissionStatus = typeof COMMISSION_STATUS[keyof typeof COMMISSION_STATUS];
+
+// =====================================================
+//  PARTIAL REFUND PRORATION
+// =====================================================
+
+/**
+ * Calculate prorated fee adjustments for a partial refund.
+ *
+ * Proration rule: each fee is reduced proportionally to the refund ratio.
+ * refundRatio = refundAmountCents / originalSubtotalCents
+ *
+ * Full refund: all fees reversed in full.
+ * Partial refund: each fee reduced by (refundAmount / subtotal) ratio.
+ *
+ * The consumer service fee reversal goes back to the customer.
+ * The platform fee reversal reduces Outsyde revenue.
+ * The influencer commission reversal reduces influencer payout.
+ * Vendor net adjustment = refundAmount - (platformFee reversal + influencerCommission reversal)
+ */
+export function calculateRefundAdjustments(params: {
+  originalSubtotalCents: number;
+  refundAmountCents: number;
+  originalConsumerServiceFeeCents: number;
+  originalPlatformFeeCents: number;
+  originalInfluencerCommissionCents: number;
+}): {
+  consumerServiceFeeReversalCents: number;
+  platformFeeReversalCents: number;
+  influencerCommissionReversalCents: number;
+  vendorRefundCents: number;
+  outsydeRevenueReductionCents: number;
+  isFullRefund: boolean;
+} {
+  const ratio = params.originalSubtotalCents > 0
+    ? params.refundAmountCents / params.originalSubtotalCents
+    : 1;
+  const isFullRefund = ratio >= 1;
+  const r = isFullRefund ? 1 : ratio;
+
+  const consumerServiceFeeReversalCents = Math.round(params.originalConsumerServiceFeeCents * r);
+  const platformFeeReversalCents = Math.round(params.originalPlatformFeeCents * r);
+  const influencerCommissionReversalCents = Math.round(params.originalInfluencerCommissionCents * r);
+  const vendorRefundCents = params.refundAmountCents - platformFeeReversalCents - influencerCommissionReversalCents;
+  const outsydeRevenueReductionCents = consumerServiceFeeReversalCents + platformFeeReversalCents;
+
+  return {
+    consumerServiceFeeReversalCents,
+    platformFeeReversalCents,
+    influencerCommissionReversalCents,
+    vendorRefundCents: Math.max(0, vendorRefundCents),
+    outsydeRevenueReductionCents,
+    isFullRefund,
+  };
+}

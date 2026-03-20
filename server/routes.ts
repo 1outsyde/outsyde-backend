@@ -93,7 +93,7 @@ import {
   transitionShootBookingState,
   getDraftExpiryTime
 } from "./bookingStateMachine";
-import { calculateProductFee, calculateBookingFee } from "./fees";
+import { calculateProductFee, calculateBookingFee, calculateConsumerServiceFee } from "./fees";
 import {
   trackLinkClick,
   recordAttribution,
@@ -4877,8 +4877,9 @@ export async function registerRoutes(
       // Determine capture method based on autoAcceptBookings
       const captureMethod = business.autoAcceptBookings === false ? 'manual' : 'automatic';
       
-      // Calculate platform fee (10% Outsyde booking fee)
+      // Calculate platform fee (12% Outsyde booking fee) + consumer service fee (3%)
       const platformFeeAmount = calculateBookingFee(appointment.totalPrice);
+      const apptConsumerFee = calculateConsumerServiceFee(appointment.totalPrice);
 
       // Get or create Stripe customer for the user
       const user = await storage.getUser(userId);
@@ -4886,9 +4887,10 @@ export async function registerRoutes(
         return res.status(404).json({ error: "User not found" });
       }
 
-      // Create PaymentIntent
+      // Create PaymentIntent (amount includes service fee, app fee includes both)
       const paymentIntent = await stripeService.createBookingPaymentIntent({
         amountCents: appointment.totalPrice,
+        consumerServiceFeeCents: apptConsumerFee,
         customerId: user.stripeCustomerId || undefined,
         connectedAccountId: business.stripeAccountId,
         applicationFeeAmount: platformFeeAmount,
@@ -5011,8 +5013,9 @@ export async function registerRoutes(
       // Determine capture method based on autoAcceptBookings
       const captureMethod = photographer.autoAcceptBookings === false ? 'manual' : 'automatic';
       
-      // Calculate platform fee (10% Outsyde booking fee)
+      // Calculate platform fee (12% Outsyde booking fee) + consumer service fee (3%)
       const platformFeeAmount = calculateBookingFee(booking.totalPrice);
+      const shootConsumerFee = calculateConsumerServiceFee(booking.totalPrice);
 
       // Get user for Stripe customer
       const user = await storage.getUser(userId);
@@ -5020,9 +5023,10 @@ export async function registerRoutes(
         return res.status(404).json({ error: "User not found" });
       }
 
-      // Create PaymentIntent
+      // Create PaymentIntent (amount includes service fee, app fee includes both)
       const paymentIntent = await stripeService.createBookingPaymentIntent({
         amountCents: booking.totalPrice,
+        consumerServiceFeeCents: shootConsumerFee,
         customerId: user.stripeCustomerId || undefined,
         connectedAccountId: photographer.stripeAccountId,
         applicationFeeAmount: platformFeeAmount,
@@ -5552,11 +5556,15 @@ export async function registerRoutes(
         // Get service details
         const service = await storage.getVendorService(booking.serviceId);
 
-        // Create Stripe checkout session with destination charge
+        // Create Stripe checkout session with destination charge + consumer service fee
+        const { calculateConsumerServiceFee: calcSvcFee } = await import('./fees');
+        const appointmentServiceFee = calcSvcFee(booking.totalPrice);
+
         const checkoutSession = await stripeService.createAppointmentCheckout({
           connectedAccountId: business.stripeAccountId!,
           amountInCents: booking.totalPrice,
           platformFeeInCents: booking.platformFee ?? 0,
+          consumerServiceFeeCents: appointmentServiceFee,
           serviceName: service?.name || 'Service Booking',
           successUrl: `${successUrl}?session_id={CHECKOUT_SESSION_ID}`,
           cancelUrl,
@@ -5616,11 +5624,15 @@ export async function registerRoutes(
           return res.status(400).json({ code: "PAYMENT_NOT_CONFIGURED", message: "Photographer not configured for payments" });
         }
 
-        // Create Stripe checkout session with destination charge
+        // Create Stripe checkout session with destination charge + consumer service fee
+        const { calculateConsumerServiceFee: calcShootSvcFee } = await import('./fees');
+        const shootServiceFee = calcShootSvcFee(booking.totalPrice);
+
         const checkoutSession = await stripeService.createPhotographerBookingCheckout({
           connectedAccountId: photographer.stripeAccountId!,
           amountInCents: booking.totalPrice,
           platformFeeInCents: booking.platformFee ?? 0,
+          consumerServiceFeeCents: shootServiceFee,
           serviceName: `${booking.shootType} Photography Session`,
           successUrl: `${successUrl}?session_id={CHECKOUT_SESSION_ID}`,
           cancelUrl,
