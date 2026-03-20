@@ -1,70 +1,97 @@
 /**
- * Seed default subscription tiers for vendor onboarding.
- * Idempotent — only inserts if the table is empty.
+ * Seed subscription tiers for vendor onboarding.
+ * Updates existing tiers if names match, inserts if missing.
  */
 
 import { db } from "./db";
 import { subscriptionTiers } from "@shared/schema";
+import { eq } from "drizzle-orm";
+
+const TIERS = [
+  {
+    name: 'starter',
+    displayName: 'Starter',
+    description: 'Perfect for new businesses ready to start selling.',
+    priceInCents: 2999, // $29.99/mo
+    platformFeeBps: 800,
+    stripePriceId: 'price_1TBN0rBXLHe4A1FGdPxUowLM',
+    features: [
+      'Product & service listings',
+      'Basic analytics',
+      'Customer messaging',
+      'Standard discovery',
+    ],
+    alaCarteDiscountPercent: 0,
+    sortOrder: 0,
+  },
+  {
+    name: 'growth',
+    displayName: 'Growth',
+    description: 'For businesses ready to grow with real tools.',
+    priceInCents: 5999, // $59.99/mo
+    platformFeeBps: 800,
+    stripePriceId: 'price_1TBN1CBXLHe4A1FGiGdGx0ZF',
+    features: [
+      'Everything in Starter',
+      'Advanced analytics',
+      '1 complimentary Unranked influencer per month',
+      'Shoot credits (1 credit/month)',
+    ],
+    alaCarteDiscountPercent: 10,
+    sortOrder: 1,
+  },
+  {
+    name: 'pro',
+    displayName: 'Pro',
+    description: 'For established businesses that want maximum impact.',
+    priceInCents: 9999, // $99.99/mo
+    platformFeeBps: 800,
+    stripePriceId: 'price_1TBN1TBXLHe4A1FGcJTK79L0',
+    features: [
+      'Everything in Growth',
+      '1 Silver or 2 Bronze tier influencers per month',
+      'Shoot credits (2 credits/month)',
+      'Authority badge',
+    ],
+    alaCarteDiscountPercent: 20,
+    sortOrder: 2,
+  },
+];
 
 export async function seedSubscriptionTiers(): Promise<void> {
-  const existing = await db.select().from(subscriptionTiers);
-  if (existing.length > 0) return;
+  for (const tier of TIERS) {
+    const [existing] = await db.select()
+      .from(subscriptionTiers)
+      .where(eq(subscriptionTiers.name, tier.name));
 
-  console.log("[Subscriptions] Seeding default subscription tiers...");
+    if (existing) {
+      // Update existing tier to match current config
+      await db.update(subscriptionTiers)
+        .set({
+          displayName: tier.displayName,
+          description: tier.description,
+          priceInCents: tier.priceInCents,
+          platformFeeBps: tier.platformFeeBps,
+          stripePriceId: tier.stripePriceId,
+          features: tier.features,
+          alaCarteDiscountPercent: tier.alaCarteDiscountPercent,
+          sortOrder: tier.sortOrder,
+        })
+        .where(eq(subscriptionTiers.id, existing.id));
+    } else {
+      await db.insert(subscriptionTiers).values(tier);
+    }
+  }
 
-  await db.insert(subscriptionTiers).values([
-    {
-      name: 'access',
-      displayName: 'Access',
-      description: 'Get started with your online storefront. List products, accept bookings, and reach local customers.',
-      priceInCents: 2000, // $20/month
-      platformFeeBps: 800, // informational — actual fee logic is in fees.ts
-      features: [
-        'Online storefront',
-        'Up to 25 product listings',
-        'Booking calendar',
-        'Customer messaging',
-        'Basic analytics',
-      ],
-      alaCarteDiscountPercent: 0,
-      sortOrder: 0,
-    },
-    {
-      name: 'growth',
-      displayName: 'Growth',
-      description: 'Scale your business with advanced tools, unlimited listings, and priority placement in search.',
-      priceInCents: 4000, // $40/month
-      platformFeeBps: 800,
-      features: [
-        'Everything in Access',
-        'Unlimited product listings',
-        'Priority search placement',
-        'Multi-staff management',
-        'Advanced analytics',
-        'Loyalty program integration',
-      ],
-      alaCarteDiscountPercent: 10,
-      sortOrder: 1,
-    },
-    {
-      name: 'pro',
-      displayName: 'Pro',
-      description: 'Full suite for established businesses. Sponsored posts, featured placement, and dedicated support.',
-      priceInCents: 8900, // $89/month
-      platformFeeBps: 800,
-      features: [
-        'Everything in Growth',
-        'Sponsored post credits',
-        'Featured storefront placement',
-        'Shipment tracking',
-        'Team payouts (Stripe Connect per staff)',
-        'Priority customer support',
-        'Custom branding',
-      ],
-      alaCarteDiscountPercent: 20,
-      sortOrder: 2,
-    },
-  ]);
+  // Remove legacy tiers that are no longer in the config
+  const validNames = TIERS.map(t => t.name);
+  const allTiers = await db.select().from(subscriptionTiers);
+  for (const tier of allTiers) {
+    if (!validNames.includes(tier.name)) {
+      await db.delete(subscriptionTiers).where(eq(subscriptionTiers.id, tier.id));
+      console.log(`[Subscriptions] Removed legacy tier: ${tier.name}`);
+    }
+  }
 
-  console.log("[Subscriptions] 3 tiers seeded: Access ($20), Growth ($40), Pro ($89)");
+  console.log("[Subscriptions] Tiers synced: Starter ($29.99), Growth ($59.99), Pro ($99.99)");
 }
