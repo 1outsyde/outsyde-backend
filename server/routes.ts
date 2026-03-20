@@ -3672,6 +3672,10 @@ export async function registerRoutes(
         holdDurationMinutes: holdDurationMinutes ? parseInt(holdDurationMinutes, 10) : undefined
       });
 
+      // Calculate fee preview for frontend display
+      const { calculateBookingFees } = await import('./fees');
+      const feePreview = calculateBookingFees(result.servicePriceCents);
+
       res.json({
         success: true,
         holdId: result.holdId,
@@ -3680,7 +3684,18 @@ export async function registerRoutes(
         servicePriceCents: result.servicePriceCents,
         durationMinutes: result.durationMinutes,
         startTime: result.startTime,
-        endTime: result.endTime
+        endTime: result.endTime,
+        // Fee breakdown for frontend rendering (all in cents)
+        feeBreakdown: {
+          subtotalAmount: feePreview.subtotalCents,
+          consumerServiceFeeAmount: feePreview.consumerServiceFeeCents,
+          bookingFeeAmount: feePreview.platformFeeCents,
+          vendorNetAmount: feePreview.vendorNetCents,
+          grossChargeAmount: feePreview.customerTotalBeforeTaxCents,
+          taxAmount: 0,
+          outsydeGrossRevenueAmount: feePreview.outsydeGrossRevenueCents,
+          feeModelVersion: feePreview.feeModelVersion,
+        },
       });
     } catch (error) {
       if (error instanceof AvailabilityError) {
@@ -5735,7 +5750,6 @@ export async function registerRoutes(
           return res.status(404).json({ error: "Booking not found" });
         }
         
-        // Check user is client or business owner
         if (booking.clientId !== userId) {
           const business = await storage.getBusiness(booking.businessId);
           if (business?.ownerId !== userId) {
@@ -5743,14 +5757,28 @@ export async function registerRoutes(
           }
         }
 
-        res.json({ booking });
+        const { calculateBookingFees: calcBkFees } = await import('./fees');
+        const fees = calcBkFees(booking.totalPrice);
+
+        res.json({
+          booking,
+          feeBreakdown: {
+            subtotalAmount: booking.totalPrice,
+            consumerServiceFeeAmount: fees.consumerServiceFeeCents,
+            bookingFeeAmount: booking.platformFee ?? fees.platformFeeCents,
+            vendorNetAmount: booking.vendorNet ?? fees.vendorNetCents,
+            grossChargeAmount: fees.customerTotalBeforeTaxCents,
+            taxAmount: 0,
+            outsydeGrossRevenueAmount: fees.outsydeGrossRevenueCents,
+            feeModelVersion: fees.feeModelVersion,
+          },
+        });
       } else if (type === 'shoot') {
         const [booking] = await db.select().from(shootBookings).where(eq(shootBookings.id, id));
         if (!booking) {
           return res.status(404).json({ error: "Booking not found" });
         }
 
-        // Check user is client or photographer
         if (booking.clientId !== userId) {
           const photographer = await storage.getPhotographer(booking.photographerId);
           if (photographer?.userId !== userId) {
@@ -5758,7 +5786,22 @@ export async function registerRoutes(
           }
         }
 
-        res.json({ booking });
+        const { calculateBookingFees: calcShFees } = await import('./fees');
+        const fees = calcShFees(booking.totalPrice);
+
+        res.json({
+          booking,
+          feeBreakdown: {
+            subtotalAmount: booking.totalPrice,
+            consumerServiceFeeAmount: fees.consumerServiceFeeCents,
+            bookingFeeAmount: booking.platformFee ?? fees.platformFeeCents,
+            vendorNetAmount: booking.vendorNet ?? fees.vendorNetCents,
+            grossChargeAmount: fees.customerTotalBeforeTaxCents,
+            taxAmount: 0,
+            outsydeGrossRevenueAmount: fees.outsydeGrossRevenueCents,
+            feeModelVersion: fees.feeModelVersion,
+          },
+        });
       } else {
         return res.status(400).json({ error: "type must be 'appointment' or 'shoot'" });
       }
