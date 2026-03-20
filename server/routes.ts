@@ -6233,17 +6233,61 @@ export async function registerRoutes(
         await storage.updateUser(userId, { stripeCustomerId: customer.id });
       }
 
-      const baseUrl = process.env.API_BASE_URL || process.env.FRONTEND_URL || `https://${process.env.REPLIT_DOMAINS?.split(',')[0] || 'localhost:5000'}`;
-      const session = await stripeService.createTierSubscriptionCheckout(
-        stripeCustomerId,
-        tierId,
-        `${baseUrl}/vendor/dashboard?subscription=success`,
-        `${baseUrl}/vendor/dashboard?subscription=cancelled`,
-        userId,
-        business.id
-      );
+      // Detect if client wants native Payment Sheet (mobile) or web redirect
+      const useNative = req.body.native === true || req.headers['x-client-type'] === 'mobile';
 
-      res.json({ success: true, url: session.url });
+      if (useNative) {
+        // Native flow: create subscription directly, return client secret for Payment Sheet
+        const result = await stripeService.createTierSubscriptionNative(
+          stripeCustomerId,
+          tierId,
+          userId,
+          business.id
+        );
+
+        res.json({
+          success: true,
+          clientSecret: result.clientSecret,
+          subscriptionId: result.subscriptionId,
+          ephemeralKey: result.ephemeralKey,
+          customerId: stripeCustomerId,
+        });
+      } else {
+        // Web flow: create Checkout Session, return redirect URL
+      // Check if client wants native Payment Sheet (mobile) or web redirect
+      const useNative = req.body.native === true || req.headers['x-platform'] === 'mobile';
+
+      if (useNative) {
+        // Native flow: return clientSecret for React Native Payment Sheet
+        const result = await stripeService.createTierSubscriptionNative(
+          stripeCustomerId,
+          tierId,
+          userId,
+          business.id
+        );
+
+        res.json({
+          success: true,
+          clientSecret: result.clientSecret,
+          subscriptionId: result.subscriptionId,
+          ephemeralKey: result.ephemeralKey,
+          customerId: stripeCustomerId,
+        });
+      } else {
+        // Web flow: return Stripe Checkout Session URL
+        const baseUrl = process.env.API_BASE_URL || process.env.FRONTEND_URL || `https://${process.env.REPLIT_DOMAINS?.split(',')[0] || 'localhost:5000'}`;
+        const session = await stripeService.createTierSubscriptionCheckout(
+          stripeCustomerId,
+          tierId,
+          `${baseUrl}/vendor/dashboard?subscription=success`,
+          `${baseUrl}/vendor/dashboard?subscription=cancelled`,
+          userId,
+          business.id
+        );
+
+        res.json({ success: true, url: session.url });
+      }
+      }
     } catch (error) {
       if (error instanceof z.ZodError) {
         return res.status(400).json({ success: false, error: { code: 'INVALID_INPUT', message: 'tierId is required' } });
