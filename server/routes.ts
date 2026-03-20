@@ -742,6 +742,96 @@ export async function registerRoutes(
     }
   });
 
+  // Complete Google/Apple OAuth signup — create user record with chosen username
+  app.post("/api/auth/oauth/complete-signup", authRateLimiter, async (req, res) => {
+    try {
+      const { googleSub, email, username, name, firstName, lastName, profileImageUrl } = req.body;
+
+      if (!googleSub || !email) {
+        return res.status(400).json({ success: false, message: "googleSub and email are required" });
+      }
+
+      // Validate username
+      const { validateUsername: valUn } = await import('./usernameUtils');
+      const unVal = valUn(username);
+      if (!unVal.valid) {
+        return res.status(400).json({ success: false, message: unVal.reason });
+      }
+
+      // Check username availability
+      const existingUn = await storage.getUserByUsername(unVal.cleaned!);
+      if (existingUn) {
+        return res.status(409).json({ success: false, message: "Username is already taken" });
+      }
+
+      // Check email not already registered
+      const existingEmail = await storage.getUserByEmail(email);
+      if (existingEmail) {
+        return res.status(409).json({ success: false, message: "Email already registered" });
+      }
+
+      // Check googleSub not already linked
+      const existingGoogle = await storage.getUserByGoogleSub(googleSub);
+      if (existingGoogle) {
+        return res.status(409).json({ success: false, message: "Google account already linked" });
+      }
+
+      // Admin check
+      const ALLOWED_ADMIN_EMAILS = ['info@goutsyde.com', 'jamesmeyers2304@gmail.com'].map(e => e.toLowerCase());
+      const isAdminEmail = ALLOWED_ADMIN_EMAILS.includes(email.toLowerCase());
+
+      // NOW create the user with the chosen username
+      const user = await storage.createUser({
+        email,
+        username: unVal.cleaned!,
+        name: name || email.split('@')[0],
+        firstName: firstName || null,
+        lastName: lastName || null,
+        profileImageUrl: profileImageUrl || null,
+        isOAuthUser: true,
+        isAdmin: isAdminEmail,
+      });
+
+      await storage.updateUser(user.id, { googleSub });
+      const fullUser = await storage.getUser(user.id);
+      if (!fullUser) {
+        return res.status(500).json({ success: false, message: "Failed to create user" });
+      }
+
+      // Issue tokens
+      const tokenPayload: TokenPayload = {
+        userId: fullUser.id,
+        isVendor: fullUser.isVendor || false,
+        isPhotographer: fullUser.isPhotographer || false,
+        isAdmin: fullUser.isAdmin || false,
+      };
+
+      const accessToken = generateAccessToken(tokenPayload);
+      const refreshToken = generateRefreshToken(tokenPayload);
+      await storage.storeRefreshToken(fullUser.id, refreshToken, new Date(Date.now() + REFRESH_TOKEN_EXPIRY_MS));
+
+      if (req.session) {
+        req.session.userId = fullUser.id;
+        req.session.isVendor = fullUser.isVendor;
+      }
+
+      const safeUser = sanitizeUserForResponse(fullUser, { includeOwnData: true });
+
+      res.json({
+        success: true,
+        user: safeUser,
+        accessToken,
+        refreshToken,
+        expiresIn: ACCESS_TOKEN_EXPIRY_SECONDS,
+        isNewUser: false,
+        requiresUsername: false,
+      });
+    } catch (error) {
+      console.error("OAuth complete signup error:", error);
+      res.status(500).json({ success: false, message: "Failed to complete signup" });
+    }
+  });
+
   // Complete onboarding — persist user type selection
   app.post("/api/auth/onboarding/complete", optionalAuthMiddleware, async (req, res) => {
     const authReq = req as AuthenticatedRequest;
@@ -921,35 +1011,34 @@ export async function registerRoutes(
       const isAdminEmail = ALLOWED_ADMIN_EMAILS.includes(email.toLowerCase());
 
       if (!user) {
-        // Generate a temporary username from email prefix + random suffix
-        // User will be prompted to set a proper username via requiresUsername flag
-        const emailPrefix = email.split('@')[0].toLowerCase().replace(/[^a-z0-9_]/g, '').slice(0, 14);
-        const tempUsername = `${emailPrefix}_${Math.random().toString(36).slice(2, 7)}`;
-
-        const newUser = await storage.createUser({
-          email,
-          username: tempUsername,
-          name: name || `${given_name || ''} ${family_name || ''}`.trim() || email.split('@')[0],
-          firstName: given_name || null,
-          lastName: family_name || null,
-          profileImageUrl: picture || null,
-          isOAuthUser: true,
-          isAdmin: isAdminEmail,
+        // New Google user — do NOT create a record yet.
+        // Return their Google profile so the frontend can route them
+        // through username selection before account creation.
+        return res.json({
+          success: true,
+          isNewUser: true,
+          requiresUsername: true,
+          googleProfile: {
+            googleSub,
+            email,
+            name: name || `${given_name || ''} ${family_name || ''}`.trim() || null,
+            firstName: given_name || null,
+            lastName: family_name || null,
+            profileImageUrl: picture || null,
+          },
         });
-        
-        await storage.updateUser(newUser.id, { googleSub });
-        user = await storage.getUser(newUser.id);
-      } else {
-        if (isAdminEmail && !user.isAdmin) {
-          await storage.updateUser(user.id, { isAdmin: true });
-          user = await storage.getUser(user.id);
-        }
+      }
+
+      // Existing user — update admin status if needed
+      if (isAdminEmail && !user.isAdmin) {
+        await storage.updateUser(user.id, { isAdmin: true });
+        user = await storage.getUser(user.id);
       }
 
       if (!user) {
         return res.status(500).json({
           success: false,
-          error: { code: "CREATE_FAILED", message: "Failed to create or retrieve user" }
+          error: { code: "CREATE_FAILED", message: "Failed to retrieve user" }
         });
       }
 
@@ -960,33 +1049,21 @@ export async function registerRoutes(
         isAdmin: user.isAdmin || false,
       };
 
-      // Check for business association
       if (user.isVendor) {
         const business = await storage.getBusinessByOwnerId(user.id);
-        if (business) {
-          tokenPayload.businessId = business.id;
-        }
+        if (business) tokenPayload.businessId = business.id;
       }
-
-      // Check for photographer association
       if (user.isPhotographer) {
         const photographer = await storage.getPhotographerByUserId(user.id);
-        if (photographer) {
-          tokenPayload.photographerId = photographer.id;
-        }
+        if (photographer) tokenPayload.photographerId = photographer.id;
       }
 
       const accessToken = generateAccessToken(tokenPayload);
       const refreshToken = generateRefreshToken(tokenPayload);
 
-      // Store refresh token in database
       await storage.storeRefreshToken(user.id, refreshToken, new Date(Date.now() + REFRESH_TOKEN_EXPIRY_MS));
 
-      // Return user data and tokens
       const safeUser = sanitizeUserForResponse(user, { includeOwnData: true });
-
-      // Flag new users who need to set a username before proceeding
-      const isNewUser = !user.username;
 
       res.json({
         success: true,
@@ -994,8 +1071,8 @@ export async function registerRoutes(
         accessToken,
         refreshToken,
         expiresIn: ACCESS_TOKEN_EXPIRY_SECONDS,
-        isNewUser,
-        requiresUsername: isNewUser,
+        isNewUser: false,
+        requiresUsername: false,
       });
 
     } catch (error) {
@@ -1190,33 +1267,29 @@ export async function registerRoutes(
       const isAdminEmail = ALLOWED_ADMIN_EMAILS.includes(email.toLowerCase());
 
       if (!user) {
-        // Generate temporary username — user will be prompted to set a proper one
-        const emailPrefix = email.split('@')[0].toLowerCase().replace(/[^a-z0-9_]/g, '').slice(0, 14);
-        const tempUsername = `${emailPrefix}_${Math.random().toString(36).slice(2, 7)}`;
-
-        const newUser = await storage.createUser({
+        // New Google user — redirect to app with isNewUser flag.
+        // No user record created until they choose a username.
+        const newUserParams = new URLSearchParams({
+          isNewUser: 'true',
+          requiresUsername: 'true',
           email,
-          username: tempUsername,
-          name: name || `${given_name || ''} ${family_name || ''}`.trim() || email.split('@')[0],
-          firstName: given_name || null,
-          lastName: family_name || null,
-          profileImageUrl: picture || null,
-          isOAuthUser: true,
-          isAdmin: isAdminEmail,
+          googleSub,
+          name: name || '',
+          firstName: given_name || '',
+          lastName: family_name || '',
+          profileImageUrl: picture || '',
         });
-        
-        await storage.updateUser(newUser.id, { googleSub });
-        user = await storage.getUser(newUser.id);
-      } else {
-        if (isAdminEmail && !user.isAdmin) {
-          await storage.updateUser(user.id, { isAdmin: true });
-          user = await storage.getUser(user.id);
-        }
+        return res.redirect(`${successRedirect}?${newUserParams.toString()}`);
+      }
+
+      if (isAdminEmail && !user.isAdmin) {
+        await storage.updateUser(user.id, { isAdmin: true });
+        user = await storage.getUser(user.id);
       }
 
       if (!user) {
-        console.error("Failed to create or retrieve user");
-        return res.redirect(`${errorRedirect}?error=user_creation_failed`);
+        console.error("Failed to retrieve user");
+        return res.redirect(`${errorRedirect}?error=user_retrieval_failed`);
       }
 
       // Create complete session for the user (matching web login flow)
