@@ -6202,39 +6202,40 @@ export async function registerRoutes(
     }
   });
 
-  // Create tier subscription checkout
-  // Tier subscription checkout — approved vendors can subscribe even without canMonetize flag
-  app.post("/api/stripe/checkout/tier-subscription", async (req, res) => {
-    const userId = req.session?.userId;
+  // Platform subscription checkout — businesses pay Outsyde directly (no Connect, no splits).
+  // No canMonetize check — this IS the monetization setup step.
+  // No isVendor session check — business ownership is the only requirement.
+  app.post("/api/stripe/checkout/tier-subscription", optionalAuthMiddleware, async (req, res) => {
+    const authReq = req as AuthenticatedRequest;
+    const userId = authReq.user?.userId || req.session?.userId;
     if (!userId) {
-      return res.status(401).json({ error: "Not authenticated" });
-    }
-
-    if (!req.session?.isVendor) {
-      return res.status(403).json({ error: "Only vendors can subscribe" });
+      return res.status(401).json({ success: false, error: { code: 'AUTH_REQUIRED', message: 'Not authenticated' } });
     }
 
     try {
-      const checkoutSchema = z.object({
-        tierId: z.string().min(1, "Tier ID is required"),
-      });
-      const { tierId } = checkoutSchema.parse(req.body);
+      const { tierId } = z.object({ tierId: z.string().min(1) }).parse(req.body);
 
       const user = await storage.getUser(userId);
       if (!user) {
-        return res.status(404).json({ error: "User not found" });
+        return res.status(404).json({ success: false, error: { code: 'NOT_FOUND', message: 'User not found' } });
       }
 
       const business = await storage.getBusinessByOwnerId(userId);
       if (!business) {
-        return res.status(404).json({ error: "Business not found" });
+        return res.status(404).json({ success: false, error: { code: 'NOT_FOUND', message: 'No business found for this account' } });
       }
 
-      const customer = await stripeService.createCustomer(user.email!, userId, user.name!);
+      // Get or create Stripe customer (platform customer, NOT Connect)
+      let stripeCustomerId = user.stripeCustomerId;
+      if (!stripeCustomerId) {
+        const customer = await stripeService.createCustomer(user.email!, userId, user.name || user.email!);
+        stripeCustomerId = customer.id;
+        await storage.updateUser(userId, { stripeCustomerId: customer.id });
+      }
 
-      const baseUrl = process.env.API_BASE_URL || `https://${process.env.REPLIT_DOMAINS?.split(',')[0] || 'localhost:5000'}`;
+      const baseUrl = process.env.API_BASE_URL || process.env.FRONTEND_URL || `https://${process.env.REPLIT_DOMAINS?.split(',')[0] || 'localhost:5000'}`;
       const session = await stripeService.createTierSubscriptionCheckout(
-        customer.id,
+        stripeCustomerId,
         tierId,
         `${baseUrl}/vendor/dashboard?subscription=success`,
         `${baseUrl}/vendor/dashboard?subscription=cancelled`,
@@ -6242,13 +6243,13 @@ export async function registerRoutes(
         business.id
       );
 
-      res.json({ url: session.url });
+      res.json({ success: true, url: session.url });
     } catch (error) {
       if (error instanceof z.ZodError) {
-        return res.status(400).json({ error: "Invalid data", details: error.errors });
+        return res.status(400).json({ success: false, error: { code: 'INVALID_INPUT', message: 'tierId is required' } });
       }
       console.error("Create tier subscription checkout error:", error);
-      res.status(500).json({ error: "Failed to create checkout session" });
+      res.status(500).json({ success: false, error: { code: 'SERVER_ERROR', message: 'Failed to create checkout session' } });
     }
   });
 
