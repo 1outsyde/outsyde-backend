@@ -46,7 +46,7 @@ function sanitizeUserForResponse(user: User, options: { includeOwnData?: boolean
     ageRange: calculateAgeRange(dateOfBirth),
   };
 }
-import { eq, desc, sql, gte, or } from "drizzle-orm";
+import { eq, desc, sql, gte, lte, or } from "drizzle-orm";
 import { z } from "zod";
 import {
   hashPassword,
@@ -111,6 +111,7 @@ import {
   appointments,
   orders,
   shootBookings,
+  influencerEarningLedger,
   photographerAvailability,
   photographerBlackoutDates,
   createAppointmentDraftSchema,
@@ -11769,6 +11770,264 @@ export async function registerRoutes(
     } catch (error) {
       console.error("Initiate influencer payout error:", error);
       res.status(500).json({ error: "Failed to initiate payout" });
+    }
+  });
+
+  // ==================== INFLUENCER PAYOUT VISIBILITY ====================
+
+  // Addition 1: Admin payout visibility
+  app.get("/api/admin/influencer-payouts/history", requireAdmin, async (req, res) => {
+    try {
+      const {
+        status,
+        influencer_id,
+        business_id,
+        date_from,
+        date_to,
+        page = '1',
+        limit: limitStr = '50',
+      } = req.query;
+
+      const pageNum = Math.max(1, parseInt(page as string));
+      const limitNum = Math.min(200, Math.max(1, parseInt(limitStr as string)));
+      const offsetNum = (pageNum - 1) * limitNum;
+
+      // Build conditions for the earning ledger query
+      const conditions: unknown[] = [
+        eq(influencerEarningLedger.sourceType, 'commission'),
+      ];
+
+      if (status) conditions.push(eq(influencerEarningLedger.status, status as string));
+      if (influencer_id) conditions.push(eq(influencerEarningLedger.influencerId, influencer_id as string));
+      if (date_from) conditions.push(gte(influencerEarningLedger.createdAt, new Date(date_from as string)));
+      if (date_to) conditions.push(lte(influencerEarningLedger.createdAt, new Date(date_to as string)));
+
+      // Count total
+      const [countRow] = await db.select({ count: sql<number>`count(*)` })
+        .from(influencerEarningLedger)
+        .where(and(...(conditions as any)));
+      const total = Number(countRow?.count || 0);
+
+      // Fetch paginated results
+      const rows = await db.select()
+        .from(influencerEarningLedger)
+        .where(and(...(conditions as any)))
+        .orderBy(desc(influencerEarningLedger.createdAt))
+        .limit(limitNum)
+        .offset(offsetNum);
+
+      // Enrich with influencer + order + business data
+      const results = [];
+      for (const row of rows) {
+        const profile = await storage.getInfluencerProfile(row.influencerId);
+        const user = profile ? await storage.getUser(profile.userId) : null;
+        let orderData: { businessId?: string; businessName?: string; subtotal?: number; refCode?: string } = {};
+        if (row.sourceRefId) {
+          const order = await storage.getOrder(row.sourceRefId);
+          if (order) {
+            const biz = await storage.getBusiness(order.businessId);
+            orderData = {
+              businessId: order.businessId,
+              businessName: biz?.name || 'Unknown',
+              subtotal: order.totalAmount,
+              refCode: order.influencerCodeUsed || undefined,
+            };
+          }
+        }
+
+        // Filter by business_id if specified
+        if (business_id && orderData.businessId !== business_id) continue;
+
+        results.push({
+          id: row.id,
+          influencer_id: row.influencerId,
+          influencer_username: user?.username || user?.name || 'Unknown',
+          order_id: row.sourceRefId,
+          business_id: orderData.businessId || null,
+          business_name: orderData.businessName || null,
+          referral_code: orderData.refCode || null,
+          order_subtotal: (orderData.subtotal || 0) / 100,
+          commission_rate: 0.15,
+          commission_amount: row.amountCents / 100,
+          stripe_transfer_id: row.stripeTransferId || null,
+          status: row.status,
+          created_at: row.createdAt,
+          paid_at: row.paidAt,
+        });
+      }
+
+      // Summary aggregations
+      const summaryRows = await db.select({
+        status: influencerEarningLedger.status,
+        total: sql<number>`COALESCE(SUM(${influencerEarningLedger.amountCents}), 0)`,
+      })
+        .from(influencerEarningLedger)
+        .where(eq(influencerEarningLedger.sourceType, 'commission'))
+        .groupBy(influencerEarningLedger.status);
+
+      const summary = {
+        total_paid: 0,
+        total_pending: 0,
+        total_reversed: 0,
+        total_disputed: 0,
+      };
+      for (const s of summaryRows) {
+        const val = Number(s.total) / 100;
+        if (s.status === 'completed' || s.status === 'transfer_sent') summary.total_paid += val;
+        else if (s.status === 'pending' || s.status === 'approved') summary.total_pending += val;
+        else if (s.status === 'reversed') summary.total_reversed += Math.abs(val);
+      }
+
+      res.json({ total, page: pageNum, limit: limitNum, results, summary });
+    } catch (error) {
+      console.error("Admin influencer payouts error:", error);
+      res.status(500).json({ success: false, error: { code: 'SERVER_ERROR', message: 'Failed to load payout history' } });
+    }
+  });
+
+  // Addition 2: Influencer Stripe Connect onboarding link
+  app.get("/api/influencer/stripe-connect/onboarding-link", async (req, res) => {
+    const userId = req.session?.userId;
+    if (!userId) {
+      return res.status(401).json({ success: false, error: { code: 'AUTH_REQUIRED', message: 'Authentication required' } });
+    }
+
+    try {
+      const profile = await storage.getInfluencerProfileByUserId(userId);
+      if (!profile) {
+        return res.status(403).json({ success: false, error: { code: 'FORBIDDEN', message: 'Influencer profile not found' } });
+      }
+
+      const baseUrl = process.env.API_BASE_URL || `https://${process.env.REPLIT_DOMAINS?.split(',')[0] || 'localhost:5000'}`;
+
+      // Case 1: Already has a Stripe account — check if fully verified
+      if (profile.stripeAccountId) {
+        try {
+          const accountStatus = await stripeService.getConnectAccountStatus(profile.stripeAccountId);
+          if (accountStatus.chargesEnabled && accountStatus.payoutsEnabled) {
+            return res.json({ already_connected: true, stripe_account_id: profile.stripeAccountId });
+          }
+        } catch (statusErr) {
+          console.error("[InfluencerStripe] Account status check failed:", statusErr);
+        }
+
+        // Account exists but not fully verified — generate new onboarding link
+        const stripe = await (await import('./stripe/stripeClient')).getUncachableStripeClient();
+        const accountLink = await stripe.accountLinks.create({
+          account: profile.stripeAccountId,
+          type: 'account_onboarding',
+          refresh_url: `${baseUrl}/influencer/dashboard?stripe=refresh`,
+          return_url: `${baseUrl}/influencer/dashboard?stripe=complete`,
+        });
+
+        return res.json({
+          already_connected: false,
+          url: accountLink.url,
+          expires_at: accountLink.expires_at,
+        });
+      }
+
+      // Case 2: No Stripe account — create one
+      const stripe = await (await import('./stripe/stripeClient')).getUncachableStripeClient();
+      const user = await storage.getUser(userId);
+
+      const account = await stripe.accounts.create({
+        type: 'standard',
+        email: user?.email || undefined,
+        metadata: {
+          influencerId: profile.id,
+          userId,
+          type: 'influencer',
+        },
+      });
+
+      // Store the new account ID
+      await storage.updateInfluencerProfile(profile.id, {
+        stripeAccountId: account.id,
+      });
+
+      // Generate onboarding link
+      const accountLink = await stripe.accountLinks.create({
+        account: account.id,
+        type: 'account_onboarding',
+        refresh_url: `${baseUrl}/influencer/dashboard?stripe=refresh`,
+        return_url: `${baseUrl}/influencer/dashboard?stripe=complete`,
+      });
+
+      res.json({
+        already_connected: false,
+        url: accountLink.url,
+        expires_at: accountLink.expires_at,
+      });
+    } catch (error) {
+      console.error("Influencer Stripe Connect onboarding error:", error);
+      res.status(500).json({ success: false, error: { code: 'SERVER_ERROR', message: 'Failed to generate onboarding link' } });
+    }
+  });
+
+  // Addition 3: Influencer personal payout history (enhanced version)
+  app.get("/api/influencer/payout-history", async (req, res) => {
+    const userId = req.session?.userId;
+    if (!userId) {
+      return res.status(401).json({ success: false, error: { code: 'AUTH_REQUIRED', message: 'Authentication required' } });
+    }
+
+    try {
+      const profile = await storage.getInfluencerProfileByUserId(userId);
+      if (!profile) {
+        return res.status(403).json({ success: false, error: { code: 'FORBIDDEN', message: 'Influencer profile not found' } });
+      }
+
+      // Fetch all commission ledger entries for this influencer
+      const ledger = await storage.getInfluencerEarningLedger(profile.id);
+      const commissions = ledger.filter(e => e.sourceType === 'commission' || e.sourceType === 'commission_reversal');
+
+      // Build summary
+      let totalEarned = 0;
+      let totalPending = 0;
+      let totalReversed = 0;
+
+      for (const entry of commissions) {
+        if (entry.status === 'completed' || entry.status === 'transfer_sent') {
+          totalEarned += entry.amountCents;
+        } else if (entry.status === 'pending' || entry.status === 'approved') {
+          totalPending += entry.amountCents;
+        }
+        if (entry.sourceType === 'commission_reversal') {
+          totalReversed += Math.abs(entry.amountCents);
+        }
+      }
+
+      // Build payout list (commission entries only, not reversals)
+      const payouts = commissions
+        .filter(e => e.sourceType === 'commission')
+        .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
+        .map(entry => {
+          // Look up order info if available
+          return {
+            id: entry.id,
+            order_id: entry.sourceRefId,
+            commission_amount: entry.amountCents / 100,
+            commission_rate: 0.15,
+            order_subtotal: 0, // would need order lookup for exact value
+            referral_code: '',
+            status: entry.status,
+            created_at: entry.createdAt,
+            paid_at: entry.paidAt,
+          };
+        });
+
+      res.json({
+        summary: {
+          total_earned: totalEarned / 100,
+          total_pending: totalPending / 100,
+          total_reversed: totalReversed / 100,
+        },
+        payouts,
+      });
+    } catch (error) {
+      console.error("Influencer payout history error:", error);
+      res.status(500).json({ success: false, error: { code: 'SERVER_ERROR', message: 'Failed to load payout history' } });
     }
   });
 
