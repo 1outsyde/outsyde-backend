@@ -583,7 +583,30 @@ export async function registerRoutes(
         hourlyRate: data.hourlyRate,
         portfolioUrl: data.portfolioUrl,
         specialties: data.specialties,
+        // Expanded profile fields (all optional)
+        shootLocation: req.body.shootLocation,
+        studioName: req.body.studioName,
+        studioAddress: req.body.studioAddress,
+        usesSharedStudio: req.body.usesSharedStudio,
+        travelRadius: req.body.travelRadius,
+        pricingType: req.body.pricingType,
+        startingPrice: req.body.startingPrice,
+        minimumBooking: req.body.minimumBooking,
+        additionalServices: req.body.additionalServices,
+        experienceLevel: req.body.experienceLevel,
+        equipmentLevel: req.body.equipmentLevel,
+        deliveryTime: req.body.deliveryTime,
       });
+
+      // Auto-geocode photographer location (async, non-blocking)
+      if (data.city && data.state) {
+        const { geocodeAddress } = await import('./geocoding');
+        geocodeAddress({ city: data.city, state: data.state })
+          .then(coords => {
+            if (coords) storage.updatePhotographer(photographer.id, { latitude: coords.latitude, longitude: coords.longitude });
+          })
+          .catch(() => {});
+      }
 
       // Send in-app notification to all admins
       await NotificationTriggers.newPhotographerApplication({
