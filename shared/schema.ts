@@ -279,6 +279,7 @@ export const businesses = pgTable("businesses", {
   city: text("city"),
   state: text("state"),
   zipCode: text("zip_code"),
+  country: text("country").default("United States"),
   latitude: doublePrecision("latitude"),
   longitude: doublePrecision("longitude"),
 
@@ -334,7 +335,9 @@ export const businesses = pgTable("businesses", {
 }, (table) => ({
   idxBusinessOwner: index("idx_businesses_owner").on(table.ownerId),
   idxBusinessCity: index("idx_businesses_city").on(table.city),
+  idxBusinessState: index("idx_businesses_state").on(table.state),
   idxBusinessApproval: index("idx_businesses_approval").on(table.approvalStatus),
+  idxBusinessLocation: index("idx_businesses_location").on(table.latitude, table.longitude),
 }));
 
 /* =====================================================

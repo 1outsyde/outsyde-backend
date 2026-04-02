@@ -493,6 +493,18 @@ export async function registerRoutes(
         approvalStatus: "pending", // New businesses require approval
       });
 
+      // Auto-geocode business address to lat/lng (async, non-blocking)
+      if (data.city && data.state) {
+        const { geocodeAddress } = await import('./geocoding');
+        geocodeAddress({ streetAddress: data.address, city: data.city, state: data.state, zipCode: data.zipCode })
+          .then(coords => {
+            if (coords) {
+              storage.updateBusiness(business.id, { latitude: coords.latitude, longitude: coords.longitude });
+            }
+          })
+          .catch(err => console.error('[Geocode] Business geocode failed:', err));
+      }
+
       // Send in-app notification to all admins
       await NotificationTriggers.newVendorApplication({
         businessId: business.id,
