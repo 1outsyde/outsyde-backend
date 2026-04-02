@@ -378,17 +378,35 @@ export async function registerRoutes(
         return res.status(400).json({ error: "Email already registered" });
       }
 
+      // Auto-sync billing address from home if billingSameAsHome
+      const effectiveBillingStreet = data.billingSameAsHome ? data.address : data.billingStreet;
+      const effectiveBillingCity = data.billingSameAsHome ? data.city : data.billingCity;
+      const effectiveBillingState = data.billingSameAsHome ? data.state : data.billingState;
+      const effectiveBillingZip = data.billingSameAsHome ? data.zipCode : data.billingZip;
+      const effectiveBillingCountry = data.billingSameAsHome ? (data.country ?? 'United States') : (data.billingCountry ?? 'United States');
+
       const hashedPassword = await hashPassword(data.password);
       const user = await storage.createUser({
         email: data.email,
         password: hashedPassword,
         name: data.name,
+        firstName: data.firstName,
+        lastName: data.lastName,
         phone: data.phone,
         isVendor: false,
         address: data.address,
+        aptUnit: data.aptUnit,
         city: data.city,
         state: data.state,
         zipCode: data.zipCode,
+        country: data.country ?? 'United States',
+        billingSameAsHome: data.billingSameAsHome,
+        billingStreet: effectiveBillingStreet,
+        billingAptUnit: data.billingAptUnit,
+        billingCity: effectiveBillingCity,
+        billingState: effectiveBillingState,
+        billingZip: effectiveBillingZip,
+        billingCountry: effectiveBillingCountry,
         username: unValidation.cleaned!,
         dateOfBirth: data.dateOfBirth ? new Date(data.dateOfBirth) : undefined,
         gender: data.gender,
@@ -474,6 +492,18 @@ export async function registerRoutes(
         subscriptionActive: false, // Starts inactive until approved
         approvalStatus: "pending", // New businesses require approval
       });
+
+      // Auto-geocode business address to lat/lng (async, non-blocking)
+      if (data.city && data.state) {
+        const { geocodeAddress } = await import('./geocoding');
+        geocodeAddress({ streetAddress: data.address, city: data.city, state: data.state, zipCode: data.zipCode })
+          .then(coords => {
+            if (coords) {
+              storage.updateBusiness(business.id, { latitude: coords.latitude, longitude: coords.longitude });
+            }
+          })
+          .catch(err => console.error('[Geocode] Business geocode failed:', err));
+      }
 
       // Send in-app notification to all admins
       await NotificationTriggers.newVendorApplication({
@@ -745,7 +775,11 @@ export async function registerRoutes(
   // Complete Google/Apple OAuth signup — create user record with chosen username
   app.post("/api/auth/oauth/complete-signup", authRateLimiter, async (req, res) => {
     try {
-      const { googleSub, email, username, name, firstName, lastName, profileImageUrl } = req.body;
+      const {
+        googleSub, email, username, name, firstName, lastName, profileImageUrl,
+        address, aptUnit, city, state, zipCode, country,
+        billingSameAsHome = true, billingStreet, billingAptUnit, billingCity, billingState, billingZip, billingCountry,
+      } = req.body;
 
       if (!googleSub || !email) {
         return res.status(400).json({ success: false, message: "googleSub and email are required" });
@@ -780,7 +814,13 @@ export async function registerRoutes(
       const ALLOWED_ADMIN_EMAILS = ['info@goutsyde.com', 'jamesmeyers2304@gmail.com'].map(e => e.toLowerCase());
       const isAdminEmail = ALLOWED_ADMIN_EMAILS.includes(email.toLowerCase());
 
-      // NOW create the user with the chosen username
+      // Auto-sync billing from home if same
+      const effBillingStreet = billingSameAsHome ? address : billingStreet;
+      const effBillingCity = billingSameAsHome ? city : billingCity;
+      const effBillingState = billingSameAsHome ? state : billingState;
+      const effBillingZip = billingSameAsHome ? zipCode : billingZip;
+      const effBillingCountry = billingSameAsHome ? (country ?? 'United States') : (billingCountry ?? 'United States');
+
       const user = await storage.createUser({
         email,
         username: unVal.cleaned!,
@@ -788,6 +828,19 @@ export async function registerRoutes(
         firstName: firstName || null,
         lastName: lastName || null,
         profileImageUrl: profileImageUrl || null,
+        address: address || null,
+        aptUnit: aptUnit || null,
+        city: city || null,
+        state: state || null,
+        zipCode: zipCode || null,
+        country: country ?? 'United States',
+        billingSameAsHome: billingSameAsHome ?? true,
+        billingStreet: effBillingStreet || null,
+        billingAptUnit: billingAptUnit || null,
+        billingCity: effBillingCity || null,
+        billingState: effBillingState || null,
+        billingZip: effBillingZip || null,
+        billingCountry: effBillingCountry,
         isOAuthUser: true,
         isAdmin: isAdminEmail,
       });
@@ -6233,17 +6286,61 @@ export async function registerRoutes(
         await storage.updateUser(userId, { stripeCustomerId: customer.id });
       }
 
-      const baseUrl = process.env.API_BASE_URL || process.env.FRONTEND_URL || `https://${process.env.REPLIT_DOMAINS?.split(',')[0] || 'localhost:5000'}`;
-      const session = await stripeService.createTierSubscriptionCheckout(
-        stripeCustomerId,
-        tierId,
-        `${baseUrl}/vendor/dashboard?subscription=success`,
-        `${baseUrl}/vendor/dashboard?subscription=cancelled`,
-        userId,
-        business.id
-      );
+      // Detect if client wants native Payment Sheet (mobile) or web redirect
+      const useNative = req.body.native === true || req.headers['x-client-type'] === 'mobile';
 
-      res.json({ success: true, url: session.url });
+      if (useNative) {
+        // Native flow: create subscription directly, return client secret for Payment Sheet
+        const result = await stripeService.createTierSubscriptionNative(
+          stripeCustomerId,
+          tierId,
+          userId,
+          business.id
+        );
+
+        res.json({
+          success: true,
+          clientSecret: result.clientSecret,
+          subscriptionId: result.subscriptionId,
+          ephemeralKey: result.ephemeralKey,
+          customerId: stripeCustomerId,
+        });
+      } else {
+        // Web flow: create Checkout Session, return redirect URL
+      // Check if client wants native Payment Sheet (mobile) or web redirect
+      const useNative = req.body.native === true || req.headers['x-platform'] === 'mobile';
+
+      if (useNative) {
+        // Native flow: return clientSecret for React Native Payment Sheet
+        const result = await stripeService.createTierSubscriptionNative(
+          stripeCustomerId,
+          tierId,
+          userId,
+          business.id
+        );
+
+        res.json({
+          success: true,
+          clientSecret: result.clientSecret,
+          subscriptionId: result.subscriptionId,
+          ephemeralKey: result.ephemeralKey,
+          customerId: stripeCustomerId,
+        });
+      } else {
+        // Web flow: return Stripe Checkout Session URL
+        const baseUrl = process.env.API_BASE_URL || process.env.FRONTEND_URL || `https://${process.env.REPLIT_DOMAINS?.split(',')[0] || 'localhost:5000'}`;
+        const session = await stripeService.createTierSubscriptionCheckout(
+          stripeCustomerId,
+          tierId,
+          `${baseUrl}/vendor/dashboard?subscription=success`,
+          `${baseUrl}/vendor/dashboard?subscription=cancelled`,
+          userId,
+          business.id
+        );
+
+        res.json({ success: true, url: session.url });
+      }
+      }
     } catch (error) {
       if (error instanceof z.ZodError) {
         return res.status(400).json({ success: false, error: { code: 'INVALID_INPUT', message: 'tierId is required' } });
@@ -13434,7 +13531,10 @@ export async function registerRoutes(
 
   // ==================== FEED POSTS ROUTES ====================
 
-  // Get feed posts (public, algorithmic for authenticated users)
+  // IMPORTANT: Discovery feed uses live GPS coordinates passed from the frontend
+  // at query time — NOT the user's stored home address. The stored address is
+  // for shipping/billing only. Frontend should pass ?lat=XX.XXXX&lng=XX.XXXX
+  // (current device coordinates). If no coordinates, fall back to stored city/state.
   // Supports: ?city= (case-insensitive filter), ?cursor= or ?offset=, ?lat=&lng= (optional)
   app.get("/api/feed", async (req, res) => {
     try {

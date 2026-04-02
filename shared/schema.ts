@@ -176,14 +176,25 @@ export const users = pgTable("users", {
   // Monetization permission (system-controlled, requires approval)
   canMonetize: boolean("can_monetize").default(false).notNull(),
 
-  address: text("address"),
+  // Home address
+  address: text("address"), // street address (legacy field name)
+  aptUnit: text("apt_unit"),
   city: text("city"),
   state: text("state"),
   zipCode: text("zip_code"),
+  country: text("country").default("United States"),
   latitude: doublePrecision("latitude"),
   longitude: doublePrecision("longitude"),
 
-  billingAddress: jsonb("billing_address").$type<BillingAddress>(),
+  // Billing address
+  billingAddress: jsonb("billing_address").$type<BillingAddress>(), // legacy JSONB field
+  billingSameAsHome: boolean("billing_same_as_home").default(true),
+  billingStreet: text("billing_street"),
+  billingAptUnit: text("billing_apt_unit"),
+  billingCity: text("billing_city"),
+  billingState: text("billing_state"),
+  billingZip: text("billing_zip"),
+  billingCountry: text("billing_country").default("United States"),
 
   username: text("username").notNull().unique(),
   dateOfBirth: timestamp("date_of_birth"),
@@ -268,6 +279,7 @@ export const businesses = pgTable("businesses", {
   city: text("city"),
   state: text("state"),
   zipCode: text("zip_code"),
+  country: text("country").default("United States"),
   latitude: doublePrecision("latitude"),
   longitude: doublePrecision("longitude"),
 
@@ -323,7 +335,9 @@ export const businesses = pgTable("businesses", {
 }, (table) => ({
   idxBusinessOwner: index("idx_businesses_owner").on(table.ownerId),
   idxBusinessCity: index("idx_businesses_city").on(table.city),
+  idxBusinessState: index("idx_businesses_state").on(table.state),
   idxBusinessApproval: index("idx_businesses_approval").on(table.approvalStatus),
+  idxBusinessLocation: index("idx_businesses_location").on(table.latitude, table.longitude),
 }));
 
 /* =====================================================
@@ -1959,12 +1973,26 @@ export const customerSignupSchema = z.object({
   email: z.string().email(),
   password: z.string().min(6),
   name: z.string().min(1),
+  firstName: z.string().optional(),
+  lastName: z.string().optional(),
   username: z.string().min(3).max(30).regex(/^[a-zA-Z0-9_]+$/, "Username can only contain letters, numbers, and underscores").optional(),
   phone: z.string().optional(),
-  address: z.string().optional(),
+  // Home address
+  address: z.string().optional(), // street address
+  aptUnit: z.string().optional(),
   city: z.string().optional(),
   state: z.string().optional(),
   zipCode: z.string().optional(),
+  country: z.string().optional(),
+  // Billing address
+  billingSameAsHome: z.boolean().default(true),
+  billingStreet: z.string().optional(),
+  billingAptUnit: z.string().optional(),
+  billingCity: z.string().optional(),
+  billingState: z.string().optional(),
+  billingZip: z.string().optional(),
+  billingCountry: z.string().optional(),
+  // Profile
   dateOfBirth: z.string().optional(),
   gender: z.string().optional(),
   ethnicity: z.string().optional(),

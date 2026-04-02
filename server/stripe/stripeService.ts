@@ -592,7 +592,7 @@ export class StripeService {
       throw new Error(`Subscription tier ${tierId} has no Stripe price ID configured`);
     }
 
-    // Create a subscription checkout session (not a one-time payment)
+    // Create a subscription checkout session (web redirect flow)
     return stripe.checkout.sessions.create({
       customer: customerId,
       mode: "subscription",
@@ -619,6 +619,63 @@ export class StripeService {
         },
       },
     });
+  }
+
+  /**
+   * Create a subscription directly and return the client secret for native Payment Sheet.
+   * Used by React Native with Apple Pay / Google Pay.
+   */
+  async createTierSubscriptionNative(
+    customerId: string,
+    tierId: string,
+    vendorId: string,
+    businessId: string
+  ): Promise<{ clientSecret: string; subscriptionId: string; ephemeralKey: string }> {
+    const stripe = await getUncachableStripeClient();
+
+    const [tier] = await db.select()
+      .from(subscriptionTiers)
+      .where(eq(subscriptionTiers.id, tierId));
+
+    if (!tier) throw new Error(`Subscription tier not found: ${tierId}`);
+    if (!tier.stripePriceId) throw new Error(`Subscription tier ${tierId} has no Stripe price ID configured`);
+
+    // Create an ephemeral key for the customer (required for Payment Sheet)
+    const ephemeralKey = await stripe.ephemeralKeys.create(
+      { customer: customerId },
+      { apiVersion: '2024-06-20' }
+    );
+
+    // Create subscription with payment_behavior: 'default_incomplete' so we get a PaymentIntent
+    const subscription = await stripe.subscriptions.create({
+      customer: customerId,
+      items: [{ price: tier.stripePriceId }],
+      payment_behavior: 'default_incomplete',
+      payment_settings: {
+        save_default_payment_method: 'on_subscription',
+      },
+      expand: ['latest_invoice.payment_intent'],
+      metadata: {
+        type: 'vendor_subscription',
+        vendorId,
+        businessId,
+        tierId,
+      },
+    });
+
+    // Extract client secret from the expanded PaymentIntent
+    const invoice = subscription.latest_invoice as any;
+    const paymentIntent = invoice?.payment_intent;
+
+    if (!paymentIntent?.client_secret) {
+      throw new Error('Failed to get client secret from subscription payment intent');
+    }
+
+    return {
+      clientSecret: paymentIntent.client_secret,
+      subscriptionId: subscription.id,
+      ephemeralKey: ephemeralKey.secret!,
+    };
   }
 
   // =========================
