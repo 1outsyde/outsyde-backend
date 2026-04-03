@@ -590,7 +590,7 @@ export async function registerRoutes(
         usesSharedStudio: req.body.usesSharedStudio,
         travelRadius: req.body.travelRadius,
         pricingType: req.body.pricingType,
-        startingPrice: req.body.startingPrice,
+        startingPrice: req.body.startingPrice ? Math.round(parseFloat(req.body.startingPrice) * 100) : null,
         minimumBooking: req.body.minimumBooking,
         additionalServices: req.body.additionalServices,
         experienceLevel: req.body.experienceLevel,
