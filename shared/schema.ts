@@ -573,18 +573,29 @@ export const photographers = pgTable("photographers", {
     isStudio?: boolean;
   }>>(),
 
-  // Demo/seed data flag - hidden from non-admin users in search
+  // Expanded photographer profile fields
+  shootLocation: text("shoot_location").array(), // ['on-location', 'studio', 'both']
+  studioName: text("studio_name"),
+  studioAddress: text("studio_address"),
+  usesSharedStudio: boolean("uses_shared_studio").default(false),
+  travelRadius: text("travel_radius"), // 'city_only' | '25_miles' | '50_miles' | '100_miles' | 'anywhere'
+  pricingType: text("pricing_type"), // 'hourly' | 'per_session' | 'per_project' | 'packages' | 'contact'
+  startingPrice: integer("starting_price"), // in cents
+  minimumBooking: text("minimum_booking"), // '30min' | '1hour' | '2hours' | 'half_day' | 'full_day'
+  additionalServices: text("additional_services").array(),
+  experienceLevel: text("experience_level"), // 'starting' | '1-2years' | '3-5years' | '5-10years' | '10plus'
+  equipmentLevel: text("equipment_level"), // 'professional_studio' | 'professional_natural' | 'building'
+  deliveryTime: text("delivery_time"), // 'same_day' | '24-48hours' | '3-5days' | '1-2weeks' | 'varies'
+
+  // Demo/seed data flag
   isDemo: boolean("is_demo").default(false).notNull(),
 
   // Booking settings
-  autoAcceptBookings: boolean("auto_accept_bookings").default(true).notNull(), // If false, bookings require provider approval within 24h
+  autoAcceptBookings: boolean("auto_accept_bookings").default(true).notNull(),
 
-  // Visibility control (moderation, not approval gate)
-  // public = visible in search/profiles/booking
-  // hidden = admin-hidden, not visible publicly
-  // flagged = under review, not visible publicly
+  // Visibility control
   visibilityStatus: text("visibility_status").default("public").notNull(),
-  adminNotes: text("admin_notes"), // Internal notes explaining visibility changes
+  adminNotes: text("admin_notes"),
 
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),

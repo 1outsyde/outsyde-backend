@@ -171,6 +171,19 @@ export type NewPhotographerInput = {
   hourlyRate: number;
   stripeAccountId?: string | null;
   specialties?: string[];
+  // Expanded profile fields (all optional)
+  shootLocation?: string[];
+  studioName?: string | null;
+  studioAddress?: string | null;
+  usesSharedStudio?: boolean;
+  travelRadius?: string | null;
+  pricingType?: string | null;
+  startingPrice?: number | null;
+  minimumBooking?: string | null;
+  additionalServices?: string[];
+  experienceLevel?: string | null;
+  equipmentLevel?: string | null;
+  deliveryTime?: string | null;
 };
 
 export interface IStorage {
@@ -1082,6 +1095,18 @@ export class DatabaseStorage implements IStorage {
       stripeAccountId: data.stripeAccountId ?? null,
       stripeOnboardingComplete: false,
       specialties: data.specialties ?? [],
+      shootLocation: data.shootLocation,
+      studioName: data.studioName,
+      studioAddress: data.studioAddress,
+      usesSharedStudio: data.usesSharedStudio,
+      travelRadius: data.travelRadius,
+      pricingType: data.pricingType,
+      startingPrice: data.startingPrice,
+      minimumBooking: data.minimumBooking,
+      additionalServices: data.additionalServices,
+      experienceLevel: data.experienceLevel,
+      equipmentLevel: data.equipmentLevel,
+      deliveryTime: data.deliveryTime,
     }).returning();
     return result[0];
   }
@@ -5469,6 +5494,10 @@ export class DatabaseStorage implements IStorage {
     }
 
     // ==================== SEARCH PHOTOGRAPHERS ====================
+    // TODO: Filter photographer results by travel_radius
+    // A photographer with travel_radius='50_miles' should appear in results
+    // for consumers within 50 miles of the photographer's city, even if not
+    // in the same city. Implement when geospatial ranking is added.
     if (scope === 'all' || scope === 'photographers') {
       const photographerResults = await db.select({
         photographer: photographers,
