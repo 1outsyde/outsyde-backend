@@ -908,6 +908,144 @@ export async function registerRoutes(
     }
   });
 
+  // Apple Sign-In — verify identity token and resolve user
+  app.post("/api/auth/oauth/apple", authRateLimiter, async (req, res) => {
+    try {
+      const { identityToken, fullName, email } = req.body;
+
+      if (!identityToken) {
+        return res.status(400).json({ success: false, message: "identityToken is required" });
+      }
+
+      const { verifyAppleIdentityToken } = await import('./appleAuth');
+      let applePayload;
+      try {
+        applePayload = await verifyAppleIdentityToken(identityToken);
+      } catch (verifyErr) {
+        console.error("Apple token verification failed:", verifyErr);
+        return res.status(401).json({ success: false, error: { code: 'INVALID_TOKEN', message: 'Invalid Apple identity token' } });
+      }
+
+      const appleId = applePayload.sub;
+      const appleEmail = applePayload.email || email;
+
+      // Check if user exists by Apple ID
+      let user = await storage.getUserByAppleId(appleId);
+
+      if (!user && appleEmail) {
+        // Check if user exists by email (may have been created via another method)
+        user = await storage.getUserByEmail(appleEmail);
+        if (user) {
+          // Link Apple ID to existing account
+          await storage.updateUser(user.id, { appleId });
+          user = await storage.getUser(user.id);
+        }
+      }
+
+      if (!user) {
+        // New user — return profile for username selection (do NOT create record)
+        return res.json({
+          success: true,
+          isNewUser: true,
+          requiresUsername: true,
+          appleProfile: {
+            appleId,
+            email: appleEmail || null,
+            fullName: fullName || null,
+          },
+        });
+      }
+
+      // Existing user — issue tokens
+      const tokenPayload: TokenPayload = {
+        userId: user.id,
+        isVendor: user.isVendor || false,
+        isPhotographer: user.isPhotographer || false,
+        isAdmin: user.isAdmin || false,
+      };
+      if (user.isVendor) {
+        const business = await storage.getBusinessByOwnerId(user.id);
+        if (business) tokenPayload.businessId = business.id;
+      }
+      if (user.isPhotographer) {
+        const photographer = await storage.getPhotographerByUserId(user.id);
+        if (photographer) tokenPayload.photographerId = photographer.id;
+      }
+
+      const accessToken = generateAccessToken(tokenPayload);
+      const refreshToken = generateRefreshToken(tokenPayload);
+      await storage.storeRefreshToken(user.id, refreshToken, new Date(Date.now() + REFRESH_TOKEN_EXPIRY_MS));
+
+      const safeUser = sanitizeUserForResponse(user, { includeOwnData: true });
+      res.json({ success: true, user: safeUser, accessToken, refreshToken, expiresIn: ACCESS_TOKEN_EXPIRY_SECONDS, isNewUser: false });
+    } catch (error) {
+      console.error("Apple auth error:", error);
+      res.status(500).json({ success: false, error: { code: 'SERVER_ERROR', message: 'Apple authentication failed' } });
+    }
+  });
+
+  // Apple Sign-In complete signup — create user with chosen username
+  app.post("/api/auth/oauth/apple/complete-signup", authRateLimiter, async (req, res) => {
+    try {
+      const { appleId, email, username, fullName, firstName, lastName } = req.body;
+
+      if (!appleId) {
+        return res.status(400).json({ success: false, message: "appleId is required" });
+      }
+
+      // Validate username
+      const { validateUsername: valUn } = await import('./usernameUtils');
+      const unVal = valUn(username);
+      if (!unVal.valid) return res.status(400).json({ success: false, message: unVal.reason });
+
+      const existingUn = await storage.getUserByUsername(unVal.cleaned!);
+      if (existingUn) return res.status(409).json({ success: false, message: "Username is already taken" });
+
+      if (email) {
+        const existingEmail = await storage.getUserByEmail(email);
+        if (existingEmail) return res.status(409).json({ success: false, message: "Email already registered" });
+      }
+
+      const existingApple = await storage.getUserByAppleId(appleId);
+      if (existingApple) return res.status(409).json({ success: false, message: "Apple account already linked" });
+
+      const derivedName = fullName
+        || (firstName && lastName ? `${firstName} ${lastName}` : null)
+        || email?.split('@')[0]
+        || 'User';
+
+      const user = await storage.createUser({
+        email: email || null,
+        username: unVal.cleaned!,
+        name: derivedName,
+        firstName: firstName || null,
+        lastName: lastName || null,
+        isOAuthUser: true,
+        appleId,
+      });
+
+      const fullUser = await storage.getUser(user.id);
+      if (!fullUser) return res.status(500).json({ success: false, message: "Failed to create user" });
+
+      const tokenPayload: TokenPayload = {
+        userId: fullUser.id,
+        isVendor: false,
+        isPhotographer: false,
+        isAdmin: fullUser.isAdmin || false,
+      };
+
+      const accessToken = generateAccessToken(tokenPayload);
+      const refreshToken = generateRefreshToken(tokenPayload);
+      await storage.storeRefreshToken(fullUser.id, refreshToken, new Date(Date.now() + REFRESH_TOKEN_EXPIRY_MS));
+
+      const safeUser = sanitizeUserForResponse(fullUser, { includeOwnData: true });
+      res.json({ success: true, user: safeUser, accessToken, refreshToken, expiresIn: ACCESS_TOKEN_EXPIRY_SECONDS, isNewUser: false });
+    } catch (error) {
+      console.error("Apple complete signup error:", error);
+      res.status(500).json({ success: false, message: "Failed to complete Apple signup" });
+    }
+  });
+
   // Complete onboarding — persist user type selection
   app.post("/api/auth/onboarding/complete", optionalAuthMiddleware, async (req, res) => {
     const authReq = req as AuthenticatedRequest;
@@ -1622,6 +1760,9 @@ export async function registerRoutes(
       }
 
       if (!user.password) {
+        if (user.appleId) {
+          return res.status(401).json({ success: false, error: { code: "OAUTH_ONLY", message: "This account uses Apple sign-in. Please continue with Apple." } });
+        }
         if (user.isOAuthUser || user.googleSub) {
           return res.status(401).json({ success: false, error: { code: "OAUTH_ONLY", message: "This account uses Google sign-in. Please continue with Google." } });
         }

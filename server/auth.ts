@@ -49,8 +49,17 @@ export function generateRefreshToken(payload: TokenPayload): string {
 export function verifyAccessToken(token: string): TokenPayload | null {
   try {
     return jwt.verify(token, JWT_SECRET) as TokenPayload;
-  } catch (error) {
+  } catch {
     return null;
+  }
+}
+
+export function isTokenExpired(token: string): boolean {
+  try {
+    jwt.verify(token, JWT_SECRET);
+    return false;
+  } catch (error: unknown) {
+    return (error as { name?: string }).name === 'TokenExpiredError';
   }
 }
 
@@ -69,10 +78,7 @@ export function authMiddleware(req: Request, res: Response, next: NextFunction) 
   if (!authHeader || !authHeader.startsWith("Bearer ")) {
     return res.status(401).json({ 
       success: false, 
-      error: { 
-        code: "NO_TOKEN", 
-        message: "Authorization token required" 
-      } 
+      error: { code: "TOKEN_MISSING", message: "Authorization token required" } 
     });
   }
   
@@ -80,11 +86,13 @@ export function authMiddleware(req: Request, res: Response, next: NextFunction) 
   const payload = verifyAccessToken(token);
   
   if (!payload) {
+    // Distinguish expired vs invalid for frontend refresh logic
+    const expired = isTokenExpired(token);
     return res.status(401).json({ 
       success: false, 
       error: { 
-        code: "TOKEN_INVALID", 
-        message: "Invalid or expired token" 
+        code: expired ? "TOKEN_EXPIRED" : "TOKEN_INVALID", 
+        message: expired ? "Access token has expired" : "Invalid access token",
       } 
     });
   }
