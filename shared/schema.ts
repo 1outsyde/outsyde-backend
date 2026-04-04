@@ -231,6 +231,9 @@ export const users = pgTable("users", {
   // Password reset
   resetTokenHash: text("reset_token_hash"),
   resetTokenExpiresAt: timestamp("reset_token_expires_at"),
+  resetCodeHash: text("reset_code_hash"),
+  resetCodeExpiresAt: timestamp("reset_code_expires_at"),
+  resetCodeAttempts: integer("reset_code_attempts").default(0),
 
   createdAt: timestamp("created_at").defaultNow().notNull(),
 });
