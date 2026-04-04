@@ -2027,7 +2027,129 @@ export async function registerRoutes(
     }
   });
 
-  // ==================== PASSWORD RESET ====================
+  // ==================== PASSWORD RESET (CODE-BASED FLOW) ====================
+
+  // Send 6-digit verification code via email
+  app.post("/api/auth/forgot-password/send-code", strictAuthRateLimiter, async (req, res) => {
+    try {
+      const { email } = req.body;
+      if (!email || typeof email !== 'string') {
+        return res.status(400).json({ success: false, message: "Email is required" });
+      }
+
+      // Always return success to prevent email enumeration
+      const user = await storage.getUserByEmail(email.toLowerCase().trim());
+      if (!user) {
+        return res.json({ success: true, message: "If an account exists with that email, a reset code has been sent." });
+      }
+
+      // Generate 6-digit code
+      const code = Math.floor(100000 + Math.random() * 900000).toString();
+      const { createHash } = await import('crypto');
+      const codeHash = createHash('sha256').update(code).digest('hex');
+      const expiresAt = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes
+
+      // Store hashed code with expiry, reset attempts
+      await storage.updateUser(user.id, {
+        resetCodeHash: codeHash,
+        resetCodeExpiresAt: expiresAt,
+        resetCodeAttempts: 0,
+      });
+
+      // Send code via Resend
+      try {
+        const { Resend } = await import('resend');
+        const resendApiKey = process.env.RESEND_API_KEY;
+        if (resendApiKey) {
+          const resend = new Resend(resendApiKey);
+          await resend.emails.send({
+            from: process.env.RESEND_FROM_EMAIL || 'noreply@info.goutsyde.com',
+            to: email,
+            subject: 'Outsyde — Password Reset Code',
+            html: `
+              <div style="font-family: sans-serif; max-width: 400px; margin: 0 auto; padding: 20px;">
+                <h2 style="color: #f59e0b;">Outsyde</h2>
+                <p>Your password reset code is:</p>
+                <div style="font-size: 32px; font-weight: bold; letter-spacing: 8px; text-align: center; padding: 20px; background: #f5f5f5; border-radius: 8px; margin: 16px 0;">${code}</div>
+                <p style="color: #666;">This code expires in 10 minutes. If you didn't request this, you can safely ignore this email.</p>
+                <p style="color: #999; font-size: 12px;">— Outsyde Team</p>
+              </div>
+            `,
+          });
+          console.log(`[Auth] Reset code sent to ${email}`);
+        } else {
+          console.log(`[Auth] RESEND_API_KEY not set. Reset code for ${email}: ${code}`);
+        }
+      } catch (emailErr) {
+        console.error("Failed to send reset code email:", emailErr);
+      }
+
+      res.json({ success: true, message: "If an account exists with that email, a reset code has been sent." });
+    } catch (error) {
+      console.error("Send reset code error:", error);
+      res.status(500).json({ success: false, message: "Failed to send reset code" });
+    }
+  });
+
+  // Verify 6-digit code and issue one-time reset token
+  app.post("/api/auth/forgot-password/verify-code", strictAuthRateLimiter, async (req, res) => {
+    try {
+      const { email, code } = req.body;
+      if (!email || !code) {
+        return res.status(400).json({ success: false, error: { code: 'INVALID_INPUT', message: 'Email and code are required' } });
+      }
+
+      const user = await storage.getUserByEmail(email.toLowerCase().trim());
+      if (!user || !user.resetCodeHash || !user.resetCodeExpiresAt) {
+        return res.status(400).json({ success: false, error: { code: 'INVALID_CODE', message: 'Invalid or expired code. Please request a new one.' } });
+      }
+
+      // Check attempts (max 5)
+      if ((user.resetCodeAttempts ?? 0) >= 5) {
+        // Invalidate the code
+        await storage.updateUser(user.id, { resetCodeHash: null, resetCodeExpiresAt: null, resetCodeAttempts: 0 });
+        return res.status(400).json({ success: false, error: { code: 'TOO_MANY_ATTEMPTS', message: 'Too many failed attempts. Please request a new code.' } });
+      }
+
+      // Check expiry
+      const expiresAt = new Date(user.resetCodeExpiresAt);
+      if (expiresAt < new Date()) {
+        await storage.updateUser(user.id, { resetCodeHash: null, resetCodeExpiresAt: null, resetCodeAttempts: 0 });
+        return res.status(400).json({ success: false, error: { code: 'INVALID_CODE', message: 'Invalid or expired code. Please request a new one.' } });
+      }
+
+      // Verify code hash
+      const { createHash, randomBytes } = await import('crypto');
+      const submittedHash = createHash('sha256').update(code.toString().trim()).digest('hex');
+
+      if (submittedHash !== user.resetCodeHash) {
+        // Increment attempts
+        await storage.updateUser(user.id, { resetCodeAttempts: (user.resetCodeAttempts ?? 0) + 1 });
+        return res.status(400).json({ success: false, error: { code: 'INVALID_CODE', message: 'Invalid or expired code. Please request a new one.' } });
+      }
+
+      // Code is valid — generate a one-time reset token (15-minute expiry)
+      const rawToken = randomBytes(32).toString('hex');
+      const tokenHash = createHash('sha256').update(rawToken).digest('hex');
+      const tokenExpiry = new Date(Date.now() + 15 * 60 * 1000);
+
+      // Mark code as used, store reset token
+      await storage.updateUser(user.id, {
+        resetCodeHash: null,
+        resetCodeExpiresAt: null,
+        resetCodeAttempts: 0,
+        resetTokenHash: tokenHash,
+        resetTokenExpiresAt: tokenExpiry,
+      });
+
+      res.json({ success: true, resetToken: rawToken });
+    } catch (error) {
+      console.error("Verify reset code error:", error);
+      res.status(500).json({ success: false, message: "Failed to verify code" });
+    }
+  });
+
+  // ==================== PASSWORD RESET (DEEP LINK FLOW — LEGACY) ====================
 
   app.post("/api/auth/forgot-password", strictAuthRateLimiter, async (req, res) => {
     try {
