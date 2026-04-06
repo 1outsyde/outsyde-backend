@@ -2216,9 +2216,10 @@ export async function registerRoutes(
 
   app.post("/api/auth/reset-password", strictAuthRateLimiter, async (req, res) => {
     try {
-      const { token, email, newPassword } = req.body;
+      const { token, resetToken, email, newPassword } = req.body;
+      const resolvedToken = resetToken || token;
 
-      if (!token || !email || !newPassword) {
+      if (!resolvedToken || !email || !newPassword) {
         return res.status(400).json({ success: false, message: "Token, email, and newPassword are required" });
       }
 
@@ -2233,7 +2234,7 @@ export async function registerRoutes(
 
       // Verify token hash
       const { createHash } = await import('crypto');
-      const tokenHash = createHash('sha256').update(token).digest('hex');
+      const tokenHash = createHash('sha256').update(resolvedToken).digest('hex');
 
       if (!user.resetTokenHash || user.resetTokenHash !== tokenHash) {
         return res.status(400).json({ success: false, message: "Invalid or expired reset token" });
