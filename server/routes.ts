@@ -653,8 +653,8 @@ export async function registerRoutes(
           // Create onboarding link
           const accountLink = await stripeService.createConnectOnboardingLink(
             account.id,
-            `${baseUrl}/photographer/onboarding?refresh=true`,
-            `${baseUrl}/photographer/dashboard?stripe=success`
+            'outsyde://stripe-return?status=refresh&type=photographer',
+            'outsyde://stripe-return?status=success&type=photographer'
           );
 
           return res.json({ 
@@ -6984,8 +6984,8 @@ export async function registerRoutes(
         // Generate onboarding link
         const onboardingLink = await stripeService.createConnectOnboardingLink(
           stripeAccountId,
-          `${baseUrl}/vendor/onboarding?refresh=true`,
-          `${baseUrl}/vendor/onboarding?complete=true`
+          'outsyde://stripe-return?status=refresh&type=vendor',
+          'outsyde://stripe-return?status=success&type=vendor'
         );
 
         // Store the URL for reference
@@ -7024,8 +7024,8 @@ export async function registerRoutes(
         // Generate onboarding link
         const onboardingLink = await stripeService.createConnectOnboardingLink(
           stripeAccountId,
-          `${baseUrl}/photographer/onboarding?refresh=true`,
-          `${baseUrl}/photographer/onboarding?complete=true`
+          'outsyde://stripe-return?status=refresh&type=photographer',
+          'outsyde://stripe-return?status=success&type=photographer'
         );
 
         // Store the URL for reference
@@ -7065,8 +7065,8 @@ export async function registerRoutes(
         // Generate onboarding link
         const onboardingLink = await stripeService.createConnectOnboardingLink(
           stripeAccountId,
-          `${baseUrl}/influencer/onboarding?refresh=true`,
-          `${baseUrl}/influencer/onboarding?complete=true`
+          'outsyde://stripe-return?status=refresh&type=influencer',
+          'outsyde://stripe-return?status=success&type=influencer'
         );
 
         // Store the URL for reference
@@ -12536,8 +12536,8 @@ export async function registerRoutes(
         const accountLink = await stripe.accountLinks.create({
           account: profile.stripeAccountId,
           type: 'account_onboarding',
-          refresh_url: `${baseUrl}/influencer/dashboard?stripe=refresh`,
-          return_url: `${baseUrl}/influencer/dashboard?stripe=complete`,
+          refresh_url: 'outsyde://stripe-return?status=refresh&type=influencer',
+          return_url: 'outsyde://stripe-return?status=success&type=influencer',
         });
 
         return res.json({
@@ -12570,8 +12570,8 @@ export async function registerRoutes(
       const accountLink = await stripe.accountLinks.create({
         account: account.id,
         type: 'account_onboarding',
-        refresh_url: `${baseUrl}/influencer/dashboard?stripe=refresh`,
-        return_url: `${baseUrl}/influencer/dashboard?stripe=complete`,
+        refresh_url: 'outsyde://stripe-return?status=refresh&type=influencer',
+        return_url: 'outsyde://stripe-return?status=success&type=influencer',
       });
 
       res.json({
