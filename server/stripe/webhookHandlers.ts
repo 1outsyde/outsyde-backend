@@ -966,8 +966,9 @@ export class WebhookHandlers {
     const metadata = account.metadata || {};
     const accountId = account.id;
     
-    // Check if onboarding is complete
-    const isOnboardingComplete = account.charges_enabled && account.payouts_enabled && account.details_submitted;
+    // Onboarding is complete when charges are enabled and details are submitted.
+    // payouts_enabled may lag behind in sandbox — don't gate on it.
+    const isOnboardingComplete = account.charges_enabled === true && account.details_submitted === true;
     
     console.log(`[Stripe] account.updated for ${accountId}: charges_enabled=${account.charges_enabled}, payouts_enabled=${account.payouts_enabled}, details_submitted=${account.details_submitted}, isComplete=${isOnboardingComplete}`);
     
@@ -1013,9 +1014,11 @@ export class WebhookHandlers {
     
     // Update photographer onboarding status
     if (photographer && photographer.stripeAccountId === accountId) {
+      console.log(`[Stripe] Updating photographer ${photographer.id} stripeOnboardingComplete=${isOnboardingComplete}`);
       await storage.updatePhotographer(photographer.id, {
         stripeOnboardingComplete: isOnboardingComplete,
       });
+      console.log(`[Stripe] Photographer ${photographer.id} stripeOnboardingComplete updated to ${isOnboardingComplete}`);
       
       if (isOnboardingComplete) {
         console.log(`[Stripe] Photographer ${photographer.id} (${photographer.displayName}) completed Stripe onboarding`);
