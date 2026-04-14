@@ -6937,6 +6937,59 @@ export async function registerRoutes(
     }
   });
 
+  // Confirm Stripe Connect onboarding completion (belt-and-suspenders alongside webhook)
+  app.post("/api/stripe/connect/complete", optionalAuthMiddleware, async (req, res) => {
+    const authReq = req as AuthenticatedRequest;
+    const userId = authReq.user?.userId || req.session?.userId;
+    if (!userId) {
+      return res.status(401).json({ success: false, message: "Not authenticated" });
+    }
+
+    try {
+      const { accountId } = req.body;
+      if (!accountId) {
+        return res.status(400).json({ success: false, message: "accountId is required" });
+      }
+
+      // Verify the account belongs to this user
+      const business = await storage.getBusinessByOwnerId(userId);
+      const photographer = await storage.getPhotographerByUserId(userId);
+
+      const ownsAccount =
+        (business?.stripeAccountId === accountId) ||
+        (photographer?.stripeAccountId === accountId);
+
+      if (!ownsAccount) {
+        return res.status(403).json({ success: false, message: "Account does not belong to this user" });
+      }
+
+      // Check Stripe account status
+      const status = await stripeService.getConnectAccountStatus(accountId);
+      const isComplete = status.chargesEnabled && status.payoutsEnabled;
+
+      if (isComplete) {
+        if (business && business.stripeAccountId === accountId) {
+          await storage.updateBusiness(business.id, { stripeOnboardingComplete: true });
+          console.log(`[Stripe] Business ${business.id} onboarding confirmed complete via /connect/complete`);
+        }
+        if (photographer && photographer.stripeAccountId === accountId) {
+          await storage.updatePhotographer(photographer.id, { stripeOnboardingComplete: true });
+          console.log(`[Stripe] Photographer ${photographer.id} onboarding confirmed complete via /connect/complete`);
+        }
+      }
+
+      res.json({
+        success: true,
+        complete: isComplete,
+        chargesEnabled: status.chargesEnabled,
+        payoutsEnabled: status.payoutsEnabled,
+      });
+    } catch (error) {
+      console.error("Stripe Connect complete error:", error);
+      res.status(500).json({ success: false, message: "Failed to check onboarding status" });
+    }
+  });
+
   // Create or refresh Stripe Express onboarding link (supports vendors, photographers, and influencers)
   app.post("/api/vendor/stripe-onboarding/create-link", async (req, res) => {
     const userId = req.session?.userId;
