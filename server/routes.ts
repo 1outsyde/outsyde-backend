@@ -6963,9 +6963,9 @@ export async function registerRoutes(
         return res.status(403).json({ success: false, message: "Account does not belong to this user" });
       }
 
-      // Check Stripe account status
+      // Check Stripe account status — charges_enabled is sufficient for onboarding
       const status = await stripeService.getConnectAccountStatus(accountId);
-      const isComplete = status.chargesEnabled && status.payoutsEnabled;
+      const isComplete = status.chargesEnabled === true;
 
       if (isComplete) {
         if (business && business.stripeAccountId === accountId) {
