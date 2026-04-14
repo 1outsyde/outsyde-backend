@@ -5,8 +5,7 @@ import helmet from "helmet";
 import compression from "compression";
 import { storage } from "./storage";
 import { registerRoutes } from "./routes";
-import { runMigrations } from "stripe-replit-sync";
-import { getStripeSync } from "./stripe/stripeClient";
+// stripe-replit-sync removed — no longer on Replit
 import { WebhookHandlers } from "./stripe/webhookHandlers";
 import { stripeService } from "./stripe/stripeService";
 import { setupWebSocket } from "./websocket";
@@ -188,39 +187,12 @@ async function initStripe() {
   }
 
   try {
-    log("Initializing Stripe schema...", "stripe");
-    await runMigrations({ databaseUrl });
-    log("Stripe schema ready", "stripe");
+    log("Initializing Stripe...", "stripe");
+    log("Using STRIPE_WEBHOOK_SECRET for webhook verification", "stripe");
 
-    const stripeSync = await getStripeSync();
-
-    // Only setup managed webhook on Replit - external hosting uses STRIPE_WEBHOOK_SECRET
-    if (isOnReplit()) {
-      log("Setting up managed webhook...", "stripe");
-      // Get the domain from Replit environment
-      const replitDomains = process.env.REPLIT_DOMAINS;
-      if (replitDomains) {
-        const primaryDomain = replitDomains.split(",")[0];
-        const webhookUrl = `https://${primaryDomain}/api/stripe/webhook`;
-        log(`Webhook configured: ${webhookUrl}`, "stripe");
-        await stripeSync.findOrCreateManagedWebhook(
-          webhookUrl,
-          {
-            enabled_events: ["*"],
-            description: "Managed webhook for Outsyde marketplace",
-          }
-        );
-      } else {
-        log("REPLIT_DOMAINS not set - skipping managed webhook setup", "stripe");
-      }
-    } else {
-      log("Using STRIPE_WEBHOOK_SECRET for webhook verification (external hosting)", "stripe");
-    }
-
-    log("Setting up subscription tier products...", "stripe");
     await stripeService.setupSubscriptionProducts();
     await stripeService.setupAlaCarteProducts();
-    log("Subscription products ready", "stripe");
+    log("Stripe ready", "stripe");
   } catch (error) {
     console.error("Stripe initialization failed:", error);
   }
