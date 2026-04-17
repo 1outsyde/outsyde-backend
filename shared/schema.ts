@@ -2042,6 +2042,8 @@ export const vendorSignupSchema = z.object({
   zipCode: z.string().optional(),
   websiteUrl: z.string().optional(),
   socialMedia: z.string().optional(),
+  logoImage: z.string().optional(), // business profile photo / logo URL
+  username: z.string().optional(),
   acceptedSubscription: z.boolean().refine((val) => val === true, {
     message: "You must accept the subscription terms",
   }),

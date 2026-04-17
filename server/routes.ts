@@ -489,8 +489,9 @@ export async function registerRoutes(
         zipCode: data.zipCode,
         websiteUrl: data.websiteUrl,
         socialMedia: data.socialMedia,
-        subscriptionActive: false, // Starts inactive until approved
-        approvalStatus: "pending", // New businesses require approval
+        logoImage: data.logoImage,
+        subscriptionActive: false,
+        approvalStatus: "pending",
       });
 
       // Auto-geocode business address to lat/lng (async, non-blocking)
