@@ -432,7 +432,11 @@ export async function registerRoutes(
           .json({ error: "Invalid data", details: error.errors });
       }
       console.error("Customer signup error:", error);
-      res.status(500).json({ error: "Signup failed" });
+      res.status(500).json({
+        code: "SERVER_ERROR",
+        message: error instanceof Error ? error.message : "Signup failed",
+        detail: error instanceof Error && process.env.NODE_ENV !== "production" ? error.stack : undefined,
+      });
     }
   });
 
@@ -536,7 +540,11 @@ export async function registerRoutes(
           .json({ error: "Invalid data", details: error.errors });
       }
       console.error("Vendor signup error:", error);
-      res.status(500).json({ error: "Signup failed" });
+      res.status(500).json({
+        code: "SERVER_ERROR",
+        message: error instanceof Error ? error.message : "Signup failed",
+        detail: error instanceof Error && process.env.NODE_ENV !== "production" ? error.stack : undefined,
+      });
     }
   });
 
@@ -682,7 +690,11 @@ export async function registerRoutes(
           .json({ error: "Invalid data", details: error.errors });
       }
       console.error("Photographer signup error:", error);
-      res.status(500).json({ error: "Signup failed" });
+      res.status(500).json({
+        code: "SERVER_ERROR",
+        message: error instanceof Error ? error.message : "Signup failed",
+        detail: error instanceof Error && process.env.NODE_ENV !== "production" ? error.stack : undefined,
+      });
     }
   });
 
