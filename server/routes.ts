@@ -13065,6 +13065,7 @@ export async function registerRoutes(
         isVendor: u.isVendor,
         isPhotographer: u.isPhotographer,
         isAdmin: u.isAdmin,
+        isActive: u.isActive,
         createdAt: u.createdAt,
         loyaltyPoints: u.loyaltyPoints,
       }));
@@ -13125,6 +13126,7 @@ export async function registerRoutes(
           isVendor: user.isVendor,
           isPhotographer: user.isPhotographer,
           isAdmin: user.isAdmin,
+          isActive: user.isActive,
           createdAt: user.createdAt,
           loyaltyPoints: user.loyaltyPoints,
         },
@@ -13200,6 +13202,43 @@ export async function registerRoutes(
       }
       console.error("Update admin user error:", error);
       res.status(500).json({ error: "Failed to update user" });
+    }
+  });
+
+  // Admin: Disable user account
+  app.post("/api/admin/users/:userId/disable", requireAdmin, async (req, res) => {
+    try {
+      const { userId } = req.params;
+      const user = await storage.getUser(userId);
+      if (!user) {
+        return res.status(404).json({ error: "User not found" });
+      }
+      if (user.isAdmin) {
+        return res.status(403).json({ error: "Cannot disable admin accounts" });
+      }
+
+      await storage.updateUser(userId, { isActive: false });
+      res.json({ success: true, user: { id: user.id, email: user.email, isActive: false } });
+    } catch (error) {
+      console.error("Disable user error:", error);
+      res.status(500).json({ error: "Failed to disable user" });
+    }
+  });
+
+  // Admin: Enable user account
+  app.post("/api/admin/users/:userId/enable", requireAdmin, async (req, res) => {
+    try {
+      const { userId } = req.params;
+      const user = await storage.getUser(userId);
+      if (!user) {
+        return res.status(404).json({ error: "User not found" });
+      }
+
+      await storage.updateUser(userId, { isActive: true });
+      res.json({ success: true, user: { id: user.id, email: user.email, isActive: true } });
+    } catch (error) {
+      console.error("Enable user error:", error);
+      res.status(500).json({ error: "Failed to enable user" });
     }
   });
 
