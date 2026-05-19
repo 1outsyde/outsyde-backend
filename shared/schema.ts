@@ -235,6 +235,9 @@ export const users = pgTable("users", {
   resetCodeExpiresAt: timestamp("reset_code_expires_at"),
   resetCodeAttempts: integer("reset_code_attempts").default(0),
 
+  // Account status
+  isActive: boolean("is_active").default(true).notNull(),
+
   createdAt: timestamp("created_at").defaultNow().notNull(),
 });
 
