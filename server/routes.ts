@@ -5425,9 +5425,13 @@ export async function registerRoutes(
       // Determine capture method based on autoAcceptBookings
       const captureMethod = business.autoAcceptBookings === false ? 'manual' : 'automatic';
       
-      // Calculate platform fee (12% Outsyde booking fee) + consumer service fee (3%)
-      const platformFeeAmount = calculateBookingFee(appointment.totalPrice);
-      const apptConsumerFee = calculateConsumerServiceFee(appointment.totalPrice);
+      // Calculate booking fees: 7% vendor fee + 5% consumer upcharge
+      const basePriceCents = appointment.totalPrice;
+      const vendorPayoutCents = Math.round(basePriceCents * (1 - 0.07));
+      const consumerUpchargeCents = Math.round(basePriceCents * 0.05);
+      const totalChargedToConsumerCents = basePriceCents + consumerUpchargeCents;
+      const platformFeeCents = totalChargedToConsumerCents - vendorPayoutCents;
+      const outsydePointsEarned = Math.round((consumerUpchargeCents / 100) * 100);
 
       // Get or create Stripe customer for the user
       const user = await storage.getUser(userId);
@@ -5435,13 +5439,12 @@ export async function registerRoutes(
         return res.status(404).json({ error: "User not found" });
       }
 
-      // Create PaymentIntent (amount includes service fee, app fee includes both)
+      // Create PaymentIntent with explicit vendor payout via transfer_data.amount
       const paymentIntent = await stripeService.createBookingPaymentIntent({
-        amountCents: appointment.totalPrice,
-        consumerServiceFeeCents: apptConsumerFee,
+        totalChargedCents: totalChargedToConsumerCents,
+        vendorPayoutCents,
         customerId: user.stripeCustomerId || undefined,
         connectedAccountId: business.stripeAccountId,
-        applicationFeeAmount: platformFeeAmount,
         captureMethod,
         metadata: {
           type: 'appointment_booking',
@@ -5449,29 +5452,39 @@ export async function registerRoutes(
           clientId: userId,
           providerId: appointment.businessId,
           serviceId: appointment.serviceId,
+          basePriceCents: String(basePriceCents),
+          vendorPayoutCents: String(vendorPayoutCents),
+          consumerUpchargeCents: String(consumerUpchargeCents),
+          platformFeeCents: String(platformFeeCents),
+          outsydePointsEarned: String(outsydePointsEarned),
         },
         description: `Appointment booking at ${business.name}`,
       });
 
-      // Update appointment with payment details and transition to pending_payment if still draft
+      // Update appointment with payment details
       await db.update(appointments).set({
         stripePaymentIntentId: paymentIntent.id,
         paymentMethod: 'payment_intent',
         captureMethod,
-        platformFee: platformFeeAmount,
-        vendorNet: appointment.totalPrice - platformFeeAmount,
+        platformFee: platformFeeCents,
+        vendorNet: vendorPayoutCents,
         status: BOOKING_STATES.PENDING_PAYMENT,
         updatedAt: new Date()
       }).where(eq(appointments.id, appointmentId));
 
-      console.log(`[Booking] Created PaymentIntent ${paymentIntent.id} for appointment ${appointmentId} (captureMethod: ${captureMethod})`);
+      console.log(`[Booking] Created PaymentIntent ${paymentIntent.id} for appointment ${appointmentId} (captureMethod: ${captureMethod}, charged: ${totalChargedToConsumerCents}¢, vendor: ${vendorPayoutCents}¢, platform: ${platformFeeCents}¢)`);
 
       res.json({
         clientSecret: paymentIntent.client_secret,
         paymentIntentId: paymentIntent.id,
-        captureMethod,
-        amount: appointment.totalPrice,
-        currency: 'usd',
+        feeBreakdown: {
+          basePriceCents,
+          consumerUpchargeCents,
+          vendorPayoutCents,
+          platformFeeCents,
+          totalChargedToConsumerCents,
+          outsydePointsEarned,
+        },
       });
     } catch (error: any) {
       console.error("Create appointment PaymentIntent error:", error);
@@ -5561,9 +5574,13 @@ export async function registerRoutes(
       // Determine capture method based on autoAcceptBookings
       const captureMethod = photographer.autoAcceptBookings === false ? 'manual' : 'automatic';
       
-      // Calculate platform fee (12% Outsyde booking fee) + consumer service fee (3%)
-      const platformFeeAmount = calculateBookingFee(booking.totalPrice);
-      const shootConsumerFee = calculateConsumerServiceFee(booking.totalPrice);
+      // Calculate booking fees: 7% vendor fee + 5% consumer upcharge
+      const basePriceCents = booking.totalPrice;
+      const vendorPayoutCents = Math.round(basePriceCents * (1 - 0.07));
+      const consumerUpchargeCents = Math.round(basePriceCents * 0.05);
+      const totalChargedToConsumerCents = basePriceCents + consumerUpchargeCents;
+      const platformFeeCents = totalChargedToConsumerCents - vendorPayoutCents;
+      const outsydePointsEarned = Math.round((consumerUpchargeCents / 100) * 100);
 
       // Get user for Stripe customer
       const user = await storage.getUser(userId);
@@ -5571,43 +5588,52 @@ export async function registerRoutes(
         return res.status(404).json({ error: "User not found" });
       }
 
-      // Create PaymentIntent (amount includes service fee, app fee includes both)
+      // Create PaymentIntent with explicit vendor payout via transfer_data.amount
       const paymentIntent = await stripeService.createBookingPaymentIntent({
-        amountCents: booking.totalPrice,
-        consumerServiceFeeCents: shootConsumerFee,
+        totalChargedCents: totalChargedToConsumerCents,
+        vendorPayoutCents,
         customerId: user.stripeCustomerId || undefined,
         connectedAccountId: photographer.stripeAccountId,
-        applicationFeeAmount: platformFeeAmount,
         captureMethod,
         metadata: {
           type: 'shoot_booking',
           bookingId: bookingId,
           clientId: userId,
           providerId: booking.photographerId,
-          serviceId: booking.serviceId || undefined,
+          serviceId: booking.serviceId || '',
+          basePriceCents: String(basePriceCents),
+          vendorPayoutCents: String(vendorPayoutCents),
+          consumerUpchargeCents: String(consumerUpchargeCents),
+          platformFeeCents: String(platformFeeCents),
+          outsydePointsEarned: String(outsydePointsEarned),
         },
         description: `Photography shoot booking with ${photographer.displayName}`,
       });
 
-      // Update booking with payment details and transition to pending_payment if still draft
+      // Update booking with payment details
       await db.update(shootBookings).set({
         stripePaymentIntentId: paymentIntent.id,
         paymentMethod: 'payment_intent',
         captureMethod,
-        platformFee: platformFeeAmount,
-        vendorNet: booking.totalPrice - platformFeeAmount,
+        platformFee: platformFeeCents,
+        vendorNet: vendorPayoutCents,
         status: BOOKING_STATES.PENDING_PAYMENT,
         updatedAt: new Date()
       }).where(eq(shootBookings.id, bookingId));
 
-      console.log(`[Booking] Created PaymentIntent ${paymentIntent.id} for shoot booking ${bookingId} (captureMethod: ${captureMethod})`);
+      console.log(`[Booking] Created PaymentIntent ${paymentIntent.id} for shoot booking ${bookingId} (captureMethod: ${captureMethod}, charged: ${totalChargedToConsumerCents}¢, vendor: ${vendorPayoutCents}¢, platform: ${platformFeeCents}¢)`);
 
       res.json({
         clientSecret: paymentIntent.client_secret,
         paymentIntentId: paymentIntent.id,
-        captureMethod,
-        amount: booking.totalPrice,
-        currency: 'usd',
+        feeBreakdown: {
+          basePriceCents,
+          consumerUpchargeCents,
+          vendorPayoutCents,
+          platformFeeCents,
+          totalChargedToConsumerCents,
+          outsydePointsEarned,
+        },
       });
     } catch (error: any) {
       console.error("Create shoot booking PaymentIntent error:", error);

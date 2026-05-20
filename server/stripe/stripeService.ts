@@ -300,36 +300,24 @@ export class StripeService {
    * @param applicationFeeAmount - Platform fee in cents
    */
   async createBookingPaymentIntent(params: {
-    amountCents: number;
-    consumerServiceFeeCents?: number;
+    totalChargedCents: number;
+    vendorPayoutCents: number;
     currency?: string;
     customerId?: string;
     connectedAccountId: string;
-    applicationFeeAmount: number;
     captureMethod: 'automatic' | 'manual';
-    metadata: {
-      type: 'appointment_booking' | 'shoot_booking';
-      bookingId: string;
-      clientId: string;
-      providerId: string;
-      serviceId?: string;
-    };
+    metadata: Record<string, string>;
     description?: string;
   }) {
     const stripe = await getUncachableStripeClient();
 
-    // Total charge = service subtotal + consumer service fee
-    const totalCharge = params.amountCents + (params.consumerServiceFeeCents || 0);
-    // application_fee = booking fee + consumer service fee (both stay with Outsyde)
-    const totalAppFee = params.applicationFeeAmount + (params.consumerServiceFeeCents || 0);
-
     const paymentIntentData: Record<string, unknown> = {
-      amount: totalCharge,
+      amount: params.totalChargedCents,
       currency: params.currency || 'usd',
       capture_method: params.captureMethod,
-      application_fee_amount: totalAppFee,
       transfer_data: {
         destination: params.connectedAccountId,
+        amount: params.vendorPayoutCents,
       },
       metadata: params.metadata,
       description: params.description,
