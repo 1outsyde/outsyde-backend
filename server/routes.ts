@@ -5642,6 +5642,97 @@ export async function registerRoutes(
   });
 
   // =========================
+  // PRODUCT CART PAYMENT INTENT
+  // =========================
+
+  app.post("/api/cart/payment-intent", optionalAuthMiddleware, async (req, res) => {
+    const authReq = req as AuthenticatedRequest;
+    const userId = authReq.user?.userId || req.session?.userId;
+    if (!userId) {
+      return res.status(401).json({ success: false, error: { code: 'AUTH_REQUIRED', message: 'Not authenticated' } });
+    }
+
+    try {
+      const { items, shippingAddress } = req.body;
+
+      if (!Array.isArray(items) || items.length === 0) {
+        return res.status(400).json({ success: false, error: { code: 'INVALID_INPUT', message: 'Items array is required and must not be empty' } });
+      }
+
+      // Validate single vendor
+      const vendorIds = new Set(items.map((i: { vendorStripeAccountId: string }) => i.vendorStripeAccountId));
+      if (vendorIds.size > 1) {
+        return res.status(400).json({
+          success: false,
+          error: { code: 'MULTI_VENDOR_NOT_SUPPORTED', message: 'Please checkout one vendor at a time. Multi-vendor checkout is coming soon.' }
+        });
+      }
+
+      // Validate item fields
+      for (const item of items) {
+        if (!item.priceCents || typeof item.priceCents !== 'number' || item.priceCents <= 0 || !Number.isInteger(item.priceCents)) {
+          return res.status(400).json({ success: false, error: { code: 'INVALID_INPUT', message: 'All items must have a positive integer priceCents' } });
+        }
+        if (!item.quantity || typeof item.quantity !== 'number' || item.quantity <= 0) {
+          return res.status(400).json({ success: false, error: { code: 'INVALID_INPUT', message: 'All items must have a positive quantity' } });
+        }
+      }
+
+      if (!items[0].vendorStripeAccountId) {
+        return res.status(400).json({ success: false, error: { code: 'INVALID_INPUT', message: 'vendorStripeAccountId is required' } });
+      }
+
+      // Calculate product fees: 4% vendor fee + 4% consumer upcharge
+      const basePriceCents = items.reduce((sum: number, i: { priceCents: number; quantity: number }) => sum + (i.priceCents * i.quantity), 0);
+      const consumerUpchargeCents = Math.round(basePriceCents * 0.04);
+      const vendorPayoutCents = Math.round(basePriceCents * (1 - 0.04));
+      const totalChargedToConsumerCents = basePriceCents + consumerUpchargeCents;
+      const platformFeeCents = totalChargedToConsumerCents - vendorPayoutCents;
+      const outsydePointsEarned = Math.round((consumerUpchargeCents / 100) * 100);
+
+      const paymentIntent = await stripeService.createBookingPaymentIntent({
+        totalChargedCents: totalChargedToConsumerCents,
+        vendorPayoutCents,
+        connectedAccountId: items[0].vendorStripeAccountId,
+        captureMethod: 'automatic',
+        metadata: {
+          type: 'product_purchase',
+          bookingId: `cart_${Date.now()}`,
+          clientId: userId,
+          providerId: items[0].vendorId || '',
+          basePriceCents: String(basePriceCents),
+          consumerUpchargeCents: String(consumerUpchargeCents),
+          vendorPayoutCents: String(vendorPayoutCents),
+          platformFeeCents: String(platformFeeCents),
+          outsydePointsEarned: String(outsydePointsEarned),
+          itemCount: String(items.length),
+          itemSummary: items.map((i: { name: string; quantity: number }) => `${i.name} x${i.quantity}`).join(', ').substring(0, 490),
+        },
+        description: 'Product purchase via Outsyde',
+      });
+
+      console.log(`[Cart] Created PaymentIntent ${paymentIntent.id} for product purchase (charged: ${totalChargedToConsumerCents}¢, vendor: ${vendorPayoutCents}¢, platform: ${platformFeeCents}¢)`);
+
+      res.json({
+        success: true,
+        clientSecret: paymentIntent.client_secret,
+        paymentIntentId: paymentIntent.id,
+        feeBreakdown: {
+          basePriceCents,
+          consumerUpchargeCents,
+          vendorPayoutCents,
+          platformFeeCents,
+          totalChargedToConsumerCents,
+          outsydePointsEarned,
+        },
+      });
+    } catch (error: unknown) {
+      console.error("Create cart PaymentIntent error:", error);
+      res.status(500).json({ success: false, error: { code: 'SERVER_ERROR', message: 'Failed to create payment intent' } });
+    }
+  });
+
+  // =========================
   // BOOKING REFUNDS
   // =========================
 
