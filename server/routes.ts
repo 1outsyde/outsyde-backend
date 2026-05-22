@@ -13106,6 +13106,116 @@ export async function registerRoutes(
     }
   });
 
+  // ==================== VENDOR DASHBOARD ROUTES ====================
+
+  app.get("/api/business/orders", authMiddleware, async (req, res) => {
+    try {
+      const authReq = req as AuthenticatedRequest;
+      const userId = authReq.user?.userId || req.session?.userId;
+      if (!userId) return res.status(401).json({ error: "Not authenticated" });
+
+      const business = await storage.getBusinessByOwnerId(userId);
+      if (!business) return res.status(404).json({ error: "Business not found" });
+
+      const orders = await storage.getVendorOrders(business.id);
+      res.json({ orders });
+    } catch (error) {
+      console.error("Get business orders error:", error);
+      res.status(500).json({ error: "Failed to get orders" });
+    }
+  });
+
+  app.get("/api/business/bookings", authMiddleware, async (req, res) => {
+    try {
+      const authReq = req as AuthenticatedRequest;
+      const userId = authReq.user?.userId || req.session?.userId;
+      if (!userId) return res.status(401).json({ error: "Not authenticated" });
+
+      const business = await storage.getBusinessByOwnerId(userId);
+      if (!business) return res.status(404).json({ error: "Business not found" });
+
+      const bookings = await storage.getAppointmentsByBusiness(business.id);
+      res.json({ bookings });
+    } catch (error) {
+      console.error("Get business bookings error:", error);
+      res.status(500).json({ error: "Failed to get bookings" });
+    }
+  });
+
+  app.get("/api/business/products", authMiddleware, async (req, res) => {
+    try {
+      const authReq = req as AuthenticatedRequest;
+      const userId = authReq.user?.userId || req.session?.userId;
+      if (!userId) return res.status(401).json({ error: "Not authenticated" });
+
+      const business = await storage.getBusinessByOwnerId(userId);
+      if (!business) return res.status(404).json({ error: "Business not found" });
+
+      const products = await storage.getVendorProducts(business.id);
+      res.json({ products });
+    } catch (error) {
+      console.error("Get business products error:", error);
+      res.status(500).json({ error: "Failed to get products" });
+    }
+  });
+
+  app.get("/api/business/services", authMiddleware, async (req, res) => {
+    try {
+      const authReq = req as AuthenticatedRequest;
+      const userId = authReq.user?.userId || req.session?.userId;
+      if (!userId) return res.status(401).json({ error: "Not authenticated" });
+
+      const business = await storage.getBusinessByOwnerId(userId);
+      if (!business) return res.status(404).json({ error: "Business not found" });
+
+      const services = await storage.getVendorServicesByBusiness(business.id);
+      res.json({ services });
+    } catch (error) {
+      console.error("Get business services error:", error);
+      res.status(500).json({ error: "Failed to get services" });
+    }
+  });
+
+  app.get("/api/business/stats", authMiddleware, async (req, res) => {
+    try {
+      const authReq = req as AuthenticatedRequest;
+      const userId = authReq.user?.userId || req.session?.userId;
+      if (!userId) return res.status(401).json({ error: "Not authenticated" });
+
+      const business = await storage.getBusinessByOwnerId(userId);
+      if (!business) return res.status(404).json({ error: "Business not found" });
+
+      const allOrders = await storage.getVendorOrders(business.id);
+      const bookings = await storage.getAppointmentsByBusiness(business.id);
+
+      const now = new Date();
+      const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+
+      const paidStatuses = ['paid', 'shipped', 'delivered'];
+      const paidOrders = allOrders.filter(o => paidStatuses.includes(o.status || ''));
+      const monthlyRevenue = paidOrders
+        .filter(o => new Date(o.createdAt) >= monthStart)
+        .reduce((sum, o) => sum + (o.totalAmount || 0), 0);
+
+      const confirmedBookings = bookings.filter(b =>
+        b.status === 'confirmed' || b.status === 'completed'
+      );
+
+      res.json({
+        stats: {
+          orderCount: paidOrders.length,
+          bookingCount: confirmedBookings.length,
+          monthlyRevenueCents: monthlyRevenue,
+          reviewCount: business.reviewCount || 0,
+          averageRating: business.rating ? (business.rating / 10) : 0,
+        },
+      });
+    } catch (error) {
+      console.error("Get business stats error:", error);
+      res.status(500).json({ error: "Failed to get stats" });
+    }
+  });
+
   // ==================== ADMIN DASHBOARD ROUTES ====================
 
   // Admin: Get dashboard overview stats
