@@ -498,6 +498,18 @@ export async function registerRoutes(
         approvalStatus: "pending",
       });
 
+      if (data.billingAddress || data.billingCity || data.billingState || data.billingZipCode) {
+        await storage.updateBusiness(business.id, {
+          billingAddress: {
+            line1: data.billingAddress || '',
+            city: data.billingCity || '',
+            state: data.billingState || '',
+            postalCode: data.billingZipCode || '',
+            country: 'United States',
+          },
+        });
+      }
+
       // Auto-geocode business address to lat/lng (async, non-blocking)
       if (data.city && data.state) {
         const { geocodeAddress } = await import('./geocoding');
