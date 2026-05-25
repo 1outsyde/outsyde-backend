@@ -259,25 +259,28 @@ export async function registerRoutes(
   app.get("/api/search", optionalAuthMiddleware, async (req, res) => {
     const authReq = req as AuthenticatedRequest;
     try {
-      const { 
-        q, 
-        scope = 'all', 
+      const {
+        q,
+        scope = 'all',
         viewerUserId,
+        city,
+        personalized,
         limit = '50',
-        offset = '0'
+        offset = '0',
       } = req.query;
 
-      // Validate scope
       const validScopes = ['all', 'consumers', 'photographers', 'businesses', 'products', 'services'];
-      const searchScope = validScopes.includes(scope as string) ? scope as any : 'all';
+      const searchScope = validScopes.includes(scope as string) ? scope as string : 'all';
 
-      // Use authenticated user's ID if viewerUserId not provided
-      const effectiveViewerUserId = (viewerUserId as string) || authReq.session?.userId;
+      const effectiveViewerUserId =
+        (viewerUserId as string) || authReq.user?.userId || authReq.session?.userId || null;
 
-      // Check if current user is admin for demo data visibility
+      const enablePersonalization =
+        personalized === 'true' && !!effectiveViewerUserId;
+
       let isAdmin = false;
-      if (authReq.session?.userId) {
-        const user = await storage.getUser(authReq.session.userId);
+      if (effectiveViewerUserId) {
+        const user = await storage.getUser(effectiveViewerUserId);
         isAdmin = user?.isAdmin || false;
       }
 
@@ -285,6 +288,8 @@ export async function registerRoutes(
         q: (q as string) || '',
         scope: searchScope,
         viewerUserId: effectiveViewerUserId,
+        city: (city as string) || null,
+        personalized: enablePersonalization,
         limit: Math.min(100, parseInt(limit as string) || 50),
         offset: parseInt(offset as string) || 0,
         isAdmin,
@@ -7625,23 +7630,6 @@ export async function registerRoutes(
     } catch (error) {
       console.error("Get cities error:", error);
       res.status(500).json({ error: "Failed to get cities" });
-    }
-  });
-
-  // ==================== UNIFIED SEARCH ====================
-
-  app.get("/api/search", async (req, res) => {
-    try {
-      const { city, category, search } = req.query;
-      const results = await storage.searchAll({
-        city: city as string | undefined,
-        category: category as string | undefined,
-        search: search as string | undefined,
-      });
-      res.json(results);
-    } catch (error) {
-      console.error("Search error:", error);
-      res.status(500).json({ error: "Failed to search" });
     }
   });
 

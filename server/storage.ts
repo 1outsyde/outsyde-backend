@@ -711,11 +711,13 @@ export type SearchScope = 'all' | 'consumers' | 'photographers' | 'businesses' |
 
 export interface UnifiedSearchParams {
   q: string;
-  scope: SearchScope;
-  viewerUserId?: string;
-  limit?: number;
-  offset?: number;
-  isAdmin?: boolean;
+  scope: string;
+  viewerUserId: string | null;
+  city: string | null;
+  personalized: boolean;
+  limit: number;
+  offset: number;
+  isAdmin: boolean;
 }
 
 export interface UnifiedSearchResult {
@@ -730,13 +732,19 @@ export interface UnifiedSearchResult {
   providerUserId: string | null;
   baseScore: number;
   personalizationScore: number;
+  price?: number | null;
+  businessId?: string | null;
+  businessName?: string | null;
+  productImage?: string | null;
+  providerId?: string | null;
+  providerName?: string | null;
+  providerType?: 'photographer' | 'business' | null;
 }
 
 export interface UnifiedSearchResponse {
   results: UnifiedSearchResult[];
   total: number;
-  limit: number;
-  offset: number;
+  personalized: boolean;
 }
 
 export class DatabaseStorage implements IStorage {
@@ -5365,386 +5373,435 @@ export class DatabaseStorage implements IStorage {
     };
   }
 
-  // =========================
-  // UNIFIED SEARCH WITH SCOPE
-  // =========================
-
   async unifiedSearchWithScope(params: UnifiedSearchParams): Promise<UnifiedSearchResponse> {
-    const { q, scope, viewerUserId, limit = 50, offset = 0, isAdmin = false } = params;
-    const query = q.trim().toLowerCase();
-    
-    if (!query) {
-      return { results: [], total: 0, limit, offset };
-    }
+    const { q, scope, viewerUserId, city, personalized, limit, offset, isAdmin } = params;
+    const searchTerm = q?.trim() || '';
+    const likePattern = searchTerm ? `%${searchTerm}%` : '%';
 
-    let allResults: UnifiedSearchResult[] = [];
-    let viewerPreferences: { selectedIndustries?: string[]; industryNiches?: Record<string, string[]> } | null = null;
-    let followedUserIds: Set<string> = new Set();
-
-    // Load viewer preferences for personalization (scope=all only)
-    if (viewerUserId && scope === 'all') {
+    let viewerIndustries: string[] = [];
+    let viewerNiches: Record<string, string[]> = {};
+    if (personalized && viewerUserId) {
       const viewer = await this.getUser(viewerUserId);
-      if (viewer) {
-        viewerPreferences = {
-          selectedIndustries: viewer.selectedIndustries ?? [],
-          industryNiches: viewer.industryNiches ?? {},
-        };
-      }
-      // Load followed users for personalization boost
-      const following = await this.getUserFollowing(viewerUserId, 500, 0);
-      followedUserIds = new Set(following.map(u => u.id));
+      viewerIndustries = viewer?.selectedIndustries || [];
+      viewerNiches = viewer?.industryNiches || {};
     }
 
-    // Helper to calculate base text relevance score
-    const calculateBaseScore = (fields: (string | null | undefined)[]): number => {
-      let score = 0;
-      for (const field of fields) {
-        if (!field) continue;
-        const lower = field.toLowerCase();
-        // Exact match gets highest score
-        if (lower === query) score = Math.max(score, 100);
-        // Starts with query
-        else if (lower.startsWith(query)) score = Math.max(score, 80);
-        // Contains query as word
-        else if (lower.includes(` ${query}`) || lower.includes(`${query} `)) score = Math.max(score, 60);
-        // Contains query
-        else if (lower.includes(query)) score = Math.max(score, 40);
-      }
-      return score;
-    };
+    const results: UnifiedSearchResult[] = [];
 
-    // Helper to calculate personalization score
-    const calculatePersonalizationScore = (
-      category: string | null,
-      providerId: string | null,
-      rating: number | null
-    ): number => {
-      if (!viewerPreferences) return 0;
-      let score = 0;
-      
-      // Followed provider boost
-      if (providerId && followedUserIds.has(providerId)) {
-        score += 30;
-      }
-      
-      // Category preference match
-      if (category) {
-        const catLower = category.toLowerCase();
-        const industries = (viewerPreferences.selectedIndustries || []).map(i => i.toLowerCase());
-        for (const ind of industries) {
-          if (catLower.includes(ind)) {
-            score += 20;
-            break;
-          }
-        }
-        // Niche match is higher
-        const allNiches: string[] = [];
-        if (viewerPreferences.industryNiches) {
-          for (const niches of Object.values(viewerPreferences.industryNiches)) {
-            allNiches.push(...niches.map(n => n.toLowerCase()));
-          }
-        }
-        for (const niche of allNiches) {
-          if (catLower.includes(niche)) {
-            score += 25;
-            break;
-          }
-        }
-      }
-      
-      // Rating boost (0-10 points based on rating 0-50)
-      if (rating !== null && rating > 0) {
-        score += Math.min(10, rating / 5);
-      }
-      
-      return score;
-    };
-
-    // ==================== SEARCH CONSUMERS ====================
+    // ==================== CONSUMERS ====================
     if (scope === 'all' || scope === 'consumers') {
-      // Search users who are NOT vendors and NOT photographers (regular consumers)
-      const consumerResults = await db.select().from(users)
-        .where(and(
-          eq(users.isVendor, false),
-          eq(users.isPhotographer, false),
-          or(
-            ilike(users.username, `%${query}%`),
-            ilike(users.name, `%${query}%`),
-            ilike(users.firstName, `%${query}%`),
-            ilike(users.lastName, `%${query}%`)
-          ),
-          // Hide demo users from non-admins
-          isAdmin ? undefined : sql`NOT (${users.id}::text ILIKE '%demo%')`
-        ))
-        .limit(limit * 2);
+      const consumerRows = await db
+        .select()
+        .from(users)
+        .where(
+          and(
+            eq(users.isVendor, false),
+            eq(users.isPhotographer, false),
+            isAdmin ? undefined : eq(users.isActive, true),
+            or(
+              ilike(users.username, likePattern),
+              ilike(users.name, likePattern),
+              ilike(users.firstName, likePattern),
+              ilike(users.lastName, likePattern)
+            ),
+            city ? ilike(users.city, `%${city}%`) : undefined
+          )
+        )
+        .limit(scope === 'all' ? 15 : limit)
+        .offset(scope === 'consumers' ? offset : 0);
 
-      for (const user of consumerResults) {
-        const displayName = user.name || `${user.firstName || ''} ${user.lastName || ''}`.trim() || user.username || 'User';
-        const baseScore = calculateBaseScore([user.username, user.name, user.firstName, user.lastName]);
-        const personalizationScore = calculatePersonalizationScore(null, user.id, null);
-        
-        allResults.push({
-          id: user.id,
+      for (const u of consumerRows) {
+        if (!isAdmin && u.isAdmin) continue;
+        const displayName =
+          u.name ||
+          (u.firstName && u.lastName ? `${u.firstName} ${u.lastName}` : null) ||
+          u.username ||
+          'Unknown';
+
+        let baseScore = 0;
+        if (searchTerm) {
+          const lower = searchTerm.toLowerCase();
+          const nameLower = displayName.toLowerCase();
+          const userLower = (u.username || '').toLowerCase();
+          if (nameLower === lower || userLower === lower) baseScore = 100;
+          else if (nameLower.startsWith(lower) || userLower.startsWith(lower)) baseScore = 75;
+          else baseScore = 40;
+        } else {
+          baseScore = 20;
+        }
+
+        results.push({
+          id: u.id,
           type: 'consumer',
           title: displayName,
-          subtitle: user.username ? `@${user.username}` : (user.city ? `${user.city}, ${user.state || ''}` : null),
-          imageUrl: user.profileImageUrl,
+          subtitle: [u.city, u.state].filter(Boolean).join(', ') || null,
+          imageUrl: u.profileImageUrl || null,
           ratingAvg: null,
           ratingCount: null,
           category: null,
-          providerUserId: user.id,
+          providerUserId: u.id,
           baseScore,
-          personalizationScore: scope === 'all' ? personalizationScore : 0,
+          personalizationScore: baseScore,
         });
       }
     }
 
-    // ==================== SEARCH PHOTOGRAPHERS ====================
-    // TODO: Filter photographer results by travel_radius
-    // A photographer with travel_radius='50_miles' should appear in results
-    // for consumers within 50 miles of the photographer's city, even if not
-    // in the same city. Implement when geospatial ranking is added.
+    // ==================== PHOTOGRAPHERS ====================
     if (scope === 'all' || scope === 'photographers') {
-      const photographerResults = await db.select({
-        photographer: photographers,
-        user: users,
-      })
+      const photogs = await db
+        .select()
         .from(photographers)
-        .leftJoin(users, eq(photographers.userId, users.id))
-        .where(and(
-          or(
-            ilike(photographers.displayName, `%${query}%`),
-            ilike(photographers.bio, `%${query}%`),
-            sql`array_to_string(${photographers.specialties}, ' ') ILIKE ${'%' + query + '%'}`,
-            // Also search by owner's username and name
-            ilike(users.username, `%${query}%`),
-            ilike(users.name, `%${query}%`)
-          ),
-          // Hide demo data from non-admins
-          isAdmin ? undefined : sql`NOT (${photographers.userId}::text ILIKE '%demo%')`,
-          // Only show public photographers in search (admins see all)
-          isAdmin ? undefined : eq(photographers.visibilityStatus, 'public')
-        ))
-        .limit(limit * 2);
-
-      for (const { photographer, user } of photographerResults) {
-        const baseScore = calculateBaseScore([
-          photographer.displayName,
-          photographer.bio,
-          ...(photographer.specialties || [])
-        ]);
-        const personalizationScore = calculatePersonalizationScore(
-          photographer.specialties?.[0] || null,
-          photographer.userId,
-          photographer.rating
-        );
-        
-        allResults.push({
-          id: photographer.id,
-          type: 'photographer',
-          title: photographer.displayName || user?.name || 'Photographer',
-          subtitle: photographer.city ? `${photographer.city}${photographer.state ? `, ${photographer.state}` : ''}` : null,
-          imageUrl: photographer.logoImage || photographer.coverImage || user?.profileImageUrl || null,
-          ratingAvg: photographer.rating ? photographer.rating / 10 : null, // Convert to 0-5 scale
-          ratingCount: photographer.reviewCount,
-          category: photographer.specialties?.[0] || 'Photography',
-          providerUserId: photographer.userId,
-          baseScore,
-          personalizationScore: scope === 'all' ? personalizationScore : 0,
-        });
-      }
-    }
-
-    // ==================== SEARCH BUSINESSES ====================
-    if (scope === 'all' || scope === 'businesses') {
-      // Business visibility helper (equivalent to isBusinessVisibleToPublic)
-      // - Must be approved
-      // - Must not be demo data
-      // - Must have active subscription
-      // - Must have completed Stripe onboarding if monetization features enabled
-      const businessResults = await db.select({
-        business: businesses,
-        user: users,
-      })
-        .from(businesses)
-        .leftJoin(users, eq(businesses.ownerId, users.id))
-        .where(and(
-          eq(businesses.approvalStatus, 'approved'),
-          eq(businesses.subscriptionActive, true), // Must have active subscription
-          or(
-            ilike(businesses.name, `%${query}%`),
-            ilike(businesses.category, `%${query}%`),
-            ilike(businesses.description, `%${query}%`),
-            ilike(businesses.tagline, `%${query}%`),
-            // Also search by owner's username and name
-            ilike(users.username, `%${query}%`),
-            ilike(users.name, `%${query}%`)
-          ),
-          // Hide demo data from non-admins
-          isAdmin ? undefined : sql`NOT (${businesses.ownerId}::text ILIKE '%demo%')`
-        ))
-        .limit(limit * 2);
-
-      for (const { business } of businessResults) {
-        // Additional visibility check: Stripe onboarding required if monetization features enabled
-        const needsStripe = business.hasProducts || business.hasServices;
-        if (!isAdmin && needsStripe && !business.stripeOnboardingComplete) {
-          continue; // Skip businesses that need Stripe but haven't completed onboarding
-        }
-        const baseScore = calculateBaseScore([
-          business.name,
-          business.category,
-          business.description,
-          business.tagline
-        ]);
-        const personalizationScore = calculatePersonalizationScore(
-          business.category,
-          business.ownerId,
-          business.rating
-        );
-        
-        allResults.push({
-          id: business.id,
-          type: 'business',
-          title: business.name,
-          subtitle: business.city ? `${business.category} · ${business.city}, ${business.state || ''}` : business.category,
-          imageUrl: business.logoImage || business.coverImage,
-          ratingAvg: business.rating ? business.rating / 10 : null, // Convert to 0-5 scale
-          ratingCount: business.reviewCount,
-          category: business.category,
-          providerUserId: business.ownerId,
-          baseScore,
-          personalizationScore: scope === 'all' ? personalizationScore : 0,
-        });
-      }
-    }
-
-    // ==================== SEARCH PRODUCTS ====================
-    if (scope === 'all' || scope === 'products') {
-      // Use search index for products, but also check if parent business is visible
-      // Join with search index that has hasActiveSubscription flag
-      const productResults = await db.select().from(searchIndex)
-        .where(and(
-          eq(searchIndex.entityType, 'product'),
-          eq(searchIndex.isActive, true),
-          eq(searchIndex.hasActiveSubscription, true), // Parent business must have active subscription
-          or(
-            ilike(searchIndex.name, `%${query}%`),
-            ilike(searchIndex.description, `%${query}%`),
-            ilike(searchIndex.category, `%${query}%`),
-            sql`array_to_string(${searchIndex.tags}, ' ') ILIKE ${'%' + query + '%'}`
-          ),
-          // Hide demo data from non-admins
-          isAdmin ? undefined : eq(searchIndex.isDemo, false)
-        ))
-        .limit(limit * 2);
-
-      for (const product of productResults) {
-        const baseScore = calculateBaseScore([
-          product.name,
-          product.description,
-          product.category,
-          ...(product.tags || [])
-        ]);
-        const personalizationScore = calculatePersonalizationScore(
-          product.category,
-          product.userId,
-          product.rating
-        );
-        
-        allResults.push({
-          id: product.entityId,
-          type: 'product',
-          title: product.name,
-          subtitle: product.priceCents ? `$${(product.priceCents / 100).toFixed(2)}` : product.category,
-          imageUrl: product.imageUrl,
-          ratingAvg: product.rating ? product.rating / 10 : null,
-          ratingCount: product.reviewCount,
-          category: product.category,
-          providerUserId: product.userId,
-          baseScore,
-          personalizationScore: scope === 'all' ? personalizationScore : 0,
-        });
-      }
-    }
-
-    // ==================== SEARCH SERVICES ====================
-    if (scope === 'all' || scope === 'services') {
-      // Use search index for services (both business services and photographer services)
-      // Business services require parent business to have active subscription
-      // Photographer services are always visible if active
-      const serviceResults = await db.select().from(searchIndex)
-        .where(and(
-          or(
-            // Business services: require active subscription
-            and(
-              eq(searchIndex.entityType, 'service'),
-              eq(searchIndex.hasActiveSubscription, true)
+        .where(
+          and(
+            or(
+              ilike(photographers.displayName, likePattern),
+              ilike(photographers.bio, likePattern),
+              sql`${photographers.specialties}::text ILIKE ${likePattern}`
             ),
-            // Photographer services: no subscription required
-            eq(searchIndex.entityType, 'photographer_service')
-          ),
-          eq(searchIndex.isActive, true),
-          or(
-            ilike(searchIndex.name, `%${query}%`),
-            ilike(searchIndex.description, `%${query}%`),
-            ilike(searchIndex.category, `%${query}%`)
-          ),
-          // Hide demo data from non-admins
-          isAdmin ? undefined : eq(searchIndex.isDemo, false)
-        ))
-        .limit(limit * 2);
+            city ? ilike(photographers.city, `%${city}%`) : undefined,
+            isAdmin ? undefined : eq(photographers.visibilityStatus, 'public')
+          )
+        )
+        .limit(scope === 'all' ? 15 : limit)
+        .offset(scope === 'photographers' ? offset : 0);
 
-      for (const service of serviceResults) {
-        const baseScore = calculateBaseScore([
-          service.name,
-          service.description,
-          service.category
-        ]);
-        const personalizationScore = calculatePersonalizationScore(
-          service.category,
-          service.userId,
-          service.rating
-        );
-        
-        allResults.push({
-          id: service.entityId,
-          type: 'service',
-          title: service.name,
-          subtitle: service.priceCents ? `From $${(service.priceCents / 100).toFixed(2)}` : service.category,
-          imageUrl: service.imageUrl,
-          ratingAvg: service.rating ? service.rating / 10 : null,
-          ratingCount: service.reviewCount,
-          category: service.category,
-          providerUserId: service.userId,
+      for (const p of photogs) {
+        const lower = searchTerm.toLowerCase();
+        const nameLower = (p.displayName || '').toLowerCase();
+
+        let baseScore = 0;
+        if (searchTerm) {
+          if (nameLower === lower) baseScore = 100;
+          else if (nameLower.startsWith(lower)) baseScore = 80;
+          else baseScore = 45;
+        } else {
+          baseScore = 30 + (p.rating || 0) * 2;
+        }
+
+        let personalizationScore = baseScore;
+        if (personalized) {
+          const specialties = p.specialties || [];
+          const nicheMatch = specialties.some((s: string) =>
+            viewerIndustries.some(ind => s.toLowerCase().includes(ind.toLowerCase()))
+          );
+          if (nicheMatch) personalizationScore += 25;
+        }
+
+        results.push({
+          id: p.id,
+          type: 'photographer',
+          title: p.displayName || 'Photographer',
+          subtitle: [p.city, p.state].filter(Boolean).join(', ') || null,
+          imageUrl: p.logoImage || p.coverImage || null,
+          ratingAvg: p.rating ? p.rating / 10 : null,
+          ratingCount: p.reviewCount || null,
+          category: (p.specialties || [])[0] || 'Photography',
+          providerUserId: p.userId,
           baseScore,
-          personalizationScore: scope === 'all' ? personalizationScore : 0,
+          personalizationScore,
+        });
+      }
+    }
+
+    // ==================== BUSINESSES ====================
+    if (scope === 'all' || scope === 'businesses') {
+      const businessRows = await db
+        .select()
+        .from(businesses)
+        .where(
+          and(
+            or(
+              ilike(businesses.name, likePattern),
+              ilike(businesses.category, likePattern),
+              ilike(businesses.description, likePattern),
+              ilike(businesses.tagline, likePattern)
+            ),
+            city ? ilike(businesses.city, `%${city}%`) : undefined,
+            isAdmin ? undefined : eq(businesses.approvalStatus, 'approved')
+          )
+        )
+        .limit(scope === 'all' ? 15 : limit)
+        .offset(scope === 'businesses' ? offset : 0);
+
+      for (const b of businessRows) {
+        if (!isAdmin && b.ownerId?.toLowerCase().includes('demo')) continue;
+
+        if (!isAdmin) {
+          const subStatus = await this.isBusinessSubscriptionActive(b.id);
+          if (!subStatus.active) continue;
+        }
+
+        const lower = searchTerm.toLowerCase();
+        const nameLower = b.name.toLowerCase();
+        const catLower = (b.category || '').toLowerCase();
+
+        let baseScore = 0;
+        if (searchTerm) {
+          if (nameLower === lower) baseScore = 100;
+          else if (nameLower.startsWith(lower)) baseScore = 85;
+          else if (catLower.includes(lower)) baseScore = 60;
+          else baseScore = 40;
+        } else {
+          baseScore = 30 + (b.rating || 0) * 2;
+        }
+
+        let personalizationScore = baseScore;
+        if (personalized) {
+          const catMatch = viewerIndustries.some(ind =>
+            (b.category || '').toLowerCase().includes(ind.toLowerCase())
+          );
+          if (catMatch) personalizationScore += 30;
+
+          const nicheValues = Object.values(viewerNiches).flat();
+          const nicheMatch = nicheValues.some(n =>
+            (b.category || '').toLowerCase().includes(n.toLowerCase()) ||
+            (b.description || '').toLowerCase().includes(n.toLowerCase())
+          );
+          if (nicheMatch) personalizationScore += 15;
+        }
+
+        results.push({
+          id: b.id,
+          type: 'business',
+          title: b.name,
+          subtitle: [b.category, [b.city, b.state].filter(Boolean).join(', ')]
+            .filter(Boolean)
+            .join(' · ') || null,
+          imageUrl: b.logoImage || b.coverImage || null,
+          ratingAvg: b.rating ? b.rating / 10 : null,
+          ratingCount: b.reviewCount || null,
+          category: b.category || null,
+          providerUserId: b.ownerId,
+          baseScore,
+          personalizationScore,
+        });
+      }
+    }
+
+    // ==================== PRODUCTS ====================
+    if (scope === 'all' || scope === 'products') {
+      const productRows = await db
+        .select({
+          p: vendorProducts,
+          bName: businesses.name,
+          bCity: businesses.city,
+          bState: businesses.state,
+          bOwnerId: businesses.ownerId,
+          bStripe: businesses.stripeOnboardingComplete,
+          bApproval: businesses.approvalStatus,
+        })
+        .from(vendorProducts)
+        .innerJoin(businesses, eq(vendorProducts.businessId, businesses.id))
+        .where(
+          and(
+            eq(vendorProducts.status, 'live'),
+            eq(vendorProducts.isActive, true),
+            or(
+              ilike(vendorProducts.name, likePattern),
+              ilike(vendorProducts.description, likePattern),
+              ilike(vendorProducts.category, likePattern)
+            ),
+            city ? ilike(businesses.city, `%${city}%`) : undefined,
+            isAdmin ? undefined : eq(businesses.approvalStatus, 'approved'),
+            isAdmin ? undefined : eq(businesses.stripeOnboardingComplete, true)
+          )
+        )
+        .limit(scope === 'all' ? 10 : limit)
+        .offset(scope === 'products' ? offset : 0);
+
+      for (const row of productRows) {
+        if (!isAdmin && row.bOwnerId?.toLowerCase().includes('demo')) continue;
+
+        const lower = searchTerm.toLowerCase();
+        const nameLower = row.p.name.toLowerCase();
+
+        let baseScore = 0;
+        if (searchTerm) {
+          if (nameLower === lower) baseScore = 100;
+          else if (nameLower.startsWith(lower)) baseScore = 80;
+          else baseScore = 45;
+        } else {
+          baseScore = 25;
+        }
+
+        let personalizationScore = baseScore;
+        if (personalized) {
+          const catMatch = viewerIndustries.some(ind =>
+            (row.p.category || '').toLowerCase().includes(ind.toLowerCase())
+          );
+          if (catMatch) personalizationScore += 20;
+        }
+
+        results.push({
+          id: row.p.id,
+          type: 'product',
+          title: row.p.name,
+          subtitle: row.bName
+            ? `${row.bName}${row.bCity ? ` · ${row.bCity}` : ''}`
+            : null,
+          imageUrl: row.p.imageUrl || null,
+          ratingAvg: null,
+          ratingCount: null,
+          category: row.p.category || null,
+          providerUserId: row.bOwnerId || null,
+          price: row.p.price,
+          businessId: row.p.businessId,
+          businessName: row.bName || null,
+          productImage: row.p.imageUrl || null,
+          baseScore,
+          personalizationScore,
+        });
+      }
+    }
+
+    // ==================== SERVICES (Vendor) ====================
+    if (scope === 'all' || scope === 'services') {
+      const vendorServiceRows = await db
+        .select({
+          s: vendorServices,
+          bName: businesses.name,
+          bCity: businesses.city,
+          bState: businesses.state,
+          bOwnerId: businesses.ownerId,
+          bStripe: businesses.stripeOnboardingComplete,
+          bApproval: businesses.approvalStatus,
+        })
+        .from(vendorServices)
+        .innerJoin(businesses, eq(vendorServices.businessId, businesses.id))
+        .where(
+          and(
+            eq(vendorServices.status, 'live'),
+            eq(vendorServices.isActive, true),
+            or(
+              ilike(vendorServices.name, likePattern),
+              ilike(vendorServices.description, likePattern),
+              ilike(vendorServices.category, likePattern)
+            ),
+            city ? ilike(businesses.city, `%${city}%`) : undefined,
+            isAdmin ? undefined : eq(businesses.approvalStatus, 'approved'),
+            isAdmin ? undefined : eq(businesses.stripeOnboardingComplete, true)
+          )
+        )
+        .limit(scope === 'all' ? 10 : limit)
+        .offset(scope === 'services' ? offset : 0);
+
+      for (const row of vendorServiceRows) {
+        if (!isAdmin && row.bOwnerId?.toLowerCase().includes('demo')) continue;
+
+        const lower = searchTerm.toLowerCase();
+        const nameLower = row.s.name.toLowerCase();
+
+        let baseScore = 0;
+        if (searchTerm) {
+          if (nameLower === lower) baseScore = 100;
+          else if (nameLower.startsWith(lower)) baseScore = 80;
+          else baseScore = 45;
+        } else {
+          baseScore = 25;
+        }
+
+        results.push({
+          id: row.s.id,
+          type: 'service',
+          title: row.s.name,
+          subtitle: row.bName
+            ? `by ${row.bName}${row.bCity ? ` · ${row.bCity}` : ''}`
+            : null,
+          imageUrl: null,
+          ratingAvg: null,
+          ratingCount: null,
+          category: row.s.category || null,
+          providerUserId: row.bOwnerId || null,
+          price: row.s.price,
+          businessId: row.s.businessId,
+          businessName: row.bName || null,
+          providerName: row.bName || null,
+          providerType: 'business',
+          baseScore,
+          personalizationScore: baseScore,
+        });
+      }
+
+      // Also include photographer services
+      const photographerServiceRows = await db
+        .select({
+          s: photographerServices,
+          pId: photographers.id,
+          pName: photographers.displayName,
+          pCity: photographers.city,
+          pState: photographers.state,
+          pUserId: photographers.userId,
+          pVisibility: photographers.visibilityStatus,
+        })
+        .from(photographerServices)
+        .innerJoin(photographers, eq(photographerServices.photographerId, photographers.id))
+        .where(
+          and(
+            eq(photographerServices.status, 'live'),
+            eq(photographerServices.isActive, true),
+            or(
+              ilike(photographerServices.name, likePattern),
+              ilike(photographerServices.description, likePattern),
+              ilike(photographerServices.category, likePattern)
+            ),
+            city ? ilike(photographers.city, `%${city}%`) : undefined,
+            isAdmin ? undefined : eq(photographers.visibilityStatus, 'public')
+          )
+        )
+        .limit(scope === 'all' ? 10 : limit)
+        .offset(0);
+
+      for (const row of photographerServiceRows) {
+        const lower = searchTerm.toLowerCase();
+        const nameLower = row.s.name.toLowerCase();
+
+        let baseScore = 0;
+        if (searchTerm) {
+          if (nameLower === lower) baseScore = 100;
+          else if (nameLower.startsWith(lower)) baseScore = 80;
+          else baseScore = 45;
+        } else {
+          baseScore = 25;
+        }
+
+        results.push({
+          id: row.s.id,
+          type: 'service',
+          title: row.s.name,
+          subtitle: row.pName
+            ? `by ${row.pName}${row.pCity ? ` · ${row.pCity}` : ''}`
+            : null,
+          imageUrl: null,
+          ratingAvg: null,
+          ratingCount: null,
+          category: row.s.category || 'Photography',
+          providerUserId: row.pUserId,
+          price: row.s.priceCents,
+          providerId: row.pId,
+          providerName: row.pName || null,
+          providerType: 'photographer',
+          baseScore,
+          personalizationScore: baseScore,
         });
       }
     }
 
     // ==================== SORTING ====================
-    if (scope === 'all') {
-      // Sort by personalization score (higher is better), then base score
-      allResults.sort((a, b) => {
-        const totalA = a.personalizationScore + a.baseScore;
-        const totalB = b.personalizationScore + b.baseScore;
-        return totalB - totalA;
-      });
-    } else {
-      // Sort by base score only (text relevance)
-      allResults.sort((a, b) => b.baseScore - a.baseScore);
-    }
+    results.sort((a, b) => {
+      if (scope === 'all') {
+        return (b.personalizationScore ?? b.baseScore) - (a.personalizationScore ?? a.baseScore);
+      }
+      if (b.baseScore !== a.baseScore) return b.baseScore - a.baseScore;
+      return (b.ratingAvg || 0) - (a.ratingAvg || 0);
+    });
 
-    // Apply pagination
-    const total = allResults.length;
-    const paginatedResults = allResults.slice(offset, offset + limit);
+    const total = results.length;
+    const paginated = results.slice(offset, offset + limit);
 
     return {
-      results: paginatedResults,
+      results: paginated,
       total,
-      limit,
-      offset,
+      personalized: personalized && viewerIndustries.length > 0,
     };
   }
 
