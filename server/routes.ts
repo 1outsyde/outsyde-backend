@@ -6579,8 +6579,9 @@ export async function registerRoutes(
   });
 
   // Get customer's appointments
-  app.get("/api/my-appointments", async (req, res) => {
-    const userId = req.session?.userId;
+  app.get("/api/my-appointments", authMiddleware, async (req, res) => {
+    const authReq = req as AuthenticatedRequest;
+    const userId = authReq.user?.userId || req.session?.userId;
     if (!userId) {
       return res.status(401).json({ error: "Not authenticated" });
     }
@@ -15195,8 +15196,9 @@ export async function registerRoutes(
   });
 
   // Customer: Get their orders with shipment info
-  app.get("/api/my-orders", async (req, res) => {
-    const userId = req.session?.userId;
+  app.get("/api/my-orders", authMiddleware, async (req, res) => {
+    const authReq = req as AuthenticatedRequest;
+    const userId = authReq.user?.userId || req.session?.userId;
     if (!userId) {
       return res.status(401).json({ error: "Not authenticated" });
     }
