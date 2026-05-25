@@ -169,6 +169,8 @@ export async function registerRoutes(
   httpServer: Server,
   app: Express
 ): Promise<Server> {
+  console.log("[ROUTES] registerRoutes called — registering all routes");
+
   // ============================================================
   // AUTH DEBUG MIDDLEWARE - Logs authenticated requests for debugging
   // ============================================================
@@ -6721,11 +6723,11 @@ export async function registerRoutes(
         await storage.updateUser(userId, { stripeCustomerId: customer.id });
       }
 
-      // Detect if client wants native Payment Sheet (mobile) or web redirect
-      const useNative = req.body.native === true || req.headers['x-client-type'] === 'mobile';
+      const useNative = req.body.native === true ||
+        req.headers['x-platform'] === 'mobile' ||
+        req.headers['x-client-type'] === 'mobile';
 
       if (useNative) {
-        // Native flow: create subscription directly, return client secret for Payment Sheet
         const result = await stripeService.createTierSubscriptionNative(
           stripeCustomerId,
           tierId,
@@ -6741,28 +6743,6 @@ export async function registerRoutes(
           customerId: stripeCustomerId,
         });
       } else {
-        // Web flow: create Checkout Session, return redirect URL
-      // Check if client wants native Payment Sheet (mobile) or web redirect
-      const useNative = req.body.native === true || req.headers['x-platform'] === 'mobile';
-
-      if (useNative) {
-        // Native flow: return clientSecret for React Native Payment Sheet
-        const result = await stripeService.createTierSubscriptionNative(
-          stripeCustomerId,
-          tierId,
-          userId,
-          business.id
-        );
-
-        res.json({
-          success: true,
-          clientSecret: result.clientSecret,
-          subscriptionId: result.subscriptionId,
-          ephemeralKey: result.ephemeralKey,
-          customerId: stripeCustomerId,
-        });
-      } else {
-        // Web flow: return Stripe Checkout Session URL
         const baseUrl = process.env.API_BASE_URL || process.env.FRONTEND_URL || `https://${process.env.REPLIT_DOMAINS?.split(',')[0] || 'localhost:5000'}`;
         const session = await stripeService.createTierSubscriptionCheckout(
           stripeCustomerId,
@@ -6774,7 +6754,6 @@ export async function registerRoutes(
         );
 
         res.json({ success: true, url: session.url });
-      }
       }
     } catch (error) {
       if (error instanceof z.ZodError) {
@@ -13108,6 +13087,7 @@ export async function registerRoutes(
   });
 
   // ==================== VENDOR DASHBOARD ROUTES ====================
+  console.log("[ROUTES] Registering GET /api/business/orders");
 
   app.get("/api/business/orders", authMiddleware, async (req, res) => {
     try {
