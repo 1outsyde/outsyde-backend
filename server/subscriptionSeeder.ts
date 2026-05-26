@@ -12,9 +12,9 @@ const TIERS = [
     name: 'starter',
     displayName: 'Starter',
     description: 'Perfect for new businesses ready to start selling.',
-    priceInCents: 2999, // $29.99/mo
+    priceInCents: 2900, // $29/mo
     platformFeeBps: 800,
-    stripePriceId: 'price_1TBN0rBXLHe4A1FGdPxUowLM',
+    stripePriceId: 'price_1TNP3CBXLHe4A1FGCux43w00',
     features: [
       'Product & service listings',
       'Basic analytics',
@@ -28,9 +28,9 @@ const TIERS = [
     name: 'growth',
     displayName: 'Growth',
     description: 'For businesses ready to grow with real tools.',
-    priceInCents: 5999, // $59.99/mo
+    priceInCents: 5900, // $59/mo
     platformFeeBps: 800,
-    stripePriceId: 'price_1TBN1CBXLHe4A1FGiGdGx0ZF',
+    stripePriceId: 'price_1TNP4DBXLHe4A1FGIga6ZQ0k',
     features: [
       'Everything in Starter',
       'Advanced analytics',
@@ -44,9 +44,9 @@ const TIERS = [
     name: 'pro',
     displayName: 'Pro',
     description: 'For established businesses that want maximum impact.',
-    priceInCents: 9999, // $99.99/mo
+    priceInCents: 9900, // $99/mo
     platformFeeBps: 800,
-    stripePriceId: 'price_1TBN1TBXLHe4A1FGcJTK79L0',
+    stripePriceId: 'price_1TNP4VBXLHe4A1FGREAhrzSU',
     features: [
       'Everything in Growth',
       '1 Silver or 2 Bronze tier influencers per month',
@@ -93,5 +93,5 @@ export async function seedSubscriptionTiers(): Promise<void> {
     }
   }
 
-  console.log("[Subscriptions] Tiers synced: Starter ($29.99), Growth ($59.99), Pro ($99.99)");
+  console.log("[Subscriptions] Tiers synced: Starter ($29), Growth ($59), Pro ($99)");
 }
