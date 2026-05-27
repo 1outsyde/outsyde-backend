@@ -6724,6 +6724,40 @@ export async function registerRoutes(
         await storage.updateUser(userId, { stripeCustomerId: customer.id });
       }
 
+      // Check if business already has an active subscription — use update instead of create
+      const existingSub = await storage.getVendorSubscription(userId);
+      if (existingSub?.stripeSubscriptionId && (existingSub.status === 'active' || existingSub.status === 'trialing')) {
+        const stripe = await getUncachableStripeClient();
+        const stripeSub = await stripe.subscriptions.retrieve(existingSub.stripeSubscriptionId);
+        const itemId = stripeSub.items.data[0]?.id;
+
+        if (!itemId) {
+          return res.status(400).json({ success: false, error: { code: 'NO_ITEMS', message: 'Existing subscription has no items' } });
+        }
+
+        const [newTier] = await db.select().from(subscriptionTiers).where(eq(subscriptionTiers.id, tierId));
+        if (!newTier?.stripePriceId) {
+          return res.status(404).json({ success: false, error: { code: 'TIER_NOT_FOUND', message: 'Tier not found or not configured' } });
+        }
+
+        if (existingSub.tierId === tierId) {
+          return res.status(400).json({ success: false, error: { code: 'SAME_TIER', message: 'Already on this tier' } });
+        }
+
+        await stripe.subscriptions.update(existingSub.stripeSubscriptionId, {
+          items: [{ id: itemId, price: newTier.stripePriceId }],
+          proration_behavior: 'none',
+        });
+
+        return res.json({
+          success: true,
+          message: 'Subscription tier updated',
+          tierChanged: true,
+          newTier: newTier.displayName || newTier.name,
+        });
+      }
+
+      // No existing subscription — create a new one
       const useNative = req.body.native === true ||
         req.headers['x-platform'] === 'mobile' ||
         req.headers['x-client-type'] === 'mobile';
@@ -6744,7 +6778,7 @@ export async function registerRoutes(
           customerId: stripeCustomerId,
         });
       } else {
-        const baseUrl = process.env.API_BASE_URL || process.env.FRONTEND_URL || `https://${process.env.REPLIT_DOMAINS?.split(',')[0] || 'localhost:5000'}`;
+        const baseUrl = process.env.API_BASE_URL || process.env.FRONTEND_URL || 'https://outsyde-backend.onrender.com';
         const session = await stripeService.createTierSubscriptionCheckout(
           stripeCustomerId,
           tierId,
@@ -6766,13 +6800,15 @@ export async function registerRoutes(
   });
 
   // Change subscription tier (upgrade or downgrade)
-  app.post("/api/vendor/subscription/change-tier", async (req, res) => {
-    const userId = req.session?.userId;
+  app.post("/api/vendor/subscription/change-tier", authMiddleware, async (req, res) => {
+    const authReq = req as AuthenticatedRequest;
+    const userId = authReq.user?.userId || req.session?.userId;
     if (!userId) {
       return res.status(401).json({ error: "Not authenticated" });
     }
 
-    if (!req.session?.isVendor) {
+    const user = await storage.getUser(userId);
+    if (!user?.isVendor) {
       return res.status(403).json({ error: "Only vendors can change subscription tier" });
     }
 
