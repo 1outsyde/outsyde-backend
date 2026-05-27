@@ -11,6 +11,7 @@ import {
   insertReviewSchema,
   billingAddressSchema,
   subscriptionTiers,
+  vendorSubscriptions,
   calculateAgeRange,
   type User,
   type StaffMember,
@@ -6974,6 +6975,63 @@ export async function registerRoutes(
     }
   });
 
+  // Sync subscription status from Stripe (recovery for webhook failures)
+  app.get("/api/vendor/subscription/sync", authMiddleware, async (req, res) => {
+    const authReq = req as AuthenticatedRequest;
+    const userId = authReq.user?.userId || req.session?.userId;
+    if (!userId) return res.status(401).json({ error: "Not authenticated" });
+
+    try {
+      const stripe = await getUncachableStripeClient();
+
+      const subscription = await storage.getVendorSubscription(userId);
+      if (!subscription?.stripeSubscriptionId) {
+        return res.json({ synced: false, reason: "No subscription record found" });
+      }
+
+      const stripeSub = await stripe.subscriptions.retrieve(subscription.stripeSubscriptionId);
+      const liveStatus = stripeSub.status;
+      const currentPriceId = stripeSub.items.data[0]?.price?.id;
+
+      let tierId = subscription.tierId;
+      if (currentPriceId) {
+        const [matchingTier] = await db
+          .select()
+          .from(subscriptionTiers)
+          .where(eq(subscriptionTiers.stripePriceId, currentPriceId));
+        if (matchingTier) tierId = matchingTier.id;
+      }
+
+      await db
+        .update(vendorSubscriptions)
+        .set({
+          status: liveStatus,
+          tierId,
+          updatedAt: new Date(),
+        })
+        .where(eq(vendorSubscriptions.vendorId, userId));
+
+      const business = await storage.getBusinessByOwnerId(userId);
+      if (business) {
+        await storage.updateBusiness(business.id, {
+          subscriptionActive: liveStatus === 'active' || liveStatus === 'trialing',
+        });
+      }
+
+      console.log(`[Subscription Sync] userId=${userId} DB was: ${subscription.status} → Stripe live: ${liveStatus}`);
+
+      return res.json({
+        synced: true,
+        previousStatus: subscription.status,
+        currentStatus: liveStatus,
+        tierId,
+      });
+    } catch (error) {
+      console.error("[Subscription Sync] Error:", error);
+      return res.status(500).json({ synced: false, error: "Failed to sync subscription" });
+    }
+  });
+
   // ==================== STRIPE EXPRESS ONBOARDING ====================
 
   // Get vendor's Stripe onboarding status (supports vendors, photographers, and influencers)
@@ -8323,11 +8381,18 @@ export async function registerRoutes(
 
       // Check subscription via vendor_subscriptions table (NOT businesses.subscriptionActive)
       const subscription = await storage.getVendorSubscriptionByBusinessId(business.id);
-      const subStatus = await storage.isBusinessSubscriptionActive(business.id);
-      const hasPlanSelected = !!subscription; // vendor_subscriptions record exists
-      const isSubscriptionActive = subStatus.active; // status === 'active'
+      const hasPlanSelected = !!subscription;
 
-      const canPublish = isApproved && isSubscriptionActive && stripeOnboardingComplete;
+      // A subscription with a stripeSubscriptionId that isn't in a terminal/failed state
+      // is treated as provisioned — even if the webhook hasn't fired yet to set 'active'
+      const rawSubStatus = (subscription?.status || '').toLowerCase();
+      const hasProvisionedSub =
+        !!subscription?.stripeSubscriptionId &&
+        rawSubStatus !== 'canceled' &&
+        rawSubStatus !== 'incomplete_expired' &&
+        rawSubStatus !== 'unpaid';
+
+      const canPublish = isApproved && hasProvisionedSub && stripeOnboardingComplete;
 
       // Determine current onboarding step for frontend routing
       let currentStep = 'complete';
@@ -8335,7 +8400,7 @@ export async function registerRoutes(
       else if (!hasPlanSelected) currentStep = 'select_plan';
       else if (!business.stripeAccountId) currentStep = 'stripe_onboarding';
       else if (!stripeOnboardingComplete) currentStep = 'stripe_onboarding';
-      else if (!isSubscriptionActive) currentStep = 'subscription_pending';
+      else if (!hasProvisionedSub) currentStep = 'subscription_pending';
 
       // Get current tier info if subscription exists
       let currentTier: { id: string; name: string; displayName: string; priceInCents: number } | null = null;
@@ -8358,7 +8423,7 @@ export async function registerRoutes(
           requiresApproval: !isApproved,
           requiresPlanSelection: isApproved && !hasPlanSelected,
           requiresOnboarding: isApproved && hasPlanSelected && !stripeOnboardingComplete,
-          requiresSubscription: isApproved && hasPlanSelected && stripeOnboardingComplete && !isSubscriptionActive,
+          requiresSubscription: !hasProvisionedSub,
           canPublishProducts: canPublish,
           canPublishServices: canPublish,
 
@@ -8367,7 +8432,7 @@ export async function registerRoutes(
 
           // Raw status fields
           approvalStatus,
-          subscriptionStatus: isSubscriptionActive ? 'active' : (subscription?.status || 'none'),
+          subscriptionStatus: hasProvisionedSub ? (rawSubStatus || 'active') : (subscription?.status || 'none'),
           stripeOnboardingComplete,
           hasStripeAccount: !!business.stripeAccountId,
           currentTier,

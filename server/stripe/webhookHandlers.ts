@@ -449,48 +449,64 @@ export class WebhookHandlers {
   ===================================================== */
   static async handleVendorSubscriptionCheckoutCompleted(session: any) {
     const { vendorId, businessId, tierId } = session.metadata || {};
-    if (!vendorId || !businessId || !tierId) return;
-
-    const existing = await storage.getVendorSubscription(vendorId);
-
-    let subscriptionId: string;
-    if (existing) {
-      await storage.updateVendorSubscription(existing.id, {
-        tierId,
-        stripeSubscriptionId: session.subscription,
-        stripeCustomerId: session.customer,
-      });
-      subscriptionId = existing.id;
-    } else {
-      const newSub = await storage.createVendorSubscription({
-        vendorId,
-        businessId,
-        tierId,
-        stripeCustomerId: session.customer,
-        stripeSubscriptionId: session.subscription,
-      });
-      subscriptionId = newSub.id;
+    if (!vendorId || !businessId || !tierId) {
+      console.error('[Webhook] checkout.session.completed missing metadata:', { vendorId, businessId, tierId });
+      return;
     }
 
-    const [tier] = await db.select().from(subscriptionTiers).where(eq(subscriptionTiers.id, tierId));
-    const tierName = tier?.displayName || tier?.name || 'subscription';
+    try {
+      const existing = await storage.getVendorSubscription(vendorId);
 
-    await NotificationTriggers.subscriptionActivated({
-      userId: vendorId,
-      tierName,
-      subscriptionId,
-    });
+      let subscriptionId: string;
+      if (existing) {
+        await storage.updateVendorSubscription(existing.id, {
+          tierId,
+          status: 'active',
+          stripeSubscriptionId: session.subscription,
+          stripeCustomerId: session.customer,
+        });
+        subscriptionId = existing.id;
+      } else {
+        const newSub = await storage.createVendorSubscription({
+          vendorId,
+          businessId,
+          tierId,
+          stripeCustomerId: session.customer,
+          stripeSubscriptionId: session.subscription,
+        });
+        subscriptionId = newSub.id;
+        await storage.updateVendorSubscription(newSub.id, { status: 'active' });
+      }
 
-    await NotificationTriggers.paymentSucceeded({
-      userId: vendorId,
-      amount: session.amount_total || 0,
-      referenceType: 'vendor_subscription',
-      referenceId: subscriptionId,
-      description: `Your ${tierName} subscription payment was successful.`,
-    });
+      // Activate the business subscription flag
+      await storage.updateBusiness(businessId, {
+        subscriptionActive: true,
+      });
 
-    // Complete referral bonus if this is the vendor's first paid transaction
-    await this.tryCompleteReferral(vendorId, subscriptionId, 'vendor_subscription');
+      console.log(`[Webhook] Subscription activated: vendor=${vendorId} business=${businessId} tier=${tierId} stripeSubId=${session.subscription}`);
+
+      const [tier] = await db.select().from(subscriptionTiers).where(eq(subscriptionTiers.id, tierId));
+      const tierName = tier?.displayName || tier?.name || 'subscription';
+
+      await NotificationTriggers.subscriptionActivated({
+        userId: vendorId,
+        tierName,
+        subscriptionId,
+      });
+
+      await NotificationTriggers.paymentSucceeded({
+        userId: vendorId,
+        amount: session.amount_total || 0,
+        referenceType: 'vendor_subscription',
+        referenceId: subscriptionId,
+        description: `Your ${tierName} subscription payment was successful.`,
+      });
+
+      await this.tryCompleteReferral(vendorId, subscriptionId, 'vendor_subscription');
+    } catch (error) {
+      console.error('[Webhook] checkout.session.completed subscription activation failed:', error);
+      console.error('[Webhook] Event data:', JSON.stringify(session));
+    }
   }
 
   /* =====================================================
@@ -928,19 +944,32 @@ export class WebhookHandlers {
   static async handleInvoicePaid(invoice: any) {
     if (!invoice.subscription) return;
 
-    const vendorSub = await storage.getVendorSubscriptionByStripeId(invoice.subscription);
-    if (!vendorSub || vendorSub.status !== "active") return;
+    try {
+      const vendorSub = await storage.getVendorSubscriptionByStripeId(invoice.subscription);
+      if (!vendorSub) return;
 
-    const stripe = await getUncachableStripeClient();
-    const subResponse = await stripe.subscriptions.retrieve(invoice.subscription);
-    const sub = subResponse as unknown as { current_period_start: number; current_period_end: number };
+      const stripe = await getUncachableStripeClient();
+      const subResponse = await stripe.subscriptions.retrieve(invoice.subscription);
+      const sub = subResponse as unknown as { current_period_start: number; current_period_end: number; status: string };
 
-    await storage.updateVendorSubscription(vendorSub.id, {
-      currentPeriodStart: new Date(sub.current_period_start * 1000),
-      currentPeriodEnd: new Date(sub.current_period_end * 1000),
-    });
+      await storage.updateVendorSubscription(vendorSub.id, {
+        status: sub.status || 'active',
+        currentPeriodStart: new Date(sub.current_period_start * 1000),
+        currentPeriodEnd: new Date(sub.current_period_end * 1000),
+      });
 
-    await storage.createBenefitAllowances(vendorSub.id);
+      if (vendorSub.businessId) {
+        await storage.updateBusiness(vendorSub.businessId, {
+          subscriptionActive: sub.status === 'active' || sub.status === 'trialing',
+        });
+      }
+
+      await storage.createBenefitAllowances(vendorSub.id);
+
+      console.log(`[Webhook] invoice.paid: subscription ${invoice.subscription} status=${sub.status}`);
+    } catch (error) {
+      console.error('[Webhook] invoice.paid handler failed:', error);
+    }
   }
 
   /* =====================================================
