@@ -7407,26 +7407,91 @@ export async function registerRoutes(
     }
   });
 
+  // ==================== STRIPE BILLING PORTAL ====================
+
+  app.post("/api/stripe/billing-portal", authMiddleware, async (req, res) => {
+    const authReq = req as AuthenticatedRequest;
+    const userId = authReq.user?.userId || req.session?.userId;
+    if (!userId) return res.status(401).json({ error: "Not authenticated" });
+
+    try {
+      const stripe = await getUncachableStripeClient();
+
+      const user = await storage.getUser(userId);
+      if (!user?.stripeCustomerId) {
+        return res.status(404).json({
+          error: "No billing account found",
+          message: "No subscription billing account is associated with this account.",
+        });
+      }
+
+      const baseUrl = process.env.API_BASE_URL || 'https://outsyde-backend.onrender.com';
+      const returnUrl = `${baseUrl}/api/stripe/portal-return`;
+
+      const session = await stripe.billingPortal.sessions.create({
+        customer: user.stripeCustomerId,
+        return_url: returnUrl,
+      });
+
+      return res.json({ portalUrl: session.url });
+    } catch (error: any) {
+      console.error("[Billing Portal] Error:", error);
+      if (error?.raw?.code === 'billing_portal_no_configuration') {
+        return res.status(503).json({
+          error: "Billing portal not configured",
+          message: "The billing portal needs to be enabled in Stripe Dashboard → Settings → Billing → Customer Portal.",
+        });
+      }
+      return res.status(500).json({ error: "Failed to create billing portal session" });
+    }
+  });
+
+  app.get("/api/stripe/portal-return", (_req, res) => {
+    res.redirect("outsyde://stripe-return?status=portal-return");
+  });
+
   // ==================== VENDOR SUBSCRIPTION & BENEFITS ROUTES ====================
 
-  // Get vendor's subscription details
-  app.get("/api/vendor/subscription", async (req, res) => {
-    const userId = req.session?.userId;
+  // Get vendor's subscription details (with tier info)
+  app.get("/api/vendor/subscription", authMiddleware, async (req, res) => {
+    const authReq = req as AuthenticatedRequest;
+    const userId = authReq.user?.userId || req.session?.userId;
     if (!userId) {
       return res.status(401).json({ error: "Not authenticated" });
     }
 
-    if (!req.session?.isVendor) {
-      return res.status(403).json({ error: "Only vendors can access this" });
-    }
-
     try {
-      const subscription = await storage.getVendorSubscription(userId);
-      if (!subscription) {
+      const business = await storage.getBusinessByOwnerId(userId);
+      if (!business) {
         return res.json({ subscription: null });
       }
 
-      res.json({ subscription });
+      const result = await db
+        .select({
+          id: vendorSubscriptions.id,
+          vendorId: vendorSubscriptions.vendorId,
+          businessId: vendorSubscriptions.businessId,
+          status: vendorSubscriptions.status,
+          tierId: vendorSubscriptions.tierId,
+          stripeSubscriptionId: vendorSubscriptions.stripeSubscriptionId,
+          stripeCustomerId: vendorSubscriptions.stripeCustomerId,
+          currentPeriodStart: vendorSubscriptions.currentPeriodStart,
+          currentPeriodEnd: vendorSubscriptions.currentPeriodEnd,
+          createdAt: vendorSubscriptions.createdAt,
+          tierName: subscriptionTiers.name,
+          tierDisplayName: subscriptionTiers.displayName,
+          priceInCents: subscriptionTiers.priceInCents,
+        })
+        .from(vendorSubscriptions)
+        .leftJoin(subscriptionTiers, eq(vendorSubscriptions.tierId, subscriptionTiers.id))
+        .where(eq(vendorSubscriptions.businessId, business.id))
+        .limit(1);
+
+      if (!result.length) {
+        return res.json({ subscription: null });
+      }
+
+      res.json({ subscription: result[0] });
     } catch (error) {
       console.error("Get vendor subscription error:", error);
       res.status(500).json({ error: "Failed to get subscription" });
@@ -8546,6 +8611,7 @@ export async function registerRoutes(
         trackInventory: z.boolean().optional(),
         isActive: z.boolean().optional(),
         isFeatured: z.boolean().optional(),
+        status: z.enum(['draft', 'live', 'paused', 'archived']).optional(),
       });
 
       const validated = updateSchema.parse(req.body);
