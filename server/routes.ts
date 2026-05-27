@@ -678,11 +678,12 @@ export async function registerRoutes(
             stripeAccountId: account.id,
           });
 
-          // Create onboarding link
+          // Create onboarding link with HTTPS redirect URLs (Stripe rejects deep links)
+          const onboardingBaseUrl = process.env.API_BASE_URL || 'https://outsyde-backend.onrender.com';
           const accountLink = await stripeService.createConnectOnboardingLink(
             account.id,
-            'outsyde://stripe-return?status=refresh&type=photographer',
-            'outsyde://stripe-return?status=success&type=photographer'
+            `${onboardingBaseUrl}/api/stripe/connect-refresh?account=${account.id}&type=photographer`,
+            `${onboardingBaseUrl}/api/stripe/connect-return?account=${account.id}&type=photographer`
           );
 
           return res.json({ 
@@ -7118,16 +7119,19 @@ export async function registerRoutes(
   });
 
   // Create or refresh Stripe Express onboarding link (supports vendors, photographers, and influencers)
-  app.post("/api/vendor/stripe-onboarding/create-link", async (req, res) => {
-    const userId = req.session?.userId;
+  app.post("/api/vendor/stripe-onboarding/create-link", authMiddleware, async (req, res) => {
+    const authReq = req as AuthenticatedRequest;
+    const userId = authReq.user?.userId || req.session?.userId;
     if (!userId) {
       return res.status(401).json({ error: "Not authenticated" });
     }
 
     const user = await storage.getUser(userId);
     const isInfluencer = user?.isInfluencer;
+    const isVendor = user?.isVendor || req.session?.isVendor;
+    const isPhotographer = user?.isPhotographer || req.session?.isPhotographer;
 
-    if (!req.session?.isVendor && !req.session?.isPhotographer && !isInfluencer) {
+    if (!isVendor && !isPhotographer && !isInfluencer) {
       return res.status(403).json({ error: "Only vendors, photographers, or influencers can access this" });
     }
 
@@ -7136,9 +7140,9 @@ export async function registerRoutes(
         return res.status(400).json({ error: "User email required for Stripe onboarding" });
       }
 
-      const baseUrl = process.env.API_BASE_URL || `https://${process.env.REPLIT_DOMAINS?.split(',')[0] || 'localhost:5000'}`;
+      const baseUrl = process.env.API_BASE_URL || 'https://outsyde-backend.onrender.com';
       
-      if (req.session?.isVendor) {
+      if (isVendor) {
         const business = await storage.getBusinessByOwnerId(userId);
         if (!business) {
           return res.status(404).json({ error: "Business not found" });
@@ -7161,11 +7165,11 @@ export async function registerRoutes(
           });
         }
 
-        // Generate onboarding link
+        // Generate onboarding link with HTTPS redirect URLs (Stripe rejects deep links)
         const onboardingLink = await stripeService.createConnectOnboardingLink(
           stripeAccountId,
-          'outsyde://stripe-return?status=refresh&type=vendor',
-          'outsyde://stripe-return?status=success&type=vendor'
+          `${baseUrl}/api/stripe/connect-refresh?account=${stripeAccountId}&type=vendor`,
+          `${baseUrl}/api/stripe/connect-return?account=${stripeAccountId}&type=vendor`
         );
 
         // Store the URL for reference
@@ -7179,7 +7183,7 @@ export async function registerRoutes(
         });
       }
 
-      if (req.session?.isPhotographer) {
+      if (isPhotographer) {
         const photographer = await storage.getPhotographerByUserId(userId);
         if (!photographer) {
           return res.status(404).json({ error: "Photographer profile not found" });
@@ -7201,11 +7205,11 @@ export async function registerRoutes(
           });
         }
 
-        // Generate onboarding link
+        // Generate onboarding link with HTTPS redirect URLs (Stripe rejects deep links)
         const onboardingLink = await stripeService.createConnectOnboardingLink(
           stripeAccountId,
-          'outsyde://stripe-return?status=refresh&type=photographer',
-          'outsyde://stripe-return?status=success&type=photographer'
+          `${baseUrl}/api/stripe/connect-refresh?account=${stripeAccountId}&type=photographer`,
+          `${baseUrl}/api/stripe/connect-return?account=${stripeAccountId}&type=photographer`
         );
 
         // Store the URL for reference
@@ -7242,11 +7246,11 @@ export async function registerRoutes(
           });
         }
 
-        // Generate onboarding link
+        // Generate onboarding link with HTTPS redirect URLs (Stripe rejects deep links)
         const onboardingLink = await stripeService.createConnectOnboardingLink(
           stripeAccountId,
-          'outsyde://stripe-return?status=refresh&type=influencer',
-          'outsyde://stripe-return?status=success&type=influencer'
+          `${baseUrl}/api/stripe/connect-refresh?account=${stripeAccountId}&type=influencer`,
+          `${baseUrl}/api/stripe/connect-return?account=${stripeAccountId}&type=influencer`
         );
 
         // Store the URL for reference
@@ -7260,9 +7264,42 @@ export async function registerRoutes(
         });
       }
     } catch (error) {
-      console.error("Create Stripe onboarding link error:", error);
+      console.error("[Stripe Connect] create-link error:", error);
       res.status(500).json({ error: "Failed to create onboarding link" });
     }
+  });
+
+  // Stripe Connect return — called when user completes or exits onboarding
+  app.get("/api/stripe/connect-return", async (req, res) => {
+    const { account, type } = req.query;
+    if (account) {
+      try {
+        const stripe = await getUncachableStripeClient();
+        const stripeAccount = await stripe.accounts.retrieve(account as string);
+        if (stripeAccount.details_submitted) {
+          if (type === 'vendor') {
+            const business = await storage.getBusinessByStripeAccountId(account as string);
+            if (business) {
+              await storage.updateBusiness(business.id, { stripeOnboardingComplete: true });
+            }
+          } else if (type === 'photographer') {
+            const photographer = await storage.getPhotographerByStripeAccountId(account as string);
+            if (photographer) {
+              await storage.updatePhotographer(photographer.id, { stripeOnboardingComplete: true });
+            }
+          }
+        }
+      } catch (e) {
+        console.error("[Stripe Connect] Failed to retrieve account on return:", e);
+      }
+    }
+    res.redirect(`outsyde://stripe-return?status=complete&type=${type || 'vendor'}`);
+  });
+
+  // Stripe Connect refresh — called when onboarding link expires
+  app.get("/api/stripe/connect-refresh", async (req, res) => {
+    const { type } = req.query;
+    res.redirect(`outsyde://stripe-return?status=refresh&type=${type || 'vendor'}`);
   });
 
   // Get Stripe publishable key for frontend
@@ -12718,7 +12755,7 @@ export async function registerRoutes(
         return res.status(403).json({ success: false, error: { code: 'FORBIDDEN', message: 'Influencer profile not found' } });
       }
 
-      const baseUrl = process.env.API_BASE_URL || `https://${process.env.REPLIT_DOMAINS?.split(',')[0] || 'localhost:5000'}`;
+      const baseUrl = process.env.API_BASE_URL || 'https://outsyde-backend.onrender.com';
 
       // Case 1: Already has a Stripe account — check if fully verified
       if (profile.stripeAccountId) {
@@ -12736,8 +12773,8 @@ export async function registerRoutes(
         const accountLink = await stripe.accountLinks.create({
           account: profile.stripeAccountId,
           type: 'account_onboarding',
-          refresh_url: 'outsyde://stripe-return?status=refresh&type=influencer',
-          return_url: 'outsyde://stripe-return?status=success&type=influencer',
+          refresh_url: `${baseUrl}/api/stripe/connect-refresh?account=${profile.stripeAccountId}&type=influencer`,
+          return_url: `${baseUrl}/api/stripe/connect-return?account=${profile.stripeAccountId}&type=influencer`,
         });
 
         return res.json({
@@ -12770,8 +12807,8 @@ export async function registerRoutes(
       const accountLink = await stripe.accountLinks.create({
         account: account.id,
         type: 'account_onboarding',
-        refresh_url: 'outsyde://stripe-return?status=refresh&type=influencer',
-        return_url: 'outsyde://stripe-return?status=success&type=influencer',
+        refresh_url: `${baseUrl}/api/stripe/connect-refresh?account=${account.id}&type=influencer`,
+        return_url: `${baseUrl}/api/stripe/connect-return?account=${account.id}&type=influencer`,
       });
 
       res.json({
