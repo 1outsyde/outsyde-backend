@@ -7877,8 +7877,9 @@ export async function registerRoutes(
   // ==================== VENDOR STOREFRONT ROUTES ====================
 
   // Get current vendor's business
-  app.get("/api/vendor/my-business", async (req, res) => {
-    const userId = req.session?.userId;
+  app.get("/api/vendor/my-business", authMiddleware, async (req, res) => {
+    const authReq = req as AuthenticatedRequest;
+    const userId = authReq.user?.userId || req.session?.userId;
     if (!userId) {
       return res.status(401).json({ error: "Not authenticated" });
     }
@@ -7896,8 +7897,9 @@ export async function registerRoutes(
   });
 
   // Update vendor's business profile
-  app.patch("/api/vendor/my-business", async (req, res) => {
-    const userId = req.session?.userId;
+  app.patch("/api/vendor/my-business", authMiddleware, async (req, res) => {
+    const authReq = req as AuthenticatedRequest;
+    const userId = authReq.user?.userId || req.session?.userId;
     if (!userId) {
       return res.status(401).json({ error: "Not authenticated" });
     }
@@ -7910,6 +7912,41 @@ export async function registerRoutes(
 
       const { coverImage, coverMediaType, ...otherFields } = req.body;
       const updates: Record<string, any> = { ...otherFields };
+
+      // Validate city/state (max 100 chars)
+      if (updates.city !== undefined && updates.city !== null) {
+        if (typeof updates.city !== 'string' || updates.city.length === 0 || updates.city.length > 100) {
+          return res.status(400).json({ error: "city must be a non-empty string (max 100 chars)" });
+        }
+      }
+      if (updates.state !== undefined && updates.state !== null) {
+        if (typeof updates.state !== 'string' || updates.state.length === 0 || updates.state.length > 100) {
+          return res.status(400).json({ error: "state must be a non-empty string (max 100 chars)" });
+        }
+      }
+
+      // Validate contactPhone (digits, spaces, dashes, parens, +)
+      if (updates.contactPhone !== undefined && updates.contactPhone !== null && updates.contactPhone !== '') {
+        if (!/^[0-9\s\-\(\)\+\.]+$/.test(updates.contactPhone)) {
+          return res.status(400).json({ error: "contactPhone must contain only digits, spaces, dashes, parentheses, or +" });
+        }
+      }
+
+      // Validate contactEmail
+      if (updates.contactEmail !== undefined && updates.contactEmail !== null && updates.contactEmail !== '') {
+        if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(updates.contactEmail)) {
+          return res.status(400).json({ error: "contactEmail must be a valid email address" });
+        }
+      }
+
+      // Validate websiteUrl
+      if (updates.websiteUrl !== undefined && updates.websiteUrl !== null && updates.websiteUrl !== '') {
+        try {
+          new URL(updates.websiteUrl);
+        } catch {
+          return res.status(400).json({ error: "websiteUrl must be a valid URL" });
+        }
+      }
 
       // Validate coverMediaType when coverImage is set (must be 'image' or 'video')
       if (coverMediaType !== undefined) {
