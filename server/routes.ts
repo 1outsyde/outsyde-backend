@@ -8917,6 +8917,7 @@ export async function registerRoutes(
         category: z.string().nullable().optional(),
         isActive: z.boolean().optional(),
         isFeatured: z.boolean().optional(),
+        status: z.enum(["draft", "live", "paused", "archived"]).optional(),
       });
 
       const validated = updateSchema.parse(req.body);
