@@ -13332,7 +13332,7 @@ export async function registerRoutes(
   // ==================== VENDOR DASHBOARD ROUTES ====================
   console.log("[ROUTES] Registering GET /api/business/orders");
 
-  app.get("/api/business/orders", authMiddleware, async (req, res) => {
+  app.get("/api/business/orders", hybridAuthMiddleware, async (req, res) => {
     try {
       const authReq = req as AuthenticatedRequest;
       const userId = authReq.user?.userId || req.session?.userId;
@@ -13346,6 +13346,58 @@ export async function registerRoutes(
     } catch (error) {
       console.error("Get business orders error:", error);
       res.status(500).json({ error: "Failed to get orders" });
+    }
+  });
+
+  app.patch("/api/business/orders/:id", hybridAuthMiddleware, async (req, res) => {
+    try {
+      const authReq = req as AuthenticatedRequest;
+      const userId = authReq.user?.userId || req.session?.userId;
+      if (!userId) return res.status(401).json({ error: "Not authenticated" });
+
+      const business = await storage.getBusinessByOwnerId(userId);
+      if (!business) return res.status(404).json({ error: "Business not found" });
+
+      const orderId = req.params.id;
+      const existingOrder = await storage.getOrder(orderId);
+      if (!existingOrder) return res.status(404).json({ error: "Order not found" });
+      if (existingOrder.businessId !== business.id) {
+        return res.status(403).json({ error: "Not authorized to update this order" });
+      }
+
+      const { status, trackingNumber, carrier, shippedAt } = req.body as {
+        status?: string;
+        trackingNumber?: string;
+        carrier?: string;
+        shippedAt?: string;
+      };
+
+      const orderUpdates: Partial<typeof existingOrder> = {};
+      if (status !== undefined) orderUpdates.status = status;
+
+      let updatedOrder = existingOrder;
+      if (Object.keys(orderUpdates).length > 0) {
+        const result = await storage.updateOrderWithValidation(orderId, orderUpdates, userId);
+        if (!result.success) {
+          return res.status(400).json({ error: result.error || "Failed to update order" });
+        }
+        updatedOrder = result.order!;
+      }
+
+      if (trackingNumber && carrier) {
+        await storage.createShipment({
+          orderId,
+          businessId: business.id,
+          carrier,
+          trackingNumber,
+          shippedAt: shippedAt ? new Date(shippedAt) : new Date(),
+        });
+      }
+
+      return res.json({ order: updatedOrder });
+    } catch (error) {
+      console.error("Update business order error:", error);
+      return res.status(500).json({ error: "Failed to update order" });
     }
   });
 
