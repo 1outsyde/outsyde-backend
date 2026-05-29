@@ -57,6 +57,7 @@ import {
   verifyAccessToken,
   verifyRefreshToken,
   authMiddleware,
+  hybridAuthMiddleware,
   optionalAuthMiddleware,
   getUserIdFromRequest,
   ACCESS_TOKEN_EXPIRY_SECONDS,
@@ -8073,7 +8074,7 @@ export async function registerRoutes(
   // ==================== VENDOR STOREFRONT ROUTES ====================
 
   // Get current vendor's business
-  app.get("/api/vendor/my-business", authMiddleware, async (req, res) => {
+  app.get("/api/vendor/my-business", hybridAuthMiddleware, async (req, res) => {
     const authReq = req as AuthenticatedRequest;
     const userId = authReq.user?.userId || req.session?.userId;
     if (!userId) {
@@ -8093,7 +8094,7 @@ export async function registerRoutes(
   });
 
   // Update vendor's business profile
-  app.patch("/api/vendor/my-business", authMiddleware, async (req, res) => {
+  app.patch("/api/vendor/my-business", hybridAuthMiddleware, async (req, res) => {
     const authReq = req as AuthenticatedRequest;
     const userId = authReq.user?.userId || req.session?.userId;
     if (!userId) {
