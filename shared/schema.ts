@@ -338,6 +338,15 @@ export const businesses = pgTable("businesses", {
   // Booking settings
   autoAcceptBookings: boolean("auto_accept_bookings").default(true).notNull(),
 
+  // Storefront display toggles
+  showResponseTime: boolean("show_response_time").default(true),
+  showEmail: boolean("show_email").default(true),
+  showPhone: boolean("show_phone").default(true),
+  showWebsite: boolean("show_website").default(true),
+  showStoreHours: boolean("show_store_hours").default(true),
+  responseTimeValue: integer("response_time_value").default(2),
+  responseTimeUnit: text("response_time_unit").default("hours"),
+
   createdAt: timestamp("created_at").defaultNow().notNull(),
 }, (table) => ({
   idxBusinessOwner: index("idx_businesses_owner").on(table.ownerId),

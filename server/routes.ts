@@ -8145,6 +8145,24 @@ export async function registerRoutes(
         }
       }
 
+      // Validate storefront display toggles
+      const booleanToggles = ['showResponseTime', 'showEmail', 'showPhone', 'showWebsite', 'showStoreHours'] as const;
+      for (const field of booleanToggles) {
+        if (updates[field] !== undefined && typeof updates[field] !== 'boolean') {
+          return res.status(400).json({ error: `${field} must be a boolean` });
+        }
+      }
+      if (updates.responseTimeValue !== undefined) {
+        if (typeof updates.responseTimeValue !== 'number' || updates.responseTimeValue < 1) {
+          return res.status(400).json({ error: "responseTimeValue must be a positive number" });
+        }
+      }
+      if (updates.responseTimeUnit !== undefined) {
+        if (!['minutes', 'hours', 'business_days'].includes(updates.responseTimeUnit)) {
+          return res.status(400).json({ error: "responseTimeUnit must be: minutes, hours, or business_days" });
+        }
+      }
+
       // Validate coverMediaType when coverImage is set (must be 'image' or 'video')
       if (coverMediaType !== undefined) {
         if (coverMediaType !== null && coverMediaType !== 'image' && coverMediaType !== 'video') {
