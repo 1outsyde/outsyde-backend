@@ -33,8 +33,11 @@ export async function uploadImageToR2(
     })
   );
 
-  const accountId = process.env.R2_ACCOUNT_ID;
-  return `https://${accountId}.r2.cloudflarestorage.com/${BUCKET}/${key}`;
+  const publicUrl = process.env.R2_PUBLIC_URL;
+  if (!publicUrl) {
+    throw new Error("R2_PUBLIC_URL environment variable is not set");
+  }
+  return `${publicUrl}/${key}`;
 }
 
 export async function deleteFromR2(url: string): Promise<void> {
