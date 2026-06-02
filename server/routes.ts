@@ -1983,11 +1983,11 @@ export async function registerRoutes(
   // ============================================================
   app.get("/api/auth/me", async (req, res) => {
     try {
-      // Get authenticated user ID from session or OAuth
+      // Get authenticated user ID from JWT, session, or OAuth
       const oauthUser = req.user as any;
       const oauthUserId = oauthUser?.claims?.sub;
-      const sessionUserId = req.session?.userId;
-      const authenticatedUserId = oauthUserId || sessionUserId;
+      // getUserIdFromRequest checks JWT (Authorization: Bearer) first, then session
+      const authenticatedUserId = oauthUserId || getUserIdFromRequest(req);
 
       if (!authenticatedUserId) {
         return res.status(401).json({ 
@@ -8512,7 +8512,7 @@ export async function registerRoutes(
 
   // Get vendor's products
   app.get("/api/vendor/products", async (req, res) => {
-    const userId = req.session?.userId;
+    const userId = getUserIdFromRequest(req);
     if (!userId) {
       return res.status(401).json({ error: "Not authenticated" });
     }
@@ -8827,7 +8827,7 @@ export async function registerRoutes(
 
   // Get vendor's services
   app.get("/api/vendor/services", async (req, res) => {
-    const userId = req.session?.userId;
+    const userId = getUserIdFromRequest(req);
     if (!userId) {
       return res.status(401).json({ error: "Not authenticated" });
     }
