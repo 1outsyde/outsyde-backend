@@ -1,6 +1,7 @@
 import type { Express } from "express";
 import type { Server } from "http";
 import { randomUUID } from "crypto";
+import multer from "multer";
 import { storage } from "./storage";
 import { db } from "./db";
 import {
@@ -119,7 +120,8 @@ import {
   createAppointmentDraftSchema,
   createShootDraftSchema,
   updatePhotographerAvailabilitySettingsSchema,
-  BOOKING_STATES
+  BOOKING_STATES,
+  feedPosts,
 } from "@shared/schema";
 import { and, ilike } from "drizzle-orm";
 
@@ -15799,6 +15801,88 @@ export async function registerRoutes(
   // ==================== PHASE 3 ROUTES ====================
   const { registerPhase3Routes } = await import("./phase3Routes");
   registerPhase3Routes(app, requireAdmin);
+
+  // ==================== MEDIA ROUTES (R2 + Mux) ====================
+
+  const multerUpload = multer({
+    storage: multer.memoryStorage(),
+    limits: { fileSize: 20 * 1024 * 1024 }, // 20 MB
+  });
+
+  // POST /api/media/upload-image — upload an image to Cloudflare R2 (auth required)
+  app.post("/api/media/upload-image", hybridAuthMiddleware, (req, res, next) => {
+    multerUpload.single("file")(req as any, res as any, next);
+  }, async (req, res) => {
+    if (!(req as any).file) {
+      return res.status(400).json({ error: "No file provided" });
+    }
+    const file = (req as any).file as Express.Multer.File;
+    const folder = (req.body?.folder as string) || "posts";
+    const allowedFolders = ["posts", "profiles", "covers", "products"];
+    if (!allowedFolders.includes(folder)) {
+      return res.status(400).json({ error: "Invalid folder" });
+    }
+    try {
+      const { uploadImageToR2 } = await import("./services/r2");
+      const url = await uploadImageToR2(file.buffer, file.mimetype, folder);
+      return res.json({ url });
+    } catch (error) {
+      console.error("[R2] Image upload failed:", error);
+      return res.status(500).json({ error: "Failed to upload image" });
+    }
+  });
+
+  // POST /api/media/video-upload-url — issue a Mux direct-upload URL (auth required)
+  app.post("/api/media/video-upload-url", hybridAuthMiddleware, async (req, res) => {
+    try {
+      const { createMuxUploadUrl } = await import("./services/mux");
+      const result = await createMuxUploadUrl();
+      return res.json(result);
+    } catch (error) {
+      console.error("[Mux] Failed to create upload URL:", error);
+      return res.status(500).json({ error: "Failed to create video upload URL" });
+    }
+  });
+
+  // POST /api/webhooks/mux — Mux webhook handler
+  // Updates the feed_posts record when a video finishes processing on Mux.
+  // The mediaUrl field temporarily holds the Mux uploadId so we can locate
+  // the right row once the asset is ready.
+  app.post("/api/webhooks/mux", async (req, res) => {
+    try {
+      const payload = req.body;
+      const { type, data } = payload ?? {};
+
+      if (type === "video.asset.ready") {
+        const playbackId: string | undefined = data?.playback_ids?.[0]?.id;
+        const uploadId: string | undefined = data?.upload_id;
+
+        if (playbackId && uploadId) {
+          const videoUrl = `https://stream.mux.com/${playbackId}.m3u8`;
+          const thumbnailUrl = `https://image.mux.com/${playbackId}/thumbnail.jpg`;
+
+          await db
+            .update(feedPosts)
+            .set({
+              mediaUrl: videoUrl,
+              imageUrl: videoUrl,
+              thumbnailUrl,
+              updatedAt: new Date(),
+            })
+            .where(eq(feedPosts.mediaUrl, uploadId));
+
+          console.log(
+            `[Mux] webhook: updated post for uploadId=${uploadId} → playbackId=${playbackId}`
+          );
+        }
+      }
+
+      return res.json({ received: true });
+    } catch (error) {
+      console.error("[Mux] Webhook processing error:", error);
+      return res.status(500).json({ error: "Webhook processing error" });
+    }
+  });
 
   return httpServer;
 }
