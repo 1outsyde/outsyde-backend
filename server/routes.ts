@@ -122,6 +122,8 @@ import {
   updatePhotographerAvailabilitySettingsSchema,
   BOOKING_STATES,
   feedPosts,
+  businesses,
+  photographers,
 } from "@shared/schema";
 import { and, ilike } from "drizzle-orm";
 
@@ -15873,6 +15875,26 @@ export async function registerRoutes(
 
           console.log(
             `[Mux] webhook: updated post for uploadId=${uploadId} → playbackId=${playbackId}`
+          );
+
+          // Update businesses whose coverImage was set to the Mux uploadId
+          const businessResult = await db
+            .update(businesses)
+            .set({ coverImage: videoUrl })
+            .where(eq(businesses.coverImage, uploadId));
+
+          console.log(
+            `[Mux] webhook: updated businesses coverImage for uploadId=${uploadId} → ${videoUrl}`
+          );
+
+          // Update photographers whose coverImage was set to the Mux uploadId
+          const photographerResult = await db
+            .update(photographers)
+            .set({ coverImage: videoUrl })
+            .where(eq(photographers.coverImage, uploadId));
+
+          console.log(
+            `[Mux] webhook: updated photographers coverImage for uploadId=${uploadId} → ${videoUrl}`
           );
         }
       }
