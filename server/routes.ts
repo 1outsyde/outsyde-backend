@@ -3141,6 +3141,41 @@ export async function registerRoutes(
     }
   });
 
+  // Get all posts for a profile (vendor, photographer, or consumer) — used by profile Posts tab.
+  // Works for both authenticated and unauthenticated viewers.
+  app.get("/api/profiles/:userId/posts", optionalAuthMiddleware, async (req, res) => {
+    try {
+      const { userId } = req.params;
+      const limit = Math.min(parseInt(req.query.limit as string) || 60, 200);
+
+      const posts = await db
+        .select({
+          id: feedPosts.id,
+          userId: feedPosts.authorId,
+          mediaUrl: feedPosts.mediaUrl,
+          imageUrl: feedPosts.imageUrl,
+          thumbnailUrl: feedPosts.thumbnailUrl,
+          caption: feedPosts.content,
+          mediaType: feedPosts.mediaType,
+          createdAt: feedPosts.createdAt,
+        })
+        .from(feedPosts)
+        .where(
+          and(
+            eq(feedPosts.authorId, userId),
+            eq(feedPosts.isActive, true)
+          )
+        )
+        .orderBy(desc(feedPosts.createdAt))
+        .limit(limit);
+
+      res.json({ posts });
+    } catch (error) {
+      console.error("Get profile posts error:", error);
+      res.status(500).json({ error: "Failed to get profile posts" });
+    }
+  });
+
   // ==================== NOTIFICATIONS ====================
 
   app.get("/api/notifications", async (req, res) => {
