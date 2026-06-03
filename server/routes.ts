@@ -14541,7 +14541,24 @@ export async function registerRoutes(
         }
         activePosts.push(post);
       }
-      
+
+      // Always show the authenticated user's own posts at the top of their feed,
+      // bypassing city filters, subscription checks, and scoring thresholds.
+      // This ensures a user sees their own freshly-posted content immediately.
+      if (userId) {
+        const ownPosts = (await storage.getUserFeedPosts(userId)).slice(0, limit);
+
+        // Strip any own-post entries already in the list before re-inserting.
+        // This guards against duplicate rows that can arise when the algorithmic
+        // query (which joins multiple tables sharing the column name "id") returns
+        // a null id for an own post, making ID-based deduplication unreliable.
+        const otherActivePosts = activePosts.filter((p: any) => p.authorId !== userId);
+
+        // Rebuild activePosts: own posts newest-first at the top, then others
+        activePosts.length = 0;
+        activePosts.push(...ownPosts, ...otherActivePosts);
+      }
+
       // Enrich posts with author, tagged entities, and product/service info
       // Filter out posts with missing/invalid authors (fail closed)
       const enrichedPosts: any[] = [];
