@@ -15818,7 +15818,7 @@ export async function registerRoutes(
     }
     const file = (req as any).file as Express.Multer.File;
     const folder = (req.body?.folder as string) || "posts";
-    const allowedFolders = ["posts", "profiles", "covers", "products"];
+    const allowedFolders = ["posts", "profiles", "covers", "products", "logos"];
     if (!allowedFolders.includes(folder)) {
       return res.status(400).json({ error: "Invalid folder" });
     }
