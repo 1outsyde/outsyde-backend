@@ -13,7 +13,6 @@ export async function createMuxUploadUrl(): Promise<{
     cors_origin: "*",
     new_asset_settings: {
       playback_policy: ["public"],
-      mp4_support: "standard",
     },
   });
 
