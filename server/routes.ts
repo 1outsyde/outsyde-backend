@@ -3157,6 +3157,8 @@ export async function registerRoutes(
           thumbnailUrl: feedPosts.thumbnailUrl,
           caption: feedPosts.content,
           mediaType: feedPosts.mediaType,
+          displayLayout: feedPosts.displayLayout,
+          feedSurface: feedPosts.feedSurface,
           createdAt: feedPosts.createdAt,
         })
         .from(feedPosts)
@@ -14893,6 +14895,7 @@ export async function registerRoutes(
         photographerServiceId: data.photographerServiceId,
       };
       console.log(`[POST /api/feed] INSERT DATA:`, JSON.stringify(insertData, null, 2));
+      console.log('[POST /api/feed] persisting', { displayLayout: insertData.displayLayout, feedSurface: insertData.feedSurface });
       
       const post = await storage.createFeedPost(insertData as any);
       console.log(`[POST /api/feed] CREATED POST ID=${post.id}, feedSurface=${post.feedSurface}, mediaType=${post.mediaType}`);
