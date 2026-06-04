@@ -10429,6 +10429,59 @@ export async function registerRoutes(
     }
   });
 
+  // ==================== PUBLIC USER PROFILE ROUTE ====================
+
+  // Public profile for any user (consumer, vendor, photographer, influencer).
+  // No auth middleware — unauthenticated access is intentional.
+  // Returns only public-safe fields; private fields (email, phone, password,
+  // address, billing, tokens, stripe ids) are never exposed.
+  // Placed AFTER all static /api/users/* and /api/users/:userId/* routes so
+  // it does not shadow more specific handlers (e.g. GET /api/users/blocked).
+  app.get("/api/users/:id", async (req, res) => {
+    try {
+      const { id } = req.params;
+      console.log('[GET /api/users/:id] returning public profile for', id);
+
+      const user = await storage.getUser(id);
+      if (!user || !user.isActive) {
+        return res.status(404).json({ error: "User not found" });
+      }
+
+      const [followerCount, followingCount] = await Promise.all([
+        storage.getFollowerCount(id),
+        storage.getFollowingCount(id),
+      ]);
+
+      const publicProfile = {
+        // Identity
+        id: user.id,
+        userId: user.id,          // explicit alias — mobile client keys on userId
+        name: user.name,          // users.name is the display-name equivalent; no displayName column on users
+        username: user.username,
+        // Avatar / cover media — profileImageUrl is the real column name; avatarUrl is a stable alias
+        profileImageUrl: user.profileImageUrl,
+        avatarUrl: user.profileImageUrl,
+        coverMediaUrl: user.coverMediaUrl,
+        coverMediaType: user.coverMediaType,
+        // Location (coarse — city/state only, not full address)
+        city: user.city,
+        state: user.state,
+        // Role flags (no single role column; boolean flags convey the same info)
+        isVendor: user.isVendor,
+        isPhotographer: user.isPhotographer,
+        isInfluencer: user.isInfluencer,
+        // Social counts — derived from the follows table
+        followerCount,
+        followingCount,
+      };
+
+      res.json({ user: publicProfile });
+    } catch (error) {
+      console.error("[GET /api/users/:id] error:", error);
+      res.status(500).json({ error: "Failed to get user profile" });
+    }
+  });
+
   // ==================== MESSAGE REPORTING ROUTES ====================
 
   // Report a message
