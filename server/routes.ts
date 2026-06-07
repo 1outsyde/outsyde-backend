@@ -14614,6 +14614,14 @@ export async function registerRoutes(
         activePosts.push(...ownPosts, ...otherActivePosts);
       }
 
+      // Batch-fetch liked post IDs for the viewer — ONE query, no N+1
+      const activePostIds = activePosts.map((p: any) => p.id).filter(Boolean) as string[];
+      const likedSet = userId
+        ? await storage.getLikedPostIds(userId, activePostIds)
+        : new Set<string>();
+      // TODO: remove before final merge
+      console.log('[isLiked]', 'feed=main', 'viewer=', userId, 'likedCount=', likedSet.size);
+
       // Enrich posts with author, tagged entities, and product/service info
       // Filter out posts with missing/invalid authors (fail closed)
       const enrichedPosts: any[] = [];
@@ -14690,6 +14698,8 @@ export async function registerRoutes(
           },
           // Media metadata object
           media: mediaObj,
+          // Per-viewer like status — false for logged-out viewers
+          isLiked: likedSet.has(post.id),
           // Legacy identity fields for backwards compatibility
           userId: post.authorId,
           username: author.username || null,
@@ -15236,6 +15246,18 @@ export async function registerRoutes(
 
       // Serialize through VideoCard contract — guaranteed shape, no nulls on required fields
       const videos = formatVideoCards(posts);
+
+      // Batch-fetch liked post IDs for the viewer — ONE query, no N+1
+      const pulsePostIds = videos.map(v => v.id).filter(Boolean) as string[];
+      const pulseLikedSet = userId
+        ? await storage.getLikedPostIds(userId, pulsePostIds)
+        : new Set<string>();
+      // TODO: remove before final merge
+      console.log('[isLiked]', 'feed=pulse', 'viewer=', userId, 'likedCount=', pulseLikedSet.size);
+      for (const card of videos) {
+        card.isLiked = pulseLikedSet.has(card.id);
+      }
+
       const nextOffset = offset + videos.length;
       const hasMore = videos.length === limit;
       const nextCursor = hasMore ? Buffer.from(String(nextOffset)).toString('base64') : null;

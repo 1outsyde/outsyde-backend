@@ -40,6 +40,7 @@ export interface VideoCard {
   pulseScore: number;
   feedSurface: string;
   postIntent: string;
+  isLiked: boolean;
 }
 
 /**
@@ -84,6 +85,7 @@ export function formatVideoCard(post: PulseFeedPost): VideoCard | null {
     pulseScore: post.pulseScore || 0,
     feedSurface: post.feedSurface || 'pulse',
     postIntent: post.postIntent || 'social',
+    isLiked: false,
   };
 }
 
