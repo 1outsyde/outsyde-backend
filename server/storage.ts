@@ -157,7 +157,7 @@ import {
   isValidBookingTransition
 } from "@shared/schema";
 import { db } from "./db";
-import { eq, ilike, or, and, sql, isNull, desc, asc, gte, lte, ne } from "drizzle-orm";
+import { eq, ilike, or, and, sql, isNull, desc, asc, gte, lte, ne, inArray } from "drizzle-orm";
 import { randomUUID, createHash } from "crypto";
 
 // Input type for creating a photographer (no need for InsertPhotographer in schema)
@@ -526,6 +526,7 @@ export interface IStorage {
   likePost(postId: string, userId: string): Promise<boolean>;
   unlikePost(postId: string, userId: string): Promise<boolean>;
   hasUserLikedPost(postId: string, userId: string): Promise<boolean>;
+  getLikedPostIds(userId: string, postIds: string[]): Promise<Set<string>>;
   addPostComment(data: InsertPostComment): Promise<PostComment>;
   getPostComments(postId: string): Promise<PostComment[]>;
   canCustomerTagBusiness(customerId: string, businessId: string): Promise<boolean>;
@@ -5229,6 +5230,18 @@ export class DatabaseStorage implements IStorage {
         eq(postLikes.userId, userId)
       ));
     return !!like;
+  }
+
+  async getLikedPostIds(userId: string, postIds: string[]): Promise<Set<string>> {
+    if (postIds.length === 0) return new Set();
+    const rows = await db
+      .select({ postId: postLikes.postId })
+      .from(postLikes)
+      .where(and(
+        eq(postLikes.userId, userId),
+        inArray(postLikes.postId, postIds)
+      ));
+    return new Set(rows.map(r => r.postId));
   }
 
   async addPostComment(data: InsertPostComment): Promise<PostComment> {
