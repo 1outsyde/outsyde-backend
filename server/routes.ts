@@ -2022,6 +2022,7 @@ export async function registerRoutes(
         userId: user.id,
         username: user.username,
         displayName: user.name,
+        bio: user.bio ?? null,
         email: user.email,
         profilePhotoUrl: user.profileImageUrl,
         isVendor: false as boolean,
@@ -2340,7 +2341,6 @@ export async function registerRoutes(
   
   // Rate limits for identity changes (similar to major platforms)
   const USERNAME_CHANGE_COOLDOWN_DAYS = 14;
-  const DISPLAY_NAME_CHANGE_COOLDOWN_DAYS = 7;
   
   // Helper to check if enough time has passed since last change
   const canChangeIdentityField = (lastChangedAt: Date | null, cooldownDays: number): { allowed: boolean; daysRemaining: number } => {
@@ -2405,18 +2405,12 @@ export async function registerRoutes(
         }
       }
 
-      // DisplayName/Name change with 7-day cooldown
+      // DisplayName/Name changes are allowed without cooldown
       const newDisplayName = displayName || name;
       const currentDisplayName = user.name || user.firstName;
       if (newDisplayName !== undefined && newDisplayName !== currentDisplayName) {
-        const { allowed, daysRemaining } = canChangeIdentityField(user.displayNameLastChangedAt, DISPLAY_NAME_CHANGE_COOLDOWN_DAYS);
-        
-        if (!allowed) {
-          errors.push(`Display name can only be changed once every ${DISPLAY_NAME_CHANGE_COOLDOWN_DAYS} days. ${daysRemaining} days remaining.`);
-        } else {
-          updates.name = newDisplayName;
-          updates.displayNameLastChangedAt = new Date();
-        }
+        updates.name = newDisplayName;
+        updates.displayNameLastChangedAt = new Date();
       }
 
       // If there are rate limit errors, return them
@@ -2478,7 +2472,6 @@ export async function registerRoutes(
       }
 
       const usernameStatus = canChangeIdentityField(user.usernameLastChangedAt, USERNAME_CHANGE_COOLDOWN_DAYS);
-      const displayNameStatus = canChangeIdentityField(user.displayNameLastChangedAt, DISPLAY_NAME_CHANGE_COOLDOWN_DAYS);
 
       res.json({
         username: {
@@ -2490,9 +2483,9 @@ export async function registerRoutes(
         },
         displayName: {
           current: user.name || user.firstName,
-          canChange: displayNameStatus.allowed,
-          daysRemaining: displayNameStatus.daysRemaining,
-          cooldownDays: DISPLAY_NAME_CHANGE_COOLDOWN_DAYS,
+          canChange: true,
+          daysRemaining: 0,
+          cooldownDays: 0,
           lastChangedAt: user.displayNameLastChangedAt,
         }
       });
@@ -2546,6 +2539,7 @@ export async function registerRoutes(
         profileImageUrl: z.string().url().optional().nullable(),
         coverMediaUrl: z.string().url().optional().nullable(),
         coverMediaType: z.enum(['image', 'video']).optional().nullable(),
+        bio: z.string().optional().nullable(),
       });
 
       const validated = updateSchema.safeParse(req.body);
@@ -2572,6 +2566,9 @@ export async function registerRoutes(
       }
       if (validated.data.coverMediaType !== undefined) {
         updateData.coverMediaType = validated.data.coverMediaType;
+      }
+      if (validated.data.bio !== undefined) {
+        updateData.bio = validated.data.bio;
       }
 
       if (Object.keys(updateData).length === 0) {
