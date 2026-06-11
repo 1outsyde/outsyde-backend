@@ -12,8 +12,13 @@ export async function createMuxUploadUrl(): Promise<{
   const upload = await mux.video.uploads.create({
     cors_origin: "*",
     new_asset_settings: {
-      playback_policy: ["public"],
+      playback_policies: ["public"],
+      video_quality: "basic",
     },
+  }).catch((error: unknown) => {
+    throw new Error(
+      `[Mux] uploads.create failed: ${JSON.stringify((error as any)?.error ?? error)}`
+    );
   });
 
   if (!upload.url) {
