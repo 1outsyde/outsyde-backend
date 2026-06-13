@@ -10455,6 +10455,7 @@ export async function registerRoutes(
         userId: user.id,          // explicit alias — mobile client keys on userId
         name: user.name,          // users.name is the display-name equivalent; no displayName column on users
         username: user.username,
+        bio: user.bio,
         // Avatar / cover media — profileImageUrl is the real column name; avatarUrl is a stable alias
         profileImageUrl: user.profileImageUrl,
         avatarUrl: user.profileImageUrl,
