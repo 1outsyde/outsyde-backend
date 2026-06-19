@@ -348,7 +348,13 @@ export class PhotographerController {
           .json({ success: false, message: "Photographer not found" });
       }
 
-      res.json({ success: true, photographer });
+      // Social counts — derived from the follows table, keyed on the owner's users.id
+      const [followerCount, followingCount] = await Promise.all([
+        storage.getFollowerCount(photographer.userId),
+        storage.getFollowingCount(photographer.userId),
+      ]);
+
+      res.json({ success: true, photographer: { ...photographer, followerCount, followingCount } });
     } catch (error) {
       console.error("Get photographer error:", error);
       res

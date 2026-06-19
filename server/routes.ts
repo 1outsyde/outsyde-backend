@@ -8098,8 +8098,14 @@ export async function registerRoutes(
       if (!(await isBusinessVisibleToPublic(business))) {
         return res.status(404).json({ error: "This business is currently unavailable" });
       }
-      
-      res.json({ business });
+
+      // Social counts — derived from the follows table, keyed on the owner's users.id
+      const [followerCount, followingCount] = await Promise.all([
+        storage.getFollowerCount(business.ownerId),
+        storage.getFollowingCount(business.ownerId),
+      ]);
+
+      res.json({ business: { ...business, followerCount, followingCount } });
     } catch (error) {
       console.error("Get business error:", error);
       res.status(500).json({ error: "Failed to get business" });
