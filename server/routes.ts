@@ -8173,7 +8173,14 @@ export async function registerRoutes(
       if (!business) {
         return res.status(404).json({ error: "No business found for this account" });
       }
-      res.json({ business });
+
+      // Social counts — derived from the follows table; userId here is already the owner
+      const [followerCount, followingCount] = await Promise.all([
+        storage.getFollowerCount(userId),
+        storage.getFollowingCount(userId),
+      ]);
+
+      res.json({ business: { ...business, followerCount, followingCount } });
     } catch (error) {
       console.error("Get vendor business error:", error);
       res.status(500).json({ error: "Failed to get business" });
