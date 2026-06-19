@@ -2777,25 +2777,36 @@ export async function registerRoutes(
         return res.status(400).json({ success: false, error: "targetUserId is required" });
       }
 
-      // Prevent self-follow
-      if (followerUserId === targetUserId) {
-        return res.status(400).json({ success: false, error: "Cannot follow yourself" });
-      }
-
-      // Verify target user exists
+      // Resolve the actual user to follow: targetUserId may be a user id directly
+      // (consumer/photographer paths), or a business id, which resolves to its owner.
+      let resolvedTargetUserId = targetUserId;
       const targetUser = await storage.getUser(targetUserId);
       if (!targetUser) {
+        const targetBusiness = await storage.getBusiness(targetUserId);
+        if (targetBusiness) {
+          resolvedTargetUserId = targetBusiness.ownerId;
+        }
+      }
+
+      // Verify the resolved target user exists
+      const resolvedTargetUser = targetUser || await storage.getUser(resolvedTargetUserId);
+      if (!resolvedTargetUser) {
         return res.status(404).json({ success: false, error: "Target user not found" });
       }
 
+      // Prevent self-follow
+      if (followerUserId === resolvedTargetUserId) {
+        return res.status(400).json({ success: false, error: "Cannot follow yourself" });
+      }
+
       // Check if already following
-      const existingFollow = await storage.getFollow(followerUserId, targetUserId);
+      const existingFollow = await storage.getFollow(followerUserId, resolvedTargetUserId);
       if (existingFollow) {
         return res.status(409).json({ success: false, error: "Already following this user" });
       }
 
       // Create follow relationship
-      const follow = await storage.createFollow({ followerUserId, targetUserId });
+      const follow = await storage.createFollow({ followerUserId, targetUserId: resolvedTargetUserId });
 
       // Get follower info for notification
       const followerUser = await storage.getUser(followerUserId);
@@ -2803,7 +2814,7 @@ export async function registerRoutes(
 
       // Send notification to target user
       await NotificationTriggers.newFollower({
-        targetUserId,
+        targetUserId: resolvedTargetUserId,
         followerUserId,
         followerName,
       });
