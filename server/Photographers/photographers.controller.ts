@@ -117,10 +117,18 @@ export class PhotographerController {
         photographer.state
       );
 
-      res.json({ 
+      // Social counts — derived from the follows table; photographer.userId is the owner
+      const [followerCount, followingCount] = await Promise.all([
+        storage.getFollowerCount(photographer.userId),
+        storage.getFollowingCount(photographer.userId),
+      ]);
+
+      res.json({
         ...photographer,
         isProfileComplete,
         stripeConnected: photographer.stripeOnboardingComplete || false,
+        followerCount,
+        followingCount,
       });
     } catch (error) {
       console.error("Get me photographer error:", error);
