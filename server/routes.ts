@@ -2826,6 +2826,21 @@ export async function registerRoutes(
     }
   });
 
+  // Resolve a /api/follows target param to the actual user id to operate against:
+  // a raw user id is returned as-is; a business id resolves to its owner's user id.
+  // Mirrors the resolution already applied in POST /api/follows.
+  async function resolveFollowTargetUserId(targetUserId: string): Promise<string | undefined> {
+    const targetUser = await storage.getUser(targetUserId);
+    if (targetUser) {
+      return targetUserId;
+    }
+    const targetBusiness = await storage.getBusiness(targetUserId);
+    if (targetBusiness) {
+      return targetBusiness.ownerId;
+    }
+    return undefined;
+  }
+
   // Unfollow a user - requires authentication (JWT or session only)
   app.delete("/api/follows/:targetUserId", optionalAuthMiddleware, async (req, res) => {
     const authReq = req as AuthenticatedRequest;
@@ -2841,14 +2856,16 @@ export async function registerRoutes(
         return res.status(400).json({ success: false, error: "targetUserId is required" });
       }
 
+      const resolvedTargetUserId = await resolveFollowTargetUserId(targetUserId) || targetUserId;
+
       // Check if follow exists
-      const existingFollow = await storage.getFollow(followerUserId, targetUserId);
+      const existingFollow = await storage.getFollow(followerUserId, resolvedTargetUserId);
       if (!existingFollow) {
         return res.status(404).json({ success: false, error: "Not following this user" });
       }
 
       // Delete follow relationship
-      await storage.deleteFollow(followerUserId, targetUserId);
+      await storage.deleteFollow(followerUserId, resolvedTargetUserId);
 
       res.json({ success: true, message: "Unfollowed successfully" });
     } catch (error) {
@@ -2872,7 +2889,12 @@ export async function registerRoutes(
         return res.status(400).json({ success: false, error: "targetUserId is required" });
       }
 
-      const follow = await storage.getFollow(followerUserId, targetUserId);
+      const resolvedTargetUserId = await resolveFollowTargetUserId(targetUserId);
+      if (!resolvedTargetUserId) {
+        return res.json({ success: true, isFollowing: false });
+      }
+
+      const follow = await storage.getFollow(followerUserId, resolvedTargetUserId);
       res.json({ success: true, isFollowing: !!follow });
     } catch (error) {
       console.error("Check follow error:", error);
