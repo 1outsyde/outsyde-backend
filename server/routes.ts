@@ -3200,6 +3200,12 @@ export async function registerRoutes(
           displayLayout: feedPosts.displayLayout,
           feedSurface: feedPosts.feedSurface,
           createdAt: feedPosts.createdAt,
+          aspectRatio: feedPosts.aspectRatio,
+          likesCount: feedPosts.likesCount,
+          commentsCount: feedPosts.commentsCount,
+          productId: feedPosts.productId,
+          serviceId: feedPosts.serviceId,
+          photographerServiceId: feedPosts.photographerServiceId,
         })
         .from(feedPosts)
         .where(
