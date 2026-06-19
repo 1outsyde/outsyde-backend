@@ -523,6 +523,7 @@ export interface IStorage {
   getBusinessFeedPosts(businessId: string): Promise<FeedPost[]>;
   getPhotographerFeedPosts(photographerId: string): Promise<FeedPost[]>;
   deleteFeedPost(id: string): Promise<void>;
+  updateFeedPostContent(id: string, content: string): Promise<FeedPost | undefined>;
   likePost(postId: string, userId: string): Promise<boolean>;
   unlikePost(postId: string, userId: string): Promise<boolean>;
   hasUserLikedPost(postId: string, userId: string): Promise<boolean>;
@@ -5179,6 +5180,14 @@ export class DatabaseStorage implements IStorage {
     await db.update(feedPosts)
       .set({ isActive: false, updatedAt: new Date() })
       .where(eq(feedPosts.id, id));
+  }
+
+  async updateFeedPostContent(id: string, content: string): Promise<FeedPost | undefined> {
+    const [post] = await db.update(feedPosts)
+      .set({ content, updatedAt: new Date() })
+      .where(eq(feedPosts.id, id))
+      .returning();
+    return post;
   }
 
   async likePost(postId: string, userId: string): Promise<boolean> {
