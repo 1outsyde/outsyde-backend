@@ -15259,6 +15259,53 @@ export async function registerRoutes(
     }
   });
 
+  app.get("/api/feed/:postId", optionalAuthMiddleware, async (req, res) => {
+    try {
+      const { postId } = req.params;
+      const post = await storage.getFeedPost(postId);
+
+      if (!post || post.isActive === false) {
+        return res.status(404).json({ error: "Post not found" });
+      }
+
+      res.json({ post });
+    } catch (error) {
+      console.error("Get post error:", error);
+      res.status(500).json({ error: "Failed to get post" });
+    }
+  });
+
+  app.patch("/api/feed/:postId", async (req, res) => {
+    const userId = req.session?.userId;
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    try {
+      const { postId } = req.params;
+      const post = await storage.getFeedPost(postId);
+
+      if (!post) {
+        return res.status(404).json({ error: "Post not found" });
+      }
+
+      if (post.authorId !== userId) {
+        return res.status(403).json({ error: "You can only edit your own posts" });
+      }
+
+      const schema = z.object({
+        content: z.string().max(2000),
+      });
+      const data = schema.parse(req.body);
+
+      const updatedPost = await storage.updateFeedPostContent(postId, data.content);
+      res.json({ post: updatedPost });
+    } catch (error) {
+      console.error("Update post error:", error);
+      res.status(500).json({ error: "Failed to update post" });
+    }
+  });
+
   // =====================================================
   // PULSE FEED ROUTES (TikTok-style Discovery)
   // =====================================================
