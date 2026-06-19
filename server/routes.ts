@@ -2777,14 +2777,20 @@ export async function registerRoutes(
         return res.status(400).json({ success: false, error: "targetUserId is required" });
       }
 
-      // Resolve the actual user to follow: targetUserId may be a user id directly
-      // (consumer/photographer paths), or a business id, which resolves to its owner.
+      // Resolve the actual user to follow: targetUserId may be a user id directly,
+      // a business id (resolves to businesses.ownerId), or a photographer record id
+      // (resolves to photographers.userId).
       let resolvedTargetUserId = targetUserId;
       const targetUser = await storage.getUser(targetUserId);
       if (!targetUser) {
         const targetBusiness = await storage.getBusiness(targetUserId);
         if (targetBusiness) {
           resolvedTargetUserId = targetBusiness.ownerId;
+        } else {
+          const targetPhotographer = await storage.getPhotographer(targetUserId);
+          if (targetPhotographer) {
+            resolvedTargetUserId = targetPhotographer.userId;
+          }
         }
       }
 
@@ -2837,6 +2843,10 @@ export async function registerRoutes(
     const targetBusiness = await storage.getBusiness(targetUserId);
     if (targetBusiness) {
       return targetBusiness.ownerId;
+    }
+    const targetPhotographer = await storage.getPhotographer(targetUserId);
+    if (targetPhotographer) {
+      return targetPhotographer.userId;
     }
     return undefined;
   }
