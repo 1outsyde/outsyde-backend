@@ -130,6 +130,7 @@ import {
   scheduling,
   feedPosts,
   postLikes,
+  userSavedPosts,
   postComments,
   profileComments,
   businessAvailability,
@@ -526,6 +527,9 @@ export interface IStorage {
   updateFeedPostContent(id: string, content: string): Promise<FeedPost | undefined>;
   likePost(postId: string, userId: string): Promise<boolean>;
   unlikePost(postId: string, userId: string): Promise<boolean>;
+  savePost(postId: string, userId: string): Promise<boolean>;
+  unsavePost(postId: string, userId: string): Promise<boolean>;
+  getSavedPosts(userId: string): Promise<any[]>;
   hasUserLikedPost(postId: string, userId: string): Promise<boolean>;
   getLikedPostIds(userId: string, postIds: string[]): Promise<Set<string>>;
   addPostComment(data: InsertPostComment): Promise<PostComment>;
@@ -5227,8 +5231,69 @@ export class DatabaseStorage implements IStorage {
     await db.update(feedPosts)
       .set({ likesCount: sql`GREATEST(${feedPosts.likesCount} - 1, 0)` })
       .where(eq(feedPosts.id, postId));
-    
+
     return true;
+  }
+
+  async savePost(postId: string, userId: string): Promise<boolean> {
+    const existing = await db.select()
+      .from(userSavedPosts)
+      .where(and(
+        eq(userSavedPosts.postId, postId),
+        eq(userSavedPosts.userId, userId)
+      ));
+
+    if (existing.length > 0) return true;
+
+    await db.insert(userSavedPosts)
+      .values({
+        id: randomUUID(),
+        postId,
+        userId,
+      });
+
+    return true;
+  }
+
+  async unsavePost(postId: string, userId: string): Promise<boolean> {
+    await db.delete(userSavedPosts)
+      .where(and(
+        eq(userSavedPosts.postId, postId),
+        eq(userSavedPosts.userId, userId)
+      ));
+
+    return true;
+  }
+
+  async getSavedPosts(userId: string): Promise<any[]> {
+    const posts = await db
+      .select({
+        id: feedPosts.id,
+        userId: feedPosts.authorId,
+        mediaUrl: feedPosts.mediaUrl,
+        imageUrl: feedPosts.imageUrl,
+        thumbnailUrl: feedPosts.thumbnailUrl,
+        caption: feedPosts.content,
+        mediaType: feedPosts.mediaType,
+        displayLayout: feedPosts.displayLayout,
+        feedSurface: feedPosts.feedSurface,
+        createdAt: feedPosts.createdAt,
+        aspectRatio: feedPosts.aspectRatio,
+        likesCount: feedPosts.likesCount,
+        commentsCount: feedPosts.commentsCount,
+        productId: feedPosts.productId,
+        serviceId: feedPosts.serviceId,
+        photographerServiceId: feedPosts.photographerServiceId,
+      })
+      .from(userSavedPosts)
+      .innerJoin(feedPosts, eq(userSavedPosts.postId, feedPosts.id))
+      .where(and(
+        eq(userSavedPosts.userId, userId),
+        eq(feedPosts.isActive, true)
+      ))
+      .orderBy(desc(userSavedPosts.createdAt));
+
+    return posts;
   }
 
   async hasUserLikedPost(postId: string, userId: string): Promise<boolean> {
