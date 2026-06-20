@@ -15110,6 +15110,62 @@ export async function registerRoutes(
     }
   });
 
+  // Save a post
+  app.post("/api/feed/:postId/save", async (req, res) => {
+    const userId = req.session?.userId;
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    try {
+      const { postId } = req.params;
+      const post = await storage.getFeedPost(postId);
+
+      if (!post) {
+        return res.status(404).json({ error: "Post not found" });
+      }
+
+      const saved = await storage.savePost(postId, userId);
+      res.json({ success: true, saved });
+    } catch (error) {
+      console.error("Save post error:", error);
+      res.status(500).json({ error: "Failed to save post" });
+    }
+  });
+
+  // Unsave a post
+  app.delete("/api/feed/:postId/save", async (req, res) => {
+    const userId = req.session?.userId;
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    try {
+      const { postId } = req.params;
+      await storage.unsavePost(postId, userId);
+      res.json({ success: true, saved: false });
+    } catch (error) {
+      console.error("Unsave post error:", error);
+      res.status(500).json({ error: "Failed to unsave post" });
+    }
+  });
+
+  // Get current user's saved posts
+  app.get("/api/users/me/saved-posts", async (req, res) => {
+    const userId = req.session?.userId;
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    try {
+      const posts = await storage.getSavedPosts(userId);
+      res.json({ posts });
+    } catch (error) {
+      console.error("Get saved posts error:", error);
+      res.status(500).json({ error: "Failed to get saved posts" });
+    }
+  });
+
   // Add a comment to a post
   app.post("/api/feed/:postId/comments", async (req, res) => {
     const userId = req.session?.userId;
