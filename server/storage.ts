@@ -937,6 +937,7 @@ export class DatabaseStorage implements IStorage {
       description: insertBusiness.description || null,
       hasProducts: insertBusiness.hasProducts ?? false,
       hasServices: insertBusiness.hasServices ?? false,
+      isMultiStaff: insertBusiness.isMultiStaff ?? false,
       isStartup: insertBusiness.isStartup ?? false,
       yearsInBusiness: insertBusiness.yearsInBusiness || null,
       employeeCount: insertBusiness.employeeCount || null,

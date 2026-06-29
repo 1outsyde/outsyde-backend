@@ -320,6 +320,7 @@ export const businesses = pgTable("businesses", {
 
   hasProducts: boolean("has_products").default(false),
   hasServices: boolean("has_services").default(false),
+  isMultiStaff: boolean("is_multi_staff").notNull().default(false),
 
   stripeAccountId: text("stripe_account_id"),
   stripeOnboardingComplete: boolean("stripe_onboarding_complete").default(false),
@@ -2044,6 +2045,7 @@ export const vendorSignupSchema = z.object({
   businessCategory: z.string().min(1),
   businessDescription: z.string().optional(),
   offerType: z.enum(["products", "services", "both"]),
+  isMultiStaff: z.boolean().optional(),
   isStartup: z.boolean().optional(),
   yearsInBusiness: z.string().optional(),
   employeeCount: z.string().optional(),
