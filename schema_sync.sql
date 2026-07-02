@@ -1064,3 +1064,6 @@ ALTER TABLE moderation_queue ADD COLUMN IF NOT EXISTS reviewed_at TIMESTAMP;
 ALTER TABLE moderation_queue ADD COLUMN IF NOT EXISTS flag_count INTEGER DEFAULT 1;
 ALTER TABLE moderation_queue ADD COLUMN IF NOT EXISTS created_at TIMESTAMP;
 
+
+-- businesses.is_multi_staff (independent-booking multi-staff service businesses)
+ALTER TABLE businesses ADD COLUMN IF NOT EXISTS is_multi_staff BOOLEAN NOT NULL DEFAULT false;

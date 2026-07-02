@@ -495,6 +495,9 @@ export async function registerRoutes(
         description: data.businessDescription,
         hasProducts: data.offerType === "products" || data.offerType === "both",
         hasServices: data.offerType === "services" || data.offerType === "both",
+        isMultiStaff: (data.offerType === "services" || data.offerType === "both")
+          ? (data.isMultiStaff ?? false)
+          : false,
         isStartup: data.isStartup,
         yearsInBusiness: data.yearsInBusiness,
         employeeCount: data.employeeCount,
