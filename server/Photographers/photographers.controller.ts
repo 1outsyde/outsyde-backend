@@ -4,6 +4,7 @@ import { PhotographerService } from "./photographers.service";
 import { stripeService } from "../stripe/stripeService";
 import { storage } from "../storage";
 import { verifyAccessToken, AuthenticatedRequest } from "../auth";
+import { toPublicPhotographerDTO } from "../serializers/photographer";
 import { provisionConnectedCatalogItem } from "../services/connectedCatalog";
 
 // Rate limit for displayName changes (7 days cooldown)
@@ -338,7 +339,16 @@ export class PhotographerController {
   static async list(_req: Request, res: Response) {
     try {
       const list = await PhotographerService.list();
-      res.json({ success: true, photographers: list });
+      const photographerDTOs = await Promise.all(
+        list.map(async (photographer) => {
+          const [followerCount, followingCount] = await Promise.all([
+            storage.getFollowerCount(photographer.userId),
+            storage.getFollowingCount(photographer.userId),
+          ]);
+          return toPublicPhotographerDTO(photographer, { followerCount, followingCount });
+        })
+      );
+      res.json({ success: true, photographers: photographerDTOs });
     } catch (error) {
       console.error("List photographers error:", error);
       res
@@ -363,7 +373,10 @@ export class PhotographerController {
         storage.getFollowingCount(photographer.userId),
       ]);
 
-      res.json({ success: true, photographer: { ...photographer, followerCount, followingCount } });
+      res.json({
+        success: true,
+        photographer: toPublicPhotographerDTO(photographer, { followerCount, followingCount }),
+      });
     } catch (error) {
       console.error("Get photographer error:", error);
       res
