@@ -4,19 +4,18 @@
  * Single function (authorizeAndProvisionGoLive) that:
  *   1. Enforces Connect onboarding completion.
  *   2. Enforces active vendor subscription.
- *   3. Provisions (or rotates the Price on) the vendor's Stripe catalog item
- *      in their own Connect account.
+ *   3. Delegates Stripe Product+Price provisioning to provisionConnectedCatalogItem
+ *      (server/services/connectedCatalog.ts) — the ONE place provisioning logic lives.
  *
  * Both go-live routes (POST /api/vendor/products/:id/go-live and
  * POST /api/vendor/services/:id/go-live) and the price-change-while-live
- * path in the two PATCH routes call this function exclusively — no other
- * code site talks to Stripe for vendor catalog provisioning.
+ * path in the two PATCH routes call this function exclusively.
  */
 
 import { storage } from '../storage';
 import { stripeService } from '../stripe/stripeService';
-import { getUncachableStripeClient } from '../stripe/stripeClient';
 import type { Business } from '@shared/schema';
+import { provisionConnectedCatalogItem } from './connectedCatalog';
 
 // ─── Typed errors ─────────────────────────────────────────────────────────────
 
@@ -125,76 +124,14 @@ export async function authorizeAndProvisionGoLive(
   }
 
   // ── Provision ─────────────────────────────────────────────────────────────
-  const connectedAccountId = business.stripeAccountId;
-
-  // Case A: No Stripe Product yet — full provision on the vendor's connected account.
-  if (!item.stripeProductId) {
-    const stripeProduct = await stripeService.createStripeProduct({
-      name: item.name,
-      description: item.description || undefined,
-      metadata: {
-        type: kind === 'service' ? 'vendor_service' : 'vendor_product',
-        itemId: item.id,
-        businessId: business.id,
-      },
-      connectedAccountId,
-    });
-
-    const stripePrice = await stripeService.createStripePrice({
-      productId: stripeProduct.id,
-      unitAmountCents: item.price,
-      connectedAccountId,
-    });
-
-    return { stripeProductId: stripeProduct.id, stripePriceId: stripePrice.id };
-  }
-
-  // Case B: Product exists but no active Price (e.g. after archive then re-publish).
-  if (!item.stripePriceId) {
-    const stripePrice = await stripeService.createStripePrice({
-      productId: item.stripeProductId,
-      unitAmountCents: item.price,
-      connectedAccountId,
-    });
-
-    const stripe = await getUncachableStripeClient();
-    await stripe.products.update(
-      item.stripeProductId,
-      { default_price: stripePrice.id },
-      { stripeAccount: connectedAccountId },
-    );
-
-    return { stripeProductId: item.stripeProductId, stripePriceId: stripePrice.id };
-  }
-
-  // Case C: Both Product and Price exist — compare live Stripe amount vs. desired.
-  const stripe = await getUncachableStripeClient();
-  const currentStripePrice = await stripe.prices.retrieve(
-    item.stripePriceId,
-    {},
-    { stripeAccount: connectedAccountId },
-  );
-
-  if ((currentStripePrice.unit_amount ?? null) === item.price) {
-    // Price unchanged — idempotent, no Stripe API calls needed.
-    return { stripeProductId: item.stripeProductId, stripePriceId: item.stripePriceId };
-  }
-
-  // Price changed: create new Price → set as default → archive old Price.
-  // Product ID is never duplicated.
-  const newStripePrice = await stripeService.createStripePrice({
-    productId: item.stripeProductId,
+  // Delegate to the shared connected-account catalog service.
+  // Cases A/B/C (create / reprice / idempotent) are handled there.
+  return provisionConnectedCatalogItem({
+    connectedAccountId: business.stripeAccountId,
+    name: item.name,
+    description: item.description,
     unitAmountCents: item.price,
-    connectedAccountId,
+    existingProductId: item.stripeProductId,
+    existingPriceId: item.stripePriceId,
   });
-
-  await stripe.products.update(
-    item.stripeProductId,
-    { default_price: newStripePrice.id },
-    { stripeAccount: connectedAccountId },
-  );
-
-  await stripeService.deactivateStripePrice(item.stripePriceId, connectedAccountId);
-
-  return { stripeProductId: item.stripeProductId, stripePriceId: newStripePrice.id };
 }

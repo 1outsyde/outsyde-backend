@@ -4,6 +4,7 @@ import { PhotographerService } from "./photographers.service";
 import { stripeService } from "../stripe/stripeService";
 import { storage } from "../storage";
 import { verifyAccessToken, AuthenticatedRequest } from "../auth";
+import { provisionConnectedCatalogItem } from "../services/connectedCatalog";
 
 // Rate limit for displayName changes (7 days cooldown)
 const DISPLAY_NAME_CHANGE_COOLDOWN_DAYS = 7;
@@ -546,44 +547,47 @@ export class PhotographerController {
         packageHours
       } = req.body;
 
-      // Handle price changes for live services with Stripe
+      // Handle Stripe catalog updates for live services.
+      // BUG-FIX: guard was `service.stripeProductId` (legacy platform field, always null
+      // for services provisioned via the connected-account go-live path).  Corrected to
+      // `service.stripeConnectedProductId` — the field written by goLiveService.
       let stripeUpdates: any = {};
-      if (service.status === 'live' && service.stripeProductId) {
-        // Update Stripe Product metadata if name/description changed
+      if (service.status === 'live' && service.stripeConnectedProductId && photographer.stripeAccountId) {
+        // Sync name/description to the Stripe Product on the photographer's connected account.
         if (name || description) {
-          await stripeService.updateStripeProduct(service.stripeProductId, {
-            name: name || service.name,
-            description: description !== undefined ? (description || undefined) : (service.description || undefined),
-          });
+          await stripeService.updateStripeProduct(
+            service.stripeConnectedProductId,
+            {
+              name: name || service.name,
+              description: description !== undefined ? (description || undefined) : (service.description || undefined),
+            },
+            photographer.stripeAccountId,
+          );
         }
-        
-        // Determine current and new price based on pricing model
-        const currentPrice = service.pricingModel === 'hourly' 
+
+        // Determine current and new price based on pricing model.
+        const currentPrice = service.pricingModel === 'hourly'
           ? service.hourlyRateCents || 0
           : service.priceCents || 0;
         const newPricingModel = pricingModel || service.pricingModel || 'package';
         const newPrice = newPricingModel === 'hourly'
           ? (hourlyRateCents !== undefined ? hourlyRateCents : service.hourlyRateCents) || 0
           : (priceCents !== undefined ? priceCents : service.priceCents) || 0;
-        
-        // If price changed and service is live, create new Stripe Price and deactivate old one
+
+        // Price rotation: create new Price, set as default, archive old Price.
+        // Delegates to provisionConnectedCatalogItem so rotation logic is shared
+        // with the business path and lives in exactly one place.
         const priceChanged = newPrice !== currentPrice || (pricingModel && pricingModel !== service.pricingModel);
-        if (priceChanged && service.stripePriceId && !isContactForPricing && newPrice > 0) {
-          // Create new price
-          const newStripePrice = await stripeService.createStripePrice({
-            productId: service.stripeProductId,
+        if (priceChanged && !isContactForPricing && newPrice > 0) {
+          const result = await provisionConnectedCatalogItem({
+            connectedAccountId: photographer.stripeAccountId,
+            name: name || service.name,
+            description: description !== undefined ? (description || undefined) : (service.description || undefined),
             unitAmountCents: newPrice,
-            metadata: {
-              photographerServiceId: service.id,
-              photographerId: photographer.id,
-              pricingModel: newPricingModel,
-            },
+            existingProductId: service.stripeConnectedProductId,
+            existingPriceId: service.stripeConnectedPriceId ?? null,
           });
-          
-          // Deactivate old price
-          await stripeService.deactivateStripePrice(service.stripePriceId);
-          
-          stripeUpdates.stripePriceId = newStripePrice.id;
+          stripeUpdates.stripeConnectedPriceId = result.stripePriceId;
         }
       }
 
