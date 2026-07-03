@@ -69,6 +69,7 @@ import {
 import rateLimit from "express-rate-limit";
 import { stripeService } from "./stripe/stripeService";
 import { getStripePublishableKey, getUncachableStripeClient } from "./stripe/stripeClient";
+import { authorizeAndProvisionGoLive, GoLiveError } from "./services/goLiveGate";
 import { ObjectStorageService, ObjectNotFoundError } from "./objectStorage";
 import { ObjectPermission } from "./objectAcl";
 import { NotificationTriggers } from "./notificationService";
@@ -8759,37 +8760,38 @@ export async function registerRoutes(
 
       const validated = updateSchema.parse(req.body);
       
-      // Handle price changes for live products with Stripe
+      // Handle Stripe catalog updates for live products.
       let stripeUpdates: any = {};
       if (product.status === 'live' && product.stripeProductId) {
-        // Update Stripe Product metadata if name/description changed
-        if (validated.name || validated.description) {
+        // Name/description/image sync (metadata only — no provisioning, no gates).
+        if (validated.name || validated.description !== undefined || validated.images !== undefined) {
           await stripeService.updateStripeProduct(product.stripeProductId, {
             name: validated.name || product.name,
             description: validated.description !== undefined ? (validated.description || undefined) : (product.description || undefined),
             images: validated.images || product.images || (product.imageUrl ? [product.imageUrl] : undefined),
           });
         }
-        
-        // If price changed and product is live, create new Stripe Price and deactivate old one
-        if (validated.price !== undefined && validated.price !== product.price && product.stripePriceId) {
-          // Create new price
-          const newStripePrice = await stripeService.createStripePrice({
-            productId: product.stripeProductId,
-            unitAmountCents: validated.price,
-            metadata: {
-              vendorProductId: product.id,
-              businessId: business.id,
-            },
-          });
-          
-          // Deactivate old price
-          await stripeService.deactivateStripePrice(product.stripePriceId);
-          
-          stripeUpdates.stripePriceId = newStripePrice.id;
+
+        // Price change: route through the chokepoint so the new Price is created on
+        // the vendor's Connect account, the old Price is archived, and auth gates are
+        // re-enforced (subscription lapse should block even a price edit).
+        if (validated.price !== undefined && validated.price !== product.price) {
+          try {
+            const priceResult = await authorizeAndProvisionGoLive(
+              { ...product, price: validated.price },
+              business,
+              'product',
+            );
+            stripeUpdates.stripePriceId = priceResult.stripePriceId;
+          } catch (err) {
+            if (err instanceof GoLiveError) {
+              return res.status(409).json({ code: err.code, message: err.message });
+            }
+            throw err;
+          }
         }
       }
-      
+
       const updated = await storage.updateVendorProduct(req.params.id, { ...validated, ...stripeUpdates });
       res.json({ product: updated });
     } catch (error) {
@@ -8841,38 +8843,7 @@ export async function registerRoutes(
         return res.status(404).json({ error: "No business found" });
       }
 
-      // Self-healing sync: Check Stripe API for onboarding status if local says incomplete
-      let isOnboardingComplete = business.stripeOnboardingComplete || false;
-      if (!isOnboardingComplete && business.stripeAccountId) {
-        isOnboardingComplete = await stripeService.syncOnboardingStatus({
-          entityType: 'business',
-          entityId: business.id,
-          stripeAccountId: business.stripeAccountId,
-          currentOnboardingComplete: false,
-          updateFn: (id, data) => storage.updateBusiness(id, data),
-        });
-      }
-
-      // Check Stripe onboarding is complete before allowing Go Live
-      if (!business.stripeAccountId || !isOnboardingComplete) {
-        return res.status(403).json({ 
-          error: "Payments not enabled",
-          message: "You must complete Stripe payment setup before publishing products. Please complete your payment onboarding first.",
-          requiresOnboarding: true,
-        });
-      }
-
-      // Check subscription is active before allowing Go Live
-      const subStatus = await storage.isBusinessSubscriptionActive(business.id);
-      if (!subStatus.active) {
-        return res.status(403).json({
-          error: "Subscription required",
-          message: "You must have an active subscription to publish products. Please subscribe to a plan first.",
-          requiresSubscription: true,
-        });
-      }
-
-      // Check business is approved before allowing Go Live
+      // Approval gate (separate from Connect/subscription — remains a 403)
       if ((business as any).approvalStatus !== 'approved') {
         return res.status(403).json({
           error: "Business not approved",
@@ -8886,38 +8857,24 @@ export async function registerRoutes(
         return res.status(404).json({ error: "Product not found" });
       }
 
-      // Already live? Just return the product
-      if (product.status === 'live' && product.stripeProductId && product.stripePriceId) {
-        return res.json({ product, message: "Product is already live" });
+      // Single chokepoint: enforces Connect onboarding + active subscription, then
+      // provisions (or idempotently reuses) the Stripe Product+Price on the vendor's
+      // own Connect account. Throws GoLiveError on gate failure.
+      let provisionResult: { stripeProductId: string; stripePriceId: string };
+      try {
+        provisionResult = await authorizeAndProvisionGoLive(product, business, 'product');
+      } catch (err) {
+        if (err instanceof GoLiveError) {
+          return res.status(409).json({ code: err.code, message: err.message });
+        }
+        throw err;
       }
 
-      // Create Stripe Product
-      const stripeProduct = await stripeService.createStripeProduct({
-        name: product.name,
-        description: product.description || undefined,
-        metadata: {
-          type: 'vendor_product',
-          itemId: product.id,
-          businessId: business.id,
-        },
-        images: product.images || (product.imageUrl ? [product.imageUrl] : undefined),
-      });
-
-      // Create Stripe Price
-      const stripePrice = await stripeService.createStripePrice({
-        productId: stripeProduct.id,
-        unitAmountCents: product.price,
-        metadata: {
-          vendorProductId: product.id,
-          businessId: business.id,
-        },
-      });
-
-      // Update product with Stripe IDs and set status to live
+      // Persist Stripe IDs and mark live.
       const updated = await storage.updateVendorProduct(product.id, {
         status: 'live',
-        stripeProductId: stripeProduct.id,
-        stripePriceId: stripePrice.id,
+        stripeProductId: provisionResult.stripeProductId,
+        stripePriceId: provisionResult.stripePriceId,
       });
 
       res.json({ product: updated, message: "Product is now live" });
@@ -9064,37 +9021,37 @@ export async function registerRoutes(
 
       const validated = updateSchema.parse(req.body);
       
-      // Handle price changes for live services with Stripe
+      // Handle Stripe catalog updates for live services.
       let stripeUpdates: any = {};
       if (service.status === 'live' && service.stripeProductId) {
-        // Update Stripe Product metadata if name/description changed
-        if (validated.name || validated.description) {
+        // Name/description sync (metadata only — no provisioning, no gates).
+        if (validated.name || validated.description !== undefined) {
           await stripeService.updateStripeProduct(service.stripeProductId, {
             name: validated.name || service.name,
             description: validated.description !== undefined ? (validated.description || undefined) : (service.description || undefined),
           });
         }
-        
-        // If price changed and service is live, create new Stripe Price and deactivate old one
-        if (validated.price !== undefined && validated.price !== service.price && service.stripePriceId) {
-          // Create new price
-          const newStripePrice = await stripeService.createStripePrice({
-            productId: service.stripeProductId,
-            unitAmountCents: validated.price,
-            metadata: {
-              vendorServiceId: service.id,
-              businessId: business.id,
-              durationMinutes: String(validated.durationMinutes || service.durationMinutes),
-            },
-          });
-          
-          // Deactivate old price
-          await stripeService.deactivateStripePrice(service.stripePriceId);
-          
-          stripeUpdates.stripePriceId = newStripePrice.id;
+
+        // Price change: route through the chokepoint so the new Price is created on
+        // the vendor's Connect account, the old Price is archived, and auth gates are
+        // re-enforced (subscription lapse should block even a price edit).
+        if (validated.price !== undefined && validated.price !== service.price) {
+          try {
+            const priceResult = await authorizeAndProvisionGoLive(
+              { ...service, price: validated.price },
+              business,
+              'service',
+            );
+            stripeUpdates.stripePriceId = priceResult.stripePriceId;
+          } catch (err) {
+            if (err instanceof GoLiveError) {
+              return res.status(409).json({ code: err.code, message: err.message });
+            }
+            throw err;
+          }
         }
       }
-      
+
       const updated = await storage.updateVendorService(req.params.id, { ...validated, ...stripeUpdates });
       res.json({ service: updated });
     } catch (error) {
@@ -9146,38 +9103,7 @@ export async function registerRoutes(
         return res.status(404).json({ error: "No business found" });
       }
 
-      // Self-healing sync: Check Stripe API for onboarding status if local says incomplete
-      let isOnboardingComplete = business.stripeOnboardingComplete || false;
-      if (!isOnboardingComplete && business.stripeAccountId) {
-        isOnboardingComplete = await stripeService.syncOnboardingStatus({
-          entityType: 'business',
-          entityId: business.id,
-          stripeAccountId: business.stripeAccountId,
-          currentOnboardingComplete: false,
-          updateFn: (id, data) => storage.updateBusiness(id, data),
-        });
-      }
-
-      // Check Stripe onboarding is complete before allowing Go Live
-      if (!business.stripeAccountId || !isOnboardingComplete) {
-        return res.status(403).json({ 
-          error: "Payments not enabled",
-          message: "You must complete Stripe payment setup before publishing services. Please complete your payment onboarding first.",
-          requiresOnboarding: true,
-        });
-      }
-
-      // Check subscription is active before allowing Go Live
-      const subStatus = await storage.isBusinessSubscriptionActive(business.id);
-      if (!subStatus.active) {
-        return res.status(403).json({
-          error: "Subscription required",
-          message: "You must have an active subscription to publish services. Please subscribe to a plan first.",
-          requiresSubscription: true,
-        });
-      }
-
-      // Check business is approved before allowing Go Live
+      // Approval gate (separate from Connect/subscription — remains a 403)
       if ((business as any).approvalStatus !== 'approved') {
         return res.status(403).json({
           error: "Business not approved",
@@ -9191,38 +9117,24 @@ export async function registerRoutes(
         return res.status(404).json({ error: "Service not found" });
       }
 
-      // Already live? Just return the service
-      if (service.status === 'live' && service.stripeProductId && service.stripePriceId) {
-        return res.json({ service, message: "Service is already live" });
+      // Single chokepoint: enforces Connect onboarding + active subscription, then
+      // provisions (or idempotently reuses) the Stripe Product+Price on the vendor's
+      // own Connect account. Throws GoLiveError on gate failure.
+      let provisionResult: { stripeProductId: string; stripePriceId: string };
+      try {
+        provisionResult = await authorizeAndProvisionGoLive(service, business, 'service');
+      } catch (err) {
+        if (err instanceof GoLiveError) {
+          return res.status(409).json({ code: err.code, message: err.message });
+        }
+        throw err;
       }
 
-      // Create Stripe Product
-      const stripeProduct = await stripeService.createStripeProduct({
-        name: service.name,
-        description: service.description || undefined,
-        metadata: {
-          type: 'vendor_service',
-          itemId: service.id,
-          businessId: business.id,
-        },
-      });
-
-      // Create Stripe Price
-      const stripePrice = await stripeService.createStripePrice({
-        productId: stripeProduct.id,
-        unitAmountCents: service.price,
-        metadata: {
-          vendorServiceId: service.id,
-          businessId: business.id,
-          durationMinutes: String(service.durationMinutes),
-        },
-      });
-
-      // Update service with Stripe IDs and set status to live
+      // Persist Stripe IDs and mark live.
       const updated = await storage.updateVendorService(service.id, {
         status: 'live',
-        stripeProductId: stripeProduct.id,
-        stripePriceId: stripePrice.id,
+        stripeProductId: provisionResult.stripeProductId,
+        stripePriceId: provisionResult.stripePriceId,
       });
 
       res.json({ service: updated, message: "Service is now live" });
