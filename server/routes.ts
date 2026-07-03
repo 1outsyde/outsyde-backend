@@ -18,6 +18,7 @@ import {
   type StaffMember,
   type StaffInvite,
 } from "@shared/schema";
+import { sendStaffInviteEmail } from "./services/resendService";
 
 // Helper to sanitize user data for non-admin responses (removes sensitive fields)
 // DOB: replaced with age range for privacy
@@ -9551,6 +9552,7 @@ export async function registerRoutes(
       const inviteSchema = z.object({
         email: z.string().email("Valid email is required"),
         role: z.enum(["staff", "manager"]).optional(),
+        phone: z.string().optional(),
       });
 
       const validated = inviteSchema.parse(req.body);
@@ -9567,13 +9569,27 @@ export async function registerRoutes(
       const invite = await storage.createStaffInvite({
         businessId: business.id,
         email: validated.email,
+        phone: validated.phone ?? null,
         role: validated.role || "staff",
         invitedByUserId: userId,
       });
 
-      // TODO: Send invite email with the invite code
+      // Send invite email — invite row persists regardless of send outcome
+      const { sent, error: sendError } = await sendStaffInviteEmail(
+        invite.email,
+        business.name || "Outsyde Business",
+        invite.inviteCode,
+        invite.role || "staff",
+      );
 
-      res.status(201).json({ invite });
+      if (sent) {
+        await storage.updateStaffInvite(invite.id, { sentAt: new Date() });
+        invite.sentAt = new Date();
+      } else {
+        console.warn(`[staff/invites] Email not sent for invite ${invite.id}: ${sendError}`);
+      }
+
+      res.status(201).json({ invite, sent });
     } catch (error) {
       console.error("Create staff invite error:", error);
       if (error instanceof z.ZodError) {

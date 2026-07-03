@@ -514,24 +514,26 @@ export const staffAvailability = pgTable("staff_availability", {
 export const staffInvites = pgTable("staff_invites", {
   id: varchar("id", { length: 36 }).primaryKey().default(sql`gen_random_uuid()`),
   businessId: varchar("business_id", { length: 36 }).notNull().references(() => businesses.id),
-  
-  // Either email-based invite or invite code
-  email: text("email"),
-  inviteCode: text("invite_code").unique(),
-  
+
+  // Recipient contact — email is required; phone reserved for future SMS
+  email: text("email").notNull(),
+  phone: text("phone"),
+  inviteCode: text("invite_code").unique().notNull(),
+
   // Pre-filled staff info
   displayName: text("display_name"),
   role: text("role").default("staff"),
-  
-  // Status: 'pending' | 'accepted' | 'expired' | 'cancelled'
+
+  // Status: 'pending' | 'accepted' | 'revoked' | 'expired'
   status: text("status").default("pending").notNull(),
-  
+
   invitedByUserId: varchar("invited_by_user_id", { length: 36 }).references(() => users.id),
   acceptedByUserId: varchar("accepted_by_user_id", { length: 36 }).references(() => users.id),
-  
-  expiresAt: timestamp("expires_at"),
+
+  sentAt: timestamp("sent_at"),
+  expiresAt: timestamp("expires_at").notNull().default(sql`NOW() + INTERVAL '7 days'`),
   acceptedAt: timestamp("accepted_at"),
-  
+
   createdAt: timestamp("created_at").defaultNow().notNull(),
 });
 
@@ -1807,6 +1809,8 @@ export const insertStaffInviteSchema = createInsertSchema(staffInvites).omit({
   id: true,
   createdAt: true,
   acceptedAt: true,
+  sentAt: true,
+  inviteCode: true,
 });
 
 export const updateStaffMemberSchema = z.object({

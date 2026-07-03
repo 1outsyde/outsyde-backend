@@ -4733,7 +4733,7 @@ export class DatabaseStorage implements IStorage {
 
   async createStaffInvite(data: InsertStaffInvite): Promise<StaffInvite> {
     const id = randomUUID();
-    const inviteCode = data.inviteCode || randomUUID().substring(0, 8).toUpperCase();
+    const inviteCode = randomUUID().substring(0, 8).toUpperCase();
     const [invite] = await db.insert(staffInvites)
       .values({ id, ...data, inviteCode })
       .returning();
