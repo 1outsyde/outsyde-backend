@@ -69,6 +69,7 @@ import {
 import rateLimit from "express-rate-limit";
 import { stripeService } from "./stripe/stripeService";
 import { getStripePublishableKey, getUncachableStripeClient } from "./stripe/stripeClient";
+import { provisionStripeForItem, ConnectNotReadyError } from "./services/stripeProvisioning";
 import { ObjectStorageService, ObjectNotFoundError } from "./objectStorage";
 import { ObjectPermission } from "./objectAcl";
 import { NotificationTriggers } from "./notificationService";
@@ -8737,9 +8738,42 @@ export async function registerRoutes(
       });
 
       const validated = updateSchema.parse(req.body);
-      
-      // Handle price changes for live products with Stripe
+
+      // Draft -> live transition via this PATCH route must provision Stripe on the vendor's
+      // Connect account before the item is ever marked live. Edits that don't change status,
+      // and live -> draft/paused/archived transitions, never touch Stripe here.
       let stripeUpdates: any = {};
+      const isDraftToLive = validated.status === "live" && product.status !== "live";
+      if (isDraftToLive) {
+        try {
+          // Merge in same-request field edits (e.g. price/name changed alongside status) so
+          // the freshly-created Stripe Product/Price reflect the values actually being published.
+          const provisioned = await provisionStripeForItem(
+            {
+              ...product,
+              name: validated.name ?? product.name,
+              description: validated.description !== undefined ? validated.description : product.description,
+              price: validated.price ?? product.price,
+              images: validated.images ?? product.images,
+              imageUrl: validated.imageUrl ?? product.imageUrl,
+            },
+            business,
+            "product"
+          );
+          stripeUpdates.stripeProductId = provisioned.stripeProductId;
+          stripeUpdates.stripePriceId = provisioned.stripePriceId;
+        } catch (err) {
+          if (err instanceof ConnectNotReadyError) {
+            return res.status(409).json({
+              code: "connect_incomplete",
+              message: "Complete your payment setup to publish this item.",
+            });
+          }
+          throw err;
+        }
+      }
+
+      // Handle price changes for products that are already live with Stripe
       if (product.status === 'live' && product.stripeProductId) {
         // Update Stripe Product metadata if name/description changed
         if (validated.name || validated.description) {
@@ -8831,6 +8865,7 @@ export async function registerRoutes(
           updateFn: (id, data) => storage.updateBusiness(id, data),
         });
       }
+      business.stripeOnboardingComplete = isOnboardingComplete;
 
       // Check Stripe onboarding is complete before allowing Go Live
       if (!business.stripeAccountId || !isOnboardingComplete) {
@@ -8870,33 +8905,26 @@ export async function registerRoutes(
         return res.json({ product, message: "Product is already live" });
       }
 
-      // Create Stripe Product
-      const stripeProduct = await stripeService.createStripeProduct({
-        name: product.name,
-        description: product.description || undefined,
-        metadata: {
-          type: 'vendor_product',
-          itemId: product.id,
-          businessId: business.id,
-        },
-        images: product.images || (product.imageUrl ? [product.imageUrl] : undefined),
-      });
-
-      // Create Stripe Price
-      const stripePrice = await stripeService.createStripePrice({
-        productId: stripeProduct.id,
-        unitAmountCents: product.price,
-        metadata: {
-          vendorProductId: product.id,
-          businessId: business.id,
-        },
-      });
+      // Provision (or reuse) the Product/Price on the vendor's own Connect account — never
+      // the platform account, and never a duplicate Product for an item that already has one.
+      let provisioned;
+      try {
+        provisioned = await provisionStripeForItem(product, business, "product");
+      } catch (err) {
+        if (err instanceof ConnectNotReadyError) {
+          return res.status(409).json({
+            code: "connect_incomplete",
+            message: "Complete your payment setup to publish this item.",
+          });
+        }
+        throw err;
+      }
 
       // Update product with Stripe IDs and set status to live
       const updated = await storage.updateVendorProduct(product.id, {
         status: 'live',
-        stripeProductId: stripeProduct.id,
-        stripePriceId: stripePrice.id,
+        stripeProductId: provisioned.stripeProductId,
+        stripePriceId: provisioned.stripePriceId,
       });
 
       res.json({ product: updated, message: "Product is now live" });
@@ -9042,9 +9070,41 @@ export async function registerRoutes(
       });
 
       const validated = updateSchema.parse(req.body);
-      
-      // Handle price changes for live services with Stripe
+
+      // Draft -> live transition via this PATCH route must provision Stripe on the vendor's
+      // Connect account before the item is ever marked live. Edits that don't change status,
+      // and live -> draft/paused/archived transitions, never touch Stripe here.
       let stripeUpdates: any = {};
+      const isDraftToLive = validated.status === "live" && service.status !== "live";
+      if (isDraftToLive) {
+        try {
+          // Merge in same-request field edits (e.g. price/duration changed alongside status)
+          // so the freshly-created Stripe Product/Price reflect the values actually published.
+          const provisioned = await provisionStripeForItem(
+            {
+              ...service,
+              name: validated.name ?? service.name,
+              description: validated.description !== undefined ? validated.description : service.description,
+              price: validated.price ?? service.price,
+              durationMinutes: validated.durationMinutes ?? service.durationMinutes,
+            },
+            business,
+            "service"
+          );
+          stripeUpdates.stripeProductId = provisioned.stripeProductId;
+          stripeUpdates.stripePriceId = provisioned.stripePriceId;
+        } catch (err) {
+          if (err instanceof ConnectNotReadyError) {
+            return res.status(409).json({
+              code: "connect_incomplete",
+              message: "Complete your payment setup to publish this item.",
+            });
+          }
+          throw err;
+        }
+      }
+
+      // Handle price changes for services that are already live with Stripe
       if (service.status === 'live' && service.stripeProductId) {
         // Update Stripe Product metadata if name/description changed
         if (validated.name || validated.description) {
@@ -9136,6 +9196,7 @@ export async function registerRoutes(
           updateFn: (id, data) => storage.updateBusiness(id, data),
         });
       }
+      business.stripeOnboardingComplete = isOnboardingComplete;
 
       // Check Stripe onboarding is complete before allowing Go Live
       if (!business.stripeAccountId || !isOnboardingComplete) {
@@ -9175,33 +9236,26 @@ export async function registerRoutes(
         return res.json({ service, message: "Service is already live" });
       }
 
-      // Create Stripe Product
-      const stripeProduct = await stripeService.createStripeProduct({
-        name: service.name,
-        description: service.description || undefined,
-        metadata: {
-          type: 'vendor_service',
-          itemId: service.id,
-          businessId: business.id,
-        },
-      });
-
-      // Create Stripe Price
-      const stripePrice = await stripeService.createStripePrice({
-        productId: stripeProduct.id,
-        unitAmountCents: service.price,
-        metadata: {
-          vendorServiceId: service.id,
-          businessId: business.id,
-          durationMinutes: String(service.durationMinutes),
-        },
-      });
+      // Provision (or reuse) the Product/Price on the vendor's own Connect account — never
+      // the platform account, and never a duplicate Product for an item that already has one.
+      let provisioned;
+      try {
+        provisioned = await provisionStripeForItem(service, business, "service");
+      } catch (err) {
+        if (err instanceof ConnectNotReadyError) {
+          return res.status(409).json({
+            code: "connect_incomplete",
+            message: "Complete your payment setup to publish this item.",
+          });
+        }
+        throw err;
+      }
 
       // Update service with Stripe IDs and set status to live
       const updated = await storage.updateVendorService(service.id, {
         status: 'live',
-        stripeProductId: stripeProduct.id,
-        stripePriceId: stripePrice.id,
+        stripeProductId: provisioned.stripeProductId,
+        stripePriceId: provisioned.stripePriceId,
       });
 
       res.json({ service: updated, message: "Service is now live" });
