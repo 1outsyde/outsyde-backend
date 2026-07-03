@@ -476,15 +476,21 @@ export class StripeService {
   }
 
   /**
-   * Deactivate a Stripe Price (archive it)
-   * Used when a vendor changes their price - old price becomes inactive
+   * Deactivate a Stripe Price (archive it).
+   * Used when a vendor changes their price — old price becomes inactive.
+   * Pass connectedAccountId when the price lives on a Connect account.
    */
-  async deactivateStripePrice(priceId: string) {
+  async deactivateStripePrice(priceId: string, connectedAccountId?: string) {
     const stripe = await getUncachableStripeClient();
 
-    return stripe.prices.update(priceId, {
-      active: false,
-    });
+    if (connectedAccountId) {
+      return stripe.prices.update(
+        priceId,
+        { active: false },
+        { stripeAccount: connectedAccountId },
+      );
+    }
+    return stripe.prices.update(priceId, { active: false });
   }
 
   /**
