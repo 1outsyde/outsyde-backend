@@ -4,6 +4,7 @@ import { PhotographerService } from "./photographers.service";
 import { stripeService } from "../stripe/stripeService";
 import { storage } from "../storage";
 import { verifyAccessToken, AuthenticatedRequest } from "../auth";
+import { updateBusinessProfileSchema } from "@shared/schema";
 
 // Rate limit for displayName changes (7 days cooldown)
 const DISPLAY_NAME_CHANGE_COOLDOWN_DAYS = 7;
@@ -194,7 +195,16 @@ export class PhotographerController {
         return res.status(400).json({ error: "coverMediaType is required when setting coverImage" });
       }
       if (logoImage !== undefined) updates.logoImage = logoImage;
-      if (brandColors !== undefined) updates.brandColors = brandColors;
+      if (brandColors !== undefined) {
+        const brandColorsResult = updateBusinessProfileSchema.shape.brandColors.safeParse(brandColors);
+        if (!brandColorsResult.success) {
+          return res.status(400).json({
+            error: "Invalid brandColors",
+            details: brandColorsResult.error.errors.map((e) => e.message),
+          });
+        }
+        updates.brandColors = brandColorsResult.data ?? null;
+      }
 
       // Guard against empty update payload to prevent SQL error
       if (Object.keys(updates).length === 0) {

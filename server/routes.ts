@@ -124,6 +124,7 @@ import {
   feedPosts,
   businesses,
   photographers,
+  updateBusinessProfileSchema,
 } from "@shared/schema";
 import { and, ilike } from "drizzle-orm";
 
@@ -8280,6 +8281,18 @@ export async function registerRoutes(
         if (coverImage !== null && coverMediaType === undefined) {
           return res.status(400).json({ error: "coverMediaType is required when setting coverImage" });
         }
+      }
+
+      // Validate brandColors against the curated color ID schema
+      if (updates.brandColors !== undefined) {
+        const brandColorsResult = updateBusinessProfileSchema.shape.brandColors.safeParse(updates.brandColors);
+        if (!brandColorsResult.success) {
+          return res.status(400).json({
+            error: "Invalid brandColors",
+            details: brandColorsResult.error.errors.map((e) => e.message),
+          });
+        }
+        updates.brandColors = brandColorsResult.data ?? null;
       }
 
       const updated = await storage.updateBusiness(business.id, updates);

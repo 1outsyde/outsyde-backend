@@ -4,6 +4,7 @@ import {
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
 import { sql } from "drizzle-orm";
+import { SOLID_COLOR_IDS, GRADIENT_COLOR_IDS } from "./colorOptions";
 
 /**
  * Hours of Operation Day Schema - Aligned with Frontend Format
@@ -315,7 +316,7 @@ export const businesses = pgTable("businesses", {
   }>(),
   contactEmail: text("contact_email"),
   contactPhone: text("contact_phone"),
-  brandColors: jsonb("brand_colors").$type<{ primary?: string; secondary?: string }>(),
+  brandColors: jsonb("brand_colors").$type<{ type: "solid" | "gradient"; id: string } | null>(),
   knownFor: jsonb("known_for").$type<string[]>().default([]),
 
   hasProducts: boolean("has_products").default(false),
@@ -564,7 +565,7 @@ export const photographers = pgTable("photographers", {
   coverImage: text("cover_image"),
   coverMediaType: text("cover_media_type"), // 'image' or 'video'
   logoImage: text("logo_image"),
-  brandColors: jsonb("brand_colors").$type<{ primary?: string; secondary?: string }>(),
+  brandColors: jsonb("brand_colors").$type<{ type: "solid" | "gradient"; id: string } | null>(),
 
   hoursOfOperation: jsonb("hours_of_operation").$type<{
     monday?: { open: string; close: string; closed?: boolean };
@@ -1838,10 +1839,21 @@ export const updateBusinessProfileSchema = z.object({
   contactEmail: z.string().email().optional(),
   contactPhone: z.string().optional(),
   hoursOfOperation: z.record(z.string(), hoursOfOperationDaySchema).optional(),
-  brandColors: z.object({
-    primary: z.string().optional(),
-    secondary: z.string().optional(),
-  }).optional(),
+  brandColors: z
+    .object({
+      type: z.enum(["solid", "gradient"]),
+      id: z.string(),
+    })
+    .nullable()
+    .refine(
+      (val) =>
+        !val ||
+        (val.type === "solid"
+          ? (SOLID_COLOR_IDS as readonly string[]).includes(val.id)
+          : (GRADIENT_COLOR_IDS as readonly string[]).includes(val.id)),
+      { message: "Invalid color id for given type" },
+    )
+    .optional(),
   hasProducts: z.boolean().optional(),
   hasServices: z.boolean().optional(),
 });
