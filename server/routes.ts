@@ -129,6 +129,7 @@ import { and, ilike } from "drizzle-orm";
 
 // ✅ CORRECT IMPORT (default export)
 import { photographersRouter } from "./Photographers/photographers.routes";
+import { toPublicBusinessDTO } from "./serializers/business";
 
 // =========================
 // PAYMENTS CONFIGURATION
@@ -255,7 +256,17 @@ export async function registerRoutes(
         }
       }
       
-      res.json(visibleBusinesses);
+      const businessDTOs = await Promise.all(
+        visibleBusinesses.map(async (business) => {
+          const [followerCount, followingCount] = await Promise.all([
+            storage.getFollowerCount(business.ownerId),
+            storage.getFollowingCount(business.ownerId),
+          ]);
+          return toPublicBusinessDTO(business, { followerCount, followingCount });
+        })
+      );
+
+      res.json(businessDTOs);
     } catch (error) {
       console.error("Get vendors error:", error);
       res.status(500).json({ error: "Failed to get vendors" });
@@ -8089,7 +8100,17 @@ export async function registerRoutes(
         }
       }
       
-      res.json({ businesses: visibleBusinesses });
+      const businessDTOs = await Promise.all(
+        visibleBusinesses.map(async (business) => {
+          const [followerCount, followingCount] = await Promise.all([
+            storage.getFollowerCount(business.ownerId),
+            storage.getFollowingCount(business.ownerId),
+          ]);
+          return toPublicBusinessDTO(business, { followerCount, followingCount });
+        })
+      );
+
+      res.json({ businesses: businessDTOs });
     } catch (error) {
       console.error("Get businesses error:", error);
       res.status(500).json({ error: "Failed to get businesses" });
@@ -8114,7 +8135,7 @@ export async function registerRoutes(
         storage.getFollowingCount(business.ownerId),
       ]);
 
-      res.json({ business: { ...business, followerCount, followingCount } });
+      res.json({ business: toPublicBusinessDTO(business, { followerCount, followingCount }) });
     } catch (error) {
       console.error("Get business error:", error);
       res.status(500).json({ error: "Failed to get business" });
