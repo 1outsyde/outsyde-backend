@@ -476,6 +476,7 @@ export const staffMembers = pgTable("staff_members", {
   stripeAccountId: text("stripe_account_id"),
   stripeOnboardingComplete: boolean("stripe_onboarding_complete").default(false),
   stripeOnboardingUrl: text("stripe_onboarding_url"),
+  stripeOnboardingLastEventAt: timestamp("stripe_onboarding_last_event_at"),
   
   // Staff hours (can be different from business hours)
   hoursOfOperation: jsonb("hours_of_operation").$type<HoursOfOperation>(),

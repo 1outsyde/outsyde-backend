@@ -78,7 +78,7 @@ export class WebhookHandlers {
         break;
 
       case "account.updated":
-        await this.handleConnectAccountUpdated(event.data.object);
+        await this.handleConnectAccountUpdated(event.data.object, event.created);
         break;
       
       // PaymentIntent events for booking payments
@@ -1020,7 +1020,7 @@ export class WebhookHandlers {
   /* =====================================================
      CONNECT ACCOUNT UPDATED (ONBOARDING STATUS)
   ===================================================== */
-  static async handleConnectAccountUpdated(account: any) {
+  static async handleConnectAccountUpdated(account: any, eventCreatedAt: number) {
     const metadata = account.metadata || {};
     const accountId = account.id;
     
@@ -1099,14 +1099,21 @@ export class WebhookHandlers {
       }
     }
     
-    // Update staff member onboarding status
+    // Update staff member onboarding status (with event-ordering guard)
     if (staffMember && staffMember.stripeAccountId === accountId) {
-      console.log(`[Stripe] Updating staff ${staffMember.id} (${staffMember.displayName}) stripeOnboardingComplete=${isOnboardingComplete}`);
-      await storage.updateStaffMember(staffMember.id, {
-        stripeOnboardingComplete: isOnboardingComplete,
-      });
-      if (isOnboardingComplete) {
-        console.log(`[Stripe] Staff member ${staffMember.id} (${staffMember.displayName}) completed Stripe onboarding`);
+      const incomingEventTime = new Date(eventCreatedAt * 1000);
+      const lastAppliedTime = staffMember.stripeOnboardingLastEventAt;
+      if (lastAppliedTime && incomingEventTime <= new Date(lastAppliedTime)) {
+        console.log(`[Stripe] Ignoring stale/out-of-order account.updated for staff ${staffMember.id} — event time ${incomingEventTime.toISOString()} <= last applied ${new Date(lastAppliedTime).toISOString()}`);
+      } else {
+        console.log(`[Stripe] Updating staff ${staffMember.id} (${staffMember.displayName}) stripeOnboardingComplete=${isOnboardingComplete}`);
+        await storage.updateStaffMember(staffMember.id, {
+          stripeOnboardingComplete: isOnboardingComplete,
+          stripeOnboardingLastEventAt: incomingEventTime,
+        });
+        if (isOnboardingComplete) {
+          console.log(`[Stripe] Staff member ${staffMember.id} (${staffMember.displayName}) completed Stripe onboarding`);
+        }
       }
     }
 
