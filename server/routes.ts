@@ -268,6 +268,9 @@ async function acceptStaffInvite(
     );
   }
 
+  console.log(
+    `[acceptStaffInvite] Success: staff ${staff.id} created for business ${invite.businessId}, user ${user.id}`,
+  );
   return { success: true, staff };
 }
 
@@ -9850,18 +9853,23 @@ export async function registerRoutes(
         return res.status(400).json({ error: "Staff member already has a Stripe account" });
       }
 
-      // Create Stripe Express account for the staff member
-      const account = await stripeService.createConnectAccount(
+      // Create Stripe Express account using the staff-specific function so
+      // capabilities (transfers-only), MCC, and metadata (role:"staff") are correct.
+      // This matters for the account.updated webhook — metadata.role="staff" must
+      // match for the staff branch to trigger without falling to the fallback lookup.
+      const account = await stripeService.createStaffConnectAccount(
         staff.email || `staff-${staff.id}@outsyde.app`,
         staff.id,
-        staff.displayName
+        business.id,
+        staff.displayName,
       );
 
-      // Generate onboarding link
+      // Generate onboarding link using the same redirect routes as the auto-accept path.
+      const appBaseUrl = process.env.APP_BASE_URL || `${req.protocol}://${req.get("host")}`;
       const accountLink = await stripeService.createConnectOnboardingLink(
         account.id,
-        `${req.protocol}://${req.get('host')}/staff/onboarding/refresh?staffId=${staff.id}`,
-        `${req.protocol}://${req.get('host')}/staff/onboarding/complete?staffId=${staff.id}`
+        `${appBaseUrl}/api/vendor/staff/connect/refresh?staffId=${staff.id}`,
+        `${appBaseUrl}/api/vendor/staff/connect/return?staffId=${staff.id}`,
       );
 
       // Update staff record with Stripe account ID
