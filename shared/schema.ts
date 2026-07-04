@@ -2038,6 +2038,8 @@ export const customerSignupSchema = z.object({
   selectedIndustries: z.array(z.string()).default([]),
   industryNiches: z.record(z.string(), z.array(z.string())).default({}),
   industryValues: z.record(z.string(), z.array(z.string())).default({}),
+  // Optional: auto-accept a staff invite at signup time
+  inviteCode: z.string().optional(),
 });
 
 export const vendorSignupSchema = z.object({

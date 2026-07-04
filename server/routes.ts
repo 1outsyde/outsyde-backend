@@ -174,6 +174,64 @@ function detectDeviceFromRequest(req: any): string {
   return 'desktop';
 }
 
+// ---------------------------------------------------------------------------
+// Shared invite-accept logic — used by both POST /api/staff/accept-invite
+// (explicit accept by already-registered user) and customer signup
+// (auto-accept when inviteCode is supplied at signup time).
+//
+// The caller decides how to handle the result. The signup path must never
+// block on a non-success result — it logs and continues.
+// ---------------------------------------------------------------------------
+type AcceptInviteResult =
+  | { success: true; staff: StaffMember }
+  | { success: false; statusCode: number; error: string };
+
+async function acceptStaffInvite(
+  inviteCode: string,
+  user: User,
+): Promise<AcceptInviteResult> {
+  const invite = await storage.getStaffInviteByCode(inviteCode);
+  if (!invite) {
+    return { success: false, statusCode: 404, error: "Invalid invite code" };
+  }
+
+  // Transition expired pending invites to status="expired" on first encounter
+  if (invite.status === "pending" && invite.expiresAt && new Date(invite.expiresAt) < new Date()) {
+    await storage.updateStaffInvite(invite.id, { status: "expired" });
+    return { success: false, statusCode: 400, error: "This invite has expired" };
+  }
+
+  if (invite.status !== "pending") {
+    return { success: false, statusCode: 400, error: "This invite is no longer valid" };
+  }
+
+  if (user.email !== invite.email) {
+    return { success: false, statusCode: 403, error: "This invite was sent to a different email address" };
+  }
+
+  const displayName =
+    user.firstName && user.lastName
+      ? `${user.firstName} ${user.lastName}`
+      : user.name || user.email || "Staff Member";
+
+  const staff = await storage.createStaffMember({
+    businessId: invite.businessId,
+    userId: user.id,
+    displayName,
+    email: user.email,
+    role: invite.role || "staff",
+    status: "active",
+  });
+
+  await storage.updateStaffInvite(invite.id, {
+    status: "accepted",
+    acceptedAt: new Date(),
+    acceptedByUserId: user.id,
+  });
+
+  return { success: true, staff };
+}
+
 export async function registerRoutes(
   httpServer: Server,
   app: Express
@@ -442,6 +500,18 @@ export async function registerRoutes(
         industryNiches: data.industryNiches,
         industryValues: data.industryValues,
       });
+
+      // Auto-accept a staff invite if one was supplied — never blocks signup on failure
+      if (data.inviteCode) {
+        try {
+          const inviteResult = await acceptStaffInvite(data.inviteCode, user);
+          if (!inviteResult.success) {
+            console.warn(`[signup] invite auto-accept skipped for code ${data.inviteCode}: ${inviteResult.error}`);
+          }
+        } catch (inviteErr) {
+          console.warn(`[signup] invite auto-accept unexpected error for code ${data.inviteCode}:`, inviteErr);
+        }
+      }
 
       if (req.session) {
         req.session.userId = user.id;
@@ -9640,7 +9710,7 @@ export async function registerRoutes(
     }
   });
 
-  // Accept a staff invite (public endpoint for invited users)
+  // Accept a staff invite (explicit accept by an already-registered, logged-in user)
   app.post("/api/staff/accept-invite", async (req, res) => {
     const userId = req.session?.userId;
     if (!userId) {
@@ -9654,48 +9724,17 @@ export async function registerRoutes(
 
       const { inviteCode } = acceptSchema.parse(req.body);
 
-      const invite = await storage.getStaffInviteByCode(inviteCode);
-      if (!invite) {
-        return res.status(404).json({ error: "Invalid invite code" });
-      }
-
-      // Transition expired pending invites to status="expired" on first encounter
-      if (invite.status === "pending" && invite.expiresAt && new Date(invite.expiresAt) < new Date()) {
-        await storage.updateStaffInvite(invite.id, { status: "expired" });
-        return res.status(400).json({ error: "This invite has expired" });
-      }
-
-      if (invite.status !== "pending") {
-        return res.status(400).json({ error: "This invite is no longer valid" });
-      }
-
-      // Get the user's email to verify it matches
       const user = await storage.getUser(userId);
-      if (!user || user.email !== invite.email) {
-        return res.status(403).json({ error: "This invite was sent to a different email address" });
+      if (!user) {
+        return res.status(401).json({ error: "Not authenticated" });
       }
 
-      // Create the staff member record linked to this user
-      const displayName = user.firstName && user.lastName 
-        ? `${user.firstName} ${user.lastName}`
-        : user.name || user.email || "Staff Member";
-      const staff = await storage.createStaffMember({
-        businessId: invite.businessId,
-        userId: userId,
-        displayName: displayName,
-        email: user.email,
-        role: invite.role || "staff",
-        status: "active",
-      });
+      const result = await acceptStaffInvite(inviteCode, user);
+      if (!result.success) {
+        return res.status(result.statusCode).json({ error: result.error });
+      }
 
-      // Mark the invite as accepted
-      await storage.updateStaffInvite(invite.id, {
-        status: "accepted",
-        acceptedAt: new Date(),
-        acceptedByUserId: userId,
-      });
-
-      res.json({ message: "Invite accepted", staff });
+      res.json({ message: "Invite accepted", staff: result.staff });
     } catch (error) {
       console.error("Accept staff invite error:", error);
       if (error instanceof z.ZodError) {
