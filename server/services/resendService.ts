@@ -1,6 +1,8 @@
 import { Resend } from 'resend';
 
-const INVITE_FROM = 'Outsyde <invites@goutsyde.com>';
+const INVITE_FROM = process.env.RESEND_FROM_EMAIL
+  ? `Outsyde <${process.env.RESEND_FROM_EMAIL}>`
+  : 'Outsyde <invites@info.goutsyde.com>';
 
 function getAppBaseUrl(): string {
   if (process.env.APP_BASE_URL) return process.env.APP_BASE_URL;
