@@ -9625,6 +9625,21 @@ export async function registerRoutes(
     }
   });
 
+  // Public preview of a staff invite — no auth required
+  app.get("/api/staff/invites/:code", async (req, res) => {
+    try {
+      const { code } = req.params;
+      const preview = await storage.getStaffInviteWithContext(code);
+      if (!preview) {
+        return res.status(404).json({ error: "Invalid invite code" });
+      }
+      res.json(preview);
+    } catch (error) {
+      console.error("Get staff invite preview error:", error);
+      res.status(500).json({ error: "Failed to get invite details" });
+    }
+  });
+
   // Accept a staff invite (public endpoint for invited users)
   app.post("/api/staff/accept-invite", async (req, res) => {
     const userId = req.session?.userId;
@@ -9644,12 +9659,14 @@ export async function registerRoutes(
         return res.status(404).json({ error: "Invalid invite code" });
       }
 
-      if (invite.status !== "pending") {
-        return res.status(400).json({ error: "This invite is no longer valid" });
+      // Transition expired pending invites to status="expired" on first encounter
+      if (invite.status === "pending" && invite.expiresAt && new Date(invite.expiresAt) < new Date()) {
+        await storage.updateStaffInvite(invite.id, { status: "expired" });
+        return res.status(400).json({ error: "This invite has expired" });
       }
 
-      if (invite.expiresAt && new Date(invite.expiresAt) < new Date()) {
-        return res.status(400).json({ error: "This invite has expired" });
+      if (invite.status !== "pending") {
+        return res.status(400).json({ error: "This invite is no longer valid" });
       }
 
       // Get the user's email to verify it matches
@@ -9675,6 +9692,7 @@ export async function registerRoutes(
       await storage.updateStaffInvite(invite.id, {
         status: "accepted",
         acceptedAt: new Date(),
+        acceptedByUserId: userId,
       });
 
       res.json({ message: "Invite accepted", staff });
