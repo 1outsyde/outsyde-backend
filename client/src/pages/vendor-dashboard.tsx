@@ -180,6 +180,11 @@ export default function VendorDashboardPage({ onLogout }: VendorDashboardPagePro
   const [newStaffEmail, setNewStaffEmail] = useState("");
   const [newStaffRole, setNewStaffRole] = useState<"staff" | "manager">("staff");
 
+  // Invite team state
+  const [inviteEmail, setInviteEmail] = useState("");
+  const [inviteRole, setInviteRole] = useState<"staff" | "manager">("staff");
+  const [invitePhone, setInvitePhone] = useState("");
+
   // Fetch staff members
   const { data: staffData, isLoading: staffLoading } = useQuery<{ staff: StaffMember[] }>({
     queryKey: ["/api/vendor/staff"],
@@ -259,6 +264,45 @@ export default function VendorDashboardPage({ onLogout }: VendorDashboardPagePro
       toast({ title: "Failed to get onboarding link", variant: "destructive" });
     },
   });
+
+  // Send team invite via email
+  const sendInviteMutation = useMutation({
+    mutationFn: async (data: { email: string; role: string; phone?: string }) => {
+      const response = await apiRequest("POST", "/api/vendor/staff/invites", data);
+      return response.json();
+    },
+    onSuccess: (data) => {
+      if (data.sent) {
+        toast({ title: "Invite sent!", description: `An email invite was sent to ${inviteEmail}.` });
+      } else {
+        toast({
+          title: "Invite created (email not delivered)",
+          description: "The invite record was saved but the email could not be sent. You can resend later.",
+          variant: "destructive",
+        });
+      }
+      setInviteEmail("");
+      setInviteRole("staff");
+      setInvitePhone("");
+      queryClient.invalidateQueries({ queryKey: ["/api/vendor/staff/invites"] });
+    },
+    onError: (err: Error) => {
+      toast({
+        title: "Failed to send invite",
+        description: err?.message ?? "Please try again.",
+        variant: "destructive",
+      });
+    },
+  });
+
+  const handleSendInvite = () => {
+    if (!inviteEmail.trim()) return;
+    sendInviteMutation.mutate({
+      email: inviteEmail.trim(),
+      role: inviteRole,
+      phone: invitePhone.trim() || undefined,
+    });
+  };
 
   const handleAddStaff = () => {
     if (!newStaffName.trim()) return;
@@ -528,6 +572,119 @@ export default function VendorDashboardPage({ onLogout }: VendorDashboardPagePro
                     )}
                   </CardContent>
                 </Card>
+
+                {/* Invite Team — only for multi-staff businesses */}
+                {businessData?.business?.isMultiStaff && (
+                  <div className="space-y-4" data-testid="section-invite-team">
+                    <Card>
+                      <CardHeader>
+                        <CardTitle>Invite Team Member</CardTitle>
+                        <CardDescription>
+                          Send an email invitation to a new staff member. They'll receive a link to join your team.
+                        </CardDescription>
+                      </CardHeader>
+                      <CardContent className="space-y-4">
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                          <div className="space-y-2">
+                            <Label htmlFor="invite-email">Email address <span className="text-destructive">*</span></Label>
+                            <Input
+                              id="invite-email"
+                              type="email"
+                              placeholder="colleague@example.com"
+                              value={inviteEmail}
+                              onChange={(e) => setInviteEmail(e.target.value)}
+                              data-testid="input-invite-email"
+                            />
+                          </div>
+                          <div className="space-y-2">
+                            <Label htmlFor="invite-role">Role</Label>
+                            <Select value={inviteRole} onValueChange={(v: "staff" | "manager") => setInviteRole(v)}>
+                              <SelectTrigger id="invite-role" data-testid="select-invite-role">
+                                <SelectValue placeholder="Select role" />
+                              </SelectTrigger>
+                              <SelectContent>
+                                <SelectItem value="staff">Staff</SelectItem>
+                                <SelectItem value="manager">Manager</SelectItem>
+                              </SelectContent>
+                            </Select>
+                          </div>
+                        </div>
+                        <div className="space-y-2">
+                          <Label htmlFor="invite-phone" className="flex items-center gap-2">
+                            Phone number
+                            <Badge variant="outline" className="text-xs font-normal">SMS coming soon</Badge>
+                          </Label>
+                          <Input
+                            id="invite-phone"
+                            type="tel"
+                            placeholder="+1 (555) 000-0000"
+                            value={invitePhone}
+                            onChange={(e) => setInvitePhone(e.target.value)}
+                            disabled
+                            data-testid="input-invite-phone"
+                          />
+                        </div>
+                        <Button
+                          onClick={handleSendInvite}
+                          disabled={!inviteEmail.trim() || sendInviteMutation.isPending}
+                          data-testid="button-send-invite"
+                        >
+                          <UserPlus className="h-4 w-4 mr-2" />
+                          {sendInviteMutation.isPending ? "Sending..." : "Send Invite"}
+                        </Button>
+                      </CardContent>
+                    </Card>
+
+                    {/* Pending invites list */}
+                    <Card>
+                      <CardHeader>
+                        <CardTitle>Sent Invites</CardTitle>
+                        <CardDescription>Track the status of invitations you've sent.</CardDescription>
+                      </CardHeader>
+                      <CardContent>
+                        {invitesLoading ? (
+                          <p className="text-muted-foreground text-sm py-4">Loading invites...</p>
+                        ) : invitesData?.invites && invitesData.invites.length > 0 ? (
+                          <div className="divide-y">
+                            {invitesData.invites.map((inv) => (
+                              <div
+                                key={inv.id}
+                                className="flex items-center justify-between py-3"
+                                data-testid={`invite-row-${inv.id}`}
+                              >
+                                <div>
+                                  <p className="font-medium text-sm">{inv.email}</p>
+                                  <p className="text-xs text-muted-foreground capitalize">{inv.role || "staff"}</p>
+                                </div>
+                                <Badge
+                                  variant={
+                                    inv.status === "accepted"
+                                      ? "default"
+                                      : inv.status === "pending"
+                                      ? "secondary"
+                                      : "outline"
+                                  }
+                                  className={
+                                    inv.status === "accepted"
+                                      ? "bg-green-100 text-green-800 border-green-200"
+                                      : inv.status === "revoked" || inv.status === "expired"
+                                      ? "bg-gray-100 text-gray-600"
+                                      : ""
+                                  }
+                                  data-testid={`badge-invite-status-${inv.id}`}
+                                >
+                                  {inv.status}
+                                </Badge>
+                              </div>
+                            ))}
+                          </div>
+                        ) : (
+                          <p className="text-muted-foreground text-sm py-4">No invites sent yet.</p>
+                        )}
+                      </CardContent>
+                    </Card>
+                  </div>
+                )}
               </div>
             )}
 

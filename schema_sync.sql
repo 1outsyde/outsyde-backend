@@ -1067,3 +1067,14 @@ ALTER TABLE moderation_queue ADD COLUMN IF NOT EXISTS created_at TIMESTAMP;
 
 -- businesses.is_multi_staff (independent-booking multi-staff service businesses)
 ALTER TABLE businesses ADD COLUMN IF NOT EXISTS is_multi_staff BOOLEAN NOT NULL DEFAULT false;
+
+-- staff_invites: add phone, sent_at; strengthen email/invite_code/expires_at (B3a Resend integration)
+ALTER TABLE staff_invites ADD COLUMN IF NOT EXISTS phone TEXT;
+ALTER TABLE staff_invites ADD COLUMN IF NOT EXISTS sent_at TIMESTAMP;
+UPDATE staff_invites SET email = 'unknown@unknown.invalid' WHERE email IS NULL;
+UPDATE staff_invites SET invite_code = gen_random_uuid()::text WHERE invite_code IS NULL;
+UPDATE staff_invites SET expires_at = NOW() + INTERVAL '7 days' WHERE expires_at IS NULL;
+ALTER TABLE staff_invites ALTER COLUMN email SET NOT NULL;
+ALTER TABLE staff_invites ALTER COLUMN invite_code SET NOT NULL;
+ALTER TABLE staff_invites ALTER COLUMN expires_at SET NOT NULL;
+ALTER TABLE staff_invites ALTER COLUMN expires_at SET DEFAULT NOW() + INTERVAL '7 days';
