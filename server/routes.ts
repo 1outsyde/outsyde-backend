@@ -7581,7 +7581,7 @@ export async function registerRoutes(
 
   // Stripe Connect return — called when user completes or exits onboarding
   app.get("/api/stripe/connect-return", async (req, res) => {
-    const { account, type } = req.query;
+    const { account, type, staffId } = req.query;
     if (account) {
       try {
         const stripe = await getUncachableStripeClient();
@@ -7597,19 +7597,32 @@ export async function registerRoutes(
             if (photographer) {
               await storage.updatePhotographer(photographer.id, { stripeOnboardingComplete: true });
             }
+          } else if (type === 'staff') {
+            const staffMember = await storage.getStaffMemberByStripeAccountId(account as string);
+            if (staffMember) {
+              await storage.updateStaffMember(staffMember.id, { stripeOnboardingComplete: true });
+            }
           }
         }
       } catch (e) {
         console.error("[Stripe Connect] Failed to retrieve account on return:", e);
       }
     }
-    res.redirect(`outsyde://stripe-return?status=complete&type=${type || 'vendor'}`);
+    let deepLink = `outsyde://stripe-return?status=complete&type=${type || 'vendor'}`;
+    if (type === 'staff' && staffId) {
+      deepLink += `&staffId=${staffId}`;
+    }
+    res.redirect(deepLink);
   });
 
   // Stripe Connect refresh — called when onboarding link expires
   app.get("/api/stripe/connect-refresh", async (req, res) => {
-    const { type } = req.query;
-    res.redirect(`outsyde://stripe-return?status=refresh&type=${type || 'vendor'}`);
+    const { type, staffId } = req.query;
+    let deepLink = `outsyde://stripe-return?status=refresh&type=${type || 'vendor'}`;
+    if (type === 'staff' && staffId) {
+      deepLink += `&staffId=${staffId}`;
+    }
+    res.redirect(deepLink);
   });
 
   // Get Stripe publishable key for frontend
@@ -10178,12 +10191,15 @@ export async function registerRoutes(
 
       let accountId = staff.stripeAccountId;
 
-      // Create Stripe account if doesn't exist
+      // Create Stripe account if doesn't exist.
+      // Must use createStaffConnectAccount (not the generic photographer alias) so
+      // metadata.role="staff" is set — the webhook handler's staff branch depends on it.
       if (!accountId) {
-        const account = await stripeService.createConnectAccount(
+        const account = await stripeService.createStaffConnectAccount(
           staff.email || `staff-${staff.id}@outsyde.app`,
           staff.id,
-          staff.displayName
+          staff.businessId,
+          staff.displayName,
         );
         accountId = account.id;
 
@@ -10193,11 +10209,16 @@ export async function registerRoutes(
         });
       }
 
-      // Generate onboarding link
+      // Generate onboarding link.
+      // Redirect URLs must be HTTPS (Stripe rejects custom-scheme deep links directly).
+      // /api/stripe/connect-return and /api/stripe/connect-refresh bounce back into the
+      // app via the outsyde:// deep link, passing type=staff so the app can distinguish
+      // this from the vendor/business onboarding return.
+      const baseUrl = process.env.API_BASE_URL || 'https://outsyde-backend.onrender.com';
       const accountLink = await stripeService.createConnectOnboardingLink(
         accountId,
-        `${req.protocol}://${req.get('host')}/staff-dashboard?stripe=refresh`,
-        `${req.protocol}://${req.get('host')}/staff-dashboard?stripe=complete`
+        `${baseUrl}/api/stripe/connect-refresh?account=${accountId}&type=staff&staffId=${staff.id}`,
+        `${baseUrl}/api/stripe/connect-return?account=${accountId}&type=staff&staffId=${staff.id}`,
       );
 
       res.json({ url: accountLink.url });
