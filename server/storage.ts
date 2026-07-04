@@ -187,6 +187,19 @@ export type NewPhotographerInput = {
   deliveryTime?: string | null;
 };
 
+export type StaffInvitePreview = {
+  businessName: string | null;
+  businessLogo: string | null;
+  businessCategory: string | null;
+  businessCity: string | null;
+  businessState: string | null;
+  role: string | null;
+  invitedByName: string | null;
+  expiresAt: Date;
+  status: string;
+  isExpired: boolean;
+};
+
 export interface IStorage {
   getUser(id: string): Promise<User | undefined>;
   getUserByEmail(email: string): Promise<User | undefined>;
@@ -488,6 +501,7 @@ export interface IStorage {
   createStaffInvite(data: InsertStaffInvite): Promise<StaffInvite>;
   getStaffInvite(id: string): Promise<StaffInvite | undefined>;
   getStaffInviteByCode(code: string): Promise<StaffInvite | undefined>;
+  getStaffInviteWithContext(code: string): Promise<StaffInvitePreview | null>;
   getStaffInvitesByBusiness(businessId: string): Promise<StaffInvite[]>;
   getStaffInvitesByEmail(email: string): Promise<StaffInvite[]>;
   updateStaffInvite(id: string, updates: Partial<StaffInvite>): Promise<StaffInvite | undefined>;
@@ -4748,6 +4762,48 @@ export class DatabaseStorage implements IStorage {
   async getStaffInviteByCode(code: string): Promise<StaffInvite | undefined> {
     const result = await db.select().from(staffInvites).where(eq(staffInvites.inviteCode, code));
     return result[0];
+  }
+
+  async getStaffInviteWithContext(code: string): Promise<StaffInvitePreview | null> {
+    const result = await db
+      .select({
+        businessName: businesses.name,
+        businessLogo: businesses.logoImage,
+        businessCategory: businesses.category,
+        businessCity: businesses.city,
+        businessState: businesses.state,
+        role: staffInvites.role,
+        inviterFirstName: users.firstName,
+        inviterLastName: users.lastName,
+        inviterName: users.name,
+        expiresAt: staffInvites.expiresAt,
+        status: staffInvites.status,
+      })
+      .from(staffInvites)
+      .leftJoin(businesses, eq(staffInvites.businessId, businesses.id))
+      .leftJoin(users, eq(staffInvites.invitedByUserId, users.id))
+      .where(eq(staffInvites.inviteCode, code));
+
+    if (!result[0]) return null;
+
+    const row = result[0];
+    const invitedByName =
+      row.inviterFirstName && row.inviterLastName
+        ? `${row.inviterFirstName} ${row.inviterLastName}`
+        : row.inviterName || null;
+
+    return {
+      businessName: row.businessName,
+      businessLogo: row.businessLogo,
+      businessCategory: row.businessCategory,
+      businessCity: row.businessCity,
+      businessState: row.businessState,
+      role: row.role,
+      invitedByName,
+      expiresAt: row.expiresAt,
+      status: row.status,
+      isExpired: new Date(row.expiresAt) < new Date(),
+    };
   }
 
   async getStaffInvitesByBusiness(businessId: string): Promise<StaffInvite[]> {
