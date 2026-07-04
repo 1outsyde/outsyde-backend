@@ -10221,6 +10221,10 @@ export async function registerRoutes(
         `${baseUrl}/api/stripe/connect-return?account=${accountId}&type=staff&staffId=${staff.id}`,
       );
 
+      await storage.updateStaffMember(staff.id, {
+        stripeOnboardingUrl: accountLink.url,
+      });
+
       res.json({ url: accountLink.url });
     } catch (error) {
       console.error("Staff Stripe onboarding error:", error);
