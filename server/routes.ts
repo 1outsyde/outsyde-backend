@@ -9208,6 +9208,27 @@ export async function registerRoutes(
     }
   });
 
+  // Get pending invites for a business (must be registered before /:staffId to avoid shadowing)
+  app.get("/api/vendor/staff/invites", async (req, res) => {
+    const userId = req.session?.userId;
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    try {
+      const business = await storage.getBusinessByOwnerId(userId);
+      if (!business) {
+        return res.status(404).json({ error: "No business found" });
+      }
+
+      const invites = await storage.getStaffInvitesByBusiness(business.id);
+      res.json({ invites });
+    } catch (error) {
+      console.error("Get staff invites error:", error);
+      res.status(500).json({ error: "Failed to get invites" });
+    }
+  });
+
   // Get single staff member details
   app.get("/api/vendor/staff/:staffId", async (req, res) => {
     const userId = req.session?.userId;
@@ -9514,27 +9535,6 @@ export async function registerRoutes(
   });
 
   // ==================== STAFF INVITE ROUTES ====================
-
-  // Get pending invites for a business
-  app.get("/api/vendor/staff/invites", async (req, res) => {
-    const userId = req.session?.userId;
-    if (!userId) {
-      return res.status(401).json({ error: "Not authenticated" });
-    }
-
-    try {
-      const business = await storage.getBusinessByOwnerId(userId);
-      if (!business) {
-        return res.status(404).json({ error: "No business found" });
-      }
-
-      const invites = await storage.getStaffInvitesByBusiness(business.id);
-      res.json({ invites });
-    } catch (error) {
-      console.error("Get staff invites error:", error);
-      res.status(500).json({ error: "Failed to get invites" });
-    }
-  });
 
   // Create a staff invite
   app.post("/api/vendor/staff/invites", async (req, res) => {
