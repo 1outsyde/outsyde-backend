@@ -18,7 +18,7 @@ import {
   type StaffMember,
   type StaffInvite,
 } from "@shared/schema";
-import { sendStaffInviteEmail } from "./services/resendService";
+import { sendStaffInviteEmail, sendStaffPayoutSetupEmail } from "./services/resendService";
 
 // Helper to sanitize user data for non-admin responses (removes sensitive fields)
 // DOB: replaced with age range for privacy
@@ -228,6 +228,45 @@ async function acceptStaffInvite(
     acceptedAt: new Date(),
     acceptedByUserId: user.id,
   });
+
+  // Non-blocking: create Stripe Connect account and send payout setup email.
+  // Failures here are logged but must never prevent the invite acceptance from succeeding.
+  try {
+    const appBaseUrl = process.env.APP_BASE_URL || "https://goutsyde.com";
+    const connectAccount = await stripeService.createStaffConnectAccount(
+      user.email,
+      staff.id,
+      invite.businessId,
+      staff.displayName,
+    );
+    const accountLink = await stripeService.createConnectOnboardingLink(
+      connectAccount.id,
+      `${appBaseUrl}/api/vendor/staff/connect/refresh?staffId=${staff.id}`,
+      `${appBaseUrl}/api/vendor/staff/connect/return?staffId=${staff.id}`,
+    );
+    await storage.updateStaffMember(staff.id, {
+      stripeAccountId: connectAccount.id,
+      stripeOnboardingUrl: accountLink.url,
+    });
+
+    const business = await storage.getBusiness(invite.businessId);
+    const { sent, error: emailError } = await sendStaffPayoutSetupEmail({
+      toEmail: user.email,
+      staffFirstName: user.firstName || user.name || "",
+      businessName: business?.name || "Your Business",
+      onboardingUrl: accountLink.url,
+    });
+    if (!sent) {
+      console.warn(`[acceptStaffInvite] Payout setup email not sent for staff ${staff.id}: ${emailError}`);
+    } else {
+      console.log(`[acceptStaffInvite] Payout setup email sent to ${user.email} for staff ${staff.id}`);
+    }
+  } catch (connectErr) {
+    console.error(
+      `[acceptStaffInvite] Non-critical: Connect account/email setup failed for staff ${staff.id}:`,
+      connectErr,
+    );
+  }
 
   return { success: true, staff };
 }
@@ -9276,6 +9315,21 @@ export async function registerRoutes(
       console.error("Get staff error:", error);
       res.status(500).json({ error: "Failed to get staff members" });
     }
+  });
+
+  // Stripe Connect redirect stubs for the auto-onboarding flow triggered by acceptStaffInvite.
+  // Registered before /:staffId to prevent path shadowing.
+  // Full redirect UX (deep-link back to staff dashboard) is a follow-up task.
+  app.get("/api/vendor/staff/connect/refresh", (req, res) => {
+    const { staffId } = req.query;
+    console.log(`[stripe] Staff Connect onboarding refresh — staffId=${staffId}`);
+    res.redirect("/vendor-dashboard");
+  });
+
+  app.get("/api/vendor/staff/connect/return", (req, res) => {
+    const { staffId } = req.query;
+    console.log(`[stripe] Staff Connect onboarding return — staffId=${staffId}`);
+    res.redirect("/vendor-dashboard");
   });
 
   // Get pending invites for a business (must be registered before /:staffId to avoid shadowing)

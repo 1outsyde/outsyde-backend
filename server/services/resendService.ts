@@ -98,6 +98,94 @@ export async function sendStaffInviteEmail(
   }
 }
 
+function buildPayoutSetupHtml(staffFirstName: string, businessName: string, onboardingUrl: string): string {
+  const greeting = staffFirstName ? `Hi ${staffFirstName},` : 'Hi there,';
+  return `
+    <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+      <div style="background: linear-gradient(135deg, #f5a623, #f7b84b); padding: 24px; text-align: center;">
+        <h1 style="color: white; margin: 0; font-size: 24px;">${businessName} added you to Outsyde</h1>
+      </div>
+      <div style="padding: 32px; background: #ffffff;">
+        <p style="font-size: 16px; color: #333; margin-top: 0;">${greeting}</p>
+        <p style="font-size: 16px; color: #333;">
+          You've joined <strong>${businessName}</strong> on Outsyde. Complete the short setup below
+          so you can start receiving payouts directly to your bank account.
+        </p>
+        <div style="text-align: center; margin: 32px 0;">
+          <a href="${onboardingUrl}"
+             style="background: #f5a623; color: white; padding: 14px 36px; text-decoration: none; border-radius: 6px; font-weight: bold; font-size: 16px; display: inline-block;">
+            Set Up Payouts — Get Paid
+          </a>
+        </div>
+        <p style="font-size: 13px; color: #888;">
+          Or copy this link into your browser:<br/>
+          <a href="${onboardingUrl}" style="color: #f5a623;">${onboardingUrl}</a>
+        </p>
+        <p style="font-size: 12px; color: #aaa; margin-top: 24px;">
+          This link is single-use and expires after you complete setup. If you need a new link,
+          ask your business owner to resend it from their Outsyde dashboard.
+        </p>
+      </div>
+      <div style="background: #f5f5f5; padding: 16px; text-align: center; color: #999; font-size: 12px;">
+        <p style="margin: 0;">Outsyde — Local Business Platform</p>
+      </div>
+    </div>
+  `;
+}
+
+function buildPayoutSetupText(staffFirstName: string, businessName: string, onboardingUrl: string): string {
+  const greeting = staffFirstName ? `Hi ${staffFirstName},` : 'Hi there,';
+  return `${greeting}
+
+You've joined ${businessName} on Outsyde. Set up payouts to get paid:
+
+${onboardingUrl}
+
+This link is single-use. Ask your business owner to resend it if you need a new one.
+`;
+}
+
+export async function sendStaffPayoutSetupEmail(params: {
+  toEmail: string;
+  staffFirstName: string;
+  businessName: string;
+  onboardingUrl: string;
+}): Promise<{ sent: boolean; error?: string }> {
+  const { toEmail, staffFirstName, businessName, onboardingUrl } = params;
+  const apiKey = process.env.RESEND_API_KEY;
+  if (!apiKey) {
+    const msg = '[resendService] RESEND_API_KEY not set — skipping payout setup email';
+    console.warn(msg);
+    return { sent: false, error: msg };
+  }
+
+  try {
+    const resend = new Resend(apiKey);
+    const result = await resend.emails.send({
+      from: INVITE_FROM,
+      to: toEmail,
+      subject: `${businessName} added you — set up payouts to get paid`,
+      html: buildPayoutSetupHtml(staffFirstName, businessName, onboardingUrl),
+      text: buildPayoutSetupText(staffFirstName, businessName, onboardingUrl),
+    });
+
+    if (result.error) {
+      const errMsg = typeof result.error === 'object' && result.error !== null
+        ? (result.error as { message?: string }).message ?? JSON.stringify(result.error)
+        : String(result.error);
+      console.warn(`[resendService] Payout setup email failed for ${toEmail}:`, errMsg);
+      return { sent: false, error: errMsg };
+    }
+
+    console.log(`[resendService] Staff payout setup email sent to ${toEmail}`);
+    return { sent: true };
+  } catch (err) {
+    const errMsg = err instanceof Error ? err.message : String(err);
+    console.warn(`[resendService] Unexpected error sending payout setup email to ${toEmail}:`, errMsg);
+    return { sent: false, error: errMsg };
+  }
+}
+
 /**
  * SMS stub — logs only, never sends.
  * Wire a real provider here when SMS_ENABLED is set and a provider is configured.

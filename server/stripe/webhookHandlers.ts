@@ -1004,19 +1004,25 @@ export class WebhookHandlers {
     // Try to find the entity by metadata first, then fallback to account ID lookup
     let business = null;
     let photographer = null;
+    let staffMember = null;
     
     if (metadata.role === 'business' && metadata.businessId) {
       business = await storage.getBusiness(metadata.businessId);
     } else if (metadata.role === 'photographer' && metadata.photographerId) {
       photographer = await storage.getPhotographer(metadata.photographerId);
+    } else if (metadata.role === 'staff' && metadata.staffId) {
+      staffMember = await storage.getStaffMember(metadata.staffId);
     }
     
     // Fallback: Look up by stripeAccountId directly if metadata didn't match
-    if (!business && !photographer) {
+    if (!business && !photographer && !staffMember) {
       console.log(`[Stripe] No metadata match for ${accountId}, searching by account ID...`);
       business = await storage.getBusinessByStripeAccountId(accountId);
       if (!business) {
         photographer = await storage.getPhotographerByStripeAccountId(accountId);
+      }
+      if (!business && !photographer) {
+        staffMember = await storage.getStaffMemberByStripeAccountId(accountId);
       }
     }
     
@@ -1064,8 +1070,19 @@ export class WebhookHandlers {
       }
     }
     
-    if (!business && !photographer) {
-      console.log(`[Stripe] No business or photographer found for account ${accountId}`);
+    // Update staff member onboarding status
+    if (staffMember && staffMember.stripeAccountId === accountId) {
+      console.log(`[Stripe] Updating staff ${staffMember.id} (${staffMember.displayName}) stripeOnboardingComplete=${isOnboardingComplete}`);
+      await storage.updateStaffMember(staffMember.id, {
+        stripeOnboardingComplete: isOnboardingComplete,
+      });
+      if (isOnboardingComplete) {
+        console.log(`[Stripe] Staff member ${staffMember.id} (${staffMember.displayName}) completed Stripe onboarding`);
+      }
+    }
+
+    if (!business && !photographer && !staffMember) {
+      console.log(`[Stripe] No business, photographer, or staff member found for account ${accountId}`);
     }
   }
 

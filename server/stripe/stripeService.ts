@@ -241,6 +241,39 @@ export class StripeService {
   }
 
   /**
+   * Create a Stripe Express account for a staff member.
+   * Staff receive payouts via transfers from Outsyde (merchant of record);
+   * they never independently process card payments, so only transfers capability
+   * is requested — matching the influencer pattern.
+   */
+  async createStaffConnectAccount(
+    email: string,
+    staffId: string,
+    businessId: string,
+    displayName: string,
+  ) {
+    const stripe = await getUncachableStripeClient();
+
+    return stripe.accounts.create({
+      type: "express",
+      email,
+      business_type: "individual",
+      capabilities: {
+        transfers: { requested: true },
+      },
+      business_profile: {
+        name: displayName,
+        mcc: "7299", // Miscellaneous personal services
+      },
+      metadata: {
+        staffId,
+        businessId,
+        role: "staff",
+      },
+    });
+  }
+
+  /**
    * Legacy alias for createPhotographerConnectAccount
    */
   async createConnectAccount(
