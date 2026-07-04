@@ -483,6 +483,7 @@ export interface IStorage {
   createStaffMember(data: InsertStaffMember): Promise<StaffMember>;
   getStaffMember(id: string): Promise<StaffMember | undefined>;
   getStaffMemberByUserId(userId: string): Promise<StaffMember | undefined>;
+  getStaffMemberByStripeAccountId(stripeAccountId: string): Promise<StaffMember | undefined>;
   getStaffMembersByBusiness(businessId: string): Promise<StaffMember[]>;
   updateStaffMember(id: string, updates: Partial<StaffMember>): Promise<StaffMember | undefined>;
   deleteStaffMember(id: string): Promise<void>;
@@ -4624,6 +4625,11 @@ export class DatabaseStorage implements IStorage {
 
   async getStaffMemberByUserId(userId: string): Promise<StaffMember | undefined> {
     const result = await db.select().from(staffMembers).where(eq(staffMembers.userId, userId));
+    return result[0];
+  }
+
+  async getStaffMemberByStripeAccountId(stripeAccountId: string): Promise<StaffMember | undefined> {
+    const result = await db.select().from(staffMembers).where(eq(staffMembers.stripeAccountId, stripeAccountId));
     return result[0];
   }
 
