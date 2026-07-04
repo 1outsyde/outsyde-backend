@@ -20,14 +20,43 @@ export class WebhookHandlers {
     signature: string,
     _uuid: string
   ): Promise<void> {
-    const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET;
-    if (!webhookSecret) {
-      console.error("[Stripe] STRIPE_WEBHOOK_SECRET not configured");
+    const primarySecret = process.env.STRIPE_WEBHOOK_SECRET;
+    const connectSecret = process.env.STRIPE_CONNECT_WEBHOOK_SECRET;
+
+    if (!primarySecret && !connectSecret) {
+      console.error("[Stripe] No webhook secret configured (STRIPE_WEBHOOK_SECRET or STRIPE_CONNECT_WEBHOOK_SECRET)");
       throw new Error("Webhook secret not configured");
     }
 
     const stripe = await getUncachableStripeClient();
-    const event = stripe.webhooks.constructEvent(payload, signature, webhookSecret);
+
+    // Try each configured secret in order. constructEvent() throws a
+    // SignatureVerificationError when the secret is wrong — that is the
+    // expected signal to try the next one. Any other error is re-thrown
+    // immediately since it indicates a genuine processing problem.
+    const secrets = [primarySecret, connectSecret].filter(Boolean) as string[];
+    let event: any;
+    let lastErr: unknown;
+
+    for (const secret of secrets) {
+      try {
+        event = stripe.webhooks.constructEvent(payload, signature, secret);
+        break; // signature matched — stop trying
+      } catch (err: any) {
+        if (err?.type === "StripeSignatureVerificationError") {
+          lastErr = err;
+          continue; // wrong secret — try the next one
+        }
+        throw err; // unexpected error — propagate immediately
+      }
+    }
+
+    if (!event) {
+      // All secrets tried and none matched
+      console.error("[Stripe] Signature verification failed against all configured secrets");
+      throw lastErr;
+    }
+
     await this.handleEvent(event);
   }
 
