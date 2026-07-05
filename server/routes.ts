@@ -4225,6 +4225,13 @@ export async function registerRoutes(
         return res.status(400).json({ error: "startDate and endDate are required" });
       }
 
+      // Never expose availability for a photographer who hasn't finished Stripe onboarding
+      // (same rule as the staff availability endpoint, GET /api/businesses/:businessId/staff/:staffId/availability).
+      const photographer = await storage.getPhotographer(photographerId);
+      if (!photographer || !photographer.stripeOnboardingComplete) {
+        return res.status(404).json({ error: "Photographer is not available" });
+      }
+
       // If serviceId is provided, get duration from the service
       let effectiveDurationHours: number | undefined;
       let serviceInfo = null;
@@ -6290,8 +6297,21 @@ export async function registerRoutes(
       // Check slot availability (including drafts from other users)
       const providerId = data.staffMemberId || data.businessId;
       const providerType = data.staffMemberId ? 'staff' : 'staff'; // Default to first staff if none specified
-      
+
       if (data.staffMemberId) {
+        // Never allow a booking to be created against a staff member who hasn't
+        // finished Stripe onboarding — there's nowhere for their payout to land.
+        const staffMember = await storage.getStaffMember(data.staffMemberId);
+        if (!staffMember) {
+          return res.status(404).json({ error: "Staff member not found" });
+        }
+        if (!staffMember.stripeOnboardingComplete) {
+          return res.status(400).json({
+            error: "Staff member not accepting bookings",
+            message: "This staff member has not completed their payment setup."
+          });
+        }
+
         const available = await isSlotAvailable(
           'staff',
           data.staffMemberId,
@@ -6374,6 +6394,20 @@ export async function registerRoutes(
       const endMins = totalMinutes % 60;
       const endTime = `${endHours.toString().padStart(2, '0')}:${endMins.toString().padStart(2, '0')}`;
 
+      // Get photographer for pricing, and validate they can accept bookings
+      const photographer = await storage.getPhotographer(data.photographerId);
+      if (!photographer) {
+        return res.status(404).json({ error: "Photographer not found" });
+      }
+      // Never allow a booking to be created against a photographer who hasn't
+      // finished Stripe onboarding — there's nowhere for their payout to land.
+      if (!photographer.stripeAccountId || !photographer.stripeOnboardingComplete) {
+        return res.status(400).json({
+          error: "Photographer not accepting bookings",
+          message: "This photographer has not completed their payment setup."
+        });
+      }
+
       // Check availability
       const available = await isSlotAvailable(
         'photographer',
@@ -6384,16 +6418,10 @@ export async function registerRoutes(
       );
 
       if (!available.available) {
-        return res.status(409).json({ 
+        return res.status(409).json({
           code: "SLOT_UNAVAILABLE",
           message: available.reason || "This time slot is not available. Please choose a different time."
         });
-      }
-
-      // Get photographer for pricing
-      const photographer = await storage.getPhotographer(data.photographerId);
-      if (!photographer) {
-        return res.status(404).json({ error: "Photographer not found" });
       }
 
       // Calculate price (10% Outsyde booking fee)
@@ -6765,6 +6793,14 @@ export async function registerRoutes(
         }
         if (staffMember.status !== "active") {
           return res.status(400).json({ error: "Staff member is not available" });
+        }
+        // Never allow a booking to be created against a staff member who hasn't
+        // finished Stripe onboarding — there's nowhere for their payout to land.
+        if (!staffMember.stripeOnboardingComplete) {
+          return res.status(400).json({
+            error: "Staff member not accepting bookings",
+            message: "This staff member has not completed their payment setup."
+          });
         }
       }
 
@@ -10042,7 +10078,9 @@ export async function registerRoutes(
         return res.status(404).json({ error: "Staff member not found" });
       }
 
-      if (staff.status !== "active") {
+      // Same gate as the public staff listing endpoint (GET /api/businesses/:businessId/staff):
+      // never expose availability for a staff member who isn't active or hasn't finished Stripe onboarding.
+      if (staff.status !== "active" || !staff.stripeOnboardingComplete) {
         return res.status(404).json({ error: "Staff member is not available" });
       }
 
