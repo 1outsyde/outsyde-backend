@@ -1149,6 +1149,9 @@ export const subscriptionTiers = pgTable("subscription_tiers", {
   sortOrder: integer("sort_order").default(0),
   isActive: boolean("is_active").default(true),
 
+  // Max active staff members allowed on this tier. NULL = uncapped (no limit).
+  maxStaff: integer("max_staff"),
+
   createdAt: timestamp("created_at").defaultNow().notNull(),
 });
 

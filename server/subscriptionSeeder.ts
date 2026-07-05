@@ -23,6 +23,7 @@ const TIERS = [
     ],
     alaCarteDiscountPercent: 0,
     sortOrder: 0,
+    maxStaff: 3,
   },
   {
     name: 'growth',
@@ -39,6 +40,7 @@ const TIERS = [
     ],
     alaCarteDiscountPercent: 10,
     sortOrder: 1,
+    maxStaff: 8,
   },
   {
     name: 'pro',
@@ -55,6 +57,7 @@ const TIERS = [
     ],
     alaCarteDiscountPercent: 20,
     sortOrder: 2,
+    maxStaff: null as number | null, // uncapped — no staff seat limit
   },
 ];
 
@@ -76,6 +79,7 @@ export async function seedSubscriptionTiers(): Promise<void> {
           features: tier.features,
           alaCarteDiscountPercent: tier.alaCarteDiscountPercent,
           sortOrder: tier.sortOrder,
+          maxStaff: tier.maxStaff,
         })
         .where(eq(subscriptionTiers.id, existing.id));
     } else {

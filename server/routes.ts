@@ -49,7 +49,7 @@ function sanitizeUserForResponse(user: User, options: { includeOwnData?: boolean
     ageRange: calculateAgeRange(dateOfBirth),
   };
 }
-import { eq, desc, sql, gte, lte, or } from "drizzle-orm";
+import { eq, desc, sql, gte, lte, or, isNull, gt } from "drizzle-orm";
 import { z } from "zod";
 import {
   hashPassword,
@@ -156,6 +156,36 @@ async function requireActiveVendorSubscription(userId: string): Promise<{ allowe
     };
   }
   return { allowed: true };
+}
+
+// Soft seat-limit check for staff invites — never blocks, only returns a warning
+// to surface as an upsell nudge. `maxStaff` is NULL on the business's tier when
+// the tier is uncapped, in which case no warning is ever produced.
+async function getStaffSeatWarning(businessId: string): Promise<string | null> {
+  const subscription = await storage.getVendorSubscriptionByBusinessId(businessId);
+  if (!subscription) {
+    return null;
+  }
+
+  const [tier] = await db.select().from(subscriptionTiers).where(eq(subscriptionTiers.id, subscription.tierId));
+  if (!tier || tier.maxStaff == null) {
+    return null;
+  }
+
+  const activeCount = await storage.getActiveStaffCount(businessId);
+  if (activeCount < tier.maxStaff) {
+    return null;
+  }
+
+  // Point to the nearest higher tier that actually removes the cap, so the
+  // message is never wrong even if there are multiple capped tiers above this one.
+  const [uncappedTier] = await db.select().from(subscriptionTiers)
+    .where(and(isNull(subscriptionTiers.maxStaff), gt(subscriptionTiers.sortOrder, tier.sortOrder ?? 0)))
+    .orderBy(subscriptionTiers.sortOrder)
+    .limit(1);
+
+  const base = `You're at ${activeCount} of ${tier.maxStaff} seats on ${tier.displayName}`;
+  return uncappedTier ? `${base} — ${uncappedTier.displayName} removes the cap` : base;
 }
 
 function legacyVerifyPassword(password: string, hash: string): boolean {
@@ -9689,6 +9719,9 @@ export async function registerRoutes(
         return res.status(404).json({ error: "No business found" });
       }
 
+      // Soft seat-limit nudge — never blocks invite creation, see getStaffSeatWarning
+      const seatWarning = await getStaffSeatWarning(business.id);
+
       const inviteSchema = z.object({
         email: z.string().email("Valid email is required"),
         role: z.enum(["staff", "manager"]).optional(),
@@ -9729,7 +9762,7 @@ export async function registerRoutes(
         console.warn(`[staff/invites] Email not sent for invite ${invite.id}: ${sendError}`);
       }
 
-      res.status(201).json({ invite, sent });
+      res.status(201).json({ invite, sent, seatWarning });
     } catch (error) {
       console.error("Create staff invite error:", error);
       if (error instanceof z.ZodError) {
