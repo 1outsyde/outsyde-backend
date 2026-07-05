@@ -17,6 +17,7 @@ import {
   type User,
   type StaffMember,
   type StaffInvite,
+  type SubscriptionTier,
 } from "@shared/schema";
 import { sendStaffInviteEmail, sendStaffPayoutSetupEmail } from "./services/resendService";
 
@@ -158,16 +159,22 @@ async function requireActiveVendorSubscription(userId: string): Promise<{ allowe
   return { allowed: true };
 }
 
-// Soft seat-limit check for staff invites — never blocks, only returns a warning
-// to surface as an upsell nudge. `maxStaff` is NULL on the business's tier when
-// the tier is uncapped, in which case no warning is ever produced.
-async function getStaffSeatWarning(businessId: string): Promise<string | null> {
+// Resolves the subscription tier for a business, or null if there's no
+// subscription / tier row. Shared by getStaffSeatWarning and GET /api/vendor/staff/seat-status.
+async function getSubscriptionTierForBusiness(businessId: string): Promise<SubscriptionTier | null> {
   const subscription = await storage.getVendorSubscriptionByBusinessId(businessId);
   if (!subscription) {
     return null;
   }
-
   const [tier] = await db.select().from(subscriptionTiers).where(eq(subscriptionTiers.id, subscription.tierId));
+  return tier ?? null;
+}
+
+// Soft seat-limit check for staff invites — never blocks, only returns a warning
+// to surface as an upsell nudge. `maxStaff` is NULL on the business's tier when
+// the tier is uncapped, in which case no warning is ever produced.
+async function getStaffSeatWarning(businessId: string): Promise<string | null> {
+  const tier = await getSubscriptionTierForBusiness(businessId);
   if (!tier || tier.maxStaff == null) {
     return null;
   }
@@ -9396,6 +9403,34 @@ export async function registerRoutes(
     } catch (error) {
       console.error("Get staff invites error:", error);
       res.status(500).json({ error: "Failed to get invites" });
+    }
+  });
+
+  // Get current seat usage for a business (must be registered before /:staffId to avoid shadowing).
+  // Read-only — lets the dashboard show seat usage at all times, not just at invite time (B5/F5).
+  app.get("/api/vendor/staff/seat-status", async (req, res) => {
+    const userId = req.session?.userId;
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    try {
+      const business = await storage.getBusinessByOwnerId(userId);
+      if (!business) {
+        return res.status(404).json({ error: "No business found" });
+      }
+
+      const activeCount = await storage.getActiveStaffCount(business.id);
+      const tier = await getSubscriptionTierForBusiness(business.id);
+
+      res.json({
+        activeCount,
+        maxStaff: tier?.maxStaff ?? null,
+        tierName: tier?.displayName ?? "Unknown",
+      });
+    } catch (error) {
+      console.error("Get staff seat status error:", error);
+      res.status(500).json({ error: "Failed to get seat status" });
     }
   });
 
