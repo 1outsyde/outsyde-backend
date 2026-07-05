@@ -409,6 +409,7 @@ export interface IStorage {
   getVendorSubscription(vendorId: string): Promise<VendorSubscription | undefined>;
   getVendorSubscriptionByStripeId(stripeSubscriptionId: string): Promise<VendorSubscription | undefined>;
   getVendorSubscriptionByBusinessId(businessId: string): Promise<VendorSubscription | undefined>;
+  getSubscriptionTierForBusiness(businessId: string): Promise<SubscriptionTier | null>;
   updateVendorSubscription(id: string, updates: Partial<VendorSubscription>): Promise<VendorSubscription | undefined>;
   isBusinessSubscriptionActive(businessId: string, gracePeriodDays?: number): Promise<{ active: boolean; status?: string; reason?: string }>;
   isVendorSubscriptionActive(vendorId: string, gracePeriodDays?: number): Promise<{ active: boolean; status?: string; reason?: string }>;
@@ -485,6 +486,7 @@ export interface IStorage {
   getStaffMemberByUserId(userId: string): Promise<StaffMember | undefined>;
   getStaffMemberByStripeAccountId(stripeAccountId: string): Promise<StaffMember | undefined>;
   getStaffMembersByBusiness(businessId: string): Promise<StaffMember[]>;
+  getActiveStaffCount(businessId: string): Promise<number>;
   updateStaffMember(id: string, updates: Partial<StaffMember>): Promise<StaffMember | undefined>;
   deleteStaffMember(id: string): Promise<void>;
   
@@ -3655,6 +3657,16 @@ export class DatabaseStorage implements IStorage {
     return subscription;
   }
 
+  // Returns the SubscriptionTier for a business, or null if no subscription / tier found.
+  async getSubscriptionTierForBusiness(businessId: string): Promise<SubscriptionTier | null> {
+    const subscription = await this.getVendorSubscriptionByBusinessId(businessId);
+    if (!subscription?.tierId) return null;
+    const [tier] = await db.select()
+      .from(subscriptionTiers)
+      .where(eq(subscriptionTiers.id, subscription.tierId));
+    return tier ?? null;
+  }
+
   async isBusinessSubscriptionActive(businessId: string, gracePeriodDays: number = 3): Promise<{ active: boolean; status?: string; reason?: string }> {
     const subscription = await this.getVendorSubscriptionByBusinessId(businessId);
     
@@ -4637,6 +4649,21 @@ export class DatabaseStorage implements IStorage {
     return db.select().from(staffMembers)
       .where(eq(staffMembers.businessId, businessId))
       .orderBy(staffMembers.displayName);
+  }
+
+  // Returns the count of ACTIVE staff members for a business.
+  // Only rows with status = 'active' are counted; pending/inactive are excluded.
+  async getActiveStaffCount(businessId: string): Promise<number> {
+    const [row] = await db
+      .select({ count: sql<number>`count(*)::int` })
+      .from(staffMembers)
+      .where(
+        and(
+          eq(staffMembers.businessId, businessId),
+          eq(staffMembers.status, "active"),
+        ),
+      );
+    return row?.count ?? 0;
   }
 
   async updateStaffMember(id: string, updates: Partial<StaffMember>): Promise<StaffMember | undefined> {

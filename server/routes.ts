@@ -9689,6 +9689,23 @@ export async function registerRoutes(
         return res.status(404).json({ error: "No business found" });
       }
 
+      // ── Seat-limit soft gate (B5) ────────────────────────────────────────────
+      // Counts ACTIVE staff only (pending/inactive excluded). NULL maxStaff = uncapped.
+      // This is a nudge/upsell — it never hard-blocks the invite creation.
+      const checkStaffSeatLimit = async (): Promise<string | null> => {
+        const tier = await storage.getSubscriptionTierForBusiness(business.id);
+        if (!tier || tier.maxStaff === null || tier.maxStaff === undefined) {
+          return null; // uncapped tier or no subscription — no warning
+        }
+        const activeCount = await storage.getActiveStaffCount(business.id);
+        if (activeCount >= tier.maxStaff) {
+          return `You're at ${activeCount} of ${tier.maxStaff} seats on ${tier.displayName} — Pro removes the cap.`;
+        }
+        return null;
+      };
+      const seatWarning = await checkStaffSeatLimit();
+      // ── End seat-limit gate ──────────────────────────────────────────────────
+
       const inviteSchema = z.object({
         email: z.string().email("Valid email is required"),
         role: z.enum(["staff", "manager"]).optional(),
@@ -9729,7 +9746,8 @@ export async function registerRoutes(
         console.warn(`[staff/invites] Email not sent for invite ${invite.id}: ${sendError}`);
       }
 
-      res.status(201).json({ invite, sent });
+      // Include seatWarning if present — frontend should surface this as an upsell nudge.
+      res.status(201).json({ invite, sent, ...(seatWarning ? { seatWarning } : {}) });
     } catch (error) {
       console.error("Create staff invite error:", error);
       if (error instanceof z.ZodError) {

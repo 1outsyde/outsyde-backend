@@ -1146,6 +1146,11 @@ export const subscriptionTiers = pgTable("subscription_tiers", {
   stripeProductId: text("stripe_product_id"),
   stripePriceId: text("stripe_price_id"),
 
+  // Maximum number of active staff members allowed on this tier.
+  // NULL means uncapped (no limit). This is intentionally a DB column rather
+  // than application-level hardcoding so limits can be updated without a redeploy.
+  maxStaff: integer("max_staff"),
+
   sortOrder: integer("sort_order").default(0),
   isActive: boolean("is_active").default(true),
 
