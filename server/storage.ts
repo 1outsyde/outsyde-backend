@@ -485,6 +485,7 @@ export interface IStorage {
   getStaffMemberByUserId(userId: string): Promise<StaffMember | undefined>;
   getStaffMemberByStripeAccountId(stripeAccountId: string): Promise<StaffMember | undefined>;
   getStaffMembersByBusiness(businessId: string): Promise<StaffMember[]>;
+  getActiveStaffCount(businessId: string): Promise<number>;
   updateStaffMember(id: string, updates: Partial<StaffMember>): Promise<StaffMember | undefined>;
   deleteStaffMember(id: string): Promise<void>;
   
@@ -4637,6 +4638,13 @@ export class DatabaseStorage implements IStorage {
     return db.select().from(staffMembers)
       .where(eq(staffMembers.businessId, businessId))
       .orderBy(staffMembers.displayName);
+  }
+
+  async getActiveStaffCount(businessId: string): Promise<number> {
+    const result = await db.select({ count: sql<number>`count(*)::int` })
+      .from(staffMembers)
+      .where(and(eq(staffMembers.businessId, businessId), eq(staffMembers.status, 'active')));
+    return result[0]?.count || 0;
   }
 
   async updateStaffMember(id: string, updates: Partial<StaffMember>): Promise<StaffMember | undefined> {
