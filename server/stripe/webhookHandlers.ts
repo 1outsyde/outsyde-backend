@@ -4,6 +4,7 @@ import { db } from "../db";
 import { fulfillmentTasks, subscriptionTiers, appointments, shootBookings, BOOKING_STATES } from "@shared/schema";
 import { sql, eq } from "drizzle-orm";
 import { NotificationTriggers } from "../notificationService";
+import { sendStaffOnboardingCompleteOwnerEmail } from "../services/resendService";
 import { stripeService } from "./stripeService";
 import { transitionAppointmentState, transitionShootBookingState } from "../bookingStateMachine";
 import { markHoldAsConverted } from "../availabilityService";
@@ -1106,6 +1107,7 @@ export class WebhookHandlers {
       if (lastAppliedTime && incomingEventTime <= new Date(lastAppliedTime)) {
         console.log(`[Stripe] Ignoring stale/out-of-order account.updated for staff ${staffMember.id} — event time ${incomingEventTime.toISOString()} <= last applied ${new Date(lastAppliedTime).toISOString()}`);
       } else {
+        const wasAlreadyComplete = staffMember.stripeOnboardingComplete === true;
         console.log(`[Stripe] Updating staff ${staffMember.id} (${staffMember.displayName}) stripeOnboardingComplete=${isOnboardingComplete}`);
         await storage.updateStaffMember(staffMember.id, {
           stripeOnboardingComplete: isOnboardingComplete,
@@ -1113,6 +1115,51 @@ export class WebhookHandlers {
         });
         if (isOnboardingComplete) {
           console.log(`[Stripe] Staff member ${staffMember.id} (${staffMember.displayName}) completed Stripe onboarding`);
+
+          // Notify only on the true pending->complete transition — never on
+          // re-delivery of an already-complete state (e.g. a later account.updated
+          // where charges_enabled/details_submitted are unchanged).
+          if (!wasAlreadyComplete) {
+            try {
+              const business = await storage.getBusiness(staffMember.businessId);
+              const businessName = business?.name || "Your Business";
+
+              const owner = await storage.getUserByBusinessOwnerId(staffMember.businessId);
+              if (owner) {
+                await NotificationTriggers.staffOnboardingCompleteOwner({
+                  ownerId: owner.id,
+                  staffId: staffMember.id,
+                  staffName: staffMember.displayName,
+                  businessName,
+                });
+                if (owner.email) {
+                  const { sent, error: ownerEmailError } = await sendStaffOnboardingCompleteOwnerEmail({
+                    toEmail: owner.email,
+                    staffName: staffMember.displayName,
+                    businessName,
+                  });
+                  if (!sent) {
+                    console.warn(`[Stripe] Owner onboarding-complete email not sent for staff ${staffMember.id}: ${ownerEmailError}`);
+                  }
+                }
+              } else {
+                console.warn(`[Stripe] No owner found for business ${staffMember.businessId} — skipping owner notification`);
+              }
+
+              if (staffMember.userId) {
+                await NotificationTriggers.staffBookable({
+                  userId: staffMember.userId,
+                  staffId: staffMember.id,
+                  businessName,
+                });
+              }
+            } catch (notifyErr) {
+              console.error(
+                `[Stripe] Non-critical: staff onboarding-complete notifications failed for staff ${staffMember.id}:`,
+                notifyErr,
+              );
+            }
+          }
         }
       }
     }

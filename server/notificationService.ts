@@ -20,7 +20,10 @@ export type NotificationType =
   | 'new_photographer_application'
   | 'new_follower'
   | 'vendor_approved'
-  | 'vendor_rejected';
+  | 'vendor_rejected'
+  | 'staff_invite_accepted'
+  | 'staff_onboarding_complete'
+  | 'staff_bookable';
 
 interface NotificationData {
   userId: string;
@@ -84,6 +87,11 @@ function getNotificationUrl(type: NotificationType, referenceType?: string, refe
       return referenceId ? `/vendor/dashboard` : '/vendor/dashboard';
     case 'vendor_rejected':
       return referenceId ? `/vendor/application-status` : '/';
+    case 'staff_invite_accepted':
+    case 'staff_onboarding_complete':
+      return '/vendor/dashboard?tab=staff';
+    case 'staff_bookable':
+      return '/staff/dashboard';
     default:
       return '/';
   }
@@ -363,6 +371,69 @@ export const NotificationTriggers = {
       referenceType: params.accountType,
       metadata: {
         accountType: params.accountType,
+        businessName: params.businessName,
+      },
+    });
+  },
+
+  // In-app only — owner-facing. Email is sent separately via resendService
+  // by the caller, matching the existing invite/payout-setup email pattern.
+  async staffInviteAccepted(params: {
+    ownerId: string;
+    staffId: string;
+    staffName: string;
+    businessName: string;
+  }): Promise<void> {
+    await sendNotification({
+      userId: params.ownerId,
+      type: 'staff_invite_accepted',
+      title: 'Staff Member Joined',
+      message: `${params.staffName} has accepted the invite to join ${params.businessName} and is completing their account setup.`,
+      referenceType: 'staff_member',
+      referenceId: params.staffId,
+      metadata: {
+        staffName: params.staffName,
+        businessName: params.businessName,
+      },
+    });
+  },
+
+  // In-app only — owner-facing. Email is sent separately via resendService.
+  async staffOnboardingCompleteOwner(params: {
+    ownerId: string;
+    staffId: string;
+    staffName: string;
+    businessName: string;
+  }): Promise<void> {
+    await sendNotification({
+      userId: params.ownerId,
+      type: 'staff_onboarding_complete',
+      title: 'Staff Member Bookable',
+      message: `${params.staffName} has completed Stripe onboarding and is now bookable by customers.`,
+      referenceType: 'staff_member',
+      referenceId: params.staffId,
+      metadata: {
+        staffName: params.staffName,
+        businessName: params.businessName,
+      },
+    });
+  },
+
+  // In-app only, no email — staff member already received a payout-setup
+  // email at accept time (see acceptStaffInvite in routes.ts).
+  async staffBookable(params: {
+    userId: string;
+    staffId: string;
+    businessName: string;
+  }): Promise<void> {
+    await sendNotification({
+      userId: params.userId,
+      type: 'staff_bookable',
+      title: "You're Now Bookable",
+      message: `Your account setup for ${params.businessName} is complete. You're now bookable by customers.`,
+      referenceType: 'staff_member',
+      referenceId: params.staffId,
+      metadata: {
         businessName: params.businessName,
       },
     });

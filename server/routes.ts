@@ -19,7 +19,7 @@ import {
   type StaffInvite,
   type SubscriptionTier,
 } from "@shared/schema";
-import { sendStaffInviteEmail, sendStaffPayoutSetupEmail } from "./services/resendService";
+import { sendStaffInviteEmail, sendStaffPayoutSetupEmail, sendStaffAcceptedOwnerEmail } from "./services/resendService";
 
 // Helper to sanitize user data for non-admin responses (removes sensitive fields)
 // DOB: replaced with age range for privacy
@@ -265,6 +265,38 @@ async function acceptStaffInvite(
     acceptedAt: new Date(),
     acceptedByUserId: user.id,
   });
+
+  // Non-blocking: notify the business owner that this staff member accepted.
+  // Failures here must never prevent the invite acceptance from succeeding.
+  try {
+    const owner = await storage.getUserByBusinessOwnerId(invite.businessId);
+    const business = await storage.getBusiness(invite.businessId);
+    if (owner) {
+      await NotificationTriggers.staffInviteAccepted({
+        ownerId: owner.id,
+        staffId: staff.id,
+        staffName: staff.displayName,
+        businessName: business?.name || "Your Business",
+      });
+      if (owner.email) {
+        const { sent, error: ownerEmailError } = await sendStaffAcceptedOwnerEmail({
+          toEmail: owner.email,
+          staffName: staff.displayName,
+          businessName: business?.name || "Your Business",
+        });
+        if (!sent) {
+          console.warn(`[acceptStaffInvite] Owner accept email not sent for staff ${staff.id}: ${ownerEmailError}`);
+        }
+      }
+    } else {
+      console.warn(`[acceptStaffInvite] No owner found for business ${invite.businessId} — skipping owner notification`);
+    }
+  } catch (ownerNotifyErr) {
+    console.error(
+      `[acceptStaffInvite] Non-critical: owner notification failed for staff ${staff.id}:`,
+      ownerNotifyErr,
+    );
+  }
 
   // Non-blocking: create Stripe Connect account and send payout setup email.
   // Failures here are logged but must never prevent the invite acceptance from succeeding.

@@ -186,6 +186,139 @@ export async function sendStaffPayoutSetupEmail(params: {
   }
 }
 
+function buildStaffAcceptedOwnerHtml(staffName: string, businessName: string): string {
+  return `
+    <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+      <div style="background: linear-gradient(135deg, #f5a623, #f7b84b); padding: 24px; text-align: center;">
+        <h1 style="color: white; margin: 0; font-size: 24px;">${staffName} Joined ${businessName}</h1>
+      </div>
+      <div style="padding: 32px; background: #ffffff;">
+        <p style="font-size: 16px; color: #333; margin-top: 0;">
+          <strong>${staffName}</strong> has accepted their invite to join <strong>${businessName}</strong> on Outsyde
+          and is completing their account setup.
+        </p>
+        <p style="font-size: 14px; color: #555;">
+          You'll get another update once they finish setting up payouts and are ready to accept bookings.
+        </p>
+      </div>
+      <div style="background: #f5f5f5; padding: 16px; text-align: center; color: #999; font-size: 12px;">
+        <p style="margin: 0;">Outsyde — Local Business Platform</p>
+      </div>
+    </div>
+  `;
+}
+
+function buildStaffAcceptedOwnerText(staffName: string, businessName: string): string {
+  return `${staffName} has accepted their invite to join ${businessName} on Outsyde and is completing their account setup.
+
+You'll get another update once they finish setting up payouts and are ready to accept bookings.
+`;
+}
+
+export async function sendStaffAcceptedOwnerEmail(params: {
+  toEmail: string;
+  staffName: string;
+  businessName: string;
+}): Promise<{ sent: boolean; error?: string }> {
+  const { toEmail, staffName, businessName } = params;
+  const apiKey = process.env.RESEND_API_KEY;
+  if (!apiKey) {
+    const msg = '[resendService] RESEND_API_KEY not set — skipping staff-accepted owner email';
+    console.warn(msg);
+    return { sent: false, error: msg };
+  }
+
+  try {
+    const resend = new Resend(apiKey);
+    const result = await resend.emails.send({
+      from: INVITE_FROM,
+      to: toEmail,
+      subject: `${staffName} accepted your invite to ${businessName}`,
+      html: buildStaffAcceptedOwnerHtml(staffName, businessName),
+      text: buildStaffAcceptedOwnerText(staffName, businessName),
+    });
+
+    if (result.error) {
+      const errMsg = typeof result.error === 'object' && result.error !== null
+        ? (result.error as { message?: string }).message ?? JSON.stringify(result.error)
+        : String(result.error);
+      console.warn(`[resendService] Staff-accepted owner email failed for ${toEmail}:`, errMsg);
+      return { sent: false, error: errMsg };
+    }
+
+    console.log(`[resendService] Staff-accepted owner email sent to ${toEmail}`);
+    return { sent: true };
+  } catch (err) {
+    const errMsg = err instanceof Error ? err.message : String(err);
+    console.warn(`[resendService] Unexpected error sending staff-accepted owner email to ${toEmail}:`, errMsg);
+    return { sent: false, error: errMsg };
+  }
+}
+
+function buildStaffOnboardingCompleteOwnerHtml(staffName: string, businessName: string): string {
+  return `
+    <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+      <div style="background: linear-gradient(135deg, #f5a623, #f7b84b); padding: 24px; text-align: center;">
+        <h1 style="color: white; margin: 0; font-size: 24px;">${staffName} Is Now Bookable</h1>
+      </div>
+      <div style="padding: 32px; background: #ffffff;">
+        <p style="font-size: 16px; color: #333; margin-top: 0;">
+          <strong>${staffName}</strong> has completed Stripe onboarding for <strong>${businessName}</strong>
+          and is now bookable by customers on Outsyde.
+        </p>
+      </div>
+      <div style="background: #f5f5f5; padding: 16px; text-align: center; color: #999; font-size: 12px;">
+        <p style="margin: 0;">Outsyde — Local Business Platform</p>
+      </div>
+    </div>
+  `;
+}
+
+function buildStaffOnboardingCompleteOwnerText(staffName: string, businessName: string): string {
+  return `${staffName} has completed Stripe onboarding for ${businessName} and is now bookable by customers on Outsyde.
+`;
+}
+
+export async function sendStaffOnboardingCompleteOwnerEmail(params: {
+  toEmail: string;
+  staffName: string;
+  businessName: string;
+}): Promise<{ sent: boolean; error?: string }> {
+  const { toEmail, staffName, businessName } = params;
+  const apiKey = process.env.RESEND_API_KEY;
+  if (!apiKey) {
+    const msg = '[resendService] RESEND_API_KEY not set — skipping staff-onboarding-complete owner email';
+    console.warn(msg);
+    return { sent: false, error: msg };
+  }
+
+  try {
+    const resend = new Resend(apiKey);
+    const result = await resend.emails.send({
+      from: INVITE_FROM,
+      to: toEmail,
+      subject: `${staffName} is now bookable at ${businessName}`,
+      html: buildStaffOnboardingCompleteOwnerHtml(staffName, businessName),
+      text: buildStaffOnboardingCompleteOwnerText(staffName, businessName),
+    });
+
+    if (result.error) {
+      const errMsg = typeof result.error === 'object' && result.error !== null
+        ? (result.error as { message?: string }).message ?? JSON.stringify(result.error)
+        : String(result.error);
+      console.warn(`[resendService] Staff-onboarding-complete owner email failed for ${toEmail}:`, errMsg);
+      return { sent: false, error: errMsg };
+    }
+
+    console.log(`[resendService] Staff-onboarding-complete owner email sent to ${toEmail}`);
+    return { sent: true };
+  } catch (err) {
+    const errMsg = err instanceof Error ? err.message : String(err);
+    console.warn(`[resendService] Unexpected error sending staff-onboarding-complete owner email to ${toEmail}:`, errMsg);
+    return { sent: false, error: errMsg };
+  }
+}
+
 /**
  * SMS stub — logs only, never sends.
  * Wire a real provider here when SMS_ENABLED is set and a provider is configured.
