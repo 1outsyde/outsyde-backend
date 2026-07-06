@@ -211,6 +211,13 @@ function detectDeviceFromRequest(req: any): string {
   return 'desktop';
 }
 
+// A "pending" invite whose expiresAt has passed is effectively dead even
+// though its stored status hasn't been flipped yet (that only happens lazily,
+// wherever the invite is next read/acted on — see isInviteExpired call sites).
+function isInviteExpired(invite: Pick<StaffInvite, "status" | "expiresAt">): boolean {
+  return invite.status === "pending" && !!invite.expiresAt && new Date(invite.expiresAt) < new Date();
+}
+
 // ---------------------------------------------------------------------------
 // Shared invite-accept logic — used by both POST /api/staff/accept-invite
 // (explicit accept by already-registered user) and customer signup
@@ -233,7 +240,7 @@ async function acceptStaffInvite(
   }
 
   // Transition expired pending invites to status="expired" on first encounter
-  if (invite.status === "pending" && invite.expiresAt && new Date(invite.expiresAt) < new Date()) {
+  if (isInviteExpired(invite)) {
     await storage.updateStaffInvite(invite.id, { status: "expired" });
     return { success: false, statusCode: 400, error: "This invite has expired" };
   }
@@ -6331,12 +6338,15 @@ export async function registerRoutes(
       const providerType = data.staffMemberId ? 'staff' : 'staff'; // Default to first staff if none specified
 
       if (data.staffMemberId) {
-        // Never allow a booking to be created against a staff member who hasn't
-        // finished Stripe onboarding — there's nowhere for their payout to land.
         const staffMember = await storage.getStaffMember(data.staffMemberId);
         if (!staffMember) {
           return res.status(404).json({ error: "Staff member not found" });
         }
+        if (staffMember.status !== "active") {
+          return res.status(400).json({ error: "Staff member is not available" });
+        }
+        // Never allow a booking to be created against a staff member who hasn't
+        // finished Stripe onboarding — there's nowhere for their payout to land.
         if (!staffMember.stripeOnboardingComplete) {
           return res.status(400).json({
             error: "Staff member not accepting bookings",
@@ -9467,7 +9477,21 @@ export async function registerRoutes(
       }
 
       const invites = await storage.getStaffInvitesByBusiness(business.id);
-      res.json({ invites });
+
+      // Self-heal: a pending invite past its expiresAt is effectively dead even
+      // though nothing has written status="expired" yet (that normally only
+      // happens lazily, on an accept attempt). Never show it as "pending" here.
+      const effectiveInvites = await Promise.all(
+        invites.map(async (invite) => {
+          if (!isInviteExpired(invite)) {
+            return invite;
+          }
+          const updated = await storage.updateStaffInvite(invite.id, { status: "expired" });
+          return updated || { ...invite, status: "expired" };
+        })
+      );
+
+      res.json({ invites: effectiveInvites });
     } catch (error) {
       console.error("Get staff invites error:", error);
       res.status(500).json({ error: "Failed to get invites" });
@@ -9833,10 +9857,12 @@ export async function registerRoutes(
 
       const validated = inviteSchema.parse(req.body);
 
-      // Check if there's already a pending invite for this email
+      // Check if there's already a pending invite for this email — a pending
+      // invite whose expiresAt has already passed is effectively dead and must
+      // not block a fresh invite, even if its stored status hasn't caught up yet.
       const existingInvites = await storage.getStaffInvitesByBusiness(business.id);
       const pendingInvite = existingInvites.find(
-        (inv: StaffInvite) => inv.email === validated.email && inv.status === "pending"
+        (inv: StaffInvite) => inv.email === validated.email && inv.status === "pending" && !isInviteExpired(inv)
       );
       if (pendingInvite) {
         return res.status(400).json({ error: "An invite is already pending for this email" });
