@@ -4806,6 +4806,11 @@ export class DatabaseStorage implements IStorage {
         ? `${row.inviterFirstName} ${row.inviterLastName}`
         : row.inviterName || null;
 
+    // A pending invite past its expiresAt is effectively dead even though
+    // nothing has written status="expired" to the row yet (that happens
+    // lazily elsewhere, e.g. on an accept attempt) — never preview it as "pending".
+    const isExpired = row.status === "pending" && new Date(row.expiresAt) < new Date();
+
     return {
       businessName: row.businessName,
       businessLogo: row.businessLogo,
@@ -4815,8 +4820,8 @@ export class DatabaseStorage implements IStorage {
       role: row.role,
       invitedByName,
       expiresAt: row.expiresAt,
-      status: row.status,
-      isExpired: new Date(row.expiresAt) < new Date(),
+      status: isExpired ? "expired" : row.status,
+      isExpired,
     };
   }
 
