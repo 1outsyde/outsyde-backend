@@ -10241,6 +10241,38 @@ export async function registerRoutes(
     }
   });
 
+  // Staff member's own assigned services. Deliberately does NOT go through
+  // isBusinessVisibleToPublic() — that gate exists to hide incomplete storefronts
+  // from customers, but a staff member viewing their own assigned services is an
+  // authenticated self-access, not a public/customer-facing read. Without this,
+  // a staff member at a business that hasn't finished Stripe onboarding (or lacks
+  // an active subscription) would 404 trying to see their own services.
+  app.get("/api/staff/my-services", async (req, res) => {
+    const userId = getUserIdFromRequest(req);
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    try {
+      const resolved = await resolveRequestingStaffMember(req, userId);
+      if ("status" in resolved) {
+        return res.status(resolved.status).json(resolved.body);
+      }
+      const staff = resolved.staff;
+
+      const businessServices = await storage.getVendorServicesByBusiness(staff.businessId);
+      const myServiceIds = new Set((staff.serviceIds || []).map(String));
+      const services = businessServices.filter(
+        (s) => myServiceIds.has(String(s.id)) && s.isActive && s.status === "live",
+      );
+
+      res.json({ services });
+    } catch (error) {
+      console.error("Get staff services error:", error);
+      res.status(500).json({ error: "Failed to get services" });
+    }
+  });
+
   // Get staff member's own bookings
   app.get("/api/staff/my-bookings", async (req, res) => {
     const userId = getUserIdFromRequest(req);
