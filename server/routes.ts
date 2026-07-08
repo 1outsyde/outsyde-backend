@@ -350,6 +350,67 @@ async function acceptStaffInvite(
   return { success: true, staff };
 }
 
+// ---------------------------------------------------------------------------
+// Resolves the staff_members row for the requesting user on the staff
+// self-service endpoints (/api/staff/*). A single userId can legitimately map
+// to staff rows at multiple businesses (one invite accepted per business), so
+// this never silently guesses — a caller with >1 staff membership must pass
+// ?businessId= (query for GET/DELETE, body for POST) to disambiguate.
+//
+// The 409's `businesses` array is sorted most-recently-active-first
+// (lastActiveAt, falling back to createdAt for rows never yet resolved) so a
+// caller that wants to auto-default can safely take businesses[0] — that's a
+// frontend UX decision, not something this helper makes silently.
+// ---------------------------------------------------------------------------
+type ResolvedStaffMember =
+  | { staff: StaffMember }
+  | { status: number; body: Record<string, unknown> };
+
+function sortStaffMembershipsByRecency(staffMemberships: StaffMember[]): StaffMember[] {
+  return [...staffMemberships].sort((a, b) => {
+    const aTime = a.lastActiveAt ? new Date(a.lastActiveAt).getTime() : new Date(a.createdAt).getTime();
+    const bTime = b.lastActiveAt ? new Date(b.lastActiveAt).getTime() : new Date(b.createdAt).getTime();
+    return bTime - aTime;
+  });
+}
+
+async function resolveRequestingStaffMember(req: any, userId: string): Promise<ResolvedStaffMember> {
+  const businessId: string | undefined =
+    (req.query && (req.query.businessId as string)) ||
+    (req.body && req.body.businessId) ||
+    undefined;
+
+  if (businessId) {
+    const staff = await storage.getStaffMemberByUserIdAndBusiness(userId, businessId);
+    if (!staff) {
+      return { status: 404, body: { error: "No staff profile found for that business" } };
+    }
+    await storage.touchStaffMemberLastActive(staff.id);
+    return { staff };
+  }
+
+  const staffMemberships = await storage.getStaffMembersByUserId(userId);
+  if (staffMemberships.length === 0) {
+    return { status: 404, body: { error: "No staff profile found" } };
+  }
+  if (staffMemberships.length > 1) {
+    const sorted = sortStaffMembershipsByRecency(staffMemberships);
+    return {
+      status: 409,
+      body: {
+        error: "Staff member linked to multiple businesses — specify businessId",
+        businesses: sorted.map((s) => ({
+          businessId: s.businessId,
+          staffId: s.id,
+          displayName: s.displayName,
+        })),
+      },
+    };
+  }
+  await storage.touchStaffMemberLastActive(staffMemberships[0].id);
+  return { staff: staffMemberships[0] };
+}
+
 export async function registerRoutes(
   httpServer: Server,
   app: Express
@@ -10167,10 +10228,11 @@ export async function registerRoutes(
     }
 
     try {
-      const staff = await storage.getStaffMemberByUserId(userId);
-      if (!staff) {
-        return res.status(404).json({ error: "No staff profile found" });
+      const resolved = await resolveRequestingStaffMember(req, userId);
+      if ("status" in resolved) {
+        return res.status(resolved.status).json(resolved.body);
       }
+      const staff = resolved.staff;
 
       res.json({ staff });
     } catch (error) {
@@ -10187,10 +10249,11 @@ export async function registerRoutes(
     }
 
     try {
-      const staff = await storage.getStaffMemberByUserId(userId);
-      if (!staff) {
-        return res.status(404).json({ error: "No staff profile found" });
+      const resolved = await resolveRequestingStaffMember(req, userId);
+      if ("status" in resolved) {
+        return res.status(resolved.status).json(resolved.body);
       }
+      const staff = resolved.staff;
 
       const bookings = await storage.getAppointmentsByStaffMember(staff.id);
       res.json({ bookings });
@@ -10208,10 +10271,11 @@ export async function registerRoutes(
     }
 
     try {
-      const staff = await storage.getStaffMemberByUserId(userId);
-      if (!staff) {
-        return res.status(404).json({ error: "No staff profile found" });
+      const resolved = await resolveRequestingStaffMember(req, userId);
+      if ("status" in resolved) {
+        return res.status(resolved.status).json(resolved.body);
       }
+      const staff = resolved.staff;
 
       const { startDate, endDate } = req.query;
       const availability = await storage.getStaffAvailability(
@@ -10235,10 +10299,11 @@ export async function registerRoutes(
     }
 
     try {
-      const staff = await storage.getStaffMemberByUserId(userId);
-      if (!staff) {
-        return res.status(404).json({ error: "No staff profile found" });
+      const resolved = await resolveRequestingStaffMember(req, userId);
+      if ("status" in resolved) {
+        return res.status(resolved.status).json(resolved.body);
       }
+      const staff = resolved.staff;
 
       const availabilitySchema = z.object({
         date: z.string().min(1, "Date is required"),
@@ -10275,10 +10340,11 @@ export async function registerRoutes(
     }
 
     try {
-      const staff = await storage.getStaffMemberByUserId(userId);
-      if (!staff) {
-        return res.status(404).json({ error: "No staff profile found" });
+      const resolved = await resolveRequestingStaffMember(req, userId);
+      if ("status" in resolved) {
+        return res.status(resolved.status).json(resolved.body);
       }
+      const staff = resolved.staff;
 
       // Get the availability slot to verify ownership
       const availabilitySlots = await storage.getStaffAvailability(staff.id);
@@ -10304,13 +10370,14 @@ export async function registerRoutes(
     }
 
     try {
-      const staff = await storage.getStaffMemberByUserId(userId);
-      if (!staff) {
-        return res.status(404).json({ error: "No staff profile found" });
+      const resolved = await resolveRequestingStaffMember(req, userId);
+      if ("status" in resolved) {
+        return res.status(resolved.status).json(resolved.body);
       }
+      const staff = resolved.staff;
 
       const bookings = await storage.getAppointmentsByStaffMember(staff.id);
-      
+
       // Calculate earnings from completed bookings
       const now = new Date();
       const thisMonthStart = new Date(now.getFullYear(), now.getMonth(), 1);
@@ -10348,10 +10415,11 @@ export async function registerRoutes(
     }
 
     try {
-      const staff = await storage.getStaffMemberByUserId(userId);
-      if (!staff) {
-        return res.status(404).json({ error: "No staff profile found" });
+      const resolved = await resolveRequestingStaffMember(req, userId);
+      if ("status" in resolved) {
+        return res.status(resolved.status).json(resolved.body);
       }
+      const staff = resolved.staff;
 
       let accountId = staff.stripeAccountId;
 
