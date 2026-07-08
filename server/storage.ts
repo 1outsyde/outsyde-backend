@@ -483,6 +483,8 @@ export interface IStorage {
   createStaffMember(data: InsertStaffMember): Promise<StaffMember>;
   getStaffMember(id: string): Promise<StaffMember | undefined>;
   getStaffMemberByUserId(userId: string): Promise<StaffMember | undefined>;
+  getStaffMembersByUserId(userId: string): Promise<StaffMember[]>;
+  getStaffMemberByUserIdAndBusiness(userId: string, businessId: string): Promise<StaffMember | undefined>;
   getStaffMemberByStripeAccountId(stripeAccountId: string): Promise<StaffMember | undefined>;
   getStaffMembersByBusiness(businessId: string): Promise<StaffMember[]>;
   getActiveStaffCount(businessId: string): Promise<number>;
@@ -4624,8 +4626,21 @@ export class DatabaseStorage implements IStorage {
     return result[0];
   }
 
+  // Ambiguous when a person is staff at 2+ businesses (no business filter, no
+  // deterministic order) — self-service routes must use the business-scoped
+  // lookups below instead. Kept only because it's part of the public interface.
   async getStaffMemberByUserId(userId: string): Promise<StaffMember | undefined> {
     const result = await db.select().from(staffMembers).where(eq(staffMembers.userId, userId));
+    return result[0];
+  }
+
+  async getStaffMembersByUserId(userId: string): Promise<StaffMember[]> {
+    return db.select().from(staffMembers).where(eq(staffMembers.userId, userId));
+  }
+
+  async getStaffMemberByUserIdAndBusiness(userId: string, businessId: string): Promise<StaffMember | undefined> {
+    const result = await db.select().from(staffMembers)
+      .where(and(eq(staffMembers.userId, userId), eq(staffMembers.businessId, businessId)));
     return result[0];
   }
 
