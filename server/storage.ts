@@ -481,13 +481,13 @@ export interface IStorage {
 
   // Staff Members
   createStaffMember(data: InsertStaffMember): Promise<StaffMember>;
-  getStaffMember(id: string): Promise<StaffMember | undefined>;
+  getStaffMember(id: string): Promise<(StaffMember & { username: string | null }) | undefined>;
   getStaffMemberByUserId(userId: string): Promise<StaffMember | undefined>;
   getStaffMembersByUserId(userId: string): Promise<StaffMember[]>;
   getStaffMemberByUserIdAndBusiness(userId: string, businessId: string): Promise<StaffMember | undefined>;
   touchStaffMemberLastActive(staffId: string): Promise<void>;
   getStaffMemberByStripeAccountId(stripeAccountId: string): Promise<StaffMember | undefined>;
-  getStaffMembersByBusiness(businessId: string): Promise<StaffMember[]>;
+  getStaffMembersByBusiness(businessId: string): Promise<(StaffMember & { username: string | null })[]>;
   getActiveStaffCount(businessId: string): Promise<number>;
   updateStaffMember(id: string, updates: Partial<StaffMember>): Promise<StaffMember | undefined>;
   deleteStaffMember(id: string): Promise<void>;
@@ -747,7 +747,7 @@ export interface UnifiedSearchParams {
 
 export interface UnifiedSearchResult {
   id: string;
-  type: 'consumer' | 'photographer' | 'business' | 'product' | 'service';
+  type: 'consumer' | 'photographer' | 'business' | 'product' | 'service' | 'staff';
   title: string;
   subtitle: string | null;
   imageUrl: string | null;
@@ -755,6 +755,7 @@ export interface UnifiedSearchResult {
   ratingCount: number | null;
   category: string | null;
   providerUserId: string | null;
+  username: string | null;
   baseScore: number;
   personalizationScore: number;
   price?: number | null;
@@ -4622,9 +4623,15 @@ export class DatabaseStorage implements IStorage {
     return staff;
   }
 
-  async getStaffMember(id: string): Promise<StaffMember | undefined> {
-    const result = await db.select().from(staffMembers).where(eq(staffMembers.id, id));
-    return result[0];
+  async getStaffMember(id: string): Promise<(StaffMember & { username: string | null }) | undefined> {
+    const result = await db
+      .select({ staff: staffMembers, linkedUsername: users.username })
+      .from(staffMembers)
+      .leftJoin(users, eq(staffMembers.userId, users.id))
+      .where(eq(staffMembers.id, id));
+    const row = result[0];
+    if (!row) return undefined;
+    return { ...row.staff, username: row.linkedUsername ?? null };
   }
 
   // Ambiguous when a person is staff at 2+ businesses (no business filter, no
@@ -4656,10 +4663,14 @@ export class DatabaseStorage implements IStorage {
     return result[0];
   }
 
-  async getStaffMembersByBusiness(businessId: string): Promise<StaffMember[]> {
-    return db.select().from(staffMembers)
+  async getStaffMembersByBusiness(businessId: string): Promise<(StaffMember & { username: string | null })[]> {
+    const result = await db
+      .select({ staff: staffMembers, linkedUsername: users.username })
+      .from(staffMembers)
+      .leftJoin(users, eq(staffMembers.userId, users.id))
       .where(eq(staffMembers.businessId, businessId))
       .orderBy(staffMembers.displayName);
+    return result.map((row) => ({ ...row.staff, username: row.linkedUsername ?? null }));
   }
 
   async getActiveStaffCount(businessId: string): Promise<number> {
@@ -5625,6 +5636,7 @@ export class DatabaseStorage implements IStorage {
           ratingCount: null,
           category: null,
           providerUserId: u.id,
+          username: u.username || null,
           baseScore,
           personalizationScore: baseScore,
         });
@@ -5682,6 +5694,7 @@ export class DatabaseStorage implements IStorage {
           ratingCount: p.reviewCount || null,
           category: (p.specialties || [])[0] || 'Photography',
           providerUserId: p.userId,
+          username: null,
           baseScore,
           personalizationScore,
         });
@@ -5757,6 +5770,77 @@ export class DatabaseStorage implements IStorage {
           ratingCount: b.reviewCount || null,
           category: b.category || null,
           providerUserId: b.ownerId,
+          username: null,
+          baseScore,
+          personalizationScore,
+        });
+      }
+    }
+
+    // ==================== STAFF ====================
+    if (scope === 'all' || scope === 'staff') {
+      const staffRows = await db
+        .select({
+          st: staffMembers,
+          bName: businesses.name,
+          bCity: businesses.city,
+          bState: businesses.state,
+          linkedUsername: users.username,
+        })
+        .from(staffMembers)
+        .innerJoin(businesses, eq(staffMembers.businessId, businesses.id))
+        .leftJoin(users, eq(staffMembers.userId, users.id))
+        .where(
+          and(
+            eq(staffMembers.status, 'active'),
+            eq(staffMembers.stripeOnboardingComplete, true),
+            or(
+              ilike(staffMembers.displayName, likePattern),
+              sql`${staffMembers.specialties}::text ILIKE ${likePattern}`
+            ),
+            city ? ilike(businesses.city, `%${city}%`) : undefined
+          )
+        )
+        .limit(scope === 'all' ? 15 : limit)
+        .offset(scope === 'staff' ? offset : 0);
+
+      for (const row of staffRows) {
+        const lower = searchTerm.toLowerCase();
+        const nameLower = (row.st.displayName || '').toLowerCase();
+
+        let baseScore = 0;
+        if (searchTerm) {
+          if (nameLower === lower) baseScore = 100;
+          else if (nameLower.startsWith(lower)) baseScore = 80;
+          else baseScore = 45;
+        } else {
+          baseScore = 25;
+        }
+
+        let personalizationScore = baseScore;
+        if (personalized) {
+          const specialties = row.st.specialties || [];
+          const nicheMatch = specialties.some((s: string) =>
+            viewerIndustries.some(ind => s.toLowerCase().includes(ind.toLowerCase()))
+          );
+          if (nicheMatch) personalizationScore += 25;
+        }
+
+        results.push({
+          id: row.st.id,
+          type: 'staff',
+          title: row.st.displayName,
+          subtitle: row.bName
+            ? `@ ${row.bName}${row.bCity ? ` · ${row.bCity}` : ''}`
+            : null,
+          imageUrl: row.st.profileImageUrl || null,
+          ratingAvg: row.st.rating || null,
+          ratingCount: row.st.reviewCount || null,
+          category: (row.st.specialties || [])[0] || null,
+          providerUserId: row.st.userId || null,
+          username: row.linkedUsername || null,
+          businessId: row.st.businessId,
+          businessName: row.bName || null,
           baseScore,
           personalizationScore,
         });
@@ -5829,6 +5913,7 @@ export class DatabaseStorage implements IStorage {
           ratingCount: null,
           category: row.p.category || null,
           providerUserId: row.bOwnerId || null,
+          username: null,
           price: row.p.price,
           businessId: row.p.businessId,
           businessName: row.bName || null,
@@ -5897,6 +5982,7 @@ export class DatabaseStorage implements IStorage {
           ratingCount: null,
           category: row.s.category || null,
           providerUserId: row.bOwnerId || null,
+          username: null,
           price: row.s.price,
           businessId: row.s.businessId,
           businessName: row.bName || null,
@@ -5961,6 +6047,7 @@ export class DatabaseStorage implements IStorage {
           ratingCount: null,
           category: row.s.category || 'Photography',
           providerUserId: row.pUserId,
+          username: null,
           price: row.s.priceCents,
           providerId: row.pId,
           providerName: row.pName || null,
