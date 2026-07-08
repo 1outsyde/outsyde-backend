@@ -10309,6 +10309,9 @@ export async function registerRoutes(
         date: z.string().min(1, "Date is required"),
         startTime: z.string().min(1, "Start time is required"),
         endTime: z.string().min(1, "End time is required"),
+        // Staff can self-create 'available' or 'blocked' slots only —
+        // 'booked'/'break' stay system/owner-controlled.
+        slotType: z.enum(["available", "blocked"]).optional().default("available"),
       });
 
       const data = availabilitySchema.parse(req.body);
@@ -10319,7 +10322,7 @@ export async function registerRoutes(
         date: data.date,
         startTime: data.startTime,
         endTime: data.endTime,
-        slotType: "available",
+        slotType: data.slotType,
       });
 
       res.status(201).json({ availability });
