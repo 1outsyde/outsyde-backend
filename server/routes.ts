@@ -356,10 +356,23 @@ async function acceptStaffInvite(
 // to staff rows at multiple businesses (one invite accepted per business), so
 // this never silently guesses — a caller with >1 staff membership must pass
 // ?businessId= (query for GET/DELETE, body for POST) to disambiguate.
+//
+// The 409's `businesses` array is sorted most-recently-active-first
+// (lastActiveAt, falling back to createdAt for rows never yet resolved) so a
+// caller that wants to auto-default can safely take businesses[0] — that's a
+// frontend UX decision, not something this helper makes silently.
 // ---------------------------------------------------------------------------
 type ResolvedStaffMember =
   | { staff: StaffMember }
   | { status: number; body: Record<string, unknown> };
+
+function sortStaffMembershipsByRecency(staffMemberships: StaffMember[]): StaffMember[] {
+  return [...staffMemberships].sort((a, b) => {
+    const aTime = a.lastActiveAt ? new Date(a.lastActiveAt).getTime() : new Date(a.createdAt).getTime();
+    const bTime = b.lastActiveAt ? new Date(b.lastActiveAt).getTime() : new Date(b.createdAt).getTime();
+    return bTime - aTime;
+  });
+}
 
 async function resolveRequestingStaffMember(req: any, userId: string): Promise<ResolvedStaffMember> {
   const businessId: string | undefined =
@@ -372,6 +385,7 @@ async function resolveRequestingStaffMember(req: any, userId: string): Promise<R
     if (!staff) {
       return { status: 404, body: { error: "No staff profile found for that business" } };
     }
+    await storage.touchStaffMemberLastActive(staff.id);
     return { staff };
   }
 
@@ -380,11 +394,12 @@ async function resolveRequestingStaffMember(req: any, userId: string): Promise<R
     return { status: 404, body: { error: "No staff profile found" } };
   }
   if (staffMemberships.length > 1) {
+    const sorted = sortStaffMembershipsByRecency(staffMemberships);
     return {
       status: 409,
       body: {
         error: "Staff member linked to multiple businesses — specify businessId",
-        businesses: staffMemberships.map((s) => ({
+        businesses: sorted.map((s) => ({
           businessId: s.businessId,
           staffId: s.id,
           displayName: s.displayName,
@@ -392,6 +407,7 @@ async function resolveRequestingStaffMember(req: any, userId: string): Promise<R
       },
     };
   }
+  await storage.touchStaffMemberLastActive(staffMemberships[0].id);
   return { staff: staffMemberships[0] };
 }
 

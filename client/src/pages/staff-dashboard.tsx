@@ -21,6 +21,43 @@ interface StaffDashboardPageProps {
   onLogout: () => void;
 }
 
+// GET /api/staff/me — if the account is staff at exactly one business this resolves
+// directly. If it's ambiguous (staff at 2+ businesses), the backend returns 409 with a
+// `businesses` array sorted most-recently-active-first; auto-select businesses[0] rather
+// than showing a blocking picker (see G9 follow-up). Logged since it's a silent choice.
+async function fetchStaffProfile(): Promise<{ staff: StaffMember | null }> {
+  const res = await fetch("/api/staff/me", { credentials: "include" });
+
+  if (res.status === 409) {
+    const body = await res.json();
+    const chosen = (body.businesses || [])[0];
+    if (!chosen) return { staff: null };
+    console.log(
+      `[StaffDashboard] Ambiguous staff account, auto-selected business ${chosen.businessId} (staffId ${chosen.staffId})`
+    );
+    const retryRes = await fetch(`/api/staff/me?businessId=${encodeURIComponent(chosen.businessId)}`, {
+      credentials: "include",
+    });
+    if (!retryRes.ok) return { staff: null };
+    const retryJson = await retryRes.json();
+    return { staff: retryJson.staff ?? null };
+  }
+
+  if (!res.ok) return { staff: null };
+  const json = await res.json();
+  return { staff: json.staff ?? null };
+}
+
+// Shared GET helper for the 3 businessId-scoped read queries below.
+async function fetchWithBusinessContext<T>(url: string, businessId: string): Promise<T> {
+  const res = await fetch(`${url}?businessId=${encodeURIComponent(businessId)}`, { credentials: "include" });
+  if (!res.ok) {
+    const text = (await res.text()) || res.statusText;
+    throw new Error(`${res.status}: ${text}`);
+  }
+  return res.json();
+}
+
 export default function StaffDashboardPage({ onLogout }: StaffDashboardPageProps) {
   const [activeSection, setActiveSection] = useState("dashboard");
   const [availabilityDialogOpen, setAvailabilityDialogOpen] = useState(false);
@@ -29,28 +66,35 @@ export default function StaffDashboardPage({ onLogout }: StaffDashboardPageProps
   const [endTime, setEndTime] = useState("17:00");
   const { toast } = useToast();
 
-  const { data: staffData, isLoading: staffLoading } = useQuery<{ staff: StaffMember }>({
+  const { data: staffData, isLoading: staffLoading } = useQuery<{ staff: StaffMember | null }>({
     queryKey: ["/api/staff/me"],
+    queryFn: fetchStaffProfile,
   });
 
+  const staff = staffData?.staff ?? undefined;
+  const businessId = staff?.businessId;
+
   const { data: bookingsData, isLoading: bookingsLoading } = useQuery<{ bookings: Appointment[] }>({
-    queryKey: ["/api/staff/my-bookings"],
-    enabled: !!staffData?.staff,
+    queryKey: ["/api/staff/my-bookings", businessId],
+    queryFn: () => fetchWithBusinessContext("/api/staff/my-bookings", businessId!),
+    enabled: !!businessId,
   });
 
   const { data: availabilityData, isLoading: availabilityLoading } = useQuery<{ availability: StaffAvailability[] }>({
-    queryKey: ["/api/staff/my-availability"],
-    enabled: !!staffData?.staff,
+    queryKey: ["/api/staff/my-availability", businessId],
+    queryFn: () => fetchWithBusinessContext("/api/staff/my-availability", businessId!),
+    enabled: !!businessId,
   });
 
   const { data: earningsData } = useQuery<{ total: number; thisMonth: number; pending: number }>({
-    queryKey: ["/api/staff/my-earnings"],
-    enabled: !!staffData?.staff,
+    queryKey: ["/api/staff/my-earnings", businessId],
+    queryFn: () => fetchWithBusinessContext("/api/staff/my-earnings", businessId!),
+    enabled: !!businessId,
   });
 
   const stripeOnboardingMutation = useMutation({
     mutationFn: async () => {
-      const response = await apiRequest("POST", "/api/staff/stripe-onboarding/create-link");
+      const response = await apiRequest("POST", "/api/staff/stripe-onboarding/create-link", { businessId });
       return response.json();
     },
     onSuccess: (data) => {
@@ -69,11 +113,11 @@ export default function StaffDashboardPage({ onLogout }: StaffDashboardPageProps
 
   const addAvailabilityMutation = useMutation({
     mutationFn: async (data: { date: string; startTime: string; endTime: string }) => {
-      const response = await apiRequest("POST", "/api/staff/my-availability", data);
+      const response = await apiRequest("POST", "/api/staff/my-availability", { ...data, businessId });
       return response.json();
     },
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["/api/staff/my-availability"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/staff/my-availability", businessId] });
       setAvailabilityDialogOpen(false);
       setSelectedDate("");
       toast({ title: "Availability added" });
@@ -89,16 +133,14 @@ export default function StaffDashboardPage({ onLogout }: StaffDashboardPageProps
 
   const deleteAvailabilityMutation = useMutation({
     mutationFn: async (id: string) => {
-      const response = await apiRequest("DELETE", `/api/staff/my-availability/${id}`);
+      const response = await apiRequest("DELETE", `/api/staff/my-availability/${id}`, { businessId });
       return response.json();
     },
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["/api/staff/my-availability"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/staff/my-availability", businessId] });
       toast({ title: "Availability removed" });
     },
   });
-
-  const staff = staffData?.staff;
   const bookings = bookingsData?.bookings || [];
   const availability = availabilityData?.availability || [];
   const earnings = earningsData || { total: 0, thisMonth: 0, pending: 0 };

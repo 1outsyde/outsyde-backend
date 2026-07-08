@@ -485,6 +485,7 @@ export interface IStorage {
   getStaffMemberByUserId(userId: string): Promise<StaffMember | undefined>;
   getStaffMembersByUserId(userId: string): Promise<StaffMember[]>;
   getStaffMemberByUserIdAndBusiness(userId: string, businessId: string): Promise<StaffMember | undefined>;
+  touchStaffMemberLastActive(staffId: string): Promise<void>;
   getStaffMemberByStripeAccountId(stripeAccountId: string): Promise<StaffMember | undefined>;
   getStaffMembersByBusiness(businessId: string): Promise<StaffMember[]>;
   getActiveStaffCount(businessId: string): Promise<number>;
@@ -4642,6 +4643,12 @@ export class DatabaseStorage implements IStorage {
     const result = await db.select().from(staffMembers)
       .where(and(eq(staffMembers.userId, userId), eq(staffMembers.businessId, businessId)));
     return result[0];
+  }
+
+  async touchStaffMemberLastActive(staffId: string): Promise<void> {
+    await db.update(staffMembers)
+      .set({ lastActiveAt: new Date() })
+      .where(eq(staffMembers.id, staffId));
   }
 
   async getStaffMemberByStripeAccountId(stripeAccountId: string): Promise<StaffMember | undefined> {

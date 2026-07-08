@@ -480,8 +480,14 @@ export const staffMembers = pgTable("staff_members", {
   
   // Staff hours (can be different from business hours)
   hoursOfOperation: jsonb("hours_of_operation").$type<HoursOfOperation>(),
-  
+
   createdAt: timestamp("created_at").defaultNow().notNull(),
+
+  // Stamped by resolveRequestingStaffMember() whenever a staff self-service
+  // request actually resolves to this business — the real "used this business"
+  // signal for disambiguating a person staffing 2+ businesses. Not the same as
+  // createdAt (invite-acceptance time) or stripeOnboardingLastEventAt (webhook-only).
+  lastActiveAt: timestamp("last_active_at"),
 });
 
 /* =====================================================
