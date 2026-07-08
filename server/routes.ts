@@ -527,7 +527,7 @@ export async function registerRoutes(
         offset = '0',
       } = req.query;
 
-      const validScopes = ['all', 'consumers', 'photographers', 'businesses', 'products', 'services'];
+      const validScopes = ['all', 'consumers', 'photographers', 'businesses', 'products', 'services', 'staff'];
       const searchScope = validScopes.includes(scope as string) ? scope as string : 'all';
 
       const effectiveViewerUserId =
@@ -10166,16 +10166,17 @@ export async function registerRoutes(
   app.get("/api/businesses/:businessId/staff", async (req, res) => {
     try {
       const staff = await storage.getStaffMembersByBusiness(req.params.businessId);
-      
+
       // Only return active staff with completed Stripe onboarding
-      const activeStaff = staff.filter((s: StaffMember) => 
+      const activeStaff = staff.filter((s: StaffMember & { username: string | null }) =>
         s.status === "active" && s.stripeOnboardingComplete
       );
 
       // Return sanitized staff info for public viewing
-      const publicStaff = activeStaff.map((s: StaffMember) => ({
+      const publicStaff = activeStaff.map((s: StaffMember & { username: string | null }) => ({
         id: s.id,
         displayName: s.displayName,
+        username: s.username,
         bio: s.bio,
         profileImageUrl: s.profileImageUrl,
         specialties: s.specialties,
