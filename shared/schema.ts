@@ -465,7 +465,7 @@ export const staffMembers = pgTable("staff_members", {
   // Staff role: 'staff' (regular) | 'manager' (can see team stats) | 'owner' (full access)
   role: text("role").default("staff").notNull(),
   
-  // Status: 'active' | 'inactive' | 'pending' (invited but not accepted)
+  // Status: 'active' | 'inactive' | 'pending' (invited but not accepted) | 'archived' (offboarded — soft-delete, row is kept)
   status: text("status").default("active").notNull(),
   
   // Rating/reviews for this staff member
