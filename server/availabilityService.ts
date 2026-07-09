@@ -1308,111 +1308,143 @@ export interface HoldResult {
   endTime: string;
 }
 
+/**
+ * Resolve service name/price/duration for hold creation.
+ *
+ * Deliberately NOT shared with validateBookingSlot's inline service lookup
+ * (same underlying query, duplicated on purpose) -- validateBookingSlot
+ * backs the separate POST /api/booking/validate route and is left untouched
+ * in this pass so that route's behavior can't be affected by this change.
+ */
+async function resolveServiceForHold(
+  providerType: 'business' | 'photographer',
+  serviceId: string
+): Promise<{ serviceDurationMinutes: number; servicePriceCents: number; serviceName: string } | null> {
+  if (providerType === 'business') {
+    const [service] = await db.select()
+      .from(vendorServices)
+      .where(eq(vendorServices.id, serviceId));
+
+    if (!service) return null;
+
+    return {
+      serviceDurationMinutes: service.durationMinutes || 60,
+      servicePriceCents: Math.round((service.price || 0) * 100),
+      serviceName: service.name,
+    };
+  }
+
+  const [service] = await db.select()
+    .from(photographerServices)
+    .where(eq(photographerServices.id, serviceId));
+
+  if (!service) return null;
+
+  return {
+    serviceDurationMinutes: service.estimatedDurationMinutes || (service.packageHours ? service.packageHours * 60 : 60),
+    servicePriceCents: service.priceCents || service.hourlyRateCents || 0,
+    serviceName: service.name,
+  };
+}
+
 export async function createBookingHold(params: CreateHoldParams): Promise<HoldResult> {
   const holdDuration = params.holdDurationMinutes || DEFAULT_HOLD_DURATION_MINUTES;
 
-  // Validate slot first (lightweight check before locking)
-  const validation = await validateBookingSlot(
-    params.providerType,
+  const service = await resolveServiceForHold(params.providerType, params.serviceId);
+  if (!service) {
+    throw new AvailabilityError(AVAILABILITY_ERRORS.SERVICE_NOT_FOUND, 'Service not found');
+  }
+
+  const endTime = calculateEndTime(params.startTime, service.serviceDurationMinutes);
+
+  // checkProviderAvailability only ever stores provider_type = 'business' |
+  // 'photographer' in weeklyAvailability/providerBlocks/bookingHolds -- staff
+  // is represented as providerType 'business' + a staffMemberId. Translate
+  // this route's (providerType, staffMemberId) pair into the 'staff' variant
+  // checkProviderAvailability expects, passing the businessId as providerId.
+  const cpaProviderType: 'business' | 'staff' | 'photographer' =
+    params.providerType === 'business' && params.staffMemberId ? 'staff' : params.providerType;
+
+  const availability = await checkProviderAvailability(
+    cpaProviderType,
     params.providerId,
-    params.serviceId,
+    params.staffMemberId || null,
     params.date,
     params.startTime,
-    params.staffMemberId
+    endTime,
+    params.serviceId
   );
 
-  if (!validation.valid) {
+  if (!availability.available) {
     throw new AvailabilityError(
-      validation.errorCode || AVAILABILITY_ERRORS.SLOT_UNAVAILABLE,
-      validation.errorMessage || 'Slot not available'
+      AVAILABILITY_ERRORS.SLOT_UNAVAILABLE,
+      availability.reason || 'Slot not available'
     );
   }
 
-  const endTime = calculateEndTime(params.startTime, validation.serviceDurationMinutes!);
+  // TEMPORARY BRIDGE CHECK: confirmed appointments/shootBookings have not
+  // been migrated onto the new hold-based tables yet, so checkProviderAvailability
+  // (which only looks at weeklyAvailability/providerBlocks/bookingHolds) cannot
+  // see them. Keep checking the legacy confirmed-bookings tables here too,
+  // in addition to checkProviderAvailability, until that migration happens --
+  // both checks must pass (AND), either one conflicting is enough to reject.
+  const bookings = await getConfirmedBookingsForDate(
+    params.providerType, params.providerId, params.date, params.staffMemberId
+  );
+  const bookingConflict = bookings.find(b =>
+    doTimesOverlap(params.startTime, endTime, b.startTime, b.endTime)
+  );
+  if (bookingConflict) {
+    throw new AvailabilityError(
+      AVAILABILITY_ERRORS.SLOT_UNAVAILABLE,
+      'Slot is already booked'
+    );
+  }
+
   const expiresAt = new Date(Date.now() + holdDuration * 60 * 1000);
   const startAt = parseDateWithTime(params.date, params.startTime);
   const endAt = parseDateWithTime(params.date, endTime);
 
-  // Use a serializable transaction with SELECT FOR UPDATE to prevent race conditions.
-  // Two concurrent requests for the same slot: the second will block on the row lock
-  // until the first commits, then see the hold and fail gracefully.
+  // No SELECT FOR UPDATE / re-check transaction needed here: the
+  // no_overlapping_active_holds exclusion constraint (migrations/011) makes
+  // this INSERT itself the atomic race-breaker. A genuine concurrent
+  // double-hold attempt is rejected by Postgres at insert time (23P01), not
+  // by application-level locking.
+  let hold: BookingHold;
   try {
-    const result = await db.transaction(async (tx) => {
-      // Lock any existing active holds for this provider+date range to prevent races
-      const conflictingHolds = await tx.select()
-        .from(bookingHolds)
-        .where(and(
-          eq(bookingHolds.providerType, params.providerType),
-          eq(bookingHolds.providerId, params.providerId),
-          eq(bookingHolds.holdDate, params.date),
-          eq(bookingHolds.status, 'active'),
-          gte(bookingHolds.expiresAt, new Date()),
-          params.staffMemberId ? eq(bookingHolds.staffMemberId, params.staffMemberId) : sql`1=1`
-        ))
-        .for('update');
-
-      // Re-check for overlap within the locked set
-      const hasConflict = conflictingHolds.some(h =>
-        doTimesOverlap(params.startTime, endTime, h.startTime, h.endTime)
-      );
-
-      if (hasConflict) {
-        throw new AvailabilityError(
-          AVAILABILITY_ERRORS.SLOT_UNAVAILABLE,
-          'This slot was just booked. Please choose another time.'
-        );
-      }
-
-      // Also re-check confirmed bookings within the transaction
-      const bookings = await getConfirmedBookingsForDate(
-        params.providerType, params.providerId, params.date, params.staffMemberId
-      );
-      const bookingConflict = bookings.find(b =>
-        doTimesOverlap(params.startTime, endTime, b.startTime, b.endTime)
-      );
-      if (bookingConflict) {
-        throw new AvailabilityError(
-          AVAILABILITY_ERRORS.SLOT_UNAVAILABLE,
-          'Slot is already booked'
-        );
-      }
-
-      // Insert hold within the transaction
-      const [hold] = await tx.insert(bookingHolds).values({
-        providerType: params.providerType,
-        providerId: params.providerId,
-        staffMemberId: params.staffMemberId,
-        userId: params.userId,
-        serviceId: params.serviceId,
-        serviceName: validation.serviceName!,
-        servicePriceCents: validation.servicePriceCents!,
-        durationMinutes: validation.serviceDurationMinutes!,
-        holdDate: params.date,
-        startTime: params.startTime,
-        endTime,
-        startAt,
-        endAt,
-        expiresAt,
-      }).returning();
-
-      return hold;
-    });
-
-    console.log(`[BookingHold] Created hold ${result.id} for user ${params.userId}, expires at ${expiresAt.toISOString()}`);
-
-    return {
-      holdId: result.id,
-      expiresAt,
-      serviceName: validation.serviceName!,
-      servicePriceCents: validation.servicePriceCents!,
-      durationMinutes: validation.serviceDurationMinutes!,
+    [hold] = await db.insert(bookingHolds).values({
+      providerType: params.providerType,
+      providerId: params.providerId,
+      staffMemberId: params.staffMemberId,
+      userId: params.userId,
+      serviceId: params.serviceId,
+      serviceName: service.serviceName,
+      servicePriceCents: service.servicePriceCents,
+      durationMinutes: service.serviceDurationMinutes,
+      holdDate: params.date,
       startTime: params.startTime,
       endTime,
-    };
+      startAt,
+      endAt,
+      expiresAt,
+    }).returning();
   } catch (err) {
-    if (err instanceof AvailabilityError) throw err;
-    // PostgreSQL unique violation (duplicate slot) is a second layer of protection
-    if ((err as any)?.code === '23505') {
+    const pgError = err as { code?: string; constraint?: string };
+    // Exclusion-constraint violation: covers both a genuine concurrent
+    // double-hold and the ~60s window where a hold is logically expired
+    // (expiresAt < now) but status is still 'active' because the sweep
+    // interval (bookingStateMachine.ts startBookingCleanupJob, every 60s)
+    // hasn't flipped it to 'expired' yet -- the DB constraint only checks
+    // status, not expiresAt, so it still fires in that window. Same
+    // user-facing outcome either way: the slot isn't available right now.
+    if (pgError?.code === '23P01' && pgError?.constraint === 'no_overlapping_active_holds') {
+      throw new AvailabilityError(
+        AVAILABILITY_ERRORS.SLOT_UNAVAILABLE,
+        'This slot was just taken. Please choose another time.'
+      );
+    }
+    // PostgreSQL unique violation, retained as a second layer of protection
+    if (pgError?.code === '23505') {
       throw new AvailabilityError(
         AVAILABILITY_ERRORS.SLOT_UNAVAILABLE,
         'This slot was just booked. Please choose another time.'
@@ -1420,6 +1452,18 @@ export async function createBookingHold(params: CreateHoldParams): Promise<HoldR
     }
     throw err;
   }
+
+  console.log(`[BookingHold] Created hold ${hold.id} for user ${params.userId}, expires at ${expiresAt.toISOString()}`);
+
+  return {
+    holdId: hold.id,
+    expiresAt,
+    serviceName: service.serviceName,
+    servicePriceCents: service.servicePriceCents,
+    durationMinutes: service.serviceDurationMinutes,
+    startTime: params.startTime,
+    endTime,
+  };
 }
 
 // ============================================
