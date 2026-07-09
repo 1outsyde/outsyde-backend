@@ -514,6 +514,10 @@ export interface IStorage {
   getStaffInvitesByBusiness(businessId: string): Promise<StaffInvite[]>;
   getStaffInvitesByEmail(email: string): Promise<StaffInvite[]>;
   updateStaffInvite(id: string, updates: Partial<StaffInvite>): Promise<StaffInvite | undefined>;
+  // Resets a dead (expired/revoked/stale-pending) invite row back to a fresh
+  // pending state instead of inserting a duplicate row for the same email —
+  // used by the resend path in POST /api/vendor/staff/invites.
+  reactivateStaffInvite(id: string, data: { phone?: string | null; role?: string; invitedByUserId?: string }): Promise<StaffInvite | undefined>;
   deleteStaffInvite(id: string): Promise<void>;
 
   // Refund Requests
@@ -4892,6 +4896,28 @@ export class DatabaseStorage implements IStorage {
   async updateStaffInvite(id: string, updates: Partial<StaffInvite>): Promise<StaffInvite | undefined> {
     const [updated] = await db.update(staffInvites)
       .set(updates)
+      .where(eq(staffInvites.id, id))
+      .returning();
+    return updated;
+  }
+
+  async reactivateStaffInvite(
+    id: string,
+    data: { phone?: string | null; role?: string; invitedByUserId?: string },
+  ): Promise<StaffInvite | undefined> {
+    const inviteCode = randomUUID().substring(0, 8).toUpperCase();
+    const [updated] = await db.update(staffInvites)
+      .set({
+        phone: data.phone ?? null,
+        role: data.role ?? "staff",
+        invitedByUserId: data.invitedByUserId,
+        inviteCode,
+        status: "pending",
+        sentAt: null,
+        acceptedAt: null,
+        acceptedByUserId: null,
+        expiresAt: sql`NOW() + INTERVAL '7 days'`,
+      })
       .where(eq(staffInvites.id, id))
       .returning();
     return updated;

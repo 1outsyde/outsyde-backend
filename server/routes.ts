@@ -9948,20 +9948,40 @@ export async function registerRoutes(
       // invite whose expiresAt has already passed is effectively dead and must
       // not block a fresh invite, even if its stored status hasn't caught up yet.
       const existingInvites = await storage.getStaffInvitesByBusiness(business.id);
-      const pendingInvite = existingInvites.find(
-        (inv: StaffInvite) => inv.email === validated.email && inv.status === "pending" && !isInviteExpired(inv)
+      const emailInvites = existingInvites.filter((inv: StaffInvite) => inv.email === validated.email);
+      const pendingInvite = emailInvites.find(
+        (inv: StaffInvite) => inv.status === "pending" && !isInviteExpired(inv)
       );
       if (pendingInvite) {
         return res.status(400).json({ error: "An invite is already pending for this email" });
       }
 
-      const invite = await storage.createStaffInvite({
-        businessId: business.id,
-        email: validated.email,
-        phone: validated.phone ?? null,
-        role: validated.role || "staff",
-        invitedByUserId: userId,
-      });
+      // Resend: reuse the most recent dead invite row (expired/revoked/stale
+      // pending) instead of inserting a duplicate staff_invites row for the
+      // same email at this business — same find-or-reactivate spirit as G7.
+      // getStaffInvitesByBusiness is already ordered desc by createdAt, so the
+      // first match here is the most recent one.
+      const reusableInvite = emailInvites.find(
+        (inv: StaffInvite) => inv.status === "revoked" || inv.status === "expired" || isInviteExpired(inv)
+      );
+
+      const invite = reusableInvite
+        ? await storage.reactivateStaffInvite(reusableInvite.id, {
+            phone: validated.phone ?? null,
+            role: validated.role || "staff",
+            invitedByUserId: userId,
+          })
+        : await storage.createStaffInvite({
+            businessId: business.id,
+            email: validated.email,
+            phone: validated.phone ?? null,
+            role: validated.role || "staff",
+            invitedByUserId: userId,
+          });
+
+      if (!invite) {
+        return res.status(500).json({ error: "Failed to create invite" });
+      }
 
       // Send invite email — invite row persists regardless of send outcome
       const { sent, error: sendError } = await sendStaffInviteEmail(
