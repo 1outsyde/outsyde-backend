@@ -1550,7 +1550,7 @@ export async function getBookingHold(holdId: string): Promise<BookingHold | null
  */
 export async function getUserActiveHolds(userId: string): Promise<BookingHold[]> {
   const now = new Date();
-  
+
   return db.select()
     .from(bookingHolds)
     .where(and(
@@ -1558,4 +1558,163 @@ export async function getUserActiveHolds(userId: string): Promise<BookingHold[]>
       eq(bookingHolds.status, 'active'),
       gte(bookingHolds.expiresAt, now)
     ));
+}
+
+// ============================================
+// UNIFIED AVAILABILITY ENGINE (NEW TABLES ONLY) -- NOT WIRED TO ANY ROUTE YET
+// ============================================
+// Standalone check against weeklyAvailability / providerBlocks / bookingHolds
+// exclusively. Does NOT call isSlotAvailable, checkStaffSlotAvailable,
+// checkPhotographerSlotAvailable, checkBusinessSlotAvailable, their reserve*
+// counterparts, or any legacy *Availability table. Fully independent for now.
+
+/**
+ * Check a single provider/staff/photographer slot against the new
+ * weekly-availability / provider-block / booking-hold tables only.
+ *
+ * `providerType === 'staff'`: weeklyAvailability, providerBlocks and
+ * bookingHolds only ever store provider_type = 'business' | 'photographer'
+ * (there is no 'staff' value in these tables' provider_type column -- see
+ * shared/schema.ts). Staff are a business-scoped sub-resource: `providerId`
+ * must be the staff member's businessId, and `staffMemberId` narrows the
+ * business-scoped rows down to that staff member. This mirrors how
+ * getWeeklyAvailabilityForDay / getProviderBlocksForDate / the exclusion
+ * constraint in migrations/011_booking_holds_exclusion_constraint.sql already
+ * treat staff.
+ */
+export async function checkProviderAvailability(
+  providerType: 'business' | 'staff' | 'photographer',
+  providerId: string,
+  staffMemberId: string | null,
+  date: string,
+  startTime: string,
+  endTime: string,
+  serviceId?: string
+): Promise<{ available: boolean; reason?: string }> {
+  if (providerType === 'staff' && !staffMemberId) {
+    return { available: false, reason: 'staffMemberId is required when providerType is "staff"' };
+  }
+
+  const dbProviderType: 'business' | 'photographer' = providerType === 'photographer' ? 'photographer' : 'business';
+  const scopedStaffMemberId = providerType === 'staff' ? staffMemberId : null;
+
+  const dateObj = parseDateWithTime(date, '00:00');
+  const dayOfWeek = dateObj.getDay();
+
+  // ---- 1. Weekly open-hours check, weeklyAvailability table only. ----
+  // No fallback to the legacy hoursOfOperation JSON field here (unlike
+  // getWeeklyAvailabilityForDay) -- if no row exists for this exact
+  // provider/staff/day, we fail closed rather than assuming "open".
+  const weeklyConditions = [
+    eq(weeklyAvailability.providerType, dbProviderType),
+    eq(weeklyAvailability.providerId, providerId),
+    eq(weeklyAvailability.dayOfWeek, dayOfWeek),
+    eq(weeklyAvailability.isActive, true),
+  ];
+  if (scopedStaffMemberId) {
+    weeklyConditions.push(eq(weeklyAvailability.staffMemberId, scopedStaffMemberId));
+  } else {
+    weeklyConditions.push(isNull(weeklyAvailability.staffMemberId));
+  }
+
+  const windows = await db.select()
+    .from(weeklyAvailability)
+    .where(and(...weeklyConditions));
+
+  if (windows.length === 0) {
+    return {
+      available: false,
+      reason: `No weekly availability configured for this ${providerType === 'staff' ? 'staff member' : providerType} on this day`,
+    };
+  }
+
+  const slotStartMins = timeToMinutes(startTime);
+  const slotEndMins = timeToMinutes(endTime);
+
+  const fitsInWindow = windows.some(w => {
+    const windowStart = timeToMinutes(w.startTime);
+    const windowEnd = timeToMinutes(w.endTime);
+    return slotStartMins >= windowStart && slotEndMins <= windowEnd;
+  });
+
+  if (!fitsInWindow) {
+    return { available: false, reason: 'Requested time is outside of open hours' };
+  }
+
+  // ---- 2. Buffer resolution. ----
+  // Photographers have a real column (photographers.travelBufferMinutes,
+  // confirmed present, default 30) applied symmetrically before/after the
+  // slot. Business and staff have NO buffer column anywhere in the schema
+  // today -- this 0 is deliberate, not an oversight, until a future
+  // migration adds real per-business/per-staff buffer columns.
+  let bufferMinutes = 0;
+  if (providerType === 'photographer') {
+    const [photographer] = await db.select({ travelBufferMinutes: photographers.travelBufferMinutes })
+      .from(photographers)
+      .where(eq(photographers.id, providerId));
+    bufferMinutes = photographer?.travelBufferMinutes ?? 30;
+  }
+
+  const slotStart = parseDateWithTime(date, startTime);
+  const slotEnd = parseDateWithTime(date, endTime);
+  const bufferedStart = new Date(slotStart.getTime() - bufferMinutes * 60_000);
+  const bufferedEnd = new Date(slotEnd.getTime() + bufferMinutes * 60_000);
+
+  // ---- 3. providerBlocks check (buffer-expanded window). ----
+  const blocks = await getProviderBlocksForDate(
+    dbProviderType,
+    providerId,
+    dateObj,
+    scopedStaffMemberId || undefined
+  );
+  const blockConflict = blocks.some(b => bufferedStart < b.endAt && bufferedEnd > b.startAt);
+  if (blockConflict) {
+    return { available: false, reason: 'Provider has blocked this time' };
+  }
+
+  // ---- 4. bookingHolds check, mirroring the DB exclusion constraint. ----
+  // migrations/011_booking_holds_exclusion_constraint.sql defines
+  // no_overlapping_active_holds as: EXCLUDE USING gist (provider_type WITH =,
+  // provider_id WITH =, COALESCE(staff_member_id, '') WITH =,
+  // tsrange(start_at, end_at) WITH &&) WHERE (status = 'active'). We mirror
+  // each piece:
+  //   - provider_type / provider_id: plain equality, same as the constraint.
+  //   - COALESCE(staff_member_id, '') equality: reproduced below as
+  //     "eq(staffMemberId, X)" when a staff id is given, or "isNull(...)"
+  //     when it's not -- this has the same match semantics as the COALESCE
+  //     (two NULLs collapse to '' = '' and match; a NULL and a real id never
+  //     match, since '' never equals a real id).
+  //   - tsrange(start_at, end_at) WITH &&: tsrange's default bounds are
+  //     '[)' (inclusive start, exclusive end), so two ranges overlap iff
+  //     start1 < end2 && end1 > start2 -- reproduced below as a plain Date
+  //     comparison on the buffer-expanded window.
+  //   - WHERE (status = 'active'): reproduced as eq(status, 'active'). We
+  //     additionally require expiresAt >= now (matching this file's existing
+  //     getActiveHoldsForDate convention) since the DB constraint itself has
+  //     no expiry awareness -- an expired-but-not-yet-swept row still counts
+  //     as a real DB-level conflict, but we don't want it blocking a fresh
+  //     request here.
+  const now = new Date();
+  const holdConditions = [
+    eq(bookingHolds.providerType, dbProviderType),
+    eq(bookingHolds.providerId, providerId),
+    eq(bookingHolds.status, 'active'),
+    gte(bookingHolds.expiresAt, now),
+  ];
+  if (scopedStaffMemberId) {
+    holdConditions.push(eq(bookingHolds.staffMemberId, scopedStaffMemberId));
+  } else {
+    holdConditions.push(isNull(bookingHolds.staffMemberId));
+  }
+
+  const holds = await db.select()
+    .from(bookingHolds)
+    .where(and(...holdConditions));
+
+  const holdConflict = holds.some(h => bufferedStart < h.endAt && bufferedEnd > h.startAt);
+  if (holdConflict) {
+    return { available: false, reason: 'Slot is temporarily held by another customer' };
+  }
+
+  return { available: true };
 }
