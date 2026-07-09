@@ -11,7 +11,6 @@ import {
 import { eq, and, or, lt, inArray } from "drizzle-orm";
 import { expireOldHolds } from "./availabilityService";
 
-const DRAFT_TTL_MINUTES = 10;
 const PENDING_PROVIDER_TTL_HOURS = 24;
 
 export type BookingErrorCode = 'BOOKING_NOT_FOUND' | 'BOOKING_EXPIRED' | 'INVALID_STATE' | 'ALREADY_CONFIRMED' | 'PENDING_PROVIDER_EXPIRED' | 'DECLINED';
@@ -35,10 +34,6 @@ export interface BookingContext {
 export function isValidTransition(fromState: BookingState, toState: BookingState): boolean {
   const allowedTransitions = BOOKING_TRANSITIONS[fromState];
   return allowedTransitions?.includes(toState) ?? false;
-}
-
-export function getDraftExpiryTime(): Date {
-  return new Date(Date.now() + DRAFT_TTL_MINUTES * 60 * 1000);
 }
 
 export function isDraftExpired(draftExpiresAt: Date | null): boolean {
