@@ -14083,6 +14083,105 @@ export async function registerRoutes(
     }
   });
 
+  // Admin: Get known issues (Overview "Known Issues" panel)
+  app.get("/api/admin/issues", requireAdmin, async (req, res) => {
+    try {
+      const { status = "open" } = req.query;
+      const { adminIssues } = await import("@shared/schema");
+      const query = status === "all"
+        ? db.select().from(adminIssues).orderBy(desc(adminIssues.createdAt))
+        : db.select().from(adminIssues).where(eq(adminIssues.status, status as string)).orderBy(desc(adminIssues.createdAt));
+      const issues = await query;
+      res.json({ issues });
+    } catch (error) {
+      console.error("Get admin issues error:", error);
+      res.status(500).json({ error: "Failed to get issues" });
+    }
+  });
+
+  // Admin: Create a known issue
+  app.post("/api/admin/issues", requireAdmin, async (req, res) => {
+    try {
+      const schema = z.object({
+        title: z.string().min(1),
+        area: z.string().min(1),
+        severity: z.enum(['low', 'medium', 'high']).optional(),
+      });
+      const data = schema.parse(req.body);
+      const adminUser = (req as any).adminUser;
+      const { adminIssues } = await import("@shared/schema");
+
+      const [issue] = await db.insert(adminIssues).values({
+        title: data.title,
+        area: data.area,
+        severity: data.severity || 'medium',
+        createdBy: adminUser.id,
+      }).returning();
+
+      await storage.createAuditLog({
+        actorId: adminUser.id,
+        actorType: "admin",
+        action: "create_admin_issue",
+        targetType: "admin_issue",
+        targetId: issue.id,
+        beforeState: null,
+        afterState: { title: issue.title, severity: issue.severity },
+      });
+
+      res.status(201).json({ success: true, issue });
+    } catch (error) {
+      if (error instanceof z.ZodError) {
+        return res.status(400).json({ error: "Invalid data", details: error.errors });
+      }
+      console.error("Create admin issue error:", error);
+      res.status(500).json({ error: "Failed to create issue" });
+    }
+  });
+
+  // Admin: Update a known issue (e.g. resolve it)
+  app.patch("/api/admin/issues/:id", requireAdmin, async (req, res) => {
+    try {
+      const { id } = req.params;
+      const schema = z.object({
+        status: z.enum(['open', 'resolved']).optional(),
+        severity: z.enum(['low', 'medium', 'high']).optional(),
+      });
+      const data = schema.parse(req.body);
+      const adminUser = (req as any).adminUser;
+      const { adminIssues } = await import("@shared/schema");
+
+      const [existing] = await db.select().from(adminIssues).where(eq(adminIssues.id, id));
+      if (!existing) {
+        return res.status(404).json({ error: "Issue not found" });
+      }
+
+      const updates: Record<string, any> = { ...data };
+      if (data.status === 'resolved') {
+        updates.resolvedAt = new Date();
+      }
+
+      const [issue] = await db.update(adminIssues).set(updates).where(eq(adminIssues.id, id)).returning();
+
+      await storage.createAuditLog({
+        actorId: adminUser.id,
+        actorType: "admin",
+        action: "update_admin_issue",
+        targetType: "admin_issue",
+        targetId: id,
+        beforeState: { status: existing.status, severity: existing.severity },
+        afterState: { status: issue.status, severity: issue.severity },
+      });
+
+      res.json({ success: true, issue });
+    } catch (error) {
+      if (error instanceof z.ZodError) {
+        return res.status(400).json({ error: "Invalid data", details: error.errors });
+      }
+      console.error("Update admin issue error:", error);
+      res.status(500).json({ error: "Failed to update issue" });
+    }
+  });
+
   // Admin: Get all users
   app.get("/api/admin/users", requireAdmin, async (req, res) => {
     try {

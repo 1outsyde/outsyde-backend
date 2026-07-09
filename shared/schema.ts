@@ -1526,6 +1526,26 @@ export const refundRequests = pgTable("refund_requests", {
 });
 
 /* =====================================================
+   ADMIN ISSUES
+===================================================== */
+export const adminIssues = pgTable("admin_issues", {
+  id: varchar("id", { length: 36 }).primaryKey().default(sql`gen_random_uuid()`),
+  title: text("title").notNull(),
+  area: text("area").notNull(),
+  severity: text("severity").default("medium").notNull(), // 'low' | 'medium' | 'high'
+  status: text("status").default("open").notNull(), // 'open' | 'resolved'
+  createdBy: varchar("created_by", { length: 36 }).references(() => users.id),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  resolvedAt: timestamp("resolved_at"),
+});
+
+export const insertAdminIssueSchema = createInsertSchema(adminIssues).omit({
+  id: true, createdAt: true, resolvedAt: true, status: true
+});
+export type AdminIssue = typeof adminIssues.$inferSelect;
+export type InsertAdminIssue = z.infer<typeof insertAdminIssueSchema>;
+
+/* =====================================================
    FEED POSTS
 ===================================================== */
 export const feedPosts = pgTable("feed_posts", {
