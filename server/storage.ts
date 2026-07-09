@@ -485,6 +485,10 @@ export interface IStorage {
   getStaffMemberByUserId(userId: string): Promise<StaffMember | undefined>;
   getStaffMembersByUserId(userId: string): Promise<StaffMember[]>;
   getStaffMemberByUserIdAndBusiness(userId: string, businessId: string): Promise<StaffMember | undefined>;
+  // Finds any existing staff_members row (any status) for this business matching
+  // either the user id or the email — used to reactivate on re-invite instead of
+  // inserting a duplicate row (G7).
+  findStaffMemberForReactivation(businessId: string, userId: string | undefined | null, email: string | undefined | null): Promise<StaffMember | undefined>;
   touchStaffMemberLastActive(staffId: string): Promise<void>;
   getStaffMemberByStripeAccountId(stripeAccountId: string): Promise<StaffMember | undefined>;
   getStaffMembersByBusiness(businessId: string): Promise<(StaffMember & { username: string | null })[]>;
@@ -4649,6 +4653,21 @@ export class DatabaseStorage implements IStorage {
   async getStaffMemberByUserIdAndBusiness(userId: string, businessId: string): Promise<StaffMember | undefined> {
     const result = await db.select().from(staffMembers)
       .where(and(eq(staffMembers.userId, userId), eq(staffMembers.businessId, businessId)));
+    return result[0];
+  }
+
+  async findStaffMemberForReactivation(
+    businessId: string,
+    userId: string | undefined | null,
+    email: string | undefined | null,
+  ): Promise<StaffMember | undefined> {
+    const identityMatch = or(
+      userId ? eq(staffMembers.userId, userId) : undefined,
+      email ? eq(staffMembers.email, email) : undefined,
+    );
+    if (!identityMatch) return undefined;
+    const result = await db.select().from(staffMembers)
+      .where(and(eq(staffMembers.businessId, businessId), identityMatch));
     return result[0];
   }
 

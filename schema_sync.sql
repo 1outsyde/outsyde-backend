@@ -191,6 +191,9 @@ ALTER TABLE staff_members ADD COLUMN IF NOT EXISTS stripe_onboarding_complete BO
 ALTER TABLE staff_members ADD COLUMN IF NOT EXISTS stripe_onboarding_url TEXT;
 ALTER TABLE staff_members ADD COLUMN IF NOT EXISTS hours_of_operation JSONB;
 ALTER TABLE staff_members ADD COLUMN IF NOT EXISTS created_at TIMESTAMP;
+-- G7: uniqueness backstop for re-invite reactivation (see migrations/010_staff_members_business_identity_uidx.sql)
+CREATE UNIQUE INDEX IF NOT EXISTS staff_members_business_email_uidx ON staff_members (business_id, email) WHERE email IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS staff_members_business_user_uidx ON staff_members (business_id, user_id) WHERE user_id IS NOT NULL;
 
 -- staff_availability
 ALTER TABLE staff_availability ADD COLUMN IF NOT EXISTS staff_member_id VARCHAR(36);

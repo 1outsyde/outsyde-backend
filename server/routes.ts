@@ -258,14 +258,38 @@ async function acceptStaffInvite(
       ? `${user.firstName} ${user.lastName}`
       : user.name || user.email || "Staff Member";
 
-  const staff = await storage.createStaffMember({
-    businessId: invite.businessId,
-    userId: user.id,
-    displayName,
-    email: user.email,
-    role: invite.role || "staff",
-    status: "active",
-  });
+  // Find-or-reactivate: a staff_members row may already exist for this person
+  // at this business in any status (e.g. "archived" from a prior offboarding —
+  // G6). Reactivate it instead of inserting a second row, both to preserve
+  // history (rating, stripe account, etc.) and because a fresh insert would
+  // now violate the business_id+email / business_id+user_id uniqueness
+  // constraint (G7).
+  const existingStaff = await storage.findStaffMemberForReactivation(
+    invite.businessId,
+    user.id,
+    user.email,
+  );
+
+  const staff = existingStaff
+    ? await storage.updateStaffMember(existingStaff.id, {
+        userId: user.id,
+        displayName,
+        email: user.email,
+        role: invite.role || "staff",
+        status: "active",
+      })
+    : await storage.createStaffMember({
+        businessId: invite.businessId,
+        userId: user.id,
+        displayName,
+        email: user.email,
+        role: invite.role || "staff",
+        status: "active",
+      });
+
+  if (!staff) {
+    return { success: false, statusCode: 500, error: "Failed to reactivate staff member" };
+  }
 
   await storage.updateStaffInvite(invite.id, {
     status: "accepted",
@@ -9690,7 +9714,7 @@ export async function registerRoutes(
         serviceIds: z.array(z.string()).optional(),
         specialties: z.array(z.string()).optional(),
         role: z.enum(["staff", "manager", "owner"]).optional(),
-        status: z.enum(["active", "inactive", "pending"]).optional(),
+        status: z.enum(["active", "inactive", "pending", "archived"]).optional(),
         hoursOfOperation: z.any().optional(),
       });
 
@@ -9707,7 +9731,9 @@ export async function registerRoutes(
     }
   });
 
-  // Delete a staff member
+  // Offboard a staff member — soft-archive, not a hard delete. Existing
+  // appointments/availability rows stay untouched; every call site that gates
+  // on status === "active" simply stops matching this row (G6).
   app.delete("/api/vendor/staff/:staffId", async (req, res) => {
     const userId = req.session?.userId;
     if (!userId) {
@@ -9725,11 +9751,11 @@ export async function registerRoutes(
         return res.status(404).json({ error: "Staff member not found" });
       }
 
-      await storage.deleteStaffMember(staff.id);
-      res.json({ message: "Staff member deleted" });
+      const archived = await storage.updateStaffMember(staff.id, { status: "archived" });
+      res.json({ staff: archived, message: "Staff member archived" });
     } catch (error) {
-      console.error("Delete staff error:", error);
-      res.status(500).json({ error: "Failed to delete staff member" });
+      console.error("Archive staff error:", error);
+      res.status(500).json({ error: "Failed to archive staff member" });
     }
   });
 
