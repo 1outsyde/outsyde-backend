@@ -158,7 +158,7 @@ import {
   isValidBookingTransition
 } from "@shared/schema";
 import { db } from "./db";
-import { eq, ilike, or, and, sql, isNull, desc, asc, gte, lte, ne, inArray } from "drizzle-orm";
+import { eq, ilike, or, and, sql, isNull, isNotNull, desc, asc, gte, lte, ne, inArray, notInArray } from "drizzle-orm";
 import { randomUUID, createHash } from "crypto";
 
 // Input type for creating a photographer (no need for InsertPhotographer in schema)
@@ -5586,6 +5586,20 @@ export class DatabaseStorage implements IStorage {
 
     // ==================== CONSUMERS ====================
     if (scope === 'all' || scope === 'consumers') {
+      // Exclude users who are active, fully-onboarded staff members elsewhere
+      // in the app (mirrors the STAFF block's own gating below) so the same
+      // person doesn't surface as both "consumer" and "staff" in results.
+      const activeStaffUserIds = db
+        .select({ userId: staffMembers.userId })
+        .from(staffMembers)
+        .where(
+          and(
+            isNotNull(staffMembers.userId),
+            eq(staffMembers.status, 'active'),
+            eq(staffMembers.stripeOnboardingComplete, true)
+          )
+        );
+
       const consumerRows = await db
         .select()
         .from(users)
@@ -5594,6 +5608,7 @@ export class DatabaseStorage implements IStorage {
             eq(users.isVendor, false),
             eq(users.isPhotographer, false),
             isAdmin ? undefined : eq(users.isActive, true),
+            notInArray(users.id, activeStaffUserIds),
             or(
               ilike(users.username, likePattern),
               ilike(users.name, likePattern),
