@@ -1124,7 +1124,7 @@ export async function validateBookingSlot(
     }
     
     serviceDurationMinutes = service.durationMinutes || 60;
-    servicePriceCents = Math.round((service.price || 0) * 100); // Convert to cents
+    servicePriceCents = service.price || 0; // price column is already integer cents
     serviceName = service.name;
   } else {
     const [service] = await db.select()
@@ -1311,7 +1311,7 @@ async function resolveServiceForHold(
 
     return {
       serviceDurationMinutes: service.durationMinutes || 60,
-      servicePriceCents: Math.round((service.price || 0) * 100),
+      servicePriceCents: service.price || 0, // price column is already integer cents
       serviceName: service.name,
     };
   }
