@@ -369,6 +369,75 @@ export class StripeService {
   }
 
   /**
+   * Create a plain PaymentIntent for the full charge amount, with NO
+   * transfer_data / application_fee_amount at all. Funds land on the
+   * platform's own Stripe balance, not sent to any connected account.
+   *
+   * Used by the hold-based business/staff booking flow: at this point we
+   * don't yet know the real split (staff vs. business booth-cut, Model A),
+   * so the split is computed and paid out later, asynchronously, via
+   * separate stripe.transfers.create() calls once the charge succeeds
+   * (see webhookHandlers.ts handlePaymentIntentSucceeded, type 'appointment').
+   */
+  async createPlatformPaymentIntent(params: {
+    amountCents: number;
+    currency?: string;
+    customerId?: string;
+    captureMethod: 'automatic' | 'manual';
+    metadata: Record<string, string>;
+    description?: string;
+  }) {
+    const stripe = await getUncachableStripeClient();
+
+    const paymentIntentData: Record<string, unknown> = {
+      amount: params.amountCents,
+      currency: params.currency || 'usd',
+      capture_method: params.captureMethod,
+      metadata: params.metadata,
+      description: params.description,
+      automatic_payment_methods: {
+        enabled: true,
+      },
+    };
+
+    if (params.customerId) {
+      paymentIntentData.customer = params.customerId;
+    }
+
+    return stripe.paymentIntents.create(paymentIntentData as any, {
+      idempotencyKey: idempotencyKey('pi'),
+    });
+  }
+
+  /**
+   * Transfer a booking payout from the platform balance to a connected
+   * account (staff member or business), after a plain platform-balance
+   * charge (createPlatformPaymentIntent) has succeeded. Separate-transfer
+   * pattern, not a destination charge -- mirrors transferToVendor() below,
+   * with booking-specific metadata for reconciliation.
+   */
+  async transferBookingPayout(params: {
+    amountInCents: number;
+    connectedAccountId: string;
+    appointmentId: string;
+    recipient: 'staff' | 'business';
+  }) {
+    const stripe = await getUncachableStripeClient();
+
+    return stripe.transfers.create({
+      amount: params.amountInCents,
+      currency: "usd",
+      destination: params.connectedAccountId,
+      transfer_group: `appointment_${params.appointmentId}`,
+      metadata: {
+        appointmentId: params.appointmentId,
+        recipient: params.recipient,
+        type: 'appointment_booking_payout',
+      },
+    }, { idempotencyKey: idempotencyKey(`transfer_appt_${params.appointmentId}_${params.recipient}`) });
+  }
+
+  /**
    * Capture a previously authorized PaymentIntent (for manual capture flow)
    * Called when provider accepts a booking
    */

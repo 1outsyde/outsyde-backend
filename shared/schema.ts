@@ -791,6 +791,11 @@ export const appointments = pgTable("appointments", {
   // Optional staff member assignment - if set, staff gets direct payout
   staffMemberId: varchar("staff_member_id", { length: 36 }).references(() => staffMembers.id),
 
+  // Traceability back to the bookingHolds row this appointment was created from
+  // (unified availability engine / hold-based booking flow). Null for rows
+  // created outside that flow (e.g. the dev-test endpoint).
+  holdId: varchar("hold_id", { length: 36 }),
+
   appointmentDate: text("appointment_date").notNull(),
   appointmentTime: text("appointment_time").notNull(),
   // End time for slot blocking (calculated from service duration)
@@ -859,6 +864,8 @@ export const appointments = pgTable("appointments", {
   availabilityIdx: index("idx_appointments_availability").on(table.staffMemberId, table.appointmentDate, table.status),
   // Index for pending provider expiry cleanup
   pendingProviderIdx: index("idx_appointments_pending_provider").on(table.status, table.pendingProviderExpiresAt),
+  // Index for idempotency lookups by originating hold
+  holdIdIdx: index("idx_appointments_hold_id").on(table.holdId),
 }));
 
 /* =====================================================

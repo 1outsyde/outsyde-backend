@@ -10,6 +10,7 @@ import { transitionAppointmentState, transitionShootBookingState } from "../book
 import { markHoldAsConverted } from "../availabilityService";
 import { sendBookingConfirmationPush } from "../expoPushService";
 import { processInfluencerCommission, reverseInfluencerCommission } from "../influencerPayoutService";
+import { calculateBookingFees } from "../fees";
 
 function isOnReplit(): boolean {
   return !!(process.env.REPL_IDENTITY || process.env.WEB_REPL_RENEWAL || process.env.REPL_ID);
@@ -113,13 +114,18 @@ export class WebhookHandlers {
   static async handlePaymentIntentSucceeded(paymentIntent: any) {
     const metadata = paymentIntent.metadata || {};
     const { type, bookingId, clientId } = metadata;
+    // The hold-based 'appointment' type (see routes.ts POST
+    // /api/booking/:holdId/create-payment-intent) uses appointmentId, not
+    // bookingId, since it's the first metadata shape without a legacy
+    // bookingId key.
+    const appointmentIdFromMetadata = metadata.appointmentId;
 
-    if (!type || !bookingId) {
+    if (!type || (!bookingId && !appointmentIdFromMetadata)) {
       // Not a booking-related PaymentIntent, ignore
       return;
     }
 
-    console.log(`[Stripe] PaymentIntent succeeded for ${type} ${bookingId}`);
+    console.log(`[Stripe] PaymentIntent succeeded for ${type} ${bookingId || appointmentIdFromMetadata}`);
 
     try {
       if (type === 'appointment_booking') {
@@ -221,6 +227,127 @@ export class WebhookHandlers {
           }
 
           console.log(`[Stripe] Shoot booking ${bookingId} confirmed via PaymentIntent`);
+        }
+      } else if (type === 'appointment') {
+        // Hold-based business/staff booking flow (POST
+        // /api/booking/:holdId/create-payment-intent). This PaymentIntent was
+        // created with NO transfer_data -- the full charge landed on the
+        // platform balance. Confirm the booking, convert the hold, then pay
+        // out the vendor(s) via separate stripe.transfers.create() calls.
+        const appointmentId = appointmentIdFromMetadata;
+        const { holdId, businessId, staffMemberId } = metadata;
+
+        if (!appointmentId) {
+          console.error("[Stripe] Appointment PaymentIntent succeeded but missing appointmentId in metadata");
+          return;
+        }
+
+        const appointment = await storage.getAppointment(appointmentId);
+        if (!appointment) {
+          console.error(`[Stripe] Appointment ${appointmentId} not found`);
+          return;
+        }
+
+        if (appointment.status === BOOKING_STATES.PENDING_PAYMENT ||
+            appointment.status === BOOKING_STATES.PENDING_PROVIDER) {
+          const result = await transitionAppointmentState(
+            appointmentId,
+            BOOKING_STATES.CONFIRMED,
+            {
+              triggeredBy: 'stripe',
+              triggerSource: 'webhook',
+              metadata: {
+                stripePaymentIntentId: paymentIntent.id,
+                event: 'payment_intent.succeeded'
+              }
+            }
+          );
+
+          if (!result.success) {
+            console.error(`[Stripe] Failed to confirm appointment ${appointmentId}: ${result.error}`);
+            return;
+          }
+
+          await db.update(appointments).set({
+            stripePaymentIntentId: paymentIntent.id,
+            updatedAt: new Date()
+          }).where(eq(appointments.id, appointmentId));
+
+          console.log(`[Stripe] Appointment ${appointmentId} confirmed via platform-balance PaymentIntent`);
+
+          // Convert the hold now that the appointment is confirmed. This is
+          // the first place holdId is ever set in Stripe metadata, so this
+          // is also the first time markHoldAsConverted is actually reachable.
+          if (holdId) {
+            try {
+              await markHoldAsConverted(holdId, appointmentId, 'appointment');
+            } catch (holdErr) {
+              console.error(`[Stripe] Failed to convert hold ${holdId}:`, holdErr);
+            }
+          }
+
+          // PLACEHOLDER SPLIT MODEL: calculateBookingFees() applies the
+          // current fees.ts v2 rates (3% consumer fee / 12% booking fee),
+          // NOT the real 5%/5%-with-floor booking model this flow is meant
+          // to land on. Using it here only so a real transfer actually fires
+          // and appointments.staffPayout gets populated with real data,
+          // rather than blocking this whole payout path on the final fee
+          // model being designed. Replace this call once that model exists.
+          const feeBreakdown = calculateBookingFees(appointment.totalPrice);
+          const vendorNetCents = feeBreakdown.vendorNetCents;
+
+          const business = businessId ? await storage.getBusiness(businessId) : undefined;
+          if (!business?.stripeAccountId) {
+            console.error(`[Stripe] Cannot pay out appointment ${appointmentId}: business ${businessId} has no stripeAccountId. Funds remain on platform balance -- manual reconciliation required.`);
+          } else if (staffMemberId) {
+            // Staff-scoped booking. Model A (booth-split percentage) has no
+            // schema-backed column anywhere on `businesses` as of this build
+            // (confirmed absent from shared/schema.ts) -- until that exists,
+            // the staff member receives the full vendorNetCents, same as a
+            // solo-provider business would. The business-side booth-cut
+            // transfer is intentionally NOT fired here; wire it in once
+            // Model A's split percentage is schema-backed.
+            const staffMember = await storage.getStaffMember(staffMemberId);
+            if (!staffMember?.stripeAccountId) {
+              console.error(`[Stripe] Cannot pay out appointment ${appointmentId}: staff member ${staffMemberId} has no stripeAccountId. Funds remain on platform balance -- manual reconciliation required.`);
+            } else {
+              try {
+                const transfer = await stripeService.transferBookingPayout({
+                  amountInCents: vendorNetCents,
+                  connectedAccountId: staffMember.stripeAccountId,
+                  appointmentId,
+                  recipient: 'staff',
+                });
+                await db.update(appointments).set({
+                  staffPayout: vendorNetCents,
+                  updatedAt: new Date(),
+                }).where(eq(appointments.id, appointmentId));
+                console.log(`[Stripe] Transferred ${vendorNetCents}c to staff ${staffMemberId} (transfer ${transfer.id}) for appointment ${appointmentId}`);
+              } catch (transferErr) {
+                // The charge already succeeded and the booking is confirmed
+                // above -- a failed transfer here does NOT roll back the
+                // booking or touch payment status. This is a genuine edge
+                // case: the customer's money is real and sitting on the
+                // platform balance instead of reaching the staff member.
+                // No automatic retry is attempted; log loudly for manual
+                // reconciliation.
+                console.error(`[Stripe] FAILED to transfer ${vendorNetCents}c to staff ${staffMemberId} for appointment ${appointmentId}. Funds remain on platform balance -- manual reconciliation required.`, transferErr);
+              }
+            }
+          } else {
+            // Solo-provider business: single transfer for the full vendor net.
+            try {
+              const transfer = await stripeService.transferBookingPayout({
+                amountInCents: vendorNetCents,
+                connectedAccountId: business.stripeAccountId,
+                appointmentId,
+                recipient: 'business',
+              });
+              console.log(`[Stripe] Transferred ${vendorNetCents}c to business ${businessId} (transfer ${transfer.id}) for appointment ${appointmentId}`);
+            } catch (transferErr) {
+              console.error(`[Stripe] FAILED to transfer ${vendorNetCents}c to business ${businessId} for appointment ${appointmentId}. Funds remain on platform balance -- manual reconciliation required.`, transferErr);
+            }
+          }
         }
       }
     } catch (error) {

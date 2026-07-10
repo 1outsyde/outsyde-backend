@@ -98,7 +98,7 @@ import {
   transitionAppointmentState,
   transitionShootBookingState
 } from "./bookingStateMachine";
-import { calculateProductFee, calculateBookingFee, calculateConsumerServiceFee } from "./fees";
+import { calculateProductFee, calculateBookingFee, calculateConsumerServiceFee, calculateBookingFees } from "./fees";
 import {
   trackLinkClick,
   recordAttribution,
@@ -4692,6 +4692,144 @@ export async function registerRoutes(
       }
       console.error("Confirm booking hold error:", error);
       res.status(500).json({ error: "Failed to confirm booking hold" });
+    }
+  });
+
+  // POST /api/booking/:holdId/create-payment-intent - Create the real appointment
+  // row from a confirmed hold and a plain (no transfer_data) PaymentIntent for it.
+  // Business/staff side only -- the hold-based flow never applies to photographers
+  // (System A creates shootBookings and its own PaymentIntents independently).
+  app.post("/api/booking/:holdId/create-payment-intent", async (req, res) => {
+    const userId = req.session?.userId || getUserIdFromRequest(req);
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    try {
+      const { holdId } = req.params;
+
+      // Validates: hold exists, belongs to this user, is active, not expired.
+      const { hold } = await confirmBookingHold(holdId, userId);
+
+      if (hold.providerType !== 'business') {
+        return res.status(400).json({ error: "This route only supports business/staff bookings" });
+      }
+
+      // Idempotency: if an appointment was already created for this hold
+      // (e.g. a retried request), reuse it instead of creating a duplicate
+      // appointment + PaymentIntent. Mirrors the existing reuse pattern in
+      // /api/bookings/appointments/:appointmentId/create-payment-intent.
+      const [existing] = await db.select().from(appointments).where(eq(appointments.holdId, holdId));
+      if (existing) {
+        if (existing.stripePaymentIntentId) {
+          try {
+            const existingPI = await stripeService.getPaymentIntent(existing.stripePaymentIntentId);
+            if (['requires_payment_method', 'requires_confirmation', 'requires_action'].includes(existingPI.status)) {
+              return res.json({
+                clientSecret: existingPI.client_secret,
+                paymentIntentId: existingPI.id,
+                appointmentId: existing.id,
+                captureMethod: existingPI.capture_method,
+              });
+            }
+          } catch (piError) {
+            console.log(`[Booking] Existing PaymentIntent ${existing.stripePaymentIntentId} for hold ${holdId} not found or invalid`);
+          }
+        }
+        return res.status(409).json({ error: "A payment attempt for this hold already exists." });
+      }
+
+      const business = await storage.getBusiness(hold.providerId);
+      if (!business) {
+        return res.status(404).json({ error: "Business not found" });
+      }
+      if (!business.stripeAccountId) {
+        return res.status(400).json({ error: "Business has not completed Stripe onboarding" });
+      }
+
+      let staffMember: Awaited<ReturnType<typeof storage.getStaffMember>> | undefined;
+      if (hold.staffMemberId) {
+        staffMember = await storage.getStaffMember(hold.staffMemberId);
+        if (!staffMember?.stripeAccountId) {
+          return res.status(400).json({ error: "Staff member has not completed Stripe onboarding" });
+        }
+      }
+
+      // fees.ts subtotal/consumer-fee breakdown, matching the preview already
+      // shown to the customer at /api/booking/hold. appointments.totalPrice
+      // stores the subtotal (matches existing convention elsewhere in this
+      // file); the actual Stripe charge is subtotal + consumer service fee.
+      const feeBreakdown = calculateBookingFees(hold.servicePriceCents);
+
+      // NOTE: captureMethod is forced to 'automatic' here, regardless of
+      // business.autoAcceptBookings. The manual-capture -> pending_provider
+      // path (handlePaymentIntentCapturableUpdated in webhookHandlers.ts)
+      // only recognizes type 'appointment_booking'/'shoot_booking', not the
+      // 'appointment' type this route uses -- wiring that up is out of scope
+      // for this build. Forcing 'automatic' avoids a real deadlock (a manual
+      // authorization that never surfaces to the provider to accept, and
+      // therefore never gets captured). Revisit once that handler is extended.
+      const captureMethod: 'automatic' = 'automatic';
+
+      const appointment = await storage.createAppointment({
+        businessId: hold.providerId,
+        clientId: hold.userId,
+        serviceId: hold.serviceId,
+        staffMemberId: hold.staffMemberId || undefined,
+        holdId: hold.id,
+        appointmentDate: hold.holdDate,
+        appointmentTime: hold.startTime,
+        appointmentEndTime: hold.endTime,
+        durationMinutes: hold.durationMinutes,
+        totalPrice: hold.servicePriceCents,
+        platformFee: feeBreakdown.platformFeeCents,
+        vendorNet: feeBreakdown.vendorNetCents,
+        status: BOOKING_STATES.PENDING_PAYMENT,
+        paymentMethod: 'payment_intent',
+        captureMethod,
+      });
+
+      const user = await storage.getUser(userId);
+
+      const paymentIntent = await stripeService.createPlatformPaymentIntent({
+        amountCents: feeBreakdown.customerTotalBeforeTaxCents,
+        customerId: user?.stripeCustomerId || undefined,
+        captureMethod,
+        metadata: {
+          type: 'appointment',
+          appointmentId: appointment.id,
+          holdId: hold.id,
+          businessId: hold.providerId,
+          staffMemberId: hold.staffMemberId || '',
+        },
+        description: `Appointment booking at ${business.name}`,
+      });
+
+      await db.update(appointments).set({
+        stripePaymentIntentId: paymentIntent.id,
+        updatedAt: new Date(),
+      }).where(eq(appointments.id, appointment.id));
+
+      res.json({
+        clientSecret: paymentIntent.client_secret,
+        paymentIntentId: paymentIntent.id,
+        appointmentId: appointment.id,
+        captureMethod,
+        feeBreakdown: {
+          subtotalAmount: feeBreakdown.subtotalCents,
+          consumerServiceFeeAmount: feeBreakdown.consumerServiceFeeCents,
+          bookingFeeAmount: feeBreakdown.platformFeeCents,
+          vendorNetAmount: feeBreakdown.vendorNetCents,
+          grossChargeAmount: feeBreakdown.customerTotalBeforeTaxCents,
+          feeModelVersion: feeBreakdown.feeModelVersion,
+        },
+      });
+    } catch (error) {
+      if (error instanceof AvailabilityError) {
+        return res.status(400).json({ errorCode: error.code, error: error.message });
+      }
+      console.error("Create appointment PaymentIntent from hold error:", error);
+      res.status(500).json({ error: "Failed to create payment intent" });
     }
   });
 
