@@ -502,8 +502,6 @@ export interface IStorage {
   createStaffAvailability(data: InsertStaffAvailability): Promise<StaffAvailability>;
   updateStaffAvailability(id: string, updates: Partial<StaffAvailability>): Promise<StaffAvailability | undefined>;
   deleteStaffAvailability(id: string): Promise<void>;
-  checkStaffSlotAvailable(staffMemberId: string, date: string, startTime: string, endTime: string, excludeSlotId?: string): Promise<boolean>;
-  reserveStaffSlot(staffMemberId: string, businessId: string, date: string, startTime: string, endTime: string, appointmentId: string): Promise<StaffAvailability>;
   releaseStaffSlot(appointmentId: string): Promise<boolean>;
   
   // Staff Invites
@@ -4762,46 +4760,6 @@ export class DatabaseStorage implements IStorage {
 
   async deleteStaffAvailability(id: string): Promise<void> {
     await db.delete(staffAvailability).where(eq(staffAvailability.id, id));
-  }
-
-  async checkStaffSlotAvailable(staffMemberId: string, date: string, startTime: string, endTime: string, excludeSlotId?: string): Promise<boolean> {
-    let conditions = [
-      eq(staffAvailability.staffMemberId, staffMemberId),
-      eq(staffAvailability.date, date),
-      eq(staffAvailability.slotType, 'booked'),
-    ];
-    
-    if (excludeSlotId) {
-      conditions.push(ne(staffAvailability.id, excludeSlotId));
-    }
-    
-    const overlapping = await db.select()
-      .from(staffAvailability)
-      .where(and(...conditions));
-    
-    for (const slot of overlapping) {
-      if (slot.startTime < endTime && slot.endTime > startTime) {
-        return false;
-      }
-    }
-    return true;
-  }
-
-  async reserveStaffSlot(staffMemberId: string, businessId: string, date: string, startTime: string, endTime: string, appointmentId: string): Promise<StaffAvailability> {
-    const id = randomUUID();
-    const [slot] = await db.insert(staffAvailability)
-      .values({
-        id,
-        staffMemberId,
-        businessId,
-        date,
-        startTime,
-        endTime,
-        slotType: 'booked',
-        appointmentId,
-      })
-      .returning();
-    return slot;
   }
 
   async releaseStaffSlot(appointmentId: string): Promise<boolean> {
