@@ -632,7 +632,7 @@ export async function getPhotographerAvailabilitySlots(
 }
 
 export async function isSlotAvailable(
-  type: 'staff' | 'photographer',
+  type: 'staff' | 'photographer' | 'business',
   providerId: string,
   date: string,
   startTime: string,
@@ -642,52 +642,34 @@ export async function isSlotAvailable(
   const dateObj = new Date(date);
 
   if (type === 'staff') {
-    // Check provider_blocks table first
-    const [staff] = await db.select().from(staffMembers).where(eq(staffMembers.id, providerId));
-    if (staff) {
-      const blocks = await getProviderBlocksForDate('business', staff.businessId, dateObj, providerId);
-      if (isTimeBlockedByProviderBlock(dateObj, startTime, endTime, blocks)) {
-        return { available: false, reason: 'Staff has blocked this time' };
-      }
+    // Look up the staff member's businessId — checkProviderAvailability expects
+    // providerId = businessId and staffMemberId = the staff member's own ID
+    const [staffMember] = await db
+      .select()
+      .from(staffMembers)
+      .where(eq(staffMembers.id, providerId));
+    if (!staffMember) {
+      return { available: false, reason: 'Staff member not found' };
     }
+    return checkProviderAvailability(
+      'staff',
+      staffMember.businessId,
+      providerId,
+      date,
+      startTime,
+      endTime
+    );
+  }
 
-    const blockedSlot = await db.select().from(staffAvailability)
-      .where(
-        and(
-          eq(staffAvailability.staffMemberId, providerId),
-          eq(staffAvailability.date, date),
-          eq(staffAvailability.slotType, 'blocked')
-        )
-      );
-
-    for (const slot of blockedSlot) {
-      if (doTimesOverlap(startTime, endTime, slot.startTime, slot.endTime)) {
-        return { available: false, reason: 'Staff has blocked this time' };
-      }
-    }
-
-    const existingBookings = await db.select().from(appointments)
-      .where(
-        and(
-          eq(appointments.staffMemberId, providerId),
-          eq(appointments.appointmentDate, date),
-          inArray(appointments.status, activeStates)
-        )
-      );
-
-    for (const booking of existingBookings) {
-      const bookingEnd = booking.appointmentEndTime || 
-        `${(parseInt(booking.appointmentTime.split(':')[0]) + 1).toString().padStart(2, '0')}:${booking.appointmentTime.split(':')[1]}`;
-      
-      if (doTimesOverlap(startTime, endTime, booking.appointmentTime, bookingEnd)) {
-        if (booking.status === BOOKING_STATES.DRAFT) {
-          return { available: false, reason: 'Slot is temporarily held by another customer' };
-        }
-        return { available: false, reason: 'Slot is already booked' };
-      }
-    }
-
-    return { available: true };
+  if (type === 'business') {
+    return checkProviderAvailability(
+      'business',
+      providerId,
+      null,
+      date,
+      startTime,
+      endTime
+    );
   }
 
   if (type === 'photographer') {
@@ -1608,9 +1590,9 @@ export async function getUserActiveHolds(userId: string): Promise<BookingHold[]>
 // UNIFIED AVAILABILITY ENGINE (NEW TABLES ONLY) -- NOT WIRED TO ANY ROUTE YET
 // ============================================
 // Standalone check against weeklyAvailability / providerBlocks / bookingHolds
-// exclusively. Does NOT call isSlotAvailable, checkStaffSlotAvailable,
-// checkPhotographerSlotAvailable, checkBusinessSlotAvailable, their reserve*
-// counterparts, or any legacy *Availability table. Fully independent for now.
+// exclusively. Does NOT call isSlotAvailable, checkPhotographerSlotAvailable,
+// checkBusinessSlotAvailable, their reserve* counterparts, or any legacy
+// *Availability table. Fully independent for now.
 
 /**
  * Check a single provider/staff/photographer slot against the new
