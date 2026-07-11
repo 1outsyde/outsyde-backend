@@ -8879,6 +8879,13 @@ export async function registerRoutes(
         category: z.string().nullable().optional(),
         isActive: z.boolean().optional(),
         isFeatured: z.boolean().optional(),
+        fullRefundWindow: z.enum(['1_week', '48_hours', '24_hours', '1_hour', 'never']).optional(),
+        hasPartialRefund: z.boolean().optional(),
+        partialRefundWindow: z.enum(['1_week', '48_hours', '24_hours', '1_hour', 'never']).nullable().optional(),
+        partialRefundPercentage: z.number().int().min(0).max(100).nullable().optional(),
+        hasCancellationFee: z.boolean().optional(),
+        cancellationFeeType: z.enum(['flat', 'percentage']).nullable().optional(),
+        cancellationFeeAmount: z.number().int().min(0).nullable().optional(),
       });
 
       const validated = serviceSchema.parse(req.body);
@@ -8929,10 +8936,17 @@ export async function registerRoutes(
         isActive: z.boolean().optional(),
         isFeatured: z.boolean().optional(),
         status: z.enum(["draft", "live", "paused", "archived"]).optional(),
+        fullRefundWindow: z.enum(['1_week', '48_hours', '24_hours', '1_hour', 'never']).optional(),
+        hasPartialRefund: z.boolean().optional(),
+        partialRefundWindow: z.enum(['1_week', '48_hours', '24_hours', '1_hour', 'never']).nullable().optional(),
+        partialRefundPercentage: z.number().int().min(0).max(100).nullable().optional(),
+        hasCancellationFee: z.boolean().optional(),
+        cancellationFeeType: z.enum(['flat', 'percentage']).nullable().optional(),
+        cancellationFeeAmount: z.number().int().min(0).nullable().optional(),
       });
 
       const validated = updateSchema.parse(req.body);
-      
+
       // Handle Stripe catalog updates for live services.
       let stripeUpdates: any = {};
       if (service.status === 'live' && service.stripeProductId) {
@@ -9093,6 +9107,46 @@ export async function registerRoutes(
     } catch (error) {
       console.error("Archive vendor service error:", error);
       res.status(500).json({ error: "Failed to archive service" });
+    }
+  });
+
+  // Apply one service's cancellation policy to all other services for this business
+  app.post("/api/vendor/services/:id/apply-cancellation-policy-to-all", async (req, res) => {
+    const userId = req.session?.userId;
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    try {
+      const business = await storage.getBusinessByOwnerId(userId);
+      if (!business) {
+        return res.status(404).json({ error: "No business found" });
+      }
+
+      const service = await storage.getVendorService(req.params.id);
+      if (!service || service.businessId !== business.id) {
+        return res.status(404).json({ error: "Service not found" });
+      }
+
+      const policy = {
+        fullRefundWindow: service.fullRefundWindow ?? null,
+        hasPartialRefund: service.hasPartialRefund ?? false,
+        partialRefundWindow: service.partialRefundWindow ?? null,
+        partialRefundPercentage: service.partialRefundPercentage ?? null,
+        hasCancellationFee: service.hasCancellationFee ?? false,
+        cancellationFeeType: service.cancellationFeeType ?? null,
+        cancellationFeeAmount: service.cancellationFeeAmount ?? null,
+      };
+
+      const [updatedCount] = await Promise.all([
+        storage.updateAllVendorServicesCancellationPolicy(business.id, service.id, policy),
+        storage.updateBusiness(business.id, policy),
+      ]);
+
+      res.json({ success: true, updatedCount });
+    } catch (error) {
+      console.error("Apply cancellation policy to all error:", error);
+      res.status(500).json({ error: "Failed to apply cancellation policy" });
     }
   });
 
