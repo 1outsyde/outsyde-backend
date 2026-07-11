@@ -349,6 +349,15 @@ export const businesses = pgTable("businesses", {
   responseTimeValue: integer("response_time_value").default(2),
   responseTimeUnit: text("response_time_unit").default("hours"),
 
+  // Cancellation policy defaults (used as "apply to all services" template)
+  fullRefundWindow: text("full_refund_window").default("never"), // '1_week'|'48_hours'|'24_hours'|'1_hour'|'never'
+  hasPartialRefund: boolean("has_partial_refund").default(false),
+  partialRefundWindow: text("partial_refund_window"), // nullable, same 5 values as fullRefundWindow
+  partialRefundPercentage: integer("partial_refund_percentage"), // nullable, 0-100
+  hasCancellationFee: boolean("has_cancellation_fee").default(false),
+  cancellationFeeType: text("cancellation_fee_type"), // nullable, 'flat'|'percentage'
+  cancellationFeeAmount: integer("cancellation_fee_amount"), // nullable, cents if flat / whole percent if percentage
+
   createdAt: timestamp("created_at").defaultNow().notNull(),
 }, (table) => ({
   idxBusinessOwner: index("idx_businesses_owner").on(table.ownerId),
@@ -413,6 +422,15 @@ export const vendorServices = pgTable("vendor_services", {
   // Stripe catalog IDs - populated when item goes live
   stripeProductId: text("stripe_product_id"),
   stripePriceId: text("stripe_price_id"),
+
+  // Cancellation policy
+  fullRefundWindow: text("full_refund_window").default("never"), // '1_week'|'48_hours'|'24_hours'|'1_hour'|'never'
+  hasPartialRefund: boolean("has_partial_refund").default(false),
+  partialRefundWindow: text("partial_refund_window"), // nullable, same 5 values as fullRefundWindow
+  partialRefundPercentage: integer("partial_refund_percentage"), // nullable, 0-100
+  hasCancellationFee: boolean("has_cancellation_fee").default(false),
+  cancellationFeeType: text("cancellation_fee_type"), // nullable, 'flat'|'percentage'
+  cancellationFeeAmount: integer("cancellation_fee_amount"), // nullable, cents if flat / whole percent if percentage
 
   createdAt: timestamp("created_at").defaultNow().notNull(),
 });
