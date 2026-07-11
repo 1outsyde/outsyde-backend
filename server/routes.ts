@@ -13593,11 +13593,15 @@ export async function registerRoutes(
         b.status === 'confirmed' || b.status === 'completed'
       );
 
+      const monthlyBookingRevenue = confirmedBookings
+        .filter(b => new Date(b.createdAt) >= monthStart)
+        .reduce((sum, b) => sum + (b.totalPrice || 0), 0);
+
       res.json({
         stats: {
           orderCount: paidOrders.length,
           bookingCount: confirmedBookings.length,
-          monthlyRevenueCents: monthlyRevenue,
+          monthlyRevenueCents: monthlyRevenue + monthlyBookingRevenue,
           reviewCount: business.reviewCount || 0,
           averageRating: business.rating ? (business.rating / 10) : 0,
         },
