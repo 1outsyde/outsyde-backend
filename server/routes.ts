@@ -4790,10 +4790,21 @@ export async function registerRoutes(
       });
 
       const user = await storage.getUser(userId);
+      if (!user) {
+        return res.status(404).json({ error: "User not found" });
+      }
+
+      // Get or create Stripe customer (platform customer, NOT Connect)
+      let stripeCustomerId = user.stripeCustomerId;
+      if (!stripeCustomerId) {
+        const customer = await stripeService.createCustomer(user.email!, userId, user.name || user.email!);
+        stripeCustomerId = customer.id;
+        await storage.updateUser(userId, { stripeCustomerId: customer.id });
+      }
 
       const paymentIntent = await stripeService.createPlatformPaymentIntent({
         amountCents: feeBreakdown.customerTotalBeforeTaxCents,
-        customerId: user?.stripeCustomerId || undefined,
+        customerId: stripeCustomerId,
         captureMethod,
         metadata: {
           type: 'appointment',
@@ -4803,6 +4814,7 @@ export async function registerRoutes(
           staffMemberId: hold.staffMemberId || '',
         },
         description: `Appointment booking at ${business.name}`,
+        saveForFutureUse: true,
       });
 
       await db.update(appointments).set({

@@ -386,6 +386,7 @@ export class StripeService {
     captureMethod: 'automatic' | 'manual';
     metadata: Record<string, string>;
     description?: string;
+    saveForFutureUse?: boolean;
   }) {
     const stripe = await getUncachableStripeClient();
 
@@ -402,6 +403,10 @@ export class StripeService {
 
     if (params.customerId) {
       paymentIntentData.customer = params.customerId;
+    }
+
+    if (params.saveForFutureUse) {
+      paymentIntentData.setup_future_usage = 'off_session';
     }
 
     return stripe.paymentIntents.create(paymentIntentData as any, {
