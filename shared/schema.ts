@@ -346,6 +346,7 @@ export const businesses = pgTable("businesses", {
   showPhone: boolean("show_phone").default(true),
   showWebsite: boolean("show_website").default(true),
   showStoreHours: boolean("show_store_hours").default(true),
+  showAddress: boolean("show_address").default(true),
   responseTimeValue: integer("response_time_value").default(2),
   responseTimeUnit: text("response_time_unit").default("hours"),
 

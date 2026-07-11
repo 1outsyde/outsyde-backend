@@ -8367,7 +8367,7 @@ export async function registerRoutes(
       }
 
       // Validate storefront display toggles
-      const booleanToggles = ['showResponseTime', 'showEmail', 'showPhone', 'showWebsite', 'showStoreHours'] as const;
+      const booleanToggles = ['showResponseTime', 'showEmail', 'showPhone', 'showWebsite', 'showStoreHours', 'showAddress'] as const;
       for (const field of booleanToggles) {
         if (updates[field] !== undefined && typeof updates[field] !== 'boolean') {
           return res.status(400).json({ error: `${field} must be a boolean` });
