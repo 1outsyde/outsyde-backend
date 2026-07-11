@@ -477,6 +477,34 @@ export class StripeService {
     return stripe.paymentIntents.retrieve(paymentIntentId);
   }
 
+  async getPaymentMethodIdFromIntent(paymentIntentId: string): Promise<string | null> {
+    const stripe = await getUncachableStripeClient();
+    const pi = await stripe.paymentIntents.retrieve(paymentIntentId);
+    const pm = pi.payment_method;
+    if (!pm) return null;
+    return typeof pm === 'string' ? pm : pm.id;
+  }
+
+  async chargeSavedPaymentMethod(params: {
+    customerId: string;
+    paymentMethodId: string;
+    amountCents: number;
+    metadata: Record<string, string>;
+    description?: string;
+  }) {
+    const stripe = await getUncachableStripeClient();
+    return stripe.paymentIntents.create({
+      amount: params.amountCents,
+      currency: 'usd',
+      customer: params.customerId,
+      payment_method: params.paymentMethodId,
+      off_session: true,
+      confirm: true,
+      metadata: params.metadata,
+      description: params.description,
+    });
+  }
+
   // =========================
   // REFUNDS (PLATFORM CONTROLLED)
   // =========================

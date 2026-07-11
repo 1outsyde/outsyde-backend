@@ -6469,6 +6469,178 @@ export async function registerRoutes(
     }
   });
 
+  // Consumer-initiated cancel: applies service cancellation policy (refund + optional fee)
+  app.post("/api/bookings/appointments/:appointmentId/cancel", async (req, res) => {
+    const userId = req.session?.userId || getUserIdFromRequest(req);
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    try {
+      const { appointmentId } = req.params;
+      const appointment = await storage.getAppointment(appointmentId);
+
+      if (!appointment) {
+        return res.status(404).json({ error: "Appointment not found" });
+      }
+
+      // Only the booking client may use this route
+      if (appointment.clientId !== userId) {
+        return res.status(403).json({ error: "Not authorized to cancel this booking" });
+      }
+
+      if (appointment.status !== BOOKING_STATES.CONFIRMED) {
+        return res.status(400).json({
+          error: "Booking must be confirmed to cancel",
+          currentStatus: appointment.status,
+        });
+      }
+
+      // ── Fetch service policy ──────────────────────────────────────────────
+      const service = appointment.serviceId
+        ? await storage.getVendorService(appointment.serviceId)
+        : null;
+
+      // Map window enum values to hours
+      const WINDOW_HOURS: Record<string, number> = {
+        '1_week':   168,
+        '48_hours': 48,
+        '24_hours': 24,
+        '1_hour':   1,
+        'never':    Infinity,
+      };
+
+      // Hours from now until the appointment
+      const appointmentDateTime = new Date(
+        `${appointment.appointmentDate}T${appointment.appointmentTime}`
+      );
+      const hoursUntilAppointment =
+        (appointmentDateTime.getTime() - Date.now()) / (1000 * 60 * 60);
+
+      const svc = service as any;
+
+      // ── Determine refund tier ─────────────────────────────────────────────
+      let refundTier: 'full' | 'partial' | 'none' = 'none';
+      let refundAmountCents = 0;
+
+      const fullWindow = WINDOW_HOURS[svc?.fullRefundWindow ?? 'never'] ?? Infinity;
+      if (svc?.fullRefundWindow && svc.fullRefundWindow !== 'never' && hoursUntilAppointment >= fullWindow) {
+        refundTier = 'full';
+        refundAmountCents = appointment.totalPrice;
+      } else if (svc?.hasPartialRefund && svc.partialRefundWindow && svc.partialRefundWindow !== 'never') {
+        const partialWindow = WINDOW_HOURS[svc.partialRefundWindow] ?? Infinity;
+        if (hoursUntilAppointment >= partialWindow) {
+          refundTier = 'partial';
+          refundAmountCents = Math.round(
+            appointment.totalPrice * ((svc.partialRefundPercentage ?? 0) / 100)
+          );
+        }
+      }
+
+      // ── Determine cancellation fee ────────────────────────────────────────
+      let feeAmountCents = 0;
+      if (svc?.hasCancellationFee && svc.cancellationFeeAmount != null) {
+        if (svc.cancellationFeeType === 'flat') {
+          feeAmountCents = svc.cancellationFeeAmount; // already in cents
+        } else if (svc.cancellationFeeType === 'percentage') {
+          feeAmountCents = Math.round(
+            (appointment.vendorNet ?? appointment.totalPrice) * (svc.cancellationFeeAmount / 100)
+          );
+        }
+      }
+
+      // ── Issue refund (best-effort) ────────────────────────────────────────
+      let refundSucceeded = false;
+      if (refundAmountCents > 0 && appointment.stripePaymentIntentId) {
+        try {
+          const refund = await stripeService.createBookingRefund({
+            paymentIntentId: appointment.stripePaymentIntentId,
+            amountCents: refundAmountCents,
+            reason: 'requested_by_customer',
+            metadata: {
+              appointmentId,
+              initiatedBy: userId,
+              refundTier,
+              reason: 'Consumer-initiated cancellation',
+            },
+          });
+          await db.update(appointments).set({
+            stripeRefundId: refund.id,
+            refundedAt: new Date(),
+            refundAmount: refundAmountCents,
+          }).where(eq(appointments.id, appointmentId));
+          refundSucceeded = true;
+        } catch (refundError: any) {
+          console.error(`[Cancel] Refund failed for appointment ${appointmentId}:`, refundError);
+        }
+      }
+
+      // ── Charge cancellation fee (best-effort) ────────────────────────────
+      let feeCharged = false;
+      let feeNeedsManualCollection = false;
+      if (feeAmountCents > 0 && appointment.stripePaymentIntentId) {
+        try {
+          const user = await storage.getUser(userId);
+          const paymentMethodId = await stripeService.getPaymentMethodIdFromIntent(
+            appointment.stripePaymentIntentId,
+          );
+          if (user?.stripeCustomerId && paymentMethodId) {
+            await stripeService.chargeSavedPaymentMethod({
+              customerId: user.stripeCustomerId,
+              paymentMethodId,
+              amountCents: feeAmountCents,
+              metadata: {
+                appointmentId,
+                initiatedBy: userId,
+                type: 'cancellation_fee',
+              },
+              description: `Cancellation fee for appointment ${appointmentId}`,
+            });
+            feeCharged = true;
+          } else {
+            feeNeedsManualCollection = true;
+          }
+        } catch (feeError: any) {
+          console.error(`[Cancel] Fee charge failed for appointment ${appointmentId}:`, feeError);
+          feeNeedsManualCollection = true;
+        }
+      }
+
+      // ── Always transition to CANCELED ─────────────────────────────────────
+      await transitionAppointmentState(appointmentId, BOOKING_STATES.CANCELED, {
+        triggeredBy: userId,
+        triggerSource: 'api',
+        metadata: {
+          action: 'consumer_cancel',
+          refundTier,
+          refundAmountCents: String(refundAmountCents),
+          refundSucceeded: String(refundSucceeded),
+          feeAmountCents: String(feeAmountCents),
+          feeCharged: String(feeCharged),
+          feeNeedsManualCollection: String(feeNeedsManualCollection),
+        },
+      });
+
+      await db.update(appointments).set({
+        canceledAt: new Date(),
+        canceledBy: userId,
+        cancellationReason: 'Consumer-initiated cancellation',
+      }).where(eq(appointments.id, appointmentId));
+
+      res.json({
+        success: true,
+        refundTier,
+        refundAmountCents,
+        feeAmountCents,
+        feeCharged,
+        feeNeedsManualCollection,
+      });
+    } catch (error: any) {
+      console.error("Consumer cancel appointment error:", error);
+      res.status(500).json({ error: "Failed to cancel appointment", details: error.message });
+    }
+  });
+
   /**
    * Refund a photographer shoot booking
    * Can be initiated by provider (photographer) or admin
