@@ -266,6 +266,26 @@ export interface IStorage {
   getAppointment(id: string): Promise<Appointment | undefined>;
   getAppointmentsByBusiness(businessId: string): Promise<Appointment[]>;
   getAppointmentsByClient(clientId: string): Promise<Appointment[]>;
+  getAppointmentsByClientWithDetails(clientId: string): Promise<{
+    id: string;
+    appointmentDate: string;
+    appointmentTime: string;
+    appointmentEndTime: string | null;
+    totalPrice: number;
+    status: string;
+    businessId: string;
+    serviceId: string;
+    staffMemberId: string | null;
+    businessName: string | null;
+    businessLogoImage: string | null;
+    businessCity: string | null;
+    businessState: string | null;
+    businessAddress: string | null;
+    serviceName: string | null;
+    serviceDurationMinutes: number | null;
+    staffDisplayName: string | null;
+    staffProfileImageUrl: string | null;
+  }[]>;
   getAppointmentsByStaffMember(staffMemberId: string): Promise<Appointment[]>;
   updateAppointment(id: string, updates: Partial<Appointment>): Promise<Appointment | undefined>;
   updateAppointmentWithValidation(appointmentId: string, updates: Partial<Appointment>, actorId?: string): Promise<{ success: boolean; appointment?: Appointment; error?: string }>;
@@ -1662,6 +1682,54 @@ export class DatabaseStorage implements IStorage {
   async getAppointmentsByClient(clientId: string): Promise<Appointment[]> {
     return db.select()
       .from(appointments)
+      .where(eq(appointments.clientId, clientId))
+      .orderBy(desc(appointments.createdAt));
+  }
+
+  async getAppointmentsByClientWithDetails(clientId: string): Promise<{
+    id: string;
+    appointmentDate: string;
+    appointmentTime: string;
+    appointmentEndTime: string | null;
+    totalPrice: number;
+    status: string;
+    businessId: string;
+    serviceId: string;
+    staffMemberId: string | null;
+    businessName: string | null;
+    businessLogoImage: string | null;
+    businessCity: string | null;
+    businessState: string | null;
+    businessAddress: string | null;
+    serviceName: string | null;
+    serviceDurationMinutes: number | null;
+    staffDisplayName: string | null;
+    staffProfileImageUrl: string | null;
+  }[]> {
+    return db.select({
+      id: appointments.id,
+      appointmentDate: appointments.appointmentDate,
+      appointmentTime: appointments.appointmentTime,
+      appointmentEndTime: appointments.appointmentEndTime,
+      totalPrice: appointments.totalPrice,
+      status: appointments.status,
+      businessId: appointments.businessId,
+      serviceId: appointments.serviceId,
+      staffMemberId: appointments.staffMemberId,
+      businessName: businesses.name,
+      businessLogoImage: businesses.logoImage,
+      businessCity: businesses.city,
+      businessState: businesses.state,
+      businessAddress: businesses.address,
+      serviceName: vendorServices.name,
+      serviceDurationMinutes: vendorServices.durationMinutes,
+      staffDisplayName: staffMembers.displayName,
+      staffProfileImageUrl: staffMembers.profileImageUrl,
+    })
+      .from(appointments)
+      .leftJoin(businesses, eq(appointments.businessId, businesses.id))
+      .leftJoin(vendorServices, eq(appointments.serviceId, vendorServices.id))
+      .leftJoin(staffMembers, eq(appointments.staffMemberId, staffMembers.id))
       .where(eq(appointments.clientId, clientId))
       .orderBy(desc(appointments.createdAt));
   }
