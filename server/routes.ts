@@ -6405,6 +6405,58 @@ export async function registerRoutes(
     }
   });
 
+  // Cancel a confirmed appointment as a no-show WITHOUT issuing a refund
+  app.post("/api/bookings/appointments/:appointmentId/cancel-no-refund", async (req, res) => {
+    const userId = req.session?.userId || getUserIdFromRequest(req);
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    try {
+      const { appointmentId } = req.params;
+      const { reason } = req.body;
+      const appointment = await storage.getAppointment(appointmentId);
+
+      if (!appointment) {
+        return res.status(404).json({ error: "Appointment not found" });
+      }
+
+      // Check if user is the business owner
+      const business = await storage.getBusiness(appointment.businessId);
+      if (!business || business.ownerId !== userId) {
+        return res.status(403).json({ error: "Not authorized to cancel this booking" });
+      }
+
+      if (appointment.status !== BOOKING_STATES.CONFIRMED) {
+        return res.status(400).json({
+          error: "Booking must be in confirmed state to cancel as no-show",
+          currentStatus: appointment.status,
+        });
+      }
+
+      const result = await transitionAppointmentState(appointmentId, BOOKING_STATES.NO_SHOW, {
+        triggeredBy: userId,
+        triggerSource: 'api',
+        metadata: { action: 'provider_cancel_no_refund', reason },
+      });
+
+      if (!result.success) {
+        return res.status(400).json({ error: result.error });
+      }
+
+      await db.update(appointments).set({
+        canceledBy: userId,
+        cancellationReason: reason || 'No-show, not refunded',
+      }).where(eq(appointments.id, appointmentId));
+
+      const updatedAppointment = await storage.getAppointment(appointmentId);
+      res.json({ success: true, appointment: updatedAppointment });
+    } catch (error) {
+      console.error("Cancel no-refund appointment error:", error);
+      res.status(500).json({ error: "Failed to cancel booking" });
+    }
+  });
+
   /**
    * Refund a photographer shoot booking
    * Can be initiated by provider (photographer) or admin
