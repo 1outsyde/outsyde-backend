@@ -298,6 +298,14 @@ export interface IStorage {
     serviceDurationMinutes: number | null;
     staffDisplayName: string | null;
     staffProfileImageUrl: string | null;
+    businessHasPhysicalLocation: boolean | null;
+    serviceFullRefundWindow: string | null;
+    serviceHasPartialRefund: boolean | null;
+    servicePartialRefundWindow: string | null;
+    servicePartialRefundPercentage: number | null;
+    serviceHasCancellationFee: boolean | null;
+    serviceCancellationFeeType: string | null;
+    serviceCancellationFeeAmount: number | null;
   }[]>;
   getAppointmentsByStaffMember(staffMemberId: string): Promise<Appointment[]>;
   updateAppointment(id: string, updates: Partial<Appointment>): Promise<Appointment | undefined>;
@@ -1798,6 +1806,14 @@ export class DatabaseStorage implements IStorage {
       serviceDurationMinutes: vendorServices.durationMinutes,
       staffDisplayName: staffMembers.displayName,
       staffProfileImageUrl: staffMembers.profileImageUrl,
+      businessHasPhysicalLocation: businesses.hasPhysicalLocation,
+      serviceFullRefundWindow: vendorServices.fullRefundWindow,
+      serviceHasPartialRefund: vendorServices.hasPartialRefund,
+      servicePartialRefundWindow: vendorServices.partialRefundWindow,
+      servicePartialRefundPercentage: vendorServices.partialRefundPercentage,
+      serviceHasCancellationFee: vendorServices.hasCancellationFee,
+      serviceCancellationFeeType: vendorServices.cancellationFeeType,
+      serviceCancellationFeeAmount: vendorServices.cancellationFeeAmount,
     })
       .from(appointments)
       .leftJoin(businesses, eq(appointments.businessId, businesses.id))
