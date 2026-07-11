@@ -6541,7 +6541,7 @@ export async function registerRoutes(
     }
 
     try {
-      const appointments = await storage.getAppointmentsByClient(userId);
+      const appointments = await storage.getAppointmentsByClientWithDetails(userId);
       res.json({ appointments });
     } catch (error) {
       console.error("Get appointments error:", error);
