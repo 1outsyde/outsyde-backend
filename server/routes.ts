@@ -6539,7 +6539,7 @@ export async function registerRoutes(
 
       // ── Determine cancellation fee ────────────────────────────────────────
       let feeAmountCents = 0;
-      if (svc?.hasCancellationFee && svc.cancellationFeeAmount != null) {
+      if (refundTier !== 'full' && svc?.hasCancellationFee && svc.cancellationFeeAmount != null) {
         if (svc.cancellationFeeType === 'flat') {
           feeAmountCents = svc.cancellationFeeAmount; // already in cents
         } else if (svc.cancellationFeeType === 'percentage') {
