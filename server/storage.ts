@@ -487,6 +487,15 @@ export interface IStorage {
   createVendorService(data: InsertVendorService): Promise<VendorService>;
   updateVendorService(id: string, updates: Partial<VendorService>): Promise<VendorService | undefined>;
   deleteVendorService(id: string): Promise<void>;
+  updateAllVendorServicesCancellationPolicy(businessId: string, excludeServiceId: string, policy: {
+    fullRefundWindow: string | null;
+    hasPartialRefund: boolean;
+    partialRefundWindow: string | null;
+    partialRefundPercentage: number | null;
+    hasCancellationFee: boolean;
+    cancellationFeeType: string | null;
+    cancellationFeeAmount: number | null;
+  }): Promise<number>;
 
   // Subscription enforcement - pause/unpause items
   pauseBusinessLiveItems(businessId: string): Promise<{ pausedProducts: number; pausedServices: number }>;
@@ -4463,6 +4472,29 @@ export class DatabaseStorage implements IStorage {
 
   async deleteVendorService(id: string): Promise<void> {
     await db.delete(vendorServices).where(eq(vendorServices.id, id));
+  }
+
+  async updateAllVendorServicesCancellationPolicy(
+    businessId: string,
+    excludeServiceId: string,
+    policy: {
+      fullRefundWindow: string | null;
+      hasPartialRefund: boolean;
+      partialRefundWindow: string | null;
+      partialRefundPercentage: number | null;
+      hasCancellationFee: boolean;
+      cancellationFeeType: string | null;
+      cancellationFeeAmount: number | null;
+    },
+  ): Promise<number> {
+    const result = await db.update(vendorServices)
+      .set(policy)
+      .where(and(
+        eq(vendorServices.businessId, businessId),
+        ne(vendorServices.id, excludeServiceId),
+      ))
+      .returning({ id: vendorServices.id });
+    return result.length;
   }
 
   // =========================
