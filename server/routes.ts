@@ -13526,7 +13526,7 @@ export async function registerRoutes(
       const business = await storage.getBusinessByOwnerId(userId);
       if (!business) return res.status(404).json({ error: "Business not found" });
 
-      const bookings = await storage.getAppointmentsByBusiness(business.id);
+      const bookings = await storage.getAppointmentsByBusinessWithDetails(business.id);
       res.json({ bookings });
     } catch (error) {
       console.error("Get business bookings error:", error);
