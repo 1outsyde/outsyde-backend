@@ -265,6 +265,19 @@ export interface IStorage {
   createAppointment(data: InsertAppointment): Promise<Appointment>;
   getAppointment(id: string): Promise<Appointment | undefined>;
   getAppointmentsByBusiness(businessId: string): Promise<Appointment[]>;
+  getAppointmentsByBusinessWithDetails(businessId: string): Promise<{
+    id: string;
+    customerName: string;
+    customerAvatar: string | null;
+    date: string;
+    time: string;
+    serviceName: string | null;
+    status: string;
+    amount: number;
+    subtotalAmount: number;
+    bookingFeeAmount: number;
+    vendorNetAmount: number;
+  }[]>;
   getAppointmentsByClient(clientId: string): Promise<Appointment[]>;
   getAppointmentsByClientWithDetails(clientId: string): Promise<{
     id: string;
@@ -1677,6 +1690,57 @@ export class DatabaseStorage implements IStorage {
       .from(appointments)
       .where(eq(appointments.businessId, businessId))
       .orderBy(desc(appointments.createdAt));
+  }
+
+  async getAppointmentsByBusinessWithDetails(businessId: string): Promise<{
+    id: string;
+    customerName: string;
+    customerAvatar: string | null;
+    date: string;
+    time: string;
+    serviceName: string | null;
+    status: string;
+    amount: number;
+    subtotalAmount: number;
+    bookingFeeAmount: number;
+    vendorNetAmount: number;
+  }[]> {
+    const rows = await db.select({
+      id: appointments.id,
+      date: appointments.appointmentDate,
+      time: appointments.appointmentTime,
+      status: appointments.status,
+      totalPrice: appointments.totalPrice,
+      platformFee: appointments.platformFee,
+      vendorNet: appointments.vendorNet,
+      firstName: users.firstName,
+      lastName: users.lastName,
+      email: users.email,
+      customerAvatar: users.profileImageUrl,
+      serviceName: vendorServices.name,
+    })
+      .from(appointments)
+      .leftJoin(users, eq(appointments.clientId, users.id))
+      .leftJoin(vendorServices, eq(appointments.serviceId, vendorServices.id))
+      .where(eq(appointments.businessId, businessId))
+      .orderBy(desc(appointments.createdAt));
+
+    return rows.map((row) => {
+      const fullName = `${row.firstName ?? ""} ${row.lastName ?? ""}`.trim();
+      return {
+        id: row.id,
+        customerName: fullName || row.email || "Unknown",
+        customerAvatar: row.customerAvatar,
+        date: row.date,
+        time: row.time,
+        serviceName: row.serviceName,
+        status: row.status,
+        amount: (row.totalPrice ?? 0) / 100,
+        subtotalAmount: (row.totalPrice ?? 0) / 100,
+        bookingFeeAmount: (row.platformFee ?? 0) / 100,
+        vendorNetAmount: (row.vendorNet ?? 0) / 100,
+      };
+    });
   }
 
   async getAppointmentsByClient(clientId: string): Promise<Appointment[]> {
