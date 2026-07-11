@@ -339,6 +339,7 @@ export const businesses = pgTable("businesses", {
 
   // Booking settings
   autoAcceptBookings: boolean("auto_accept_bookings").default(true).notNull(),
+  defaultServiceLocationType: text("default_service_location_type").default("business"),
 
   // Storefront display toggles
   showResponseTime: boolean("show_response_time").default(true),
@@ -432,6 +433,13 @@ export const vendorServices = pgTable("vendor_services", {
   hasCancellationFee: boolean("has_cancellation_fee").default(false),
   cancellationFeeType: text("cancellation_fee_type"), // nullable, 'flat'|'percentage'
   cancellationFeeAmount: integer("cancellation_fee_amount"), // nullable, cents if flat / whole percent if percentage
+
+  // Service location type: 'business' | 'alternate' | 'customer'
+  serviceLocationType: text("service_location_type").default("business"),
+  alternateAddress: text("alternate_address"),
+  alternateCity: text("alternate_city"),
+  alternateState: text("alternate_state"),
+  alternateZipCode: text("alternate_zip_code"),
 
   createdAt: timestamp("created_at").defaultNow().notNull(),
 });
@@ -866,6 +874,12 @@ export const appointments = pgTable("appointments", {
   stateChangedAt: timestamp("state_changed_at"),
   stateChangedBy: varchar("state_changed_by", { length: 36 }), // 'system', 'stripe', or userId
   previousState: text("previous_state"),
+
+  // Customer-provided service address (populated when serviceLocationType === 'customer')
+  customerServiceAddress: text("customer_service_address"),
+  customerServiceCity: text("customer_service_city"),
+  customerServiceState: text("customer_service_state"),
+  customerServiceZipCode: text("customer_service_zip_code"),
 
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
