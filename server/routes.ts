@@ -4771,6 +4771,16 @@ export async function registerRoutes(
       // therefore never gets captured). Revisit once that handler is extended.
       const captureMethod: 'automatic' = 'automatic';
 
+      // Only persist customer-submitted address when the service expects it.
+      const service = hold.serviceId ? await storage.getVendorService(hold.serviceId) : undefined;
+      const isCustomerLocation = service?.serviceLocationType === 'customer';
+      const customerAddress = isCustomerLocation ? {
+        customerServiceAddress: req.body.customerServiceAddress ?? null,
+        customerServiceCity: req.body.customerServiceCity ?? null,
+        customerServiceState: req.body.customerServiceState ?? null,
+        customerServiceZipCode: req.body.customerServiceZipCode ?? null,
+      } : {};
+
       const appointment = await storage.createAppointment({
         businessId: hold.providerId,
         clientId: hold.userId,
@@ -4787,6 +4797,7 @@ export async function registerRoutes(
         status: BOOKING_STATES.PENDING_PAYMENT,
         paymentMethod: 'payment_intent',
         captureMethod,
+        ...customerAddress,
       });
 
       const user = await storage.getUser(userId);
