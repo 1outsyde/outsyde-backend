@@ -298,6 +298,23 @@ export interface IStorage {
     serviceDurationMinutes: number | null;
     staffDisplayName: string | null;
     staffProfileImageUrl: string | null;
+    serviceLocationType: string | null;
+    alternateAddress: string | null;
+    alternateCity: string | null;
+    alternateState: string | null;
+    alternateZipCode: string | null;
+    virtualLink: string | null;
+    fullRefundWindow: string | null;
+    hasPartialRefund: boolean | null;
+    partialRefundWindow: string | null;
+    partialRefundPercentage: number | null;
+    hasCancellationFee: boolean | null;
+    cancellationFeeType: string | null;
+    cancellationFeeAmount: number | null;
+    customerServiceAddress: string | null;
+    customerServiceCity: string | null;
+    customerServiceState: string | null;
+    customerServiceZipCode: string | null;
   }[]>;
   getAppointmentsByStaffMember(staffMemberId: string): Promise<Appointment[]>;
   updateAppointment(id: string, updates: Partial<Appointment>): Promise<Appointment | undefined>;
@@ -1798,6 +1815,23 @@ export class DatabaseStorage implements IStorage {
       serviceDurationMinutes: vendorServices.durationMinutes,
       staffDisplayName: staffMembers.displayName,
       staffProfileImageUrl: staffMembers.profileImageUrl,
+      serviceLocationType: vendorServices.serviceLocationType,
+      alternateAddress: vendorServices.alternateAddress,
+      alternateCity: vendorServices.alternateCity,
+      alternateState: vendorServices.alternateState,
+      alternateZipCode: vendorServices.alternateZipCode,
+      virtualLink: vendorServices.virtualLink,
+      fullRefundWindow: vendorServices.fullRefundWindow,
+      hasPartialRefund: vendorServices.hasPartialRefund,
+      partialRefundWindow: vendorServices.partialRefundWindow,
+      partialRefundPercentage: vendorServices.partialRefundPercentage,
+      hasCancellationFee: vendorServices.hasCancellationFee,
+      cancellationFeeType: vendorServices.cancellationFeeType,
+      cancellationFeeAmount: vendorServices.cancellationFeeAmount,
+      customerServiceAddress: appointments.customerServiceAddress,
+      customerServiceCity: appointments.customerServiceCity,
+      customerServiceState: appointments.customerServiceState,
+      customerServiceZipCode: appointments.customerServiceZipCode,
     })
       .from(appointments)
       .leftJoin(businesses, eq(appointments.businessId, businesses.id))
