@@ -28,6 +28,7 @@ export function toPublicBusinessDTO(
     yearsInBusiness: business.yearsInBusiness,
 
     hasPhysicalLocation: business.hasPhysicalLocation,
+    showAddress: business.showAddress,
     address: business.address,
     city: business.city,
     state: business.state,
@@ -56,6 +57,7 @@ export function toPublicBusinessDTO(
     hasProducts: business.hasProducts,
     hasServices: business.hasServices,
     isMultiStaff: business.isMultiStaff,
+    defaultServiceLocationType: business.defaultServiceLocationType,
 
     autoAcceptBookings: business.autoAcceptBookings,
     responseTimeValue: business.showResponseTime ? business.responseTimeValue : null,
