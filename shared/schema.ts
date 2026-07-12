@@ -348,6 +348,11 @@ export const businesses = pgTable("businesses", {
   showWebsite: boolean("show_website").default(true),
   showStoreHours: boolean("show_store_hours").default(true),
   showAddress: boolean("show_address").default(true),
+
+  // Vendor-defined booking terms shown as a required checkbox to customers
+  // at the Review step. null = vendor has not set any terms (checkbox hidden).
+  vendorTermsAndConditions: text("vendor_terms_and_conditions"),
+
   responseTimeValue: integer("response_time_value").default(2),
   responseTimeUnit: text("response_time_unit").default("hours"),
 

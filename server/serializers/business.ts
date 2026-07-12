@@ -61,6 +61,8 @@ export function toPublicBusinessDTO(
     responseTimeValue: business.showResponseTime ? business.responseTimeValue : null,
     responseTimeUnit: business.showResponseTime ? business.responseTimeUnit : null,
 
+    vendorTermsAndConditions: business.vendorTermsAndConditions ?? null,
+
     createdAt: business.createdAt,
 
     followerCount: opts.followerCount,
