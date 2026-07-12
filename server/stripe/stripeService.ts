@@ -443,6 +443,32 @@ export class StripeService {
   }
 
   /**
+   * Transfer a photographer payout from the platform balance to the photographer's
+   * connected account after a platform-balance PaymentIntent has succeeded.
+   * Parallel to transferBookingPayout() (business/staff path) — kept separate
+   * because the metadata shape and transfer_group key differ for shoot bookings.
+   */
+  async transferShootBookingPayout(params: {
+    amountInCents: number;
+    connectedAccountId: string;
+    bookingId: string;
+  }) {
+    const stripe = await getUncachableStripeClient();
+
+    return stripe.transfers.create({
+      amount: params.amountInCents,
+      currency: 'usd',
+      destination: params.connectedAccountId,
+      transfer_group: `shoot_booking_${params.bookingId}`,
+      metadata: {
+        bookingId: params.bookingId,
+        recipient: 'photographer',
+        type: 'shoot_booking_payout',
+      },
+    }, { idempotencyKey: idempotencyKey(`transfer_shoot_${params.bookingId}`) });
+  }
+
+  /**
    * Capture a previously authorized PaymentIntent (for manual capture flow)
    * Called when provider accepts a booking
    */
