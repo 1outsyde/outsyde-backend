@@ -1,7 +1,7 @@
 import { getUncachableStripeClient } from "./stripeClient";
 import { storage } from "../storage";
 import { db } from "../db";
-import { fulfillmentTasks, subscriptionTiers, appointments, shootBookings, BOOKING_STATES } from "@shared/schema";
+import { fulfillmentTasks, subscriptionTiers, appointments, shootBookings, bookingAuditLog, BOOKING_STATES } from "@shared/schema";
 import { sql, eq, and, inArray } from "drizzle-orm";
 import { NotificationTriggers } from "../notificationService";
 import { sendStaffOnboardingCompleteOwnerEmail } from "../services/resendService";
@@ -180,6 +180,14 @@ export class WebhookHandlers {
           console.log(`[Stripe] Appointment ${bookingId} confirmed via PaymentIntent`);
         }
       } else if (type === 'shoot_booking') {
+        // Capture current status before the atomic claim for the audit log
+        // fromState. Safe: if the UPDATE succeeds, this value is the correct
+        // pre-update state because the claim guard prevents re-entry.
+        const [priorRow] = await db.select({ status: shootBookings.status })
+          .from(shootBookings)
+          .where(eq(shootBookings.id, bookingId));
+        const priorStatus = priorRow?.status;
+
         // DB-level idempotency guard: atomically claim the PENDING→CONFIRMED
         // transition with a conditional UPDATE. If 0 rows are affected, a
         // concurrent or duplicate webhook delivery already processed this
@@ -206,6 +214,25 @@ export class WebhookHandlers {
         }
 
         console.log(`[Stripe] Shoot booking ${bookingId} confirmed via PaymentIntent ${paymentIntent.id}`);
+
+        // Write the bookingAuditLog entry that transitionShootBookingState would
+        // normally write via logAuditEntry(). Closes the gap from bypassing the
+        // state machine on the direct-UPDATE webhook path.
+        try {
+          await db.insert(bookingAuditLog).values({
+            bookingType: 'shoot_booking',
+            bookingId,
+            fromState: priorStatus ?? BOOKING_STATES.PENDING_PAYMENT,
+            toState: BOOKING_STATES.CONFIRMED,
+            triggeredBy: 'stripe',
+            triggerSource: 'webhook',
+            metadata: {
+              stripePaymentIntentId: paymentIntent.id,
+            },
+          });
+        } catch (auditErr) {
+          console.error(`[Stripe] Failed to write audit log for shoot booking ${bookingId}:`, auditErr);
+        }
 
         // Transfer payout to photographer's connected account. vendorPayoutCents
         // was stored in PI metadata at creation time so the webhook uses the
