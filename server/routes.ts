@@ -9070,11 +9070,12 @@ export async function registerRoutes(
         hasCancellationFee: z.boolean().optional(),
         cancellationFeeType: z.enum(['flat', 'percentage']).nullable().optional(),
         cancellationFeeAmount: z.number().int().min(0).nullable().optional(),
-        serviceLocationType: z.enum(['business', 'alternate', 'customer']).optional(),
+        serviceLocationType: z.enum(['business', 'alternate', 'customer', 'virtual']).optional(),
         alternateAddress: z.string().nullable().optional(),
         alternateCity: z.string().nullable().optional(),
         alternateState: z.string().nullable().optional(),
         alternateZipCode: z.string().nullable().optional(),
+        virtualLink: z.string().nullable().optional(),
       });
 
       const validated = serviceSchema.parse(req.body);
@@ -9132,11 +9133,12 @@ export async function registerRoutes(
         hasCancellationFee: z.boolean().optional(),
         cancellationFeeType: z.enum(['flat', 'percentage']).nullable().optional(),
         cancellationFeeAmount: z.number().int().min(0).nullable().optional(),
-        serviceLocationType: z.enum(['business', 'alternate', 'customer']).optional(),
+        serviceLocationType: z.enum(['business', 'alternate', 'customer', 'virtual']).optional(),
         alternateAddress: z.string().nullable().optional(),
         alternateCity: z.string().nullable().optional(),
         alternateState: z.string().nullable().optional(),
         alternateZipCode: z.string().nullable().optional(),
+        virtualLink: z.string().nullable().optional(),
       });
 
       const validated = updateSchema.parse(req.body);

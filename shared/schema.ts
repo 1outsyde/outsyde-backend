@@ -440,6 +440,7 @@ export const vendorServices = pgTable("vendor_services", {
   alternateCity: text("alternate_city"),
   alternateState: text("alternate_state"),
   alternateZipCode: text("alternate_zip_code"),
+  virtualLink: text("virtual_link"),
 
   createdAt: timestamp("created_at").defaultNow().notNull(),
 });
