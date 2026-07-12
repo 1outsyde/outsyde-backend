@@ -2,7 +2,7 @@ import { getUncachableStripeClient } from "./stripeClient";
 import { storage } from "../storage";
 import { db } from "../db";
 import { fulfillmentTasks, subscriptionTiers, appointments, shootBookings, BOOKING_STATES } from "@shared/schema";
-import { sql, eq } from "drizzle-orm";
+import { sql, eq, and, inArray } from "drizzle-orm";
 import { NotificationTriggers } from "../notificationService";
 import { sendStaffOnboardingCompleteOwnerEmail } from "../services/resendService";
 import { stripeService } from "./stripeService";
@@ -180,53 +180,78 @@ export class WebhookHandlers {
           console.log(`[Stripe] Appointment ${bookingId} confirmed via PaymentIntent`);
         }
       } else if (type === 'shoot_booking') {
-        const booking = await storage.getShootBooking(bookingId);
-        if (!booking) {
-          console.error(`[Stripe] Shoot booking ${bookingId} not found`);
+        // DB-level idempotency guard: atomically claim the PENDING→CONFIRMED
+        // transition with a conditional UPDATE. If 0 rows are affected, a
+        // concurrent or duplicate webhook delivery already processed this
+        // event — exit without doing any work (no SELECT-then-UPDATE race).
+        const claimed = await db.update(shootBookings)
+          .set({
+            status: BOOKING_STATES.CONFIRMED,
+            stripePaymentIntentId: paymentIntent.id,
+            stateChangedAt: new Date(),
+            stateChangedBy: 'stripe',
+            updatedAt: new Date(),
+          })
+          .where(
+            and(
+              eq(shootBookings.id, bookingId),
+              inArray(shootBookings.status, [BOOKING_STATES.PENDING_PAYMENT, BOOKING_STATES.PENDING_PROVIDER])
+            )
+          )
+          .returning({ id: shootBookings.id });
+
+        if (claimed.length === 0) {
+          console.log(`[Stripe] Shoot booking ${bookingId} already confirmed or not in expected state — skipping duplicate webhook`);
           return;
         }
 
-        if (booking.status === BOOKING_STATES.PENDING_PAYMENT || 
-            booking.status === BOOKING_STATES.PENDING_PROVIDER) {
-          const result = await transitionShootBookingState(
-            bookingId,
-            BOOKING_STATES.CONFIRMED,
-            {
-              triggeredBy: 'stripe',
-              triggerSource: 'webhook',
-              metadata: {
-                stripePaymentIntentId: paymentIntent.id,
-                event: 'payment_intent.succeeded'
-              }
+        console.log(`[Stripe] Shoot booking ${bookingId} confirmed via PaymentIntent ${paymentIntent.id}`);
+
+        // Transfer payout to photographer's connected account. vendorPayoutCents
+        // was stored in PI metadata at creation time so the webhook uses the
+        // exact figure computed in the create-payment-intent route — no
+        // re-derivation from the booking needed.
+        const vendorPayoutCents = metadata.vendorPayoutCents
+          ? parseInt(metadata.vendorPayoutCents, 10)
+          : 0;
+
+        if (vendorPayoutCents > 0) {
+          const booking = await storage.getShootBooking(bookingId);
+          const photographer = booking ? await storage.getPhotographer(booking.photographerId) : null;
+
+          if (!photographer?.stripeAccountId) {
+            console.error(`[Stripe] Cannot transfer payout for shoot booking ${bookingId}: photographer has no stripeAccountId. Funds remain on platform balance — manual reconciliation required.`);
+          } else {
+            try {
+              const transfer = await stripeService.transferShootBookingPayout({
+                amountInCents: vendorPayoutCents,
+                connectedAccountId: photographer.stripeAccountId,
+                bookingId,
+              });
+              console.log(`[Stripe] Transferred ${vendorPayoutCents}¢ to photographer ${photographer.id} (transfer ${transfer.id}) for shoot booking ${bookingId}`);
+            } catch (transferErr) {
+              // The charge already succeeded and the booking is confirmed above.
+              // A failed transfer does NOT roll back the booking or payment.
+              // Log loudly for manual reconciliation.
+              console.error(`[Stripe] FAILED to transfer ${vendorPayoutCents}¢ to photographer ${photographer?.id} for shoot booking ${bookingId}. Funds remain on platform balance — manual reconciliation required.`, transferErr);
             }
-          );
-
-          if (!result.success) {
-            console.error(`[Stripe] Failed to confirm shoot booking ${bookingId}: ${result.error}`);
-            return;
           }
+        } else {
+          console.error(`[Stripe] Shoot booking ${bookingId} has no vendorPayoutCents in metadata — payout transfer skipped. Manual reconciliation required.`);
+        }
 
-          // Update shoot booking with payment details
-          await db.update(shootBookings).set({
-            stripePaymentIntentId: paymentIntent.id,
-            updatedAt: new Date()
-          }).where(eq(shootBookings.id, bookingId));
-
-          // Award points
-          const user = clientId ? await storage.getUser(clientId) : null;
-          if (user) {
-            await storage.earnPoints({
-              userId: user.id,
-              dollarAmountCents: paymentIntent.amount,
-              transactionType: 'photographer_booking',
-              referenceType: 'shoot_booking',
-              referenceId: bookingId,
-              description: 'Points earned from photographer booking',
-            });
-            await this.tryCompleteReferral(user.id, bookingId, 'shoot_booking');
-          }
-
-          console.log(`[Stripe] Shoot booking ${bookingId} confirmed via PaymentIntent`);
+        // Award points
+        const user = clientId ? await storage.getUser(clientId) : null;
+        if (user) {
+          await storage.earnPoints({
+            userId: user.id,
+            dollarAmountCents: paymentIntent.amount,
+            transactionType: 'photographer_booking',
+            referenceType: 'shoot_booking',
+            referenceId: bookingId,
+            description: 'Points earned from photographer booking',
+          });
+          await this.tryCompleteReferral(user.id, bookingId, 'shoot_booking');
         }
       } else if (type === 'appointment') {
         // Hold-based business/staff booking flow (POST
