@@ -4182,85 +4182,40 @@ export async function registerRoutes(
       const booking = await storage.getShootBooking(bookingId);
 
       if (!booking) {
-        return res.status(410).json({ code: "BOOKING_EXPIRED", message: "Booking not found or has expired. Please restart booking." });
+        return res.status(404).json({ code: "BOOKING_NOT_FOUND", message: "Booking not found" });
       }
 
       if (booking.clientId !== userId) {
         return res.status(403).json({ code: "UNAUTHORIZED", message: "Not authorized to access this booking" });
       }
 
-      // Check for terminal states
-      if (['expired', 'canceled', 'no_show'].includes(booking.status)) {
-        return res.status(410).json({ code: "BOOKING_EXPIRED", message: "Booking can no longer be modified. Please restart booking." });
-      }
-
-      // Already confirmed? Return success (idempotent)
-      if (booking.status === 'paid' || booking.status === 'confirmed') {
-        return res.json({ booking, code: "ALREADY_CONFIRMED", message: "Booking already confirmed" });
-      }
-
-      // Check if draft expired
-      if (booking.status === 'draft' && booking.draftExpiresAt && new Date() > new Date(booking.draftExpiresAt)) {
-        return res.status(410).json({ code: "BOOKING_EXPIRED", message: "Booking draft has expired. Please restart booking." });
-      }
-
-      // Must be in pending_payment state to confirm
-      if (booking.status === 'draft') {
-        return res.status(409).json({ code: "INVALID_STATE", message: "Payment has not been initiated. Please start payment first." });
-      }
-
-      // Verify payment via Stripe if checkout session exists
+      // Read-only status endpoint. Booking confirmation is handled exclusively
+      // by the Stripe webhook (payment_intent.succeeded → handlePaymentIntentSucceeded).
+      // Old app versions may still call this after PaymentSheet succeeds — they
+      // receive the current booking status and no error, regardless of whether
+      // the webhook has fired yet. No booking state is mutated here.
+      //
+      // If the booking was created via the old checkout-session flow
+      // (stripeCheckoutSessionId set), report the session payment status for
+      // informational purposes only — still no state mutation.
+      let sessionPaymentStatus: string | null = null;
       if (booking.stripeCheckoutSessionId) {
-        const session = await stripeService.getCheckoutSession(booking.stripeCheckoutSessionId);
-        
-        if (session.payment_status !== 'paid') {
-          return res.status(400).json({ 
-            code: "PAYMENT_INCOMPLETE",
-            message: "Please complete payment to confirm your booking"
-          });
+        try {
+          const session = await stripeService.getCheckoutSession(booking.stripeCheckoutSessionId);
+          sessionPaymentStatus = session.payment_status;
+        } catch (sessionErr) {
+          console.warn(`[confirm-payment] Could not retrieve checkout session ${booking.stripeCheckoutSessionId}:`, sessionErr);
         }
-
-        // Verify metadata matches booking
-        if (session.metadata?.bookingId !== bookingId) {
-          console.error(`Metadata mismatch: session bookingId=${session.metadata?.bookingId}, expected=${bookingId}`);
-          return res.status(400).json({ code: "PAYMENT_VERIFICATION_FAILED", message: "Payment verification failed - booking mismatch" });
-        }
-
-        // Verify amount matches (amount_total is in cents)
-        if (session.amount_total !== booking.totalPrice) {
-          console.error(`Amount mismatch: session=${session.amount_total}, booking=${booking.totalPrice}`);
-          return res.status(400).json({ code: "PAYMENT_VERIFICATION_FAILED", message: "Payment verification failed - amount mismatch" });
-        }
-
-        // Update booking status to paid
-        const updated = await storage.updateShootBooking(bookingId, {
-          status: 'paid',
-          stripePaymentIntentId: typeof session.payment_intent === 'string' 
-            ? session.payment_intent 
-            : session.payment_intent?.id,
-        });
-
-        // Send confirmation notification
-        const photographer = await storage.getPhotographer(booking.photographerId);
-        const photographerName = photographer?.displayName || 'Photographer';
-        
-        NotificationTriggers.bookingConfirmed({
-          customerId: userId,
-          photographerId: booking.photographerId,
-          bookingId: booking.id,
-          photographerName,
-          shootType: booking.shootType,
-          date: booking.date,
-          time: booking.startTime,
-        }).catch(err => console.error('Notification error:', err));
-
-        return res.json({ booking: updated, message: "Booking confirmed - payment received" });
       }
 
-      return res.status(400).json({ code: "PAYMENT_SESSION_MISSING", message: "No payment session found. Please restart booking." });
+      return res.json({
+        booking,
+        status: booking.status,
+        ...(sessionPaymentStatus !== null ? { sessionPaymentStatus } : {}),
+      });
     } catch (error) {
       console.error("Confirm photographer booking error:", error);
-      res.status(500).json({ code: "INTERNAL_ERROR", message: "Failed to confirm booking" });
+      res.status(500).json({ code: "INTERNAL_ERROR", message: "Failed to retrieve booking" });
     }
   });
 
@@ -6151,12 +6106,20 @@ export async function registerRoutes(
         return res.status(404).json({ error: "User not found" });
       }
 
-      // Create PaymentIntent with explicit vendor payout via transfer_data.amount
-      const paymentIntent = await stripeService.createBookingPaymentIntent({
-        totalChargedCents: totalChargedToConsumerCents,
-        vendorPayoutCents,
+      // Create PaymentIntent on platform balance — no transfer_data, matching the
+      // business/staff booking pattern (createPlatformPaymentIntent). After
+      // payment_intent.succeeded fires, the webhook handler transfers
+      // vendorPayoutCents to the photographer's connected account via
+      // stripeService.transferShootBookingPayout(). vendorPayoutCents is stored
+      // in PI metadata so the webhook uses the exact figure computed here.
+      //
+      // NOTE: fee rates here (7% vendor deduction / 5% consumer upcharge) differ
+      // from the business/staff schedule in fees.ts (12% booking fee / 3% consumer
+      // fee). Centralising all fee schedules into fees.ts is tracked separately —
+      // do not change these rates here.
+      const paymentIntent = await stripeService.createPlatformPaymentIntent({
+        amountCents: totalChargedToConsumerCents,
         customerId: user.stripeCustomerId || undefined,
-        connectedAccountId: photographer.stripeAccountId,
         captureMethod,
         metadata: {
           type: 'shoot_booking',
