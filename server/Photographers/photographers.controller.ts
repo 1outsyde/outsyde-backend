@@ -1,5 +1,6 @@
 // server/Photographers/photographers.controller.ts
 import { Request, Response } from "express";
+import { z } from "zod";
 import { PhotographerService } from "./photographers.service";
 import { stripeService } from "../stripe/stripeService";
 import { storage } from "../storage";
@@ -484,33 +485,66 @@ export class PhotographerController {
         });
       }
 
-      const { 
-        name, 
-        description, 
-        category, 
-        priceCents, 
-        isContactForPricing, 
-        estimatedDurationMinutes,
-        pricingModel,
-        hourlyRateCents,
-        packageHours
-      } = req.body;
+      const createSchema = z.object({
+        name: z.string().min(1),
+        description: z.string().nullable().optional(),
+        category: z.string().nullable().optional(),
+        pricingModel: z.enum(['hourly', 'package']).optional(),
+        hourlyRateCents: z.number().min(0).nullable().optional(),
+        priceCents: z.number().min(0).nullable().optional(),
+        packageHours: z.number().min(1).nullable().optional(),
+        isContactForPricing: z.boolean().optional(),
+        estimatedDurationMinutes: z.number().min(1).nullable().optional(),
+        isActive: z.boolean().optional(),
+        serviceLocationType: z.enum(['business', 'alternate', 'customer', 'virtual']).optional(),
+        alternateAddress: z.string().nullable().optional(),
+        alternateCity: z.string().nullable().optional(),
+        alternateState: z.string().nullable().optional(),
+        alternateZipCode: z.string().nullable().optional(),
+        virtualLink: z.string().nullable().optional(),
+        fullRefundWindow: z.enum(['1_week', '48_hours', '24_hours', '1_hour', 'never']).optional(),
+        hasPartialRefund: z.boolean().optional(),
+        partialRefundWindow: z.enum(['1_week', '48_hours', '24_hours', '1_hour', 'never']).nullable().optional(),
+        partialRefundPercentage: z.number().int().min(0).max(100).nullable().optional(),
+        hasCancellationFee: z.boolean().optional(),
+        cancellationFeeType: z.enum(['flat', 'percentage']).nullable().optional(),
+        cancellationFeeAmount: z.number().int().min(0).nullable().optional(),
+      });
 
-      if (!name) {
-        return res.status(400).json({ error: "Service name is required" });
+      let validated: z.infer<typeof createSchema>;
+      try {
+        validated = createSchema.parse(req.body);
+      } catch (zodErr) {
+        if (zodErr instanceof z.ZodError) {
+          return res.status(400).json({ error: "Invalid data", details: zodErr.errors });
+        }
+        throw zodErr;
       }
 
       const service = await storage.createPhotographerService({
         photographerId: photographer.id,
-        name,
-        description,
-        category,
-        priceCents: isContactForPricing ? null : priceCents,
-        isContactForPricing: isContactForPricing || false,
-        estimatedDurationMinutes,
-        pricingModel: pricingModel || "package",
-        hourlyRateCents: hourlyRateCents || null,
-        packageHours: packageHours || null,
+        name: validated.name,
+        description: validated.description ?? null,
+        category: validated.category ?? null,
+        pricingModel: validated.pricingModel ?? "package",
+        hourlyRateCents: validated.hourlyRateCents ?? null,
+        priceCents: validated.isContactForPricing ? null : (validated.priceCents ?? null),
+        packageHours: validated.packageHours ?? null,
+        isContactForPricing: validated.isContactForPricing ?? false,
+        estimatedDurationMinutes: validated.estimatedDurationMinutes ?? null,
+        serviceLocationType: validated.serviceLocationType,
+        alternateAddress: validated.alternateAddress,
+        alternateCity: validated.alternateCity,
+        alternateState: validated.alternateState,
+        alternateZipCode: validated.alternateZipCode,
+        virtualLink: validated.virtualLink,
+        fullRefundWindow: validated.fullRefundWindow,
+        hasPartialRefund: validated.hasPartialRefund,
+        partialRefundWindow: validated.partialRefundWindow,
+        partialRefundPercentage: validated.partialRefundPercentage,
+        hasCancellationFee: validated.hasCancellationFee,
+        cancellationFeeType: validated.cancellationFeeType,
+        cancellationFeeAmount: validated.cancellationFeeAmount,
       });
 
       res.status(201).json({ service });
@@ -547,18 +581,67 @@ export class PhotographerController {
         return res.status(403).json({ error: "Not authorized to update this service" });
       }
 
-      const { 
-        name, 
-        description, 
-        category, 
-        priceCents, 
-        isContactForPricing, 
-        estimatedDurationMinutes, 
+      const updateSchema = z.object({
+        name: z.string().min(1).optional(),
+        description: z.string().nullable().optional(),
+        category: z.string().nullable().optional(),
+        pricingModel: z.enum(['hourly', 'package']).optional(),
+        hourlyRateCents: z.number().min(0).nullable().optional(),
+        priceCents: z.number().min(0).nullable().optional(),
+        packageHours: z.number().min(1).nullable().optional(),
+        isContactForPricing: z.boolean().optional(),
+        estimatedDurationMinutes: z.number().min(1).nullable().optional(),
+        isActive: z.boolean().optional(),
+        serviceLocationType: z.enum(['business', 'alternate', 'customer', 'virtual']).optional(),
+        alternateAddress: z.string().nullable().optional(),
+        alternateCity: z.string().nullable().optional(),
+        alternateState: z.string().nullable().optional(),
+        alternateZipCode: z.string().nullable().optional(),
+        virtualLink: z.string().nullable().optional(),
+        fullRefundWindow: z.enum(['1_week', '48_hours', '24_hours', '1_hour', 'never']).optional(),
+        hasPartialRefund: z.boolean().optional(),
+        partialRefundWindow: z.enum(['1_week', '48_hours', '24_hours', '1_hour', 'never']).nullable().optional(),
+        partialRefundPercentage: z.number().int().min(0).max(100).nullable().optional(),
+        hasCancellationFee: z.boolean().optional(),
+        cancellationFeeType: z.enum(['flat', 'percentage']).nullable().optional(),
+        cancellationFeeAmount: z.number().int().min(0).nullable().optional(),
+      });
+
+      let validated: z.infer<typeof updateSchema>;
+      try {
+        validated = updateSchema.parse(req.body);
+      } catch (zodErr) {
+        if (zodErr instanceof z.ZodError) {
+          return res.status(400).json({ error: "Invalid data", details: zodErr.errors });
+        }
+        throw zodErr;
+      }
+
+      const {
+        name,
+        description,
+        category,
+        priceCents,
+        isContactForPricing,
+        estimatedDurationMinutes,
         isActive,
         pricingModel,
         hourlyRateCents,
-        packageHours
-      } = req.body;
+        packageHours,
+        serviceLocationType,
+        alternateAddress,
+        alternateCity,
+        alternateState,
+        alternateZipCode,
+        virtualLink,
+        fullRefundWindow,
+        hasPartialRefund,
+        partialRefundWindow,
+        partialRefundPercentage,
+        hasCancellationFee,
+        cancellationFeeType,
+        cancellationFeeAmount,
+      } = validated;
 
       // Handle Stripe catalog updates for live services.
       // BUG-FIX: guard was `service.stripeProductId` (legacy platform field, always null
@@ -615,6 +698,19 @@ export class PhotographerController {
         pricingModel,
         hourlyRateCents,
         packageHours,
+        serviceLocationType,
+        alternateAddress,
+        alternateCity,
+        alternateState,
+        alternateZipCode,
+        virtualLink,
+        fullRefundWindow,
+        hasPartialRefund,
+        partialRefundWindow,
+        partialRefundPercentage,
+        hasCancellationFee,
+        cancellationFeeType,
+        cancellationFeeAmount,
         ...stripeUpdates,
       });
 

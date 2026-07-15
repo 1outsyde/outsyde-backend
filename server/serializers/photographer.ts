@@ -42,6 +42,8 @@ export function toPublicPhotographerDTO(
     hoursOfOperation: photographer.hoursOfOperation,
 
     autoAcceptBookings: photographer.autoAcceptBookings,
+    defaultServiceLocationType: photographer.defaultServiceLocationType,
+    vendorTermsAndConditions: photographer.vendorTermsAndConditions ?? null,
 
     createdAt: photographer.createdAt,
 
