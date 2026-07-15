@@ -24,6 +24,7 @@ export function toPublicPhotographerDTO(
     bio: photographer.bio,
     city: photographer.city,
     state: photographer.state,
+    studioAddress: photographer.studioAddress ?? null,
     latitude: photographer.latitude,
     longitude: photographer.longitude,
     portfolioUrl: photographer.portfolioUrl,
