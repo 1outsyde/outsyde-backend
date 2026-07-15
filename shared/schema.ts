@@ -653,6 +653,10 @@ export const photographers = pgTable("photographers", {
   // Booking settings
   autoAcceptBookings: boolean("auto_accept_bookings").default(true).notNull(),
 
+  // Booking defaults (mirror businesses)
+  defaultServiceLocationType: text("default_service_location_type").default("business"),
+  vendorTermsAndConditions: text("vendor_terms_and_conditions"),
+
   // Visibility control
   visibilityStatus: text("visibility_status").default("public").notNull(),
   adminNotes: text("admin_notes"),
@@ -730,6 +734,23 @@ export const photographerServices = pgTable("photographer_services", {
   // Connected account Stripe IDs - for marketplace model (creator-owned)
   stripeConnectedProductId: text("stripe_connected_product_id"),
   stripeConnectedPriceId: text("stripe_connected_price_id"),
+
+  // Service location type: 'business' | 'alternate' | 'customer' | 'virtual'
+  serviceLocationType: text("service_location_type").default("business"),
+  alternateAddress: text("alternate_address"),
+  alternateCity: text("alternate_city"),
+  alternateState: text("alternate_state"),
+  alternateZipCode: text("alternate_zip_code"),
+  virtualLink: text("virtual_link"),
+
+  // Cancellation policy
+  fullRefundWindow: text("full_refund_window").default("never"), // '1_week'|'48_hours'|'24_hours'|'1_hour'|'never'
+  hasPartialRefund: boolean("has_partial_refund").default(false),
+  partialRefundWindow: text("partial_refund_window"), // nullable, same 5 values as fullRefundWindow
+  partialRefundPercentage: integer("partial_refund_percentage"), // nullable, 0-100
+  hasCancellationFee: boolean("has_cancellation_fee").default(false),
+  cancellationFeeType: text("cancellation_fee_type"), // nullable, 'flat'|'percentage'
+  cancellationFeeAmount: integer("cancellation_fee_amount"), // nullable, cents if flat / whole percent if percentage
 
   createdAt: timestamp("created_at").defaultNow().notNull(),
 });
