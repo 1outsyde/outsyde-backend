@@ -125,7 +125,7 @@ import {
   businesses,
   photographers,
 } from "@shared/schema";
-import { and, ilike } from "drizzle-orm";
+import { and, ilike, ne, asc } from "drizzle-orm";
 
 // ✅ CORRECT IMPORT (default export)
 import { photographersRouter } from "./Photographers/photographers.routes";
@@ -6756,6 +6756,64 @@ export async function registerRoutes(
     } catch (error) {
       console.error("Get appointments error:", error);
       res.status(500).json({ error: "Failed to get appointments" });
+    }
+  });
+
+  // Get consumer's own photographer (shoot) bookings
+  app.get("/api/my-shoot-bookings", authMiddleware, async (req, res) => {
+    const authReq = req as AuthenticatedRequest;
+    const userId = authReq.user?.userId || req.session?.userId;
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    try {
+      const bookings = await db
+        .select()
+        .from(shootBookings)
+        .where(
+          and(
+            eq(shootBookings.clientId, userId),
+            ne(shootBookings.status, BOOKING_STATES.DRAFT)
+          )
+        )
+        .orderBy(asc(shootBookings.date), asc(shootBookings.startTime));
+
+      // Map shoot_bookings DB status values to the Session.status union the frontend expects.
+      // Precedent: getAppointmentsByClientWithDetails returns all non-draft statuses without
+      // server-side filtering; we do the same here and let the frontend split upcoming vs past.
+      const statusMap: Record<string, "upcoming" | "completed" | "cancelled"> = {
+        [BOOKING_STATES.PENDING_PAYMENT]: "upcoming",
+        [BOOKING_STATES.PENDING_PROVIDER]: "upcoming",
+        [BOOKING_STATES.CONFIRMED]: "upcoming",
+        [BOOKING_STATES.COMPLETED]: "completed",
+        [BOOKING_STATES.CANCELED]: "cancelled",
+        [BOOKING_STATES.DECLINED]: "cancelled",
+        [BOOKING_STATES.EXPIRED]: "cancelled",
+        [BOOKING_STATES.NO_SHOW]: "completed",
+      };
+
+      const sessions = await Promise.all(bookings.map(async (booking) => {
+        const photographer = await storage.getPhotographer(booking.photographerId);
+        return {
+          id: booking.id,
+          photographerId: booking.photographerId,
+          photographerName: photographer?.displayName ?? "Photographer",
+          photographerAvatar: photographer?.logoImage ?? "",
+          date: booking.date,
+          time: booking.startTime,
+          endTime: booking.endTime,
+          location: booking.locationDetails ?? booking.locationType ?? "",
+          sessionType: booking.shootType,
+          status: statusMap[booking.status] ?? "upcoming",
+          price: (booking.totalPrice ?? 0) / 100,
+        };
+      }));
+
+      res.json({ sessions });
+    } catch (error) {
+      console.error("Get my shoot bookings error:", error);
+      res.status(500).json({ error: "Failed to get shoot bookings" });
     }
   });
 
