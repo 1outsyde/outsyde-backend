@@ -6670,6 +6670,123 @@ export async function registerRoutes(
     return { refundTier, refundAmountCents, feeAmountCents };
   }
 
+  // ── Cancellation preview: pure read, no side effects ──────────────────────────
+  // Returns what WOULD happen if the consumer cancels right now, without
+  // touching any booking state, Stripe, or availability slots.
+
+  app.get("/api/bookings/appointments/:appointmentId/cancel-preview", async (req, res) => {
+    const userId = req.session?.userId || getUserIdFromRequest(req);
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    try {
+      const { appointmentId } = req.params;
+      const appointment = await storage.getAppointment(appointmentId);
+
+      if (!appointment) {
+        return res.status(404).json({ error: "Appointment not found" });
+      }
+
+      if (appointment.clientId !== userId) {
+        return res.status(403).json({ error: "Not authorized" });
+      }
+
+      if (appointment.status !== BOOKING_STATES.CONFIRMED) {
+        return res.json({
+          cancellable: false,
+          reason: "Booking must be confirmed to cancel",
+          currentStatus: appointment.status,
+        });
+      }
+
+      const service = appointment.serviceId
+        ? await storage.getVendorService(appointment.serviceId)
+        : null;
+
+      const { refundTier, refundAmountCents, feeAmountCents } = computeCancellationRefund(
+        service,
+        new Date(`${appointment.appointmentDate}T${appointment.appointmentTime}`),
+        appointment.totalPrice,
+        appointment.vendorNet,
+      );
+
+      const fees = calculateBookingFees(appointment.totalPrice);
+
+      return res.json({
+        cancellable: true,
+        refundTier,
+        refundAmountCents,
+        feeAmountCents,
+        // feeWouldBeCharged indicates a fee applies; actual collection method
+        // (automatic vs manual) is determined at cancel time by payment method availability.
+        feeWouldBeCharged: feeAmountCents > 0,
+        feeNeedsManualCollection: false,
+        subtotalCents: fees.subtotalCents,
+        grossChargeAmountCents: fees.customerTotalBeforeTaxCents,
+      });
+    } catch (error: any) {
+      console.error("Appointment cancel preview error:", error);
+      res.status(500).json({ error: "Failed to compute cancellation preview", details: error.message });
+    }
+  });
+
+  app.get("/api/bookings/shoot/:bookingId/cancel-preview", async (req, res) => {
+    const userId = req.session?.userId || getUserIdFromRequest(req);
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    try {
+      const { bookingId } = req.params;
+      const booking = await storage.getShootBooking(bookingId);
+
+      if (!booking) {
+        return res.status(404).json({ error: "Shoot booking not found" });
+      }
+
+      if (booking.clientId !== userId) {
+        return res.status(403).json({ error: "Not authorized" });
+      }
+
+      const cancellableStatuses = [BOOKING_STATES.CONFIRMED, BOOKING_STATES.PENDING_PROVIDER];
+      if (!(cancellableStatuses as string[]).includes(booking.status)) {
+        return res.json({
+          cancellable: false,
+          reason: "Booking must be confirmed or pending provider acceptance to cancel",
+          currentStatus: booking.status,
+        });
+      }
+
+      const service = booking.serviceId
+        ? await storage.getPhotographerService(booking.serviceId)
+        : null;
+
+      const { refundTier, refundAmountCents, feeAmountCents } = computeCancellationRefund(
+        service,
+        new Date(`${booking.date}T${booking.startTime}`),
+        booking.totalPrice,
+        booking.vendorNet,
+      );
+
+      const fees = calculateBookingFees(booking.totalPrice);
+
+      return res.json({
+        cancellable: true,
+        refundTier,
+        refundAmountCents,
+        feeAmountCents,
+        feeWouldBeCharged: feeAmountCents > 0,
+        feeNeedsManualCollection: false,
+        subtotalCents: fees.subtotalCents,
+        grossChargeAmountCents: fees.customerTotalBeforeTaxCents,
+      });
+    } catch (error: any) {
+      console.error("Shoot booking cancel preview error:", error);
+      res.status(500).json({ error: "Failed to compute cancellation preview", details: error.message });
+    }
+  });
+
   // Consumer-initiated cancel: applies service cancellation policy (refund + optional fee)
   app.post("/api/bookings/appointments/:appointmentId/cancel", async (req, res) => {
     const userId = req.session?.userId || getUserIdFromRequest(req);
