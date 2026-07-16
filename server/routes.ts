@@ -4650,10 +4650,11 @@ export async function registerRoutes(
     }
   });
 
-  // POST /api/booking/:holdId/create-payment-intent - Create the real appointment
-  // row from a confirmed hold and a plain (no transfer_data) PaymentIntent for it.
-  // Business/staff side only -- the hold-based flow never applies to photographers
-  // (System A creates shootBookings and its own PaymentIntents independently).
+  // POST /api/booking/:holdId/create-payment-intent - Convert a confirmed hold
+  // into a real booking record and create a platform-balance PaymentIntent for it.
+  // Supports both business/staff holds (creates an `appointments` row) and
+  // photographer holds (creates a `shootBookings` row). Both paths call the same
+  // calculateBookingFees() and stripeService.createPlatformPaymentIntent().
   app.post("/api/booking/:holdId/create-payment-intent", async (req, res) => {
     const userId = req.session?.userId || getUserIdFromRequest(req);
     if (!userId) {
@@ -4666,9 +4667,179 @@ export async function registerRoutes(
       // Validates: hold exists, belongs to this user, is active, not expired.
       const { hold } = await confirmBookingHold(holdId, userId);
 
-      if (hold.providerType !== 'business') {
-        return res.status(400).json({ error: "This route only supports business/staff bookings" });
+      if (hold.providerType !== 'business' && hold.providerType !== 'photographer') {
+        return res.status(400).json({ error: "Unsupported provider type" });
       }
+
+      // ==========================================
+      // PHOTOGRAPHER BRANCH
+      // ==========================================
+      if (hold.providerType === 'photographer') {
+        // Idempotency: check whether a shootBooking already exists for this
+        // photographer/date/time/client combination. shootBookings has no holdId
+        // column; the unique constraint on (photographerId, date, startTime)
+        // ensures at most one booking per slot, and only one hold can be active
+        // per slot at a time, making this lookup unambiguous.
+        const [existingShoot] = await db.select()
+          .from(shootBookings)
+          .where(
+            and(
+              eq(shootBookings.photographerId, hold.providerId),
+              eq(shootBookings.date, hold.holdDate),
+              eq(shootBookings.startTime, hold.startTime),
+              eq(shootBookings.clientId, hold.userId)
+            )
+          );
+        if (existingShoot) {
+          if (existingShoot.stripePaymentIntentId) {
+            try {
+              const existingPI = await stripeService.getPaymentIntent(existingShoot.stripePaymentIntentId);
+              if (['requires_payment_method', 'requires_confirmation', 'requires_action'].includes(existingPI.status)) {
+                return res.json({
+                  clientSecret: existingPI.client_secret,
+                  paymentIntentId: existingPI.id,
+                  shootBookingId: existingShoot.id,
+                  captureMethod: existingPI.capture_method,
+                });
+              }
+            } catch (piError) {
+              console.log(`[Booking] Existing PaymentIntent ${existingShoot.stripePaymentIntentId} for hold ${holdId} not found or invalid`);
+            }
+          }
+          return res.status(409).json({ error: "A payment attempt for this hold already exists." });
+        }
+
+        const photographer = await storage.getPhotographer(hold.providerId);
+        if (!photographer) {
+          return res.status(404).json({ error: "Photographer not found" });
+        }
+        if (!photographer.stripeAccountId || !photographer.stripeOnboardingComplete) {
+          return res.status(400).json({ error: "Photographer has not completed Stripe onboarding" });
+        }
+
+        // Same calculateBookingFees() as the business branch — one fee model,
+        // one place to update when rates change.
+        const photographerFees = calculateBookingFees(hold.servicePriceCents);
+
+        // Respect autoAcceptBookings: shoot_booking is already handled by the
+        // payment_intent.amount_capturable_updated webhook branch, so manual
+        // capture is safe here (unlike the 'appointment' type on the business
+        // branch, which forces 'automatic' because that webhook path does not
+        // recognise 'appointment' type).
+        const captureMethod = photographer.autoAcceptBookings === false ? 'manual' : 'automatic';
+
+        // hold.serviceName was resolved and stored at hold-creation time (via
+        // resolveServiceForHold in availabilityService.ts). Use it directly for
+        // shootType rather than doing a redundant service lookup.
+        const durationHours = Math.ceil(hold.durationMinutes / 60);
+
+        const shootBooking = await storage.createShootBooking({
+          photographerId: hold.providerId,
+          clientId: hold.userId,
+          serviceId: hold.serviceId ?? null,
+          shootType: hold.serviceName,
+          date: hold.holdDate,
+          startTime: hold.startTime,
+          endTime: hold.endTime,
+          durationHours,
+          totalPrice: hold.servicePriceCents,
+          platformFee: photographerFees.platformFeeCents,
+          vendorNet: photographerFees.vendorNetCents,
+          status: BOOKING_STATES.PENDING_PAYMENT,
+          draftExpiresAt: null,
+        });
+
+        // Permanently block the photographer's calendar slot. This mirrors the
+        // same step in POST /api/bookings/photographer/draft. The hold already
+        // prevents concurrent holds via its exclusion constraint, but
+        // reservePhotographerSlot marks the slot as 'booked' in the
+        // photographerAvailability table so the availability calendar reflects
+        // it immediately.
+        try {
+          await storage.reservePhotographerSlot(
+            hold.providerId,
+            hold.holdDate,
+            hold.startTime,
+            hold.endTime,
+            shootBooking.id
+          );
+        } catch (slotErr) {
+          // Clean up the orphaned shootBooking so it doesn't block the slot
+          // in the shootBookings unique-constraint without a corresponding
+          // availability entry.
+          await storage.updateShootBooking(shootBooking.id, { status: BOOKING_STATES.EXPIRED });
+          console.error('[Booking] Failed to reserve photographer slot; marked shootBooking expired:', slotErr);
+          return res.status(409).json({ error: "Failed to reserve time slot. Please try again." });
+        }
+
+        // Get or create Stripe customer (platform customer, NOT Connect).
+        const photographerUser = await storage.getUser(userId);
+        if (!photographerUser) {
+          return res.status(404).json({ error: "User not found" });
+        }
+        let photographerStripeCustomerId = photographerUser.stripeCustomerId;
+        if (!photographerStripeCustomerId) {
+          const customer = await stripeService.createCustomer(
+            photographerUser.email!,
+            userId,
+            photographerUser.name || photographerUser.email!
+          );
+          photographerStripeCustomerId = customer.id;
+          await storage.updateUser(userId, { stripeCustomerId: customer.id });
+        }
+
+        // PaymentIntent on platform balance — no transfer_data. After
+        // payment_intent.succeeded fires, the webhook's shoot_booking branch
+        // (webhookHandlers.ts) transfers vendorPayoutCents to the photographer's
+        // connected account. holdId is passed in metadata so the webhook can
+        // call markHoldAsConverted once payment succeeds (mirrors how the
+        // 'appointment' branch handles hold conversion).
+        const photographerPI = await stripeService.createPlatformPaymentIntent({
+          amountCents: photographerFees.customerTotalBeforeTaxCents,
+          customerId: photographerStripeCustomerId,
+          captureMethod,
+          metadata: {
+            type: 'shoot_booking',
+            bookingId: shootBooking.id,
+            clientId: userId,
+            holdId: hold.id,
+            providerId: hold.providerId,
+            serviceId: hold.serviceId || '',
+            vendorPayoutCents: String(photographerFees.vendorNetCents),
+            platformFeeCents: String(photographerFees.platformFeeCents),
+          },
+          description: `Photography booking with ${photographer.displayName || 'photographer'}`,
+          saveForFutureUse: true,
+        });
+
+        await db.update(shootBookings).set({
+          stripePaymentIntentId: photographerPI.id,
+          paymentMethod: 'payment_intent',
+          captureMethod,
+          updatedAt: new Date(),
+        }).where(eq(shootBookings.id, shootBooking.id));
+
+        console.log(`[Booking] Created shoot_booking PaymentIntent ${photographerPI.id} from hold ${holdId} (shootBooking ${shootBooking.id}, charged: ${photographerFees.customerTotalBeforeTaxCents}¢, vendor: ${photographerFees.vendorNetCents}¢)`);
+
+        return res.json({
+          clientSecret: photographerPI.client_secret,
+          paymentIntentId: photographerPI.id,
+          shootBookingId: shootBooking.id,
+          captureMethod,
+          feeBreakdown: {
+            subtotalAmount: photographerFees.subtotalCents,
+            consumerServiceFeeAmount: photographerFees.consumerServiceFeeCents,
+            bookingFeeAmount: photographerFees.platformFeeCents,
+            vendorNetAmount: photographerFees.vendorNetCents,
+            grossChargeAmount: photographerFees.customerTotalBeforeTaxCents,
+            feeModelVersion: photographerFees.feeModelVersion,
+          },
+        });
+      }
+
+      // ==========================================
+      // BUSINESS / STAFF BRANCH (unchanged)
+      // ==========================================
 
       // Idempotency: if an appointment was already created for this hold
       // (e.g. a retried request), reuse it instead of creating a duplicate
