@@ -267,6 +267,21 @@ export class WebhookHandlers {
           console.error(`[Stripe] Shoot booking ${bookingId} has no vendorPayoutCents in metadata — payout transfer skipped. Manual reconciliation required.`);
         }
 
+        // If this PaymentIntent was created via the hold-based unified booking
+        // flow (POST /api/booking/:holdId/create-payment-intent with
+        // providerType='photographer'), convert the hold now that payment has
+        // succeeded. holdId is absent from PaymentIntents created by the legacy
+        // POST /api/bookings/photographer/:bookingId/create-payment-intent
+        // route, so the presence check is the safe guard for backwards compat.
+        const holdIdFromMeta = metadata.holdId;
+        if (holdIdFromMeta) {
+          try {
+            await markHoldAsConverted(holdIdFromMeta, bookingId, 'shoot_booking');
+          } catch (holdErr) {
+            console.error(`[Stripe] Failed to convert hold ${holdIdFromMeta} for shoot booking ${bookingId}:`, holdErr);
+          }
+        }
+
         // Award points
         const user = clientId ? await storage.getUser(clientId) : null;
         if (user) {
