@@ -14300,7 +14300,18 @@ export async function registerRoutes(
       if (!business) return res.status(404).json({ error: "Business not found" });
 
       const orders = await storage.getVendorOrders(business.id);
-      res.json({ orders });
+
+      const enrichedOrders = await Promise.all(
+        orders.map(async (order) => {
+          const shipments = await storage.getShipmentsByOrder(order.id);
+          return {
+            ...order,
+            shipment: shipments.length > 0 ? shipments[0] : null,
+          };
+        })
+      );
+
+      res.json({ orders: enrichedOrders });
     } catch (error) {
       console.error("Get business orders error:", error);
       res.status(500).json({ error: "Failed to get orders" });
