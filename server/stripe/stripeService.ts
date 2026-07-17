@@ -567,6 +567,60 @@ export class StripeService {
     });
   }
 
+  /**
+   * Refund a cancelled paid product order.
+   *
+   * Two-call pattern required for destination charges:
+   *   1. Refund the customer in full WITHOUT auto-reversing the transfer or fee.
+   *   2. Separately reverse exactly `vendorReclaimCents` from the auto-created transfer
+   *      so the platform recoups the vendor's net without touching its own fee.
+   *
+   * Using `reverse_transfer: true` on the refund alone would only reverse the transfer
+   * proportionally (customer refund / gross charge), not the full vendor net.
+   */
+  async refundOrderCancellation(params: {
+    paymentIntentId: string;
+    refundAmountCents: number;  // order.totalAmount — full customer refund
+    vendorReclaimCents: number; // order.vendorNet  — exact amount to pull back from vendor
+    metadata: Record<string, string>;
+  }) {
+    const stripe = await getUncachableStripeClient();
+
+    // Step 1: refund the customer; do NOT touch the transfer or application fee automatically
+    const refund = await stripe.refunds.create({
+      payment_intent: params.paymentIntentId,
+      amount: params.refundAmountCents,
+      reverse_transfer: false,
+      refund_application_fee: false,
+      reason: 'requested_by_customer',
+      metadata: params.metadata,
+    });
+
+    // Step 2: retrieve the auto-created transfer and reverse exactly vendorReclaimCents
+    const paymentIntent = await stripe.paymentIntents.retrieve(
+      params.paymentIntentId,
+      { expand: ['latest_charge.transfer'] }
+    );
+    const charge = paymentIntent.latest_charge as any;
+    const transfer = charge?.transfer;
+    const transferId = typeof transfer === 'string' ? transfer : transfer?.id;
+
+    let transferReversal = null;
+    if (transferId) {
+      transferReversal = await stripe.transfers.createReversal(transferId, {
+        amount: params.vendorReclaimCents,
+        metadata: params.metadata,
+      });
+    } else {
+      console.error(
+        `[Refund] No transfer found for PaymentIntent ${params.paymentIntentId} — ` +
+        `vendor reclaim skipped, needs manual reconciliation`
+      );
+    }
+
+    return { refund, transferReversal };
+  }
+
   // =========================
   // CATALOG MANAGEMENT (Products & Prices)
   // =========================

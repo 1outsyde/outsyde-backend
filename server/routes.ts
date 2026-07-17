@@ -14341,6 +14341,32 @@ export async function registerRoutes(
         shippedAt?: string;
       };
 
+      // --- Refund gate: paid → cancelled requires Stripe refund BEFORE status change ---
+      // Order status must NOT change to 'cancelled' if the Stripe call throws.
+      let refundResult: { refund: any; transferReversal: any } | null = null;
+      if (status === 'cancelled' && existingOrder.status === 'paid') {
+        const piId = existingOrder.stripePaymentIntentId;
+        if (!piId) {
+          return res.status(400).json({ error: "Order has no payment intent — cannot issue refund" });
+        }
+        const refundAmountCents = existingOrder.totalAmount;
+        const vendorReclaimCents = existingOrder.vendorNet ?? 0;
+        if (!refundAmountCents || refundAmountCents <= 0) {
+          return res.status(400).json({ error: "Order total amount is missing — cannot issue refund" });
+        }
+
+        refundResult = await stripeService.refundOrderCancellation({
+          paymentIntentId: piId,
+          refundAmountCents,
+          vendorReclaimCents,
+          metadata: {
+            orderId,
+            reason: 'order_cancelled_by_business',
+          },
+        });
+      }
+      // --- End refund gate ---
+
       const orderUpdates: Partial<typeof existingOrder> = {};
       if (status !== undefined) orderUpdates.status = status;
 
@@ -14351,6 +14377,31 @@ export async function registerRoutes(
           return res.status(400).json({ error: result.error || "Failed to update order" });
         }
         updatedOrder = result.order!;
+      }
+
+      // Post-refund: audit log + notification (fire-and-forget — order is already cancelled)
+      if (refundResult) {
+        storage.createAuditLog({
+          actorId: userId,
+          actorType: 'user',
+          action: 'order_refund_issued',
+          targetType: 'order',
+          targetId: orderId,
+          metadata: {
+            stripeRefundId: refundResult.refund?.id ?? null,
+            stripeTransferReversalId: refundResult.transferReversal?.id ?? null,
+            refundAmountCents: existingOrder.totalAmount,
+            vendorReclaimCents: existingOrder.vendorNet ?? 0,
+          },
+        }).catch(err => console.error('Audit log error (refund):', err));
+
+        NotificationTriggers.refundIssued({
+          userId: existingOrder.customerId,
+          amount: existingOrder.totalAmount,
+          referenceType: 'order',
+          referenceId: orderId,
+          reason: 'Order cancelled by business',
+        }).catch(err => console.error('Notification error (refund):', err));
       }
 
       if (trackingNumber && carrier) {
