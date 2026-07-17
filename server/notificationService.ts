@@ -12,6 +12,7 @@ export type NotificationType =
   | 'addon_charged'
   | 'refund_issued'
   | 'new_order'
+  | 'order_confirmed'
   | 'order_shipped'
   | 'photographer_assigned'
   | 'subscription_tier_changed'
@@ -77,6 +78,9 @@ function getNotificationUrl(type: NotificationType, referenceType?: string, refe
       return '/profile';
     case 'new_order':
       return referenceId ? `/vendor/orders/${referenceId}` : '/vendor/orders';
+    case 'order_confirmed':
+    case 'order_shipped':
+      return referenceId ? `/orders/${referenceId}` : '/orders';
     case 'new_vendor_application':
       return referenceId ? `/admin/applications/${referenceId}` : '/admin/applications';
     case 'new_photographer_application':
@@ -272,6 +276,23 @@ export const NotificationTriggers = {
         orderTotal: params.orderTotal,
         itemCount: params.itemCount,
       },
+    });
+  },
+
+  async orderConfirmed(params: {
+    customerId: string;
+    orderId: string;
+    businessName: string;
+    itemCount: number;
+  }): Promise<void> {
+    await sendNotification({
+      userId: params.customerId,
+      type: 'order_confirmed',
+      title: 'Order Confirmed',
+      message: `Your order from ${params.businessName} has been confirmed and is being prepared.`,
+      referenceType: 'order',
+      referenceId: params.orderId,
+      metadata: { itemCount: params.itemCount },
     });
   },
 

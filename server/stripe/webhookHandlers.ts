@@ -495,6 +495,15 @@ export class WebhookHandlers {
             orderTotal: order.totalAmount,
             itemCount,
           });
+
+          // Notify the customer that their order is confirmed
+          const orderBusiness = orderBusinessId ? await storage.getBusiness(orderBusinessId) : null;
+          NotificationTriggers.orderConfirmed({
+            customerId: order.customerId,
+            orderId,
+            businessName: orderBusiness?.name || vendor.name || 'the business',
+            itemCount: order.items?.length || 1,
+          }).catch(err => console.error('Notification error:', err));
         }
 
         console.log(`[Stripe] Product purchase completed: Order ${orderId} marked as paid`);
@@ -927,6 +936,14 @@ export class WebhookHandlers {
         orderTotal: order.totalAmount,
         itemCount,
       });
+
+      // Notify the customer that their order is confirmed
+      NotificationTriggers.orderConfirmed({
+        customerId: order.customerId,
+        orderId,
+        businessName: business?.name || vendor.name || 'the business',
+        itemCount,
+      }).catch(err => console.error('Notification error:', err));
     }
 
     console.log(`[Stripe] Cart checkout completed: Order ${orderId} marked as paid`);

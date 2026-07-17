@@ -14361,6 +14361,13 @@ export async function registerRoutes(
           trackingNumber,
           shippedAt: shippedAt ? new Date(shippedAt) : new Date(),
         });
+
+        NotificationTriggers.orderShipped({
+          customerId: existingOrder.customerId,
+          orderId,
+          carrier,
+          trackingNumber,
+        }).catch(err => console.error('Notification error:', err));
       }
 
       return res.json({ order: updatedOrder });
