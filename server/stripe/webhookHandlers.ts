@@ -119,13 +119,17 @@ export class WebhookHandlers {
     // bookingId, since it's the first metadata shape without a legacy
     // bookingId key.
     const appointmentIdFromMetadata = metadata.appointmentId;
+    // product_purchase PaymentIntents (POST /api/cart/payment-intent) carry
+    // orderId instead of bookingId — include it in the guard so they are not
+    // silently dropped.
+    const orderIdFromMetadata = metadata.orderId;
 
-    if (!type || (!bookingId && !appointmentIdFromMetadata)) {
+    if (!type || (!bookingId && !appointmentIdFromMetadata && !orderIdFromMetadata)) {
       // Not a booking-related PaymentIntent, ignore
       return;
     }
 
-    console.log(`[Stripe] PaymentIntent succeeded for ${type} ${bookingId || appointmentIdFromMetadata}`);
+    console.log(`[Stripe] PaymentIntent succeeded for ${type} ${bookingId || appointmentIdFromMetadata || orderIdFromMetadata}`);
 
     try {
       if (type === 'appointment_booking') {
@@ -412,6 +416,88 @@ export class WebhookHandlers {
             }
           }
         }
+      } else if (type === 'product_purchase') {
+        // Mobile PaymentSheet product cart flow (POST /api/cart/payment-intent).
+        // The order row was created before the PaymentIntent, so all we do here
+        // is set it paid and run the same post-purchase steps as
+        // handleCartCheckoutCompleted does for the web checkout session path.
+        const orderId = orderIdFromMetadata;
+        if (!orderId) {
+          // Old PaymentIntents created before this fix had no orderId — nothing
+          // to update, log and exit cleanly.
+          console.warn(`[Stripe] product_purchase PaymentIntent ${paymentIntent.id} has no orderId in metadata — skipping (pre-fix payment)`);
+          return;
+        }
+
+        const order = await storage.getOrder(orderId);
+        if (!order || order.status === 'paid') return;
+
+        await storage.updateOrder(orderId, {
+          status: 'paid',
+          stripePaymentIntentId: paymentIntent.id,
+        });
+
+        // Process influencer commission if attributed
+        if (order.influencerCodeUsed || order.attributedInfluencerId) {
+          try {
+            await processInfluencerCommission(orderId, paymentIntent.id);
+          } catch (commErr) {
+            console.error(`[InfluencerPayout] Error processing commission for order ${orderId}:`, commErr);
+          }
+        }
+
+        // Decrement inventory for each purchased item
+        if (order.items && Array.isArray(order.items)) {
+          for (const item of order.items) {
+            try {
+              const product = await storage.getVendorProduct(item.productId);
+              if (product?.trackInventory && product.inventory !== null) {
+                const newInventory = Math.max(0, (product.inventory ?? 0) - item.quantity);
+                await storage.updateVendorProduct(item.productId, { inventory: newInventory });
+                console.log(`[Inventory] Decremented ${item.productId}: ${product.inventory} → ${newInventory} (ordered: ${item.quantity})`);
+              }
+            } catch (invError) {
+              console.error(`[Inventory] Failed to decrement ${item.productId}:`, invError);
+            }
+          }
+        }
+
+        // Clear the user's cart
+        const userIdFromMeta = metadata.userId;
+        if (userIdFromMeta) {
+          await storage.clearCart(userIdFromMeta);
+        }
+
+        // Award loyalty points (same referenceType as single-vendor web checkout)
+        const purchaser = userIdFromMeta ? await storage.getUser(userIdFromMeta) : null;
+        if (purchaser) {
+          await storage.earnPoints({
+            userId: purchaser.id,
+            dollarAmountCents: paymentIntent.amount,
+            transactionType: 'business_transaction',
+            referenceType: 'cart_order',
+            referenceId: orderId,
+            description: 'Points earned from purchase',
+          });
+          await this.tryCompleteReferral(purchaser.id, orderId, 'cart_order');
+        }
+
+        // Notify the business of the new order
+        const orderBusinessId = metadata.businessId;
+        const vendor = orderBusinessId ? await storage.getUserByBusinessOwnerId(orderBusinessId) : null;
+        if (vendor) {
+          const customer = await storage.getUser(order.customerId);
+          const itemCount = order.items?.length || 1;
+          await NotificationTriggers.newOrderReceived({
+            vendorUserId: vendor.id,
+            orderId,
+            customerName: customer?.name || customer?.email || 'Customer',
+            orderTotal: order.totalAmount,
+            itemCount,
+          });
+        }
+
+        console.log(`[Stripe] Product purchase completed: Order ${orderId} marked as paid`);
       }
     } catch (error) {
       console.error(`[Stripe] Error handling payment_intent.succeeded:`, error);
