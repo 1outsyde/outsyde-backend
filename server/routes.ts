@@ -5493,8 +5493,8 @@ export async function registerRoutes(
         description: z.string().nullable().optional(),
         category: z.string().nullable().optional(),
         pricingModel: z.enum(['hourly', 'package']).optional(),
-        hourlyRateCents: z.number().min(0).nullable().optional(),
-        priceCents: z.number().min(0).nullable().optional(),
+        hourlyRateCents: z.number().min(700, "Price must be at least $7.00").nullable().optional(),
+        priceCents: z.number().min(700, "Price must be at least $7.00").nullable().optional(),
         packageHours: z.number().min(1).nullable().optional(),
         isContactForPricing: z.boolean().optional(),
         estimatedDurationMinutes: z.number().min(1).nullable().optional(),
@@ -5552,8 +5552,8 @@ export async function registerRoutes(
         description: z.string().nullable().optional(),
         category: z.string().nullable().optional(),
         pricingModel: z.enum(['hourly', 'package']).optional(),
-        hourlyRateCents: z.number().min(0).nullable().optional(),
-        priceCents: z.number().min(0).nullable().optional(),
+        hourlyRateCents: z.number().min(700, "Price must be at least $7.00").nullable().optional(),
+        priceCents: z.number().min(700, "Price must be at least $7.00").nullable().optional(),
         packageHours: z.number().min(1).nullable().optional(),
         isContactForPricing: z.boolean().optional(),
         estimatedDurationMinutes: z.number().min(1).nullable().optional(),
@@ -6114,10 +6114,10 @@ export async function registerRoutes(
       // Determine capture method based on autoAcceptBookings
       const captureMethod = business.autoAcceptBookings === false ? 'manual' : 'automatic';
       
-      // Calculate booking fees: 7% vendor fee + 5% consumer upcharge
+      // Calculate booking fees: 2% vendor fee + 8% consumer upcharge
       const basePriceCents = appointment.totalPrice;
-      const vendorPayoutCents = Math.round(basePriceCents * (1 - 0.07));
-      const consumerUpchargeCents = Math.round(basePriceCents * 0.05);
+      const vendorPayoutCents = Math.round(basePriceCents * (1 - 0.02));
+      const consumerUpchargeCents = Math.round(basePriceCents * 0.08);
       const totalChargedToConsumerCents = basePriceCents + consumerUpchargeCents;
       const platformFeeCents = totalChargedToConsumerCents - vendorPayoutCents;
       const outsydePointsEarned = Math.round((consumerUpchargeCents / 100) * 100);
@@ -6263,10 +6263,10 @@ export async function registerRoutes(
       // Determine capture method based on autoAcceptBookings
       const captureMethod = photographer.autoAcceptBookings === false ? 'manual' : 'automatic';
       
-      // Calculate booking fees: 7% vendor fee + 5% consumer upcharge
+      // Calculate booking fees: 2% vendor fee + 8% consumer upcharge
       const basePriceCents = booking.totalPrice;
-      const vendorPayoutCents = Math.round(basePriceCents * (1 - 0.07));
-      const consumerUpchargeCents = Math.round(basePriceCents * 0.05);
+      const vendorPayoutCents = Math.round(basePriceCents * (1 - 0.02));
+      const consumerUpchargeCents = Math.round(basePriceCents * 0.08);
       const totalChargedToConsumerCents = basePriceCents + consumerUpchargeCents;
       const platformFeeCents = totalChargedToConsumerCents - vendorPayoutCents;
       const outsydePointsEarned = Math.round((consumerUpchargeCents / 100) * 100);
@@ -6379,10 +6379,10 @@ export async function registerRoutes(
         return res.status(400).json({ success: false, error: { code: 'INVALID_INPUT', message: 'vendorStripeAccountId is required' } });
       }
 
-      // Calculate product fees: 4% vendor fee + 4% consumer upcharge
+      // Calculate product fees: 2% vendor fee + 8% consumer upcharge
       const basePriceCents = items.reduce((sum: number, i: { priceCents: number; quantity: number }) => sum + (i.priceCents * i.quantity), 0);
-      const consumerUpchargeCents = Math.round(basePriceCents * 0.04);
-      const vendorPayoutCents = Math.round(basePriceCents * (1 - 0.04));
+      const consumerUpchargeCents = Math.round(basePriceCents * 0.08);
+      const vendorPayoutCents = Math.round(basePriceCents * (1 - 0.02));
       const totalChargedToConsumerCents = basePriceCents + consumerUpchargeCents;
       const platformFeeCents = totalChargedToConsumerCents - vendorPayoutCents;
       const outsydePointsEarned = Math.round((consumerUpchargeCents / 100) * 100);
@@ -9283,7 +9283,7 @@ export async function registerRoutes(
       const productSchema = z.object({
         name: z.string().min(1),
         description: z.string().nullable().optional(),
-        price: z.number().min(0),
+        price: z.number().min(700, "Price must be at least $7.00"),
         compareAtPrice: z.number().nullable().optional(),
         imageUrl: z.string().nullable().optional(),
         images: z.array(z.string()).optional(),
@@ -9337,7 +9337,7 @@ export async function registerRoutes(
       const updateSchema = z.object({
         name: z.string().min(1).optional(),
         description: z.string().nullable().optional(),
-        price: z.number().min(0).optional(),
+        price: z.number().min(700, "Price must be at least $7.00").optional(),
         compareAtPrice: z.number().nullable().optional(),
         imageUrl: z.string().nullable().optional(),
         images: z.array(z.string()).optional(),
@@ -9554,7 +9554,7 @@ export async function registerRoutes(
       const serviceSchema = z.object({
         name: z.string().min(1),
         description: z.string().nullable().optional(),
-        price: z.number().min(0),
+        price: z.number().min(700, "Price must be at least $7.00"),
         durationMinutes: z.number().min(5),
         category: z.string().nullable().optional(),
         isActive: z.boolean().optional(),
@@ -9616,7 +9616,7 @@ export async function registerRoutes(
       const updateSchema = z.object({
         name: z.string().min(1).optional(),
         description: z.string().nullable().optional(),
-        price: z.number().min(0).optional(),
+        price: z.number().min(700, "Price must be at least $7.00").optional(),
         durationMinutes: z.number().min(5).optional(),
         category: z.string().nullable().optional(),
         isActive: z.boolean().optional(),
