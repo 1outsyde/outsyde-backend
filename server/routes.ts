@@ -6379,28 +6379,62 @@ export async function registerRoutes(
         return res.status(400).json({ success: false, error: { code: 'INVALID_INPUT', message: 'vendorStripeAccountId is required' } });
       }
 
-      // Calculate product fees: 2% vendor fee + 8% consumer upcharge
+      const businessId = items[0].vendorId || '';
+      if (!businessId) {
+        return res.status(400).json({ success: false, error: { code: 'INVALID_INPUT', message: 'vendorId is required' } });
+      }
+
+      // Calculate product fees using the canonical fee engine (same as POST /api/cart/checkout)
       const basePriceCents = items.reduce((sum: number, i: { priceCents: number; quantity: number }) => sum + (i.priceCents * i.quantity), 0);
-      const consumerUpchargeCents = Math.round(basePriceCents * 0.08);
-      const vendorPayoutCents = Math.round(basePriceCents * (1 - 0.02));
-      const totalChargedToConsumerCents = basePriceCents + consumerUpchargeCents;
-      const platformFeeCents = totalChargedToConsumerCents - vendorPayoutCents;
-      const outsydePointsEarned = Math.round((consumerUpchargeCents / 100) * 100);
+      const { getActiveAttribution } = await import('./influencerTrackingService');
+      const attribution = await getActiveAttribution(userId);
+      const isInfluencerAttributed = !!attribution;
+      const { calculateProductFees } = await import('./fees');
+      const feeBreakdown = calculateProductFees(basePriceCents, { influencerAttributed: isInfluencerAttributed });
+
+      const totalChargedToConsumerCents = feeBreakdown.customerTotalBeforeTaxCents;
+      // Points = 1 per cent of consumer service fee (100 points per dollar of fee)
+      const outsydePointsEarned = feeBreakdown.consumerServiceFeeCents;
+
+      // Create the order row BEFORE touching Stripe so a record always exists
+      const order = await storage.createOrder({
+        customerId: userId,
+        businessId,
+        totalAmount: basePriceCents,
+        platformFee: feeBreakdown.platformFeeCents,
+        vendorNet: feeBreakdown.vendorNetCents,
+        consumerServiceFee: feeBreakdown.consumerServiceFeeCents,
+        influencerCommission: feeBreakdown.influencerCommissionCents,
+        grossChargeAmount: feeBreakdown.customerTotalBeforeTaxCents,
+        outsydeGrossRevenue: feeBreakdown.outsydeGrossRevenueCents,
+        attributedInfluencerId: attribution?.influencerId || null,
+        influencerCodeUsed: attribution?.refCode || null,
+        commissionStatus: isInfluencerAttributed ? 'pending' : null,
+        influencerTransferStatus: isInfluencerAttributed ? 'pending' : null,
+        feeModelVersion: feeBreakdown.feeModelVersion,
+        status: 'pending',
+        items: items.map((i: { productId: string; name: string; quantity: number; priceCents: number }) => ({
+          productId: i.productId,
+          name: i.name,
+          quantity: i.quantity,
+          price: i.priceCents,
+        })),
+      });
 
       const paymentIntent = await stripeService.createBookingPaymentIntent({
         totalChargedCents: totalChargedToConsumerCents,
-        vendorPayoutCents,
+        vendorPayoutCents: feeBreakdown.vendorNetCents,
         connectedAccountId: items[0].vendorStripeAccountId,
         captureMethod: 'automatic',
         metadata: {
           type: 'product_purchase',
-          bookingId: `cart_${Date.now()}`,
-          clientId: userId,
-          providerId: items[0].vendorId || '',
+          orderId: order.id,
+          userId,
+          businessId,
           basePriceCents: String(basePriceCents),
-          consumerUpchargeCents: String(consumerUpchargeCents),
-          vendorPayoutCents: String(vendorPayoutCents),
-          platformFeeCents: String(platformFeeCents),
+          consumerUpchargeCents: String(feeBreakdown.consumerServiceFeeCents),
+          vendorPayoutCents: String(feeBreakdown.vendorNetCents),
+          platformFeeCents: String(feeBreakdown.platformFeeCents),
           outsydePointsEarned: String(outsydePointsEarned),
           itemCount: String(items.length),
           itemSummary: items.map((i: { name: string; quantity: number }) => `${i.name} x${i.quantity}`).join(', ').substring(0, 490),
@@ -6408,17 +6442,21 @@ export async function registerRoutes(
         description: 'Product purchase via Outsyde',
       });
 
-      console.log(`[Cart] Created PaymentIntent ${paymentIntent.id} for product purchase (charged: ${totalChargedToConsumerCents}¢, vendor: ${vendorPayoutCents}¢, platform: ${platformFeeCents}¢)`);
+      // Record the Stripe PaymentIntent ID against the order row
+      await storage.updateOrder(order.id, { stripePaymentIntentId: paymentIntent.id });
+
+      console.log(`[Cart] Created PaymentIntent ${paymentIntent.id} for product purchase, order ${order.id} (charged: ${totalChargedToConsumerCents}¢, vendor: ${feeBreakdown.vendorNetCents}¢, platform: ${feeBreakdown.platformFeeCents}¢)`);
 
       res.json({
         success: true,
         clientSecret: paymentIntent.client_secret,
         paymentIntentId: paymentIntent.id,
+        orderId: order.id,
         feeBreakdown: {
           basePriceCents,
-          consumerUpchargeCents,
-          vendorPayoutCents,
-          platformFeeCents,
+          consumerUpchargeCents: feeBreakdown.consumerServiceFeeCents,
+          vendorPayoutCents: feeBreakdown.vendorNetCents,
+          platformFeeCents: feeBreakdown.platformFeeCents,
           totalChargedToConsumerCents,
           outsydePointsEarned,
         },
