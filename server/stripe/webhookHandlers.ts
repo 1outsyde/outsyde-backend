@@ -353,13 +353,9 @@ export class WebhookHandlers {
             }
           }
 
-          // PLACEHOLDER SPLIT MODEL: calculateBookingFees() applies the
-          // current fees.ts v2 rates (3% consumer fee / 12% booking fee),
-          // NOT the real 5%/5%-with-floor booking model this flow is meant
-          // to land on. Using it here only so a real transfer actually fires
-          // and appointments.staffPayout gets populated with real data,
-          // rather than blocking this whole payout path on the final fee
-          // model being designed. Replace this call once that model exists.
+          // Uses calculateBookingFees() from fees.ts (8% consumer fee / 2% booking fee —
+          // universal rate as of the fee-model migration). vendorNetCents from this
+          // breakdown is transferred to the business/staff connected account below.
           const feeBreakdown = calculateBookingFees(appointment.totalPrice);
           const vendorNetCents = feeBreakdown.vendorNetCents;
 

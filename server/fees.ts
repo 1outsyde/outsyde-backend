@@ -2,9 +2,9 @@
  * Outsyde Platform Fee & Payout Configuration v2
  *
  * Fee ownership:
- * - Consumer service fee (3%): charged to CUSTOMER, revenue to Outsyde
- * - Product platform fee (8%): deducted from VENDOR subtotal, revenue to Outsyde
- * - Booking fee (12%): deducted from VENDOR subtotal, revenue to Outsyde
+ * - Consumer service fee (8%): charged to CUSTOMER, revenue to Outsyde
+ * - Product platform fee (2%): deducted from VENDOR subtotal, revenue to Outsyde
+ * - Booking fee (2%): deducted from VENDOR subtotal, revenue to Outsyde
  * - Influencer commission (15%): deducted from VENDOR subtotal, paid to influencer (NOT Outsyde revenue)
  *
  * All amounts in integer cents. All calculations use Math.round() for cent precision.
@@ -13,15 +13,15 @@
 export const FEE_MODEL_VERSION = 'v2';
 
 // Consumer-side fee (added ON TOP of subtotal, paid by customer)
-export const CONSUMER_SERVICE_FEE_RATE = 0.03;
-export const CONSUMER_SERVICE_FEE_PERCENT = 3;
+export const CONSUMER_SERVICE_FEE_RATE = 0.08;
+export const CONSUMER_SERVICE_FEE_PERCENT = 8;
 
 // Vendor-side fees (deducted FROM subtotal)
-export const PRODUCT_FEE_RATE = 0.08;
-export const PRODUCT_FEE_PERCENT = 8;
+export const PRODUCT_FEE_RATE = 0.02;
+export const PRODUCT_FEE_PERCENT = 2;
 
-export const BOOKING_FEE_RATE = 0.12;
-export const BOOKING_FEE_PERCENT = 12;
+export const BOOKING_FEE_RATE = 0.02;
+export const BOOKING_FEE_PERCENT = 2;
 
 // Influencer commission (deducted from vendor, paid to influencer — NOT Outsyde revenue)
 export const INFLUENCER_COMMISSION_RATE = 0.15;
