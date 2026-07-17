@@ -6356,8 +6356,8 @@ export async function registerRoutes(
         return res.status(400).json({ success: false, error: { code: 'INVALID_INPUT', message: 'Items array is required and must not be empty' } });
       }
 
-      // Validate single vendor
-      const vendorIds = new Set(items.map((i: { vendorStripeAccountId: string }) => i.vendorStripeAccountId));
+      // Validate single vendor (keyed on vendorId, not client-supplied Stripe account)
+      const vendorIds = new Set(items.map((i: { vendorId: string }) => i.vendorId));
       if (vendorIds.size > 1) {
         return res.status(400).json({
           success: false,
@@ -6375,13 +6375,19 @@ export async function registerRoutes(
         }
       }
 
-      if (!items[0].vendorStripeAccountId) {
-        return res.status(400).json({ success: false, error: { code: 'INVALID_INPUT', message: 'vendorStripeAccountId is required' } });
-      }
-
       const businessId = items[0].vendorId || '';
       if (!businessId) {
         return res.status(400).json({ success: false, error: { code: 'INVALID_INPUT', message: 'vendorId is required' } });
+      }
+
+      // Look up the vendor's Stripe Connect account server-side — the client never
+      // needs to supply this, and we must not trust a client-supplied value.
+      const business = await storage.getBusiness(businessId);
+      if (!business) {
+        return res.status(404).json({ success: false, error: { code: 'BUSINESS_NOT_FOUND', message: 'Business not found' } });
+      }
+      if (!business.stripeAccountId) {
+        return res.status(400).json({ success: false, error: { code: 'STRIPE_NOT_ONBOARDED', message: 'Business has not completed Stripe onboarding' } });
       }
 
       // Calculate product fees using the canonical fee engine (same as POST /api/cart/checkout)
@@ -6424,7 +6430,7 @@ export async function registerRoutes(
       const paymentIntent = await stripeService.createBookingPaymentIntent({
         totalChargedCents: totalChargedToConsumerCents,
         vendorPayoutCents: feeBreakdown.vendorNetCents,
-        connectedAccountId: items[0].vendorStripeAccountId,
+        connectedAccountId: business.stripeAccountId,
         captureMethod: 'automatic',
         metadata: {
           type: 'product_purchase',
