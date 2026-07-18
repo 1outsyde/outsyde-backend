@@ -65,6 +65,8 @@ import {
   type InsertStaffAvailability,
   type StaffInvite,
   type InsertStaffInvite,
+  type StaffService,
+  type InsertStaffService,
   type Shipment,
   type InsertShipment,
   type AuditLog,
@@ -138,6 +140,7 @@ import {
   staffMembers,
   staffAvailability,
   staffInvites,
+  staffServices,
   shipments,
   auditLogs,
   userBlocks,
@@ -576,6 +579,15 @@ export interface IStorage {
   // used by the resend path in POST /api/vendor/staff/invites.
   reactivateStaffInvite(id: string, data: { phone?: string | null; role?: string; invitedByUserId?: string }): Promise<StaffInvite | undefined>;
   deleteStaffInvite(id: string): Promise<void>;
+
+  // Staff Services (staff-owned bookable services)
+  createStaffService(data: InsertStaffService): Promise<StaffService>;
+  getStaffService(id: string): Promise<StaffService | undefined>;
+  getStaffServicesByStaffMember(staffMemberId: string): Promise<StaffService[]>;
+  getLiveStaffServicesByStaffMember(staffMemberId: string): Promise<StaffService[]>;
+  hasLiveStaffServices(staffMemberId: string): Promise<boolean>;
+  updateStaffService(id: string, updates: Partial<StaffService>): Promise<StaffService | undefined>;
+  deleteStaffService(id: string): Promise<void>;
 
   // Refund Requests
   createRefundRequest(data: InsertRefundRequest): Promise<RefundRequest>;
@@ -5081,6 +5093,48 @@ export class DatabaseStorage implements IStorage {
 
   async deleteStaffInvite(id: string): Promise<void> {
     await db.delete(staffInvites).where(eq(staffInvites.id, id));
+  }
+
+  // =========================
+  // STAFF SERVICES
+  // =========================
+
+  async createStaffService(data: InsertStaffService): Promise<StaffService> {
+    const id = randomUUID();
+    const [service] = await db.insert(staffServices).values({ id, ...data }).returning();
+    return service;
+  }
+
+  async getStaffService(id: string): Promise<StaffService | undefined> {
+    const [service] = await db.select().from(staffServices).where(eq(staffServices.id, id));
+    return service;
+  }
+
+  async getStaffServicesByStaffMember(staffMemberId: string): Promise<StaffService[]> {
+    return db.select().from(staffServices)
+      .where(eq(staffServices.staffMemberId, staffMemberId));
+  }
+
+  async getLiveStaffServicesByStaffMember(staffMemberId: string): Promise<StaffService[]> {
+    return db.select().from(staffServices)
+      .where(and(eq(staffServices.staffMemberId, staffMemberId), eq(staffServices.status, 'live')));
+  }
+
+  async hasLiveStaffServices(staffMemberId: string): Promise<boolean> {
+    const [row] = await db.select({ id: staffServices.id }).from(staffServices)
+      .where(and(eq(staffServices.staffMemberId, staffMemberId), eq(staffServices.status, 'live')))
+      .limit(1);
+    return !!row;
+  }
+
+  async updateStaffService(id: string, updates: Partial<StaffService>): Promise<StaffService | undefined> {
+    const [service] = await db.update(staffServices).set(updates)
+      .where(eq(staffServices.id, id)).returning();
+    return service;
+  }
+
+  async deleteStaffService(id: string): Promise<void> {
+    await db.delete(staffServices).where(eq(staffServices.id, id));
   }
 
   // =========================
