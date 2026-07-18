@@ -578,6 +578,52 @@ export const staffInvites = pgTable("staff_invites", {
 });
 
 /* =====================================================
+   STAFF SERVICES (Staff-Owned Bookable Services)
+===================================================== */
+export const staffServices = pgTable("staff_services", {
+  id: varchar("id", { length: 36 }).primaryKey().default(sql`gen_random_uuid()`),
+  staffMemberId: varchar("staff_member_id", { length: 36 }).notNull().references(() => staffMembers.id),
+  // Denormalized for hot-path queries — derivable via staffMemberId → staff_members.businessId
+  businessId: varchar("business_id", { length: 36 }).notNull().references(() => businesses.id),
+
+  name: text("name").notNull(),
+  description: text("description"),
+  category: text("category"),
+
+  // Flat-rate fixed-duration pricing (no hourly/package model — staff services are appointments)
+  priceCents: integer("price_cents").notNull(),
+  durationMinutes: integer("duration_minutes").notNull(),
+
+  isActive: boolean("is_active").default(true),
+
+  // Publishing status: 'draft' (default) | 'live' | 'archived'
+  status: text("status").default("draft").notNull(),
+
+  // Connected account Stripe IDs — staff have their own Connect accounts
+  stripeConnectedProductId: text("stripe_connected_product_id"),
+  stripeConnectedPriceId: text("stripe_connected_price_id"),
+
+  // Service location type: 'business' | 'alternate' | 'customer' | 'virtual'
+  serviceLocationType: text("service_location_type").default("business"),
+  alternateAddress: text("alternate_address"),
+  alternateCity: text("alternate_city"),
+  alternateState: text("alternate_state"),
+  alternateZipCode: text("alternate_zip_code"),
+  virtualLink: text("virtual_link"),
+
+  // Cancellation policy
+  fullRefundWindow: text("full_refund_window").default("never"), // '1_week'|'48_hours'|'24_hours'|'1_hour'|'never'
+  hasPartialRefund: boolean("has_partial_refund").default(false),
+  partialRefundWindow: text("partial_refund_window"), // nullable, same 5 values as fullRefundWindow
+  partialRefundPercentage: integer("partial_refund_percentage"), // nullable, 0-100
+  hasCancellationFee: boolean("has_cancellation_fee").default(false),
+  cancellationFeeType: text("cancellation_fee_type"), // nullable, 'flat'|'percentage'
+  cancellationFeeAmount: integer("cancellation_fee_amount"), // nullable, cents if flat / whole percent if percentage
+
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+});
+
+/* =====================================================
    PHOTOGRAPHERS
 ===================================================== */
 export const photographers = pgTable("photographers", {
@@ -840,8 +886,11 @@ export const appointments = pgTable("appointments", {
   id: varchar("id", { length: 36 }).primaryKey().default(sql`gen_random_uuid()`),
   businessId: varchar("business_id", { length: 36 }).notNull().references(() => businesses.id),
   clientId: varchar("client_id", { length: 36 }).notNull().references(() => users.id),
-  serviceId: varchar("service_id", { length: 36 }).notNull().references(() => vendorServices.id),
-  
+  // Null when booking is for a staff-owned service (staffServiceId is set instead)
+  serviceId: varchar("service_id", { length: 36 }).references(() => vendorServices.id),
+  // Null when booking is for a business-owned service (serviceId is set instead)
+  staffServiceId: varchar("staff_service_id", { length: 36 }).references(() => staffServices.id),
+
   // Optional staff member assignment - if set, staff gets direct payout
   staffMemberId: varchar("staff_member_id", { length: 36 }).references(() => staffMembers.id),
 
@@ -907,6 +956,21 @@ export const appointments = pgTable("appointments", {
   customerServiceCity: text("customer_service_city"),
   customerServiceState: text("customer_service_state"),
   customerServiceZipCode: text("customer_service_zip_code"),
+
+  // Service snapshot — captured at booking-creation time so historical records remain
+  // correct even if the service is later edited, archived, or deleted. Nullable because
+  // existing rows pre-date this column; all new bookings populate these at write time.
+  serviceName: text("service_name"),
+  servicePriceCents: integer("service_price_cents"),
+  serviceDurationMinutes: integer("service_duration_minutes"),
+  // Cancellation policy snapshot (same field names/values as vendor_services / staff_services)
+  serviceFullRefundWindow: text("service_full_refund_window"),
+  serviceHasPartialRefund: boolean("service_has_partial_refund"),
+  servicePartialRefundWindow: text("service_partial_refund_window"),
+  servicePartialRefundPercentage: integer("service_partial_refund_percentage"),
+  serviceHasCancellationFee: boolean("service_has_cancellation_fee"),
+  serviceCancellationFeeType: text("service_cancellation_fee_type"),
+  serviceCancellationFeeAmount: integer("service_cancellation_fee_amount"),
 
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
@@ -1910,6 +1974,11 @@ export const insertStaffInviteSchema = createInsertSchema(staffInvites).omit({
   inviteCode: true,
 });
 
+export const insertStaffServiceSchema = createInsertSchema(staffServices).omit({
+  id: true,
+  createdAt: true,
+});
+
 export const updateStaffMemberSchema = z.object({
   displayName: z.string().min(1).optional(),
   bio: z.string().optional(),
@@ -2252,6 +2321,9 @@ export type City = typeof cities.$inferSelect;
 export type RefreshToken = typeof refreshTokens.$inferSelect;
 
 export type Photographer = typeof photographers.$inferSelect;
+
+export type StaffService = typeof staffServices.$inferSelect;
+export type InsertStaffService = typeof staffServices.$inferInsert;
 
 export type PhotographerService = typeof photographerServices.$inferSelect;
 export type InsertPhotographerService = typeof photographerServices.$inferInsert;
