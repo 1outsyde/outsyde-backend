@@ -30,6 +30,7 @@ export const AVAILABILITY_ERRORS = {
   PROVIDER_NOT_FOUND: 'PROVIDER_NOT_FOUND',
   INVALID_DATE: 'INVALID_DATE',
   OUTSIDE_HOURS: 'OUTSIDE_HOURS',
+  STAFF_NOT_BOOKABLE: 'STAFF_NOT_BOOKABLE',
 } as const;
 
 export class AvailabilityError extends Error {
@@ -1331,6 +1332,30 @@ async function resolveServiceForHold(
 
 export async function createBookingHold(params: CreateHoldParams): Promise<HoldResult> {
   const holdDuration = params.holdDurationMinutes || DEFAULT_HOLD_DURATION_MINUTES;
+
+  // Defensive guard: if a staffMemberId is specified, verify the staff member is
+  // active, has completed Stripe onboarding, and has at least one service assigned
+  // before any further processing. This mirrors the public listing/availability
+  // endpoint gates and prevents a downstream Stripe crash when serviceIds is empty.
+  if (params.staffMemberId) {
+    const [staffMember] = await db.select()
+      .from(staffMembers)
+      .where(eq(staffMembers.id, params.staffMemberId));
+
+    if (
+      !staffMember ||
+      staffMember.businessId !== params.providerId ||
+      staffMember.status !== 'active' ||
+      !staffMember.stripeOnboardingComplete ||
+      !staffMember.serviceIds ||
+      staffMember.serviceIds.length === 0
+    ) {
+      throw new AvailabilityError(
+        AVAILABILITY_ERRORS.STAFF_NOT_BOOKABLE,
+        'This staff member is not currently available for booking'
+      );
+    }
+  }
 
   const service = await resolveServiceForHold(params.providerType, params.serviceId);
   if (!service) {
