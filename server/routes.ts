@@ -17055,6 +17055,10 @@ export async function registerRoutes(
   const { registerPhase3Routes } = await import("./phase3Routes");
   registerPhase3Routes(app, requireAdmin);
 
+  // ==================== PLACES PROXY ROUTES ====================
+  const { registerPlacesRoutes } = await import("./placesRoutes");
+  registerPlacesRoutes(app);
+
   // ==================== MEDIA ROUTES (R2 + Mux) ====================
 
   const multerUpload = multer({
