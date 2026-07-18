@@ -10589,9 +10589,9 @@ export async function registerRoutes(
     try {
       const staff = await storage.getStaffMembersByBusiness(req.params.businessId);
 
-      // Only return active staff with completed Stripe onboarding
+      // Only return active staff with completed Stripe onboarding and at least one service assigned
       const activeStaff = staff.filter((s: StaffMember & { username: string | null }) =>
-        s.status === "active" && s.stripeOnboardingComplete
+        s.status === "active" && s.stripeOnboardingComplete && s.serviceIds && s.serviceIds.length > 0
       );
 
       // Return sanitized staff info for public viewing
@@ -10621,8 +10621,9 @@ export async function registerRoutes(
       }
 
       // Same gate as the public staff listing endpoint (GET /api/businesses/:businessId/staff):
-      // never expose availability for a staff member who isn't active or hasn't finished Stripe onboarding.
-      if (staff.status !== "active" || !staff.stripeOnboardingComplete) {
+      // never expose availability for a staff member who isn't active, hasn't finished Stripe onboarding,
+      // or has no services assigned.
+      if (staff.status !== "active" || !staff.stripeOnboardingComplete || !staff.serviceIds || staff.serviceIds.length === 0) {
         return res.status(404).json({ error: "Staff member is not available" });
       }
 
