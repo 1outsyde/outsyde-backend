@@ -1,8 +1,9 @@
 import { db } from "./db";
-import { 
-  staffAvailability, 
+import {
+  staffAvailability,
   staffMembers,
-  appointments, 
+  staffServices,
+  appointments,
   photographerAvailability,
   photographerBlackoutDates,
   shootBookings,
@@ -1291,18 +1292,57 @@ export interface HoldResult {
   endTime: string;
 }
 
+type ServiceSnapshot = {
+  serviceDurationMinutes: number;
+  servicePriceCents: number;
+  serviceName: string;
+  serviceFullRefundWindow: string | null;
+  serviceHasPartialRefund: boolean | null;
+  servicePartialRefundWindow: string | null;
+  servicePartialRefundPercentage: number | null;
+  serviceHasCancellationFee: boolean | null;
+  serviceCancellationFeeType: string | null;
+  serviceCancellationFeeAmount: number | null;
+};
+
 /**
- * Resolve service name/price/duration for hold creation.
+ * Resolve service name/price/duration/cancellation-policy for hold creation.
+ *
+ * When staffMemberId is provided the serviceId refers to a staff_services row
+ * (staff-owned service). Otherwise it refers to vendorServices (business) or
+ * photographerServices (photographer).
  *
  * Deliberately NOT shared with validateBookingSlot's inline service lookup
- * (same underlying query, duplicated on purpose) -- validateBookingSlot
- * backs the separate POST /api/booking/validate route and is left untouched
- * in this pass so that route's behavior can't be affected by this change.
+ * (same underlying query, duplicated on purpose) — validateBookingSlot backs
+ * the separate POST /api/booking/validate route and is left untouched in this
+ * pass so that route's behavior can't be affected by this change.
  */
 async function resolveServiceForHold(
   providerType: 'business' | 'photographer',
-  serviceId: string
-): Promise<{ serviceDurationMinutes: number; servicePriceCents: number; serviceName: string } | null> {
+  serviceId: string,
+  staffMemberId?: string
+): Promise<ServiceSnapshot | null> {
+  if (staffMemberId) {
+    const [service] = await db.select()
+      .from(staffServices)
+      .where(eq(staffServices.id, serviceId));
+
+    if (!service) return null;
+
+    return {
+      serviceDurationMinutes: service.durationMinutes,
+      servicePriceCents: service.priceCents,
+      serviceName: service.name,
+      serviceFullRefundWindow: service.fullRefundWindow ?? null,
+      serviceHasPartialRefund: service.hasPartialRefund ?? null,
+      servicePartialRefundWindow: service.partialRefundWindow ?? null,
+      servicePartialRefundPercentage: service.partialRefundPercentage ?? null,
+      serviceHasCancellationFee: service.hasCancellationFee ?? null,
+      serviceCancellationFeeType: service.cancellationFeeType ?? null,
+      serviceCancellationFeeAmount: service.cancellationFeeAmount ?? null,
+    };
+  }
+
   if (providerType === 'business') {
     const [service] = await db.select()
       .from(vendorServices)
@@ -1314,6 +1354,13 @@ async function resolveServiceForHold(
       serviceDurationMinutes: service.durationMinutes || 60,
       servicePriceCents: service.price || 0, // price column is already integer cents
       serviceName: service.name,
+      serviceFullRefundWindow: service.fullRefundWindow ?? null,
+      serviceHasPartialRefund: service.hasPartialRefund ?? null,
+      servicePartialRefundWindow: service.partialRefundWindow ?? null,
+      servicePartialRefundPercentage: service.partialRefundPercentage ?? null,
+      serviceHasCancellationFee: service.hasCancellationFee ?? null,
+      serviceCancellationFeeType: service.cancellationFeeType ?? null,
+      serviceCancellationFeeAmount: service.cancellationFeeAmount ?? null,
     };
   }
 
@@ -1327,6 +1374,13 @@ async function resolveServiceForHold(
     serviceDurationMinutes: service.estimatedDurationMinutes || (service.packageHours ? service.packageHours * 60 : 60),
     servicePriceCents: service.priceCents || service.hourlyRateCents || 0,
     serviceName: service.name,
+    serviceFullRefundWindow: service.fullRefundWindow ?? null,
+    serviceHasPartialRefund: service.hasPartialRefund ?? null,
+    servicePartialRefundWindow: service.partialRefundWindow ?? null,
+    servicePartialRefundPercentage: service.partialRefundPercentage ?? null,
+    serviceHasCancellationFee: service.hasCancellationFee ?? null,
+    serviceCancellationFeeType: service.cancellationFeeType ?? null,
+    serviceCancellationFeeAmount: service.cancellationFeeAmount ?? null,
   };
 }
 
@@ -1334,9 +1388,9 @@ export async function createBookingHold(params: CreateHoldParams): Promise<HoldR
   const holdDuration = params.holdDurationMinutes || DEFAULT_HOLD_DURATION_MINUTES;
 
   // Defensive guard: if a staffMemberId is specified, verify the staff member is
-  // active, has completed Stripe onboarding, and has at least one service assigned
-  // before any further processing. This mirrors the public listing/availability
-  // endpoint gates and prevents a downstream Stripe crash when serviceIds is empty.
+  // active, has completed Stripe onboarding, and has at least one live staff
+  // service before any further processing. This mirrors the public listing/
+  // availability endpoint gates and prevents a downstream Stripe crash.
   if (params.staffMemberId) {
     const [staffMember] = await db.select()
       .from(staffMembers)
@@ -1346,10 +1400,23 @@ export async function createBookingHold(params: CreateHoldParams): Promise<HoldR
       !staffMember ||
       staffMember.businessId !== params.providerId ||
       staffMember.status !== 'active' ||
-      !staffMember.stripeOnboardingComplete ||
-      !staffMember.serviceIds ||
-      staffMember.serviceIds.length === 0
+      !staffMember.stripeOnboardingComplete
     ) {
+      throw new AvailabilityError(
+        AVAILABILITY_ERRORS.STAFF_NOT_BOOKABLE,
+        'This staff member is not currently available for booking'
+      );
+    }
+
+    const [liveService] = await db.select({ id: staffServices.id })
+      .from(staffServices)
+      .where(and(
+        eq(staffServices.staffMemberId, params.staffMemberId),
+        eq(staffServices.status, 'live')
+      ))
+      .limit(1);
+
+    if (!liveService) {
       throw new AvailabilityError(
         AVAILABILITY_ERRORS.STAFF_NOT_BOOKABLE,
         'This staff member is not currently available for booking'
@@ -1357,7 +1424,7 @@ export async function createBookingHold(params: CreateHoldParams): Promise<HoldR
     }
   }
 
-  const service = await resolveServiceForHold(params.providerType, params.serviceId);
+  const service = await resolveServiceForHold(params.providerType, params.serviceId, params.staffMemberId);
   if (!service) {
     throw new AvailabilityError(AVAILABILITY_ERRORS.SERVICE_NOT_FOUND, 'Service not found');
   }

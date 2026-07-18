@@ -112,7 +112,7 @@ import {
   generateDeepLink,
   seedInfluencerTiersAndConfig,
 } from "./influencerTrackingService";
-import { 
+import {
   appointments,
   orders,
   shootBookings,
@@ -4897,9 +4897,29 @@ export async function registerRoutes(
       // therefore never gets captured). Revisit once that handler is extended.
       const captureMethod: 'automatic' = 'automatic';
 
-      // Only persist customer-submitted address when the service expects it.
-      const service = hold.serviceId ? await storage.getVendorService(hold.serviceId) : undefined;
-      const isCustomerLocation = service?.serviceLocationType === 'customer';
+      // Fetch service for location-type check and cancellation-policy snapshot.
+      // For staff bookings hold.serviceId is a staff_services.id; for vendor
+      // bookings it is a vendor_services.id.
+      type ServiceForSnapshot = {
+        serviceLocationType: string | null;
+        fullRefundWindow: string | null;
+        hasPartialRefund: boolean | null;
+        partialRefundWindow: string | null;
+        partialRefundPercentage: number | null;
+        hasCancellationFee: boolean | null;
+        cancellationFeeType: string | null;
+        cancellationFeeAmount: number | null;
+      };
+      let serviceForSnapshot: ServiceForSnapshot | undefined;
+      if (hold.staffMemberId && hold.serviceId) {
+        const staffService = await storage.getStaffService(hold.serviceId);
+        if (staffService) serviceForSnapshot = staffService as ServiceForSnapshot;
+      } else if (hold.serviceId) {
+        const vendorService = await storage.getVendorService(hold.serviceId);
+        if (vendorService) serviceForSnapshot = vendorService as ServiceForSnapshot;
+      }
+
+      const isCustomerLocation = serviceForSnapshot?.serviceLocationType === 'customer';
       const customerAddress = isCustomerLocation ? {
         customerServiceAddress: req.body.customerServiceAddress ?? null,
         customerServiceCity: req.body.customerServiceCity ?? null,
@@ -4910,7 +4930,9 @@ export async function registerRoutes(
       const appointment = await storage.createAppointment({
         businessId: hold.providerId,
         clientId: hold.userId,
-        serviceId: hold.serviceId,
+        // For staff bookings staffServiceId is set and serviceId is left null.
+        serviceId: hold.staffMemberId ? null : (hold.serviceId ?? undefined),
+        staffServiceId: hold.staffMemberId ? (hold.serviceId ?? undefined) : undefined,
         staffMemberId: hold.staffMemberId || undefined,
         holdId: hold.id,
         appointmentDate: hold.holdDate,
@@ -4924,6 +4946,17 @@ export async function registerRoutes(
         paymentMethod: 'payment_intent',
         captureMethod,
         ...customerAddress,
+        // Service snapshot — preserved even if service is later edited or archived
+        serviceName: hold.serviceName,
+        servicePriceCents: hold.servicePriceCents,
+        serviceDurationMinutes: hold.durationMinutes,
+        serviceFullRefundWindow: serviceForSnapshot?.fullRefundWindow ?? null,
+        serviceHasPartialRefund: serviceForSnapshot?.hasPartialRefund ?? null,
+        servicePartialRefundWindow: serviceForSnapshot?.partialRefundWindow ?? null,
+        servicePartialRefundPercentage: serviceForSnapshot?.partialRefundPercentage ?? null,
+        serviceHasCancellationFee: serviceForSnapshot?.hasCancellationFee ?? null,
+        serviceCancellationFeeType: serviceForSnapshot?.cancellationFeeType ?? null,
+        serviceCancellationFeeAmount: serviceForSnapshot?.cancellationFeeAmount ?? null,
       });
 
       const user = await storage.getUser(userId);
@@ -10589,10 +10622,16 @@ export async function registerRoutes(
     try {
       const staff = await storage.getStaffMembersByBusiness(req.params.businessId);
 
-      // Only return active staff with completed Stripe onboarding and at least one service assigned
-      const activeStaff = staff.filter((s: StaffMember & { username: string | null }) =>
-        s.status === "active" && s.stripeOnboardingComplete && s.serviceIds && s.serviceIds.length > 0
+      // Only return active staff with completed Stripe onboarding and at least one live staff service.
+      const activeBase = staff.filter((s: StaffMember & { username: string | null }) =>
+        s.status === "active" && s.stripeOnboardingComplete
       );
+      const liveServiceFlags = await Promise.all(
+        activeBase.map((s: StaffMember & { username: string | null }) =>
+          storage.hasLiveStaffServices(s.id)
+        )
+      );
+      const activeStaff = activeBase.filter((_: unknown, i: number) => liveServiceFlags[i]);
 
       // Return sanitized staff info for public viewing
       const publicStaff = activeStaff.map((s: StaffMember & { username: string | null }) => ({
@@ -10621,9 +10660,10 @@ export async function registerRoutes(
       }
 
       // Same gate as the public staff listing endpoint (GET /api/businesses/:businessId/staff):
-      // never expose availability for a staff member who isn't active, hasn't finished Stripe onboarding,
-      // or has no services assigned.
-      if (staff.status !== "active" || !staff.stripeOnboardingComplete || !staff.serviceIds || staff.serviceIds.length === 0) {
+      // never expose availability for a staff member who isn't active, hasn't finished Stripe
+      // onboarding, or has no live staff services.
+      const hasLive = await storage.hasLiveStaffServices(staff.id);
+      if (staff.status !== "active" || !staff.stripeOnboardingComplete || !hasLive) {
         return res.status(404).json({ error: "Staff member is not available" });
       }
 
@@ -10684,16 +10724,228 @@ export async function registerRoutes(
       }
       const staff = resolved.staff;
 
-      const businessServices = await storage.getVendorServicesByBusiness(staff.businessId);
-      const myServiceIds = new Set((staff.serviceIds || []).map(String));
-      const services = businessServices.filter(
-        (s) => myServiceIds.has(String(s.id)) && s.isActive && s.status === "live",
-      );
-
+      const services = await storage.getStaffServicesByStaffMember(staff.id);
       res.json({ services });
     } catch (error) {
       console.error("Get staff services error:", error);
       res.status(500).json({ error: "Failed to get services" });
+    }
+  });
+
+  // ==================== STAFF SERVICE CRUD ====================
+
+  const staffServiceCreateSchema = z.object({
+    name: z.string().min(1),
+    description: z.string().nullable().optional(),
+    category: z.string().nullable().optional(),
+    priceCents: z.number().int().min(700, "Price must be at least $7.00"),
+    durationMinutes: z.number().int().min(5),
+    serviceLocationType: z.enum(['business', 'alternate', 'customer', 'virtual']).optional(),
+    alternateAddress: z.string().nullable().optional(),
+    alternateCity: z.string().nullable().optional(),
+    alternateState: z.string().nullable().optional(),
+    alternateZipCode: z.string().nullable().optional(),
+    virtualLink: z.string().nullable().optional(),
+    fullRefundWindow: z.enum(['1_week', '48_hours', '24_hours', '1_hour', 'never']).optional(),
+    hasPartialRefund: z.boolean().optional(),
+    partialRefundWindow: z.enum(['1_week', '48_hours', '24_hours', '1_hour', 'never']).nullable().optional(),
+    partialRefundPercentage: z.number().int().min(0).max(100).nullable().optional(),
+    hasCancellationFee: z.boolean().optional(),
+    cancellationFeeType: z.enum(['flat', 'percentage']).nullable().optional(),
+    cancellationFeeAmount: z.number().int().min(0).nullable().optional(),
+  });
+
+  const staffServiceUpdateSchema = staffServiceCreateSchema.partial();
+
+  // Create a staff service
+  app.post("/api/staff/services", async (req, res) => {
+    const userId = getUserIdFromRequest(req);
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    try {
+      const resolved = await resolveRequestingStaffMember(req, userId);
+      if ("status" in resolved) {
+        return res.status(resolved.status).json(resolved.body);
+      }
+      const staff = resolved.staff;
+
+      const validated = staffServiceCreateSchema.parse(req.body);
+      const service = await storage.createStaffService({
+        ...validated,
+        staffMemberId: staff.id,
+        businessId: staff.businessId,
+        status: 'draft',
+      });
+
+      res.json({ service });
+    } catch (error) {
+      if (error instanceof z.ZodError) {
+        return res.status(400).json({ error: "Invalid data", details: error.errors });
+      }
+      console.error("Create staff service error:", error);
+      res.status(500).json({ error: "Failed to create service" });
+    }
+  });
+
+  // Get a single staff service
+  app.get("/api/staff/services/:id", async (req, res) => {
+    const userId = getUserIdFromRequest(req);
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    try {
+      const resolved = await resolveRequestingStaffMember(req, userId);
+      if ("status" in resolved) {
+        return res.status(resolved.status).json(resolved.body);
+      }
+      const staff = resolved.staff;
+
+      const service = await storage.getStaffService(req.params.id);
+      if (!service || service.staffMemberId !== staff.id) {
+        return res.status(404).json({ error: "Service not found" });
+      }
+
+      res.json({ service });
+    } catch (error) {
+      console.error("Get staff service error:", error);
+      res.status(500).json({ error: "Failed to get service" });
+    }
+  });
+
+  // Update a staff service
+  app.patch("/api/staff/services/:id", async (req, res) => {
+    const userId = getUserIdFromRequest(req);
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    try {
+      const resolved = await resolveRequestingStaffMember(req, userId);
+      if ("status" in resolved) {
+        return res.status(resolved.status).json(resolved.body);
+      }
+      const staff = resolved.staff;
+
+      const service = await storage.getStaffService(req.params.id);
+      if (!service || service.staffMemberId !== staff.id) {
+        return res.status(404).json({ error: "Service not found" });
+      }
+
+      if (service.status === 'archived') {
+        return res.status(409).json({ error: "Archived services cannot be edited" });
+      }
+
+      const validated = staffServiceUpdateSchema.parse(req.body);
+      const updated = await storage.updateStaffService(req.params.id, validated);
+      res.json({ service: updated });
+    } catch (error) {
+      if (error instanceof z.ZodError) {
+        return res.status(400).json({ error: "Invalid data", details: error.errors });
+      }
+      console.error("Update staff service error:", error);
+      res.status(500).json({ error: "Failed to update service" });
+    }
+  });
+
+  // Delete a staff service (draft or archived only)
+  app.delete("/api/staff/services/:id", async (req, res) => {
+    const userId = getUserIdFromRequest(req);
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    try {
+      const resolved = await resolveRequestingStaffMember(req, userId);
+      if ("status" in resolved) {
+        return res.status(resolved.status).json(resolved.body);
+      }
+      const staff = resolved.staff;
+
+      const service = await storage.getStaffService(req.params.id);
+      if (!service || service.staffMemberId !== staff.id) {
+        return res.status(404).json({ error: "Service not found" });
+      }
+
+      if (service.status === 'live') {
+        return res.status(409).json({ error: "Cannot delete a live service — archive it first" });
+      }
+
+      await storage.deleteStaffService(req.params.id);
+      res.json({ success: true });
+    } catch (error) {
+      console.error("Delete staff service error:", error);
+      res.status(500).json({ error: "Failed to delete service" });
+    }
+  });
+
+  // Publish a staff service (draft → live)
+  app.post("/api/staff/services/:id/go-live", async (req, res) => {
+    const userId = getUserIdFromRequest(req);
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    try {
+      const resolved = await resolveRequestingStaffMember(req, userId);
+      if ("status" in resolved) {
+        return res.status(resolved.status).json(resolved.body);
+      }
+      const staff = resolved.staff;
+
+      if (staff.status !== 'active' || !staff.stripeOnboardingComplete) {
+        return res.status(409).json({
+          error: "Stripe onboarding must be completed before publishing services",
+        });
+      }
+
+      const service = await storage.getStaffService(req.params.id);
+      if (!service || service.staffMemberId !== staff.id) {
+        return res.status(404).json({ error: "Service not found" });
+      }
+
+      if (service.status === 'archived') {
+        return res.status(409).json({ error: "Cannot publish an archived service" });
+      }
+
+      const updated = await storage.updateStaffService(req.params.id, { status: 'live' });
+      res.json({ service: updated, message: "Service is now live" });
+    } catch (error) {
+      console.error("Go live staff service error:", error);
+      res.status(500).json({ error: "Failed to publish service" });
+    }
+  });
+
+  // Archive a staff service (live → archived)
+  app.post("/api/staff/services/:id/archive", async (req, res) => {
+    const userId = getUserIdFromRequest(req);
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    try {
+      const resolved = await resolveRequestingStaffMember(req, userId);
+      if ("status" in resolved) {
+        return res.status(resolved.status).json(resolved.body);
+      }
+      const staff = resolved.staff;
+
+      const service = await storage.getStaffService(req.params.id);
+      if (!service || service.staffMemberId !== staff.id) {
+        return res.status(404).json({ error: "Service not found" });
+      }
+
+      if (service.status === 'archived') {
+        return res.status(409).json({ error: "Service is already archived" });
+      }
+
+      const updated = await storage.updateStaffService(req.params.id, { status: 'archived' });
+      res.json({ service: updated, message: "Service archived" });
+    } catch (error) {
+      console.error("Archive staff service error:", error);
+      res.status(500).json({ error: "Failed to archive service" });
     }
   });
 
