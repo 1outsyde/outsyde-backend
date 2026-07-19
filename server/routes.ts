@@ -10681,6 +10681,60 @@ export async function registerRoutes(
     }
   });
 
+  // Public endpoint: Get live services for a staff member (for customer browsing)
+  app.get("/api/businesses/:businessId/staff/:staffId/services", async (req, res) => {
+    try {
+      const staff = await storage.getStaffMember(req.params.staffId);
+      if (!staff || staff.businessId !== req.params.businessId) {
+        return res.status(404).json({ error: "Staff member not found" });
+      }
+
+      // Same three-part bookability gate as /availability and the public staff listing:
+      // active status + Stripe onboarding complete + at least one live service.
+      const hasLive = await storage.hasLiveStaffServices(staff.id);
+      if (staff.status !== "active" || !staff.stripeOnboardingComplete || !hasLive) {
+        return res.status(404).json({ error: "Staff member is not available" });
+      }
+
+      const rawServices = await storage.getLiveStaffServicesByStaffMember(staff.id);
+
+      // Map to the same shape as GET /api/businesses/:id/services so the frontend
+      // can reuse existing rendering logic without branching. The only field that
+      // differs between the two tables is priceCents (staff) vs price (vendor).
+      const services = rawServices.map((s) => ({
+        id: s.id,
+        staffMemberId: s.staffMemberId,
+        businessId: s.businessId,
+        name: s.name,
+        description: s.description,
+        category: s.category,
+        price: s.priceCents,
+        durationMinutes: s.durationMinutes,
+        isActive: s.isActive,
+        status: s.status,
+        serviceLocationType: s.serviceLocationType,
+        alternateAddress: s.alternateAddress,
+        alternateCity: s.alternateCity,
+        alternateState: s.alternateState,
+        alternateZipCode: s.alternateZipCode,
+        virtualLink: s.virtualLink,
+        fullRefundWindow: s.fullRefundWindow,
+        hasPartialRefund: s.hasPartialRefund,
+        partialRefundWindow: s.partialRefundWindow,
+        partialRefundPercentage: s.partialRefundPercentage,
+        hasCancellationFee: s.hasCancellationFee,
+        cancellationFeeType: s.cancellationFeeType,
+        cancellationFeeAmount: s.cancellationFeeAmount,
+        createdAt: s.createdAt,
+      }));
+
+      res.json({ services });
+    } catch (error) {
+      console.error("Get public staff services error:", error);
+      res.status(500).json({ error: "Failed to get staff services" });
+    }
+  });
+
   // ==================== STAFF DASHBOARD ROUTES (Staff-facing) ====================
   // Note: These endpoints now support both JWT (Authorization header) and session-based auth
 
