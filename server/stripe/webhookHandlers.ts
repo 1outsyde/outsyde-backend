@@ -181,6 +181,49 @@ export class WebhookHandlers {
             await this.tryCompleteReferral(user.id, bookingId, 'appointment');
           }
 
+          // Notifications (best-effort: each recipient is independently try/catch'd)
+          const ab_business = await storage.getBusiness(appointment.businessId).catch(() => undefined);
+
+          try {
+            console.log(`[Notify:appointment_booking] Sending customer notification to ${clientId} (appointment ${bookingId})`);
+            await NotificationTriggers.paymentSucceeded({
+              userId: clientId,
+              amount: appointment.totalPrice,
+              referenceType: 'appointment',
+              referenceId: bookingId,
+              description: `Booking confirmed at ${ab_business?.name || 'business'}`,
+            });
+            console.log(`[Notify:appointment_booking] Customer ${clientId} notified`);
+          } catch (err) {
+            console.error(`[Notify:appointment_booking] Customer notification failed for appointment ${bookingId}:`, err);
+          }
+
+          try {
+            const ab_owner = await storage.getUserByBusinessOwnerId(appointment.businessId);
+            if (ab_owner) {
+              console.log(`[Notify:appointment_booking] Sending business owner notification to ${ab_owner.id} (appointment ${bookingId})`);
+              await NotificationTriggers.paymentSucceeded({
+                userId: ab_owner.id,
+                amount: appointment.totalPrice,
+                referenceType: 'appointment',
+                referenceId: bookingId,
+                description: `New booking from ${user?.name || 'customer'}`,
+              });
+              console.log(`[Notify:appointment_booking] Business owner ${ab_owner.id} notified`);
+
+              sendBookingConfirmationPush({
+                customerId: clientId,
+                providerName: ab_business?.name || 'business',
+                date: appointment.appointmentDate,
+                time: appointment.appointmentTime,
+                businessOwnerId: ab_owner.id,
+                customerName: user?.name || undefined,
+              }).catch(err => console.error(`[Notify:appointment_booking] Push failed for appointment ${bookingId}:`, err));
+            }
+          } catch (err) {
+            console.error(`[Notify:appointment_booking] Business owner notification failed for appointment ${bookingId}:`, err);
+          }
+
           console.log(`[Stripe] Appointment ${bookingId} confirmed via PaymentIntent`);
         }
       } else if (type === 'shoot_booking') {
@@ -299,6 +342,36 @@ export class WebhookHandlers {
           });
           await this.tryCompleteReferral(user.id, bookingId, 'shoot_booking');
         }
+
+        // Notifications (best-effort: each recipient is independently try/catch'd)
+        try {
+          const sb_booking = await storage.getShootBooking(bookingId);
+          const sb_photographer = sb_booking ? await storage.getPhotographer(sb_booking.photographerId) : null;
+
+          console.log(`[Notify:shoot_booking] Sending notifications for shoot booking ${bookingId}`);
+          await NotificationTriggers.bookingConfirmed({
+            customerId: clientId,
+            photographerId: sb_booking?.photographerId || '',
+            bookingId,
+            photographerName: sb_photographer?.displayName || 'Photographer',
+            shootType: sb_booking?.shootType || 'session',
+            date: sb_booking?.date || '',
+            time: sb_booking?.startTime || '',
+          });
+          console.log(`[Notify:shoot_booking] Customer ${clientId} and photographer notified`);
+
+          sendBookingConfirmationPush({
+            customerId: clientId,
+            providerName: sb_photographer?.displayName || 'Photographer',
+            date: sb_booking?.date || '',
+            time: sb_booking?.startTime || '',
+            businessOwnerId: sb_photographer?.userId,
+            customerName: user?.name || undefined,
+          }).catch(err => console.error(`[Notify:shoot_booking] Push failed for shoot booking ${bookingId}:`, err));
+        } catch (err) {
+          console.error(`[Notify:shoot_booking] Notifications failed for shoot booking ${bookingId}:`, err);
+        }
+
       } else if (type === 'appointment') {
         // Hold-based business/staff booking flow (POST
         // /api/booking/:holdId/create-payment-intent). This PaymentIntent was
@@ -415,6 +488,93 @@ export class WebhookHandlers {
               console.error(`[Stripe] FAILED to transfer ${vendorNetCents}c to business ${businessId} for appointment ${appointmentId}. Funds remain on platform balance -- manual reconciliation required.`, transferErr);
             }
           }
+
+          // Points + referral
+          await storage.earnPoints({
+            userId: appointment.clientId,
+            dollarAmountCents: appointment.totalPrice,
+            transactionType: 'business_transaction',
+            referenceType: 'appointment',
+            referenceId: appointmentId,
+            description: 'Points earned from service booking',
+            businessId,
+          });
+          await this.tryCompleteReferral(appointment.clientId, appointmentId, 'appointment');
+
+          // Notifications (best-effort: each recipient is independently try/catch'd so
+          // one failure does not prevent the others from firing or block the booking)
+          const apptCustomer = await storage.getUser(appointment.clientId).catch(() => undefined);
+
+          // Customer in-app
+          try {
+            console.log(`[Notify:appointment] Sending customer notification to ${appointment.clientId} (appointment ${appointmentId})`);
+            await NotificationTriggers.paymentSucceeded({
+              userId: appointment.clientId,
+              amount: appointment.totalPrice,
+              referenceType: 'appointment',
+              referenceId: appointmentId,
+              description: `Booking confirmed at ${business?.name || 'business'}`,
+            });
+            console.log(`[Notify:appointment] Customer ${appointment.clientId} notified`);
+          } catch (err) {
+            console.error(`[Notify:appointment] Customer notification failed for appointment ${appointmentId}:`, err);
+          }
+
+          // Business owner in-app — capture owner id for the push call below
+          let apptOwnerId: string | undefined;
+          try {
+            const apptOwner = business ? await storage.getUserByBusinessOwnerId(businessId) : undefined;
+            if (apptOwner) {
+              apptOwnerId = apptOwner.id;
+              console.log(`[Notify:appointment] Sending business owner notification to ${apptOwner.id} (appointment ${appointmentId})`);
+              await NotificationTriggers.paymentSucceeded({
+                userId: apptOwner.id,
+                amount: appointment.totalPrice,
+                referenceType: 'appointment',
+                referenceId: appointmentId,
+                description: `New booking from ${apptCustomer?.name || 'customer'}`,
+              });
+              console.log(`[Notify:appointment] Business owner ${apptOwner.id} notified`);
+            }
+          } catch (err) {
+            console.error(`[Notify:appointment] Business owner notification failed for appointment ${appointmentId}:`, err);
+          }
+
+          // Staff member in-app — capture userId for the push call below
+          let apptStaffMemberUserId: string | undefined;
+          if (staffMemberId) {
+            try {
+              const apptStaffMember = await storage.getStaffMember(staffMemberId);
+              if (apptStaffMember?.userId) {
+                apptStaffMemberUserId = apptStaffMember.userId;
+                console.log(`[Notify:appointment] Sending staff notification to ${apptStaffMember.userId} (appointment ${appointmentId})`);
+                await NotificationTriggers.paymentSucceeded({
+                  userId: apptStaffMember.userId,
+                  amount: appointment.totalPrice,
+                  referenceType: 'appointment',
+                  referenceId: appointmentId,
+                  description: `New booking on ${appointment.appointmentDate} at ${appointment.appointmentTime}`,
+                });
+                console.log(`[Notify:appointment] Staff member ${apptStaffMember.userId} notified`);
+              } else {
+                console.log(`[Notify:appointment] Staff member ${staffMemberId} has no linked userId — skipping in-app notification`);
+              }
+            } catch (err) {
+              console.error(`[Notify:appointment] Staff notification failed for appointment ${appointmentId}:`, err);
+            }
+          }
+
+          // Push (Expo) — customer + business owner + optional staff member on same call
+          sendBookingConfirmationPush({
+            customerId: appointment.clientId,
+            providerName: business?.name || 'business',
+            date: appointment.appointmentDate,
+            time: appointment.appointmentTime,
+            businessOwnerId: apptOwnerId,
+            staffMemberUserId: apptStaffMemberUserId,
+            customerName: apptCustomer?.name || undefined,
+          }).catch(err => console.error(`[Notify:appointment] Push failed for appointment ${appointmentId}:`, err));
+
         }
       } else if (type === 'product_purchase') {
         // Mobile PaymentSheet product cart flow (POST /api/cart/payment-intent).

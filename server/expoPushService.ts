@@ -64,7 +64,9 @@ export async function sendExpoPush(params: ExpoPushParams): Promise<boolean> {
 }
 
 /**
- * Send booking confirmation push to both customer and business/photographer owner.
+ * Send booking confirmation push to customer and provider-side recipients.
+ * staffMemberUserId covers staff-scoped bookings where both the staff member
+ * and business owner should receive the push (they are different accounts).
  * Failures are logged but never thrown — this must not crash the booking flow.
  */
 export async function sendBookingConfirmationPush(params: {
@@ -73,6 +75,7 @@ export async function sendBookingConfirmationPush(params: {
   date: string;
   time: string;
   businessOwnerId?: string;
+  staffMemberUserId?: string;
   customerName?: string;
 }): Promise<void> {
   // Notify customer
@@ -87,6 +90,17 @@ export async function sendBookingConfirmationPush(params: {
   if (params.businessOwnerId) {
     await sendExpoPush({
       userId: params.businessOwnerId,
+      title: 'New Booking',
+      body: `New booking from ${params.customerName || 'a customer'} for ${params.date} at ${params.time}`,
+      data: { type: 'new_booking', screen: 'dashboard' },
+    });
+  }
+
+  // Notify staff member (staff bookings: staff receives payout but is a separate
+  // account from the business owner — both need the push)
+  if (params.staffMemberUserId) {
+    await sendExpoPush({
+      userId: params.staffMemberUserId,
       title: 'New Booking',
       body: `New booking from ${params.customerName || 'a customer'} for ${params.date} at ${params.time}`,
       data: { type: 'new_booking', screen: 'dashboard' },
