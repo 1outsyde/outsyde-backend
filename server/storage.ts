@@ -99,6 +99,8 @@ import {
   type InsertWeeklyAvailability,
   type ProviderBlock,
   type InsertProviderBlock,
+  type ConsumerAddress,
+  type InsertConsumerAddress,
   users,
   businesses,
   cities,
@@ -157,6 +159,7 @@ import {
   oauthStates,
   weeklyAvailability,
   providerBlocks,
+  consumerAddresses,
   isValidOrderTransition,
   isValidBookingTransition
 } from "@shared/schema";
@@ -805,6 +808,12 @@ export interface IStorage {
   createProviderBlock(data: InsertProviderBlock): Promise<ProviderBlock>;
   updateProviderBlock(id: string, updates: Partial<ProviderBlock>): Promise<ProviderBlock | undefined>;
   deleteProviderBlock(id: string): Promise<void>;
+
+  // Consumer address book
+  getConsumerAddresses(userId: string): Promise<ConsumerAddress[]>;
+  createConsumerAddress(data: InsertConsumerAddress): Promise<ConsumerAddress>;
+  updateConsumerAddress(id: string, userId: string, data: Partial<InsertConsumerAddress>): Promise<ConsumerAddress>;
+  deleteConsumerAddress(id: string, userId: string): Promise<void>;
 }
 
 // ==================== UNIFIED SEARCH TYPES ====================
@@ -7119,6 +7128,41 @@ export class DatabaseStorage implements IStorage {
 
   async deleteProviderBlock(id: string): Promise<void> {
     await db.delete(providerBlocks).where(eq(providerBlocks.id, id));
+  }
+
+  // ── Consumer address book ───────────────────────────────────────────────────
+
+  async getConsumerAddresses(userId: string): Promise<ConsumerAddress[]> {
+    return db
+      .select()
+      .from(consumerAddresses)
+      .where(eq(consumerAddresses.userId, userId))
+      .orderBy(desc(consumerAddresses.isDefault), asc(consumerAddresses.createdAt));
+  }
+
+  async createConsumerAddress(data: InsertConsumerAddress): Promise<ConsumerAddress> {
+    const [created] = await db.insert(consumerAddresses).values(data).returning();
+    return created;
+  }
+
+  async updateConsumerAddress(
+    id: string,
+    userId: string,
+    data: Partial<InsertConsumerAddress>,
+  ): Promise<ConsumerAddress> {
+    const [updated] = await db
+      .update(consumerAddresses)
+      .set({ ...data, updatedAt: new Date() })
+      .where(and(eq(consumerAddresses.id, id), eq(consumerAddresses.userId, userId)))
+      .returning();
+    if (!updated) throw new Error('Address not found or access denied');
+    return updated;
+  }
+
+  async deleteConsumerAddress(id: string, userId: string): Promise<void> {
+    await db
+      .delete(consumerAddresses)
+      .where(and(eq(consumerAddresses.id, id), eq(consumerAddresses.userId, userId)));
   }
 }
 

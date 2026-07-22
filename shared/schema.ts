@@ -220,6 +220,8 @@ export const users = pgTable("users", {
 
   // Stripe customer ID for checkout (not connected account - that's on business/photographer)
   stripeCustomerId: text("stripe_customer_id"),
+  // Stripe pm_xxx the consumer has explicitly chosen as their default saved card (nullable)
+  defaultPaymentMethodId: text("default_payment_method_id"),
 
   // Push notifications for mobile
   expoPushToken: text("expo_push_token"),
@@ -3044,3 +3046,29 @@ export const moderationQueue = pgTable("moderation_queue", {
 }, (table) => ({
   idxModerationStatus: index("idx_moderation_status").on(table.status, table.flagCount),
 }));
+
+/* =====================================================
+   CONSUMER ADDRESSES (saved address book per consumer)
+===================================================== */
+export const consumerAddresses = pgTable("consumer_addresses", {
+  id: varchar("id", { length: 36 }).primaryKey().default(sql`gen_random_uuid()`),
+  userId: varchar("user_id", { length: 36 }).notNull().references(() => users.id, { onDelete: "cascade" }),
+  label: text("label"),
+  line1: text("line1").notNull(),
+  city: text("city").notNull(),
+  state: text("state").notNull(),
+  zipCode: text("zip_code").notNull(),
+  isDefault: boolean("is_default").notNull().default(false),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+}, (table) => ({
+  idxConsumerAddressesUserId: index("consumer_addresses_user_id_idx").on(table.userId),
+}));
+
+export const insertConsumerAddressSchema = createInsertSchema(consumerAddresses).omit({
+  id: true,
+  createdAt: true,
+  updatedAt: true,
+});
+export type ConsumerAddress = typeof consumerAddresses.$inferSelect;
+export type InsertConsumerAddress = z.infer<typeof insertConsumerAddressSchema>;

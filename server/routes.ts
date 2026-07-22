@@ -14,6 +14,8 @@ import {
   subscriptionTiers,
   vendorSubscriptions,
   calculateAgeRange,
+  consumerAddresses,
+  insertConsumerAddressSchema,
   type User,
   type StaffMember,
   type StaffInvite,
@@ -6161,13 +6163,25 @@ export async function registerRoutes(
         return res.status(404).json({ error: "User not found" });
       }
 
+      // Ensure Stripe Customer exists for card vaulting
+      const stripeCustomerId = await stripeService.getOrCreateStripeCustomer({
+        userId,
+        email: user.email,
+        name: user.name || undefined,
+        existingStripeCustomerId: user.stripeCustomerId,
+      });
+      if (!user.stripeCustomerId || user.stripeCustomerId !== stripeCustomerId) {
+        await storage.updateUser(userId, { stripeCustomerId });
+      }
+
       // Create PaymentIntent with explicit vendor payout via transfer_data.amount
       const paymentIntent = await stripeService.createBookingPaymentIntent({
         totalChargedCents: totalChargedToConsumerCents,
         vendorPayoutCents,
-        customerId: user.stripeCustomerId || undefined,
+        customerId: stripeCustomerId,
         connectedAccountId: business.stripeAccountId,
         captureMethod,
+        saveForFutureUse: true,
         metadata: {
           type: 'appointment_booking',
           bookingId: appointmentId,
@@ -6310,6 +6324,17 @@ export async function registerRoutes(
         return res.status(404).json({ error: "User not found" });
       }
 
+      // Ensure Stripe Customer exists for card vaulting
+      const stripeCustomerId = await stripeService.getOrCreateStripeCustomer({
+        userId,
+        email: user.email,
+        name: user.name || undefined,
+        existingStripeCustomerId: user.stripeCustomerId,
+      });
+      if (!user.stripeCustomerId || user.stripeCustomerId !== stripeCustomerId) {
+        await storage.updateUser(userId, { stripeCustomerId });
+      }
+
       // Create PaymentIntent on platform balance — no transfer_data, matching the
       // business/staff booking pattern (createPlatformPaymentIntent). After
       // payment_intent.succeeded fires, the webhook handler transfers
@@ -6323,8 +6348,9 @@ export async function registerRoutes(
       // do not change these rates here.
       const paymentIntent = await stripeService.createPlatformPaymentIntent({
         amountCents: totalChargedToConsumerCents,
-        customerId: user.stripeCustomerId || undefined,
+        customerId: stripeCustomerId,
         captureMethod,
+        saveForFutureUse: true,
         metadata: {
           type: 'shoot_booking',
           bookingId: bookingId,
@@ -6461,11 +6487,28 @@ export async function registerRoutes(
         })),
       });
 
+      // Ensure Stripe Customer exists for card vaulting
+      const cartUser = await storage.getUser(userId);
+      if (!cartUser) {
+        return res.status(404).json({ success: false, error: { code: 'USER_NOT_FOUND', message: 'User not found' } });
+      }
+      const stripeCustomerId = await stripeService.getOrCreateStripeCustomer({
+        userId,
+        email: cartUser.email,
+        name: cartUser.name || undefined,
+        existingStripeCustomerId: cartUser.stripeCustomerId,
+      });
+      if (!cartUser.stripeCustomerId || cartUser.stripeCustomerId !== stripeCustomerId) {
+        await storage.updateUser(userId, { stripeCustomerId });
+      }
+
       const paymentIntent = await stripeService.createBookingPaymentIntent({
         totalChargedCents: totalChargedToConsumerCents,
         vendorPayoutCents: feeBreakdown.vendorNetCents,
+        customerId: stripeCustomerId,
         connectedAccountId: business.stripeAccountId,
         captureMethod: 'automatic',
+        saveForFutureUse: true,
         metadata: {
           type: 'product_purchase',
           orderId: order.id,
@@ -17546,6 +17589,223 @@ export async function registerRoutes(
     } catch (error) {
       console.error("[Mux] Webhook processing error:", error);
       return res.status(500).json({ error: "Webhook processing error" });
+    }
+  });
+
+  // =========================
+  // SAVED PAYMENT METHODS
+  // =========================
+
+  app.get("/api/me/payment-methods", authMiddleware, async (req, res) => {
+    const authReq = req as AuthenticatedRequest;
+    const userId = authReq.user?.userId;
+    if (!userId) return res.status(401).json({ error: "Not authenticated" });
+
+    try {
+      const user = await storage.getUser(userId);
+      if (!user) return res.status(404).json({ error: "User not found" });
+
+      if (!user.stripeCustomerId) {
+        return res.json({ paymentMethods: [], defaultPaymentMethodId: null });
+      }
+
+      const stripe = await getUncachableStripeClient();
+      const pms = await stripe.paymentMethods.list({
+        customer: user.stripeCustomerId,
+        type: 'card',
+        limit: 20,
+      });
+
+      res.json({
+        paymentMethods: pms.data,
+        defaultPaymentMethodId: user.defaultPaymentMethodId || null,
+      });
+    } catch (error: any) {
+      console.error("List payment methods error:", error);
+      res.status(500).json({ error: "Failed to list payment methods" });
+    }
+  });
+
+  app.post("/api/me/payment-methods/setup-intent", authMiddleware, async (req, res) => {
+    const authReq = req as AuthenticatedRequest;
+    const userId = authReq.user?.userId;
+    if (!userId) return res.status(401).json({ error: "Not authenticated" });
+
+    try {
+      const user = await storage.getUser(userId);
+      if (!user) return res.status(404).json({ error: "User not found" });
+
+      const stripeCustomerId = await stripeService.getOrCreateStripeCustomer({
+        userId,
+        email: user.email,
+        name: user.name || undefined,
+        existingStripeCustomerId: user.stripeCustomerId,
+      });
+      if (!user.stripeCustomerId || user.stripeCustomerId !== stripeCustomerId) {
+        await storage.updateUser(userId, { stripeCustomerId });
+      }
+
+      const stripe = await getUncachableStripeClient();
+      const setupIntent = await stripe.setupIntents.create({
+        customer: stripeCustomerId,
+        usage: 'off_session',
+        automatic_payment_methods: { enabled: true },
+      });
+
+      res.json({ clientSecret: setupIntent.client_secret, setupIntentId: setupIntent.id });
+    } catch (error: any) {
+      console.error("Create SetupIntent error:", error);
+      res.status(500).json({ error: "Failed to create setup intent" });
+    }
+  });
+
+  app.delete("/api/me/payment-methods/:paymentMethodId", authMiddleware, async (req, res) => {
+    const authReq = req as AuthenticatedRequest;
+    const userId = authReq.user?.userId;
+    if (!userId) return res.status(401).json({ error: "Not authenticated" });
+
+    try {
+      const { paymentMethodId } = req.params;
+      const user = await storage.getUser(userId);
+      if (!user) return res.status(404).json({ error: "User not found" });
+      if (!user.stripeCustomerId) return res.status(400).json({ error: "No saved payment methods" });
+
+      const stripe = await getUncachableStripeClient();
+      const pm = await stripe.paymentMethods.retrieve(paymentMethodId);
+      if (pm.customer !== user.stripeCustomerId) {
+        return res.status(403).json({ error: "Payment method does not belong to this account" });
+      }
+
+      await stripe.paymentMethods.detach(paymentMethodId);
+
+      if (user.defaultPaymentMethodId === paymentMethodId) {
+        await storage.updateUser(userId, { defaultPaymentMethodId: null });
+      }
+
+      res.json({ success: true });
+    } catch (error: any) {
+      console.error("Delete payment method error:", error);
+      res.status(500).json({ error: "Failed to delete payment method" });
+    }
+  });
+
+  app.patch("/api/me/payment-methods/default", authMiddleware, async (req, res) => {
+    const authReq = req as AuthenticatedRequest;
+    const userId = authReq.user?.userId;
+    if (!userId) return res.status(401).json({ error: "Not authenticated" });
+
+    try {
+      const { paymentMethodId } = req.body;
+      if (!paymentMethodId || typeof paymentMethodId !== 'string') {
+        return res.status(400).json({ error: "paymentMethodId is required" });
+      }
+
+      const user = await storage.getUser(userId);
+      if (!user) return res.status(404).json({ error: "User not found" });
+      if (!user.stripeCustomerId) return res.status(400).json({ error: "No saved payment methods" });
+
+      const stripe = await getUncachableStripeClient();
+      const pm = await stripe.paymentMethods.retrieve(paymentMethodId);
+      if (pm.customer !== user.stripeCustomerId) {
+        return res.status(403).json({ error: "Payment method does not belong to this account" });
+      }
+
+      await storage.updateUser(userId, { defaultPaymentMethodId: paymentMethodId });
+      res.json({ success: true, defaultPaymentMethodId: paymentMethodId });
+    } catch (error: any) {
+      console.error("Set default payment method error:", error);
+      res.status(500).json({ error: "Failed to set default payment method" });
+    }
+  });
+
+  // =========================
+  // CONSUMER SAVED ADDRESSES
+  // =========================
+
+  app.get("/api/me/addresses", authMiddleware, async (req, res) => {
+    const authReq = req as AuthenticatedRequest;
+    const userId = authReq.user?.userId;
+    if (!userId) return res.status(401).json({ error: "Not authenticated" });
+
+    try {
+      const addresses = await storage.getConsumerAddresses(userId);
+      res.json({ addresses });
+    } catch (error: any) {
+      console.error("List addresses error:", error);
+      res.status(500).json({ error: "Failed to list addresses" });
+    }
+  });
+
+  app.post("/api/me/addresses", authMiddleware, async (req, res) => {
+    const authReq = req as AuthenticatedRequest;
+    const userId = authReq.user?.userId;
+    if (!userId) return res.status(401).json({ error: "Not authenticated" });
+
+    try {
+      const parsed = insertConsumerAddressSchema.safeParse({ ...req.body, userId });
+      if (!parsed.success) {
+        return res.status(400).json({ error: "Invalid address data", details: parsed.error.flatten() });
+      }
+
+      // If new address is default, clear isDefault on all existing addresses first
+      if (parsed.data.isDefault) {
+        const existing = await storage.getConsumerAddresses(userId);
+        for (const addr of existing) {
+          if (addr.isDefault) {
+            await storage.updateConsumerAddress(addr.id, userId, { isDefault: false });
+          }
+        }
+      }
+
+      const address = await storage.createConsumerAddress(parsed.data);
+      res.status(201).json({ address });
+    } catch (error: any) {
+      console.error("Create address error:", error);
+      res.status(500).json({ error: "Failed to create address" });
+    }
+  });
+
+  app.put("/api/me/addresses/:id", authMiddleware, async (req, res) => {
+    const authReq = req as AuthenticatedRequest;
+    const userId = authReq.user?.userId;
+    if (!userId) return res.status(401).json({ error: "Not authenticated" });
+
+    try {
+      const { id } = req.params;
+
+      // If updating to isDefault=true, clear isDefault on all other addresses first
+      if (req.body.isDefault === true) {
+        const existing = await storage.getConsumerAddresses(userId);
+        for (const addr of existing) {
+          if (addr.isDefault && addr.id !== id) {
+            await storage.updateConsumerAddress(addr.id, userId, { isDefault: false });
+          }
+        }
+      }
+
+      const address = await storage.updateConsumerAddress(id, userId, req.body);
+      res.json({ address });
+    } catch (error: any) {
+      if (error.message === 'Address not found or access denied') {
+        return res.status(404).json({ error: error.message });
+      }
+      console.error("Update address error:", error);
+      res.status(500).json({ error: "Failed to update address" });
+    }
+  });
+
+  app.delete("/api/me/addresses/:id", authMiddleware, async (req, res) => {
+    const authReq = req as AuthenticatedRequest;
+    const userId = authReq.user?.userId;
+    if (!userId) return res.status(401).json({ error: "Not authenticated" });
+
+    try {
+      const { id } = req.params;
+      await storage.deleteConsumerAddress(id, userId);
+      res.json({ success: true });
+    } catch (error: any) {
+      console.error("Delete address error:", error);
+      res.status(500).json({ error: "Failed to delete address" });
     }
   });
 

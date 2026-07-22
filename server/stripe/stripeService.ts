@@ -25,6 +25,42 @@ export class StripeService {
     });
   }
 
+  /**
+   * Read-through helper: returns an existing Stripe Customer ID if valid, or
+   * creates a new one. Handles the edge case where a Customer was deleted
+   * directly in the Stripe Dashboard (retrieve throws a "No such customer" error).
+   * Callers are responsible for persisting the returned ID to the users table
+   * if it differs from existingStripeCustomerId.
+   */
+  async getOrCreateStripeCustomer(params: {
+    userId: string;
+    email: string;
+    name?: string;
+    existingStripeCustomerId?: string | null;
+  }): Promise<string> {
+    const stripe = await getUncachableStripeClient();
+
+    if (params.existingStripeCustomerId) {
+      try {
+        const existing = await stripe.customers.retrieve(params.existingStripeCustomerId);
+        if (!('deleted' in existing) || !existing.deleted) {
+          return existing.id;
+        }
+        // Customer was deleted on Stripe side — fall through to create
+      } catch (err: any) {
+        if (err?.code !== 'resource_missing') throw err;
+        // Customer doesn't exist on Stripe — fall through to create
+      }
+    }
+
+    const customer = await stripe.customers.create({
+      email: params.email,
+      name: params.name,
+      metadata: { userId: params.userId },
+    });
+    return customer.id;
+  }
+
   // =========================
   // STRIPE CONNECT (VENDORS)
   // =========================
@@ -341,6 +377,7 @@ export class StripeService {
     captureMethod: 'automatic' | 'manual';
     metadata: Record<string, string>;
     description?: string;
+    saveForFutureUse?: boolean;
   }) {
     const stripe = await getUncachableStripeClient();
 
@@ -361,6 +398,10 @@ export class StripeService {
 
     if (params.customerId) {
       paymentIntentData.customer = params.customerId;
+    }
+
+    if (params.saveForFutureUse) {
+      paymentIntentData.setup_future_usage = 'off_session';
     }
 
     return stripe.paymentIntents.create(paymentIntentData as any, {
