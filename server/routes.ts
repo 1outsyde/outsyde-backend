@@ -6452,6 +6452,7 @@ export async function registerRoutes(
         influencerTransferStatus: isInfluencerAttributed ? 'pending' : null,
         feeModelVersion: feeBreakdown.feeModelVersion,
         status: 'pending',
+        shippingAddress: shippingAddress ? JSON.stringify(shippingAddress) : null,
         items: items.map((i: { productId: string; name: string; quantity: number; priceCents: number }) => ({
           productId: i.productId,
           name: i.name,
@@ -12317,6 +12318,8 @@ export async function registerRoutes(
     }
 
     try {
+      const { shippingAddress } = req.body || {};
+
       const user = await storage.getUser(userId);
       if (!user) {
         return res.status(404).json({ error: "User not found" });
@@ -12491,6 +12494,7 @@ export async function registerRoutes(
           influencerTransferStatus: isInfluencerAttributed ? 'pending' : null,
           feeModelVersion: feeBreakdown.feeModelVersion,
           status: 'pending',
+          shippingAddress: shippingAddress ? JSON.stringify(shippingAddress) : null,
           items: vendorItems.map(item => ({
             productId: item.productId,
             name: productMap.get(item.productId).name,
