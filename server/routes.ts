@@ -11127,6 +11127,83 @@ export async function registerRoutes(
     }
   });
 
+  // ── Staff weekly (recurring) availability ──────────────────────────────────
+  // These endpoints let a staff member manage their own recurring weekly schedule,
+  // stored as staffMemberId-scoped rows in the weekly_availability table.
+  // The hoursOfOperation sync is intentionally skipped — staff rows are excluded
+  // from the business-wide sync that the business-owner PUT endpoint performs.
+
+  // GET /api/staff/me/weekly-availability
+  app.get("/api/staff/me/weekly-availability", async (req, res) => {
+    const userId = getUserIdFromRequest(req);
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    try {
+      const resolved = await resolveRequestingStaffMember(req, userId);
+      if ("status" in resolved) {
+        return res.status(resolved.status).json(resolved.body);
+      }
+      const staff = resolved.staff;
+
+      const availability = await storage.getWeeklyAvailability(
+        "business",
+        staff.businessId,
+        staff.id
+      );
+
+      res.json({ availability });
+    } catch (error) {
+      console.error("Get staff weekly availability error:", error);
+      res.status(500).json({ error: "Failed to get weekly availability" });
+    }
+  });
+
+  // PUT /api/staff/me/weekly-availability
+  app.put("/api/staff/me/weekly-availability", async (req, res) => {
+    const userId = getUserIdFromRequest(req);
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    try {
+      const resolved = await resolveRequestingStaffMember(req, userId);
+      if ("status" in resolved) {
+        return res.status(resolved.status).json(resolved.body);
+      }
+      const staff = resolved.staff;
+
+      const slotSchema = z.object({
+        dayOfWeek: z.number().int().min(0).max(6),
+        startTime: z.string().regex(/^\d{2}:\d{2}$/, "startTime must be HH:MM"),
+        endTime: z.string().regex(/^\d{2}:\d{2}$/, "endTime must be HH:MM"),
+        isActive: z.boolean().optional().default(true),
+      });
+
+      const bodySchema = z.object({
+        slots: z.array(slotSchema),
+      });
+
+      const { slots } = bodySchema.parse(req.body);
+
+      const availability = await storage.setWeeklyAvailability(
+        "business",
+        staff.businessId,
+        slots,
+        staff.id
+      );
+
+      res.json({ availability });
+    } catch (error) {
+      if (error instanceof z.ZodError) {
+        return res.status(400).json({ error: "Invalid data", details: error.errors });
+      }
+      console.error("Set staff weekly availability error:", error);
+      res.status(500).json({ error: "Failed to set weekly availability" });
+    }
+  });
+
   // Get staff member's earnings
   app.get("/api/staff/my-earnings", async (req, res) => {
     const userId = getUserIdFromRequest(req);
