@@ -1113,21 +1113,38 @@ export async function validateBookingSlot(
   let serviceName: string;
   
   if (providerType === 'business') {
-    const [service] = await db.select()
+    const [vendorService] = await db.select()
       .from(vendorServices)
       .where(eq(vendorServices.id, serviceId));
-    
-    if (!service) {
+
+    if (vendorService) {
+      serviceDurationMinutes = vendorService.durationMinutes || 60;
+      servicePriceCents = vendorService.price || 0; // price column is already integer cents
+      serviceName = vendorService.name;
+    } else if (staffMemberId) {
+      // Service may be staff-owned — fall back to staff_services scoped to this staff member
+      const [staffService] = await db.select()
+        .from(staffServices)
+        .where(and(eq(staffServices.id, serviceId), eq(staffServices.staffMemberId, staffMemberId)));
+
+      if (!staffService) {
+        return {
+          valid: false,
+          errorCode: AVAILABILITY_ERRORS.SERVICE_NOT_FOUND,
+          errorMessage: 'Service not found',
+        };
+      }
+
+      serviceDurationMinutes = staffService.durationMinutes;
+      servicePriceCents = staffService.priceCents;
+      serviceName = staffService.name;
+    } else {
       return {
         valid: false,
         errorCode: AVAILABILITY_ERRORS.SERVICE_NOT_FOUND,
         errorMessage: 'Service not found',
       };
     }
-    
-    serviceDurationMinutes = service.durationMinutes || 60;
-    servicePriceCents = service.price || 0; // price column is already integer cents
-    serviceName = service.name;
   } else {
     const [service] = await db.select()
       .from(photographerServices)
@@ -1308,14 +1325,11 @@ type ServiceSnapshot = {
 /**
  * Resolve service name/price/duration/cancellation-policy for hold creation.
  *
- * When staffMemberId is provided the serviceId refers to a staff_services row
- * (staff-owned service). Otherwise it refers to vendorServices (business) or
- * photographerServices (photographer).
- *
- * Deliberately NOT shared with validateBookingSlot's inline service lookup
- * (same underlying query, duplicated on purpose) — validateBookingSlot backs
- * the separate POST /api/booking/validate route and is left untouched in this
- * pass so that route's behavior can't be affected by this change.
+ * When staffMemberId is provided, tries staff_services first (scoped to that
+ * staff member). If the service is not found there, falls back to vendorServices
+ * — a business-wide service can still be booked while a staff member is selected
+ * for scheduling purposes. Without staffMemberId, routes directly to vendorServices
+ * (business) or photographerServices (photographer).
  */
 async function resolveServiceForHold(
   providerType: 'business' | 'photographer',
@@ -1323,24 +1337,49 @@ async function resolveServiceForHold(
   staffMemberId?: string
 ): Promise<ServiceSnapshot | null> {
   if (staffMemberId) {
-    const [service] = await db.select()
+    const [staffService] = await db.select()
       .from(staffServices)
-      .where(eq(staffServices.id, serviceId));
+      .where(and(eq(staffServices.id, serviceId), eq(staffServices.staffMemberId, staffMemberId)));
 
-    if (!service) return null;
+    if (staffService) {
+      return {
+        serviceDurationMinutes: staffService.durationMinutes,
+        servicePriceCents: staffService.priceCents,
+        serviceName: staffService.name,
+        serviceFullRefundWindow: staffService.fullRefundWindow ?? null,
+        serviceHasPartialRefund: staffService.hasPartialRefund ?? null,
+        servicePartialRefundWindow: staffService.partialRefundWindow ?? null,
+        servicePartialRefundPercentage: staffService.partialRefundPercentage ?? null,
+        serviceHasCancellationFee: staffService.hasCancellationFee ?? null,
+        serviceCancellationFeeType: staffService.cancellationFeeType ?? null,
+        serviceCancellationFeeAmount: staffService.cancellationFeeAmount ?? null,
+      };
+    }
 
-    return {
-      serviceDurationMinutes: service.durationMinutes,
-      servicePriceCents: service.priceCents,
-      serviceName: service.name,
-      serviceFullRefundWindow: service.fullRefundWindow ?? null,
-      serviceHasPartialRefund: service.hasPartialRefund ?? null,
-      servicePartialRefundWindow: service.partialRefundWindow ?? null,
-      servicePartialRefundPercentage: service.partialRefundPercentage ?? null,
-      serviceHasCancellationFee: service.hasCancellationFee ?? null,
-      serviceCancellationFeeType: service.cancellationFeeType ?? null,
-      serviceCancellationFeeAmount: service.cancellationFeeAmount ?? null,
-    };
+    // Not a staff-owned service — fall through to vendorServices below.
+    // (business-wide service booked with a staff member selected for scheduling)
+    if (providerType === 'business') {
+      const [vendorService] = await db.select()
+        .from(vendorServices)
+        .where(eq(vendorServices.id, serviceId));
+
+      if (!vendorService) return null;
+
+      return {
+        serviceDurationMinutes: vendorService.durationMinutes || 60,
+        servicePriceCents: vendorService.price || 0, // price column is already integer cents
+        serviceName: vendorService.name,
+        serviceFullRefundWindow: vendorService.fullRefundWindow ?? null,
+        serviceHasPartialRefund: vendorService.hasPartialRefund ?? null,
+        servicePartialRefundWindow: vendorService.partialRefundWindow ?? null,
+        servicePartialRefundPercentage: vendorService.partialRefundPercentage ?? null,
+        serviceHasCancellationFee: vendorService.hasCancellationFee ?? null,
+        serviceCancellationFeeType: vendorService.cancellationFeeType ?? null,
+        serviceCancellationFeeAmount: vendorService.cancellationFeeAmount ?? null,
+      };
+    }
+
+    return null;
   }
 
   if (providerType === 'business') {
