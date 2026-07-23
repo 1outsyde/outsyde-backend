@@ -6415,14 +6415,8 @@ export async function registerRoutes(
         return res.status(400).json({ success: false, error: { code: 'INVALID_INPUT', message: 'Items array is required and must not be empty' } });
       }
 
-      // Validate single vendor (keyed on vendorId, not client-supplied Stripe account)
+      // Collect unique vendor IDs (keyed on vendorId, not client-supplied Stripe account)
       const vendorIds = new Set(items.map((i: { vendorId: string }) => i.vendorId));
-      if (vendorIds.size > 1) {
-        return res.status(400).json({
-          success: false,
-          error: { code: 'MULTI_VENDOR_NOT_SUPPORTED', message: 'Please checkout one vendor at a time. Multi-vendor checkout is coming soon.' }
-        });
-      }
 
       // Validate item fields
       for (const item of items) {
@@ -6434,116 +6428,216 @@ export async function registerRoutes(
         }
       }
 
-      const businessId = items[0].vendorId || '';
-      if (!businessId) {
-        return res.status(400).json({ success: false, error: { code: 'INVALID_INPUT', message: 'vendorId is required' } });
-      }
+      if (vendorIds.size === 1) {
+        // ── SINGLE-VENDOR PATH (unchanged) ──────────────────────────────────
 
-      // Look up the vendor's Stripe Connect account server-side — the client never
-      // needs to supply this, and we must not trust a client-supplied value.
-      const business = await storage.getBusiness(businessId);
-      if (!business) {
-        return res.status(404).json({ success: false, error: { code: 'BUSINESS_NOT_FOUND', message: 'Business not found' } });
-      }
-      if (!business.stripeAccountId) {
-        return res.status(400).json({ success: false, error: { code: 'STRIPE_NOT_ONBOARDED', message: 'Business has not completed Stripe onboarding' } });
-      }
+        const businessId = items[0].vendorId || '';
+        if (!businessId) {
+          return res.status(400).json({ success: false, error: { code: 'INVALID_INPUT', message: 'vendorId is required' } });
+        }
 
-      // Calculate product fees using the canonical fee engine (same as POST /api/cart/checkout)
-      const basePriceCents = items.reduce((sum: number, i: { priceCents: number; quantity: number }) => sum + (i.priceCents * i.quantity), 0);
-      const { getActiveAttribution } = await import('./influencerTrackingService');
-      const attribution = await getActiveAttribution(userId);
-      const isInfluencerAttributed = !!attribution;
-      const { calculateProductFees } = await import('./fees');
-      const feeBreakdown = calculateProductFees(basePriceCents, { influencerAttributed: isInfluencerAttributed });
+        // Look up the vendor's Stripe Connect account server-side — the client never
+        // needs to supply this, and we must not trust a client-supplied value.
+        const business = await storage.getBusiness(businessId);
+        if (!business) {
+          return res.status(404).json({ success: false, error: { code: 'BUSINESS_NOT_FOUND', message: 'Business not found' } });
+        }
+        if (!business.stripeAccountId) {
+          return res.status(400).json({ success: false, error: { code: 'STRIPE_NOT_ONBOARDED', message: 'Business has not completed Stripe onboarding' } });
+        }
 
-      const totalChargedToConsumerCents = feeBreakdown.customerTotalBeforeTaxCents;
-      // Points = 1 per cent of consumer service fee (100 points per dollar of fee)
-      const outsydePointsEarned = feeBreakdown.consumerServiceFeeCents;
+        // Calculate product fees using the canonical fee engine (same as POST /api/cart/checkout)
+        const basePriceCents = items.reduce((sum: number, i: { priceCents: number; quantity: number }) => sum + (i.priceCents * i.quantity), 0);
+        const { getActiveAttribution } = await import('./influencerTrackingService');
+        const attribution = await getActiveAttribution(userId);
+        const isInfluencerAttributed = !!attribution;
+        const { calculateProductFees } = await import('./fees');
+        const feeBreakdown = calculateProductFees(basePriceCents, { influencerAttributed: isInfluencerAttributed });
 
-      // Create the order row BEFORE touching Stripe so a record always exists
-      const order = await storage.createOrder({
-        customerId: userId,
-        businessId,
-        totalAmount: basePriceCents,
-        platformFee: feeBreakdown.platformFeeCents,
-        vendorNet: feeBreakdown.vendorNetCents,
-        consumerServiceFee: feeBreakdown.consumerServiceFeeCents,
-        influencerCommission: feeBreakdown.influencerCommissionCents,
-        grossChargeAmount: feeBreakdown.customerTotalBeforeTaxCents,
-        outsydeGrossRevenue: feeBreakdown.outsydeGrossRevenueCents,
-        attributedInfluencerId: attribution?.influencerId || null,
-        influencerCodeUsed: attribution?.refCode || null,
-        commissionStatus: isInfluencerAttributed ? 'pending' : null,
-        influencerTransferStatus: isInfluencerAttributed ? 'pending' : null,
-        feeModelVersion: feeBreakdown.feeModelVersion,
-        status: 'pending',
-        shippingAddress: shippingAddress ? JSON.stringify(shippingAddress) : null,
-        items: items.map((i: { productId: string; name: string; quantity: number; priceCents: number }) => ({
-          productId: i.productId,
-          name: i.name,
-          quantity: i.quantity,
-          price: i.priceCents,
-        })),
-      });
+        const totalChargedToConsumerCents = feeBreakdown.customerTotalBeforeTaxCents;
+        // Points = 1 per cent of consumer service fee (100 points per dollar of fee)
+        const outsydePointsEarned = feeBreakdown.consumerServiceFeeCents;
 
-      // Ensure Stripe Customer exists for card vaulting
-      const cartUser = await storage.getUser(userId);
-      if (!cartUser) {
-        return res.status(404).json({ success: false, error: { code: 'USER_NOT_FOUND', message: 'User not found' } });
-      }
-      const stripeCustomerId = await stripeService.getOrCreateStripeCustomer({
-        userId,
-        email: cartUser.email,
-        name: cartUser.name || undefined,
-        existingStripeCustomerId: cartUser.stripeCustomerId,
-      });
-      if (!cartUser.stripeCustomerId || cartUser.stripeCustomerId !== stripeCustomerId) {
-        await storage.updateUser(userId, { stripeCustomerId });
-      }
-
-      const paymentIntent = await stripeService.createBookingPaymentIntent({
-        totalChargedCents: totalChargedToConsumerCents,
-        vendorPayoutCents: feeBreakdown.vendorNetCents,
-        customerId: stripeCustomerId,
-        connectedAccountId: business.stripeAccountId,
-        captureMethod: 'automatic',
-        saveForFutureUse: true,
-        metadata: {
-          type: 'product_purchase',
-          orderId: order.id,
-          userId,
+        // Create the order row BEFORE touching Stripe so a record always exists
+        const order = await storage.createOrder({
+          customerId: userId,
           businessId,
-          basePriceCents: String(basePriceCents),
-          consumerUpchargeCents: String(feeBreakdown.consumerServiceFeeCents),
-          vendorPayoutCents: String(feeBreakdown.vendorNetCents),
-          platformFeeCents: String(feeBreakdown.platformFeeCents),
-          outsydePointsEarned: String(outsydePointsEarned),
-          itemCount: String(items.length),
-          itemSummary: items.map((i: { name: string; quantity: number }) => `${i.name} x${i.quantity}`).join(', ').substring(0, 490),
-        },
-        description: 'Product purchase via Outsyde',
-      });
+          totalAmount: basePriceCents,
+          platformFee: feeBreakdown.platformFeeCents,
+          vendorNet: feeBreakdown.vendorNetCents,
+          consumerServiceFee: feeBreakdown.consumerServiceFeeCents,
+          influencerCommission: feeBreakdown.influencerCommissionCents,
+          grossChargeAmount: feeBreakdown.customerTotalBeforeTaxCents,
+          outsydeGrossRevenue: feeBreakdown.outsydeGrossRevenueCents,
+          attributedInfluencerId: attribution?.influencerId || null,
+          influencerCodeUsed: attribution?.refCode || null,
+          commissionStatus: isInfluencerAttributed ? 'pending' : null,
+          influencerTransferStatus: isInfluencerAttributed ? 'pending' : null,
+          feeModelVersion: feeBreakdown.feeModelVersion,
+          status: 'pending',
+          shippingAddress: shippingAddress ? JSON.stringify(shippingAddress) : null,
+          items: items.map((i: { productId: string; name: string; quantity: number; priceCents: number }) => ({
+            productId: i.productId,
+            name: i.name,
+            quantity: i.quantity,
+            price: i.priceCents,
+          })),
+        });
 
-      // Record the Stripe PaymentIntent ID against the order row
-      await storage.updateOrder(order.id, { stripePaymentIntentId: paymentIntent.id });
+        // Ensure Stripe Customer exists for card vaulting
+        const cartUser = await storage.getUser(userId);
+        if (!cartUser) {
+          return res.status(404).json({ success: false, error: { code: 'USER_NOT_FOUND', message: 'User not found' } });
+        }
+        const stripeCustomerId = await stripeService.getOrCreateStripeCustomer({
+          userId,
+          email: cartUser.email,
+          name: cartUser.name || undefined,
+          existingStripeCustomerId: cartUser.stripeCustomerId,
+        });
+        if (!cartUser.stripeCustomerId || cartUser.stripeCustomerId !== stripeCustomerId) {
+          await storage.updateUser(userId, { stripeCustomerId });
+        }
 
-      console.log(`[Cart] Created PaymentIntent ${paymentIntent.id} for product purchase, order ${order.id} (charged: ${totalChargedToConsumerCents}¢, vendor: ${feeBreakdown.vendorNetCents}¢, platform: ${feeBreakdown.platformFeeCents}¢)`);
-
-      res.json({
-        success: true,
-        clientSecret: paymentIntent.client_secret,
-        paymentIntentId: paymentIntent.id,
-        orderId: order.id,
-        feeBreakdown: {
-          basePriceCents,
-          consumerUpchargeCents: feeBreakdown.consumerServiceFeeCents,
+        const paymentIntent = await stripeService.createBookingPaymentIntent({
+          totalChargedCents: totalChargedToConsumerCents,
           vendorPayoutCents: feeBreakdown.vendorNetCents,
-          platformFeeCents: feeBreakdown.platformFeeCents,
-          totalChargedToConsumerCents,
-          outsydePointsEarned,
-        },
-      });
+          customerId: stripeCustomerId,
+          connectedAccountId: business.stripeAccountId,
+          captureMethod: 'automatic',
+          saveForFutureUse: true,
+          metadata: {
+            type: 'product_purchase',
+            orderId: order.id,
+            userId,
+            businessId,
+            basePriceCents: String(basePriceCents),
+            consumerUpchargeCents: String(feeBreakdown.consumerServiceFeeCents),
+            vendorPayoutCents: String(feeBreakdown.vendorNetCents),
+            platformFeeCents: String(feeBreakdown.platformFeeCents),
+            outsydePointsEarned: String(outsydePointsEarned),
+            itemCount: String(items.length),
+            itemSummary: items.map((i: { name: string; quantity: number }) => `${i.name} x${i.quantity}`).join(', ').substring(0, 490),
+          },
+          description: 'Product purchase via Outsyde',
+        });
+
+        // Record the Stripe PaymentIntent ID against the order row
+        await storage.updateOrder(order.id, { stripePaymentIntentId: paymentIntent.id });
+
+        console.log(`[Cart] Created PaymentIntent ${paymentIntent.id} for product purchase, order ${order.id} (charged: ${totalChargedToConsumerCents}¢, vendor: ${feeBreakdown.vendorNetCents}¢, platform: ${feeBreakdown.platformFeeCents}¢)`);
+
+        res.json({
+          success: true,
+          clientSecret: paymentIntent.client_secret,
+          paymentIntentId: paymentIntent.id,
+          orderId: order.id,
+          feeBreakdown: {
+            basePriceCents,
+            consumerUpchargeCents: feeBreakdown.consumerServiceFeeCents,
+            vendorPayoutCents: feeBreakdown.vendorNetCents,
+            platformFeeCents: feeBreakdown.platformFeeCents,
+            totalChargedToConsumerCents,
+            outsydePointsEarned,
+          },
+        });
+
+      } else {
+        // ── MULTI-VENDOR PATH ───────────────────────────────────────────────
+        // One charge to the consumer covering all vendors; the webhook fires
+        // individual transfers to each vendor's connected account after success.
+
+        const { getActiveAttribution } = await import('./influencerTrackingService');
+        const attribution = await getActiveAttribution(userId);
+        const isInfluencerAttributed = !!attribution;
+        const { calculateProductFees } = await import('./fees');
+
+        // Create the order group row first so every per-vendor order can reference it
+        const orderGroup = await storage.createOrderGroup({
+          customerId: userId,
+          totalVendors: vendorIds.size,
+          completedVendors: 0,
+          status: 'pending',
+        });
+
+        const vendorOrders: Array<{ orderId: string; businessId: string; vendorNetCents: number }> = [];
+        let fullConsumerTotalCents = 0;
+
+        for (const vendorId of vendorIds) {
+          const vendorItems = items.filter((i: { vendorId: string }) => i.vendorId === vendorId);
+          const vendorBaseCents = vendorItems.reduce((sum: number, i: { priceCents: number; quantity: number }) => sum + (i.priceCents * i.quantity), 0);
+          const feeBreakdown = calculateProductFees(vendorBaseCents, { influencerAttributed: isInfluencerAttributed });
+
+          const order = await storage.createOrder({
+            customerId: userId,
+            businessId: vendorId,
+            orderGroupId: orderGroup.id,
+            totalAmount: vendorBaseCents,
+            platformFee: feeBreakdown.platformFeeCents,
+            vendorNet: feeBreakdown.vendorNetCents,
+            consumerServiceFee: feeBreakdown.consumerServiceFeeCents,
+            influencerCommission: feeBreakdown.influencerCommissionCents,
+            grossChargeAmount: feeBreakdown.customerTotalBeforeTaxCents,
+            outsydeGrossRevenue: feeBreakdown.outsydeGrossRevenueCents,
+            attributedInfluencerId: attribution?.influencerId || null,
+            influencerCodeUsed: attribution?.refCode || null,
+            commissionStatus: isInfluencerAttributed ? 'pending' : null,
+            influencerTransferStatus: isInfluencerAttributed ? 'pending' : null,
+            feeModelVersion: feeBreakdown.feeModelVersion,
+            status: 'pending',
+            shippingAddress: shippingAddress ? JSON.stringify(shippingAddress) : null,
+            items: vendorItems.map((i: { productId: string; name: string; quantity: number; priceCents: number }) => ({
+              productId: i.productId,
+              name: i.name,
+              quantity: i.quantity,
+              price: i.priceCents,
+            })),
+          });
+
+          vendorOrders.push({ orderId: order.id, businessId: vendorId, vendorNetCents: feeBreakdown.vendorNetCents });
+          fullConsumerTotalCents += feeBreakdown.customerTotalBeforeTaxCents;
+        }
+
+        // Ensure Stripe Customer exists for card vaulting
+        const cartUser = await storage.getUser(userId);
+        if (!cartUser) {
+          return res.status(404).json({ success: false, error: { code: 'USER_NOT_FOUND', message: 'User not found' } });
+        }
+        const stripeCustomerId = await stripeService.getOrCreateStripeCustomer({
+          userId,
+          email: cartUser.email,
+          name: cartUser.name || undefined,
+          existingStripeCustomerId: cartUser.stripeCustomerId,
+        });
+        if (!cartUser.stripeCustomerId || cartUser.stripeCustomerId !== stripeCustomerId) {
+          await storage.updateUser(userId, { stripeCustomerId });
+        }
+
+        const paymentIntent = await stripeService.createPlatformPaymentIntent({
+          amountCents: fullConsumerTotalCents,
+          customerId: stripeCustomerId,
+          captureMethod: 'automatic',
+          saveForFutureUse: true,
+          metadata: {
+            type: 'multi_vendor_product_purchase',
+            orderGroupId: orderGroup.id,
+            userId,
+            vendorOrders: JSON.stringify(vendorOrders).slice(0, 490),
+          },
+          description: 'Multi-vendor product purchase via Outsyde',
+        });
+
+        console.log(`[Cart] Created multi-vendor PaymentIntent ${paymentIntent.id} for order group ${orderGroup.id} (${vendorIds.size} vendors, charged: ${fullConsumerTotalCents}¢)`);
+
+        res.json({
+          success: true,
+          clientSecret: paymentIntent.client_secret,
+          orderGroupId: orderGroup.id,
+          feeBreakdown: {
+            totalChargedToConsumerCents: fullConsumerTotalCents,
+          },
+        });
+      }
     } catch (error: unknown) {
       console.error("Create cart PaymentIntent error:", error);
       res.status(500).json({ success: false, error: { code: 'SERVER_ERROR', message: 'Failed to create payment intent' } });
