@@ -658,7 +658,7 @@ export interface IStorage {
   getUserBookings(userId: string): Promise<ShootBooking[]>;
   getOrder(orderId: string): Promise<Order | undefined>;
   getOrderByCheckoutSession(sessionId: string): Promise<Order | undefined>;
-  getVendorOrders(businessId: string): Promise<Order[]>;
+  getVendorOrders(businessId: string): Promise<(Order & { customerName: string | null })[]>;
   createOrder(data: InsertOrder): Promise<Order>;
   updateOrder(orderId: string, updates: Partial<Order>): Promise<Order | undefined>;
   
@@ -2704,8 +2704,18 @@ export class DatabaseStorage implements IStorage {
     return result[0];
   }
 
-  async getVendorOrders(businessId: string): Promise<Order[]> {
-    return db.select().from(orders).where(eq(orders.businessId, businessId));
+  async getVendorOrders(businessId: string): Promise<(Order & { customerName: string | null })[]> {
+    const rows = await db
+      .select()
+      .from(orders)
+      .leftJoin(users, eq(orders.customerId, users.id))
+      .where(eq(orders.businessId, businessId));
+    return rows.map(({ orders: order, users: user }) => ({
+      ...order,
+      customerName: user
+        ? [user.firstName, user.lastName].filter(Boolean).join(" ").trim() || null
+        : null,
+    }));
   }
 
   async createOrder(data: InsertOrder): Promise<Order> {
