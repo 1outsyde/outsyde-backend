@@ -654,6 +654,7 @@ export interface IStorage {
   getAllShootBookings(): Promise<ShootBooking[]>;
   getAllConversations(): Promise<Conversation[]>;
   getUserOrders(userId: string): Promise<Order[]>;
+  getProductImagesByIds(productIds: string[]): Promise<Record<string, string | null>>;
   getUserBookings(userId: string): Promise<ShootBooking[]>;
   getOrder(orderId: string): Promise<Order | undefined>;
   getOrderByCheckoutSession(sessionId: string): Promise<Order | undefined>;
@@ -2683,6 +2684,15 @@ export class DatabaseStorage implements IStorage {
 
   async getUserOrders(userId: string): Promise<Order[]> {
     return db.select().from(orders).where(eq(orders.customerId, userId));
+  }
+
+  async getProductImagesByIds(productIds: string[]): Promise<Record<string, string | null>> {
+    if (productIds.length === 0) return {};
+    const rows = await db
+      .select({ id: vendorProducts.id, imageUrl: vendorProducts.imageUrl })
+      .from(vendorProducts)
+      .where(inArray(vendorProducts.id, productIds));
+    return Object.fromEntries(rows.map((r) => [r.id, r.imageUrl ?? null]));
   }
 
   async getUserBookings(userId: string): Promise<ShootBooking[]> {
