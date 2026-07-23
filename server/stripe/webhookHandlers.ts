@@ -123,13 +123,14 @@ export class WebhookHandlers {
     // orderId instead of bookingId — include it in the guard so they are not
     // silently dropped.
     const orderIdFromMetadata = metadata.orderId;
+    const orderGroupIdFromMetadata = metadata.orderGroupId;
 
-    if (!type || (!bookingId && !appointmentIdFromMetadata && !orderIdFromMetadata)) {
+    if (!type || (!bookingId && !appointmentIdFromMetadata && !orderIdFromMetadata && !orderGroupIdFromMetadata)) {
       // Not a booking-related PaymentIntent, ignore
       return;
     }
 
-    console.log(`[Stripe] PaymentIntent succeeded for ${type} ${bookingId || appointmentIdFromMetadata || orderIdFromMetadata}`);
+    console.log(`[Stripe] PaymentIntent succeeded for ${type} ${bookingId || appointmentIdFromMetadata || orderIdFromMetadata || orderGroupIdFromMetadata}`);
 
     try {
       if (type === 'appointment_booking') {
@@ -667,6 +668,124 @@ export class WebhookHandlers {
         }
 
         console.log(`[Stripe] Product purchase completed: Order ${orderId} marked as paid`);
+
+      } else if (type === 'multi_vendor_product_purchase') {
+        // POST /api/cart/payment-intent multi-vendor path.
+        // One platform charge covers all vendors; we transfer each vendor's
+        // net payout here and mark every per-vendor order as paid.
+
+        let vendorOrders: Array<{ orderId: string; businessId: string; vendorNetCents: number }> = [];
+        try {
+          vendorOrders = JSON.parse(metadata.vendorOrders || '[]');
+        } catch (parseErr) {
+          console.error(`[Stripe] multi_vendor_product_purchase ${paymentIntent.id}: failed to parse vendorOrders metadata — manual reconciliation required`, parseErr);
+          return;
+        }
+
+        for (const vendorOrder of vendorOrders) {
+          const order = await storage.getOrder(vendorOrder.orderId);
+          if (!order || order.status === 'paid') continue;
+
+          await storage.updateOrder(vendorOrder.orderId, {
+            status: 'paid',
+            stripePaymentIntentId: paymentIntent.id,
+          });
+
+          // Decrement inventory for this vendor's items
+          if (order.items && Array.isArray(order.items)) {
+            for (const item of order.items) {
+              try {
+                const product = await storage.getVendorProduct(item.productId);
+                if (product?.trackInventory && product.inventory !== null) {
+                  const newInventory = Math.max(0, (product.inventory ?? 0) - item.quantity);
+                  await storage.updateVendorProduct(item.productId, { inventory: newInventory });
+                  console.log(`[Inventory] Decremented ${item.productId}: ${product.inventory} → ${newInventory} (ordered: ${item.quantity})`);
+                }
+              } catch (invError) {
+                console.error(`[Inventory] Failed to decrement ${item.productId}:`, invError);
+              }
+            }
+          }
+
+          // Process influencer commission if attributed
+          if (order.influencerCodeUsed || order.attributedInfluencerId) {
+            try {
+              await processInfluencerCommission(vendorOrder.orderId, paymentIntent.id);
+            } catch (commErr) {
+              console.error(`[InfluencerPayout] Error processing commission for order ${vendorOrder.orderId}:`, commErr);
+            }
+          }
+
+          // Transfer vendor's net payout to their connected account
+          const business = await storage.getBusiness(vendorOrder.businessId);
+          if (business?.stripeAccountId && vendorOrder.vendorNetCents > 0) {
+            try {
+              await stripeService.transferToVendor({
+                amountInCents: vendorOrder.vendorNetCents,
+                connectedAccountId: business.stripeAccountId,
+                orderId: vendorOrder.orderId,
+                orderGroupId: metadata.orderGroupId,
+              });
+              console.log(`[Stripe] Transfer completed for order ${vendorOrder.orderId}: ${vendorOrder.vendorNetCents}¢ → ${business.stripeAccountId}`);
+            } catch (transferErr) {
+              console.error(`[Stripe] TRANSFER FAILED for order ${vendorOrder.orderId} (${vendorOrder.vendorNetCents}¢ → ${business.stripeAccountId}) — manual reconciliation required:`, transferErr);
+              // Do not throw: the consumer payment succeeded, payout failure must be reconciled separately
+            }
+          }
+
+          // Notify this vendor of their new order
+          const vendorUser = await storage.getUserByBusinessOwnerId(vendorOrder.businessId);
+          if (vendorUser) {
+            const customer = await storage.getUser(order.customerId);
+            await NotificationTriggers.newOrderReceived({
+              vendorUserId: vendorUser.id,
+              orderId: vendorOrder.orderId,
+              customerName: customer?.name || customer?.email || 'Customer',
+              orderTotal: order.totalAmount,
+              itemCount: order.items?.length || 1,
+            });
+          }
+        }
+
+        // Post-loop: clear cart, award points, notify customer, close order group
+        if (metadata.userId) {
+          await storage.clearCart(metadata.userId);
+        }
+
+        const purchaser = metadata.userId ? await storage.getUser(metadata.userId) : null;
+        if (purchaser) {
+          await storage.earnPoints({
+            userId: purchaser.id,
+            dollarAmountCents: paymentIntent.amount,
+            transactionType: 'business_transaction',
+            referenceType: 'multi_vendor_order',
+            referenceId: metadata.orderGroupId,
+            description: 'Points earned from purchase',
+          });
+          await this.tryCompleteReferral(purchaser.id, metadata.orderGroupId, 'multi_vendor_order');
+        }
+
+        const totalItemCount = vendorOrders.reduce(async (accPromise, vo) => {
+          const acc = await accPromise;
+          const o = await storage.getOrder(vo.orderId);
+          return acc + (o?.items?.length || 0);
+        }, Promise.resolve(0));
+
+        NotificationTriggers.orderConfirmed({
+          customerId: metadata.userId,
+          orderId: vendorOrders[0]?.orderId || '',
+          businessName: 'Outsyde',
+          itemCount: await totalItemCount,
+        }).catch(err => console.error('Notification error:', err));
+
+        if (metadata.orderGroupId) {
+          await storage.updateOrderGroup(metadata.orderGroupId, {
+            status: 'completed',
+            completedVendors: vendorOrders.length,
+          });
+        }
+
+        console.log(`[Stripe] Multi-vendor purchase completed: orderGroup ${metadata.orderGroupId} with ${vendorOrders.length} orders`);
       }
     } catch (error) {
       console.error(`[Stripe] Error handling payment_intent.succeeded:`, error);
