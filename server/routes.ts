@@ -172,6 +172,7 @@ async function getSubscriptionTierForBusiness(businessId: string): Promise<Subsc
 // Soft seat-limit check for staff invites — never blocks, only returns a warning
 // to surface as an upsell nudge. `maxStaff` is NULL on the business's tier when
 // the tier is uncapped, in which case no warning is ever produced.
+// usedSeats = active staff + non-expired pending invites (both claim a seat).
 async function getStaffSeatWarning(businessId: string): Promise<string | null> {
   const tier = await getSubscriptionTierForBusiness(businessId);
   if (!tier || tier.maxStaff == null) {
@@ -179,7 +180,13 @@ async function getStaffSeatWarning(businessId: string): Promise<string | null> {
   }
 
   const activeCount = await storage.getActiveStaffCount(businessId);
-  if (activeCount < tier.maxStaff) {
+  const allInvites = await storage.getStaffInvitesByBusiness(businessId);
+  const pendingCount = allInvites.filter(
+    (inv: StaffInvite) => inv.status === "pending" && !isInviteExpired(inv)
+  ).length;
+  const usedSeats = activeCount + pendingCount;
+
+  if (usedSeats < tier.maxStaff) {
     return null;
   }
 
@@ -190,7 +197,7 @@ async function getStaffSeatWarning(businessId: string): Promise<string | null> {
     .orderBy(subscriptionTiers.sortOrder)
     .limit(1);
 
-  const base = `You're at ${activeCount} of ${tier.maxStaff} seats on ${tier.displayName}`;
+  const base = `You're at ${usedSeats} of ${tier.maxStaff} seats on ${tier.displayName}`;
   return uncappedTier ? `${base} — ${uncappedTier.displayName} removes the cap` : base;
 }
 
@@ -10146,9 +10153,16 @@ export async function registerRoutes(
 
       const activeCount = await storage.getActiveStaffCount(business.id);
       const tier = await getSubscriptionTierForBusiness(business.id);
+      const allInvites = await storage.getStaffInvitesByBusiness(business.id);
+      const pendingCount = allInvites.filter(
+        (inv: StaffInvite) => inv.status === "pending" && !isInviteExpired(inv)
+      ).length;
+      const usedSeats = activeCount + pendingCount;
 
       res.json({
         activeCount,
+        pendingCount,
+        usedSeats,
         maxStaff: tier?.maxStaff ?? null,
         tierName: tier?.displayName ?? "Unknown",
       });
@@ -10480,7 +10494,25 @@ export async function registerRoutes(
         return res.status(404).json({ error: "No business found" });
       }
 
-      // Soft seat-limit nudge — never blocks invite creation, see getStaffSeatWarning
+      // Hard seat-limit block for capped tiers: count active + pending invites.
+      // Pending invites claim a seat even before the invitee signs up, so a vendor
+      // at cap should not be able to send additional invites.
+      const tier = await getSubscriptionTierForBusiness(business.id);
+      if (tier && tier.maxStaff != null) {
+        const activeCount = await storage.getActiveStaffCount(business.id);
+        const allInvites = await storage.getStaffInvitesByBusiness(business.id);
+        const pendingCount = allInvites.filter(
+          (inv: StaffInvite) => inv.status === "pending" && !isInviteExpired(inv)
+        ).length;
+        const usedSeats = activeCount + pendingCount;
+        if (usedSeats >= tier.maxStaff) {
+          return res.status(403).json({
+            error: `Seat limit reached. You're using ${usedSeats} of ${tier.maxStaff} seats on ${tier.displayName}. Upgrade to add more team members.`,
+          });
+        }
+      }
+
+      // Soft seat-limit nudge (warning returned after invite is created, not a block).
       const seatWarning = await getStaffSeatWarning(business.id);
 
       const inviteSchema = z.object({
