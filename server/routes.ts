@@ -17185,18 +17185,29 @@ export async function registerRoutes(
     try {
       const orders = await storage.getUserOrders(userId);
       
-      // Enrich orders with business names and shipment info
+      // Enrich orders with business names, shipment info, and item image URLs
       const enrichedOrders = await Promise.all(
         orders.map(async (order) => {
           const business = await storage.getBusiness(order.businessId);
           const shipments = await storage.getShipmentsByOrder(order.id);
-          
+
+          const productIds = (order.items ?? []).map((item) => item.productId);
+          const imageMap = await storage.getProductImagesByIds(productIds);
+
           return {
             id: order.id,
             businessId: order.businessId,
             businessName: business?.name || "Unknown Business",
-            items: order.items,
+            items: (order.items ?? []).map((item) => ({
+              productId: item.productId,
+              name: item.name,
+              quantity: item.quantity,
+              price: item.price,
+              imageUrl: imageMap[item.productId] ?? null,
+            })),
             total: order.totalAmount,
+            grossChargeAmount: order.grossChargeAmount,
+            shippingAddress: order.shippingAddress,
             status: order.status,
             createdAt: order.createdAt,
             shipment: shipments.length > 0 ? shipments[0] : null,
