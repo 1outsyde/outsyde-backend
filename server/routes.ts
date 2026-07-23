@@ -10900,6 +10900,11 @@ export async function registerRoutes(
           id: convo.otherParticipant.id,
           displayName: convo.otherParticipant.name || convo.otherParticipant.username,
           avatar: convo.otherParticipant.profileImageUrl,
+          type: convo.otherParticipant.isPhotographer
+            ? "photographer"
+            : convo.otherParticipant.isVendor
+              ? "business"
+              : "consumer",
         },
         unreadCount: unreadCounts.get(convo.id) || 0,
       }));
@@ -10984,7 +10989,26 @@ export async function registerRoutes(
 
       console.log("DEBUG - Creating conversation between:", userId, "and", otherUserId);
       const conversation = await storage.getOrCreateConversation(userId, otherUserId);
-      res.json({ conversation, otherParticipant: { id: otherUserId, name: otherUserName } });
+      const otherUserRecord = await storage.getUser(otherUserId);
+      const resolvedType = participantType === "photographer"
+        ? "photographer"
+        : participantType === "business" || participantType === "vendor"
+          ? "business"
+          : otherUserRecord?.isPhotographer
+            ? "photographer"
+            : otherUserRecord?.isVendor
+              ? "business"
+              : "consumer";
+      res.json({
+        conversation,
+        otherParticipant: {
+          id: otherUserId,
+          name: otherUserName,
+          displayName: otherUserName,
+          avatar: otherUserRecord?.profileImageUrl || null,
+          type: resolvedType,
+        },
+      });
     } catch (error) {
       if (error instanceof z.ZodError) {
         return res.status(400).json({ error: "Invalid data", details: error.errors });
