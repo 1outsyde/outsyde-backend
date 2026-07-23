@@ -40,10 +40,9 @@ export function getSession() {
     console.warn("[auth] Using in-memory session store (no DATABASE_URL)");
   }
 
-  // Use SESSION_SECRET or a default for development
-  const sessionSecret = process.env.SESSION_SECRET || "dev-session-secret-change-in-production";
-  if (!process.env.SESSION_SECRET) {
-    console.warn("[auth] SESSION_SECRET not set - using insecure default (DO NOT use in production)");
+  const sessionSecret = process.env.SESSION_SECRET;
+  if (!sessionSecret) {
+    throw new Error("SESSION_SECRET environment variable is required");
   }
 
   return session({
