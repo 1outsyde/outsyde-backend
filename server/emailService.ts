@@ -372,3 +372,245 @@ Thank you for considering Outsyde.
     text,
   });
 }
+
+// ─── Booking & Order Transactional Emails ────────────────────────────────────
+
+const BRAND = {
+  bg: '#0D0D0D',
+  card: '#1A1A1A',
+  gold: '#E8B930',
+  ctaBg: '#1A3C34',
+  ctaText: '#E8B930',
+  heading: '#F5F0E8',
+  body: '#FFFFFF',
+  muted: '#888888',
+  border: '#2A2A2A',
+} as const;
+
+const FROM_ORDERS = 'orders@info.goutsyde.com';
+
+async function sendBrandedEmail(to: string, subject: string, html: string): Promise<void> {
+  const { client } = await getUncachableResendClient();
+  const result = await client.emails.send({ from: FROM_ORDERS, to, subject, html });
+  if (result.error) {
+    throw new Error(`Resend error: ${JSON.stringify(result.error)}`);
+  }
+}
+
+function buildEmailShell(
+  heading: string,
+  rows: { label: string; value: string }[],
+): string {
+  const rowsHtml = rows.map(r => `
+    <tr>
+      <td style="padding:8px 0;color:#888888;font-size:13px;width:38%;vertical-align:top;">${r.label}</td>
+      <td style="padding:8px 0;color:#FFFFFF;font-size:14px;vertical-align:top;">${r.value}</td>
+    </tr>`).join('');
+
+  return `
+    <!DOCTYPE html>
+    <html>
+    <body style="margin:0;padding:0;background:#0D0D0D;font-family:'Helvetica Neue',Arial,sans-serif;">
+      <table width="100%" cellpadding="0" cellspacing="0" style="background:#0D0D0D;padding:32px 0;">
+        <tr><td align="center">
+          <table width="600" cellpadding="0" cellspacing="0" style="max-width:600px;width:100%;">
+            <tr>
+              <td style="padding:0 0 4px 0;">
+                <div style="background:#1A1A1A;border-radius:10px 10px 0 0;padding:24px 32px;border-bottom:2px solid #E8B930;">
+                  <span style="color:#E8B930;font-size:22px;font-weight:800;letter-spacing:1px;">OUTSYDE</span>
+                </div>
+              </td>
+            </tr>
+            <tr>
+              <td style="background:#1A1A1A;border-radius:0 0 10px 10px;padding:32px;">
+                <h1 style="color:#F5F0E8;font-size:20px;font-weight:700;margin:0 0 24px 0;">${heading}</h1>
+                <table width="100%" cellpadding="0" cellspacing="0" style="border-top:1px solid #2A2A2A;">
+                  ${rowsHtml}
+                </table>
+              </td>
+            </tr>
+            <tr>
+              <td style="padding:20px 0;text-align:center;color:#888888;font-size:12px;">
+                This is an automated message from Outsyde. Please do not reply to this email.
+              </td>
+            </tr>
+          </table>
+        </td></tr>
+      </table>
+    </body>
+    </html>`;
+}
+
+export async function sendAppointmentConfirmationToConsumer(params: {
+  to: string;
+  customerName: string;
+  businessName: string;
+  date: string;
+  time: string;
+  totalPrice: number;
+}): Promise<void> {
+  try {
+    const html = buildEmailShell(
+      'Your Appointment is Confirmed!',
+      [
+        { label: 'Customer', value: params.customerName },
+        { label: 'Business', value: params.businessName },
+        { label: 'Date', value: params.date },
+        { label: 'Time', value: params.time },
+        { label: 'Total', value: `$${(params.totalPrice / 100).toFixed(2)}` },
+      ],
+    );
+    await sendBrandedEmail(params.to, `Appointment Confirmed — ${params.businessName}`, html);
+    console.log(`[Email] Appointment confirmation sent to ${params.to}`);
+  } catch (err) {
+    console.error('[Email] sendAppointmentConfirmationToConsumer failed:', err);
+  }
+}
+
+export async function sendAppointmentNotificationToVendor(params: {
+  to: string;
+  businessName: string;
+  customerName: string;
+  date: string;
+  time: string;
+  totalPrice: number;
+}): Promise<void> {
+  try {
+    const html = buildEmailShell(
+      'New Appointment Booked',
+      [
+        { label: 'Customer', value: params.customerName },
+        { label: 'Date', value: params.date },
+        { label: 'Time', value: params.time },
+        { label: 'Total', value: `$${(params.totalPrice / 100).toFixed(2)}` },
+      ],
+    );
+    await sendBrandedEmail(params.to, `New Appointment — ${params.customerName}`, html);
+    console.log(`[Email] Appointment vendor notification sent to ${params.to}`);
+  } catch (err) {
+    console.error('[Email] sendAppointmentNotificationToVendor failed:', err);
+  }
+}
+
+export async function sendShootBookingConfirmationToConsumer(params: {
+  to: string;
+  customerName: string;
+  photographerName: string;
+  date: string;
+  time: string;
+  shootType: string;
+  totalPrice: number;
+}): Promise<void> {
+  try {
+    const html = buildEmailShell(
+      'Your Shoot Booking is Confirmed!',
+      [
+        { label: 'Customer', value: params.customerName },
+        { label: 'Photographer', value: params.photographerName },
+        { label: 'Shoot Type', value: params.shootType },
+        { label: 'Date', value: params.date },
+        { label: 'Time', value: params.time },
+        { label: 'Total', value: `$${(params.totalPrice / 100).toFixed(2)}` },
+      ],
+    );
+    await sendBrandedEmail(params.to, `Shoot Booking Confirmed — ${params.photographerName}`, html);
+    console.log(`[Email] Shoot confirmation sent to ${params.to}`);
+  } catch (err) {
+    console.error('[Email] sendShootBookingConfirmationToConsumer failed:', err);
+  }
+}
+
+export async function sendShootBookingNotificationToPhotographer(params: {
+  to: string;
+  photographerName: string;
+  customerName: string;
+  date: string;
+  time: string;
+  shootType: string;
+  totalPrice: number;
+}): Promise<void> {
+  try {
+    const html = buildEmailShell(
+      'New Shoot Booking',
+      [
+        { label: 'Client', value: params.customerName },
+        { label: 'Shoot Type', value: params.shootType },
+        { label: 'Date', value: params.date },
+        { label: 'Time', value: params.time },
+        { label: 'Total', value: `$${(params.totalPrice / 100).toFixed(2)}` },
+      ],
+    );
+    await sendBrandedEmail(params.to, `New Shoot — ${params.customerName}`, html);
+    console.log(`[Email] Shoot photographer notification sent to ${params.to}`);
+  } catch (err) {
+    console.error('[Email] sendShootBookingNotificationToPhotographer failed:', err);
+  }
+}
+
+export async function sendOrderConfirmationToConsumer(params: {
+  to: string;
+  customerName: string;
+  orderId: string;
+  itemsSummary: string;
+  totalAmount: number;
+}): Promise<void> {
+  try {
+    const html = buildEmailShell(
+      'Your Order is Confirmed!',
+      [
+        { label: 'Customer', value: params.customerName },
+        { label: 'Order', value: `#${params.orderId.slice(-8).toUpperCase()}` },
+        { label: 'Items', value: params.itemsSummary },
+        { label: 'Total', value: `$${(params.totalAmount / 100).toFixed(2)}` },
+      ],
+    );
+    await sendBrandedEmail(params.to, `Order Confirmed — #${params.orderId.slice(-8).toUpperCase()}`, html);
+    console.log(`[Email] Order confirmation sent to ${params.to}`);
+  } catch (err) {
+    console.error('[Email] sendOrderConfirmationToConsumer failed:', err);
+  }
+}
+
+export async function sendOrderNotificationToVendor(params: {
+  to: string;
+  vendorName: string;
+  customerName: string;
+  orderId: string;
+  itemsSummary: string;
+  totalAmount: number;
+}): Promise<void> {
+  try {
+    const html = buildEmailShell(
+      'New Order Received',
+      [
+        { label: 'Customer', value: params.customerName },
+        { label: 'Order', value: `#${params.orderId.slice(-8).toUpperCase()}` },
+        { label: 'Items', value: params.itemsSummary },
+        { label: 'Total', value: `$${(params.totalAmount / 100).toFixed(2)}` },
+      ],
+    );
+    await sendBrandedEmail(params.to, `New Order from ${params.customerName}`, html);
+    console.log(`[Email] Order vendor notification sent to ${params.to}`);
+  } catch (err) {
+    console.error('[Email] sendOrderNotificationToVendor failed:', err);
+  }
+}
+
+export async function sendInternalEventAlert(params: {
+  eventType: string;
+  summary: string;
+  details: Record<string, string>;
+}): Promise<void> {
+  const OPS_EMAIL = 'info@goutsyde.com';
+  try {
+    const rows = Object.entries(params.details).map(([label, value]) => ({ label, value }));
+    const html = buildEmailShell(`[Outsyde Internal] ${params.eventType}`, [
+      { label: 'Summary', value: params.summary },
+      ...rows,
+    ]);
+    await sendBrandedEmail(OPS_EMAIL, `[Outsyde] ${params.eventType}`, html);
+    console.log(`[Email] Internal alert sent for event: ${params.eventType}`);
+  } catch (err) {
+    console.error('[Email] sendInternalEventAlert failed:', err);
+  }
+}
