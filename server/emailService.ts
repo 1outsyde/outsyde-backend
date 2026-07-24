@@ -390,10 +390,17 @@ const BRAND = {
 const FROM_ORDERS = 'orders@info.goutsyde.com';
 
 async function sendBrandedEmail(to: string, subject: string, html: string): Promise<void> {
-  const { client } = await getUncachableResendClient();
-  const result = await client.emails.send({ from: FROM_ORDERS, to, subject, html });
+  const apiKey = process.env.RESEND_API_KEY;
+  if (!apiKey) {
+    throw new Error('[emailService] RESEND_API_KEY not set');
+  }
+  const resend = new Resend(apiKey);
+  const result = await resend.emails.send({ from: FROM_ORDERS, to, subject, html });
   if (result.error) {
-    throw new Error(`Resend error: ${JSON.stringify(result.error)}`);
+    const errMsg = typeof result.error === 'object' && result.error !== null
+      ? (result.error as { message?: string }).message ?? JSON.stringify(result.error)
+      : String(result.error);
+    throw new Error(`Resend error: ${errMsg}`);
   }
 }
 
