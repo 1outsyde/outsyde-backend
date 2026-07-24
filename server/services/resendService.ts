@@ -338,3 +338,74 @@ export async function sendStaffInviteSMS(
   console.warn('[resendService] SMS_ENABLED=true but no provider is wired. Stubbing send.');
   return { sent: false, error: 'No SMS provider configured' };
 }
+
+function buildDeletionConfirmationHtml(scheduledDate: string): string {
+  return `
+    <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+      <div style="background: linear-gradient(135deg, #f5a623, #f7b84b); padding: 24px; text-align: center;">
+        <h1 style="color: white; margin: 0; font-size: 24px;">Account Deletion Scheduled</h1>
+      </div>
+      <div style="padding: 32px; background: #ffffff;">
+        <p style="font-size: 16px; color: #333; margin-top: 0;">
+          We've received your request to delete your Outsyde account.
+        </p>
+        <p style="font-size: 16px; color: #333;">
+          Your account is scheduled for permanent deletion on <strong>${scheduledDate}</strong>.
+          You can cancel this request at any time before that date by logging back in and selecting
+          "Cancel Deletion" from your account settings.
+        </p>
+        <p style="font-size: 14px; color: #555;">
+          Once deleted, your account and personal data cannot be recovered.
+        </p>
+        <p style="font-size: 13px; color: #888; margin-top: 24px;">
+          If you didn't request this, contact us immediately at info@goutsyde.com.
+        </p>
+      </div>
+      <div style="background: #f5f5f5; padding: 16px; text-align: center; color: #999; font-size: 12px;">
+        <p style="margin: 0;">Outsyde — Local Business Platform</p>
+      </div>
+    </div>
+  `;
+}
+
+export async function sendDeletionConfirmationEmail(params: {
+  toEmail: string;
+  scheduledDeletionAt: Date;
+}): Promise<{ sent: boolean; error?: string }> {
+  const { toEmail, scheduledDeletionAt } = params;
+  const apiKey = process.env.RESEND_API_KEY;
+  if (!apiKey) {
+    console.warn('[resendService] RESEND_API_KEY not set — skipping deletion confirmation email');
+    return { sent: false, error: 'RESEND_API_KEY not set' };
+  }
+
+  const scheduledDate = scheduledDeletionAt.toLocaleDateString('en-US', {
+    year: 'numeric', month: 'long', day: 'numeric',
+  });
+
+  try {
+    const resend = new Resend(apiKey);
+    const result = await resend.emails.send({
+      from: INVITE_FROM,
+      to: toEmail,
+      subject: 'Your Outsyde account has been scheduled for deletion',
+      html: buildDeletionConfirmationHtml(scheduledDate),
+      text: `Your Outsyde account is scheduled for permanent deletion on ${scheduledDate}.\n\nTo cancel, log back in and select "Cancel Deletion" from your account settings.\n\nIf you didn't request this, contact info@goutsyde.com immediately.`,
+    });
+
+    if (result.error) {
+      const errMsg = typeof result.error === 'object' && result.error !== null
+        ? (result.error as { message?: string }).message ?? JSON.stringify(result.error)
+        : String(result.error);
+      console.warn(`[resendService] Deletion confirmation email failed for ${toEmail}:`, errMsg);
+      return { sent: false, error: errMsg };
+    }
+
+    console.log(`[resendService] Deletion confirmation email sent to ${toEmail}`);
+    return { sent: true };
+  } catch (err) {
+    const errMsg = err instanceof Error ? err.message : String(err);
+    console.warn(`[resendService] Unexpected error sending deletion confirmation to ${toEmail}:`, errMsg);
+    return { sent: false, error: errMsg };
+  }
+}

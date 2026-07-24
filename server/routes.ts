@@ -16,12 +16,15 @@ import {
   calculateAgeRange,
   consumerAddresses,
   insertConsumerAddressSchema,
+  users,
+  refreshTokens,
   type User,
   type StaffMember,
   type StaffInvite,
   type SubscriptionTier,
 } from "@shared/schema";
-import { sendStaffInviteEmail, sendStaffPayoutSetupEmail, sendStaffAcceptedOwnerEmail } from "./services/resendService";
+import { sendStaffInviteEmail, sendStaffPayoutSetupEmail, sendStaffAcceptedOwnerEmail, sendDeletionConfirmationEmail } from "./services/resendService";
+import { checkVendorStripeBalances, checkActiveOrders } from "./services/accountDeletionService";
 
 // Helper to sanitize user data for non-admin responses (removes sensitive fields)
 // DOB: replaced with age range for privacy
@@ -2597,6 +2600,94 @@ export async function registerRoutes(
     } catch (error) {
       console.error("Reset password error:", error);
       res.status(500).json({ success: false, message: "Failed to reset password" });
+    }
+  });
+
+  // ---------------------------------------------------------------------------
+  // ACCOUNT DELETION
+  // ---------------------------------------------------------------------------
+
+  app.post("/api/account/delete-request", authMiddleware, async (req, res) => {
+    const authReq = req as AuthenticatedRequest;
+    const userId = authReq.user!.userId;
+
+    try {
+      const user = await storage.getUser(userId);
+      if (!user) return res.status(404).json({ error: "User not found" });
+
+      if (user.deletionStatus === "pending_deletion") {
+        return res.json({
+          blocked: false,
+          alreadyPending: true,
+          scheduledDeletionAt: user.scheduledDeletionAt,
+        });
+      }
+
+      if (user.deletionStatus === "deleted") {
+        return res.status(410).json({ error: "Account already deleted" });
+      }
+
+      // Check Stripe balances on all connected vendor accounts
+      const stripeCheck = await checkVendorStripeBalances(userId);
+      if (stripeCheck.blocked) {
+        return res.json({ blocked: true, reason: stripeCheck.reason });
+      }
+
+      // Check for in-flight orders / bookings / appointments
+      const orderCheck = await checkActiveOrders(userId);
+      if (orderCheck.blocked) {
+        return res.json({ blocked: true, reason: orderCheck.reason });
+      }
+
+      // All clear — schedule deletion
+      const now = new Date();
+      const scheduledDeletionAt = new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000); // +30 days
+
+      await db.update(users).set({
+        deletionStatus: "pending_deletion",
+        deletionRequestedAt: now,
+        scheduledDeletionAt,
+      } as any).where(eq(users.id, userId));
+
+      // Force logout everywhere by purging all refresh tokens
+      await db.delete(refreshTokens).where(eq(refreshTokens.userId, userId));
+
+      // Send confirmation email (best-effort — don't fail the request if Resend is down)
+      if (user.email) {
+        sendDeletionConfirmationEmail({ toEmail: user.email, scheduledDeletionAt }).catch(err =>
+          console.warn("[accountDeletion] Confirmation email failed:", err)
+        );
+      }
+
+      return res.json({ blocked: false, scheduledDeletionAt });
+    } catch (err) {
+      console.error("[accountDeletion] delete-request error:", err);
+      return res.status(500).json({ error: "Failed to schedule account deletion" });
+    }
+  });
+
+  app.post("/api/account/cancel-deletion", authMiddleware, async (req, res) => {
+    const authReq = req as AuthenticatedRequest;
+    const userId = authReq.user!.userId;
+
+    try {
+      const user = await storage.getUser(userId);
+      if (!user) return res.status(404).json({ error: "User not found" });
+
+      if (user.deletionStatus !== "pending_deletion") {
+        return res.status(400).json({ error: "No pending deletion to cancel" });
+      }
+
+      await db.update(users).set({
+        deletionStatus: "active",
+        deletionRequestedAt: null,
+        scheduledDeletionAt: null,
+      } as any).where(eq(users.id, userId));
+
+      return res.json({ success: true });
+    } catch (err) {
+      console.error("[accountDeletion] cancel-deletion error:", err);
+      return res.status(500).json({ error: "Failed to cancel account deletion" });
     }
   });
 
