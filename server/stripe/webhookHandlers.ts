@@ -422,12 +422,13 @@ export class WebhookHandlers {
           }).catch(err => console.error(`[Notify:shoot_booking] Push failed for shoot booking ${bookingId}:`, err));
 
           // Transactional emails
+          const sb_photographerUser = sb_photographer ? await storage.getUser(sb_photographer.userId) : null;
           if (user?.email) {
             sendShootBookingConfirmationToConsumer({
               toEmail: user.email,
               consumerName: user.name || user.email,
               photographerName: sb_photographer?.displayName || 'Photographer',
-              photographerContactEmail: sb_photographer?.email ?? undefined,
+              photographerContactEmail: sb_photographerUser?.email ?? undefined,
               shootType: sb_booking?.shootType || 'session',
               bookingId,
               date: sb_booking?.date || '',
@@ -435,10 +436,11 @@ export class WebhookHandlers {
               basePrice: sb_booking?.totalPrice || 0,
             }).catch(() => {});
           }
-          if (sb_photographer?.email) {
+          console.log('[Email] Photographer toEmail:', sb_photographerUser?.email);
+          if (sb_photographerUser?.email) {
             sendShootBookingNotificationToPhotographer({
-              toEmail: sb_photographer.email,
-              photographerName: sb_photographer.displayName || 'Photographer',
+              toEmail: sb_photographerUser.email,
+              photographerName: sb_photographer?.displayName || 'Photographer',
               consumerName: user?.name || 'Customer',
               consumerUsername: user?.username ?? undefined,
               shootType: sb_booking?.shootType || 'session',
@@ -454,7 +456,7 @@ export class WebhookHandlers {
             consumerName: user?.name || 'Customer',
             consumerEmail: user?.email || '',
             vendorName: sb_photographer?.displayName || 'Photographer',
-            vendorEmail: sb_photographer?.email || '',
+            vendorEmail: sb_photographerUser?.email || '',
             basePrice: sb_booking?.totalPrice || 0,
             date: sb_booking?.date || '',
             time: sb_booking?.startTime || '',
@@ -2295,12 +2297,13 @@ export class WebhookHandlers {
 
         // Transactional emails
         const sbCustomer = await storage.getUser(clientId);
+        const photographerUser = photographer ? await storage.getUser(photographer.userId) : null;
         if (sbCustomer?.email) {
           sendShootBookingConfirmationToConsumer({
             toEmail: sbCustomer.email,
             consumerName: sbCustomer.name || sbCustomer.email,
             photographerName: photographer?.displayName || 'Photographer',
-            photographerContactEmail: photographer?.email ?? undefined,
+            photographerContactEmail: photographerUser?.email ?? undefined,
             shootType: booking.shootType,
             bookingId: shootBookingId,
             date: booking.date,
@@ -2308,10 +2311,11 @@ export class WebhookHandlers {
             basePrice: booking.totalPrice,
           }).catch(() => {});
         }
-        if (photographer?.email) {
+        console.log('[Email] Photographer toEmail:', photographerUser?.email);
+        if (photographerUser?.email) {
           sendShootBookingNotificationToPhotographer({
-            toEmail: photographer.email,
-            photographerName: photographer.displayName || 'Photographer',
+            toEmail: photographerUser.email,
+            photographerName: photographer?.displayName || 'Photographer',
             consumerName: sbCustomer?.name || 'Customer',
             consumerUsername: sbCustomer?.username ?? undefined,
             shootType: booking.shootType,
@@ -2327,7 +2331,7 @@ export class WebhookHandlers {
           consumerName: sbCustomer?.name || 'Customer',
           consumerEmail: sbCustomer?.email || '',
           vendorName: photographer?.displayName || 'Photographer',
-          vendorEmail: photographer?.email || '',
+          vendorEmail: photographerUser?.email || '',
           basePrice: booking.totalPrice,
           date: booking.date,
           time: booking.startTime,
