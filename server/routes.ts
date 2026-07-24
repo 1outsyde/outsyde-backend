@@ -65,6 +65,7 @@ import {
   hybridAuthMiddleware,
   optionalAuthMiddleware,
   getUserIdFromRequest,
+  isUserAllowedToAuthenticate,
   ACCESS_TOKEN_EXPIRY_SECONDS,
   REFRESH_TOKEN_EXPIRY_MS,
   type AuthenticatedRequest,
@@ -1072,6 +1073,10 @@ export async function registerRoutes(
         return res.status(401).json({ success: false, message: "Invalid credentials" });
       }
 
+      if (!isUserAllowedToAuthenticate(user)) {
+        return res.status(403).json({ success: false, message: "This account has been disabled." });
+      }
+
       if (req.session) {
         req.session.userId = user.id;
         req.session.isVendor = user.isVendor;
@@ -1291,6 +1296,10 @@ export async function registerRoutes(
       }
 
       // Existing user — issue tokens
+      if (!isUserAllowedToAuthenticate(user)) {
+        return res.status(403).json({ success: false, error: { code: "ACCOUNT_DISABLED", message: "This account has been disabled." } });
+      }
+
       const tokenPayload: TokenPayload = {
         userId: user.id,
         isVendor: user.isVendor || false,
@@ -1590,6 +1599,10 @@ export async function registerRoutes(
         });
       }
 
+      if (!isUserAllowedToAuthenticate(user)) {
+        return res.status(403).json({ success: false, error: { code: "ACCOUNT_DISABLED", message: "This account has been disabled." } });
+      }
+
       const tokenPayload: TokenPayload = {
         userId: user.id,
         isVendor: user.isVendor || false,
@@ -1840,6 +1853,10 @@ export async function registerRoutes(
         return res.redirect(`${errorRedirect}?error=user_retrieval_failed`);
       }
 
+      if (!isUserAllowedToAuthenticate(user)) {
+        return res.redirect(`${errorRedirect}?error=account_disabled`);
+      }
+
       // Create complete session for the user (matching web login flow)
       req.session.userId = user.id;
       req.session.isVendor = user.isVendor;
@@ -1969,6 +1986,10 @@ export async function registerRoutes(
         });
       }
 
+      if (!isUserAllowedToAuthenticate(user)) {
+        return res.status(403).json({ success: false, error: { code: "ACCOUNT_DISABLED", message: "This account has been disabled." } });
+      }
+
       // Generate new tokens with full role information
       const tokenPayload: TokenPayload = {
         userId: user.id,
@@ -2033,6 +2054,9 @@ export async function registerRoutes(
       const user = await storage.getUser(payload.userId);
       if (!user) {
         return res.status(401).json({ success: false, message: "User not found" });
+      }
+      if (!isUserAllowedToAuthenticate(user)) {
+        return res.status(403).json({ success: false, message: "This account has been disabled." });
       }
       const tokenPayload: TokenPayload = {
         userId: user.id,
@@ -2112,6 +2136,10 @@ export async function registerRoutes(
 
       if (!isValidPassword) {
         return res.status(401).json({ success: false, error: { code: "INVALID_CREDENTIALS", message: "Invalid credentials" } });
+      }
+
+      if (!isUserAllowedToAuthenticate(user)) {
+        return res.status(403).json({ success: false, error: { code: "ACCOUNT_DISABLED", message: "This account has been disabled." } });
       }
 
       // Generate JWT tokens with full role information
@@ -2611,6 +2639,10 @@ export async function registerRoutes(
       const user = await storage.getUser(userId);
       if (!user) {
         return res.status(404).json({ error: "User not found" });
+      }
+
+      if (!isUserAllowedToAuthenticate(user)) {
+        return res.status(403).json({ error: "This account has been disabled." });
       }
 
       let businessId: string | undefined;

@@ -166,6 +166,18 @@ export function hybridAuthMiddleware(req: Request, res: Response, next: NextFunc
 }
 
 /**
+ * Returns true if the user account is allowed to authenticate.
+ * Call this after loading the user record and before issuing any token or
+ * setting any session, at every login/OAuth/refresh code path.
+ * isActive defaults to true for legacy rows where the column may be null/undefined —
+ * only an explicit false blocks authentication.
+ */
+export function isUserAllowedToAuthenticate(user: { isActive?: boolean | null } | undefined | null): boolean {
+  if (!user) return false;
+  return user.isActive !== false;
+}
+
+/**
  * Helper function to get userId from request (JWT or session)
  * Use this in route handlers when you need the userId but don't want middleware
  */
