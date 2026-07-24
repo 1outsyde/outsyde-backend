@@ -2704,7 +2704,7 @@ export class DatabaseStorage implements IStorage {
     return result[0];
   }
 
-  async getVendorOrders(businessId: string): Promise<(Order & { customerName: string | null })[]> {
+  async getVendorOrders(businessId: string): Promise<(Order & { customerName: string })[]> {
     const rows = await db
       .select()
       .from(orders)
@@ -2713,8 +2713,8 @@ export class DatabaseStorage implements IStorage {
     return rows.map(({ orders: order, users: user }) => ({
       ...order,
       customerName: user
-        ? [user.firstName, user.lastName].filter(Boolean).join(" ").trim() || null
-        : null,
+        ? (user.name || [user.firstName, user.lastName].filter(Boolean).join(" ").trim() || user.email || "Customer")
+        : "Unknown",
     }));
   }
 
