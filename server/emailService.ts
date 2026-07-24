@@ -935,3 +935,39 @@ export async function sendInternalEventAlert(params: {
     console.error('[Email] sendInternalEventAlert failed:', err);
   }
 }
+
+export async function sendOrderShippedEmail(params: {
+  toEmail: string;
+  consumerName: string;
+  vendorName: string;
+  productName: string;
+  orderId: string;
+  carrier: string;
+  trackingNumber: string;
+  trackingUrl: string;
+}): Promise<void> {
+  try {
+    const subject = `Your order from ${params.vendorName} has shipped!`;
+    const html = wrapEmail(`
+      ${emailHeader('Your Order Has Shipped 📦', `${params.vendorName} is on the way`)}
+      <tr><td style="background:#1A1A1A;padding:24px 32px;">
+        <p style="color:#F5F0E8;font-size:15px;margin:0 0 16px 0;">Hi ${params.consumerName},</p>
+        <p style="color:#CCCCCC;font-size:14px;margin:0 0 24px 0;">
+          Great news! <strong style="color:#F5F0E8;">${params.vendorName}</strong> has shipped your order of
+          <strong style="color:#F5F0E8;">${params.productName}</strong>.
+        </p>
+        <table width="100%" cellpadding="0" cellspacing="0" style="border-radius:6px;overflow:hidden;margin-bottom:24px;">
+          ${detailRow('Order ID', '#' + params.orderId.slice(0, 8).toUpperCase(), true)}
+          ${detailRow('Carrier', params.carrier, false)}
+          ${detailRow('Tracking #', `<span style="font-family:monospace;">${params.trackingNumber}</span>`, true)}
+        </table>
+      </td></tr>
+      ${emailCta('Track My Package', params.trackingUrl)}
+      ${emailFooter()}
+    `);
+    await sendBrandedEmail(params.toEmail, subject, html);
+    console.log(`[Email] Order shipped email sent to ${params.toEmail} for order ${params.orderId}`);
+  } catch (err) {
+    console.error('[Email] sendOrderShippedEmail failed:', err);
+  }
+}

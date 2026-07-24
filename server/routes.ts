@@ -14922,6 +14922,11 @@ export async function registerRoutes(
         shippedAt?: string;
       };
 
+      // Phase 1a: require tracking data when marking shipped
+      if (status === "shipped" && (!trackingNumber?.trim() || !carrier?.trim())) {
+        return res.status(400).json({ error: "Tracking number and carrier are required to mark an order as shipped." });
+      }
+
       // --- Refund gate: paid → cancelled requires Stripe refund BEFORE status change ---
       // Order status must NOT change to 'cancelled' if the Stripe call throws.
       let refundResult: { refund: any; transferReversal: any } | null = null;
@@ -14986,13 +14991,33 @@ export async function registerRoutes(
       }
 
       if (trackingNumber && carrier) {
-        await storage.createShipment({
-          orderId,
-          businessId: business.id,
-          carrier,
-          trackingNumber,
-          shippedAt: shippedAt ? new Date(shippedAt) : new Date(),
-        });
+        // Phase 1b: upsert shipment — update existing rather than inserting a duplicate
+        const existingShipments = await storage.getShipmentsByOrder(orderId);
+        if (existingShipments.length > 0) {
+          await storage.updateShipment(existingShipments[0].id, {
+            carrier,
+            trackingNumber,
+            shippedAt: shippedAt ? new Date(shippedAt) : new Date(),
+          });
+        } else {
+          await storage.createShipment({
+            orderId,
+            businessId: business.id,
+            carrier,
+            trackingNumber,
+            shippedAt: shippedAt ? new Date(shippedAt) : new Date(),
+          });
+        }
+
+        // Phase 1c: audit log for shipment
+        storage.createAuditLog({
+          actorId: userId,
+          actorType: 'user',
+          action: 'shipment_created',
+          targetType: 'order',
+          targetId: orderId,
+          metadata: { carrier, trackingNumber },
+        }).catch(err => console.error('Audit log error (shipment):', err));
 
         NotificationTriggers.orderShipped({
           customerId: existingOrder.customerId,
@@ -15000,6 +15025,36 @@ export async function registerRoutes(
           carrier,
           trackingNumber,
         }).catch(err => console.error('Notification error:', err));
+
+        // Phase 1f: transactional shipment email (fire-and-forget)
+        ;(async () => {
+          try {
+            const { sendOrderShippedEmail } = await import('./emailService');
+            const consumer = await storage.getUser(existingOrder.customerId);
+            const firstItem = (existingOrder.items as Array<{ name?: string }>)?.[0];
+            const CARRIER_URLS: Record<string, string> = {
+              UPS: `https://www.ups.com/track?tracknum=${trackingNumber}`,
+              FedEx: `https://www.fedex.com/fedextrack/?trknbr=${trackingNumber}`,
+              USPS: `https://tools.usps.com/go/TrackConfirmAction?tLabels=${trackingNumber}`,
+              DHL: `https://www.dhl.com/en/express/tracking.html?AWB=${trackingNumber}`,
+            };
+            const trackingUrl = CARRIER_URLS[carrier] ?? `https://google.com/search?q=${encodeURIComponent(carrier + ' tracking ' + trackingNumber)}`;
+            if (consumer?.email) {
+              await sendOrderShippedEmail({
+                toEmail: consumer.email,
+                consumerName: consumer.name || consumer.firstName || 'there',
+                vendorName: business.name,
+                productName: firstItem?.name || 'your item',
+                orderId,
+                carrier,
+                trackingNumber,
+                trackingUrl,
+              });
+            }
+          } catch (emailErr) {
+            console.error('Order shipped email error:', emailErr);
+          }
+        })();
       }
 
       return res.json({ order: updatedOrder });
@@ -15811,15 +15866,17 @@ export async function registerRoutes(
       const end = start + parseInt(limit as string);
       const paginatedOrders = orders.slice(start, end);
 
-      // Enrich with customer and business info
+      // Enrich with customer, business, and shipment info
       const enrichedOrders = await Promise.all(paginatedOrders.map(async (order) => {
         const customer = await storage.getUser(order.customerId);
         const business = await storage.getBusiness(order.businessId);
+        const shipments = await storage.getShipmentsByOrder(order.id);
         return {
           ...order,
           customerEmail: customer?.email,
           customerName: customer?.name || `${customer?.firstName || ''} ${customer?.lastName || ''}`.trim(),
           businessName: business?.name,
+          shipment: shipments[0] || null,
         };
       }));
 
@@ -17175,6 +17232,52 @@ export async function registerRoutes(
     }
   });
 
+  // Consumer: Confirm delivery of an order
+  app.post("/api/orders/:orderId/confirm-delivery", hybridAuthMiddleware, async (req, res) => {
+    try {
+      const authReq = req as AuthenticatedRequest;
+      const userId = authReq.user?.userId || req.session?.userId;
+      if (!userId) return res.status(401).json({ error: "Not authenticated" });
+
+      const { orderId } = req.params;
+      const order = await storage.getOrder(orderId);
+      if (!order) return res.status(404).json({ error: "Order not found" });
+      if (order.customerId !== userId) {
+        return res.status(403).json({ error: "Not authorized to confirm this order" });
+      }
+      if (order.status === 'delivered') {
+        return res.json({ message: "Order already marked as delivered" });
+      }
+      if (order.status !== 'shipped') {
+        return res.status(400).json({ error: "Order must be in shipped status to confirm delivery" });
+      }
+
+      const shipments = await storage.getShipmentsByOrder(orderId);
+      if (shipments.length > 0) {
+        await storage.updateShipment(shipments[0].id, {
+          status: 'delivered',
+          deliveredAt: new Date(),
+        });
+      }
+
+      await storage.updateOrder(orderId, { status: 'delivered' });
+
+      storage.createAuditLog({
+        actorId: userId,
+        actorType: 'user',
+        action: 'consumer_confirmed_delivery',
+        targetType: 'order',
+        targetId: orderId,
+        metadata: { shipmentId: shipments[0]?.id ?? null },
+      }).catch(err => console.error('Audit log error (confirm_delivery):', err));
+
+      return res.json({ message: "Delivery confirmed" });
+    } catch (error) {
+      console.error("Confirm delivery error:", error);
+      return res.status(500).json({ error: "Failed to confirm delivery" });
+    }
+  });
+
   // Vendor: Update shipment status
   app.patch("/api/shipments/:shipmentId", async (req, res) => {
     const userId = req.session?.userId;
@@ -17236,6 +17339,16 @@ export async function registerRoutes(
       // If status changed to delivered, update order status
       if (data.status === 'delivered') {
         await storage.updateOrder(shipment.orderId, { status: 'delivered' });
+
+        // Phase 1d: audit log for shipment delivered
+        storage.createAuditLog({
+          actorId: userId,
+          actorType: 'user',
+          action: 'shipment_delivered',
+          targetType: 'order',
+          targetId: shipment.orderId,
+          metadata: { shipmentId, carrier: shipment.carrier, trackingNumber: shipment.trackingNumber },
+        }).catch(err => console.error('Audit log error (shipment_delivered):', err));
         
         // Credit influencer earnings if this order has a referral event (atomic/idempotent)
         try {
