@@ -1,10 +1,11 @@
 import { db } from "./db";
-import { 
-  pulseEngagements, 
-  postDistribution, 
-  userInterests, 
+import {
+  pulseEngagements,
+  postDistribution,
+  userInterests,
   feedPosts,
   users,
+  userBlocks,
   type PulseEngagement,
   type PostDistribution,
   type UserInterests,
@@ -505,6 +506,24 @@ export async function getPulseFeed(options: PulseFeedOptions): Promise<PulseFeed
     conditions.push(
       sql`${feedPosts.id} NOT IN (${sql.join(options.excludePostIds.map(id => sql`${id}`), sql`, `)})`
     );
+  }
+
+  if (options.userId) {
+    const blockedByMe = await db.select({ blockedId: userBlocks.blockedId })
+      .from(userBlocks)
+      .where(eq(userBlocks.blockerId, options.userId));
+    const blockedMe = await db.select({ blockerId: userBlocks.blockerId })
+      .from(userBlocks)
+      .where(eq(userBlocks.blockedId, options.userId));
+    const excludedAuthorIds = [
+      ...blockedByMe.map(b => b.blockedId),
+      ...blockedMe.map(b => b.blockerId),
+    ];
+    if (excludedAuthorIds.length > 0) {
+      conditions.push(
+        sql`${feedPosts.authorId} NOT IN (${sql.join(excludedAuthorIds.map(id => sql`${id}`), sql`, `)})`
+      );
+    }
   }
 
   const eligiblePosts = await db

@@ -5416,10 +5416,21 @@ export class DatabaseStorage implements IStorage {
       }
     }
 
+    // Build bidirectional block exclusion list for the authenticated user
+    let excludedAuthorIds = new Set<string>();
+    if (userId) {
+      const blockedByMe = await this.getBlockedUsers(userId);
+      const blockedMe = await db.select({ blockerId: userBlocks.blockerId })
+        .from(userBlocks)
+        .where(eq(userBlocks.blockedId, userId));
+      for (const b of blockedByMe) excludedAuthorIds.add(b.blockedId);
+      for (const b of blockedMe) excludedAuthorIds.add(b.blockerId);
+    }
+
     // Fetch more posts than needed for ranking to ensure we don't miss high-scoring older posts
     // Also fetch posts from last 7 days to balance recency with discovery
     const fetchLimit = Math.max(limit * 5, 500);
-    
+
     const allPosts = await db.select({
       post: feedPosts,
       business: {
@@ -5451,8 +5462,13 @@ export class DatabaseStorage implements IStorage {
     .orderBy(sql`${feedPosts.createdAt} DESC`)
     .limit(fetchLimit);
 
+    // Remove posts from blocked/blocking users before scoring
+    const visiblePosts = excludedAuthorIds.size > 0
+      ? allPosts.filter(({ post }) => !excludedAuthorIds.has(post.authorId))
+      : allPosts;
+
     // Calculate scores for each post
-    const scoredPosts = allPosts.map(({ post, business, photographer }) => {
+    const scoredPosts = visiblePosts.map(({ post, business, photographer }) => {
       let score = 0;
       const now = Date.now();
       const postAge = now - new Date(post.createdAt).getTime();

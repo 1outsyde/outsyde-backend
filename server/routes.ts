@@ -11783,8 +11783,8 @@ export async function registerRoutes(
   // ==================== USER BLOCKING ROUTES ====================
 
   // Block a user
-  app.post("/api/users/:userId/block", async (req, res) => {
-    const blockerId = req.session?.userId;
+  app.post("/api/users/:userId/block", hybridAuthMiddleware, async (req: AuthenticatedRequest, res) => {
+    const blockerId = req.user?.userId || req.session?.userId;
     if (!blockerId) {
       return res.status(401).json({ error: "Not authenticated" });
     }
@@ -11805,8 +11805,8 @@ export async function registerRoutes(
   });
 
   // Unblock a user
-  app.delete("/api/users/:userId/block", async (req, res) => {
-    const blockerId = req.session?.userId;
+  app.delete("/api/users/:userId/block", hybridAuthMiddleware, async (req: AuthenticatedRequest, res) => {
+    const blockerId = req.user?.userId || req.session?.userId;
     if (!blockerId) {
       return res.status(401).json({ error: "Not authenticated" });
     }
@@ -11821,8 +11821,8 @@ export async function registerRoutes(
   });
 
   // Get list of blocked users
-  app.get("/api/users/blocked", async (req, res) => {
-    const userId = req.session?.userId;
+  app.get("/api/users/blocked", hybridAuthMiddleware, async (req: AuthenticatedRequest, res) => {
+    const userId = req.user?.userId || req.session?.userId;
     if (!userId) {
       return res.status(401).json({ error: "Not authenticated" });
     }
@@ -11837,8 +11837,8 @@ export async function registerRoutes(
   });
 
   // Check if a user is blocked
-  app.get("/api/users/:userId/blocked", async (req, res) => {
-    const userId = req.session?.userId;
+  app.get("/api/users/:userId/blocked", hybridAuthMiddleware, async (req: AuthenticatedRequest, res) => {
+    const userId = req.user?.userId || req.session?.userId;
     if (!userId) {
       return res.status(401).json({ error: "Not authenticated" });
     }
@@ -11909,8 +11909,8 @@ export async function registerRoutes(
   // ==================== MESSAGE REPORTING ROUTES ====================
 
   // Report a message
-  app.post("/api/messages/:messageId/report", async (req, res) => {
-    const reporterId = req.session?.userId;
+  app.post("/api/messages/:messageId/report", hybridAuthMiddleware, async (req: AuthenticatedRequest, res) => {
+    const reporterId = req.user?.userId || req.session?.userId;
     if (!reporterId) {
       return res.status(401).json({ error: "Not authenticated" });
     }
