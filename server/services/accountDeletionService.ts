@@ -52,7 +52,9 @@ import { getUncachableStripeClient } from "../stripe/stripeClient";
 const DELETION_SUPPORT_EMAIL = "info@goutsyde.com";
 
 // Active statuses that block deletion — only states where real work is in flight
-const ACTIVE_ORDER_STATUSES = ["pending", "processing", "confirmed", "in_progress"];
+// pending/processing/confirmed/in_progress = legacy values still in DB from before the shipping-flow refactor
+// paid = payment captured, awaiting shipment; shipped = in transit, awaiting delivery
+const ACTIVE_ORDER_STATUSES = ["pending", "processing", "confirmed", "in_progress", "paid", "shipped"];
 const ACTIVE_BOOKING_STATUSES = ["pending_payment", "pending_provider", "confirmed"];
 
 async function deleteGcsObjectByUrl(url: string): Promise<void> {
