@@ -448,175 +448,489 @@ function buildEmailShell(
     </html>`;
 }
 
+// ─── Rich Email Builder ───────────────────────────────────────────────────────
+
+function cents(n: number): string {
+  return `$${(n / 100).toFixed(2)}`;
+}
+
+function detailRow(label: string, value: string, odd: boolean): string {
+  const bg = odd ? '#1A1A1A' : '#212121';
+  return `<tr style="background:${bg};">
+    <td style="padding:10px 14px;color:#E8B930;font-size:13px;font-weight:600;width:40%;vertical-align:top;">${label}</td>
+    <td style="padding:10px 14px;color:#FFFFFF;font-size:14px;vertical-align:top;">${value}</td>
+  </tr>`;
+}
+
+function emailHeader(heading: string, subheading: string): string {
+  return `
+  <tr>
+    <td style="background:#1A1A1A;border-radius:10px 10px 0 0;padding:28px 32px 0;text-align:center;border-bottom:2px solid #E8B930;">
+      <div style="color:#E8B930;font-size:28px;font-weight:900;letter-spacing:2px;margin-bottom:6px;">OUTSYDE</div>
+      <div style="color:#888888;font-size:11px;letter-spacing:3px;text-transform:uppercase;margin-bottom:20px;">Culture meets commerce</div>
+    </td>
+  </tr>
+  <tr>
+    <td style="background:#1A1A1A;padding:24px 32px 8px;">
+      <h1 style="color:#F5F0E8;font-size:22px;font-weight:800;margin:0 0 8px 0;text-align:center;">${heading}</h1>
+      <p style="color:#888888;font-size:14px;margin:0 0 20px 0;text-align:center;">${subheading}</p>
+      <div style="border-top:1px solid #2A2A2A;"></div>
+    </td>
+  </tr>`;
+}
+
+function emailCta(label: string, url: string): string {
+  return `<tr>
+    <td style="background:#1A1A1A;padding:24px 32px;">
+      <div style="text-align:center;">
+        <a href="${url}" style="display:inline-block;background:#1A3C34;color:#E8B930;padding:14px 36px;text-decoration:none;border-radius:6px;font-weight:700;font-size:15px;letter-spacing:0.5px;">${label}</a>
+      </div>
+    </td>
+  </tr>`;
+}
+
+function emailFooter(extra?: string): string {
+  return `<tr>
+    <td style="background:#111111;border-radius:0 0 10px 10px;padding:20px 32px;text-align:center;">
+      ${extra ? `<p style="color:#AAAAAA;font-size:13px;margin:0 0 10px 0;">${extra}</p>` : ''}
+      <p style="color:#555555;font-size:12px;margin:0 0 4px 0;">For questions contact us at <a href="mailto:info@goutsyde.com" style="color:#E8B930;text-decoration:none;">info@goutsyde.com</a></p>
+      <p style="color:#444444;font-size:11px;margin:0;">info@goutsyde.com &nbsp;·&nbsp; Culture meets commerce &nbsp;·&nbsp; Go Outsyde</p>
+    </td>
+  </tr>`;
+}
+
+function wrapEmail(innerRows: string): string {
+  return `<!DOCTYPE html><html><body style="margin:0;padding:0;background:#0D0D0D;font-family:'Helvetica Neue',Arial,sans-serif;">
+  <table width="100%" cellpadding="0" cellspacing="0" style="background:#0D0D0D;padding:32px 0;">
+    <tr><td align="center">
+      <table width="600" cellpadding="0" cellspacing="0" style="max-width:600px;width:100%;">
+        ${innerRows}
+      </table>
+    </td></tr>
+  </table>
+</body></html>`;
+}
+
+// ─── 7 Transactional Email Functions ─────────────────────────────────────────
+
 export async function sendAppointmentConfirmationToConsumer(params: {
-  to: string;
-  customerName: string;
-  businessName: string;
+  toEmail: string;
+  consumerName: string;
+  vendorName: string;
+  vendorContactEmail?: string;
+  serviceName: string;
+  bookingId: string;
   date: string;
   time: string;
-  totalPrice: number;
+  location?: string;
+  basePrice: number;
 }): Promise<void> {
   try {
-    const html = buildEmailShell(
-      'Your Appointment is Confirmed!',
-      [
-        { label: 'Customer', value: params.customerName },
-        { label: 'Business', value: params.businessName },
-        { label: 'Date', value: params.date },
-        { label: 'Time', value: params.time },
-        { label: 'Total', value: `$${(params.totalPrice / 100).toFixed(2)}` },
-      ],
-    );
-    await sendBrandedEmail(params.to, `Appointment Confirmed — ${params.businessName}`, html);
-    console.log(`[Email] Appointment confirmation sent to ${params.to}`);
+    const consumerUpcharge = params.basePrice * 0.08;
+    const consumerTotal = params.basePrice + consumerUpcharge;
+
+    const rows = [
+      { label: 'Service', value: params.serviceName },
+      { label: 'Date', value: params.date },
+      { label: 'Time', value: params.time },
+      ...(params.location ? [{ label: 'Location', value: params.location }] : []),
+      { label: 'Total Paid', value: cents(consumerTotal) },
+    ].map((r, i) => detailRow(r.label, r.value, i % 2 === 0)).join('');
+
+    const contactLines = [
+      ...(params.vendorContactEmail ? [`<span style="color:#FFFFFF;">${params.vendorName}:</span> <a href="mailto:${params.vendorContactEmail}" style="color:#E8B930;">${params.vendorContactEmail}</a>`] : []),
+      `<span style="color:#FFFFFF;">Outsyde Support:</span> <a href="mailto:info@goutsyde.com" style="color:#E8B930;">info@goutsyde.com</a>`,
+    ].map(l => `<li style="margin-bottom:4px;">${l}</li>`).join('');
+
+    const html = wrapEmail(`
+      ${emailHeader('You\'re Booked! 🎉', `Your appointment with ${params.vendorName} is confirmed.`)}
+      <tr><td style="background:#1A1A1A;padding:0 32px;">
+        <table width="100%" cellpadding="0" cellspacing="0" style="border-radius:6px;overflow:hidden;">${rows}</table>
+      </td></tr>
+      <tr><td style="background:#1A1A1A;padding:16px 32px;">
+        <p style="color:#888888;font-size:13px;margin:0 0 6px 0;font-weight:600;">Have questions? Reach out:</p>
+        <ul style="margin:0;padding-left:18px;color:#AAAAAA;font-size:13px;line-height:1.8;">${contactLines}</ul>
+      </td></tr>
+      ${emailCta('View My Bookings', 'https://goutsyde.com/account/bookings')}
+      ${emailFooter()}
+    `);
+
+    await sendBrandedEmail(params.toEmail, `🎉 Your appointment is confirmed — ${params.serviceName}`, html);
+    console.log(`[Email] Appointment confirmation sent to ${params.toEmail}`);
   } catch (err) {
     console.error('[Email] sendAppointmentConfirmationToConsumer failed:', err);
   }
 }
 
 export async function sendAppointmentNotificationToVendor(params: {
-  to: string;
-  businessName: string;
-  customerName: string;
+  toEmail: string;
+  vendorName: string;
+  consumerName: string;
+  consumerUsername?: string;
+  consumerDisplayName?: string;
+  serviceName: string;
+  bookingId: string;
   date: string;
   time: string;
-  totalPrice: number;
+  location?: string;
+  basePrice: number;
 }): Promise<void> {
   try {
-    const html = buildEmailShell(
-      'New Appointment Booked',
-      [
-        { label: 'Customer', value: params.customerName },
-        { label: 'Date', value: params.date },
-        { label: 'Time', value: params.time },
-        { label: 'Total', value: `$${(params.totalPrice / 100).toFixed(2)}` },
-      ],
-    );
-    await sendBrandedEmail(params.to, `New Appointment — ${params.customerName}`, html);
-    console.log(`[Email] Appointment vendor notification sent to ${params.to}`);
+    const vendorFee = params.basePrice * 0.02;
+    const vendorPayout = params.basePrice - vendorFee;
+
+    const customerDisplay = params.consumerDisplayName || params.consumerName;
+    const usernameDisplay = params.consumerUsername ? `@${params.consumerUsername}` : '';
+
+    const rows = [
+      { label: 'Customer Name', value: customerDisplay },
+      ...(usernameDisplay ? [{ label: 'Customer Username', value: usernameDisplay }] : []),
+      { label: 'Service', value: params.serviceName },
+      { label: 'Date', value: params.date },
+      { label: 'Time', value: params.time },
+      ...(params.location ? [{ label: 'Location', value: params.location }] : []),
+      { label: 'Your Payout', value: cents(vendorPayout) },
+    ].map((r, i) => detailRow(r.label, r.value, i % 2 === 0)).join('');
+
+    const html = wrapEmail(`
+      ${emailHeader('New Booking Received! 🎉', 'Congratulations! You have a new appointment booking.')}
+      <tr><td style="background:#1A1A1A;padding:0 32px;">
+        <table width="100%" cellpadding="0" cellspacing="0" style="border-radius:6px;overflow:hidden;">${rows}</table>
+      </td></tr>
+      <tr><td style="background:#1A1A1A;padding:12px 32px 4px;">
+        <p style="color:#555555;font-size:12px;margin:0;">Outsyde platform fee: 2% (${cents(vendorFee)})</p>
+      </td></tr>
+      ${emailCta('View in Dashboard', 'https://goutsyde.com/vendor/bookings')}
+      ${emailFooter()}
+    `);
+
+    await sendBrandedEmail(params.toEmail, `🎉 New booking received — ${params.serviceName}`, html);
+    console.log(`[Email] Appointment vendor notification sent to ${params.toEmail}`);
   } catch (err) {
     console.error('[Email] sendAppointmentNotificationToVendor failed:', err);
   }
 }
 
 export async function sendShootBookingConfirmationToConsumer(params: {
-  to: string;
-  customerName: string;
+  toEmail: string;
+  consumerName: string;
   photographerName: string;
+  photographerContactEmail?: string;
+  shootType: string;
+  bookingId: string;
   date: string;
   time: string;
-  shootType: string;
-  totalPrice: number;
+  location?: string;
+  basePrice: number;
 }): Promise<void> {
   try {
-    const html = buildEmailShell(
-      'Your Shoot Booking is Confirmed!',
-      [
-        { label: 'Customer', value: params.customerName },
-        { label: 'Photographer', value: params.photographerName },
-        { label: 'Shoot Type', value: params.shootType },
-        { label: 'Date', value: params.date },
-        { label: 'Time', value: params.time },
-        { label: 'Total', value: `$${(params.totalPrice / 100).toFixed(2)}` },
-      ],
-    );
-    await sendBrandedEmail(params.to, `Shoot Booking Confirmed — ${params.photographerName}`, html);
-    console.log(`[Email] Shoot confirmation sent to ${params.to}`);
+    const consumerUpcharge = params.basePrice * 0.08;
+    const consumerTotal = params.basePrice + consumerUpcharge;
+
+    const rows = [
+      { label: 'Shoot Type', value: params.shootType },
+      { label: 'Photographer', value: params.photographerName },
+      { label: 'Date', value: params.date },
+      { label: 'Time', value: params.time },
+      ...(params.location ? [{ label: 'Location', value: params.location }] : []),
+      { label: 'Total Paid', value: cents(consumerTotal) },
+    ].map((r, i) => detailRow(r.label, r.value, i % 2 === 0)).join('');
+
+    const contactLines = [
+      ...(params.photographerContactEmail ? [`<span style="color:#FFFFFF;">${params.photographerName}:</span> <a href="mailto:${params.photographerContactEmail}" style="color:#E8B930;">${params.photographerContactEmail}</a>`] : []),
+      `<span style="color:#FFFFFF;">Outsyde Support:</span> <a href="mailto:info@goutsyde.com" style="color:#E8B930;">info@goutsyde.com</a>`,
+    ].map(l => `<li style="margin-bottom:4px;">${l}</li>`).join('');
+
+    const html = wrapEmail(`
+      ${emailHeader('Shoot Booked! 🎉', `Your session with ${params.photographerName} is locked in.`)}
+      <tr><td style="background:#1A1A1A;padding:0 32px;">
+        <table width="100%" cellpadding="0" cellspacing="0" style="border-radius:6px;overflow:hidden;">${rows}</table>
+      </td></tr>
+      <tr><td style="background:#1A1A1A;padding:16px 32px;">
+        <p style="color:#888888;font-size:13px;margin:0 0 6px 0;font-weight:600;">Have questions? Reach out:</p>
+        <ul style="margin:0;padding-left:18px;color:#AAAAAA;font-size:13px;line-height:1.8;">${contactLines}</ul>
+      </td></tr>
+      ${emailCta('View My Bookings', 'https://goutsyde.com/account/bookings')}
+      ${emailFooter()}
+    `);
+
+    await sendBrandedEmail(params.toEmail, `🎉 Your shoot is confirmed — ${params.shootType}`, html);
+    console.log(`[Email] Shoot confirmation sent to ${params.toEmail}`);
   } catch (err) {
     console.error('[Email] sendShootBookingConfirmationToConsumer failed:', err);
   }
 }
 
 export async function sendShootBookingNotificationToPhotographer(params: {
-  to: string;
+  toEmail: string;
   photographerName: string;
-  customerName: string;
+  consumerName: string;
+  consumerUsername?: string;
+  consumerDisplayName?: string;
+  shootType: string;
+  bookingId: string;
   date: string;
   time: string;
-  shootType: string;
-  totalPrice: number;
+  location?: string;
+  basePrice: number;
 }): Promise<void> {
   try {
-    const html = buildEmailShell(
-      'New Shoot Booking',
-      [
-        { label: 'Client', value: params.customerName },
-        { label: 'Shoot Type', value: params.shootType },
-        { label: 'Date', value: params.date },
-        { label: 'Time', value: params.time },
-        { label: 'Total', value: `$${(params.totalPrice / 100).toFixed(2)}` },
-      ],
-    );
-    await sendBrandedEmail(params.to, `New Shoot — ${params.customerName}`, html);
-    console.log(`[Email] Shoot photographer notification sent to ${params.to}`);
+    const vendorFee = params.basePrice * 0.02;
+    const vendorPayout = params.basePrice - vendorFee;
+
+    const clientDisplay = params.consumerDisplayName || params.consumerName;
+    const usernameDisplay = params.consumerUsername ? `@${params.consumerUsername}` : '';
+
+    const rows = [
+      { label: 'Client Name', value: clientDisplay },
+      ...(usernameDisplay ? [{ label: 'Client Username', value: usernameDisplay }] : []),
+      { label: 'Shoot Type', value: params.shootType },
+      { label: 'Date', value: params.date },
+      { label: 'Time', value: params.time },
+      ...(params.location ? [{ label: 'Location', value: params.location }] : []),
+      { label: 'Your Payout', value: cents(vendorPayout) },
+    ].map((r, i) => detailRow(r.label, r.value, i % 2 === 0)).join('');
+
+    const html = wrapEmail(`
+      ${emailHeader('New Shoot Booking! 🎉', 'Congratulations! You have a new shoot booking.')}
+      <tr><td style="background:#1A1A1A;padding:0 32px;">
+        <table width="100%" cellpadding="0" cellspacing="0" style="border-radius:6px;overflow:hidden;">${rows}</table>
+      </td></tr>
+      <tr><td style="background:#1A1A1A;padding:12px 32px 4px;">
+        <p style="color:#555555;font-size:12px;margin:0;">Outsyde platform fee: 2% (${cents(vendorFee)})</p>
+      </td></tr>
+      ${emailCta('View in Dashboard', 'https://goutsyde.com/vendor/bookings')}
+      ${emailFooter()}
+    `);
+
+    await sendBrandedEmail(params.toEmail, `🎉 New shoot booked — ${params.shootType}`, html);
+    console.log(`[Email] Shoot photographer notification sent to ${params.toEmail}`);
   } catch (err) {
     console.error('[Email] sendShootBookingNotificationToPhotographer failed:', err);
   }
 }
 
 export async function sendOrderConfirmationToConsumer(params: {
-  to: string;
-  customerName: string;
+  toEmail: string;
+  consumerName: string;
   orderId: string;
-  itemsSummary: string;
-  totalAmount: number;
+  items: Array<{
+    productName: string;
+    vendorName: string;
+    vendorContactEmail?: string;
+    quantity: number;
+    basePrice: number;
+  }>;
 }): Promise<void> {
   try {
-    const html = buildEmailShell(
-      'Your Order is Confirmed!',
-      [
-        { label: 'Customer', value: params.customerName },
-        { label: 'Order', value: `#${params.orderId.slice(-8).toUpperCase()}` },
-        { label: 'Items', value: params.itemsSummary },
-        { label: 'Total', value: `$${(params.totalAmount / 100).toFixed(2)}` },
-      ],
-    );
-    await sendBrandedEmail(params.to, `Order Confirmed — #${params.orderId.slice(-8).toUpperCase()}`, html);
-    console.log(`[Email] Order confirmation sent to ${params.to}`);
+    const orderRef = `#${params.orderId.slice(-8).toUpperCase()}`;
+    let grandTotal = 0;
+
+    const itemCards = params.items.map(item => {
+      const itemBase = item.basePrice * item.quantity;
+      const upcharge = itemBase * 0.08;
+      const itemTotal = itemBase + upcharge;
+      grandTotal += itemTotal;
+      return `<tr style="background:#1E1E1E;">
+        <td style="padding:12px 14px;border-bottom:1px solid #2A2A2A;">
+          <div style="color:#FFFFFF;font-size:14px;font-weight:600;">${item.productName}</div>
+          <div style="color:#888888;font-size:12px;margin-top:2px;">by ${item.vendorName} &nbsp;·&nbsp; Qty: ${item.quantity} &nbsp;·&nbsp; ${cents(itemTotal)}</div>
+        </td>
+      </tr>`;
+    }).join('');
+
+    const contactLines = [
+      ...Array.from(new Map(params.items
+        .filter(i => i.vendorContactEmail)
+        .map(i => [i.vendorName, i.vendorContactEmail!])
+      ).entries()).map(([name, email]) =>
+        `<span style="color:#FFFFFF;">${name}:</span> <a href="mailto:${email}" style="color:#E8B930;">${email}</a>`
+      ),
+      `<span style="color:#FFFFFF;">Outsyde Support:</span> <a href="mailto:info@goutsyde.com" style="color:#E8B930;">info@goutsyde.com</a>`,
+    ].map(l => `<li style="margin-bottom:4px;">${l}</li>`).join('');
+
+    const html = wrapEmail(`
+      ${emailHeader('Order Confirmed! 🎉', 'Thanks for your purchase. Here\'s your order summary.')}
+      <tr><td style="background:#1A1A1A;padding:0 32px 8px;">
+        <p style="color:#888888;font-size:12px;margin:0 0 8px 0;">Order ${orderRef}</p>
+        <table width="100%" cellpadding="0" cellspacing="0" style="border-radius:6px;overflow:hidden;border:1px solid #2A2A2A;">${itemCards}</table>
+        <table width="100%" cellpadding="0" cellspacing="0" style="margin-top:8px;">
+          ${detailRow('Order Total', cents(grandTotal), true)}
+        </table>
+      </td></tr>
+      <tr><td style="background:#1A1A1A;padding:16px 32px;">
+        <p style="color:#888888;font-size:13px;margin:0 0 6px 0;font-weight:600;">Questions about your order? Contact:</p>
+        <ul style="margin:0;padding-left:18px;color:#AAAAAA;font-size:13px;line-height:1.8;">${contactLines}</ul>
+      </td></tr>
+      ${emailCta('View My Orders', 'https://goutsyde.com/account/orders')}
+      ${emailFooter()}
+    `);
+
+    const subjectItem = params.items.length > 1 ? `${params.items.length} items` : params.items[0]?.productName || 'your order';
+    await sendBrandedEmail(params.toEmail, `🎉 Order confirmed — ${subjectItem}`, html);
+    console.log(`[Email] Order confirmation sent to ${params.toEmail}`);
   } catch (err) {
     console.error('[Email] sendOrderConfirmationToConsumer failed:', err);
   }
 }
 
 export async function sendOrderNotificationToVendor(params: {
-  to: string;
+  toEmail: string;
   vendorName: string;
-  customerName: string;
+  consumerName: string;
+  consumerUsername?: string;
+  consumerDisplayName?: string;
   orderId: string;
-  itemsSummary: string;
-  totalAmount: number;
+  items: Array<{
+    productName: string;
+    quantity: number;
+    basePrice: number;
+  }>;
 }): Promise<void> {
   try {
-    const html = buildEmailShell(
-      'New Order Received',
-      [
-        { label: 'Customer', value: params.customerName },
-        { label: 'Order', value: `#${params.orderId.slice(-8).toUpperCase()}` },
-        { label: 'Items', value: params.itemsSummary },
-        { label: 'Total', value: `$${(params.totalAmount / 100).toFixed(2)}` },
-      ],
-    );
-    await sendBrandedEmail(params.to, `New Order from ${params.customerName}`, html);
-    console.log(`[Email] Order vendor notification sent to ${params.to}`);
+    const orderRef = `#${params.orderId.slice(-8).toUpperCase()}`;
+    const customerDisplay = params.consumerDisplayName || params.consumerName;
+    const usernameDisplay = params.consumerUsername ? `@${params.consumerUsername}` : '';
+
+    let totalPayout = 0;
+    const itemRows = params.items.map((item, i) => {
+      const itemBase = item.basePrice * item.quantity;
+      const fee = itemBase * 0.02;
+      const payout = itemBase - fee;
+      totalPayout += payout;
+      const bg = i % 2 === 0 ? '#1A1A1A' : '#212121';
+      return `<tr style="background:${bg};">
+        <td style="padding:10px 14px;color:#FFFFFF;font-size:13px;">${item.productName}</td>
+        <td style="padding:10px 14px;color:#888888;font-size:13px;text-align:center;">${item.quantity}</td>
+        <td style="padding:10px 14px;color:#E8B930;font-size:13px;text-align:right;">${cents(payout)}</td>
+      </tr>`;
+    }).join('');
+
+    const html = wrapEmail(`
+      ${emailHeader('You Made a Sale! 🎉', 'Congratulations! Here\'s what was ordered.')}
+      <tr><td style="background:#1A1A1A;padding:0 32px 8px;">
+        <table width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:12px;">
+          ${detailRow('Customer', customerDisplay, true)}
+          ${usernameDisplay ? detailRow('Username', usernameDisplay, false) : ''}
+          ${detailRow('Order ID', orderRef, usernameDisplay ? true : false)}
+        </table>
+        <table width="100%" cellpadding="0" cellspacing="0" style="border-radius:6px;overflow:hidden;border:1px solid #2A2A2A;">
+          <tr style="background:#252525;">
+            <th style="padding:8px 14px;color:#E8B930;font-size:12px;text-align:left;font-weight:600;">Product</th>
+            <th style="padding:8px 14px;color:#E8B930;font-size:12px;text-align:center;font-weight:600;">Qty</th>
+            <th style="padding:8px 14px;color:#E8B930;font-size:12px;text-align:right;font-weight:600;">Your Payout</th>
+          </tr>
+          ${itemRows}
+          <tr style="background:#1E2E2A;">
+            <td colspan="2" style="padding:10px 14px;color:#E8B930;font-size:14px;font-weight:700;">Total Payout</td>
+            <td style="padding:10px 14px;color:#E8B930;font-size:14px;font-weight:700;text-align:right;">${cents(totalPayout)}</td>
+          </tr>
+        </table>
+        <p style="color:#555555;font-size:12px;margin:8px 0 0 0;">Outsyde platform fee: 2% per item</p>
+      </td></tr>
+      ${emailCta('View in Dashboard', 'https://goutsyde.com/vendor/orders')}
+      ${emailFooter()}
+    `);
+
+    const subjectItem = params.items[0]?.productName || 'an item';
+    const subjectSuffix = params.items.length > 1 ? ' + more' : '';
+    await sendBrandedEmail(params.toEmail, `🎉 New order received — ${subjectItem}${subjectSuffix}`, html);
+    console.log(`[Email] Order vendor notification sent to ${params.toEmail}`);
   } catch (err) {
     console.error('[Email] sendOrderNotificationToVendor failed:', err);
   }
 }
 
 export async function sendInternalEventAlert(params: {
-  eventType: string;
-  summary: string;
-  details: Record<string, string>;
+  eventType: 'appointment_booking' | 'shoot_booking' | 'product_order';
+  bookingOrOrderId: string;
+  consumerName: string;
+  consumerEmail: string;
+  vendorName: string;
+  vendorEmail: string;
+  items?: Array<{ productName: string; quantity: number; basePrice: number }>;
+  basePrice?: number;
+  date?: string;
+  time?: string;
+  location?: string;
 }): Promise<void> {
   const OPS_EMAIL = 'info@goutsyde.com';
   try {
-    const rows = Object.entries(params.details).map(([label, value]) => ({ label, value }));
-    const html = buildEmailShell(`[Outsyde Internal] ${params.eventType}`, [
-      { label: 'Summary', value: params.summary },
-      ...rows,
-    ]);
-    await sendBrandedEmail(OPS_EMAIL, `[Outsyde] ${params.eventType}`, html);
-    console.log(`[Email] Internal alert sent for event: ${params.eventType}`);
+    const totalBase = params.basePrice ?? (params.items?.reduce((s, i) => s + i.basePrice * i.quantity, 0) ?? 0);
+    const consumerUpcharge = totalBase * 0.08;
+    const consumerTotal = totalBase + consumerUpcharge;
+    const vendorFee = totalBase * 0.02;
+    const vendorPayout = totalBase - vendorFee;
+    const outsydeProfit = consumerUpcharge + vendorFee;
+
+    const partiesRows = [
+      detailRow('Consumer', `${params.consumerName} / ${params.consumerEmail}`, true),
+      detailRow('Vendor', `${params.vendorName} / ${params.vendorEmail}`, false),
+      ...(params.date ? [detailRow('Date', params.date, true)] : []),
+      ...(params.time ? [detailRow('Time', params.time, false)] : []),
+      ...(params.location ? [detailRow('Location', params.location, true)] : []),
+    ].join('');
+
+    let itemBreakdown = '';
+    if (params.items && params.items.length > 0) {
+      const itemRows = params.items.map((item, i) => {
+        const itemBase = item.basePrice * item.quantity;
+        const bg = i % 2 === 0 ? '#1A1A1A' : '#212121';
+        return `<tr style="background:${bg};">
+          <td style="padding:8px 14px;color:#FFFFFF;font-size:13px;">${item.productName} x${item.quantity}</td>
+          <td style="padding:8px 14px;color:#888888;font-size:13px;text-align:right;">${cents(itemBase)}</td>
+        </tr>`;
+      }).join('');
+      itemBreakdown = `<tr><td style="background:#1A1A1A;padding:8px 32px 0;">
+        <p style="color:#888888;font-size:12px;font-weight:600;margin:0 0 6px 0;text-transform:uppercase;letter-spacing:1px;">Items</p>
+        <table width="100%" cellpadding="0" cellspacing="0" style="border-radius:4px;overflow:hidden;">${itemRows}</table>
+      </td></tr>`;
+    }
+
+    const financialRows = [
+      detailRow('Base Amount', cents(totalBase), true),
+      detailRow('Consumer Upcharge (8%)', `+${cents(consumerUpcharge)}`, false),
+      detailRow('Consumer Total Paid', cents(consumerTotal), true),
+      detailRow('Vendor Fee (2%)', `-${cents(vendorFee)}`, false),
+      detailRow('Vendor Payout', cents(vendorPayout), true),
+    ].join('');
+
+    const html = wrapEmail(`
+      <tr>
+        <td style="background:#1A1A1A;border-radius:10px 10px 0 0;padding:20px 32px;border-bottom:2px solid #E8B930;">
+          <div style="color:#E8B930;font-size:20px;font-weight:900;letter-spacing:2px;">OUTSYDE</div>
+          <h1 style="color:#F5F0E8;font-size:18px;font-weight:700;margin:8px 0 0 0;">Transaction Summary</h1>
+          <p style="color:#888888;font-size:12px;margin:4px 0 0 0;">${params.eventType} · ${params.bookingOrOrderId}</p>
+        </td>
+      </tr>
+      <tr><td style="background:#1A1A1A;padding:16px 32px 0;">
+        <p style="color:#888888;font-size:12px;font-weight:600;margin:0 0 6px 0;text-transform:uppercase;letter-spacing:1px;">Parties</p>
+        <table width="100%" cellpadding="0" cellspacing="0" style="border-radius:4px;overflow:hidden;">${partiesRows}</table>
+      </td></tr>
+      ${itemBreakdown}
+      <tr><td style="background:#1A1A1A;padding:16px 32px 0;">
+        <p style="color:#888888;font-size:12px;font-weight:600;margin:0 0 6px 0;text-transform:uppercase;letter-spacing:1px;">Financial Breakdown</p>
+        <table width="100%" cellpadding="0" cellspacing="0" style="border-radius:4px;overflow:hidden;">
+          ${financialRows}
+          <tr style="background:#1A3C34;">
+            <td style="padding:12px 14px;color:#E8B930;font-size:14px;font-weight:800;">Outsyde Profit</td>
+            <td style="padding:12px 14px;color:#E8B930;font-size:14px;font-weight:800;text-align:right;">${cents(outsydeProfit)}</td>
+          </tr>
+          <tr style="background:#141414;">
+            <td style="padding:8px 14px 8px 28px;color:#888888;font-size:12px;">From upcharge</td>
+            <td style="padding:8px 14px;color:#888888;font-size:12px;text-align:right;">${cents(consumerUpcharge)}</td>
+          </tr>
+          <tr style="background:#141414;">
+            <td style="padding:8px 14px 12px 28px;color:#888888;font-size:12px;">From vendor fee</td>
+            <td style="padding:8px 14px 12px;color:#888888;font-size:12px;text-align:right;">${cents(vendorFee)}</td>
+          </tr>
+        </table>
+      </td></tr>
+      ${emailFooter()}
+    `);
+
+    await sendBrandedEmail(OPS_EMAIL, `[Outsyde] ${params.eventType} — ${params.bookingOrOrderId}`, html);
+    console.log(`[Email] Internal alert sent for: ${params.eventType} ${params.bookingOrOrderId}`);
   } catch (err) {
     console.error('[Email] sendInternalEventAlert failed:', err);
   }
