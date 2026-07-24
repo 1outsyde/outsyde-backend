@@ -1,4 +1,6 @@
 import { db } from "../db";
+import { objectStorageClient } from "../objectStorage";
+import { deleteMuxAsset, getMuxAssetIdByPlaybackId } from "./mux";
 import {
   users,
   businesses,
@@ -52,144 +54,185 @@ const DELETION_SUPPORT_EMAIL = "info@goutsyde.com";
 const ACTIVE_ORDER_STATUSES = ["pending", "processing", "confirmed", "in_progress"];
 const ACTIVE_BOOKING_STATUSES = ["pending_payment", "pending_provider", "confirmed"];
 
-async function deleteUserFeedPosts(userId: string): Promise<void> {
-  const posts = await db
-    .select({ id: feedPosts.id, mediaUrl: feedPosts.mediaUrl, imageUrl: feedPosts.imageUrl })
+async function deleteGcsObjectByUrl(url: string): Promise<void> {
+  if (!url.startsWith("https://storage.googleapis.com/")) return;
+  try {
+    const pathname = new URL(url).pathname; // "/{bucket}/{path...}"
+    const parts = pathname.split("/").filter(Boolean);
+    if (parts.length < 2) return;
+    const bucketName = parts[0];
+    const objectName = parts.slice(1).join("/");
+    await objectStorageClient.bucket(bucketName).file(objectName).delete({ ignoreNotFound: true });
+  } catch (err) {
+    console.warn("[accountDeletion] GCS delete failed for", url, err);
+  }
+}
+
+async function purgePostMediaAssets(
+  userId: string,
+  posts: Array<{ id: string; mediaUrl: string | null; imageUrl: string | null; mediaType: string | null }>
+): Promise<void> {
+  for (const post of posts) {
+    // Mux video asset
+    if (post.mediaType === "video" && post.mediaUrl?.includes("stream.mux.com")) {
+      // URL format: https://stream.mux.com/{playbackId}.m3u8
+      const match = post.mediaUrl.match(/stream\.mux\.com\/([^.]+)\.m3u8/);
+      if (match) {
+        try {
+          const assetId = await getMuxAssetIdByPlaybackId(match[1]);
+          if (assetId) await deleteMuxAsset(assetId);
+        } catch (err) {
+          console.warn(`[accountDeletion] Mux delete failed for post ${post.id}:`, err);
+        }
+      }
+    } else {
+      // GCS image
+      if (post.mediaUrl) await deleteGcsObjectByUrl(post.mediaUrl);
+    }
+    // Legacy imageUrl field — always GCS if present
+    if (post.imageUrl) await deleteGcsObjectByUrl(post.imageUrl);
+  }
+  const count = posts.length;
+  console.log(`[accountDeletion] User ${userId}: purged media for ${count} post(s)`);
+}
+
+async function deleteUserFeedPosts(userId: string, tx: typeof db): Promise<void> {
+  const posts = await tx
+    .select({ id: feedPosts.id, mediaUrl: feedPosts.mediaUrl, imageUrl: feedPosts.imageUrl, mediaType: feedPosts.mediaType })
     .from(feedPosts)
     .where(eq(feedPosts.authorId, userId));
 
   if (posts.length === 0) return;
 
-  // Log media for async R2/Mux cleanup — wire ObjectStorageService.deleteObject() here when available
-  const mediaUrls = posts.flatMap(p => [p.mediaUrl, p.imageUrl].filter(Boolean));
-  if (mediaUrls.length > 0) {
-    console.log(`[accountDeletion] User ${userId}: ${mediaUrls.length} media asset(s) need R2/CDN cleanup:`, mediaUrls);
-  }
+  // Purge media assets before removing DB rows so we don't lose the URL references
+  await purgePostMediaAssets(userId, posts);
 
   const postIds = posts.map(p => p.id);
-  await db.delete(postLikes).where(inArray(postLikes.postId, postIds));
-  await db.delete(postComments).where(inArray(postComments.postId, postIds));
-  await db.delete(feedPosts).where(eq(feedPosts.authorId, userId));
+  await tx.delete(postLikes).where(inArray(postLikes.postId, postIds));
+  await tx.delete(postComments).where(inArray(postComments.postId, postIds));
+  await tx.delete(feedPosts).where(eq(feedPosts.authorId, userId));
 }
 
 async function processSingleUserDeletion(userId: string): Promise<void> {
   console.log(`[accountDeletion] Starting deletion for user ${userId}`);
 
-  // Group 0: force logout
-  await db.delete(refreshTokens).where(eq(refreshTokens.userId, userId));
+  await db.transaction(async (tx) => {
+    // Group 0: force logout
+    await tx.delete(refreshTokens).where(eq(refreshTokens.userId, userId));
 
-  // Group 1: pure engagement / session data
-  await db.delete(pushSubscriptions).where(eq(pushSubscriptions.userId, userId));
-  await db.delete(notifications).where(eq(notifications.userId, userId));
-  await db.delete(cartItems).where(eq(cartItems.userId, userId));
-  await db.delete(bookingHolds).where(eq(bookingHolds.userId, userId));
-  await db.delete(follows).where(or(eq(follows.followerUserId, userId), eq(follows.targetUserId, userId)));
-  await db.delete(pulseEngagements).where(eq(pulseEngagements.userId, userId));
-  await db.delete(userInterests).where(eq(userInterests.userId, userId));
-  await db.delete(userSavedPosts).where(eq(userSavedPosts.userId, userId));
-  await db.delete(feedEngagementEvents).where(eq(feedEngagementEvents.userId, userId));
-  await db.delete(influencerApplications).where(eq(influencerApplications.userId, userId));
-  await db.delete(vendorEmailSequence).where(eq(vendorEmailSequence.vendorId, userId));
-  await db.delete(pointTransactions).where(eq(pointTransactions.userId, userId));
-  await db.delete(influencerAttributions).where(eq(influencerAttributions.userId, userId));
-  await db.delete(benefitUsage).where(eq(benefitUsage.vendorId, userId));
-  await db.delete(postLikes).where(eq(postLikes.userId, userId));
+    // Group 1: pure engagement / session data
+    await tx.delete(pushSubscriptions).where(eq(pushSubscriptions.userId, userId));
+    await tx.delete(notifications).where(eq(notifications.userId, userId));
+    await tx.delete(cartItems).where(eq(cartItems.userId, userId));
+    await tx.delete(bookingHolds).where(eq(bookingHolds.userId, userId));
+    await tx.delete(follows).where(or(eq(follows.followerUserId, userId), eq(follows.targetUserId, userId)));
+    await tx.delete(pulseEngagements).where(eq(pulseEngagements.userId, userId));
+    await tx.delete(userInterests).where(eq(userInterests.userId, userId));
+    await tx.delete(userSavedPosts).where(eq(userSavedPosts.userId, userId));
+    await tx.delete(feedEngagementEvents).where(eq(feedEngagementEvents.userId, userId));
+    await tx.delete(influencerApplications).where(eq(influencerApplications.userId, userId));
+    await tx.delete(vendorEmailSequence).where(eq(vendorEmailSequence.vendorId, userId));
+    await tx.delete(pointTransactions).where(eq(pointTransactions.userId, userId));
+    await tx.delete(influencerAttributions).where(eq(influencerAttributions.userId, userId));
+    await tx.delete(benefitUsage).where(eq(benefitUsage.vendorId, userId));
+    await tx.delete(postLikes).where(eq(postLikes.userId, userId));
 
-  // Group 2: soft-reference cleanup (no FK constraints in DB)
-  await db.delete(userBlocks).where(or(eq(userBlocks.blockerId, userId), eq(userBlocks.blockedId, userId)));
-  await db
-    .update(bookingAuditLog)
-    .set({ triggeredBy: null } as any)
-    .where(eq(bookingAuditLog.triggeredBy, userId));
+    // Group 2: soft-reference cleanup (no FK constraints in DB)
+    await tx.delete(userBlocks).where(or(eq(userBlocks.blockerId, userId), eq(userBlocks.blockedId, userId)));
+    await tx
+      .update(bookingAuditLog)
+      .set({ triggeredBy: null } as any)
+      .where(eq(bookingAuditLog.triggeredBy, userId));
 
-  // Group 3: social content — anonymize, preserve threads for other participants
-  await db.update(postComments).set({ userId: null } as any).where(eq(postComments.userId, userId));
-  await db.update(profileComments).set({ userId: null } as any).where(eq(profileComments.userId, userId));
-  await db.update(messages).set({ senderId: null } as any).where(eq(messages.senderId, userId));
-  await db.update(reviews).set({ reviewerId: null } as any).where(eq(reviews.reviewerId, userId));
+    // Group 3: social content — anonymize, preserve threads for other participants
+    await tx.update(postComments).set({ userId: null } as any).where(eq(postComments.userId, userId));
+    await tx.update(profileComments).set({ userId: null } as any).where(eq(profileComments.userId, userId));
+    await tx.update(messages).set({ senderId: null } as any).where(eq(messages.senderId, userId));
+    await tx.update(reviews).set({ reviewerId: null } as any).where(eq(reviews.reviewerId, userId));
 
-  // Group 4: feed posts + log media for cleanup
-  await deleteUserFeedPosts(userId);
+    // Group 4: feed posts + purge media assets (GCS images / Mux videos)
+    await deleteUserFeedPosts(userId, tx);
 
-  // Group 5: financial records — anonymize FK, retain row
-  await db.update(orders).set({ customerId: null } as any).where(eq(orders.customerId, userId));
-  await db.update(orderGroups).set({ customerId: null } as any).where(eq(orderGroups.customerId, userId));
-  await db.update(shootBookings).set({ clientId: null } as any).where(eq(shootBookings.clientId, userId));
-  await db.update(appointments).set({ clientId: null } as any).where(eq(appointments.clientId, userId));
-  await db.update(scheduling).set({ clientId: null } as any).where(eq(scheduling.clientId, userId));
-  await db.update(refundRequests).set({ requesterId: null } as any).where(eq(refundRequests.requesterId, userId));
-  await db.update(alaCartePurchases).set({ vendorId: null } as any).where(eq(alaCartePurchases.vendorId, userId));
-  await db.update(vendorSubscriptions).set({ vendorId: null } as any).where(eq(vendorSubscriptions.vendorId, userId));
-  await db.update(fulfillmentTasks).set({ vendorId: null } as any).where(eq(fulfillmentTasks.vendorId, userId));
-  await db.update(sponsoredPosts).set({ vendorId: null } as any).where(eq(sponsoredPosts.vendorId, userId));
-  await db.update(referrals).set({ referrerId: null } as any).where(eq(referrals.referrerId, userId));
-  await db.update(referrals).set({ referredUserId: null } as any).where(eq(referrals.referredUserId, userId));
+    // Group 5: financial records — anonymize FK, retain row
+    await tx.update(orders).set({ customerId: null } as any).where(eq(orders.customerId, userId));
+    await tx.update(orderGroups).set({ customerId: null } as any).where(eq(orderGroups.customerId, userId));
+    await tx.update(shootBookings).set({ clientId: null } as any).where(eq(shootBookings.clientId, userId));
+    await tx.update(appointments).set({ clientId: null } as any).where(eq(appointments.clientId, userId));
+    await tx.update(scheduling).set({ clientId: null } as any).where(eq(scheduling.clientId, userId));
+    await tx.update(refundRequests).set({ requesterId: null } as any).where(eq(refundRequests.requesterId, userId));
+    await tx.update(alaCartePurchases).set({ vendorId: null } as any).where(eq(alaCartePurchases.vendorId, userId));
+    await tx.update(vendorSubscriptions).set({ vendorId: null } as any).where(eq(vendorSubscriptions.vendorId, userId));
+    await tx.update(fulfillmentTasks).set({ vendorId: null } as any).where(eq(fulfillmentTasks.vendorId, userId));
+    await tx.update(sponsoredPosts).set({ vendorId: null } as any).where(eq(sponsoredPosts.vendorId, userId));
+    await tx.update(referrals).set({ referrerId: null } as any).where(eq(referrals.referrerId, userId));
+    await tx.update(referrals).set({ referredUserId: null } as any).where(eq(referrals.referredUserId, userId));
 
-  // Group 6: trust & safety — anonymize, retain
-  await db
-    .update(messageReports)
-    .set({ reporterId: null, reportedUserId: null } as any)
-    .where(or(eq(messageReports.reporterId, userId), eq(messageReports.reportedUserId, userId)));
-  await db.update(moderationQueue).set({ reporterId: null } as any).where(eq(moderationQueue.reporterId, userId));
-  await db.update(adminIssues).set({ createdBy: null } as any).where(eq(adminIssues.createdBy, userId));
+    // Group 6: trust & safety — anonymize, retain
+    await tx
+      .update(messageReports)
+      .set({ reporterId: null, reportedUserId: null } as any)
+      .where(or(eq(messageReports.reporterId, userId), eq(messageReports.reportedUserId, userId)));
+    await tx.update(moderationQueue).set({ reporterId: null } as any).where(eq(moderationQueue.reporterId, userId));
+    await tx.update(adminIssues).set({ createdBy: null } as any).where(eq(adminIssues.createdBy, userId));
 
-  // Group 7: staff unlink (userId is nullable on staffMembers)
-  await db.update(staffMembers).set({ userId: null } as any).where(eq(staffMembers.userId, userId));
+    // Group 7: staff unlink (userId is nullable on staffMembers)
+    await tx.update(staffMembers).set({ userId: null } as any).where(eq(staffMembers.userId, userId));
 
-  // Group 8: vendor/profile deactivation
-  await db.update(businesses).set({ isActive: false } as any).where(eq(businesses.ownerId, userId));
-  await db.update(photographers).set({ isActive: false } as any).where(eq(photographers.userId, userId));
-  await db.update(influencerProfiles).set({ isActive: false } as any).where(eq(influencerProfiles.userId, userId));
-  // influencer_referral_events / earning_ledger / payouts survive through influencer_profiles.id — no action needed
+    // Group 8: vendor/profile deactivation
+    await tx.update(businesses).set({ isActive: false } as any).where(eq(businesses.ownerId, userId));
+    await tx.update(photographers).set({ isActive: false } as any).where(eq(photographers.userId, userId));
+    await tx.update(influencerProfiles).set({ isActive: false } as any).where(eq(influencerProfiles.userId, userId));
+    // influencer_referral_events / earning_ledger / payouts survive through influencer_profiles.id — no action needed
 
-  // Group 10: scrub PII from the users row (do NOT delete — it anchors anonymized FKs)
-  const deletedUsername = `deleted_${userId.replace(/-/g, "").slice(0, 10)}`;
-  await db.update(users).set({
-    deletionStatus: "deleted",
-    email: null,
-    phone: null,
-    name: null,
-    firstName: null,
-    lastName: null,
-    bio: null,
-    address: null,
-    aptUnit: null,
-    city: null,
-    state: null,
-    zipCode: null,
-    latitude: null,
-    longitude: null,
-    billingAddress: null,
-    billingStreet: null,
-    billingAptUnit: null,
-    billingCity: null,
-    billingState: null,
-    billingZip: null,
-    billingCountry: null,
-    dateOfBirth: null,
-    gender: null,
-    ethnicity: null,
-    nationality: null,
-    householdSize: null,
-    incomeRange: null,
-    education: null,
-    occupation: null,
-    shoppingFrequency: null,
-    expoPushToken: null,
-    pushTokenType: null,
-    googleSub: null,
-    appleId: null,
-    stripeCustomerId: null,
-    defaultPaymentMethodId: null,
-    resetTokenHash: null,
-    resetTokenExpiresAt: null,
-    resetCodeHash: null,
-    resetCodeExpiresAt: null,
-    resetCodeAttempts: 0,
-    username: deletedUsername,
-    isAdmin: false,
-    referralCode: null,
-  } as any).where(eq(users.id, userId));
+    // Group 10: scrub PII from the users row (do NOT delete — it anchors anonymized FKs)
+    const deletedUsername = `deleted_${userId.replace(/-/g, "").slice(0, 10)}`;
+    await tx.update(users).set({
+      deletionStatus: "deleted",
+      email: null,
+      phone: null,
+      name: null,
+      firstName: null,
+      lastName: null,
+      bio: null,
+      address: null,
+      aptUnit: null,
+      city: null,
+      state: null,
+      zipCode: null,
+      latitude: null,
+      longitude: null,
+      billingAddress: null,
+      billingStreet: null,
+      billingAptUnit: null,
+      billingCity: null,
+      billingState: null,
+      billingZip: null,
+      billingCountry: null,
+      dateOfBirth: null,
+      gender: null,
+      ethnicity: null,
+      nationality: null,
+      householdSize: null,
+      incomeRange: null,
+      education: null,
+      occupation: null,
+      shoppingFrequency: null,
+      expoPushToken: null,
+      pushTokenType: null,
+      googleSub: null,
+      appleId: null,
+      stripeCustomerId: null,
+      defaultPaymentMethodId: null,
+      resetTokenHash: null,
+      resetTokenExpiresAt: null,
+      resetCodeHash: null,
+      resetCodeExpiresAt: null,
+      resetCodeAttempts: 0,
+      username: deletedUsername,
+      isAdmin: false,
+      referralCode: null,
+    } as any).where(eq(users.id, userId));
+  });
 
   console.log(`[accountDeletion] Completed deletion for user ${userId}`);
 }

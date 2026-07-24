@@ -2327,6 +2327,8 @@ export async function registerRoutes(
         isPhotographer: false as boolean,
         businessId: null as string | null,
         photographerId: null as string | null,
+        deletionStatus: user.deletionStatus ?? "active",
+        scheduledDeletionAt: user.scheduledDeletionAt ?? null,
       };
 
       // Check for business ownership
