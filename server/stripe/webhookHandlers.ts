@@ -9,6 +9,15 @@ import { stripeService } from "./stripeService";
 import { transitionAppointmentState, transitionShootBookingState } from "../bookingStateMachine";
 import { markHoldAsConverted } from "../availabilityService";
 import { sendBookingConfirmationPush } from "../expoPushService";
+import {
+  sendAppointmentConfirmationToConsumer,
+  sendAppointmentNotificationToVendor,
+  sendShootBookingConfirmationToConsumer,
+  sendShootBookingNotificationToPhotographer,
+  sendOrderConfirmationToConsumer,
+  sendOrderNotificationToVendor,
+  sendInternalEventAlert,
+} from "../emailService";
 import { processInfluencerCommission, reverseInfluencerCommission } from "../influencerPayoutService";
 import { calculateBookingFees } from "../fees";
 
@@ -225,6 +234,38 @@ export class WebhookHandlers {
             console.error(`[Notify:appointment_booking] Business owner notification failed for appointment ${bookingId}:`, err);
           }
 
+          // Transactional emails — each independently try/catch'd
+          if (user?.email) {
+            sendAppointmentConfirmationToConsumer({
+              to: user.email,
+              customerName: user.name || user.email,
+              businessName: ab_business?.name || 'Business',
+              date: appointment.appointmentDate,
+              time: appointment.appointmentTime,
+              totalPrice: appointment.totalPrice,
+            }).catch(() => {});
+          }
+          if (ab_owner?.email) {
+            sendAppointmentNotificationToVendor({
+              to: ab_owner.email,
+              businessName: ab_business?.name || 'Business',
+              customerName: user?.name || 'Customer',
+              date: appointment.appointmentDate,
+              time: appointment.appointmentTime,
+              totalPrice: appointment.totalPrice,
+            }).catch(() => {});
+          }
+          sendInternalEventAlert({
+            eventType: 'Appointment Booked (PI)',
+            summary: `${user?.name || 'Customer'} booked at ${ab_business?.name || 'Business'}`,
+            details: {
+              appointmentId: bookingId,
+              date: appointment.appointmentDate,
+              time: appointment.appointmentTime,
+              total: `$${((appointment.totalPrice || 0) / 100).toFixed(2)}`,
+            },
+          }).catch(() => {});
+
           console.log(`[Stripe] Appointment ${bookingId} confirmed via PaymentIntent`);
         }
       } else if (type === 'shoot_booking') {
@@ -369,6 +410,40 @@ export class WebhookHandlers {
             businessOwnerId: sb_photographer?.userId,
             customerName: user?.name || undefined,
           }).catch(err => console.error(`[Notify:shoot_booking] Push failed for shoot booking ${bookingId}:`, err));
+
+          // Transactional emails
+          if (user?.email) {
+            sendShootBookingConfirmationToConsumer({
+              to: user.email,
+              customerName: user.name || user.email,
+              photographerName: sb_photographer?.displayName || 'Photographer',
+              date: sb_booking?.date || '',
+              time: sb_booking?.startTime || '',
+              shootType: sb_booking?.shootType || 'session',
+              totalPrice: sb_booking?.totalPrice || 0,
+            }).catch(() => {});
+          }
+          if (sb_photographer?.email) {
+            sendShootBookingNotificationToPhotographer({
+              to: sb_photographer.email,
+              photographerName: sb_photographer.displayName || 'Photographer',
+              customerName: user?.name || 'Customer',
+              date: sb_booking?.date || '',
+              time: sb_booking?.startTime || '',
+              shootType: sb_booking?.shootType || 'session',
+              totalPrice: sb_booking?.totalPrice || 0,
+            }).catch(() => {});
+          }
+          sendInternalEventAlert({
+            eventType: 'Shoot Booked (PI)',
+            summary: `${user?.name || 'Customer'} booked ${sb_photographer?.displayName || 'Photographer'}`,
+            details: {
+              bookingId,
+              shootType: sb_booking?.shootType || 'session',
+              date: sb_booking?.date || '',
+              total: `$${((sb_booking?.totalPrice || 0) / 100).toFixed(2)}`,
+            },
+          }).catch(() => {});
         } catch (err) {
           console.error(`[Notify:shoot_booking] Notifications failed for shoot booking ${bookingId}:`, err);
         }
@@ -576,6 +651,42 @@ export class WebhookHandlers {
             customerName: apptCustomer?.name || undefined,
           }).catch(err => console.error(`[Notify:appointment] Push failed for appointment ${appointmentId}:`, err));
 
+          // Transactional emails
+          if (apptCustomer?.email) {
+            sendAppointmentConfirmationToConsumer({
+              to: apptCustomer.email,
+              customerName: apptCustomer.name || apptCustomer.email,
+              businessName: business?.name || 'Business',
+              date: appointment.appointmentDate,
+              time: appointment.appointmentTime,
+              totalPrice: appointment.totalPrice,
+            }).catch(() => {});
+          }
+          if (apptOwnerId) {
+            storage.getUser(apptOwnerId).then(apptOwner => {
+              if (apptOwner?.email) {
+                sendAppointmentNotificationToVendor({
+                  to: apptOwner.email,
+                  businessName: business?.name || 'Business',
+                  customerName: apptCustomer?.name || 'Customer',
+                  date: appointment.appointmentDate,
+                  time: appointment.appointmentTime,
+                  totalPrice: appointment.totalPrice,
+                }).catch(() => {});
+              }
+            }).catch(() => {});
+          }
+          sendInternalEventAlert({
+            eventType: 'Appointment Booked (Hold PI)',
+            summary: `${apptCustomer?.name || 'Customer'} booked at ${business?.name || 'Business'}`,
+            details: {
+              appointmentId,
+              date: appointment.appointmentDate,
+              time: appointment.appointmentTime,
+              total: `$${((appointment.totalPrice || 0) / 100).toFixed(2)}`,
+            },
+          }).catch(() => {});
+
         }
       } else if (type === 'product_purchase') {
         // Mobile PaymentSheet product cart flow (POST /api/cart/payment-intent).
@@ -665,6 +776,37 @@ export class WebhookHandlers {
             businessName: orderBusiness?.name || vendor.name || 'the business',
             itemCount: order.items?.length || 1,
           }).catch(err => console.error('Notification error:', err));
+
+          // Transactional emails
+          const itemsSummary = (order.items as any[])?.map((i: any) => `${i.name || i.productId} x${i.quantity}`).join(', ') || 'Items';
+          if (customer?.email) {
+            sendOrderConfirmationToConsumer({
+              to: customer.email,
+              customerName: customer.name || customer.email,
+              orderId,
+              itemsSummary,
+              totalAmount: order.totalAmount,
+            }).catch(() => {});
+          }
+          if (vendor.email) {
+            sendOrderNotificationToVendor({
+              to: vendor.email,
+              vendorName: orderBusiness?.name || vendor.name || 'Business',
+              customerName: customer?.name || 'Customer',
+              orderId,
+              itemsSummary,
+              totalAmount: order.totalAmount,
+            }).catch(() => {});
+          }
+          sendInternalEventAlert({
+            eventType: 'Product Purchase (Mobile PI)',
+            summary: `${customer?.name || 'Customer'} ordered from ${orderBusiness?.name || vendor.name || 'Business'}`,
+            details: {
+              orderId,
+              items: itemsSummary,
+              total: `$${((order.totalAmount || 0) / 100).toFixed(2)}`,
+            },
+          }).catch(() => {});
         }
 
         console.log(`[Stripe] Product purchase completed: Order ${orderId} marked as paid`);
@@ -744,6 +886,19 @@ export class WebhookHandlers {
               orderTotal: order.totalAmount,
               itemCount: order.items?.length || 1,
             });
+            // Email vendor about their portion
+            if (vendorUser.email) {
+              const piVendorBusiness = await storage.getBusiness(vendorOrder.businessId);
+              const piMvItemsSummary = (order.items as any[])?.map((i: any) => `${i.name || i.productId} x${i.quantity}`).join(', ') || 'Items';
+              sendOrderNotificationToVendor({
+                to: vendorUser.email,
+                vendorName: piVendorBusiness?.name || vendorUser.name || 'Business',
+                customerName: customer?.name || 'Customer',
+                orderId: vendorOrder.orderId,
+                itemsSummary: piMvItemsSummary,
+                totalAmount: order.totalAmount,
+              }).catch(() => {});
+            }
           }
         }
 
@@ -777,6 +932,26 @@ export class WebhookHandlers {
           businessName: 'Outsyde',
           itemCount: await totalItemCount,
         }).catch(err => console.error('Notification error:', err));
+
+        // Email consumer consolidated confirmation + internal alert
+        if (purchaser?.email) {
+          sendOrderConfirmationToConsumer({
+            to: purchaser.email,
+            customerName: purchaser.name || purchaser.email,
+            orderId: vendorOrders[0]?.orderId || metadata.orderGroupId || '',
+            itemsSummary: `${vendorOrders.length} vendor order(s)`,
+            totalAmount: paymentIntent.amount,
+          }).catch(() => {});
+        }
+        sendInternalEventAlert({
+          eventType: 'Multi-Vendor Purchase (PI)',
+          summary: `${purchaser?.name || purchaser?.email || 'Customer'} ordered from ${vendorOrders.length} vendor(s)`,
+          details: {
+            orderGroupId: metadata.orderGroupId || '',
+            vendors: String(vendorOrders.length),
+            total: `$${((paymentIntent.amount || 0) / 100).toFixed(2)}`,
+          },
+        }).catch(() => {});
 
         if (metadata.orderGroupId) {
           await storage.updateOrderGroup(metadata.orderGroupId, {
@@ -1223,6 +1398,37 @@ export class WebhookHandlers {
         businessName: business?.name || vendor.name || 'the business',
         itemCount,
       }).catch(err => console.error('Notification error:', err));
+
+      // Transactional emails
+      const cartItemsSummary = (order.items as any[])?.map((i: any) => `${i.name || i.productId} x${i.quantity}`).join(', ') || 'Items';
+      if (customer?.email) {
+        sendOrderConfirmationToConsumer({
+          to: customer.email,
+          customerName: customer.name || customer.email,
+          orderId,
+          itemsSummary: cartItemsSummary,
+          totalAmount: order.totalAmount,
+        }).catch(() => {});
+      }
+      if (vendor.email) {
+        sendOrderNotificationToVendor({
+          to: vendor.email,
+          vendorName: business?.name || vendor.name || 'Business',
+          customerName: customer?.name || 'Customer',
+          orderId,
+          itemsSummary: cartItemsSummary,
+          totalAmount: order.totalAmount,
+        }).catch(() => {});
+      }
+      sendInternalEventAlert({
+        eventType: 'Cart Checkout Completed',
+        summary: `${customer?.name || 'Customer'} ordered from ${business?.name || vendor.name || 'Business'}`,
+        details: {
+          orderId,
+          items: cartItemsSummary,
+          total: `$${((order.totalAmount || 0) / 100).toFixed(2)}`,
+        },
+      }).catch(() => {});
     }
 
     console.log(`[Stripe] Cart checkout completed: Order ${orderId} marked as paid`);
@@ -1316,6 +1522,19 @@ export class WebhookHandlers {
           orderTotal: order.totalAmount,
           itemCount,
         });
+        // Email vendor about their portion of the multi-vendor order
+        if (vendorUser.email) {
+          const vendorBusiness = await storage.getBusiness(businessId);
+          const mvItemsSummary = (order.items as any[])?.map((i: any) => `${i.name || i.productId} x${i.quantity}`).join(', ') || 'Items';
+          sendOrderNotificationToVendor({
+            to: vendorUser.email,
+            vendorName: vendorBusiness?.name || vendorUser.name || 'Business',
+            customerName: customer?.name || 'Customer',
+            orderId,
+            itemsSummary: mvItemsSummary,
+            totalAmount: order.totalAmount,
+          }).catch(() => {});
+        }
       }
     }
 
@@ -1344,6 +1563,35 @@ export class WebhookHandlers {
 
       // Complete referral bonus if this is the user's first transaction
       await this.tryCompleteReferral(user.id, orderGroupId, 'multi_vendor_order');
+
+      // Email consumer consolidated confirmation + internal alert
+      const grandTotal = session.amount_total || 0;
+      if (user.email) {
+        sendOrderConfirmationToConsumer({
+          to: user.email,
+          customerName: user.name || user.email,
+          orderId: vendorOrders[0]?.orderId || orderGroupId,
+          itemsSummary: `${vendorOrders.length} vendor order(s)`,
+          totalAmount: grandTotal,
+        }).catch(() => {});
+      }
+      sendInternalEventAlert({
+        eventType: 'Multi-Vendor Checkout Completed',
+        summary: `${user.name || user.email} ordered from ${vendorOrders.length} vendor(s)`,
+        details: {
+          orderGroupId: orderGroupId || '',
+          vendors: String(vendorOrders.length),
+          total: `$${(grandTotal / 100).toFixed(2)}`,
+        },
+      }).catch(() => {});
+
+      // In-app notification for consumer
+      NotificationTriggers.orderConfirmed({
+        customerId: user.id,
+        orderId: vendorOrders[0]?.orderId || orderGroupId,
+        businessName: 'Outsyde',
+        itemCount: vendorOrders.length,
+      }).catch(err => console.error('Notification error:', err));
     }
 
     console.log(`Multi-vendor checkout completed: Order group ${orderGroupId} with ${vendorOrders.length} orders`);
@@ -1832,6 +2080,38 @@ export class WebhookHandlers {
               businessOwnerId: owner.id,
               customerName: customer?.name || undefined,
             }).catch(err => console.error("[ExpoPush] Appointment push error:", err));
+
+            // Transactional emails
+            if (customer?.email) {
+              sendAppointmentConfirmationToConsumer({
+                to: customer.email,
+                customerName: customer.name || customer.email,
+                businessName: business.name,
+                date: appointment.appointmentDate,
+                time: appointment.appointmentTime,
+                totalPrice: appointment.totalPrice,
+              }).catch(() => {});
+            }
+            if (owner.email) {
+              sendAppointmentNotificationToVendor({
+                to: owner.email,
+                businessName: business.name,
+                customerName: customer?.name || 'Customer',
+                date: appointment.appointmentDate,
+                time: appointment.appointmentTime,
+                totalPrice: appointment.totalPrice,
+              }).catch(() => {});
+            }
+            sendInternalEventAlert({
+              eventType: 'Appointment Booked (Checkout Session)',
+              summary: `${customer?.name || 'Customer'} booked at ${business.name}`,
+              details: {
+                appointmentId,
+                date: appointment.appointmentDate,
+                time: appointment.appointmentTime,
+                total: `$${((appointment.totalPrice || 0) / 100).toFixed(2)}`,
+              },
+            }).catch(() => {});
           }
         }
       }
@@ -1933,6 +2213,41 @@ export class WebhookHandlers {
           businessOwnerId: photographer?.userId,
           customerName: undefined,
         }).catch(err => console.error("[ExpoPush] Shoot booking push error:", err));
+
+        // Transactional emails
+        const sbCustomer = await storage.getUser(clientId);
+        if (sbCustomer?.email) {
+          sendShootBookingConfirmationToConsumer({
+            to: sbCustomer.email,
+            customerName: sbCustomer.name || sbCustomer.email,
+            photographerName: photographer?.displayName || 'Photographer',
+            date: booking.date,
+            time: booking.startTime,
+            shootType: booking.shootType,
+            totalPrice: booking.totalPrice,
+          }).catch(() => {});
+        }
+        if (photographer?.email) {
+          sendShootBookingNotificationToPhotographer({
+            to: photographer.email,
+            photographerName: photographer.displayName || 'Photographer',
+            customerName: sbCustomer?.name || 'Customer',
+            date: booking.date,
+            time: booking.startTime,
+            shootType: booking.shootType,
+            totalPrice: booking.totalPrice,
+          }).catch(() => {});
+        }
+        sendInternalEventAlert({
+          eventType: 'Shoot Booked (Checkout Session)',
+          summary: `${sbCustomer?.name || 'Customer'} booked ${photographer?.displayName || 'Photographer'}`,
+          details: {
+            bookingId: shootBookingId,
+            shootType: booking.shootType,
+            date: booking.date,
+            total: `$${((booking.totalPrice || 0) / 100).toFixed(2)}`,
+          },
+        }).catch(() => {});
       }
       if (booking && clientId) {
         await storage.earnPoints({
