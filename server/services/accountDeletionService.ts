@@ -1,6 +1,7 @@
 import { db } from "../db";
 import { objectStorageClient } from "../objectStorage";
 import { deleteMuxAsset, getMuxAssetIdByPlaybackId } from "./mux";
+import { deleteFromR2 } from "./r2";
 import {
   users,
   businesses,
@@ -68,6 +69,19 @@ async function deleteGcsObjectByUrl(url: string): Promise<void> {
   }
 }
 
+async function deleteImageAsset(url: string, postId: string): Promise<void> {
+  if (url.startsWith("https://storage.googleapis.com/")) {
+    await deleteGcsObjectByUrl(url);
+  } else {
+    // R2 (current upload path) or any other non-GCS, non-Mux URL
+    try {
+      await deleteFromR2(url);
+    } catch (err) {
+      console.warn(`[accountDeletion] R2 delete failed for post ${postId}:`, url, err);
+    }
+  }
+}
+
 async function purgePostMediaAssets(
   userId: string,
   posts: Array<{ id: string; mediaUrl: string | null; imageUrl: string | null; mediaType: string | null }>
@@ -85,15 +99,14 @@ async function purgePostMediaAssets(
           console.warn(`[accountDeletion] Mux delete failed for post ${post.id}:`, err);
         }
       }
-    } else {
-      // GCS image
-      if (post.mediaUrl) await deleteGcsObjectByUrl(post.mediaUrl);
+    } else if (post.mediaUrl) {
+      // GCS (legacy) or R2 (current) image
+      await deleteImageAsset(post.mediaUrl, post.id);
     }
-    // Legacy imageUrl field — always GCS if present
-    if (post.imageUrl) await deleteGcsObjectByUrl(post.imageUrl);
+    // Legacy imageUrl field — GCS or R2 depending on age of the post
+    if (post.imageUrl) await deleteImageAsset(post.imageUrl, post.id);
   }
-  const count = posts.length;
-  console.log(`[accountDeletion] User ${userId}: purged media for ${count} post(s)`);
+  console.log(`[accountDeletion] User ${userId}: purged media for ${posts.length} post(s)`);
 }
 
 async function deleteUserFeedPosts(userId: string, tx: typeof db): Promise<void> {
@@ -178,10 +191,53 @@ async function processSingleUserDeletion(userId: string): Promise<void> {
     // Group 7: staff unlink (userId is nullable on staffMembers)
     await tx.update(staffMembers).set({ userId: null } as any).where(eq(staffMembers.userId, userId));
 
-    // Group 8: vendor/profile deactivation
-    await tx.update(businesses).set({ isActive: false } as any).where(eq(businesses.ownerId, userId));
-    await tx.update(photographers).set({ isActive: false } as any).where(eq(photographers.userId, userId));
-    await tx.update(influencerProfiles).set({ isActive: false } as any).where(eq(influencerProfiles.userId, userId));
+    // Group 8: vendor/profile deactivation + PII scrub
+    // businesses has no isActive column; rejecting the approvalStatus hides it from
+    // isBusinessVisibleToPublic() which is the gate on all public storefront endpoints.
+    await tx.update(businesses).set({
+      approvalStatus: "rejected",
+      contactEmail: null,
+      contactPhone: null,
+      address: null,
+      city: null,
+      state: null,
+      zipCode: null,
+      latitude: null,
+      longitude: null,
+      websiteUrl: null,
+      socialMedia: null,
+      coverImage: null,
+      logoImage: null,
+      billingAddress: null,
+    } as any).where(eq(businesses.ownerId, userId));
+
+    // photographers has no isActive column; setting visibilityStatus to 'hidden' removes
+    // it from PhotographerService.list() and .get() which both filter on visibilityStatus = 'public'.
+    await tx.update(photographers).set({
+      visibilityStatus: "hidden",
+      bio: null,
+      city: null,
+      state: null,
+      latitude: null,
+      longitude: null,
+      portfolioUrl: null,
+      studioName: null,
+      studioAddress: null,
+      coverImage: null,
+      logoImage: null,
+      billingAddress: null,
+      serviceLocations: null,
+    } as any).where(eq(photographers.userId, userId));
+
+    // influencerProfiles has no visibility gate, but scrub social handles and promo code.
+    await tx.update(influencerProfiles).set({
+      bio: null,
+      instagramUrl: null,
+      tiktokUrl: null,
+      youtubeUrl: null,
+      twitterUrl: null,
+      promoCode: null,
+    } as any).where(eq(influencerProfiles.userId, userId));
     // influencer_referral_events / earning_ledger / payouts survive through influencer_profiles.id — no action needed
 
     // Group 10: scrub PII from the users row (do NOT delete — it anchors anonymized FKs)
