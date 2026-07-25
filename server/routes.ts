@@ -6890,9 +6890,14 @@ export async function registerRoutes(
         cancellationReason: reason || 'Refunded by provider'
       }).where(eq(appointments.id, appointmentId));
 
-      // Reverse points if applicable
+      // Reverse points proportionally (partial refund = partial clawback; full = full clawback)
       try {
-        await storage.reversePointsForRefund(appointment.clientId, 'appointment', appointmentId);
+        const totalPrice = appointment.totalPrice || refundAmount;
+        const refundFraction = totalPrice > 0 ? Math.min(1, refundAmount / totalPrice) : 1;
+        await storage.reversePointsForRefund(appointment.clientId, 'appointment', appointmentId, {
+          refundFraction,
+          description: 'Points reversed from refund',
+        });
       } catch (pointsError) {
         console.error("Failed to reverse points:", pointsError);
       }
@@ -7254,6 +7259,19 @@ export async function registerRoutes(
         cancellationReason: 'Consumer-initiated cancellation',
       }).where(eq(appointments.id, appointmentId));
 
+      // Clawback points proportional to refund (no refund = no clawback; full = full; partial = partial)
+      if (refundAmountCents > 0) {
+        try {
+          const refundFraction = refundTier === 'full' ? 1 : refundAmountCents / appointment.totalPrice;
+          await storage.reversePointsForRefund(userId, 'appointment', appointmentId, {
+            refundFraction,
+            description: 'Points reversed from cancellation',
+          });
+        } catch (pointsError) {
+          console.error("Failed to reverse points on appointment cancel:", pointsError);
+        }
+      }
+
       res.json({
         success: true,
         refundTier,
@@ -7400,6 +7418,19 @@ export async function registerRoutes(
         console.error(`[Cancel] Failed to release photographer slot for booking ${bookingId}:`, slotErr);
       }
 
+      // Clawback points proportional to refund (no refund = no clawback; full = full; partial = partial)
+      if (refundAmountCents > 0) {
+        try {
+          const refundFraction = refundTier === 'full' ? 1 : refundAmountCents / booking.totalPrice;
+          await storage.reversePointsForRefund(userId, 'shoot_booking', bookingId, {
+            refundFraction,
+            description: 'Points reversed from cancellation',
+          });
+        } catch (pointsError) {
+          console.error("Failed to reverse points on shoot booking cancel:", pointsError);
+        }
+      }
+
       res.json({
         success: true,
         refundTier,
@@ -7518,9 +7549,14 @@ export async function registerRoutes(
         cancellationReason: reason || 'Refunded by provider'
       }).where(eq(shootBookings.id, bookingId));
 
-      // Reverse points if applicable
+      // Reverse points proportionally (partial refund = partial clawback; full = full clawback)
       try {
-        await storage.reversePointsForRefund(booking.clientId, 'shoot_booking', bookingId);
+        const totalPrice = booking.totalPrice || refundAmount;
+        const refundFraction = totalPrice > 0 ? Math.min(1, refundAmount / totalPrice) : 1;
+        await storage.reversePointsForRefund(booking.clientId, 'shoot_booking', bookingId, {
+          refundFraction,
+          description: 'Points reversed from refund',
+        });
       } catch (pointsError) {
         console.error("Failed to reverse points:", pointsError);
       }
@@ -12364,15 +12400,11 @@ export async function registerRoutes(
       });
 
       const newBalance = await storage.getUserPointsBalance(userId);
-      // For bonus types the transaction lands immediately; for purchase/booking it is pending review.
-      const isPending = !('points' in transaction);
-      const pointsEarned = isPending ? (transaction as any).pointsEarned : (transaction as any).points;
 
       res.json({
         success: true,
         transaction,
-        pointsEarned,
-        pending: isPending,
+        pointsEarned: transaction.points,
         newBalance,
         formattedNewBalance: newBalance.toLocaleString(),
       });
@@ -13877,11 +13909,12 @@ export async function registerRoutes(
           await storage.releaseBusinessSlot(request.targetId);
         }
 
-        // Reverse loyalty points earned from this transaction
+        // Reverse loyalty points earned from this transaction (full reversal for admin-approved refunds)
         const pointReversal = await storage.reversePointsForRefund(
           request.requesterId,
           request.targetType || 'refund',
-          request.targetId || id
+          request.targetId || id,
+          { description: 'Points reversed from refund' }
         );
         if (pointReversal.reversed) {
           console.log(`Reversed ${pointReversal.pointsReversed} points for user ${request.requesterId}`);
@@ -15175,6 +15208,14 @@ export async function registerRoutes(
           return res.status(400).json({ error: result.error || "Failed to update order" });
         }
         updatedOrder = result.order!;
+      }
+
+      // Clawback points on order cancellation (full reversal since orders are always fully refunded)
+      if (refundResult && existingOrder.customerId) {
+        // referenceType matches what webhookHandlers.ts writes when earning ('cart_order')
+        storage.reversePointsForRefund(existingOrder.customerId, 'cart_order', orderId, {
+          description: 'Points reversed from refund',
+        }).catch(err => console.error('[Points] Clawback failed for order cancellation:', err));
       }
 
       // Post-refund: audit log + notification (fire-and-forget — order is already cancelled)

@@ -408,7 +408,7 @@ export interface IStorage {
     referenceType?: string;
     referenceId?: string;
     description?: string;
-  }): Promise<PendingPointTransaction | PointTransaction>;
+  }): Promise<PointTransaction>;
   getPendingPointTransactions(opts?: { userId?: string; status?: string; limit?: number }): Promise<PendingPointTransaction[]>;
   approvePendingPointTransaction(pendingId: string, reviewerId: string, note?: string): Promise<{ pending: PendingPointTransaction; live: PointTransaction }>;
   rejectPendingPointTransaction(pendingId: string, reviewerId: string, note?: string): Promise<PendingPointTransaction>;
@@ -704,7 +704,9 @@ export interface IStorage {
   updateBookingWithValidation(bookingId: string, updates: Partial<ShootBooking>, actorId?: string): Promise<{ success: boolean; booking?: ShootBooking; error?: string }>;
 
   // Point Reversal on Refund
-  reversePointsForRefund(userId: string, referenceType: string, referenceId: string): Promise<{ reversed: boolean; pointsReversed: number }>;
+  // refundFraction: 0.0–1.0 for partial clawback; omit for full reversal.
+  // Balance is floored at 0; shortfall is logged when clawback exceeds balance.
+  reversePointsForRefund(userId: string, referenceType: string, referenceId: string, opts?: { refundFraction?: number; description?: string }): Promise<{ reversed: boolean; pointsReversed: number; shortfall: number }>;
 
   // Review Revocation on Refund
   revokeReviewsForRefund(bookingType: string, bookingId: string): Promise<number>;
@@ -2223,53 +2225,35 @@ export class DatabaseStorage implements IStorage {
     referenceType?: string;
     referenceId?: string;
     description?: string;
-  }): Promise<PendingPointTransaction | PointTransaction> {
-    if (data.transactionType === 'bonus') {
-      // Bonus awards (referrals, promotions) are credited immediately without admin review.
-      const pointsEarned = Math.min(data.dollarAmountCents, this.MAX_POINTS_PER_TRANSACTION);
-      const currentBalance = await this.getUserPointsBalance(data.userId);
-      const newBalance = currentBalance + pointsEarned;
+  }): Promise<PointTransaction> {
+    // Bonus = direct point award (referrals, promotions); purchase/booking = formula-derived.
+    const rawPoints = data.transactionType === 'bonus'
+      ? data.dollarAmountCents
+      : this.calcPurchasePoints(data.dollarAmountCents).pointsEarned;
 
-      await db.update(users)
-        .set({ loyaltyPoints: newBalance })
-        .where(eq(users.id, data.userId));
+    const isCapped = rawPoints > this.MAX_POINTS_PER_TRANSACTION;
+    const pointsEarned = isCapped ? this.MAX_POINTS_PER_TRANSACTION : rawPoints;
 
-      const result = await db.insert(pointTransactions).values({
-        id: randomUUID(),
-        userId: data.userId,
-        type: 'earn',
-        points: pointsEarned,
-        dollarAmountCents: data.dollarAmountCents,
-        businessId: data.businessId || null,
-        businessName: data.businessName || null,
-        referenceType: data.referenceType || null,
-        referenceId: data.referenceId || null,
-        balanceAfter: newBalance,
-        description: data.description || `Earned ${pointsEarned} bonus points`,
-        capped: false,
-      }).returning();
+    const currentBalance = await this.getUserPointsBalance(data.userId);
+    const newBalance = currentBalance + pointsEarned;
 
-      return result[0];
-    }
+    await db.update(users)
+      .set({ loyaltyPoints: newBalance })
+      .where(eq(users.id, data.userId));
 
-    // Purchase/booking transactions go into the pending queue for admin review.
-    // Formula: points_earned = round(consumer_total_cents * 4 / 108)
-    //          outsyde_revenue_cents = same value (numerically identical; 100 pts == $1)
-    const { pointsEarned, outsydeRevenueCents } = this.calcPurchasePoints(data.dollarAmountCents);
-
-    const result = await db.insert(pendingPointTransactions).values({
+    const result = await db.insert(pointTransactions).values({
       id: randomUUID(),
       userId: data.userId,
+      type: 'earn',
+      points: pointsEarned,
       dollarAmountCents: data.dollarAmountCents,
-      transactionType: data.transactionType,
-      pointsEarned,
-      outsydeRevenueCents,
       businessId: data.businessId || null,
       businessName: data.businessName || null,
       referenceType: data.referenceType || null,
       referenceId: data.referenceId || null,
-      description: data.description || `Points earned from ${data.transactionType.replace('_', ' ')}`,
-      status: 'pending',
+      balanceAfter: newBalance,
+      description: data.description || `Earned ${pointsEarned} points${isCapped ? ' (capped)' : ''}`,
+      capped: isCapped,
     }).returning();
 
     return result[0];
@@ -6669,10 +6653,11 @@ export class DatabaseStorage implements IStorage {
   // =========================
 
   async reversePointsForRefund(
-    userId: string, 
-    referenceType: string, 
-    referenceId: string
-  ): Promise<{ reversed: boolean; pointsReversed: number }> {
+    userId: string,
+    referenceType: string,
+    referenceId: string,
+    opts?: { refundFraction?: number; description?: string }
+  ): Promise<{ reversed: boolean; pointsReversed: number; shortfall: number }> {
     const earnedTransactions = await db.select()
       .from(pointTransactions)
       .where(and(
@@ -6683,35 +6668,57 @@ export class DatabaseStorage implements IStorage {
       ));
 
     if (earnedTransactions.length === 0) {
-      return { reversed: false, pointsReversed: 0 };
+      return { reversed: false, pointsReversed: 0, shortfall: 0 };
     }
 
-    let totalPointsToReverse = 0;
-    for (const tx of earnedTransactions) {
-      totalPointsToReverse += tx.points;
+    const totalPointsEarned = earnedTransactions.reduce((sum, tx) => sum + tx.points, 0);
+
+    // Proportional clawback: fraction 0.0–1.0 for partial refunds, omit for full reversal.
+    const fraction = opts?.refundFraction !== undefined
+      ? Math.min(1, Math.max(0, opts.refundFraction))
+      : 1;
+    const pointsToReverse = Math.round(totalPointsEarned * fraction);
+
+    if (pointsToReverse === 0) {
+      return { reversed: false, pointsReversed: 0, shortfall: 0 };
     }
 
     const currentBalance = await this.getUserPointsBalance(userId);
-    const newBalance = Math.max(0, currentBalance - totalPointsToReverse);
+    const actualDecrement = Math.min(currentBalance, pointsToReverse);
+    const newBalance = currentBalance - actualDecrement;
+    const shortfall = pointsToReverse - actualDecrement;
+
+    if (shortfall > 0) {
+      console.warn(
+        `[Points] Clawback shortfall for user ${userId} on ${referenceType} ${referenceId}: ` +
+        `tried to reverse ${pointsToReverse} pts, balance was only ${currentBalance}. ` +
+        `${shortfall} pts could not be recovered (already redeemed).`
+      );
+    }
 
     await db.update(users)
       .set({ loyaltyPoints: newBalance })
       .where(eq(users.id, userId));
 
-    const id = randomUUID();
+    const description = opts?.description
+      || (fraction < 1
+        ? `Points reversed from partial refund (${referenceType})`
+        : `Points reversed from refund (${referenceType})`);
+
     await db.insert(pointTransactions).values({
-      id,
+      id: randomUUID(),
       userId,
       type: 'reversal',
-      points: -totalPointsToReverse,
+      points: -pointsToReverse,
       dollarAmountCents: 0,
       referenceType: 'refund_reversal',
       referenceId,
       balanceAfter: newBalance,
-      description: `Points reversed due to refund (${referenceType}: ${referenceId})`,
+      description,
+      capped: false,
     });
 
-    return { reversed: true, pointsReversed: totalPointsToReverse };
+    return { reversed: true, pointsReversed: pointsToReverse, shortfall };
   }
 
   // =========================
