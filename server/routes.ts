@@ -6287,7 +6287,8 @@ export async function registerRoutes(
       const consumerUpchargeCents = Math.round(basePriceCents * 0.08);
       const totalChargedToConsumerCents = basePriceCents + consumerUpchargeCents;
       const platformFeeCents = totalChargedToConsumerCents - vendorPayoutCents;
-      const outsydePointsEarned = Math.round((consumerUpchargeCents / 100) * 100);
+      // points_earned = base_charge * 4  (4% of base at 100:1 ratio)
+      const outsydePointsEarned = Math.round(basePriceCents * 4 / 100);
 
       // Get or create Stripe customer for the user
       const user = await storage.getUser(userId);
@@ -6448,7 +6449,8 @@ export async function registerRoutes(
       const consumerUpchargeCents = Math.round(basePriceCents * 0.08);
       const totalChargedToConsumerCents = basePriceCents + consumerUpchargeCents;
       const platformFeeCents = totalChargedToConsumerCents - vendorPayoutCents;
-      const outsydePointsEarned = Math.round((consumerUpchargeCents / 100) * 100);
+      // points_earned = base_charge * 4  (4% of base at 100:1 ratio)
+      const outsydePointsEarned = Math.round(basePriceCents * 4 / 100);
 
       // Get user for Stripe customer
       const user = await storage.getUser(userId);
@@ -6587,8 +6589,8 @@ export async function registerRoutes(
         const feeBreakdown = calculateProductFees(basePriceCents, { influencerAttributed: isInfluencerAttributed });
 
         const totalChargedToConsumerCents = feeBreakdown.customerTotalBeforeTaxCents;
-        // Points = 1 per cent of consumer service fee (100 points per dollar of fee)
-        const outsydePointsEarned = feeBreakdown.consumerServiceFeeCents;
+        // points_earned = base_charge * 4  (4% of base at 100:1 ratio)
+        const outsydePointsEarned = Math.round(basePriceCents * 4 / 100);
 
         // Create the order row BEFORE touching Stripe so a record always exists
         const order = await storage.createOrder({
@@ -12362,11 +12364,15 @@ export async function registerRoutes(
       });
 
       const newBalance = await storage.getUserPointsBalance(userId);
+      // For bonus types the transaction lands immediately; for purchase/booking it is pending review.
+      const isPending = !('points' in transaction);
+      const pointsEarned = isPending ? (transaction as any).pointsEarned : (transaction as any).points;
 
       res.json({
         success: true,
         transaction,
-        pointsEarned: transaction.points,
+        pointsEarned,
+        pending: isPending,
         newBalance,
         formattedNewBalance: newBalance.toLocaleString(),
       });
@@ -12376,6 +12382,66 @@ export async function registerRoutes(
       }
       console.error("Earn points error:", error);
       res.status(500).json({ error: "Failed to earn points" });
+    }
+  });
+
+  // ==================== ADMIN: PENDING POINTS REVIEW ====================
+
+  // List pending point transactions awaiting admin review
+  app.get("/api/admin/points/pending", async (req, res) => {
+    const userId = req.session?.userId;
+    if (!userId) return res.status(401).json({ error: "Not authenticated" });
+    const user = await storage.getUser(userId);
+    if (!user?.isAdmin) return res.status(403).json({ error: "Admin access required" });
+
+    try {
+      const status = (req.query.status as string) || 'pending';
+      const limit = parseInt(req.query.limit as string) || 100;
+      const filterUserId = req.query.userId as string | undefined;
+
+      const transactions = await storage.getPendingPointTransactions({ status, limit, userId: filterUserId });
+      res.json({ transactions, count: transactions.length });
+    } catch (error) {
+      console.error("List pending points error:", error);
+      res.status(500).json({ error: "Failed to list pending transactions" });
+    }
+  });
+
+  // Approve a pending point transaction — credits points to user balance
+  app.post("/api/admin/points/pending/:id/approve", async (req, res) => {
+    const userId = req.session?.userId;
+    if (!userId) return res.status(401).json({ error: "Not authenticated" });
+    const user = await storage.getUser(userId);
+    if (!user?.isAdmin) return res.status(403).json({ error: "Admin access required" });
+
+    try {
+      const { id } = req.params;
+      const note = req.body?.note as string | undefined;
+      const result = await storage.approvePendingPointTransaction(id, userId, note);
+      res.json({ success: true, ...result });
+    } catch (error: any) {
+      console.error("Approve pending points error:", error);
+      const status = error?.message?.includes('not found') ? 404 : error?.message?.includes('already') ? 409 : 500;
+      res.status(status).json({ error: error?.message || "Failed to approve transaction" });
+    }
+  });
+
+  // Reject a pending point transaction — no points credited
+  app.post("/api/admin/points/pending/:id/reject", async (req, res) => {
+    const userId = req.session?.userId;
+    if (!userId) return res.status(401).json({ error: "Not authenticated" });
+    const user = await storage.getUser(userId);
+    if (!user?.isAdmin) return res.status(403).json({ error: "Admin access required" });
+
+    try {
+      const { id } = req.params;
+      const note = req.body?.note as string | undefined;
+      const pending = await storage.rejectPendingPointTransaction(id, userId, note);
+      res.json({ success: true, pending });
+    } catch (error: any) {
+      console.error("Reject pending points error:", error);
+      const status = error?.message?.includes('not found') ? 404 : error?.message?.includes('already') ? 409 : 500;
+      res.status(status).json({ error: error?.message || "Failed to reject transaction" });
     }
   });
 
