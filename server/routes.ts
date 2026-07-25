@@ -8599,19 +8599,62 @@ export async function registerRoutes(
 
       const sub = result[0];
 
-      // Enrich with cancelAtPeriodEnd from Stripe (best-effort; omit on failure).
+      // Fetch live data from Stripe to avoid stale DB state after a plan switch.
+      // The checkout route returns { tierChanged: true } before the webhook updates
+      // the DB, so always read tier/status/period from Stripe as the source of truth.
+      let liveStatus: string | undefined;
+      let liveCurrentPeriodEnd: Date | undefined;
+      let liveTierId: string | undefined;
+      let liveTierName: string | undefined;
+      let liveTierDisplayName: string | undefined;
+      let livePriceInCents: number | undefined;
       let cancelAtPeriodEnd: boolean | undefined;
+
       if (sub.stripeSubscriptionId) {
         try {
           const stripe = await getUncachableStripeClient();
           const stripeSub = await stripe.subscriptions.retrieve(sub.stripeSubscriptionId);
-          cancelAtPeriodEnd = (stripeSub as unknown as { cancel_at_period_end: boolean }).cancel_at_period_end;
+          const s = stripeSub as unknown as {
+            status: string;
+            current_period_end: number;
+            cancel_at_period_end: boolean;
+            items: { data: Array<{ price: { id: string } }> };
+          };
+
+          liveStatus = s.status;
+          liveCurrentPeriodEnd = new Date(s.current_period_end * 1000);
+          cancelAtPeriodEnd = s.cancel_at_period_end;
+
+          const stripePriceId = s.items.data[0]?.price?.id;
+          if (stripePriceId) {
+            const [liveTier] = await db
+              .select()
+              .from(subscriptionTiers)
+              .where(eq(subscriptionTiers.stripePriceId, stripePriceId));
+            if (liveTier) {
+              liveTierId = liveTier.id;
+              liveTierName = liveTier.name;
+              liveTierDisplayName = liveTier.displayName ?? undefined;
+              livePriceInCents = liveTier.priceInCents;
+            }
+          }
         } catch {
-          // non-fatal — UI falls back to hiding the cancel notice
+          // non-fatal — fall back to DB values below
         }
       }
 
-      res.json({ subscription: { ...sub, cancelAtPeriodEnd } });
+      res.json({
+        subscription: {
+          ...sub,
+          status: liveStatus ?? sub.status,
+          currentPeriodEnd: liveCurrentPeriodEnd ?? sub.currentPeriodEnd,
+          tierId: liveTierId ?? sub.tierId,
+          tierName: liveTierName ?? sub.tierName,
+          tierDisplayName: liveTierDisplayName ?? sub.tierDisplayName,
+          priceInCents: livePriceInCents ?? sub.priceInCents,
+          cancelAtPeriodEnd,
+        },
+      });
     } catch (error) {
       console.error("Get vendor subscription error:", error);
       res.status(500).json({ error: "Failed to get subscription" });
