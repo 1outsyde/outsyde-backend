@@ -8267,6 +8267,27 @@ export async function registerRoutes(
     }
   });
 
+  // Get Stripe Express Dashboard login link for vendor payout management
+  app.get("/api/vendor/stripe-dashboard-link", authMiddleware, async (req, res) => {
+    const authReq = req as AuthenticatedRequest;
+    const userId = authReq.user?.userId;
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+    try {
+      const business = await storage.getBusinessByOwnerId(userId);
+      if (!business?.stripeAccountId || !business?.stripeOnboardingComplete) {
+        return res.status(403).json({ error: "Stripe onboarding not complete", requiresOnboarding: true });
+      }
+      const stripe = await getUncachableStripeClient();
+      const loginLink = await stripe.accounts.loginLinks.create(business.stripeAccountId);
+      return res.json({ url: loginLink.url });
+    } catch (error) {
+      console.error("[Stripe] Vendor dashboard link error:", error);
+      return res.status(500).json({ error: "Failed to generate payout link" });
+    }
+  });
+
   // Stripe Connect return — called when user completes or exits onboarding
   app.get("/api/stripe/connect-return", async (req, res) => {
     const { account, type, staffId } = req.query;
