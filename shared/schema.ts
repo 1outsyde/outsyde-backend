@@ -1110,6 +1110,36 @@ export const pointTransactions = pgTable("point_transactions", {
 });
 
 /* =====================================================
+   PENDING POINT TRANSACTIONS (Admin Review Queue)
+   Points are staged here before being credited to users.
+   Only approved records flow into point_transactions.
+===================================================== */
+export const pendingPointTransactions = pgTable("pending_points_transactions", {
+  id: varchar("id", { length: 36 }).primaryKey().default(sql`gen_random_uuid()`),
+  userId: varchar("user_id", { length: 36 }).notNull().references(() => users.id),
+
+  dollarAmountCents: integer("dollar_amount_cents").notNull(),
+  transactionType: text("transaction_type").notNull(), // 'photographer_booking' | 'business_transaction' | 'bonus'
+  pointsEarned: integer("points_earned").notNull(),
+  outsydeRevenueCents: integer("outsyde_revenue_cents").notNull(),
+
+  businessId: varchar("business_id", { length: 36 }),
+  businessName: text("business_name"),
+  referenceType: text("reference_type"),
+  referenceId: varchar("reference_id", { length: 36 }),
+  description: text("description"),
+
+  status: text("status").notNull().default("pending"), // 'pending' | 'approved' | 'rejected'
+  reviewedAt: timestamp("reviewed_at"),
+  reviewedBy: varchar("reviewed_by", { length: 36 }),
+  reviewNote: text("review_note"),
+  liveTransactionId: varchar("live_transaction_id", { length: 36 }), // set on approval
+
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+
+/* =====================================================
    REFERRALS (Deferred Reward System)
 ===================================================== */
 export const referrals = pgTable("referrals", {
@@ -2351,6 +2381,8 @@ export type Review = typeof reviews.$inferSelect;
 
 export type PointTransaction = typeof pointTransactions.$inferSelect;
 export type InsertPointTransaction = z.infer<typeof insertPointTransactionSchema>;
+
+export type PendingPointTransaction = typeof pendingPointTransactions.$inferSelect;
 
 export type Referral = typeof referrals.$inferSelect;
 

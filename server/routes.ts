@@ -6287,7 +6287,8 @@ export async function registerRoutes(
       const consumerUpchargeCents = Math.round(basePriceCents * 0.08);
       const totalChargedToConsumerCents = basePriceCents + consumerUpchargeCents;
       const platformFeeCents = totalChargedToConsumerCents - vendorPayoutCents;
-      const outsydePointsEarned = Math.round((consumerUpchargeCents / 100) * 100);
+      // points_earned = base_charge * 4  (4% of base at 100:1 ratio)
+      const outsydePointsEarned = Math.round(basePriceCents * 4 / 100);
 
       // Get or create Stripe customer for the user
       const user = await storage.getUser(userId);
@@ -6448,7 +6449,8 @@ export async function registerRoutes(
       const consumerUpchargeCents = Math.round(basePriceCents * 0.08);
       const totalChargedToConsumerCents = basePriceCents + consumerUpchargeCents;
       const platformFeeCents = totalChargedToConsumerCents - vendorPayoutCents;
-      const outsydePointsEarned = Math.round((consumerUpchargeCents / 100) * 100);
+      // points_earned = base_charge * 4  (4% of base at 100:1 ratio)
+      const outsydePointsEarned = Math.round(basePriceCents * 4 / 100);
 
       // Get user for Stripe customer
       const user = await storage.getUser(userId);
@@ -6587,8 +6589,8 @@ export async function registerRoutes(
         const feeBreakdown = calculateProductFees(basePriceCents, { influencerAttributed: isInfluencerAttributed });
 
         const totalChargedToConsumerCents = feeBreakdown.customerTotalBeforeTaxCents;
-        // Points = 1 per cent of consumer service fee (100 points per dollar of fee)
-        const outsydePointsEarned = feeBreakdown.consumerServiceFeeCents;
+        // points_earned = base_charge * 4  (4% of base at 100:1 ratio)
+        const outsydePointsEarned = Math.round(basePriceCents * 4 / 100);
 
         // Create the order row BEFORE touching Stripe so a record always exists
         const order = await storage.createOrder({
@@ -6888,9 +6890,14 @@ export async function registerRoutes(
         cancellationReason: reason || 'Refunded by provider'
       }).where(eq(appointments.id, appointmentId));
 
-      // Reverse points if applicable
+      // Reverse points proportionally (partial refund = partial clawback; full = full clawback)
       try {
-        await storage.reversePointsForRefund(appointment.clientId, 'appointment', appointmentId);
+        const totalPrice = appointment.totalPrice || refundAmount;
+        const refundFraction = totalPrice > 0 ? Math.min(1, refundAmount / totalPrice) : 1;
+        await storage.reversePointsForRefund(appointment.clientId, 'appointment', appointmentId, {
+          refundFraction,
+          description: 'Points reversed from refund',
+        });
       } catch (pointsError) {
         console.error("Failed to reverse points:", pointsError);
       }
@@ -7252,6 +7259,19 @@ export async function registerRoutes(
         cancellationReason: 'Consumer-initiated cancellation',
       }).where(eq(appointments.id, appointmentId));
 
+      // Clawback points proportional to refund (no refund = no clawback; full = full; partial = partial)
+      if (refundAmountCents > 0) {
+        try {
+          const refundFraction = refundTier === 'full' ? 1 : refundAmountCents / appointment.totalPrice;
+          await storage.reversePointsForRefund(userId, 'appointment', appointmentId, {
+            refundFraction,
+            description: 'Points reversed from cancellation',
+          });
+        } catch (pointsError) {
+          console.error("Failed to reverse points on appointment cancel:", pointsError);
+        }
+      }
+
       res.json({
         success: true,
         refundTier,
@@ -7398,6 +7418,19 @@ export async function registerRoutes(
         console.error(`[Cancel] Failed to release photographer slot for booking ${bookingId}:`, slotErr);
       }
 
+      // Clawback points proportional to refund (no refund = no clawback; full = full; partial = partial)
+      if (refundAmountCents > 0) {
+        try {
+          const refundFraction = refundTier === 'full' ? 1 : refundAmountCents / booking.totalPrice;
+          await storage.reversePointsForRefund(userId, 'shoot_booking', bookingId, {
+            refundFraction,
+            description: 'Points reversed from cancellation',
+          });
+        } catch (pointsError) {
+          console.error("Failed to reverse points on shoot booking cancel:", pointsError);
+        }
+      }
+
       res.json({
         success: true,
         refundTier,
@@ -7516,9 +7549,14 @@ export async function registerRoutes(
         cancellationReason: reason || 'Refunded by provider'
       }).where(eq(shootBookings.id, bookingId));
 
-      // Reverse points if applicable
+      // Reverse points proportionally (partial refund = partial clawback; full = full clawback)
       try {
-        await storage.reversePointsForRefund(booking.clientId, 'shoot_booking', bookingId);
+        const totalPrice = booking.totalPrice || refundAmount;
+        const refundFraction = totalPrice > 0 ? Math.min(1, refundAmount / totalPrice) : 1;
+        await storage.reversePointsForRefund(booking.clientId, 'shoot_booking', bookingId, {
+          refundFraction,
+          description: 'Points reversed from refund',
+        });
       } catch (pointsError) {
         console.error("Failed to reverse points:", pointsError);
       }
@@ -12379,6 +12417,66 @@ export async function registerRoutes(
     }
   });
 
+  // ==================== ADMIN: PENDING POINTS REVIEW ====================
+
+  // List pending point transactions awaiting admin review
+  app.get("/api/admin/points/pending", async (req, res) => {
+    const userId = req.session?.userId;
+    if (!userId) return res.status(401).json({ error: "Not authenticated" });
+    const user = await storage.getUser(userId);
+    if (!user?.isAdmin) return res.status(403).json({ error: "Admin access required" });
+
+    try {
+      const status = (req.query.status as string) || 'pending';
+      const limit = parseInt(req.query.limit as string) || 100;
+      const filterUserId = req.query.userId as string | undefined;
+
+      const transactions = await storage.getPendingPointTransactions({ status, limit, userId: filterUserId });
+      res.json({ transactions, count: transactions.length });
+    } catch (error) {
+      console.error("List pending points error:", error);
+      res.status(500).json({ error: "Failed to list pending transactions" });
+    }
+  });
+
+  // Approve a pending point transaction — credits points to user balance
+  app.post("/api/admin/points/pending/:id/approve", async (req, res) => {
+    const userId = req.session?.userId;
+    if (!userId) return res.status(401).json({ error: "Not authenticated" });
+    const user = await storage.getUser(userId);
+    if (!user?.isAdmin) return res.status(403).json({ error: "Admin access required" });
+
+    try {
+      const { id } = req.params;
+      const note = req.body?.note as string | undefined;
+      const result = await storage.approvePendingPointTransaction(id, userId, note);
+      res.json({ success: true, ...result });
+    } catch (error: any) {
+      console.error("Approve pending points error:", error);
+      const status = error?.message?.includes('not found') ? 404 : error?.message?.includes('already') ? 409 : 500;
+      res.status(status).json({ error: error?.message || "Failed to approve transaction" });
+    }
+  });
+
+  // Reject a pending point transaction — no points credited
+  app.post("/api/admin/points/pending/:id/reject", async (req, res) => {
+    const userId = req.session?.userId;
+    if (!userId) return res.status(401).json({ error: "Not authenticated" });
+    const user = await storage.getUser(userId);
+    if (!user?.isAdmin) return res.status(403).json({ error: "Admin access required" });
+
+    try {
+      const { id } = req.params;
+      const note = req.body?.note as string | undefined;
+      const pending = await storage.rejectPendingPointTransaction(id, userId, note);
+      res.json({ success: true, pending });
+    } catch (error: any) {
+      console.error("Reject pending points error:", error);
+      const status = error?.message?.includes('not found') ? 404 : error?.message?.includes('already') ? 409 : 500;
+      res.status(status).json({ error: error?.message || "Failed to reject transaction" });
+    }
+  });
+
   // ==================== PUSH NOTIFICATIONS ====================
   
   const { 
@@ -13811,11 +13909,12 @@ export async function registerRoutes(
           await storage.releaseBusinessSlot(request.targetId);
         }
 
-        // Reverse loyalty points earned from this transaction
+        // Reverse loyalty points earned from this transaction (full reversal for admin-approved refunds)
         const pointReversal = await storage.reversePointsForRefund(
           request.requesterId,
           request.targetType || 'refund',
-          request.targetId || id
+          request.targetId || id,
+          { description: 'Points reversed from refund' }
         );
         if (pointReversal.reversed) {
           console.log(`Reversed ${pointReversal.pointsReversed} points for user ${request.requesterId}`);
@@ -15109,6 +15208,14 @@ export async function registerRoutes(
           return res.status(400).json({ error: result.error || "Failed to update order" });
         }
         updatedOrder = result.order!;
+      }
+
+      // Clawback points on order cancellation (full reversal since orders are always fully refunded)
+      if (refundResult && existingOrder.customerId) {
+        // referenceType matches what webhookHandlers.ts writes when earning ('cart_order')
+        storage.reversePointsForRefund(existingOrder.customerId, 'cart_order', orderId, {
+          description: 'Points reversed from refund',
+        }).catch(err => console.error('[Points] Clawback failed for order cancellation:', err));
       }
 
       // Post-refund: audit log + notification (fire-and-forget — order is already cancelled)
