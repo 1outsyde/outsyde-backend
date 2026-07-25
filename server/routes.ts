@@ -8567,6 +8567,7 @@ export async function registerRoutes(
         return res.json({ subscription: null });
       }
 
+      // Prefer the most recent active/trialing subscription; fall back to most recent of any status.
       const result = await db
         .select({
           id: vendorSubscriptions.id,
@@ -8586,13 +8587,31 @@ export async function registerRoutes(
         .from(vendorSubscriptions)
         .leftJoin(subscriptionTiers, eq(vendorSubscriptions.tierId, subscriptionTiers.id))
         .where(eq(vendorSubscriptions.businessId, business.id))
+        .orderBy(
+          sql`CASE WHEN ${vendorSubscriptions.status} IN ('active', 'trialing') THEN 0 ELSE 1 END`,
+          desc(vendorSubscriptions.createdAt)
+        )
         .limit(1);
 
       if (!result.length) {
         return res.json({ subscription: null });
       }
 
-      res.json({ subscription: result[0] });
+      const sub = result[0];
+
+      // Enrich with cancelAtPeriodEnd from Stripe (best-effort; omit on failure).
+      let cancelAtPeriodEnd: boolean | undefined;
+      if (sub.stripeSubscriptionId) {
+        try {
+          const stripe = await getUncachableStripeClient();
+          const stripeSub = await stripe.subscriptions.retrieve(sub.stripeSubscriptionId);
+          cancelAtPeriodEnd = (stripeSub as unknown as { cancel_at_period_end: boolean }).cancel_at_period_end;
+        } catch {
+          // non-fatal — UI falls back to hiding the cancel notice
+        }
+      }
+
+      res.json({ subscription: { ...sub, cancelAtPeriodEnd } });
     } catch (error) {
       console.error("Get vendor subscription error:", error);
       res.status(500).json({ error: "Failed to get subscription" });
