@@ -42,7 +42,15 @@ export async function uploadImageToR2(
 
 export async function deleteFromR2(url: string): Promise<void> {
   try {
-    const key = url.split(`${BUCKET}/`)[1];
+    // Prefer R2_PUBLIC_URL prefix stripping (works for custom domains too).
+    // Fall back to splitting on the bucket name for legacy URL shapes.
+    const publicUrl = process.env.R2_PUBLIC_URL;
+    let key: string | undefined;
+    if (publicUrl && url.startsWith(publicUrl)) {
+      key = url.slice(publicUrl.length).replace(/^\//, "");
+    } else {
+      key = url.split(`${BUCKET}/`)[1];
+    }
     if (!key) return;
     await r2Client.send(
       new DeleteObjectCommand({ Bucket: BUCKET, Key: key })

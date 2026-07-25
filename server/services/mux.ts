@@ -62,3 +62,14 @@ export async function deleteMuxAsset(
     console.error("[Mux] Delete failed:", err);
   }
 }
+
+export async function getMuxAssetIdByPlaybackId(
+  playbackId: string
+): Promise<string | null> {
+  try {
+    const info = await mux.video.playbackIds.retrieve(playbackId);
+    return info.object?.id ?? null;
+  } catch {
+    return null;
+  }
+}

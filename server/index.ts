@@ -12,6 +12,7 @@ import { setupWebSocket } from "./websocket";
 import { setupAuth, getSession } from "./replitAuth";
 import { initializePushService, sendCartReminderNotifications, isPushConfigured } from "./pushService";
 import { startDraftCleanupJob } from "./bookingStateMachine";
+import { processScheduledDeletions } from "./services/accountDeletionService";
 import passport from "passport";
 
 // Global error handlers — prevent silent crashes
@@ -289,6 +290,12 @@ if (process.env.NODE_ENV === 'production') {
   // Start booking draft cleanup job (runs every 60 seconds)
   startDraftCleanupJob(60000);
   console.log("Booking draft cleanup job started");
+
+  // Daily account deletion job — processes users whose 30-day grace period has expired
+  processScheduledDeletions().catch(err => console.error("[accountDeletion] Initial run failed:", err));
+  setInterval(() => {
+    processScheduledDeletions().catch(err => console.error("[accountDeletion] Scheduled run failed:", err));
+  }, 24 * 60 * 60 * 1000);
 
   await registerRoutes(httpServer, app);
   setupWebSocket(httpServer);

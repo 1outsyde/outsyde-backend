@@ -238,8 +238,13 @@ export const users = pgTable("users", {
   resetCodeExpiresAt: timestamp("reset_code_expires_at"),
   resetCodeAttempts: integer("reset_code_attempts").default(0),
 
-  // Account status
+  // Account status (isActive = admin ban only; deletionStatus drives the self-service deletion flow)
   isActive: boolean("is_active").default(true).notNull(),
+
+  // Self-service account deletion ('active' | 'pending_deletion' | 'deleted')
+  deletionStatus: text("deletion_status").default("active").notNull(),
+  deletionRequestedAt: timestamp("deletion_requested_at"),
+  scheduledDeletionAt: timestamp("scheduled_deletion_at"),
 
   createdAt: timestamp("created_at").defaultNow().notNull(),
 });
