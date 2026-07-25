@@ -487,8 +487,12 @@ export function registerPhase3Routes(app: Express, requireAdmin: (req: Request, 
       if (data.action === 'remove' && data.targetType === 'post') {
         await db.update(feedPosts).set({ isActive: false }).where(eq(feedPosts.id, data.targetId));
       } else if (data.action === 'ban' && data.targetType === 'user') {
-        // Revoke all refresh tokens to force re-auth (which will fail for banned users)
+        // Disable account — login is rejected and public profile queries return 404
+        await storage.updateUser(data.targetId, { isActive: false });
+        // Invalidate any already-issued sessions and refresh tokens immediately
         await storage.revokeAllUserRefreshTokens(data.targetId);
+        // Hide all of this user's existing posts from feeds
+        await db.update(feedPosts).set({ isActive: false }).where(eq(feedPosts.authorId, data.targetId));
       }
 
       res.json({ success: true, data: { action: data.action, targetId: data.targetId } });
