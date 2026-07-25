@@ -84,6 +84,10 @@ export class WebhookHandlers {
         await this.handleSubscriptionChange(event.data.object);
         break;
 
+      case "customer.subscription.deleted":
+        await this.handleSubscriptionDeleted(event.data.object);
+        break;
+
       case "invoice.paid":
         await this.handleInvoicePaid(event.data.object);
         break;
@@ -1278,13 +1282,27 @@ export class WebhookHandlers {
 
       let subscriptionId: string;
       if (existing) {
+        const oldStripeSubId = existing.stripeSubscriptionId;
+        const newStripeSubId: string = session.subscription;
+
         await storage.updateVendorSubscription(existing.id, {
           tierId,
           status: 'active',
-          stripeSubscriptionId: session.subscription,
+          stripeSubscriptionId: newStripeSubId,
           stripeCustomerId: session.customer,
         });
         subscriptionId = existing.id;
+
+        // If a different Stripe subscription existed, cancel it to prevent duplicate billing.
+        if (oldStripeSubId && oldStripeSubId !== newStripeSubId) {
+          try {
+            const stripe = await getUncachableStripeClient();
+            await stripe.subscriptions.cancel(oldStripeSubId);
+            console.log(`[Webhook] Cancelled old Stripe subscription ${oldStripeSubId} — replaced by ${newStripeSubId} for vendor ${vendorId}`);
+          } catch (cancelErr) {
+            console.error(`[Webhook] Failed to cancel old Stripe subscription ${oldStripeSubId}:`, cancelErr);
+          }
+        }
       } else {
         const newSub = await storage.createVendorSubscription({
           vendorId,
@@ -1857,6 +1875,22 @@ export class WebhookHandlers {
         effectiveDate,
       });
     }
+  }
+
+  /* =====================================================
+     SUBSCRIPTION DELETED (HARD CANCEL)
+  ===================================================== */
+  static async handleSubscriptionDeleted(subscription: any) {
+    const vendorSub = await storage.getVendorSubscriptionByStripeId(subscription.id);
+    if (!vendorSub) return;
+
+    await storage.updateVendorSubscription(vendorSub.id, { status: 'canceled' });
+
+    if (vendorSub.businessId) {
+      await storage.updateBusiness(vendorSub.businessId, { subscriptionActive: false });
+    }
+
+    console.log(`[Webhook] customer.subscription.deleted: stripeId=${subscription.id} vendor=${vendorSub.vendorId} marked canceled`);
   }
 
   /* =====================================================
