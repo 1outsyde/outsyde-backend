@@ -130,6 +130,7 @@ import {
   feedPosts,
   businesses,
   photographers,
+  staff,
 } from "@shared/schema";
 import { and, ilike, ne, asc } from "drizzle-orm";
 
@@ -18222,14 +18223,23 @@ export async function registerRoutes(
             `[Mux] webhook: updated businesses coverImage for uploadId=${uploadId} → ${videoUrl}`
           );
 
-          // Update photographers whose coverImage was set to the Mux uploadId
-          const photographerResult = await db
-            .update(photographers)
-            .set({ coverImage: videoUrl })
-            .where(eq(photographers.coverImage, uploadId));
+         // Update photographers whose coverImage was set to the Mux uploadId
+const photographerResult = await db
+  .update(photographers)
+  .set({ coverImage: videoUrl })
+  .where(eq(photographers.coverImage, uploadId));
+console.log(
+  `[Mux] webhook: updated photographers coverImage for uploadId=${uploadId} → ${videoUrl}`
+);
 
-          console.log(
-            `[Mux] webhook: updated photographers coverImage for uploadId=${uploadId} → ${videoUrl}`
+// Update staff whose coverImage was set to the Mux uploadId
+await db
+  .update(staff)
+  .set({ coverImage: videoUrl })
+  .where(eq(staff.coverImage, uploadId));
+console.log(
+  `[Mux] webhook: updated staff coverImage for uploadId=${uploadId} → ${videoUrl}`
+);
           );
         }
       }
