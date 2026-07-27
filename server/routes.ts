@@ -18219,7 +18219,7 @@ export async function registerRoutes(
             .where(eq(businesses.coverImage, uploadId));
 
           console.log(
-            `[Mux] webhook: updated businesses coverImage for uploadId=${uploadId} → ${videoUrl}`
+           `[Mux] webhook: updated businesses coverImage for uploadId=${uploadId} -> ${videoUrl}`
           );
 
          // Update photographers whose coverImage was set to the Mux uploadId
@@ -18228,7 +18228,7 @@ const photographerResult = await db
   .set({ coverImage: videoUrl })
   .where(eq(photographers.coverImage, uploadId));
 console.log(
-  `[Mux] webhook: updated photographers coverImage for uploadId=${uploadId} → ${videoUrl}`
+  `[Mux] webhook: updated photographers coverImage for uploadId=${uploadId} -> ${videoUrl}`
 );
 
 // Update staff whose coverImage was set to the Mux uploadId
@@ -18237,7 +18237,7 @@ await db
   .set({ coverImage: videoUrl })
   .where(eq(staff.coverImage, uploadId));
 console.log(
-  `[Mux] webhook: updated staff coverImage for uploadId=${uploadId} → ${videoUrl}`
+  `[Mux] webhook: updated staff coverImage for uploadId=${uploadId} -> ${videoUrl}`
 );
         }
       }
