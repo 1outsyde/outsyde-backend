@@ -11175,6 +11175,66 @@ export async function registerRoutes(
     }
   });
 
+  // Update current staff member's own profile
+  app.patch("/api/staff/me", async (req, res) => {
+    const userId = getUserIdFromRequest(req);
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    try {
+      const resolved = await resolveRequestingStaffMember(req, userId);
+      if ("status" in resolved) {
+        return res.status(resolved.status).json(resolved.body);
+      }
+      const staff = resolved.staff;
+
+      const { coverImage, coverMediaType, ...otherFields } = req.body;
+      const updates: Record<string, any> = { ...otherFields };
+
+      const allowedFields = [
+        "displayName", "username", "bio", "profileImageUrl",
+        "specialties", "city", "state", "title", "instagramHandle",
+      ];
+      for (const key of Object.keys(updates)) {
+        if (!allowedFields.includes(key)) {
+          delete updates[key];
+        }
+      }
+
+      if (updates.city !== undefined && updates.city !== null) {
+        if (typeof updates.city !== "string" || updates.city.length === 0 || updates.city.length > 100) {
+          return res.status(400).json({ error: "city must be a non-empty string (max 100 chars)" });
+        }
+      }
+      if (updates.state !== undefined && updates.state !== null) {
+        if (typeof updates.state !== "string" || updates.state.length === 0 || updates.state.length > 100) {
+          return res.status(400).json({ error: "state must be a non-empty string (max 100 chars)" });
+        }
+      }
+
+      if (coverMediaType !== undefined) {
+        if (coverMediaType !== null && coverMediaType !== "image" && coverMediaType !== "video") {
+          return res.status(400).json({ error: "coverMediaType must be 'image' or 'video'" });
+        }
+        updates.coverMediaType = coverMediaType;
+      }
+      if (coverImage !== undefined) {
+        updates.coverImage = coverImage;
+        if (coverImage !== null && coverMediaType === undefined) {
+          return res.status(400).json({ error: "coverMediaType is required when setting coverImage" });
+        }
+      }
+
+      const updatedStaff = await storage.updateStaffMember(staff.id, updates);
+
+      res.json({ success: true, staff: updatedStaff });
+    } catch (error) {
+      console.error("Update staff profile error:", error);
+      res.status(500).json({ error: "Failed to update staff profile" });
+    }
+  });
+
   // Staff member's own assigned services. Deliberately does NOT go through
   // isBusinessVisibleToPublic() — that gate exists to hide incomplete storefronts
   // from customers, but a staff member viewing their own assigned services is an

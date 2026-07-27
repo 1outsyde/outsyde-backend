@@ -518,6 +518,15 @@ export const staffMembers = pgTable("staff_members", {
   stripeOnboardingUrl: text("stripe_onboarding_url"),
   stripeOnboardingLastEventAt: timestamp("stripe_onboarding_last_event_at"),
   
+  // Extended profile fields (self-editable by staff member)
+  username: text("username"),
+  coverImage: text("cover_image"),
+  coverMediaType: text("cover_media_type"), // 'image' or 'video'
+  city: text("city"),
+  state: text("state"),
+  title: text("title"), // Professional title, e.g. "Senior Stylist"
+  instagramHandle: text("instagram_handle"),
+
   // Staff hours (can be different from business hours)
   hoursOfOperation: jsonb("hours_of_operation").$type<HoursOfOperation>(),
 
