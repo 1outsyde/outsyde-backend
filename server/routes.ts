@@ -130,7 +130,6 @@ import {
   feedPosts,
   businesses,
   photographers,
-  staff,
 } from "@shared/schema";
 import { and, ilike, ne, asc } from "drizzle-orm";
 
