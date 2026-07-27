@@ -18239,7 +18239,6 @@ await db
 console.log(
   `[Mux] webhook: updated staff coverImage for uploadId=${uploadId} → ${videoUrl}`
 );
-          );
         }
       }
 
