@@ -71,5 +71,7 @@ export function toPublicBusinessDTO(
     followingCount: opts.followingCount,
 
     acceptsOnlinePayments: !!(business.stripeAccountId && business.stripeOnboardingComplete),
+
+    ctaConfig: business.ctaConfig ?? null,
   };
 }
