@@ -8,6 +8,7 @@
     "build": "tsx script/build.ts",
     "start": "NODE_ENV=production npx tsx server/index.ts",
     "check": "tsc",
+    "db:migrate": "tsx scripts/migrate.ts",
     "db:push": "echo '⚠️  Run drizzle-kit push manually — never in CI/CD' && drizzle-kit push"
   },
   "dependencies": {
