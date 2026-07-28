@@ -16689,18 +16689,21 @@ export async function registerRoutes(
         // Get the author's storefront ID based on their type
         // Also determines the role for the canonical author object
         let authorRole: 'consumer' | 'photographer' | 'vendor' = 'consumer';
+        let authorLogoImage: string | null = null;
         
         if (post.authorType === 'vendor' && post.authorId) {
           const business = await storage.getBusinessByOwnerId(post.authorId);
           if (business) {
             authorBusinessId = business.id;
             authorRole = 'vendor';
+            authorLogoImage = business.logoImage ?? null;
           }
         } else if (post.authorType === 'photographer' && post.authorId) {
           const photographer = await storage.getPhotographerByUserId(post.authorId);
           if (photographer) {
             authorPhotographerId = photographer.id;
             authorRole = 'photographer';
+            authorLogoImage = photographer.logoImage ?? null;
           }
         }
         
@@ -16736,7 +16739,7 @@ export async function registerRoutes(
             userId: author.id,
             username: author.username || null,
             displayName: author.name || author.firstName || 'Anonymous',
-            profilePhotoUrl: author.profileImageUrl || null,
+            profilePhotoUrl: authorLogoImage ?? author.profileImageUrl ?? null,
             role: authorRole,
           },
           // Media metadata object
