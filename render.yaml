@@ -1,0 +1,43 @@
+services:
+  - type: web
+    name: outsyde-backend
+    runtime: node
+    plan: starter
+    region: oregon
+
+    # Build the client (Vite) and server (esbuild) bundles
+    buildCommand: npm install && npm run build
+
+    # Run pending SQL migrations BEFORE traffic switches to the new deploy.
+    # preDeployCommand runs after buildCommand, before the service goes live.
+    # This guarantees the DB schema is always ahead of or equal to the code.
+    preDeployCommand: npm run db:migrate
+
+    # Start the compiled server bundle
+    startCommand: npm run start
+
+    healthCheckPath: /api/health
+
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: DATABASE_URL
+        sync: false
+      - key: JWT_SECRET
+        sync: false
+      - key: JWT_REFRESH_SECRET
+        sync: false
+      - key: STRIPE_SECRET_KEY
+        sync: false
+      - key: STRIPE_WEBHOOK_SECRET
+        sync: false
+      - key: FRONTEND_URL
+        sync: false
+      - key: API_BASE_URL
+        sync: false
+      - key: RESEND_API_KEY
+        sync: false
+      - key: RESEND_FROM_EMAIL
+        sync: false
+      - key: PAYMENTS_ENABLED
+        value: "true"
