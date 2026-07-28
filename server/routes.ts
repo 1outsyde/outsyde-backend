@@ -12181,6 +12181,16 @@ export async function registerRoutes(
         storage.getFollowingCount(id),
       ]);
 
+      // Resolve the best available avatar across user/business/photographer tables
+      let resolvedAvatar: string | null = user.profileImageUrl ?? null;
+      if (user.isVendor) {
+        const business = await storage.getBusinessByOwnerId(id);
+        if (business?.logoImage) resolvedAvatar = business.logoImage;
+      } else if (user.isPhotographer) {
+        const photographer = await storage.getPhotographerByUserId(id);
+        if (photographer?.logoImage) resolvedAvatar = photographer.logoImage;
+      }
+
       const publicProfile = {
         // Identity
         id: user.id,
@@ -12203,6 +12213,8 @@ export async function registerRoutes(
         // Social counts — derived from the follows table
         followerCount,
         followingCount,
+        // Resolved avatar: prefers business/photographer logoImage over users.profileImageUrl
+        profilePhotoUrl: resolvedAvatar,
       };
 
       res.json({ user: publicProfile });
