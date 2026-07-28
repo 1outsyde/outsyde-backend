@@ -71,6 +71,21 @@ export const oauthStates = pgTable(
 );
 
 /* =====================================================
+   CTA CONFIG TYPE
+===================================================== */
+export interface CtaConfig {
+  buttonType: 'book_now' | 'buy_now';
+  // Business buy_now fields
+  productTarget?: 'most_recent' | 'specific' | 'best_selling';
+  specificProductId?: string | null;
+  specificProductName?: string | null;
+  // Photographer book_now fields
+  serviceTarget?: 'first_available' | 'specific';
+  specificServiceId?: string | null;
+  specificServiceName?: string | null;
+}
+
+/* =====================================================
    BILLING ADDRESS TYPE
 ===================================================== */
 export interface BillingAddress {
@@ -371,6 +386,9 @@ export const businesses = pgTable("businesses", {
   hasCancellationFee: boolean("has_cancellation_fee").default(false),
   cancellationFeeType: text("cancellation_fee_type"), // nullable, 'flat'|'percentage'
   cancellationFeeAmount: integer("cancellation_fee_amount"), // nullable, cents if flat / whole percent if percentage
+
+  // Floating CTA button configuration (set by vendor on their profile screen)
+  ctaConfig: jsonb("cta_config").$type<CtaConfig>(),
 
   createdAt: timestamp("created_at").defaultNow().notNull(),
 }, (table) => ({
@@ -718,6 +736,9 @@ export const photographers = pgTable("photographers", {
   // Booking defaults (mirror businesses)
   defaultServiceLocationType: text("default_service_location_type").default("business"),
   vendorTermsAndConditions: text("vendor_terms_and_conditions"),
+
+  // Floating CTA button configuration (set by photographer on their profile screen)
+  ctaConfig: jsonb("cta_config").$type<CtaConfig>(),
 
   // Visibility control
   visibilityStatus: text("visibility_status").default("public").notNull(),

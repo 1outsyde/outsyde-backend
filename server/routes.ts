@@ -9292,8 +9292,49 @@ export async function registerRoutes(
         return res.status(404).json({ error: "No business found for this account" });
       }
 
-      const { coverImage, coverMediaType, ...otherFields } = req.body;
+      const { coverImage, coverMediaType, ctaConfig, ...otherFields } = req.body;
       const updates: Record<string, any> = { ...otherFields };
+
+      // Resolve best_selling product before persisting ctaConfig
+      if (ctaConfig !== undefined) {
+        if (ctaConfig !== null && typeof ctaConfig === 'object' && ctaConfig.productTarget === 'best_selling') {
+          try {
+            // orders.items is a JSONB array: [{ productId, name, quantity, price }]
+            // There is no separate order_items table — tally product counts in app code.
+            const completedOrders = await db
+              .select({ items: orders.items })
+              .from(orders)
+              .where(and(
+                eq(orders.businessId, business.id),
+                ne(orders.status, 'cancelled'),
+              ));
+
+            const productCounts = new Map<string, { count: number; name: string }>();
+            for (const order of completedOrders) {
+              for (const item of (order.items || [])) {
+                const existing = productCounts.get(item.productId);
+                if (existing) {
+                  existing.count += item.quantity;
+                } else {
+                  productCounts.set(item.productId, { count: item.quantity, name: item.name });
+                }
+              }
+            }
+
+            if (productCounts.size > 0) {
+              const [bestProductId, bestData] = [...productCounts.entries()]
+                .sort((a, b) => b[1].count - a[1].count)[0];
+              ctaConfig.specificProductId = bestProductId;
+              ctaConfig.specificProductName = bestData.name;
+            }
+            // If no orders exist yet, leave specificProductId null — frontend falls back to products[0]
+          } catch (resolveErr) {
+            console.error("[CTA] best_selling resolver error:", resolveErr);
+            // Non-fatal: persist ctaConfig as-is without a resolved product
+          }
+        }
+        updates.ctaConfig = ctaConfig;
+      }
 
       // Validate city/state (max 100 chars)
       if (updates.city !== undefined && updates.city !== null) {

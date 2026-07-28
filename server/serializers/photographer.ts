@@ -52,5 +52,7 @@ export function toPublicPhotographerDTO(
     followingCount: opts.followingCount,
 
     acceptsOnlinePayments: !!(photographer.stripeAccountId && photographer.stripeOnboardingComplete),
+
+    ctaConfig: photographer.ctaConfig ?? null,
   };
 }

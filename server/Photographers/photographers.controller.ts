@@ -156,7 +156,7 @@ export class PhotographerController {
         });
       }
 
-      const { displayName, bio, city, state, portfolioUrl, hourlyRate, specialties, coverImage, coverMediaType, logoImage, brandColors } = req.body;
+      const { displayName, bio, city, state, portfolioUrl, hourlyRate, specialties, coverImage, coverMediaType, logoImage, brandColors, ctaConfig } = req.body;
       
       const updates: any = {};
       
@@ -198,6 +198,7 @@ export class PhotographerController {
       }
       if (logoImage !== undefined) updates.logoImage = logoImage;
       if (brandColors !== undefined) updates.brandColors = brandColors;
+      if (ctaConfig !== undefined) updates.ctaConfig = ctaConfig;
 
       // Guard against empty update payload to prevent SQL error
       if (Object.keys(updates).length === 0) {
