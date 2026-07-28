@@ -156,6 +156,7 @@ import {
   influencerPayouts,
   searchIndex,
   follows,
+  userInterests,
   oauthStates,
   weeklyAvailability,
   providerBlocks,
@@ -860,6 +861,7 @@ export interface UnifiedSearchResult {
   providerId?: string | null;
   providerName?: string | null;
   providerType?: 'photographer' | 'business' | null;
+  isFeatured?: boolean | null;
 }
 
 export interface UnifiedSearchResponse {
@@ -5918,6 +5920,50 @@ export class DatabaseStorage implements IStorage {
     };
   }
 
+  private async getPersonalizationBoosts(viewerUserId: string): Promise<{
+    interestVector: Record<string, number>;
+    followedSet: Set<string>;
+    reviewedTargetIds: Set<string>;
+  }> {
+    const [interestRows, followRows, reviewRows] = await Promise.all([
+      db.select().from(userInterests).where(eq(userInterests.userId, viewerUserId)).limit(1),
+      db.select({ targetId: follows.targetUserId }).from(follows).where(eq(follows.followerUserId, viewerUserId)),
+      db.select({ targetId: reviews.targetId }).from(reviews).where(eq(reviews.reviewerId, viewerUserId)),
+    ]);
+
+    const interestVector = (interestRows[0]?.interestVector as Record<string, number>) || {};
+    const followedSet = new Set(followRows.map(f => f.targetId));
+    const reviewedTargetIds = new Set(reviewRows.map(r => r.targetId));
+
+    return { interestVector, followedSet, reviewedTargetIds };
+  }
+
+  private applyPersonalizationScore(
+    result: UnifiedSearchResult,
+    boosts: { interestVector: Record<string, number>; followedSet: Set<string>; reviewedTargetIds: Set<string> }
+  ): number {
+    let score = result.personalizationScore ?? result.baseScore;
+
+    // +50 if viewer follows this entity's user
+    if (
+      (result.providerUserId && boosts.followedSet.has(result.providerUserId)) ||
+      boosts.followedSet.has(result.id)
+    ) {
+      score += 50;
+    }
+
+    // Boost by interest vector weight for this result's category
+    const categoryWeight = result.category ? (boosts.interestVector[result.category.toLowerCase()] || 0) : 0;
+    score += categoryWeight * 10;
+
+    // +10 if the entity itself was previously reviewed by the viewer (strongest signal)
+    if (boosts.reviewedTargetIds.has(result.id)) {
+      score += 10;
+    }
+
+    return score;
+  }
+
   async unifiedSearchWithScope(params: UnifiedSearchParams): Promise<UnifiedSearchResponse> {
     const { q, scope, viewerUserId, city, personalized, limit, offset, isAdmin } = params;
     const searchTerm = q?.trim() || '';
@@ -6222,6 +6268,7 @@ export class DatabaseStorage implements IStorage {
           bOwnerId: businesses.ownerId,
           bStripe: businesses.stripeOnboardingComplete,
           bApproval: businesses.approvalStatus,
+          isFeatured: vendorProducts.isFeatured,
         })
         .from(vendorProducts)
         .innerJoin(businesses, eq(vendorProducts.businessId, businesses.id))
@@ -6282,6 +6329,7 @@ export class DatabaseStorage implements IStorage {
           businessId: row.p.businessId,
           businessName: row.bName || null,
           productImage: row.p.imageUrl || null,
+          isFeatured: row.isFeatured ?? null,
           baseScore,
           personalizationScore,
         });
@@ -6299,6 +6347,7 @@ export class DatabaseStorage implements IStorage {
           bOwnerId: businesses.ownerId,
           bStripe: businesses.stripeOnboardingComplete,
           bApproval: businesses.approvalStatus,
+          isFeatured: vendorServices.isFeatured,
         })
         .from(vendorServices)
         .innerJoin(businesses, eq(vendorServices.businessId, businesses.id))
@@ -6352,6 +6401,7 @@ export class DatabaseStorage implements IStorage {
           businessName: row.bName || null,
           providerName: row.bName || null,
           providerType: 'business',
+          isFeatured: row.isFeatured ?? null,
           baseScore,
           personalizationScore: baseScore,
         });
@@ -6422,6 +6472,23 @@ export class DatabaseStorage implements IStorage {
       }
     }
 
+    // ==================== PERSONALIZATION RE-RANKING ====================
+    let wasPersonalized = false;
+
+    if (personalized && viewerUserId) {
+      const boosts = await this.getPersonalizationBoosts(viewerUserId);
+      const hasInterestData = Object.keys(boosts.interestVector).length > 0 ||
+        boosts.followedSet.size > 0 ||
+        boosts.reviewedTargetIds.size > 0;
+
+      if (hasInterestData) {
+        for (const r of results) {
+          r.personalizationScore = this.applyPersonalizationScore(r, boosts);
+        }
+        wasPersonalized = true;
+      }
+    }
+
     // ==================== SORTING ====================
     results.sort((a, b) => {
       if (scope === 'all') {
@@ -6437,7 +6504,7 @@ export class DatabaseStorage implements IStorage {
     return {
       results: paginated,
       total,
-      personalized: personalized && viewerIndustries.length > 0,
+      personalized: wasPersonalized,
     };
   }
 
