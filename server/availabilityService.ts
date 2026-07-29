@@ -96,8 +96,34 @@ function generateTimeSlots(startHour: number, endHour: number, slotMinutes: numb
 }
 
 function timeToMinutes(time: string): number {
-  const [hours, minutes] = time.split(':').map(Number);
-  return hours * 60 + minutes;
+  if (!time) return NaN;
+
+  const trimmed = time.trim();
+
+  // Handle 12-hour format: "9:00 AM", "4:30 PM", "12:00 PM", "12:00 AM"
+  const twelveHourMatch = trimmed.match(/^(\d{1,2}):(\d{2})\s*(AM|PM)$/i);
+  if (twelveHourMatch) {
+    let hours = parseInt(twelveHourMatch[1], 10);
+    const minutes = parseInt(twelveHourMatch[2], 10);
+    const period = twelveHourMatch[3].toUpperCase();
+
+    if (period === "AM") {
+      if (hours === 12) hours = 0; // 12:xx AM → 0:xx
+    } else {
+      if (hours !== 12) hours += 12; // 1:xx PM → 13:xx, but 12:xx PM stays 12:xx
+    }
+    return hours * 60 + minutes;
+  }
+
+  // Handle 24-hour format: "09:00", "16:30", "9:00"
+  const twentyFourHourMatch = trimmed.match(/^(\d{1,2}):(\d{2})$/);
+  if (twentyFourHourMatch) {
+    const hours = parseInt(twentyFourHourMatch[1], 10);
+    const minutes = parseInt(twentyFourHourMatch[2], 10);
+    return hours * 60 + minutes;
+  }
+
+  return NaN; // Unknown format
 }
 
 function doTimesOverlap(
@@ -970,6 +996,11 @@ export async function generateAvailabilitySlots(
     const windowStart = timeToMinutes(window.startTime);
     const windowEnd = timeToMinutes(window.endTime);
     
+    if (isNaN(windowStart) || isNaN(windowEnd)) {
+      console.warn(`[SLOT_DEBUG] Could not parse window times: startTime="${window.startTime}" endTime="${window.endTime}" — skipping window`);
+      continue;
+    }
+
     console.log("[SLOT_DEBUG] Processing window:", { 
       startTime: window.startTime, 
       endTime: window.endTime,
