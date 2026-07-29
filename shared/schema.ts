@@ -355,6 +355,8 @@ export const businesses = pgTable("businesses", {
   approvalNotes: text("approval_notes"),
   approvedAt: timestamp("approved_at"),
   approvedBy: varchar("approved_by", { length: 36 }),
+  vendorAgreementAccepted: boolean("vendor_agreement_accepted").default(false).notNull(),
+  vendorAgreementAcceptedAt: timestamp("vendor_agreement_accepted_at"),
 
   // Demo/seed data flag - hidden from non-admin users in search
   isDemo: boolean("is_demo").default(false).notNull(),
@@ -2305,6 +2307,10 @@ export const vendorSignupSchema = z.object({
   acceptedSubscription: z.boolean().refine((val) => val === true, {
     message: "You must accept the subscription terms",
   }),
+  vendorAgreementAccepted: z.boolean().refine((val) => val === true, {
+    message: "You must accept the Vendor Marketplace Agreement",
+  }),
+  vendorAgreementAcceptedAt: z.string().datetime().optional(),
 });
 
 export const photographerSignupSchema = z.object({

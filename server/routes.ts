@@ -808,6 +808,10 @@ export async function registerRoutes(
         logoImage: data.logoImage,
         subscriptionActive: false,
         approvalStatus: "pending",
+        vendorAgreementAccepted: data.vendorAgreementAccepted,
+        vendorAgreementAcceptedAt: data.vendorAgreementAcceptedAt
+          ? new Date(data.vendorAgreementAcceptedAt)
+          : new Date(),
       });
 
       if (data.billingAddress || data.billingCity || data.billingState || data.billingZipCode) {
