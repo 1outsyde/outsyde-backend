@@ -1071,6 +1071,8 @@ export class DatabaseStorage implements IStorage {
       rating: 0,
       reviewCount: 0,
       subscriptionActive: insertBusiness.subscriptionActive ?? false,
+      vendorAgreementAccepted: insertBusiness.vendorAgreementAccepted ?? false,
+      vendorAgreementAcceptedAt: insertBusiness.vendorAgreementAcceptedAt || null,
     }).returning();
 
     return result[0];
