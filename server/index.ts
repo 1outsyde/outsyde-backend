@@ -7,6 +7,7 @@ import { storage } from "./storage";
 import { registerRoutes } from "./routes";
 import { authMiddleware } from "./auth";
 import vendorSubscriptionRouter from "./routes/vendorSubscription";
+import vendorAnalyticsRouter from "./routes/vendorAnalytics";
 // stripe-replit-sync removed — no longer on Replit
 import { WebhookHandlers } from "./stripe/webhookHandlers";
 import { stripeService } from "./stripe/stripeService";
@@ -301,6 +302,7 @@ if (process.env.NODE_ENV === 'production') {
 
   await registerRoutes(httpServer, app);
   app.use('/api/vendor/subscription', authMiddleware, vendorSubscriptionRouter);
+  app.use('/api/vendor/analytics', authMiddleware, vendorAnalyticsRouter);
   setupWebSocket(httpServer);
 
   app.use((err: any, _req: Request, res: Response, _next: NextFunction) => {
