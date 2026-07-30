@@ -971,3 +971,45 @@ export async function sendOrderShippedEmail(params: {
     console.error('[Email] sendOrderShippedEmail failed:', err);
   }
 }
+
+export async function sendCancellationAdminEmail(params: {
+  adminEmail: string;
+  eventType: 'appointment_canceled' | 'shoot_booking_canceled' | 'appointment_refunded' | 'shoot_booking_refunded' | 'order_canceled' | 'refund_approved';
+  consumerName: string;
+  providerName: string;
+  amountCents: number;
+  referenceId: string;
+  reason?: string;
+}): Promise<void> {
+  const eventLabels: Record<typeof params.eventType, string> = {
+    appointment_canceled: 'Appointment Canceled',
+    shoot_booking_canceled: 'Shoot Booking Canceled',
+    appointment_refunded: 'Appointment Refunded',
+    shoot_booking_refunded: 'Shoot Booking Refunded',
+    order_canceled: 'Order Canceled',
+    refund_approved: 'Refund Approved',
+  };
+
+  const label = eventLabels[params.eventType];
+  const subject = `[Outsyde Admin] ${label} — ${params.consumerName}`;
+  const formattedAmount = (params.amountCents / 100).toFixed(2);
+
+  const html = wrapEmail(`
+    ${emailHeader(label, `Admin Alert — Action by ${params.consumerName}`)}
+    <tr><td style="background:#1A1A1A;padding:24px 32px;">
+      <p style="color:#F5F0E8;font-size:15px;margin:0 0 16px 0;">A cancellation or refund event just occurred on Outsyde.</p>
+      <table width="100%" cellpadding="0" cellspacing="0" style="margin:0 0 24px 0;">
+        ${detailRow('Event', label, true)}
+        ${detailRow('Customer', params.consumerName, false)}
+        ${detailRow('Provider / Business', params.providerName, true)}
+        ${detailRow('Refund Amount', `$${formattedAmount}`, false)}
+        ${detailRow('Reference ID', params.referenceId.slice(0, 16), true)}
+        ${params.reason ? detailRow('Reason', params.reason, false) : ''}
+      </table>
+    </td></tr>
+    ${emailCta('Open Admin Dashboard', `${getAppBaseUrl()}/admin`)}
+    ${emailFooter('This is an automated admin alert from Outsyde.')}
+  `);
+
+  await sendAdminEmail({ to: params.adminEmail, subject, html });
+}

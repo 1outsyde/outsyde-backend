@@ -1,9 +1,10 @@
 import { storage } from './storage';
 import { sendPushNotification, isPushConfigured } from './pushService';
-import { isEmailConfigured, sendNewVendorApplicationEmail, sendNewPhotographerApplicationEmail, sendVendorApprovalEmail, sendVendorRejectionEmail } from './emailService';
+import { isEmailConfigured, sendNewVendorApplicationEmail, sendNewPhotographerApplicationEmail, sendVendorApprovalEmail, sendVendorRejectionEmail, sendCancellationAdminEmail } from './emailService';
+import { sendExpoPush } from './expoPushService';
 import type { InsertNotification } from '@shared/schema';
 
-export type NotificationType = 
+export type NotificationType =
   | 'booking_confirmed'
   | 'payment_succeeded'
   | 'payment_failed'
@@ -11,6 +12,7 @@ export type NotificationType =
   | 'subscription_canceled'
   | 'addon_charged'
   | 'refund_issued'
+  | 'booking_canceled'
   | 'new_order'
   | 'order_confirmed'
   | 'order_shipped'
@@ -641,6 +643,110 @@ export const NotificationTriggers = {
     }
 
     console.log(`[Notification] Sent rejection notification to vendor: ${params.businessName}`);
+  },
+
+  /**
+   * Fires all 4 quad-code notifications for every cancellation/refund event:
+   *   1. Admin Expo push notification
+   *   2. Admin email notification (via Resend)
+   *   3. Consumer Expo push notification
+   *   4. Consumer in-app notification (inserted into notifications table)
+   *
+   * All recipients are independently try/catch'd so one failure never blocks
+   * the others. Callers should themselves be wrapped in try/catch.
+   */
+  async bookingCanceledOrRefunded(params: {
+    consumerUserId: string;
+    consumerName: string;
+    providerName: string;
+    eventType: 'appointment_canceled' | 'shoot_booking_canceled' | 'appointment_refunded' | 'shoot_booking_refunded' | 'order_canceled' | 'refund_approved';
+    amountCents: number;
+    referenceType: string;
+    referenceId: string;
+    reason?: string;
+  }): Promise<void> {
+    const isRefund = params.amountCents > 0;
+    const consumerTitle = isRefund ? 'Refund Issued' : 'Booking Canceled';
+    const formattedAmount = (params.amountCents / 100).toFixed(2);
+    const consumerMessage = isRefund
+      ? `A refund of $${formattedAmount} has been issued for your booking with ${params.providerName}.`
+      : `Your booking with ${params.providerName} has been canceled.`;
+
+    // 4. Consumer in-app notification (notifications table + web push)
+    try {
+      await sendNotification({
+        userId: params.consumerUserId,
+        type: isRefund ? 'refund_issued' : 'booking_canceled',
+        title: consumerTitle,
+        message: consumerMessage,
+        referenceType: params.referenceType,
+        referenceId: params.referenceId,
+        metadata: {
+          eventType: params.eventType,
+          amountCents: params.amountCents,
+          providerName: params.providerName,
+          reason: params.reason,
+        },
+      });
+    } catch (err) {
+      console.error(`[QuadNotify] Consumer in-app failed (${params.referenceId}):`, err);
+    }
+
+    // 3. Consumer Expo push notification
+    try {
+      await sendExpoPush({
+        userId: params.consumerUserId,
+        title: consumerTitle,
+        body: consumerMessage,
+        data: { type: isRefund ? 'refund_issued' : 'booking_canceled', referenceId: params.referenceId },
+      });
+    } catch (err) {
+      console.error(`[QuadNotify] Consumer Expo push failed (${params.referenceId}):`, err);
+    }
+
+    // 1 & 2. Admin Expo push + admin email (for every admin user)
+    let adminUsers: Array<{ id: string; email?: string | null }> = [];
+    try {
+      adminUsers = await storage.getAdminUsers();
+    } catch (err) {
+      console.error(`[QuadNotify] Failed to fetch admin users:`, err);
+    }
+
+    const adminTitle = `[Admin] ${isRefund ? 'Refund' : 'Cancellation'} — ${params.consumerName}`;
+    const adminBody = `${params.consumerName}'s booking with ${params.providerName} was ${isRefund ? `refunded $${formattedAmount}` : 'canceled'}.${params.reason ? ` Reason: ${params.reason}` : ''}`;
+
+    for (const admin of adminUsers) {
+      // 1. Admin Expo push
+      try {
+        await sendExpoPush({
+          userId: admin.id,
+          title: adminTitle,
+          body: adminBody,
+          data: { type: isRefund ? 'refund_issued' : 'booking_canceled', referenceId: params.referenceId },
+        });
+      } catch (err) {
+        console.error(`[QuadNotify] Admin Expo push failed for admin ${admin.id}:`, err);
+      }
+
+      // 2. Admin email
+      if (admin.email) {
+        try {
+          await sendCancellationAdminEmail({
+            adminEmail: admin.email,
+            eventType: params.eventType,
+            consumerName: params.consumerName,
+            providerName: params.providerName,
+            amountCents: params.amountCents,
+            referenceId: params.referenceId,
+            reason: params.reason,
+          });
+        } catch (err) {
+          console.error(`[QuadNotify] Admin email failed for ${admin.email}:`, err);
+        }
+      }
+    }
+
+    console.log(`[QuadNotify] Fired quad-notifications for ${params.eventType} ${params.referenceId} (${adminUsers.length} admin(s) notified)`);
   },
 };
 
