@@ -5,6 +5,8 @@ import helmet from "helmet";
 import compression from "compression";
 import { storage } from "./storage";
 import { registerRoutes } from "./routes";
+import { authMiddleware } from "./auth";
+import vendorSubscriptionRouter from "./routes/vendorSubscription";
 // stripe-replit-sync removed — no longer on Replit
 import { WebhookHandlers } from "./stripe/webhookHandlers";
 import { stripeService } from "./stripe/stripeService";
@@ -298,6 +300,7 @@ if (process.env.NODE_ENV === 'production') {
   }, 24 * 60 * 60 * 1000);
 
   await registerRoutes(httpServer, app);
+  app.use('/api/vendor/subscription', authMiddleware, vendorSubscriptionRouter);
   setupWebSocket(httpServer);
 
   app.use((err: any, _req: Request, res: Response, _next: NextFunction) => {
