@@ -94,6 +94,13 @@ interface ConsumerProfileRow {
   selected_industries: string[] | null;
 }
 
+interface LocationRow {
+  city: string;
+  state: string | null;
+  zip_code: string | null;
+  customer_count: number;
+}
+
 function toSnake(s: string): string {
   return s.toLowerCase().replace(/\s+/g, "_");
 }
@@ -118,6 +125,7 @@ router.get("/audience", async (req, res) => {
     age_ranges: { "18-24": 0, "25-34": 0, "35-44": 0, "45+": 0, unknown: 0 },
     shopping_frequency: { rarely: 0, monthly: 0, weekly: 0, multiple_times_a_week: 0 },
     top_industries: [] as string[],
+    top_locations: [] as LocationRow[],
   };
 
   try {
@@ -131,16 +139,31 @@ router.get("/audience", async (req, res) => {
     const totalCustomers = Number(countResult.rows[0]?.total ?? 0);
     if (totalCustomers === 0) return res.json(emptyResponse);
 
-    const profileResult = await db.execute<ConsumerProfileRow>(sql`
-      SELECT gender, date_of_birth::text, shopping_frequency, selected_industries
-      FROM users
-      WHERE id IN (
-        SELECT DISTINCT customer_id FROM orders WHERE business_id = ${businessId}
-        UNION
-        SELECT DISTINCT client_id FROM appointments WHERE business_id = ${businessId}
-      )
-      AND (date_of_birth IS NOT NULL OR gender IS NOT NULL OR shopping_frequency IS NOT NULL)
-    `);
+    const [profileResult, locationResult] = await Promise.all([
+      db.execute<ConsumerProfileRow>(sql`
+        SELECT gender, date_of_birth::text, shopping_frequency, selected_industries
+        FROM users
+        WHERE id IN (
+          SELECT DISTINCT customer_id FROM orders WHERE business_id = ${businessId}
+          UNION
+          SELECT DISTINCT client_id FROM appointments WHERE business_id = ${businessId}
+        )
+        AND (date_of_birth IS NOT NULL OR gender IS NOT NULL OR shopping_frequency IS NOT NULL)
+      `),
+      db.execute<LocationRow>(sql`
+        SELECT u.city, u.state, u.zip_code, COUNT(*)::int AS customer_count
+        FROM users u
+        WHERE u.id IN (
+          SELECT DISTINCT customer_id FROM orders WHERE business_id = ${businessId}
+          UNION
+          SELECT DISTINCT client_id FROM appointments WHERE business_id = ${businessId}
+        )
+        AND u.city IS NOT NULL
+        GROUP BY u.city, u.state, u.zip_code
+        ORDER BY customer_count DESC
+        LIMIT 10
+      `),
+    ]);
 
     const profiles = profileResult.rows;
 
@@ -177,6 +200,7 @@ router.get("/audience", async (req, res) => {
       age_ranges: ageRanges,
       shopping_frequency: freqCounts,
       top_industries: topIndustries,
+      top_locations: locationResult.rows,
     });
   } catch (error) {
     console.error("[vendorAnalytics] /audience error:", error);
