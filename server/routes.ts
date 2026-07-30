@@ -2359,6 +2359,7 @@ export async function registerRoutes(
         isPhotographer: false as boolean,
         businessId: null as string | null,
         photographerId: null as string | null,
+        subscriptionTier: null as string | null,
         deletionStatus: user.deletionStatus ?? "active",
         scheduledDeletionAt: user.scheduledDeletionAt ?? null,
       };
@@ -2373,6 +2374,15 @@ export async function registerRoutes(
           req.session.isVendor = true;
           req.session.businessId = business.id;
         }
+        const subResult = await db.execute<{ tier_name: string }>(sql`
+          SELECT st.name AS tier_name
+          FROM vendor_subscriptions vs
+          JOIN subscription_tiers st ON st.id = vs.tier_id
+          WHERE vs.business_id = ${business.id}
+          AND vs.status = 'active'
+          LIMIT 1
+        `);
+        sessionState.subscriptionTier = subResult.rows[0]?.tier_name ?? null;
       }
 
       // Check for photographer profile
