@@ -7919,6 +7919,13 @@ export async function registerRoutes(
           proration_behavior: 'none',
         });
 
+        await storage.updateVendorSubscription(existingSub.id, {
+          tierId: newTier.id,
+          status: 'active',
+          updatedAt: new Date(),
+        });
+        console.log(`[Subscription] tier_id updated immediately for vendor ${userId}: ${existingSub.tierId} → ${newTier.id}`);
+
         return res.json({
           success: true,
           message: 'Subscription tier updated',
