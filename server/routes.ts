@@ -6908,8 +6908,25 @@ export async function registerRoutes(
 
       console.log(`[Booking] Refunded appointment ${appointmentId}: ${refundAmount} cents (refund ID: ${refund.id})`);
 
-      res.json({ 
-        success: true, 
+      // Quad-code notifications (best-effort)
+      try {
+        const refundUser = await storage.getUser(appointment.clientId);
+        await NotificationTriggers.bookingCanceledOrRefunded({
+          consumerUserId: appointment.clientId,
+          consumerName: refundUser?.name || refundUser?.email || 'Customer',
+          providerName: business?.name || 'Business',
+          eventType: 'appointment_refunded',
+          amountCents: refundAmount,
+          referenceType: 'appointment',
+          referenceId: appointmentId,
+          reason: reason || 'Provider initiated refund',
+        });
+      } catch (notifyErr) {
+        console.error(`[Refund] Quad-notification failed for appointment ${appointmentId}:`, notifyErr);
+      }
+
+      res.json({
+        success: true,
         refundId: refund.id,
         amount: refundAmount,
         status: refund.status
@@ -6963,6 +6980,24 @@ export async function registerRoutes(
         canceledBy: userId,
         cancellationReason: reason || 'No-show, not refunded',
       }).where(eq(appointments.id, appointmentId));
+
+      // Quad-code notifications (best-effort)
+      try {
+        const noShowBusiness = await storage.getBusiness(appointment.businessId);
+        const noShowConsumer = await storage.getUser(appointment.clientId);
+        await NotificationTriggers.bookingCanceledOrRefunded({
+          consumerUserId: appointment.clientId,
+          consumerName: noShowConsumer?.name || noShowConsumer?.email || 'Customer',
+          providerName: noShowBusiness?.name || 'Business',
+          eventType: 'appointment_canceled',
+          amountCents: 0,
+          referenceType: 'appointment',
+          referenceId: appointmentId,
+          reason: reason || 'No-show — no refund issued',
+        });
+      } catch (notifyErr) {
+        console.error(`[Cancel] Quad-notification failed for no-show appointment ${appointmentId}:`, notifyErr);
+      }
 
       const updatedAppointment = await storage.getAppointment(appointmentId);
       res.json({ success: true, appointment: updatedAppointment });
@@ -7276,6 +7311,24 @@ export async function registerRoutes(
         }
       }
 
+      // Quad-code notifications (best-effort)
+      try {
+        const cancelBusiness = await storage.getBusiness(appointment.businessId);
+        const cancelUser = await storage.getUser(userId);
+        await NotificationTriggers.bookingCanceledOrRefunded({
+          consumerUserId: userId,
+          consumerName: cancelUser?.name || cancelUser?.email || 'Customer',
+          providerName: cancelBusiness?.name || 'Business',
+          eventType: refundAmountCents > 0 ? 'appointment_refunded' : 'appointment_canceled',
+          amountCents: refundAmountCents,
+          referenceType: 'appointment',
+          referenceId: appointmentId,
+          reason: 'Consumer-initiated cancellation',
+        });
+      } catch (notifyErr) {
+        console.error(`[Cancel] Quad-notification failed for appointment ${appointmentId}:`, notifyErr);
+      }
+
       res.json({
         success: true,
         refundTier,
@@ -7435,6 +7488,24 @@ export async function registerRoutes(
         }
       }
 
+      // Quad-code notifications (best-effort)
+      try {
+        const cancelPhotographer = await storage.getPhotographer(booking.photographerId);
+        const cancelUser = await storage.getUser(userId);
+        await NotificationTriggers.bookingCanceledOrRefunded({
+          consumerUserId: userId,
+          consumerName: cancelUser?.name || cancelUser?.email || 'Customer',
+          providerName: cancelPhotographer?.displayName || 'Photographer',
+          eventType: refundAmountCents > 0 ? 'shoot_booking_refunded' : 'shoot_booking_canceled',
+          amountCents: refundAmountCents,
+          referenceType: 'shoot_booking',
+          referenceId: bookingId,
+          reason: 'Consumer-initiated cancellation',
+        });
+      } catch (notifyErr) {
+        console.error(`[Cancel] Quad-notification failed for shoot booking ${bookingId}:`, notifyErr);
+      }
+
       res.json({
         success: true,
         refundTier,
@@ -7567,8 +7638,25 @@ export async function registerRoutes(
 
       console.log(`[Booking] Refunded shoot booking ${bookingId}: ${refundAmount} cents (refund ID: ${refund.id})`);
 
-      res.json({ 
-        success: true, 
+      // Quad-code notifications (best-effort)
+      try {
+        const sbRefundUser = await storage.getUser(booking.clientId);
+        await NotificationTriggers.bookingCanceledOrRefunded({
+          consumerUserId: booking.clientId,
+          consumerName: sbRefundUser?.name || sbRefundUser?.email || 'Customer',
+          providerName: photographer?.displayName || 'Photographer',
+          eventType: 'shoot_booking_refunded',
+          amountCents: refundAmount,
+          referenceType: 'shoot_booking',
+          referenceId: bookingId,
+          reason: reason || 'Provider initiated refund',
+        });
+      } catch (notifyErr) {
+        console.error(`[Refund] Quad-notification failed for shoot booking ${bookingId}:`, notifyErr);
+      }
+
+      res.json({
+        success: true,
         refundId: refund.id,
         amount: refundAmount,
         status: refund.status
@@ -14126,13 +14214,44 @@ export async function registerRoutes(
           }
         });
 
-        NotificationTriggers.refundIssued({
-          userId: request.requesterId,
-          amount: request.amount,
-          referenceType: request.targetType || 'refund_request',
-          referenceId: request.targetId || id,
-          reason: data.adminNotes || undefined,
-        }).catch(err => console.error('Notification error:', err));
+        // Quad-code notifications for admin-approved refund (best-effort)
+        (async () => {
+          try {
+            const refundRequester = await storage.getUser(request.requesterId);
+            let providerName = 'Outsyde';
+            if (request.targetType === 'appointment' && request.targetId) {
+              const appt = await storage.getAppointment(request.targetId);
+              if (appt?.businessId) {
+                const biz = await storage.getBusiness(appt.businessId);
+                if (biz?.name) providerName = biz.name;
+              }
+            } else if (request.targetType === 'shoot_booking' && request.targetId) {
+              const sb = await storage.getShootBooking(request.targetId);
+              if (sb?.photographerId) {
+                const pg = await storage.getPhotographer(sb.photographerId);
+                if (pg?.displayName) providerName = pg.displayName;
+              }
+            } else if (request.targetType === 'order' && request.targetId) {
+              const ord = await storage.getOrder(request.targetId);
+              if (ord?.businessId) {
+                const biz = await storage.getBusiness(ord.businessId);
+                if (biz?.name) providerName = biz.name;
+              }
+            }
+            await NotificationTriggers.bookingCanceledOrRefunded({
+              consumerUserId: request.requesterId,
+              consumerName: refundRequester?.name || refundRequester?.email || 'Customer',
+              providerName,
+              eventType: 'refund_approved',
+              amountCents: request.amount,
+              referenceType: request.targetType || 'refund_request',
+              referenceId: request.targetId || id,
+              reason: data.adminNotes || undefined,
+            });
+          } catch (err) {
+            console.error('[AdminRefund] Quad-notification failed for refund request', id, ':', err);
+          }
+        })();
       }
 
       res.json({ success: true, request });
@@ -15413,13 +15532,24 @@ export async function registerRoutes(
           },
         }).catch(err => console.error('Audit log error (refund):', err));
 
-        NotificationTriggers.refundIssued({
-          userId: existingOrder.customerId,
-          amount: existingOrder.totalAmount,
-          referenceType: 'order',
-          referenceId: orderId,
-          reason: 'Order cancelled by business',
-        }).catch(err => console.error('Notification error (refund):', err));
+        // Quad-code notifications for order cancellation (best-effort)
+        (async () => {
+          try {
+            const orderConsumer = await storage.getUser(existingOrder.customerId);
+            await NotificationTriggers.bookingCanceledOrRefunded({
+              consumerUserId: existingOrder.customerId,
+              consumerName: orderConsumer?.name || orderConsumer?.email || 'Customer',
+              providerName: business.name,
+              eventType: 'order_canceled',
+              amountCents: existingOrder.totalAmount,
+              referenceType: 'order',
+              referenceId: orderId,
+              reason: 'Order cancelled by business',
+            });
+          } catch (err) {
+            console.error('[OrderCancel] Quad-notification failed for order', orderId, ':', err);
+          }
+        })();
       }
 
       if (trackingNumber && carrier) {
