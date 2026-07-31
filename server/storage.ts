@@ -286,6 +286,7 @@ export interface IStorage {
     subtotalAmount: number;
     bookingFeeAmount: number;
     vendorNetAmount: number;
+    staffMemberId: string | null;
   }[]>;
   getAppointmentsByClient(clientId: string): Promise<Appointment[]>;
   getAppointmentsByClientWithDetails(clientId: string): Promise<{
@@ -1773,11 +1774,12 @@ export class DatabaseStorage implements IStorage {
       totalPrice: appointments.totalPrice,
       platformFee: appointments.platformFee,
       vendorNet: appointments.vendorNet,
+      name: users.name,
       firstName: users.firstName,
       lastName: users.lastName,
-      email: users.email,
       customerAvatar: users.profileImageUrl,
       serviceName: vendorServices.name,
+      staffMemberId: appointments.staffMemberId,
     })
       .from(appointments)
       .leftJoin(users, eq(appointments.clientId, users.id))
@@ -1786,10 +1788,10 @@ export class DatabaseStorage implements IStorage {
       .orderBy(desc(appointments.createdAt));
 
     return rows.map((row) => {
-      const fullName = `${row.firstName ?? ""} ${row.lastName ?? ""}`.trim();
+      const fullName = row.name || `${row.firstName ?? ""} ${row.lastName ?? ""}`.trim();
       return {
         id: row.id,
-        customerName: fullName || row.email || "Unknown",
+        customerName: fullName || "Unknown Customer",
         customerAvatar: row.customerAvatar,
         date: row.date,
         time: row.time,
@@ -1799,6 +1801,7 @@ export class DatabaseStorage implements IStorage {
         subtotalAmount: (row.totalPrice ?? 0) / 100,
         bookingFeeAmount: (row.platformFee ?? 0) / 100,
         vendorNetAmount: (row.vendorNet ?? 0) / 100,
+        staffMemberId: row.staffMemberId ?? null,
       };
     });
   }
