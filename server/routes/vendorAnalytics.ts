@@ -329,7 +329,7 @@ router.get("/booking-health", async (req, res) => {
       db.execute<BookingHealthRow>(sql`
         SELECT
           COUNT(*) FILTER (WHERE status NOT IN ('draft', 'pending_payment', 'expired'))::int AS total_submitted,
-          COUNT(*) FILTER (WHERE status IN ('confirmed', 'completed'))::int AS confirmed_count,
+          COUNT(*) FILTER (WHERE status IN ('confirmed', 'completed', 'pending_payment', 'no_show'))::int AS confirmed_count,
           COUNT(*) FILTER (WHERE status = 'canceled')::int AS canceled_count
         FROM appointments
         WHERE business_id = ${businessId}
@@ -349,7 +349,7 @@ router.get("/booking-health", async (req, res) => {
         SELECT COALESCE(SUM(COALESCE(duration_minutes, 60)), 0)::int AS booked_minutes
         FROM appointments
         WHERE business_id = ${businessId}
-          AND status IN ('confirmed', 'completed')
+          AND status IN ('confirmed', 'completed', 'pending_payment', 'no_show')
           AND appointment_date >= TO_CHAR(DATE_TRUNC('week', NOW()), 'YYYY-MM-DD')
           AND appointment_date < TO_CHAR(DATE_TRUNC('week', NOW()) + INTERVAL '7 days', 'YYYY-MM-DD')
       `),
@@ -402,7 +402,7 @@ router.get("/revenue-by-service", async (req, res) => {
         COALESCE(SUM(vendor_net), 0)::int AS revenue_cents
       FROM appointments
       WHERE business_id = ${businessId}
-        AND status IN ('confirmed', 'completed')
+        AND status IN ('confirmed', 'completed', 'pending_payment', 'no_show')
         AND appointment_date >= TO_CHAR(DATE_TRUNC('month', NOW()), 'YYYY-MM-DD')
         AND appointment_date < TO_CHAR(DATE_TRUNC('month', NOW()) + INTERVAL '1 month', 'YYYY-MM-DD')
       GROUP BY service_name
@@ -449,7 +449,7 @@ router.get("/peak-times", async (req, res) => {
         COUNT(*)::int AS booking_count
       FROM appointments
       WHERE business_id = ${businessId}
-        AND status IN ('confirmed', 'completed')
+        AND status IN ('confirmed', 'completed', 'pending_payment', 'no_show')
         AND created_at >= NOW() - INTERVAL '90 days'
       GROUP BY day_of_week, time_slot
     `);
@@ -513,7 +513,7 @@ router.get("/revenue-forecast", async (req, res) => {
           COALESCE(SUM(vendor_net), 0)::int AS revenue_cents
         FROM appointments
         WHERE business_id = ${businessId}
-          AND status IN ('confirmed', 'completed')
+          AND status IN ('confirmed', 'completed', 'pending_payment', 'no_show')
           AND appointment_date >= TO_CHAR(DATE_TRUNC('month', NOW()) - INTERVAL '3 months', 'YYYY-MM-DD')
           AND appointment_date < TO_CHAR(DATE_TRUNC('month', NOW()), 'YYYY-MM-DD')
         GROUP BY month
@@ -523,7 +523,7 @@ router.get("/revenue-forecast", async (req, res) => {
         SELECT COALESCE(SUM(vendor_net), 0)::int AS mtd_cents
         FROM appointments
         WHERE business_id = ${businessId}
-          AND status IN ('confirmed', 'completed')
+          AND status IN ('confirmed', 'completed', 'pending_payment', 'no_show')
           AND appointment_date >= TO_CHAR(DATE_TRUNC('month', NOW()), 'YYYY-MM-DD')
           AND appointment_date < TO_CHAR(NOW()::date + 1, 'YYYY-MM-DD')
       `),
@@ -571,7 +571,7 @@ router.get("/year-over-year", async (req, res) => {
         COALESCE(SUM(vendor_net), 0)::int AS revenue_cents
       FROM appointments
       WHERE business_id = ${businessId}
-        AND status IN ('confirmed', 'completed')
+        AND status IN ('confirmed', 'completed', 'pending_payment', 'no_show')
         AND (
           (appointment_date >= TO_CHAR(DATE_TRUNC('month', NOW()) - INTERVAL '3 months', 'YYYY-MM-DD')
            AND appointment_date < TO_CHAR(DATE_TRUNC('month', NOW()), 'YYYY-MM-DD'))
@@ -634,10 +634,10 @@ router.get("/weekly", async (req, res) => {
         TO_CHAR(DATE_TRUNC('week', created_at), 'Mon DD') AS label,
         DATE_TRUNC('week', created_at)::text AS week_start,
         COALESCE(SUM(vendor_net), 0)::int AS revenue_cents,
-        COUNT(*) FILTER (WHERE status IN ('confirmed','completed'))::int AS booking_count
+        COUNT(*) FILTER (WHERE status IN ('confirmed','completed','pending_payment','no_show'))::int AS booking_count
       FROM appointments
       WHERE business_id = ${businessId}
-        AND status IN ('confirmed','completed')
+        AND status IN ('confirmed','completed','pending_payment','no_show')
         AND created_at >= NOW() - INTERVAL '6 weeks'
       GROUP BY DATE_TRUNC('week', created_at)
       ORDER BY week_start ASC
@@ -683,10 +683,10 @@ router.get("/monthly", async (req, res) => {
         TO_CHAR(DATE_TRUNC('month', created_at), 'Mon') AS label,
         DATE_TRUNC('month', created_at)::text AS month_start,
         COALESCE(SUM(vendor_net), 0)::int AS revenue_cents,
-        COUNT(*) FILTER (WHERE status IN ('confirmed','completed'))::int AS booking_count
+        COUNT(*) FILTER (WHERE status IN ('confirmed','completed','pending_payment','no_show'))::int AS booking_count
       FROM appointments
       WHERE business_id = ${businessId}
-        AND status IN ('confirmed','completed')
+        AND status IN ('confirmed','completed','pending_payment','no_show')
         AND created_at >= NOW() - INTERVAL '6 months'
       GROUP BY DATE_TRUNC('month', created_at)
       ORDER BY month_start ASC
