@@ -1013,3 +1013,156 @@ export async function sendCancellationAdminEmail(params: {
 
   await sendAdminEmail({ to: params.adminEmail, subject, html });
 }
+
+// ============================================================
+// MANUAL BOOKING (PENDING_PROVIDER) EMAIL FUNCTIONS
+// ============================================================
+
+export async function sendBookingRequestReceivedToConsumer(params: {
+  toEmail: string;
+  consumerName: string;
+  vendorName: string;
+  serviceName: string;
+  bookingId: string;
+  date: string;
+  time: string;
+  expiresAt: Date;
+}): Promise<void> {
+  try {
+    const expiryStr = params.expiresAt.toLocaleString('en-US', { dateStyle: 'medium', timeStyle: 'short' });
+    const html = wrapEmail(`
+      ${emailHeader('Booking Request Received', `Your request for ${params.vendorName} is awaiting approval.`)}
+      <tr><td style="background:#1A1A1A;padding:0 32px;">
+        <table width="100%" cellpadding="0" cellspacing="0" style="border-radius:6px;overflow:hidden;">
+          ${detailRow('Service', params.serviceName, true)}
+          ${detailRow('Date', params.date, false)}
+          ${detailRow('Time', params.time, true)}
+          ${detailRow('Expires', expiryStr, false)}
+        </table>
+      </td></tr>
+      <tr><td style="background:#1A1A1A;padding:16px 32px;">
+        <p style="color:#888888;font-size:13px;margin:0;">Your card has been authorized but <strong style="color:#F5F0E8;">not yet charged</strong>. You will only be charged if the business accepts your request. If they decline or don't respond in time, the hold is released automatically.</p>
+      </td></tr>
+      ${emailCta('View My Bookings', 'https://goutsyde.com/account/bookings')}
+      ${emailFooter()}
+    `);
+    await sendBrandedEmail(params.toEmail, `Booking request received — ${params.serviceName}`, html);
+  } catch (err) {
+    console.error('[Email] sendBookingRequestReceivedToConsumer failed:', err);
+  }
+}
+
+export async function sendBookingRequestToVendor(params: {
+  toEmail: string;
+  vendorName: string;
+  consumerName: string;
+  consumerUsername?: string;
+  serviceName: string;
+  bookingId: string;
+  date: string;
+  time: string;
+  basePrice: number;
+  expiresAt: Date;
+}): Promise<void> {
+  try {
+    const vendorFee = params.basePrice * 0.02;
+    const vendorPayout = params.basePrice - vendorFee;
+    const expiryStr = params.expiresAt.toLocaleString('en-US', { dateStyle: 'medium', timeStyle: 'short' });
+    const usernameDisplay = params.consumerUsername ? ` (@${params.consumerUsername})` : '';
+    const html = wrapEmail(`
+      ${emailHeader('New Booking Request! 📋', `${params.consumerName}${usernameDisplay} wants to book ${params.serviceName}.`)}
+      <tr><td style="background:#1A1A1A;padding:0 32px;">
+        <table width="100%" cellpadding="0" cellspacing="0" style="border-radius:6px;overflow:hidden;">
+          ${detailRow('Customer', params.consumerName + usernameDisplay, true)}
+          ${detailRow('Service', params.serviceName, false)}
+          ${detailRow('Date', params.date, true)}
+          ${detailRow('Time', params.time, false)}
+          ${detailRow('Your Payout', cents(vendorPayout), true)}
+          ${detailRow('Respond By', expiryStr, false)}
+        </table>
+      </td></tr>
+      <tr><td style="background:#1A1A1A;padding:12px 32px 4px;">
+        <p style="color:#888888;font-size:13px;margin:0;">Accept or decline in your dashboard. If you don't respond by <strong style="color:#F5F0E8;">${expiryStr}</strong>, the request will expire automatically and the customer will not be charged.</p>
+      </td></tr>
+      ${emailCta('Review in Dashboard', 'https://goutsyde.com/vendor/bookings')}
+      ${emailFooter()}
+    `);
+    await sendBrandedEmail(params.toEmail, `New booking request — ${params.serviceName} on ${params.date}`, html);
+  } catch (err) {
+    console.error('[Email] sendBookingRequestToVendor failed:', err);
+  }
+}
+
+export async function sendBookingAcceptedToConsumer(params: {
+  toEmail: string;
+  consumerName: string;
+  vendorName: string;
+  vendorContactEmail?: string;
+  serviceName: string;
+  bookingId: string;
+  date: string;
+  time: string;
+  basePrice: number;
+}): Promise<void> {
+  try {
+    const consumerUpcharge = params.basePrice * 0.08;
+    const consumerTotal = params.basePrice + consumerUpcharge;
+    const html = wrapEmail(`
+      ${emailHeader('Booking Accepted! 🎉', `${params.vendorName} accepted your booking request.`)}
+      <tr><td style="background:#1A1A1A;padding:0 32px;">
+        <table width="100%" cellpadding="0" cellspacing="0" style="border-radius:6px;overflow:hidden;">
+          ${detailRow('Service', params.serviceName, true)}
+          ${detailRow('Date', params.date, false)}
+          ${detailRow('Time', params.time, true)}
+          ${detailRow('Total Charged', cents(consumerTotal), false)}
+        </table>
+      </td></tr>
+      ${emailCta('View My Bookings', 'https://goutsyde.com/account/bookings')}
+      ${emailFooter()}
+    `);
+    await sendBrandedEmail(params.toEmail, `Booking accepted — ${params.serviceName} on ${params.date}`, html);
+  } catch (err) {
+    console.error('[Email] sendBookingAcceptedToConsumer failed:', err);
+  }
+}
+
+export async function sendBookingDeclinedToConsumer(params: {
+  toEmail: string;
+  consumerName: string;
+  vendorName: string;
+  serviceName: string;
+  bookingId: string;
+  date: string;
+  reason?: string;
+  expired?: boolean;
+}): Promise<void> {
+  try {
+    const subject = params.expired
+      ? `Booking request expired — ${params.serviceName}`
+      : `Booking request not accepted — ${params.serviceName}`;
+    const headline = params.expired
+      ? 'Booking Request Expired'
+      : 'Booking Request Not Accepted';
+    const subheadline = params.expired
+      ? `${params.vendorName} did not respond in time. No charge was made.`
+      : `${params.vendorName} was unable to accept your request. No charge was made.`;
+    const html = wrapEmail(`
+      ${emailHeader(headline, subheadline)}
+      <tr><td style="background:#1A1A1A;padding:0 32px;">
+        <table width="100%" cellpadding="0" cellspacing="0" style="border-radius:6px;overflow:hidden;">
+          ${detailRow('Service', params.serviceName, true)}
+          ${detailRow('Date', params.date, false)}
+          ${params.reason ? detailRow('Reason', params.reason, true) : ''}
+        </table>
+      </td></tr>
+      <tr><td style="background:#1A1A1A;padding:16px 32px;">
+        <p style="color:#888888;font-size:13px;margin:0;">Your card authorization has been released. You have not been charged.</p>
+      </td></tr>
+      ${emailCta('Find Another Provider', 'https://goutsyde.com')}
+      ${emailFooter()}
+    `);
+    await sendBrandedEmail(params.toEmail, subject, html);
+  } catch (err) {
+    console.error('[Email] sendBookingDeclinedToConsumer failed:', err);
+  }
+}

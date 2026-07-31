@@ -25,6 +25,8 @@ import {
 } from "@shared/schema";
 import { sendStaffInviteEmail, sendStaffPayoutSetupEmail, sendStaffAcceptedOwnerEmail, sendDeletionConfirmationEmail } from "./services/resendService";
 import { checkVendorStripeBalances, checkActiveOrders } from "./services/accountDeletionService";
+import { sendBookingAcceptedToConsumer, sendBookingDeclinedToConsumer } from "./emailService";
+import { sendExpoPush } from "./expoPushService";
 
 // Helper to sanitize user data for non-admin responses (removes sensitive fields)
 // DOB: replaced with age range for privacy
@@ -6020,6 +6022,30 @@ export async function registerRoutes(
         return res.status(400).json({ error: result.error });
       }
 
+      // Notify customer — booking accepted
+      const client = await storage.getUser(appointment.clientId).catch(() => undefined);
+      if (client) {
+        sendExpoPush({
+          userId: client.id,
+          title: 'Booking Accepted!',
+          body: `${business.name} accepted your booking for ${appointment.serviceName || 'your appointment'} on ${appointment.appointmentDate}`,
+          data: { type: 'booking_accepted', screen: 'bookings' },
+        }).catch(() => {});
+
+        if (client.email) {
+          sendBookingAcceptedToConsumer({
+            toEmail: client.email,
+            consumerName: client.name || client.email,
+            vendorName: business.name,
+            serviceName: appointment.serviceName || 'Appointment',
+            bookingId: appointmentId,
+            date: appointment.appointmentDate,
+            time: appointment.appointmentTime,
+            basePrice: appointment.totalPrice,
+          }).catch(() => {});
+        }
+      }
+
       const updatedAppointment = await storage.getAppointment(appointmentId);
       res.json({ success: true, appointment: updatedAppointment });
     } catch (error) {
@@ -6077,6 +6103,29 @@ export async function registerRoutes(
 
       if (!result.success) {
         return res.status(400).json({ error: result.error });
+      }
+
+      // Notify customer — booking declined
+      const declClient = await storage.getUser(appointment.clientId).catch(() => undefined);
+      if (declClient) {
+        sendExpoPush({
+          userId: declClient.id,
+          title: 'Booking Not Accepted',
+          body: `${business.name} was unable to accept your request. No charge was made.`,
+          data: { type: 'booking_declined', screen: 'bookings' },
+        }).catch(() => {});
+
+        if (declClient.email) {
+          sendBookingDeclinedToConsumer({
+            toEmail: declClient.email,
+            consumerName: declClient.name || declClient.email,
+            vendorName: business.name,
+            serviceName: appointment.serviceName || 'Appointment',
+            bookingId: appointmentId,
+            date: appointment.appointmentDate,
+            reason: reason ?? undefined,
+          }).catch(() => {});
+        }
       }
 
       const updatedAppointment = await storage.getAppointment(appointmentId);
@@ -6140,6 +6189,30 @@ export async function registerRoutes(
         return res.status(400).json({ error: result.error });
       }
 
+      // Notify customer — shoot booking accepted
+      const shootAcceptClient = await storage.getUser(booking.clientId).catch(() => undefined);
+      if (shootAcceptClient) {
+        sendExpoPush({
+          userId: shootAcceptClient.id,
+          title: 'Shoot Booking Accepted!',
+          body: `${photographer.displayName || 'Your photographer'} accepted your ${booking.shootType} booking on ${booking.date}`,
+          data: { type: 'booking_accepted', screen: 'bookings' },
+        }).catch(() => {});
+
+        if (shootAcceptClient.email) {
+          sendBookingAcceptedToConsumer({
+            toEmail: shootAcceptClient.email,
+            consumerName: shootAcceptClient.name || shootAcceptClient.email,
+            vendorName: photographer.displayName || 'Photographer',
+            serviceName: booking.shootType,
+            bookingId,
+            date: booking.date,
+            time: booking.startTime,
+            basePrice: booking.totalPrice,
+          }).catch(() => {});
+        }
+      }
+
       const updatedBooking = await storage.getShootBooking(bookingId);
       res.json({ success: true, booking: updatedBooking });
     } catch (error) {
@@ -6197,6 +6270,29 @@ export async function registerRoutes(
 
       if (!result.success) {
         return res.status(400).json({ error: result.error });
+      }
+
+      // Notify customer — shoot booking declined
+      const shootDeclClient = await storage.getUser(booking.clientId).catch(() => undefined);
+      if (shootDeclClient) {
+        sendExpoPush({
+          userId: shootDeclClient.id,
+          title: 'Shoot Request Not Accepted',
+          body: `${photographer.displayName || 'Your photographer'} was unable to accept your request. No charge was made.`,
+          data: { type: 'booking_declined', screen: 'bookings' },
+        }).catch(() => {});
+
+        if (shootDeclClient.email) {
+          sendBookingDeclinedToConsumer({
+            toEmail: shootDeclClient.email,
+            consumerName: shootDeclClient.name || shootDeclClient.email,
+            vendorName: photographer.displayName || 'Photographer',
+            serviceName: booking.shootType,
+            bookingId,
+            date: booking.date,
+            reason: reason ?? undefined,
+          }).catch(() => {});
+        }
       }
 
       const updatedBooking = await storage.getShootBooking(bookingId);
