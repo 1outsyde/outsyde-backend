@@ -55,7 +55,7 @@ function sanitizeUserForResponse(user: User, options: { includeOwnData?: boolean
     ageRange: calculateAgeRange(dateOfBirth),
   };
 }
-import { eq, desc, sql, gte, lte, or, isNull, gt } from "drizzle-orm";
+import { eq, desc, sql, gte, lte, or, isNull, gt, inArray } from "drizzle-orm";
 import { z } from "zod";
 import {
   hashPassword,
@@ -18653,6 +18653,136 @@ console.log(
     } catch (error: any) {
       console.error("Delete address error:", error);
       res.status(500).json({ error: "Failed to delete address" });
+    }
+  });
+
+  // ── Vendor bulk cancel appointments by date (block-triggered) ───────────────
+  app.post("/api/vendor/bookings/bulk-cancel-by-date", hybridAuthMiddleware, async (req, res) => {
+    const authReq = req as AuthenticatedRequest;
+    const userId = authReq.user?.userId || req.session?.userId;
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    try {
+      const { date, startTime, endTime, reason } = req.body;
+
+      if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+        return res.status(400).json({ error: "date is required and must be YYYY-MM-DD" });
+      }
+
+      const business = await storage.getBusinessByOwnerId(userId);
+      if (!business) {
+        return res.status(404).json({ error: "No business found for this account" });
+      }
+      const businessId = business.id;
+
+      const cancellableStatuses = [
+        BOOKING_STATES.CONFIRMED,
+        BOOKING_STATES.PENDING_PAYMENT,
+        BOOKING_STATES.PENDING_PROVIDER,
+      ];
+
+      let targetAppointments = await db
+        .select()
+        .from(appointments)
+        .where(
+          and(
+            eq(appointments.businessId, businessId),
+            eq(appointments.appointmentDate, date),
+            inArray(appointments.status, cancellableStatuses),
+          ),
+        );
+
+      // Narrow to time window if provided
+      if (startTime && endTime) {
+        targetAppointments = targetAppointments.filter(
+          (a) => a.appointmentTime >= startTime && a.appointmentTime < endTime,
+        );
+      }
+
+      if (targetAppointments.length === 0) {
+        return res.json({ success: true, cancelledCount: 0, refundedCount: 0, failedRefunds: [], date });
+      }
+
+      const businessForNotify = await storage.getBusiness(businessId);
+      const providerName = businessForNotify?.name || 'Business';
+
+      let cancelledCount = 0;
+      let refundedCount = 0;
+      const failedRefunds: string[] = [];
+
+      for (const appt of targetAppointments) {
+        try {
+          await transitionAppointmentState(appt.id, BOOKING_STATES.CANCELED, {
+            triggeredBy: userId,
+            triggerSource: 'api',
+            metadata: {
+              action: 'vendor_bulk_cancel',
+              reason: reason || 'Vendor blocked this date',
+            },
+          });
+
+          await db.update(appointments).set({
+            canceledAt: new Date(),
+            canceledBy: userId,
+            cancellationReason: reason || 'Vendor blocked this date',
+          }).where(eq(appointments.id, appt.id));
+
+          cancelledCount++;
+
+          // Full refund — vendor is canceling, consumer is not at fault
+          if (appt.totalPrice > 0 && appt.stripePaymentIntentId) {
+            try {
+              const refund = await stripeService.createBookingRefund({
+                paymentIntentId: appt.stripePaymentIntentId,
+                amountCents: appt.totalPrice,
+                reason: 'requested_by_customer',
+                metadata: {
+                  appointmentId: appt.id,
+                  initiatedBy: userId,
+                  refundTier: 'full',
+                  reason: 'Vendor-initiated bulk cancellation',
+                },
+              });
+
+              await db.update(appointments).set({
+                stripeRefundId: refund.id,
+                refundedAt: new Date(),
+                refundAmount: appt.totalPrice,
+              }).where(eq(appointments.id, appt.id));
+
+              refundedCount++;
+            } catch (refundErr: any) {
+              console.error(`[BulkCancel] Refund failed for appointment ${appt.id}:`, refundErr);
+              failedRefunds.push(appt.id);
+            }
+          }
+
+          try {
+            const consumer = await storage.getUser(appt.clientId);
+            await NotificationTriggers.bookingCanceledOrRefunded({
+              consumerUserId: appt.clientId,
+              consumerName: consumer?.name || consumer?.email || 'Customer',
+              providerName,
+              eventType: appt.totalPrice > 0 ? 'appointment_refunded' : 'appointment_canceled',
+              amountCents: appt.totalPrice,
+              referenceType: 'appointment',
+              referenceId: appt.id,
+              reason: reason || 'Vendor blocked this date',
+            });
+          } catch (notifyErr: any) {
+            console.error(`[BulkCancel] Notification failed for appointment ${appt.id}:`, notifyErr);
+          }
+        } catch (apptErr: any) {
+          console.error(`[BulkCancel] Failed to cancel appointment ${appt.id}:`, apptErr);
+        }
+      }
+
+      res.json({ success: true, cancelledCount, refundedCount, failedRefunds, date });
+    } catch (error: any) {
+      console.error("Vendor bulk cancel by date error:", error);
+      res.status(500).json({ error: "Failed to bulk cancel appointments", details: error.message });
     }
   });
 
