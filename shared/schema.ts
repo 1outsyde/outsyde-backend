@@ -3145,3 +3145,36 @@ export const insertConsumerAddressSchema = createInsertSchema(consumerAddresses)
 });
 export type ConsumerAddress = typeof consumerAddresses.$inferSelect;
 export type InsertConsumerAddress = z.infer<typeof insertConsumerAddressSchema>;
+
+/* =====================================================
+   STORIES (Ephemeral 24-hour media posts)
+===================================================== */
+export const stories = pgTable("stories", {
+  id: varchar("id", { length: 36 }).primaryKey().default(sql`gen_random_uuid()`),
+
+  authorId: varchar("author_id", { length: 36 }).notNull().references(() => users.id),
+
+  mediaUrl: text("media_url").notNull(),
+  mediaType: text("media_type").notNull(), // 'image' | 'video'
+  thumbnailUrl: text("thumbnail_url"),
+  muxAssetId: text("mux_asset_id"),
+  caption: text("caption"),
+
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  expiresAt: timestamp("expires_at").notNull(), // set explicitly at insert time: created_at + interval '24 hours'
+  isActive: boolean("is_active").notNull().default(true),
+}, (table) => ({
+  idxStoriesAuthor: index("idx_stories_author_active_expires").on(table.authorId, table.isActive, table.expiresAt),
+  idxStoriesExpires: index("idx_stories_expires_at").on(table.expiresAt),
+}));
+
+export const storyViews = pgTable("story_views", {
+  id: varchar("id", { length: 36 }).primaryKey().default(sql`gen_random_uuid()`),
+
+  storyId: varchar("story_id", { length: 36 }).notNull().references(() => stories.id),
+  viewerId: varchar("viewer_id", { length: 36 }).notNull().references(() => users.id),
+
+  viewedAt: timestamp("viewed_at").defaultNow().notNull(),
+}, (table) => [
+  unique("story_views_unique").on(table.storyId, table.viewerId),
+]);
