@@ -1,12 +1,12 @@
 import { db } from "./db";
-import { 
-  appointments, 
-  shootBookings, 
+import {
+  appointments,
+  shootBookings,
   bookingAuditLog,
-  BOOKING_STATES, 
+  BOOKING_STATES,
   BOOKING_TRANSITIONS,
   type BookingState,
-  type CancellationReason 
+  type CancellationReason
 } from "@shared/schema";
 import { eq, and, or, lt, inArray } from "drizzle-orm";
 import { expireOldHolds } from "./availabilityService";
@@ -414,9 +414,13 @@ export async function cleanupExpiredDrafts(): Promise<{ appointments: number; sh
 export async function cleanupExpiredPendingProvider(): Promise<{ appointments: number; shootBookings: number }> {
   const now = new Date();
   
-  // First, find expired appointments with PaymentIntents to cancel
+  // Find expired appointments (with all fields needed for notifications)
   const expiredAptsWithPayment = await db.select({
     id: appointments.id,
+    clientId: appointments.clientId,
+    businessId: appointments.businessId,
+    serviceName: appointments.serviceName,
+    appointmentDate: appointments.appointmentDate,
     stripePaymentIntentId: appointments.stripePaymentIntentId,
     captureMethod: appointments.captureMethod,
   })
@@ -443,7 +447,7 @@ export async function cleanupExpiredPendingProvider(): Promise<{ appointments: n
 
   // Update expired appointments
   const expiredAppointments = await db.update(appointments)
-    .set({ 
+    .set({
       status: BOOKING_STATES.EXPIRED,
       stateChangedAt: now,
       stateChangedBy: 'system',
@@ -458,9 +462,12 @@ export async function cleanupExpiredPendingProvider(): Promise<{ appointments: n
     )
     .returning({ id: appointments.id });
 
-  // Find expired shoot bookings with PaymentIntents to cancel
+  // Find expired shoot bookings (with all fields needed for notifications)
   const expiredShootsWithPayment = await db.select({
     id: shootBookings.id,
+    clientId: shootBookings.clientId,
+    shootType: shootBookings.shootType,
+    date: shootBookings.date,
     stripePaymentIntentId: shootBookings.stripePaymentIntentId,
     captureMethod: shootBookings.captureMethod,
   })
@@ -487,7 +494,7 @@ export async function cleanupExpiredPendingProvider(): Promise<{ appointments: n
 
   // Update expired shoot bookings
   const expiredShootBookings = await db.update(shootBookings)
-    .set({ 
+    .set({
       status: BOOKING_STATES.EXPIRED,
       stateChangedAt: now,
       stateChangedBy: 'system',
@@ -516,6 +523,78 @@ export async function cleanupExpiredPendingProvider(): Promise<{ appointments: n
       BOOKING_STATES.PENDING_PROVIDER,
       BOOKING_STATES.EXPIRED
     );
+  }
+
+  // Notify customers of expired appointments (best-effort, non-blocking)
+  if (expiredAptsWithPayment.length > 0) {
+    const { sendExpoPush } = await import('./expoPushService');
+    const { sendBookingDeclinedToConsumer } = await import('./emailService');
+    const { storage } = await import('./storage');
+
+    for (const apt of expiredAptsWithPayment) {
+      try {
+        const client = await storage.getUser(apt.clientId);
+        if (!client) continue;
+
+        const business = apt.businessId ? await storage.getBusiness(apt.businessId) : undefined;
+
+        sendExpoPush({
+          userId: client.id,
+          title: 'Booking Request Expired',
+          body: `Your request for ${apt.serviceName || 'an appointment'} was not accepted in time. No charge was made.`,
+          data: { type: 'booking_expired', screen: 'bookings' },
+        }).catch(() => {});
+
+        if (client.email) {
+          sendBookingDeclinedToConsumer({
+            toEmail: client.email,
+            consumerName: client.name || client.email,
+            vendorName: business?.name || 'the business',
+            serviceName: apt.serviceName || 'Appointment',
+            bookingId: apt.id,
+            date: apt.appointmentDate,
+            expired: true,
+          }).catch(() => {});
+        }
+      } catch (notifyErr) {
+        console.error(`[PendingProviderCleanup] Failed to notify customer for expired appointment ${apt.id}:`, notifyErr);
+      }
+    }
+  }
+
+  // Notify customers of expired shoot bookings (best-effort, non-blocking)
+  if (expiredShootsWithPayment.length > 0) {
+    const { sendExpoPush } = await import('./expoPushService');
+    const { sendBookingDeclinedToConsumer } = await import('./emailService');
+    const { storage } = await import('./storage');
+
+    for (const booking of expiredShootsWithPayment) {
+      try {
+        const client = await storage.getUser(booking.clientId);
+        if (!client) continue;
+
+        sendExpoPush({
+          userId: client.id,
+          title: 'Shoot Request Expired',
+          body: `Your ${booking.shootType || 'shoot'} request was not accepted in time. No charge was made.`,
+          data: { type: 'booking_expired', screen: 'bookings' },
+        }).catch(() => {});
+
+        if (client.email) {
+          sendBookingDeclinedToConsumer({
+            toEmail: client.email,
+            consumerName: client.name || client.email,
+            vendorName: 'your photographer',
+            serviceName: booking.shootType || 'Shoot',
+            bookingId: booking.id,
+            date: booking.date,
+            expired: true,
+          }).catch(() => {});
+        }
+      } catch (notifyErr) {
+        console.error(`[PendingProviderCleanup] Failed to notify customer for expired shoot booking ${booking.id}:`, notifyErr);
+      }
+    }
   }
 
   if (expiredAppointments.length > 0 || expiredShootBookings.length > 0) {

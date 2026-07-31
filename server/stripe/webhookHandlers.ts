@@ -8,7 +8,7 @@ import { sendStaffOnboardingCompleteOwnerEmail } from "../services/resendService
 import { stripeService } from "./stripeService";
 import { transitionAppointmentState, transitionShootBookingState } from "../bookingStateMachine";
 import { markHoldAsConverted } from "../availabilityService";
-import { sendBookingConfirmationPush } from "../expoPushService";
+import { sendBookingConfirmationPush, sendExpoPush } from "../expoPushService";
 import {
   sendAppointmentConfirmationToConsumer,
   sendAppointmentNotificationToVendor,
@@ -17,6 +17,8 @@ import {
   sendOrderConfirmationToConsumer,
   sendOrderNotificationToVendor,
   sendInternalEventAlert,
+  sendBookingRequestReceivedToConsumer,
+  sendBookingRequestToVendor,
 } from "../emailService";
 import { processInfluencerCommission, reverseInfluencerCommission } from "../influencerPayoutService";
 import { calculateBookingFees } from "../fees";
@@ -1069,8 +1071,60 @@ export class WebhookHandlers {
               pendingProviderExpiresAt,
               updatedAt: new Date()
             }).where(eq(appointments.id, bookingId));
-            
+
             console.log(`[Stripe] Appointment ${bookingId} awaiting provider approval (24h timeout)`);
+
+            // Notify business owner — new booking request requires action
+            const aptOwner = await storage.getUserByBusinessOwnerId(appointment.businessId).catch(() => undefined);
+            const aptClient = await storage.getUser(appointment.clientId).catch(() => undefined);
+            const aptService = appointment.serviceName || 'Appointment';
+
+            if (aptOwner) {
+              sendExpoPush({
+                userId: aptOwner.id,
+                title: 'New Booking Request',
+                body: `${aptClient?.name || 'A customer'} requested ${aptService} on ${appointment.appointmentDate} at ${appointment.appointmentTime}`,
+                data: { type: 'booking_request', screen: 'dashboard' },
+              }).catch(() => {});
+
+              if (aptOwner.email) {
+                sendBookingRequestToVendor({
+                  toEmail: aptOwner.email,
+                  vendorName: business.name,
+                  consumerName: aptClient?.name || 'Customer',
+                  consumerUsername: aptClient?.username ?? undefined,
+                  serviceName: aptService,
+                  bookingId,
+                  date: appointment.appointmentDate,
+                  time: appointment.appointmentTime,
+                  basePrice: appointment.totalPrice,
+                  expiresAt: pendingProviderExpiresAt,
+                }).catch(() => {});
+              }
+            }
+
+            // Notify customer — request received, card authorized but not charged
+            if (aptClient) {
+              sendExpoPush({
+                userId: aptClient.id,
+                title: 'Booking Request Sent',
+                body: `Your request for ${aptService} at ${business.name} is awaiting approval`,
+                data: { type: 'booking_request_sent', screen: 'bookings' },
+              }).catch(() => {});
+
+              if (aptClient.email) {
+                sendBookingRequestReceivedToConsumer({
+                  toEmail: aptClient.email,
+                  consumerName: aptClient.name || aptClient.email,
+                  vendorName: business.name,
+                  serviceName: aptService,
+                  bookingId,
+                  date: appointment.appointmentDate,
+                  time: appointment.appointmentTime,
+                  expiresAt: pendingProviderExpiresAt,
+                }).catch(() => {});
+              }
+            }
           }
         }
       } else if (type === 'shoot_booking') {
@@ -1082,7 +1136,7 @@ export class WebhookHandlers {
         const photographer = await storage.getPhotographer(booking.photographerId);
         if (photographer && photographer.autoAcceptBookings === false) {
           const pendingProviderExpiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000);
-          
+
           const result = await transitionShootBookingState(
             bookingId,
             BOOKING_STATES.PENDING_PROVIDER,
@@ -1099,8 +1153,60 @@ export class WebhookHandlers {
               pendingProviderExpiresAt,
               updatedAt: new Date()
             }).where(eq(shootBookings.id, bookingId));
-            
+
             console.log(`[Stripe] Shoot booking ${bookingId} awaiting provider approval (24h timeout)`);
+
+            // Notify photographer — new booking request requires action
+            const shootClient = await storage.getUser(booking.clientId).catch(() => undefined);
+            const photographerUser = await storage.getUser(photographer.userId).catch(() => undefined);
+            const shootService = booking.shootType || 'Shoot';
+
+            if (photographerUser) {
+              sendExpoPush({
+                userId: photographerUser.id,
+                title: 'New Shoot Request',
+                body: `${shootClient?.name || 'A client'} requested ${shootService} on ${booking.date} at ${booking.startTime}`,
+                data: { type: 'booking_request', screen: 'dashboard' },
+              }).catch(() => {});
+
+              if (photographerUser.email) {
+                sendBookingRequestToVendor({
+                  toEmail: photographerUser.email,
+                  vendorName: photographer.displayName || 'Photographer',
+                  consumerName: shootClient?.name || 'Client',
+                  consumerUsername: shootClient?.username ?? undefined,
+                  serviceName: shootService,
+                  bookingId,
+                  date: booking.date,
+                  time: booking.startTime,
+                  basePrice: booking.totalPrice,
+                  expiresAt: pendingProviderExpiresAt,
+                }).catch(() => {});
+              }
+            }
+
+            // Notify customer
+            if (shootClient) {
+              sendExpoPush({
+                userId: shootClient.id,
+                title: 'Shoot Request Sent',
+                body: `Your ${shootService} request with ${photographer.displayName || 'photographer'} is awaiting approval`,
+                data: { type: 'booking_request_sent', screen: 'bookings' },
+              }).catch(() => {});
+
+              if (shootClient.email) {
+                sendBookingRequestReceivedToConsumer({
+                  toEmail: shootClient.email,
+                  consumerName: shootClient.name || shootClient.email,
+                  vendorName: photographer.displayName || 'Photographer',
+                  serviceName: shootService,
+                  bookingId,
+                  date: booking.date,
+                  time: booking.startTime,
+                  expiresAt: pendingProviderExpiresAt,
+                }).catch(() => {});
+              }
+            }
           }
         }
       }
