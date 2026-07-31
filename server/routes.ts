@@ -15716,7 +15716,7 @@ export async function registerRoutes(
         .reduce((sum, o) => sum + (o.totalAmount || 0), 0);
 
       const confirmedBookings = bookings.filter(b =>
-        b.status === 'confirmed' || b.status === 'completed'
+        b.status === 'confirmed' || b.status === 'completed' || b.status === 'pending_payment'
       );
 
       const monthlyBookingRevenue = confirmedBookings
