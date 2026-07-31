@@ -614,4 +614,96 @@ router.get("/year-over-year", async (req, res) => {
   }
 });
 
+// ─── GET /weekly ──────────────────────────────────────────────────────────────
+
+interface WeeklyRow {
+  label: string;
+  week_start: string;
+  revenue_cents: number;
+  booking_count: number;
+}
+
+router.get("/weekly", async (req, res) => {
+  const authReq = req as AuthenticatedRequest;
+  const businessId = authReq.user?.businessId;
+  if (!businessId) return res.status(403).json({ error: "business_role_required" });
+
+  try {
+    const result = await db.execute<WeeklyRow>(sql`
+      SELECT
+        TO_CHAR(DATE_TRUNC('week', created_at), 'Mon DD') AS label,
+        DATE_TRUNC('week', created_at)::text AS week_start,
+        COALESCE(SUM(vendor_net), 0)::int AS revenue_cents,
+        COUNT(*) FILTER (WHERE status IN ('confirmed','completed'))::int AS booking_count
+      FROM appointments
+      WHERE business_id = ${businessId}
+        AND status IN ('confirmed','completed')
+        AND created_at >= NOW() - INTERVAL '6 weeks'
+      GROUP BY DATE_TRUNC('week', created_at)
+      ORDER BY week_start ASC
+    `);
+
+    const WEEK_LABELS = ["5wk", "4wk", "3wk", "2wk", "Last", "This"];
+    const rows = result.rows;
+    const days = rows.map((r, i) => {
+      const offset = rows.length - 1 - i;
+      const label = offset === 0 ? "This" : offset === 1 ? "Last" : `${offset + 1}wk`;
+      return {
+        label,
+        revenue_cents: Number(r.revenue_cents),
+        booking_count: Number(r.booking_count),
+        order_count: 0,
+      };
+    });
+
+    return res.json({ days });
+  } catch (error) {
+    console.error("[vendorAnalytics] /weekly error:", error);
+    return res.status(500).json({ error: "internal_server_error" });
+  }
+});
+
+// ─── GET /monthly ─────────────────────────────────────────────────────────────
+
+interface MonthlyRow {
+  label: string;
+  month_start: string;
+  revenue_cents: number;
+  booking_count: number;
+}
+
+router.get("/monthly", async (req, res) => {
+  const authReq = req as AuthenticatedRequest;
+  const businessId = authReq.user?.businessId;
+  if (!businessId) return res.status(403).json({ error: "business_role_required" });
+
+  try {
+    const result = await db.execute<MonthlyRow>(sql`
+      SELECT
+        TO_CHAR(DATE_TRUNC('month', created_at), 'Mon') AS label,
+        DATE_TRUNC('month', created_at)::text AS month_start,
+        COALESCE(SUM(vendor_net), 0)::int AS revenue_cents,
+        COUNT(*) FILTER (WHERE status IN ('confirmed','completed'))::int AS booking_count
+      FROM appointments
+      WHERE business_id = ${businessId}
+        AND status IN ('confirmed','completed')
+        AND created_at >= NOW() - INTERVAL '6 months'
+      GROUP BY DATE_TRUNC('month', created_at)
+      ORDER BY month_start ASC
+    `);
+
+    const days = result.rows.map((r) => ({
+      label: r.label,
+      revenue_cents: Number(r.revenue_cents),
+      booking_count: Number(r.booking_count),
+      order_count: 0,
+    }));
+
+    return res.json({ days });
+  } catch (error) {
+    console.error("[vendorAnalytics] /monthly error:", error);
+    return res.status(500).json({ error: "internal_server_error" });
+  }
+});
+
 export default router;
