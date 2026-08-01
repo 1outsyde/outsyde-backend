@@ -25,7 +25,7 @@ import {
 } from "@shared/schema";
 import { sendStaffInviteEmail, sendStaffPayoutSetupEmail, sendStaffAcceptedOwnerEmail, sendDeletionConfirmationEmail } from "./services/resendService";
 import { checkVendorStripeBalances, checkActiveOrders } from "./services/accountDeletionService";
-import { sendBookingAcceptedToConsumer, sendBookingDeclinedToConsumer } from "./emailService";
+import { sendBookingAcceptedToConsumer, sendBookingDeclinedToConsumer, sendBookingRequestToVendor, sendBookingRequestReceivedToConsumer } from "./emailService";
 import { sendExpoPush } from "./expoPushService";
 
 // Helper to sanitize user data for non-admin responses (removes sensitive fields)
@@ -104,7 +104,8 @@ import {
 } from "./availabilityService";
 import {
   transitionAppointmentState,
-  transitionShootBookingState
+  transitionShootBookingState,
+  getPendingProviderExpiryTime
 } from "./bookingStateMachine";
 import { calculateProductFee, calculateBookingFee, calculateConsumerServiceFee, calculateBookingFees } from "./fees";
 import {
@@ -5037,15 +5038,16 @@ export async function registerRoutes(
       // file); the actual Stripe charge is subtotal + consumer service fee.
       const feeBreakdown = calculateBookingFees(hold.servicePriceCents);
 
-      // NOTE: captureMethod is forced to 'automatic' here, regardless of
-      // business.autoAcceptBookings. The manual-capture -> pending_provider
-      // path (handlePaymentIntentCapturableUpdated in webhookHandlers.ts)
-      // only recognizes type 'appointment_booking'/'shoot_booking', not the
-      // 'appointment' type this route uses -- wiring that up is out of scope
-      // for this build. Forcing 'automatic' avoids a real deadlock (a manual
-      // authorization that never surfaces to the provider to accept, and
-      // therefore never gets captured). Revisit once that handler is extended.
-      const captureMethod: 'automatic' = 'automatic';
+      // Respect autoAcceptBookings: when false the card is authorized only
+      // (manual capture). The appointment is created directly in
+      // pending_provider so the business sees it immediately. The business
+      // has 48h to accept (capture) or decline (cancel) via the
+      // accept/decline endpoints; the payment_intent.succeeded webhook
+      // already handles type:'appointment' for both pending_payment and
+      // pending_provider → confirmed once captured.
+      const isAutoAccept = business.autoAcceptBookings !== false;
+      const captureMethod = isAutoAccept ? 'automatic' : 'manual';
+      const pendingProviderExpiresAt = isAutoAccept ? undefined : getPendingProviderExpiryTime();
 
       // Fetch service for location-type check and cancellation-policy snapshot.
       // For staff bookings hold.serviceId is a staff_services.id; for vendor
@@ -5092,9 +5094,10 @@ export async function registerRoutes(
         totalPrice: hold.servicePriceCents,
         platformFee: feeBreakdown.platformFeeCents,
         vendorNet: feeBreakdown.vendorNetCents,
-        status: BOOKING_STATES.PENDING_PAYMENT,
+        status: isAutoAccept ? BOOKING_STATES.PENDING_PAYMENT : BOOKING_STATES.PENDING_PROVIDER,
         paymentMethod: 'payment_intent',
         captureMethod,
+        pendingProviderExpiresAt,
         ...customerAddress,
         // Service snapshot — preserved even if service is later edited or archived
         serviceName: hold.serviceName,
@@ -5142,11 +5145,57 @@ export async function registerRoutes(
         updatedAt: new Date(),
       }).where(eq(appointments.id, appointment.id));
 
+      // When manual acceptance is required, notify the business owner and
+      // the customer immediately so neither party is left waiting silently.
+      if (!isAutoAccept) {
+        const owner = await storage.getUserByBusinessOwnerId(hold.providerId).catch(() => undefined);
+        const clientUser = user; // fetched above
+
+        if (owner) {
+          sendExpoPush({
+            userId: owner.id,
+            title: 'New Booking Request',
+            body: `${clientUser?.name || 'A customer'} requested ${hold.serviceName} on ${hold.holdDate} at ${hold.startTime}`,
+            data: { type: 'booking_request', screen: 'dashboard' },
+          }).catch(() => {});
+
+          if (owner.email) {
+            sendBookingRequestToVendor({
+              toEmail: owner.email,
+              vendorName: business.name,
+              consumerName: clientUser?.name || 'Customer',
+              consumerUsername: (clientUser as any)?.username ?? undefined,
+              serviceName: hold.serviceName,
+              bookingId: appointment.id,
+              date: hold.holdDate,
+              time: hold.startTime,
+              basePrice: hold.servicePriceCents,
+              expiresAt: pendingProviderExpiresAt!,
+            }).catch(() => {});
+          }
+        }
+
+        if (user?.email) {
+          sendBookingRequestReceivedToConsumer({
+            toEmail: user.email,
+            consumerName: user.name || user.email,
+            vendorName: business.name,
+            serviceName: hold.serviceName,
+            bookingId: appointment.id,
+            date: hold.holdDate,
+            time: hold.startTime,
+            expiresAt: pendingProviderExpiresAt!,
+          }).catch(() => {});
+        }
+      }
+
       res.json({
         clientSecret: paymentIntent.client_secret,
         paymentIntentId: paymentIntent.id,
         appointmentId: appointment.id,
         captureMethod,
+        requiresApproval: !isAutoAccept,
+        status: isAutoAccept ? BOOKING_STATES.PENDING_PAYMENT : BOOKING_STATES.PENDING_PROVIDER,
         feeBreakdown: {
           subtotalAmount: feeBreakdown.subtotalCents,
           consumerServiceFeeAmount: feeBreakdown.consumerServiceFeeCents,
