@@ -11,7 +11,7 @@ import {
 import { eq, and, or, lt, inArray } from "drizzle-orm";
 import { expireOldHolds } from "./availabilityService";
 
-const PENDING_PROVIDER_TTL_HOURS = 24;
+const PENDING_PROVIDER_TTL_HOURS = 48;
 
 export type BookingErrorCode = 'BOOKING_NOT_FOUND' | 'BOOKING_EXPIRED' | 'INVALID_STATE' | 'ALREADY_CONFIRMED' | 'PENDING_PROVIDER_EXPIRED' | 'DECLINED';
 
