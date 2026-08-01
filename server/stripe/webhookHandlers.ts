@@ -6,7 +6,7 @@ import { sql, eq, and, inArray } from "drizzle-orm";
 import { NotificationTriggers } from "../notificationService";
 import { sendStaffOnboardingCompleteOwnerEmail } from "../services/resendService";
 import { stripeService } from "./stripeService";
-import { transitionAppointmentState, transitionShootBookingState } from "../bookingStateMachine";
+import { transitionAppointmentState, transitionShootBookingState, getPendingProviderExpiryTime } from "../bookingStateMachine";
 import { markHoldAsConverted } from "../availabilityService";
 import { sendBookingConfirmationPush, sendExpoPush } from "../expoPushService";
 import {
@@ -1053,7 +1053,7 @@ export class WebhookHandlers {
         const business = await storage.getBusiness(appointment.businessId);
         if (business && business.autoAcceptBookings === false) {
           // Transition to PENDING_PROVIDER
-          const pendingProviderExpiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000);
+          const pendingProviderExpiresAt = getPendingProviderExpiryTime();
           
           const result = await transitionAppointmentState(
             bookingId,
@@ -1072,7 +1072,7 @@ export class WebhookHandlers {
               updatedAt: new Date()
             }).where(eq(appointments.id, bookingId));
 
-            console.log(`[Stripe] Appointment ${bookingId} awaiting provider approval (24h timeout)`);
+            console.log(`[Stripe] Appointment ${bookingId} awaiting provider approval (48h timeout)`);
 
             // Notify business owner — new booking request requires action
             const aptOwner = await storage.getUserByBusinessOwnerId(appointment.businessId).catch(() => undefined);
@@ -1135,7 +1135,7 @@ export class WebhookHandlers {
 
         const photographer = await storage.getPhotographer(booking.photographerId);
         if (photographer && photographer.autoAcceptBookings === false) {
-          const pendingProviderExpiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000);
+          const pendingProviderExpiresAt = getPendingProviderExpiryTime();
 
           const result = await transitionShootBookingState(
             bookingId,
@@ -1154,7 +1154,7 @@ export class WebhookHandlers {
               updatedAt: new Date()
             }).where(eq(shootBookings.id, bookingId));
 
-            console.log(`[Stripe] Shoot booking ${bookingId} awaiting provider approval (24h timeout)`);
+            console.log(`[Stripe] Shoot booking ${bookingId} awaiting provider approval (48h timeout)`);
 
             // Notify photographer — new booking request requires action
             const shootClient = await storage.getUser(booking.clientId).catch(() => undefined);
