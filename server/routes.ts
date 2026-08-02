@@ -25,7 +25,7 @@ import {
 } from "@shared/schema";
 import { sendStaffInviteEmail, sendStaffPayoutSetupEmail, sendStaffAcceptedOwnerEmail, sendDeletionConfirmationEmail } from "./services/resendService";
 import { checkVendorStripeBalances, checkActiveOrders } from "./services/accountDeletionService";
-import { sendBookingAcceptedToConsumer, sendBookingDeclinedToConsumer, sendBookingRequestToVendor, sendBookingRequestReceivedToConsumer } from "./emailService";
+import { sendBookingAcceptedToConsumer, sendBookingDeclinedToConsumer, sendBookingRequestToVendor, sendBookingRequestReceivedToConsumer, sendAdminBookingAlert } from "./emailService";
 import { sendExpoPush } from "./expoPushService";
 
 // Helper to sanitize user data for non-admin responses (removes sensitive fields)
@@ -5190,6 +5190,16 @@ export async function registerRoutes(
             expiresAt: pendingProviderExpiresAt!,
           }).catch(() => {});
         }
+
+        sendAdminBookingAlert({
+          type: 'new_pending',
+          businessName: business.name,
+          customerName: user?.name || 'Unknown Customer',
+          serviceName: hold.serviceName,
+          date: hold.holdDate,
+          amount: `$${(feeBreakdown.customerTotalBeforeTaxCents / 100).toFixed(2)}`,
+          bookingId: appointment.id,
+        }).catch(() => {});
       }
 
       res.json({
@@ -6098,6 +6108,16 @@ export async function registerRoutes(
         }
       }
 
+      sendAdminBookingAlert({
+        type: 'accepted',
+        businessName: business.name,
+        customerName: client?.name || 'Unknown Customer',
+        serviceName: appointment.serviceName || 'Appointment',
+        date: appointment.appointmentDate,
+        amount: `$${(appointment.totalPrice / 100).toFixed(2)}`,
+        bookingId: appointmentId,
+      }).catch(() => {});
+
       const updatedAppointment = await storage.getAppointment(appointmentId);
       res.json({ success: true, appointment: updatedAppointment });
     } catch (error) {
@@ -6162,8 +6182,10 @@ export async function registerRoutes(
       if (declClient) {
         sendExpoPush({
           userId: declClient.id,
-          title: 'Booking Not Accepted',
-          body: `${business.name} was unable to accept your request. No charge was made.`,
+          title: 'Booking Request Declined',
+          body: reason
+            ? `${business.name} declined your request: "${reason}". No charge was made.`
+            : `${business.name} was unable to accept your request. No charge was made.`,
           data: { type: 'booking_declined', screen: 'bookings' },
         }).catch(() => {});
 
@@ -6179,6 +6201,16 @@ export async function registerRoutes(
           }).catch(() => {});
         }
       }
+
+      sendAdminBookingAlert({
+        type: 'declined',
+        businessName: business.name,
+        customerName: declClient?.name || 'Unknown Customer',
+        serviceName: appointment.serviceName || 'Appointment',
+        date: appointment.appointmentDate,
+        bookingId: appointmentId,
+        reason: reason || undefined,
+      }).catch(() => {});
 
       const updatedAppointment = await storage.getAppointment(appointmentId);
       res.json({ success: true, appointment: updatedAppointment });
@@ -6265,6 +6297,16 @@ export async function registerRoutes(
         }
       }
 
+      sendAdminBookingAlert({
+        type: 'accepted',
+        businessName: photographer.displayName || 'Photographer',
+        customerName: shootAcceptClient?.name || 'Unknown Customer',
+        serviceName: booking.shootType,
+        date: booking.date,
+        amount: `$${(booking.totalPrice / 100).toFixed(2)}`,
+        bookingId,
+      }).catch(() => {});
+
       const updatedBooking = await storage.getShootBooking(bookingId);
       res.json({ success: true, booking: updatedBooking });
     } catch (error) {
@@ -6329,8 +6371,10 @@ export async function registerRoutes(
       if (shootDeclClient) {
         sendExpoPush({
           userId: shootDeclClient.id,
-          title: 'Shoot Request Not Accepted',
-          body: `${photographer.displayName || 'Your photographer'} was unable to accept your request. No charge was made.`,
+          title: 'Shoot Request Declined',
+          body: reason
+            ? `${photographer.displayName || 'Your photographer'} declined your request: "${reason}". No charge was made.`
+            : `${photographer.displayName || 'Your photographer'} was unable to accept your request. No charge was made.`,
           data: { type: 'booking_declined', screen: 'bookings' },
         }).catch(() => {});
 
@@ -6346,6 +6390,16 @@ export async function registerRoutes(
           }).catch(() => {});
         }
       }
+
+      sendAdminBookingAlert({
+        type: 'declined',
+        businessName: photographer.displayName || 'Photographer',
+        customerName: shootDeclClient?.name || 'Unknown Customer',
+        serviceName: booking.shootType,
+        date: booking.date,
+        bookingId,
+        reason: reason || undefined,
+      }).catch(() => {});
 
       const updatedBooking = await storage.getShootBooking(bookingId);
       res.json({ success: true, booking: updatedBooking });

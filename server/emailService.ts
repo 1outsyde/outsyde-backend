@@ -1166,3 +1166,59 @@ export async function sendBookingDeclinedToConsumer(params: {
     console.error('[Email] sendBookingDeclinedToConsumer failed:', err);
   }
 }
+
+export async function sendAdminBookingAlert(params: {
+  type: 'new_pending' | 'accepted' | 'declined';
+  businessName: string;
+  customerName: string;
+  serviceName: string;
+  date?: string;
+  amount?: string;
+  bookingId: string;
+  reason?: string;
+}): Promise<void> {
+  const OPS_EMAIL = 'info@goutsyde.com';
+  const subjects: Record<typeof params.type, string> = {
+    new_pending: `[Outsyde] New Booking Request — ${params.businessName}`,
+    accepted:    `[Outsyde] Booking Accepted — ${params.businessName}`,
+    declined:    `[Outsyde] Booking Declined — ${params.businessName}`,
+  };
+  const typeLabel: Record<typeof params.type, string> = {
+    new_pending: 'NEW PENDING',
+    accepted:    'ACCEPTED',
+    declined:    'DECLINED',
+  };
+  const typeColor: Record<typeof params.type, string> = {
+    new_pending: '#E8B930',
+    accepted:    '#34C759',
+    declined:    '#FF3B30',
+  };
+  try {
+    const rows = [
+      detailRow('Type', typeLabel[params.type], true),
+      detailRow('Booking ID', params.bookingId, false),
+      detailRow('Business', params.businessName, true),
+      detailRow('Customer', params.customerName, false),
+      detailRow('Service', params.serviceName, true),
+      ...(params.date   ? [detailRow('Date', params.date, false)]           : []),
+      ...(params.amount ? [detailRow('Amount', params.amount, true)]        : []),
+      ...(params.reason ? [detailRow('Decline Reason', params.reason, false)] : []),
+    ].join('');
+    const html = wrapEmail(`
+      <tr>
+        <td style="background:#1A1A1A;border-radius:10px 10px 0 0;padding:20px 32px;border-bottom:3px solid ${typeColor[params.type]};">
+          <div style="color:#E8B930;font-size:20px;font-weight:900;letter-spacing:2px;">OUTSYDE</div>
+          <h1 style="color:#F5F0E8;font-size:18px;font-weight:700;margin:8px 0 4px 0;">Booking ${typeLabel[params.type]}</h1>
+          <p style="color:#888888;font-size:12px;margin:0;">${params.bookingId}</p>
+        </td>
+      </tr>
+      <tr><td style="background:#1A1A1A;padding:16px 32px 0;">
+        <table width="100%" cellpadding="0" cellspacing="0" style="border-radius:4px;overflow:hidden;">${rows}</table>
+      </td></tr>
+      ${emailFooter()}
+    `);
+    await sendAdminEmail({ to: OPS_EMAIL, subject: subjects[params.type], html });
+  } catch (err) {
+    console.error('[Email] sendAdminBookingAlert failed:', err);
+  }
+}
