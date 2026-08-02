@@ -16,6 +16,7 @@ import { setupAuth, getSession } from "./replitAuth";
 import { initializePushService, sendCartReminderNotifications, isPushConfigured } from "./pushService";
 import { startDraftCleanupJob } from "./bookingStateMachine";
 import { processScheduledDeletions } from "./services/accountDeletionService";
+import { cleanupExpiredStories } from "./services/stories";
 import passport from "passport";
 
 // Global error handlers — prevent silent crashes
@@ -283,6 +284,10 @@ if (process.env.NODE_ENV === 'production') {
   }
 
   setInterval(() => storage.cleanupExpiredTokens(), 60 * 60 * 1000);
+  // Hourly expired-stories cleanup — soft-deletes expired rows and purges media
+  setInterval(() => {
+    cleanupExpiredStories().catch(err => console.error("[Stories] Cleanup failed:", err));
+  }, 60 * 60 * 1000);
 
   initializePushService();
 
