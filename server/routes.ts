@@ -133,9 +133,12 @@ import {
   feedPosts,
   businesses,
   photographers,
+  stories,
+  storyViews,
 } from "@shared/schema";
 import { and, ilike, ne, asc } from "drizzle-orm";
 
+import { createStory, getStoriesByUser, getStory, deleteStory, recordView } from "./services/stories";
 // ✅ CORRECT IMPORT (default export)
 import { photographersRouter } from "./Photographers/photographers.routes";
 import { toPublicBusinessDTO } from "./serializers/business";
@@ -18533,6 +18536,87 @@ export async function registerRoutes(
     }
   });
 
+  // ─────────────────────────────────────────────
+  // STORIES
+  // ─────────────────────────────────────────────
+
+  // POST /api/stories — create a new story (auth required)
+  app.post("/api/stories", hybridAuthMiddleware, async (req, res) => {
+    try {
+      const authReq = req as AuthenticatedRequest;
+      const userId = authReq.user?.userId || req.session?.userId;
+      if (!userId) return res.status(401).json({ error: "Unauthorized" });
+
+      const { mediaUrl, mediaType, thumbnailUrl, muxAssetId, caption } = req.body;
+      if (!mediaUrl || !mediaType) {
+        return res.status(400).json({ error: "mediaUrl and mediaType are required" });
+      }
+      if (mediaType !== "image" && mediaType !== "video") {
+        return res.status(400).json({ error: "mediaType must be 'image' or 'video'" });
+      }
+
+      const story = await createStory({
+        authorId: userId,
+        mediaUrl,
+        mediaType,
+        thumbnailUrl,
+        muxAssetId,
+        caption,
+      });
+      return res.status(201).json(story);
+    } catch (error) {
+      console.error("[Stories] POST /api/stories error:", error);
+      return res.status(500).json({ error: "Failed to create story" });
+    }
+  });
+
+  // GET /api/stories/:userId — get active stories for a user (optional auth)
+  app.get("/api/stories/:userId", optionalAuthMiddleware, async (req, res) => {
+    try {
+      const authReq = req as AuthenticatedRequest;
+      const viewerId = authReq.user?.userId || req.session?.userId;
+      const { userId } = req.params;
+
+      const result = await getStoriesByUser(userId, viewerId);
+      return res.json(result);
+    } catch (error) {
+      console.error("[Stories] GET /api/stories/:userId error:", error);
+      return res.status(500).json({ error: "Failed to fetch stories" });
+    }
+  });
+
+  // DELETE /api/stories/:storyId — soft-delete a story (auth required, owner only)
+  app.delete("/api/stories/:storyId", hybridAuthMiddleware, async (req, res) => {
+    try {
+      const authReq = req as AuthenticatedRequest;
+      const userId = authReq.user?.userId || req.session?.userId;
+      if (!userId) return res.status(401).json({ error: "Unauthorized" });
+
+      const { storyId } = req.params;
+      await deleteStory(storyId, userId);
+      return res.json({ success: true });
+    } catch (error: any) {
+      const status = error?.statusCode ?? 500;
+      return res.status(status).json({ error: error.message || "Failed to delete story" });
+    }
+  });
+
+  // POST /api/stories/:storyId/view — record a view (optional auth)
+  app.post("/api/stories/:storyId/view", optionalAuthMiddleware, async (req, res) => {
+    try {
+      const authReq = req as AuthenticatedRequest;
+      const viewerId = authReq.user?.userId || req.session?.userId;
+      if (!viewerId) return res.status(401).json({ error: "Unauthorized" });
+
+      const { storyId } = req.params;
+      await recordView(storyId, viewerId);
+      return res.json({ success: true });
+    } catch (error) {
+      console.error("[Stories] POST /api/stories/:storyId/view error:", error);
+      return res.status(500).json({ error: "Failed to record view" });
+    }
+  });
+
   // POST /api/webhooks/mux — Mux webhook handler
   // Updates the feed_posts record when a video finishes processing on Mux.
   // The mediaUrl field temporarily holds the Mux uploadId so we can locate
@@ -18591,6 +18675,25 @@ await db
 console.log(
   `[Mux] webhook: updated staff coverImage for uploadId=${uploadId} -> ${videoUrl}`
 );
+
+          // At story creation time the mobile app stores the Mux upload_id in
+          // mux_asset_id as a temporary placeholder (same pattern feed_posts uses
+          // for media_url). Here we replace it with the real asset ID and update
+          // media_url/thumbnail_url now that Mux has finished processing the video.
+          const muxAssetId: string | undefined = data?.id;
+          if (muxAssetId) {
+            await db
+              .update(stories)
+              .set({
+                mediaUrl: videoUrl,
+                thumbnailUrl,
+                muxAssetId,
+              })
+              .where(eq(stories.muxAssetId, uploadId));
+            console.log(
+              `[Mux] webhook: updated story for uploadId=${uploadId} → assetId=${muxAssetId}`
+            );
+          }
         }
       }
 
