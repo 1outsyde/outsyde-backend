@@ -18738,6 +18738,48 @@ export async function registerRoutes(
     }
   });
 
+  // GET /api/stories/:storyId/views — list viewers for a story (author only)
+  app.get("/api/stories/:storyId/views", hybridAuthMiddleware, async (req, res) => {
+    try {
+      const authReq = req as AuthenticatedRequest;
+      const userId = authReq.user?.userId || req.session?.userId;
+      if (!userId) return res.status(401).json({ error: "Unauthorized" });
+
+      const { storyId } = req.params;
+
+      const story = await getStory(storyId);
+      if (!story) return res.status(404).json({ error: "Story not found" });
+      if (story.authorId !== userId) return res.status(403).json({ error: "Forbidden" });
+
+      const views = await db
+        .select({
+          userId: users.id,
+          name: users.name,
+          avatarUrl: users.profileImageUrl,
+          viewedAt: storyViews.viewedAt,
+        })
+        .from(storyViews)
+        .innerJoin(users, eq(storyViews.viewerId, users.id))
+        .where(eq(storyViews.storyId, storyId))
+        .orderBy(desc(storyViews.viewedAt))
+        .limit(100);
+
+      return res.json({
+        storyId,
+        viewCount: views.length,
+        viewers: views.map((v) => ({
+          userId: v.userId,
+          name: v.name ?? "Unknown",
+          avatarUrl: v.avatarUrl ?? null,
+          viewedAt: v.viewedAt.toISOString(),
+        })),
+      });
+    } catch (error) {
+      console.error("[Stories] GET /api/stories/:storyId/views error:", error);
+      return res.status(500).json({ error: "Failed to fetch story views" });
+    }
+  });
+
   // POST /api/webhooks/mux — Mux webhook handler
   // Updates the feed_posts record when a video finishes processing on Mux.
   // The mediaUrl field temporarily holds the Mux uploadId so we can locate
