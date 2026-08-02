@@ -18530,6 +18530,25 @@ await db
 console.log(
   `[Mux] webhook: updated staff coverImage for uploadId=${uploadId} -> ${videoUrl}`
 );
+
+          // At story creation time the mobile app stores the Mux upload_id in
+          // mux_asset_id as a temporary placeholder (same pattern feed_posts uses
+          // for media_url). Here we replace it with the real asset ID and update
+          // media_url/thumbnail_url now that Mux has finished processing the video.
+          const muxAssetId: string | undefined = data?.id;
+          if (muxAssetId) {
+            await db
+              .update(stories)
+              .set({
+                mediaUrl: videoUrl,
+                thumbnailUrl,
+                muxAssetId,
+              })
+              .where(eq(stories.muxAssetId, uploadId));
+            console.log(
+              `[Mux] webhook: updated story for uploadId=${uploadId} → assetId=${muxAssetId}`
+            );
+          }
         }
       }
 
