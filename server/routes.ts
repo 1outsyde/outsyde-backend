@@ -132,8 +132,9 @@ import {
   photographers,
   stories,
   storyViews,
+  follows,
 } from "@shared/schema";
-import { and, ilike, ne, asc } from "drizzle-orm";
+import { and, ilike, ne, asc, inArray } from "drizzle-orm";
 
 import { createStory, getStoriesByUser, getStory, deleteStory, recordView } from "./services/stories";
 // ✅ CORRECT IMPORT (default export)
@@ -18422,6 +18423,72 @@ export async function registerRoutes(
     } catch (error) {
       console.error("[Stories] POST /api/stories error:", error);
       return res.status(500).json({ error: "Failed to create story" });
+    }
+  });
+
+  // GET /api/stories/feed — discovery feed grouped by author (optional auth)
+  // Must be registered before GET /api/stories/:userId to prevent param capture
+  app.get("/api/stories/feed", optionalAuthMiddleware, async (req, res) => {
+    try {
+      const authReq = req as AuthenticatedRequest;
+      const currentUserId = authReq.user?.userId || req.session?.userId;
+
+      const activeStories = await db
+        .select()
+        .from(stories)
+        .where(and(eq(stories.isActive, true), gt(stories.expiresAt, new Date())))
+        .orderBy(desc(stories.createdAt));
+
+      if (activeStories.length === 0) {
+        return res.json({ feed: [] });
+      }
+
+      const byAuthor = new Map<string, typeof activeStories>();
+      for (const story of activeStories) {
+        if (!byAuthor.has(story.authorId)) byAuthor.set(story.authorId, []);
+        byAuthor.get(story.authorId)!.push(story);
+      }
+
+      const authorIds = Array.from(byAuthor.keys());
+      const authorUsers = await db
+        .select({ id: users.id, name: users.name, profileImageUrl: users.profileImageUrl })
+        .from(users)
+        .where(inArray(users.id, authorIds));
+      const userMap = new Map(authorUsers.map((u) => [u.id, u]));
+
+      let followedSet = new Set<string>();
+      if (currentUserId) {
+        const followRows = await db
+          .select({ targetUserId: follows.targetUserId })
+          .from(follows)
+          .where(eq(follows.followerUserId, currentUserId));
+        followedSet = new Set(followRows.map((f) => f.targetUserId));
+      }
+
+      const feed = Array.from(byAuthor.entries()).map(([authorId, authorStories]) => {
+        const author = userMap.get(authorId);
+        return {
+          userId: authorId,
+          authorName: author?.name || "User",
+          authorAvatarUrl: author?.profileImageUrl ?? null,
+          isFollowing: followedSet.has(authorId),
+          hasUnseenStory: true,
+          stories: authorStories,
+        };
+      });
+
+      feed.sort((a, b) => {
+        if (a.isFollowing !== b.isFollowing) return a.isFollowing ? -1 : 1;
+        return (
+          new Date(b.stories[0].createdAt).getTime() -
+          new Date(a.stories[0].createdAt).getTime()
+        );
+      });
+
+      return res.json({ feed: feed.slice(0, 50) });
+    } catch (error) {
+      console.error("[Stories] GET /api/stories/feed error:", error);
+      return res.status(500).json({ error: "Failed to fetch story feed" });
     }
   });
 
