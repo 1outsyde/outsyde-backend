@@ -970,7 +970,7 @@ export async function registerRoutes(
         req.session.photographerId = photographer.id;
       }
 
-      const { password: _, ...safeUser } = user;
+      const safeUser = sanitizeUserForResponse(user, { includeOwnData: true });
 
       // If not skipping Stripe, create Connect account and onboarding link
       if (!skipStripe) {
@@ -2956,7 +2956,7 @@ export async function registerRoutes(
         return res.status(404).json({ error: "User not found" });
       }
 
-      const { password: _, ...safeUser } = user;
+      const safeUser = sanitizeUserForResponse(user, { includeOwnData: true });
       res.json({ user: safeUser });
     } catch (error) {
       console.error("Update preferences error:", error);
