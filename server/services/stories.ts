@@ -1,5 +1,5 @@
 import { db } from "../db";
-import { stories, storyViews } from "../../shared/schema";
+import { stories, storyViews, storyHighlights } from "../../shared/schema";
 import { deleteFromR2 } from "./r2";
 import { deleteMuxAsset } from "./mux";
 import { eq, and, lt, asc, inArray, sql } from "drizzle-orm";
@@ -138,4 +138,52 @@ export async function cleanupExpiredStories() {
   }
 
   console.log(`[Stories] Cleanup: expired ${ids.length} story/stories`);
+}
+
+// ── Story Highlights ──────────────────────────────────────────────────────────
+
+export interface CreateStoryHighlightInput {
+  userId: string;
+  storyId: string;
+  mediaUrl: string;
+  mediaType: string;
+  thumbnailUrl?: string | null;
+  muxAssetId?: string | null;
+  caption?: string | null;
+}
+
+export async function createStoryHighlight(input: CreateStoryHighlightInput) {
+  const [highlight] = await db
+    .insert(storyHighlights)
+    .values({
+      userId:       input.userId,
+      storyId:      input.storyId,
+      mediaUrl:     input.mediaUrl,
+      mediaType:    input.mediaType,
+      thumbnailUrl: input.thumbnailUrl ?? null,
+      muxAssetId:   input.muxAssetId ?? null,
+      caption:      input.caption ?? null,
+    })
+    .returning();
+  return highlight;
+}
+
+export async function getStoryHighlights(userId: string) {
+  return db
+    .select()
+    .from(storyHighlights)
+    .where(eq(storyHighlights.userId, userId))
+    .orderBy(sql`${storyHighlights.savedAt} desc`);
+}
+
+export async function deleteStoryHighlight(highlightId: string, userId: string): Promise<boolean> {
+  const [existing] = await db
+    .select()
+    .from(storyHighlights)
+    .where(eq(storyHighlights.id, highlightId));
+  if (!existing) return false;
+  if (existing.userId !== userId) return false;
+
+  await db.delete(storyHighlights).where(eq(storyHighlights.id, highlightId));
+  return true;
 }

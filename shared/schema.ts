@@ -3178,3 +3178,21 @@ export const storyViews = pgTable("story_views", {
 }, (table) => [
   unique("story_views_unique").on(table.storyId, table.viewerId),
 ]);
+
+/* =====================================================
+   STORY HIGHLIGHTS
+   ===================================================== */
+export const storyHighlights = pgTable("story_highlights", {
+  id:           varchar("id", { length: 36 }).primaryKey().default(sql`gen_random_uuid()`),
+  userId:       varchar("user_id", { length: 36 }).notNull().references(() => users.id),
+  storyId:      varchar("story_id", { length: 36 }).notNull().references(() => stories.id),
+  mediaUrl:     text("media_url").notNull(),
+  mediaType:    text("media_type").notNull(),
+  thumbnailUrl: text("thumbnail_url"),
+  muxAssetId:   text("mux_asset_id"),
+  caption:      text("caption"),
+  savedAt:      timestamp("saved_at").defaultNow().notNull(),
+}, (table) => ({
+  uniqUserStory:     unique("story_highlights_unique").on(table.userId, table.storyId),
+  idxUserHighlights: index("idx_story_highlights_user").on(table.userId, table.savedAt),
+}));

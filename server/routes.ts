@@ -135,11 +135,12 @@ import {
   photographers,
   stories,
   storyViews,
+  storyHighlights,
   follows,
 } from "@shared/schema";
 import { and, ilike, ne, asc, inArray } from "drizzle-orm";
 
-import { createStory, getStoriesByUser, getStory, deleteStory, recordView } from "./services/stories";
+import { createStory, getStoriesByUser, getStory, deleteStory, recordView, createStoryHighlight, getStoryHighlights, deleteStoryHighlight } from "./services/stories";
 // ✅ CORRECT IMPORT (default export)
 import { photographersRouter } from "./Photographers/photographers.routes";
 import { toPublicBusinessDTO } from "./serializers/business";
@@ -18777,6 +18778,74 @@ export async function registerRoutes(
     } catch (error) {
       console.error("[Stories] GET /api/stories/:storyId/views error:", error);
       return res.status(500).json({ error: "Failed to fetch story views" });
+    }
+  });
+
+  // POST /api/stories/highlights — save a highlight (auth required)
+  // Must be registered before GET /api/stories/:userId to prevent param capture
+  app.post("/api/stories/highlights", hybridAuthMiddleware, async (req, res) => {
+    try {
+      const authReq = req as AuthenticatedRequest;
+      const userId = authReq.user?.userId || req.session?.userId;
+      if (!userId) return res.status(401).json({ error: "Unauthorized" });
+
+      const { storyId, mediaUrl, mediaType, thumbnailUrl, muxAssetId, caption } = req.body;
+      if (!storyId || !mediaUrl || !mediaType) {
+        return res.status(400).json({ error: "storyId, mediaUrl, and mediaType are required" });
+      }
+
+      try {
+        const highlight = await createStoryHighlight({
+          userId,
+          storyId,
+          mediaUrl,
+          mediaType,
+          thumbnailUrl: thumbnailUrl ?? null,
+          muxAssetId: muxAssetId ?? null,
+          caption: caption ?? null,
+        });
+        return res.status(201).json(highlight);
+      } catch (err: any) {
+        if (err?.code === "23505" || err?.message?.includes("story_highlights_unique")) {
+          return res.status(409).json({ error: "Already highlighted" });
+        }
+        throw err;
+      }
+    } catch (error) {
+      console.error("[Stories] POST /api/stories/highlights error:", error);
+      return res.status(500).json({ error: "Failed to save highlight" });
+    }
+  });
+
+  // GET /api/stories/highlights — fetch authed user's highlights (auth required)
+  app.get("/api/stories/highlights", hybridAuthMiddleware, async (req, res) => {
+    try {
+      const authReq = req as AuthenticatedRequest;
+      const userId = authReq.user?.userId || req.session?.userId;
+      if (!userId) return res.status(401).json({ error: "Unauthorized" });
+
+      const highlights = await getStoryHighlights(userId);
+      return res.json({ highlights });
+    } catch (error) {
+      console.error("[Stories] GET /api/stories/highlights error:", error);
+      return res.status(500).json({ error: "Failed to fetch highlights" });
+    }
+  });
+
+  // DELETE /api/stories/highlights/:highlightId — delete a highlight (auth required, owner only)
+  app.delete("/api/stories/highlights/:highlightId", hybridAuthMiddleware, async (req, res) => {
+    try {
+      const authReq = req as AuthenticatedRequest;
+      const userId = authReq.user?.userId || req.session?.userId;
+      if (!userId) return res.status(401).json({ error: "Unauthorized" });
+
+      const { highlightId } = req.params;
+      const deleted = await deleteStoryHighlight(highlightId, userId);
+      if (!deleted) return res.status(403).json({ error: "Not found or forbidden" });
+      return res.json({ success: true });
+    } catch (error) {
+      console.error("[Stories] DELETE /api/stories/highlights/:highlightId error:", error);
+      return res.status(500).json({ error: "Failed to delete highlight" });
     }
   });
 
