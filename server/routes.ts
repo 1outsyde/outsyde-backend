@@ -18825,6 +18825,9 @@ export async function registerRoutes(
       if (!userId) return res.status(401).json({ error: "Unauthorized" });
 
       const highlights = await getStoryHighlights(userId);
+      console.log("[HighlightsDebug] userId:", req.user?.id);
+      console.log("[HighlightsDebug] raw result:", JSON.stringify(highlights));
+      console.log("[HighlightsDebug] result length:", highlights?.length);
       return res.json({ highlights });
     } catch (error) {
       console.error("[Stories] GET /api/stories/highlights error:", error);
