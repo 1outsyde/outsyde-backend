@@ -1,5 +1,5 @@
 import { db } from "../db";
-import { stories, storyViews, storyHighlights } from "../../shared/schema";
+import { stories, storyViews } from "../../shared/schema";
 import { deleteFromR2 } from "./r2";
 import { deleteMuxAsset } from "./mux";
 import { eq, and, lt, asc, inArray, sql } from "drizzle-orm";
@@ -152,20 +152,13 @@ export interface CreateStoryHighlightInput {
   caption?: string | null;
 }
 
-export async function createStoryHighlight(input: CreateStoryHighlightInput) {
-  const [highlight] = await db
-    .insert(storyHighlights)
-    .values({
-      userId:       input.userId,
-      storyId:      input.storyId,
-      mediaUrl:     input.mediaUrl,
-      mediaType:    input.mediaType,
-      thumbnailUrl: input.thumbnailUrl ?? null,
-      muxAssetId:   input.muxAssetId ?? null,
-      caption:      input.caption ?? null,
-    })
-    .returning();
-  return highlight;
+export async function createStoryHighlight(input: CreateStoryHighlightInput): Promise<StoryHighlight> {
+  const result = await db.execute(
+    sql`INSERT INTO story_highlights (user_id, story_id, media_url, media_type, thumbnail_url, mux_asset_id, caption)
+        VALUES (${input.userId}, ${input.storyId}, ${input.mediaUrl}, ${input.mediaType}, ${input.thumbnailUrl ?? null}, ${input.muxAssetId ?? null}, ${input.caption ?? null})
+        RETURNING *`
+  );
+  return result.rows[0] as StoryHighlight;
 }
 
 export interface StoryHighlight {
@@ -188,13 +181,8 @@ export async function getStoryHighlights(userId: string): Promise<StoryHighlight
 }
 
 export async function deleteStoryHighlight(highlightId: string, userId: string): Promise<boolean> {
-  const [existing] = await db
-    .select()
-    .from(storyHighlights)
-    .where(eq(storyHighlights.id, highlightId));
-  if (!existing) return false;
-  if (existing.userId !== userId) return false;
-
-  await db.delete(storyHighlights).where(eq(storyHighlights.id, highlightId));
-  return true;
+  const result = await db.execute(
+    sql`DELETE FROM story_highlights WHERE id = ${highlightId} AND user_id = ${userId} RETURNING id`
+  );
+  return result.rows.length > 0;
 }
