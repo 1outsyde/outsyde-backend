@@ -168,12 +168,23 @@ export async function createStoryHighlight(input: CreateStoryHighlightInput) {
   return highlight;
 }
 
-export async function getStoryHighlights(userId: string) {
-  return db
-    .select()
-    .from(storyHighlights)
-    .where(eq(storyHighlights.userId, userId))
-    .orderBy(sql`${storyHighlights.savedAt} desc`);
+export interface StoryHighlight {
+  id: string;
+  user_id: string;
+  story_id: string;
+  media_url: string;
+  media_type: string;
+  thumbnail_url: string | null;
+  mux_asset_id: string | null;
+  caption: string | null;
+  saved_at: string;
+}
+
+export async function getStoryHighlights(userId: string): Promise<StoryHighlight[]> {
+  const result = await db.execute(
+    sql`SELECT * FROM story_highlights WHERE user_id = ${userId} ORDER BY saved_at DESC`
+  );
+  return result.rows as StoryHighlight[];
 }
 
 export async function deleteStoryHighlight(highlightId: string, userId: string): Promise<boolean> {
