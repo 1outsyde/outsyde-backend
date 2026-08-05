@@ -1,5 +1,5 @@
 import { db } from "../db";
-import { stories, storyViews } from "../../shared/schema";
+import { stories, storyViews, storyHighlights } from "../../shared/schema";
 import { deleteFromR2 } from "./r2";
 import { deleteMuxAsset } from "./mux";
 import { eq, and, lt, asc, inArray, sql } from "drizzle-orm";
@@ -86,6 +86,8 @@ export async function deleteStory(storyId: string, requesterId: string) {
   }
 
   await db.update(stories).set({ isActive: false }).where(eq(stories.id, storyId));
+
+  await db.delete(storyHighlights).where(eq(storyHighlights.storyId, storyId));
 
   // Best-effort media cleanup
   try {
