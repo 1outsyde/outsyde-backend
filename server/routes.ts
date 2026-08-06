@@ -137,8 +137,9 @@ import {
   storyViews,
   storyHighlights,
   follows,
+  staffMembers,
 } from "@shared/schema";
-import { and, ilike, ne, asc, inArray } from "drizzle-orm";
+import { and, ilike, ne, asc } from "drizzle-orm";
 
 import { createStory, getStoriesByUser, getStory, deleteStory, recordView, createStoryHighlight, getStoryHighlights, deleteStoryHighlight } from "./services/stories";
 // ✅ CORRECT IMPORT (default export)
@@ -16563,43 +16564,6 @@ export async function registerRoutes(
     }
   });
 
-  // Admin: Get all photographers
-  app.get("/api/admin/photographers", requireAdmin, async (req, res) => {
-    try {
-      const { search, limit = "50", offset = "0" } = req.query;
-      let photographers = await storage.getAllPhotographers();
-
-      // Search filter
-      if (search) {
-        const searchLower = (search as string).toLowerCase();
-        photographers = photographers.filter(p =>
-          p.displayName?.toLowerCase().includes(searchLower) ||
-          p.bio?.toLowerCase().includes(searchLower)
-        );
-      }
-
-      // Pagination
-      const start = parseInt(offset as string);
-      const end = start + parseInt(limit as string);
-      const paginatedPhotographers = photographers.slice(start, end);
-
-      // Get user info for each photographer
-      const enrichedPhotographers = await Promise.all(paginatedPhotographers.map(async (p) => {
-        const user = await storage.getUser(p.userId);
-        return {
-          ...p,
-          userEmail: user?.email,
-          userName: user?.name || `${user?.firstName || ''} ${user?.lastName || ''}`.trim(),
-        };
-      }));
-
-      res.json({ photographers: enrichedPhotographers, total: photographers.length });
-    } catch (error) {
-      console.error("Get admin photographers error:", error);
-      res.status(500).json({ error: "Failed to get photographers" });
-    }
-  });
-
   // Admin: Update photographer
   app.patch("/api/admin/photographers/:id", requireAdmin, async (req, res) => {
     try {
@@ -18914,9 +18878,9 @@ console.log(
 
 // Update staff whose coverImage was set to the Mux uploadId
 await db
-  .update(staff)
+  .update(staffMembers)
   .set({ coverImage: videoUrl })
-  .where(eq(staff.coverImage, uploadId));
+  .where(eq(staffMembers.coverImage, uploadId));
 console.log(
   `[Mux] webhook: updated staff coverImage for uploadId=${uploadId} -> ${videoUrl}`
 );
