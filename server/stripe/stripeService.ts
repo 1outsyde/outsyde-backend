@@ -597,15 +597,23 @@ export class StripeService {
     amountCents?: number; // undefined = full refund
     reason?: 'duplicate' | 'fraudulent' | 'requested_by_customer';
     metadata?: Record<string, string>;
+    // Deterministic key so a retried request returns the ORIGINAL refund
+    // instead of creating a second one. Must be stable across retries —
+    // do not build it with the idempotencyKey() helper above, which appends
+    // randomUUID() and defeats deduplication.
+    idempotencyKey?: string;
   }) {
     const stripe = await getUncachableStripeClient();
 
-    return stripe.refunds.create({
-      payment_intent: params.paymentIntentId,
-      amount: params.amountCents,
-      reason: params.reason || 'requested_by_customer',
-      metadata: params.metadata,
-    });
+    return stripe.refunds.create(
+      {
+        payment_intent: params.paymentIntentId,
+        amount: params.amountCents,
+        reason: params.reason || 'requested_by_customer',
+        metadata: params.metadata,
+      },
+      params.idempotencyKey ? { idempotencyKey: params.idempotencyKey } : undefined
+    );
   }
 
   /**

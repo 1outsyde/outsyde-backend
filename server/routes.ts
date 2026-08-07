@@ -14323,6 +14323,67 @@ export async function registerRoutes(
         updates.resolvedBy = adminUser.id;
       }
 
+      // Read before writing. Nothing below depends on the row already being
+      // marked approved, so the Stripe refund can be attempted first and the
+      // row only written once the money has actually moved.
+      const existing = await storage.getRefundRequest(id);
+
+      if (!existing) {
+        return res.status(404).json({ error: "Refund request not found" });
+      }
+
+      // Guard against re-processing: approving twice would issue a second
+      // Stripe refund (partial refunds are not rejected by Stripe) and
+      // double-reverse points and influencer commission.
+      if (existing.status === 'approved') {
+        return res.status(400).json({ error: "Refund request has already been processed" });
+      }
+
+      if (data.status === 'approved') {
+        // Issue Stripe refund for the actual payment BEFORE any DB write, so a
+        // Stripe failure leaves the request untouched and still actionable.
+        let stripeRefundId: string | null = null;
+        if (existing.targetId) {
+          try {
+            let paymentIntentId: string | null = null;
+            if (existing.targetType === 'order') {
+              const order = await storage.getOrder(existing.targetId);
+              paymentIntentId = order?.stripePaymentIntentId || null;
+            } else if (existing.targetType === 'shoot_booking') {
+              const booking = await storage.getShootBooking(existing.targetId);
+              paymentIntentId = booking?.stripePaymentIntentId || null;
+            } else if (existing.targetType === 'appointment') {
+              const appointment = await storage.getAppointment(existing.targetId);
+              paymentIntentId = appointment?.stripePaymentIntentId || null;
+            }
+
+            if (paymentIntentId) {
+              const refund = await stripeService.createBookingRefund({
+                paymentIntentId,
+                amountCents: existing.amount,
+                reason: 'requested_by_customer',
+                metadata: {
+                  refundRequestId: id,
+                  targetType: existing.targetType || '',
+                  targetId: existing.targetId,
+                  approvedBy: adminUser.id,
+                },
+                // Deterministic: a retry after a transient network failure
+                // returns the original refund rather than issuing a second.
+                idempotencyKey: `refund_req_${id}`,
+              });
+              stripeRefundId = refund.id;
+              console.log(`[Refund] Stripe refund ${refund.id} issued for ${existing.targetType} ${existing.targetId}: ${existing.amount}¢`);
+            } else {
+              console.warn(`[Refund] No Stripe payment found for ${existing.targetType} ${existing.targetId} — skipping Stripe refund`);
+            }
+          } catch (stripeError: any) {
+            console.error(`[Refund] Stripe refund failed for ${existing.targetType} ${existing.targetId}:`, stripeError.message);
+            return res.status(402).json({ success: false, message: `Stripe refund failed: ${stripeError.message}` });
+          }
+        }
+      }
+
       const request = await storage.updateRefundRequest(id, updates);
 
       if (!request) {
@@ -14330,45 +14391,6 @@ export async function registerRoutes(
       }
 
       if (data.status === 'approved') {
-        // Issue Stripe refund for the actual payment
-        let stripeRefundId: string | null = null;
-        if (request.targetId) {
-          try {
-            let paymentIntentId: string | null = null;
-            if (request.targetType === 'order') {
-              const order = await storage.getOrder(request.targetId);
-              paymentIntentId = order?.stripePaymentIntentId || null;
-            } else if (request.targetType === 'shoot_booking') {
-              const booking = await storage.getShootBooking(request.targetId);
-              paymentIntentId = booking?.stripePaymentIntentId || null;
-            } else if (request.targetType === 'appointment') {
-              const appointment = await storage.getAppointment(request.targetId);
-              paymentIntentId = appointment?.stripePaymentIntentId || null;
-            }
-
-            if (paymentIntentId) {
-              const refund = await stripeService.createBookingRefund({
-                paymentIntentId,
-                amountCents: request.amount,
-                reason: 'requested_by_customer',
-                metadata: {
-                  refundRequestId: id,
-                  targetType: request.targetType || '',
-                  targetId: request.targetId,
-                  approvedBy: adminUser.id,
-                },
-              });
-              stripeRefundId = refund.id;
-              console.log(`[Refund] Stripe refund ${refund.id} issued for ${request.targetType} ${request.targetId}: ${request.amount}¢`);
-            } else {
-              console.warn(`[Refund] No Stripe payment found for ${request.targetType} ${request.targetId} — skipping Stripe refund`);
-            }
-          } catch (stripeError: any) {
-            console.error(`[Refund] Stripe refund failed for ${request.targetType} ${request.targetId}:`, stripeError.message);
-            return res.status(402).json({ success: false, message: `Stripe refund failed: ${stripeError.message}` });
-          }
-        }
-
         // Update order/booking status to refunded with state machine validation
         if (request.targetType === 'order' && request.targetId) {
           const refundedOrder = await storage.getOrder(request.targetId);
