@@ -13856,11 +13856,14 @@ export async function registerRoutes(
       const { status = "pending" } = req.query;
       const applications = await storage.getBusinessesByApprovalStatus(status as string);
       
-      // Enrich with owner info
+      // Enrich with owner info. The raw joined `owner` row is destructured out of
+      // the spread — it is the unsanitized users record (password hash, reset
+      // token, Stripe customer ID) and must never reach a client. The ownerX
+      // fields below are the only owner data this endpoint exposes.
       const enriched = applications.map((business) => {
-        const owner = business.owner;
+        const { owner, ...businessFields } = business;
         return {
-          ...business,
+          ...businessFields,
           ownerName: owner?.name || null,
           ownerEmail: owner?.email || null,
           ownerPhone: owner?.phone || null,
