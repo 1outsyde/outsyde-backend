@@ -466,6 +466,7 @@ export async function cleanupExpiredPendingProvider(): Promise<{ appointments: n
   const expiredShootsWithPayment = await db.select({
     id: shootBookings.id,
     clientId: shootBookings.clientId,
+    photographerId: shootBookings.photographerId,
     shootType: shootBookings.shootType,
     date: shootBookings.date,
     stripePaymentIntentId: shootBookings.stripePaymentIntentId,
@@ -565,7 +566,7 @@ export async function cleanupExpiredPendingProvider(): Promise<{ appointments: n
   // Notify customers of expired shoot bookings (best-effort, non-blocking)
   if (expiredShootsWithPayment.length > 0) {
     const { sendExpoPush } = await import('./expoPushService');
-    const { sendBookingDeclinedToConsumer } = await import('./emailService');
+    const { sendBookingDeclinedToConsumer, sendShootBookingExpiredToPhotographer } = await import('./emailService');
     const { storage } = await import('./storage');
 
     for (const booking of expiredShootsWithPayment) {
@@ -593,6 +594,32 @@ export async function cleanupExpiredPendingProvider(): Promise<{ appointments: n
         }
       } catch (notifyErr) {
         console.error(`[PendingProviderCleanup] Failed to notify customer for expired shoot booking ${booking.id}:`, notifyErr);
+      }
+
+      // Notify photographer — unanswered booking request expired (best-effort)
+      try {
+        const photographer = await storage.getPhotographer(booking.photographerId);
+        if (photographer?.userId) {
+          sendExpoPush({
+            userId: photographer.userId,
+            title: 'Booking Request Expired',
+            body: 'A booking request wasn\'t responded to in time and has expired.',
+            data: { type: 'booking_expired', bookingId: booking.id },
+          }).catch(() => {});
+
+          const photographerUser = await storage.getUser(photographer.userId).catch(() => undefined);
+          if (photographerUser?.email) {
+            sendShootBookingExpiredToPhotographer({
+              toEmail: photographerUser.email,
+              photographerName: photographer.displayName || 'Photographer',
+              shootType: booking.shootType || 'Shoot',
+              bookingId: booking.id,
+              date: booking.date,
+            }).catch(() => {});
+          }
+        }
+      } catch (notifyPhotographerErr) {
+        console.error(`[PendingProviderCleanup] Failed to notify photographer for expired shoot booking ${booking.id}:`, notifyPhotographerErr);
       }
     }
   }

@@ -25,7 +25,7 @@ import {
 } from "@shared/schema";
 import { sendStaffInviteEmail, sendStaffPayoutSetupEmail, sendStaffAcceptedOwnerEmail, sendDeletionConfirmationEmail } from "./services/resendService";
 import { checkVendorStripeBalances, checkActiveOrders } from "./services/accountDeletionService";
-import { sendBookingAcceptedToConsumer, sendBookingDeclinedToConsumer, sendBookingRequestToVendor, sendBookingRequestReceivedToConsumer, sendAdminBookingAlert } from "./emailService";
+import { sendBookingAcceptedToConsumer, sendBookingDeclinedToConsumer, sendBookingRequestToVendor, sendBookingRequestReceivedToConsumer, sendAdminBookingAlert, sendShootBookingAcceptedToPhotographer, sendShootBookingDeclinedToPhotographer, sendShootBookingCanceledToPhotographer } from "./emailService";
 import { sendExpoPush } from "./expoPushService";
 
 // Helper to sanitize user data for non-admin responses (removes sensitive fields)
@@ -6310,6 +6310,27 @@ export async function registerRoutes(
         bookingId,
       }).catch(() => {});
 
+      // Notify photographer — their acceptance was processed
+      sendExpoPush({
+        userId: photographer.userId,
+        title: 'Booking Confirmed',
+        body: `You confirmed the shoot with ${shootAcceptClient?.name || 'your client'}. Payment will be transferred to your account.`,
+        data: { type: 'booking_accepted', bookingId },
+      }).catch(() => {});
+
+      const shootAcceptPhotographerUser = await storage.getUser(photographer.userId).catch(() => undefined);
+      if (shootAcceptPhotographerUser?.email) {
+        sendShootBookingAcceptedToPhotographer({
+          toEmail: shootAcceptPhotographerUser.email,
+          photographerName: photographer.displayName || 'Photographer',
+          consumerName: shootAcceptClient?.name || 'Client',
+          shootType: booking.shootType,
+          bookingId,
+          date: booking.date,
+          time: booking.startTime,
+        }).catch(() => {});
+      }
+
       const updatedBooking = await storage.getShootBooking(bookingId);
       res.json({ success: true, booking: updatedBooking });
     } catch (error) {
@@ -6403,6 +6424,27 @@ export async function registerRoutes(
         bookingId,
         reason: reason || undefined,
       }).catch(() => {});
+
+      // Notify photographer — their decline was recorded
+      sendExpoPush({
+        userId: photographer.userId,
+        title: 'Booking Declined',
+        body: `You declined the booking request from ${shootDeclClient?.name || 'your client'}.`,
+        data: { type: 'booking_declined', bookingId },
+      }).catch(() => {});
+
+      const shootDeclPhotographerUser = await storage.getUser(photographer.userId).catch(() => undefined);
+      if (shootDeclPhotographerUser?.email) {
+        sendShootBookingDeclinedToPhotographer({
+          toEmail: shootDeclPhotographerUser.email,
+          photographerName: photographer.displayName || 'Photographer',
+          consumerName: shootDeclClient?.name || 'Client',
+          shootType: booking.shootType,
+          bookingId,
+          date: booking.date,
+          reason: reason ?? undefined,
+        }).catch(() => {});
+      }
 
       const updatedBooking = await storage.getShootBooking(bookingId);
       res.json({ success: true, booking: updatedBooking });
@@ -7719,6 +7761,35 @@ export async function registerRoutes(
         });
       } catch (notifyErr) {
         console.error(`[Cancel] Quad-notification failed for shoot booking ${bookingId}:`, notifyErr);
+      }
+
+      // Notify photographer — consumer canceled their session (best-effort)
+      try {
+        const cancelPhotographerForNotify = await storage.getPhotographer(booking.photographerId);
+        const cancelConsumerForNotify = await storage.getUser(userId);
+        if (cancelPhotographerForNotify?.userId) {
+          sendExpoPush({
+            userId: cancelPhotographerForNotify.userId,
+            title: 'Shoot Booking Canceled',
+            body: `${cancelConsumerForNotify?.name || 'Your client'} has canceled their booking. The slot is now available.`,
+            data: { type: 'booking_canceled', bookingId },
+          }).catch(() => {});
+
+          const cancelPhotographerUser = await storage.getUser(cancelPhotographerForNotify.userId).catch(() => undefined);
+          if (cancelPhotographerUser?.email) {
+            sendShootBookingCanceledToPhotographer({
+              toEmail: cancelPhotographerUser.email,
+              photographerName: cancelPhotographerForNotify.displayName || 'Photographer',
+              consumerName: cancelConsumerForNotify?.name || 'Client',
+              shootType: booking.shootType,
+              bookingId,
+              date: booking.date,
+              time: booking.startTime,
+            }).catch(() => {});
+          }
+        }
+      } catch (notifyPhotographerErr) {
+        console.error(`[Cancel] Photographer notification failed for shoot booking ${bookingId}:`, notifyPhotographerErr);
       }
 
       res.json({

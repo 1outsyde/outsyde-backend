@@ -710,6 +710,134 @@ export async function sendShootBookingNotificationToPhotographer(params: {
   }
 }
 
+export async function sendShootBookingAcceptedToPhotographer(params: {
+  toEmail: string;
+  photographerName: string;
+  consumerName: string;
+  shootType: string;
+  bookingId: string;
+  date: string;
+  time: string;
+}): Promise<void> {
+  try {
+    const html = wrapEmail(`
+      ${emailHeader('Booking Confirmed ✅', `You confirmed the shoot with ${params.consumerName}.`)}
+      <tr><td style="background:#1A1A1A;padding:0 32px;">
+        <table width="100%" cellpadding="0" cellspacing="0" style="border-radius:6px;overflow:hidden;">
+          ${detailRow('Client', params.consumerName, true)}
+          ${detailRow('Shoot Type', params.shootType, false)}
+          ${detailRow('Date', params.date, true)}
+          ${detailRow('Time', params.time, false)}
+        </table>
+      </td></tr>
+      <tr><td style="background:#1A1A1A;padding:12px 32px 4px;">
+        <p style="color:#888888;font-size:13px;margin:0;">Payment will be transferred to your account after the session.</p>
+      </td></tr>
+      ${emailCta('View in Dashboard', 'https://goutsyde.com/vendor/bookings')}
+      ${emailFooter()}
+    `);
+    await sendBrandedEmail(params.toEmail, `Booking Confirmed — ${params.consumerName}`, html);
+    console.log(`[Email] Shoot booking accepted confirmation sent to photographer ${params.toEmail}`);
+  } catch (err) {
+    console.error('[Email] sendShootBookingAcceptedToPhotographer failed:', err);
+  }
+}
+
+export async function sendShootBookingDeclinedToPhotographer(params: {
+  toEmail: string;
+  photographerName: string;
+  consumerName: string;
+  shootType: string;
+  bookingId: string;
+  date: string;
+  reason?: string;
+}): Promise<void> {
+  try {
+    const html = wrapEmail(`
+      ${emailHeader('Booking Declined', `You declined the request from ${params.consumerName}.`)}
+      <tr><td style="background:#1A1A1A;padding:0 32px;">
+        <table width="100%" cellpadding="0" cellspacing="0" style="border-radius:6px;overflow:hidden;">
+          ${detailRow('Client', params.consumerName, true)}
+          ${detailRow('Shoot Type', params.shootType, false)}
+          ${detailRow('Date', params.date, true)}
+          ${params.reason ? detailRow('Reason', params.reason, false) : ''}
+        </table>
+      </td></tr>
+      <tr><td style="background:#1A1A1A;padding:16px 32px;">
+        <p style="color:#888888;font-size:13px;margin:0;">The client has not been charged. The time slot has been released.</p>
+      </td></tr>
+      ${emailCta('View in Dashboard', 'https://goutsyde.com/vendor/bookings')}
+      ${emailFooter()}
+    `);
+    await sendBrandedEmail(params.toEmail, `Booking Declined — ${params.consumerName}`, html);
+    console.log(`[Email] Shoot booking declined confirmation sent to photographer ${params.toEmail}`);
+  } catch (err) {
+    console.error('[Email] sendShootBookingDeclinedToPhotographer failed:', err);
+  }
+}
+
+export async function sendShootBookingCanceledToPhotographer(params: {
+  toEmail: string;
+  photographerName: string;
+  consumerName: string;
+  shootType: string;
+  bookingId: string;
+  date: string;
+  time: string;
+}): Promise<void> {
+  try {
+    const html = wrapEmail(`
+      ${emailHeader('Booking Canceled', `${params.consumerName} has canceled their session with you.`)}
+      <tr><td style="background:#1A1A1A;padding:0 32px;">
+        <table width="100%" cellpadding="0" cellspacing="0" style="border-radius:6px;overflow:hidden;">
+          ${detailRow('Client', params.consumerName, true)}
+          ${detailRow('Shoot Type', params.shootType, false)}
+          ${detailRow('Date', params.date, true)}
+          ${detailRow('Time', params.time, false)}
+        </table>
+      </td></tr>
+      <tr><td style="background:#1A1A1A;padding:16px 32px;">
+        <p style="color:#888888;font-size:13px;margin:0;">The slot has been released and is now available for new bookings.</p>
+      </td></tr>
+      ${emailCta('View in Dashboard', 'https://goutsyde.com/vendor/bookings')}
+      ${emailFooter()}
+    `);
+    await sendBrandedEmail(params.toEmail, `Your Booking Was Canceled — ${params.consumerName}`, html);
+    console.log(`[Email] Shoot booking canceled notification sent to photographer ${params.toEmail}`);
+  } catch (err) {
+    console.error('[Email] sendShootBookingCanceledToPhotographer failed:', err);
+  }
+}
+
+export async function sendShootBookingExpiredToPhotographer(params: {
+  toEmail: string;
+  photographerName: string;
+  shootType: string;
+  bookingId: string;
+  date: string;
+}): Promise<void> {
+  try {
+    const html = wrapEmail(`
+      ${emailHeader('Booking Request Expired', 'A booking request was not responded to in time.')}
+      <tr><td style="background:#1A1A1A;padding:0 32px;">
+        <table width="100%" cellpadding="0" cellspacing="0" style="border-radius:6px;overflow:hidden;">
+          ${detailRow('Shoot Type', params.shootType, true)}
+          ${detailRow('Date', params.date, false)}
+        </table>
+      </td></tr>
+      <tr><td style="background:#1A1A1A;padding:16px 32px;">
+        <p style="color:#888888;font-size:13px;margin:0;">The client was not charged. The time slot has been released automatically.</p>
+      </td></tr>
+      ${emailCta('View in Dashboard', 'https://goutsyde.com/vendor/bookings')}
+      ${emailFooter()}
+    `);
+    await sendBrandedEmail(params.toEmail, `Booking Request Expired`, html);
+    console.log(`[Email] Shoot booking expiry notification sent to photographer ${params.toEmail}`);
+  } catch (err) {
+    console.error('[Email] sendShootBookingExpiredToPhotographer failed:', err);
+  }
+}
+
 export async function sendOrderConfirmationToConsumer(params: {
   toEmail: string;
   consumerName: string;
