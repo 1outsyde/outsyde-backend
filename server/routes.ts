@@ -15990,6 +15990,28 @@ export async function registerRoutes(
     }
   });
 
+  app.patch("/api/photographers/me/settings", authMiddleware, async (req, res) => {
+    try {
+      const authReq = req as AuthenticatedRequest;
+      const userId = authReq.user?.userId || req.session?.userId;
+      if (!userId) return res.status(401).json({ error: "Not authenticated" });
+
+      const photographer = await storage.getPhotographerByUserId(userId);
+      if (!photographer) return res.status(404).json({ error: "Photographer profile not found" });
+
+      const { autoAcceptBookings } = req.body;
+      if (typeof autoAcceptBookings !== 'boolean') {
+        return res.status(400).json({ error: "autoAcceptBookings must be a boolean" });
+      }
+
+      await storage.updatePhotographer(photographer.id, { autoAcceptBookings });
+      res.json({ success: true });
+    } catch (error) {
+      console.error("Update photographer settings error:", error);
+      res.status(500).json({ error: "Failed to update settings" });
+    }
+  });
+
   // ==================== ADMIN DASHBOARD ROUTES ====================
 
   // Admin: Get dashboard overview stats
