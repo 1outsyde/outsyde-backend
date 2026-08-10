@@ -2418,8 +2418,9 @@ export async function registerRoutes(
         .orderBy(desc(influencerApplications.createdAt))
         .limit(1);
       sessionState.influencerStatus = influencerAppRows[0]?.status ?? null;
+      sessionState.isInfluencer = user.isInfluencer === true || influencerAppRows[0]?.status === 'approved';
 
-      console.log(`[AUTH_ME] Session verified for userId: ${user.id} | isVendor: ${sessionState.isVendor} | isPhotographer: ${sessionState.isPhotographer} | isInfluencer: ${sessionState.isInfluencer}`);
+      console.log('[AUTH_ME] returning isInfluencer:', sessionState.isInfluencer, 'influencerStatus:', sessionState.influencerStatus, 'for userId:', user.id);
       res.json(sessionState);
     } catch (error) {
       console.error("Get /api/auth/me error:", error);
@@ -14854,6 +14855,7 @@ export async function registerRoutes(
         .update(influencerApplications)
         .set({ status: 'approved', reviewedBy: reviewerId, reviewedAt: new Date() })
         .where(eq(influencerApplications.id, id));
+      console.log('[Influencer Approve] Setting isInfluencer=true for userId:', application.userId);
       await db.update(users).set({ isInfluencer: true }).where(eq(users.id, application.userId));
       const userRow = await db.select({ name: users.name }).from(users).where(eq(users.id, application.userId));
       await db
