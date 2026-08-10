@@ -14688,7 +14688,8 @@ export async function registerRoutes(
   // Admin: Get all influencer applications (JOIN with users for efficient single query)
   const handleGetInfluencerApplications = async (req: any, res: any) => {
     try {
-      const { status } = req.query;
+      const rawStatus = req.query.status;
+      const status = typeof rawStatus === 'string' && rawStatus.length > 0 ? rawStatus : undefined;
       const rows = await db
         .select({
           id: influencerApplications.id,
@@ -14713,7 +14714,7 @@ export async function registerRoutes(
         })
         .from(influencerApplications)
         .innerJoin(users, eq(users.id, influencerApplications.userId))
-        .where(status ? eq(influencerApplications.status, status as string) : undefined)
+        .where(status !== undefined ? eq(influencerApplications.status, status) : undefined)
         .orderBy(desc(influencerApplications.createdAt));
 
       const applications = rows.map((row) => ({
