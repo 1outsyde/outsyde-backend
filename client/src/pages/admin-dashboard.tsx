@@ -876,19 +876,24 @@ interface InfluencerApplication {
   id: string;
   userId: string;
   status: "pending" | "approved" | "rejected";
-  socialMediaLinks: string;
-  followerCount: string;
-  bio: string;
-  niche: string;
-  whyJoin: string;
-  submittedAt: string;
-  reviewedAt: string | null;
+  instagramUrl: string | null;
+  tiktokUrl: string | null;
+  youtubeUrl: string | null;
+  twitterUrl: string | null;
+  followerCount: number | null;
+  contentNiche: string | null;
+  whyInfluencer: string | null;
   adminNotes: string | null;
+  reviewedBy: string | null;
+  reviewedAt: string | null;
+  createdAt: string;
   user?: {
     id: string;
     name: string | null;
     email: string | null;
+    username: string | null;
     profileImageUrl: string | null;
+    isInfluencer: boolean;
   };
 }
 
@@ -900,20 +905,20 @@ function InfluencerApplicationsTab() {
   const { toast } = useToast();
 
   const { data: applicationsData, isLoading } = useQuery<{ applications: InfluencerApplication[] }>({
-    queryKey: ["/api/admin/influencer/applications"],
+    queryKey: ["/api/admin/influencers"],
   });
 
   const applications = applicationsData?.applications || [];
 
   const approveMutation = useMutation({
     mutationFn: async (data: { applicationId: string; notes: string }) => {
-      return apiRequest("POST", "/api/admin/influencer/applications/approve", { 
-        applicationId: data.applicationId, 
-        adminNotes: data.notes 
+      return apiRequest("PATCH", `/api/admin/influencers/${data.applicationId}`, {
+        status: "approved",
+        admin_notes: data.notes,
       });
     },
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["/api/admin/influencer/applications"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/admin/influencers"] });
       setReviewDialogOpen(false);
       setSelectedApplication(null);
       setAdminNotes("");
@@ -926,13 +931,13 @@ function InfluencerApplicationsTab() {
 
   const rejectMutation = useMutation({
     mutationFn: async (data: { applicationId: string; notes: string }) => {
-      return apiRequest("POST", "/api/admin/influencer/applications/reject", { 
-        applicationId: data.applicationId, 
-        adminNotes: data.notes 
+      return apiRequest("PATCH", `/api/admin/influencers/${data.applicationId}`, {
+        status: "rejected",
+        admin_notes: data.notes,
       });
     },
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["/api/admin/influencer/applications"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/admin/influencers"] });
       setReviewDialogOpen(false);
       setSelectedApplication(null);
       setAdminNotes("");
@@ -1064,10 +1069,10 @@ function InfluencerApplicationsTab() {
                         </div>
                         <p className="text-sm text-muted-foreground">{app.user?.email}</p>
                         <div className="mt-2 space-y-1">
-                          <p className="text-sm"><strong>Niche:</strong> {app.niche}</p>
-                          <p className="text-sm"><strong>Followers:</strong> {app.followerCount}</p>
+                          <p className="text-sm"><strong>Niche:</strong> {app.contentNiche || "—"}</p>
+                          <p className="text-sm"><strong>Followers:</strong> {app.followerCount?.toLocaleString() ?? "—"}</p>
                           <p className="text-xs text-muted-foreground">
-                            Submitted {format(new Date(app.submittedAt), "MMM d, yyyy 'at' h:mm a")}
+                            Submitted {format(new Date(app.createdAt), "MMM d, yyyy 'at' h:mm a")}
                           </p>
                         </div>
                       </div>
@@ -1118,29 +1123,29 @@ function InfluencerApplicationsTab() {
               <div className="space-y-3">
                 <div>
                   <Label className="text-xs text-muted-foreground uppercase">Content Niche</Label>
-                  <p className="text-sm">{selectedApplication.niche}</p>
+                  <p className="text-sm">{selectedApplication.contentNiche || "—"}</p>
                 </div>
-                
+
                 <div>
                   <Label className="text-xs text-muted-foreground uppercase">Follower Count</Label>
-                  <p className="text-sm">{selectedApplication.followerCount}</p>
+                  <p className="text-sm">{selectedApplication.followerCount?.toLocaleString() ?? "—"}</p>
                 </div>
 
                 <div>
-                  <Label className="text-xs text-muted-foreground uppercase">Social Media Links</Label>
-                  <pre className="text-sm whitespace-pre-wrap bg-muted p-2 rounded-md">
-                    {selectedApplication.socialMediaLinks}
-                  </pre>
-                </div>
-
-                <div>
-                  <Label className="text-xs text-muted-foreground uppercase">About</Label>
-                  <p className="text-sm">{selectedApplication.bio}</p>
+                  <Label className="text-xs text-muted-foreground uppercase">Social Media Profiles</Label>
+                  <div className="text-sm space-y-1">
+                    {selectedApplication.instagramUrl && <p>Instagram: {selectedApplication.instagramUrl}</p>}
+                    {selectedApplication.tiktokUrl && <p>TikTok: {selectedApplication.tiktokUrl}</p>}
+                    {selectedApplication.youtubeUrl && <p>YouTube: {selectedApplication.youtubeUrl}</p>}
+                    {selectedApplication.twitterUrl && <p>Twitter/X: {selectedApplication.twitterUrl}</p>}
+                    {!selectedApplication.instagramUrl && !selectedApplication.tiktokUrl &&
+                     !selectedApplication.youtubeUrl && !selectedApplication.twitterUrl && <p className="text-muted-foreground">No links provided</p>}
+                  </div>
                 </div>
 
                 <div>
                   <Label className="text-xs text-muted-foreground uppercase">Why They Want to Join</Label>
-                  <p className="text-sm">{selectedApplication.whyJoin}</p>
+                  <p className="text-sm">{selectedApplication.whyInfluencer || "—"}</p>
                 </div>
               </div>
 

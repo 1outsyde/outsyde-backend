@@ -18,6 +18,8 @@ import {
   insertConsumerAddressSchema,
   users,
   refreshTokens,
+  influencerApplications,
+  influencerProfiles,
   type User,
   type StaffMember,
   type StaffInvite,
@@ -13795,6 +13797,33 @@ export async function registerRoutes(
     return ALLOWED_ADMIN_EMAILS.includes(email.toLowerCase());
   };
 
+  // Middleware to require authentication (session or JWT)
+  const requireAuth = async (req: any, res: any, next: any) => {
+    let userId: string | null = null;
+
+    const authHeader = req.headers.authorization;
+    if (authHeader && authHeader.startsWith("Bearer ")) {
+      const token = authHeader.substring(7);
+      const tokenPayload = verifyAccessToken(token);
+      if (tokenPayload) {
+        userId = tokenPayload.userId;
+        if (req.session) req.session.userId = tokenPayload.userId;
+        req.user = tokenPayload;
+      }
+    }
+
+    if (!userId && req.session?.userId) {
+      userId = req.session.userId;
+    }
+
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    req.userId = userId;
+    next();
+  };
+
   // Middleware to check if user is admin (email-locked, server-enforced)
   // Supports both session-based auth (web) and JWT-based auth (mobile)
   // Order: JWT first (if present), then session fallback
@@ -14585,11 +14614,8 @@ export async function registerRoutes(
   // ==================== INFLUENCER ROUTES ====================
 
   // User: Submit influencer application
-  app.post("/api/influencer/apply", async (req, res) => {
-    const userId = req.session?.userId;
-    if (!userId) {
-      return res.status(401).json({ error: "Not authenticated" });
-    }
+  app.post("/api/influencer/apply", requireAuth, async (req, res) => {
+    const userId = (req as any).userId || req.session?.userId;
 
     try {
       const user = await storage.getUser(userId);
@@ -14607,23 +14633,33 @@ export async function registerRoutes(
         return res.status(403).json({ error: "Business owners and photographers cannot apply as influencers. The influencer program is only for customers." });
       }
 
-      // Check for existing pending application
+      // Check for existing pending or approved application
       const existingApplication = await storage.getInfluencerApplicationByUserId(userId);
-      if (existingApplication && existingApplication.status === 'pending') {
-        return res.status(400).json({ error: "You already have a pending application" });
+      if (existingApplication && ['pending', 'approved'].includes(existingApplication.status)) {
+        return res.status(400).json({ error: "Application already exists" });
       }
 
-      const { instagramUrl, tiktokUrl, youtubeUrl, twitterUrl, followerCount, contentNiche, whyInfluencer } = req.body;
+      // Accept both camelCase (frontend) and snake_case field names
+      const body = req.body;
+      const instagramUrl = body.instagramUrl || body.instagram_url || null;
+      const tiktokUrl = body.tiktokUrl || body.tiktok_url || null;
+      const youtubeUrl = body.youtubeUrl || body.youtube_url || null;
+      const twitterUrl = body.twitterUrl || body.twitter_url || null;
+      const rawFollowerCount = body.followerCount || body.follower_count;
+      const followerCount = rawFollowerCount ? parseInt(String(rawFollowerCount).replace(/,/g, '')) : null;
+      // Accept both field name variants from the frontend form
+      const contentNiche = body.contentNiche || body.content_niche || body.niche || null;
+      const whyInfluencer = body.whyInfluencer || body.why_influencer || body.whyJoin || null;
 
       const application = await storage.createInfluencerApplication({
         userId,
-        instagramUrl: instagramUrl || null,
-        tiktokUrl: tiktokUrl || null,
-        youtubeUrl: youtubeUrl || null,
-        twitterUrl: twitterUrl || null,
-        followerCount: followerCount ? parseInt(followerCount) : null,
-        contentNiche: contentNiche || null,
-        whyInfluencer: whyInfluencer || null,
+        instagramUrl,
+        tiktokUrl,
+        youtubeUrl,
+        twitterUrl,
+        followerCount,
+        contentNiche,
+        whyInfluencer,
       });
 
       res.status(201).json({ success: true, application });
@@ -14649,39 +14685,82 @@ export async function registerRoutes(
     }
   });
 
-  // Admin: Get all influencer applications
-  app.get("/api/admin/influencer-applications", requireAdmin, async (req, res) => {
+  // Admin: Get all influencer applications (JOIN with users for efficient single query)
+  const handleGetInfluencerApplications = async (req: any, res: any) => {
     try {
       const { status } = req.query;
-      const applications = await storage.getInfluencerApplications(status as string | undefined);
-      
-      // Enrich with user data
-      const enrichedApplications = await Promise.all(
-        applications.map(async (app) => {
-          const user = await storage.getUser(app.userId);
-          return {
-            ...app,
-            user: user ? { 
-              id: user.id, 
-              name: user.firstName && user.lastName ? `${user.firstName} ${user.lastName}` : user.name,
-              email: user.email,
-              profileImageUrl: user.profileImageUrl 
-            } : null,
-          };
+      const rows = await db
+        .select({
+          id: influencerApplications.id,
+          userId: influencerApplications.userId,
+          instagramUrl: influencerApplications.instagramUrl,
+          tiktokUrl: influencerApplications.tiktokUrl,
+          youtubeUrl: influencerApplications.youtubeUrl,
+          twitterUrl: influencerApplications.twitterUrl,
+          followerCount: influencerApplications.followerCount,
+          contentNiche: influencerApplications.contentNiche,
+          whyInfluencer: influencerApplications.whyInfluencer,
+          status: influencerApplications.status,
+          adminNotes: influencerApplications.adminNotes,
+          reviewedBy: influencerApplications.reviewedBy,
+          reviewedAt: influencerApplications.reviewedAt,
+          createdAt: influencerApplications.createdAt,
+          userEmail: users.email,
+          userName: users.name,
+          userUsername: users.username,
+          userProfileImageUrl: users.profileImageUrl,
+          userIsInfluencer: users.isInfluencer,
         })
-      );
-      
-      res.json({ applications: enrichedApplications });
+        .from(influencerApplications)
+        .innerJoin(users, eq(users.id, influencerApplications.userId))
+        .where(status ? eq(influencerApplications.status, status as string) : undefined)
+        .orderBy(desc(influencerApplications.createdAt));
+
+      const applications = rows.map((row) => ({
+        id: row.id,
+        userId: row.userId,
+        instagramUrl: row.instagramUrl,
+        tiktokUrl: row.tiktokUrl,
+        youtubeUrl: row.youtubeUrl,
+        twitterUrl: row.twitterUrl,
+        followerCount: row.followerCount,
+        contentNiche: row.contentNiche,
+        whyInfluencer: row.whyInfluencer,
+        status: row.status,
+        adminNotes: row.adminNotes,
+        reviewedBy: row.reviewedBy,
+        reviewedAt: row.reviewedAt,
+        createdAt: row.createdAt,
+        user: {
+          id: row.userId,
+          email: row.userEmail,
+          name: row.userName,
+          username: row.userUsername,
+          profileImageUrl: row.userProfileImageUrl,
+          isInfluencer: row.userIsInfluencer ?? false,
+        },
+      }));
+
+      res.json({ applications });
     } catch (error) {
       console.error("Get influencer applications error:", error);
       res.status(500).json({ error: "Failed to get applications" });
     }
-  });
+  };
 
-  // Admin: Approve influencer application
-  app.post("/api/admin/influencer-applications/:id/approve", requireAdmin, async (req, res) => {
+  app.get("/api/admin/influencers", requireAdmin, handleGetInfluencerApplications);
+  // Legacy alias kept for backward compatibility
+  app.get("/api/admin/influencer-applications", requireAdmin, handleGetInfluencerApplications);
+
+  // Admin: Approve or reject an influencer application (unified PATCH endpoint)
+  app.patch("/api/admin/influencers/:id", requireAdmin, async (req, res) => {
     const { id } = req.params;
-    const { commissionRate, promoCode } = req.body;
+    const { status, admin_notes: adminNotes } = req.body;
+    const reviewerId = (req as any).adminUser?.id || req.session?.userId;
+
+    if (!['approved', 'rejected'].includes(status)) {
+      return res.status(400).json({ error: "status must be 'approved' or 'rejected'" });
+    }
 
     try {
       const application = await storage.getInfluencerApplication(id);
@@ -14693,65 +14772,112 @@ export async function registerRoutes(
         return res.status(400).json({ error: "Application is not pending" });
       }
 
-      // Update application status
-      await storage.updateInfluencerApplication(id, {
-        status: 'approved',
-        reviewedAt: new Date(),
-        reviewedBy: req.session?.userId,
-      });
+      if (status === 'approved') {
+        // Step 1: Update application status
+        await db
+          .update(influencerApplications)
+          .set({ status: 'approved', reviewedBy: reviewerId, reviewedAt: new Date() })
+          .where(eq(influencerApplications.id, id));
 
-      // Update user's isInfluencer flag
-      await storage.updateUser(application.userId, { isInfluencer: true });
+        // Step 2: Flag user as influencer
+        await db
+          .update(users)
+          .set({ isInfluencer: true })
+          .where(eq(users.id, application.userId));
 
-      // Get user for display name
-      const user = await storage.getUser(application.userId);
-      
-      // Create influencer profile
-      const generatedPromoCode = promoCode || `INF${application.userId.substring(0, 6).toUpperCase()}`;
-      const displayName = user?.firstName && user?.lastName 
-        ? `${user.firstName} ${user.lastName}` 
-        : user?.name || null;
-      const profile = await storage.createInfluencerProfile({
-        userId: application.userId,
-        displayName,
-        bio: application.whyInfluencer,
-        promoCode: generatedPromoCode,
-        instagramUrl: application.instagramUrl,
-        tiktokUrl: application.tiktokUrl,
-        youtubeUrl: application.youtubeUrl,
-        twitterUrl: application.twitterUrl,
-        followerCount: application.followerCount,
-      });
+        // Step 3: Create influencer profile (ON CONFLICT DO NOTHING in case it already exists)
+        const userRow = await db
+          .select({ name: users.name })
+          .from(users)
+          .where(eq(users.id, application.userId));
+        const displayName = userRow[0]?.name || null;
 
-      res.json({ success: true, profile });
+        await db
+          .insert(influencerProfiles)
+          .values({
+            id: randomUUID(),
+            userId: application.userId,
+            displayName,
+            instagramUrl: application.instagramUrl,
+            tiktokUrl: application.tiktokUrl,
+            youtubeUrl: application.youtubeUrl,
+            twitterUrl: application.twitterUrl,
+            followerCount: application.followerCount ?? 0,
+          })
+          .onConflictDoNothing();
+
+        res.json({ success: true });
+      } else {
+        // Rejection: update application with status and notes
+        await db
+          .update(influencerApplications)
+          .set({
+            status: 'rejected',
+            adminNotes: adminNotes || null,
+            reviewedBy: reviewerId,
+            reviewedAt: new Date(),
+          })
+          .where(eq(influencerApplications.id, id));
+
+        res.json({ success: true });
+      }
+    } catch (error) {
+      console.error("Update influencer application error:", error);
+      res.status(500).json({ error: "Failed to update application" });
+    }
+  });
+
+  // Legacy approve/reject routes kept for backward compatibility
+  app.post("/api/admin/influencer-applications/:id/approve", requireAdmin, async (req, res) => {
+    req.body.status = 'approved';
+    // Re-use the unified handler by forwarding to PATCH logic inline
+    const { id } = req.params;
+    const reviewerId = (req as any).adminUser?.id || req.session?.userId;
+    try {
+      const application = await storage.getInfluencerApplication(id);
+      if (!application) return res.status(404).json({ error: "Application not found" });
+      if (application.status !== 'pending') return res.status(400).json({ error: "Application is not pending" });
+
+      await db
+        .update(influencerApplications)
+        .set({ status: 'approved', reviewedBy: reviewerId, reviewedAt: new Date() })
+        .where(eq(influencerApplications.id, id));
+      await db.update(users).set({ isInfluencer: true }).where(eq(users.id, application.userId));
+      const userRow = await db.select({ name: users.name }).from(users).where(eq(users.id, application.userId));
+      await db
+        .insert(influencerProfiles)
+        .values({
+          id: randomUUID(),
+          userId: application.userId,
+          displayName: userRow[0]?.name || null,
+          instagramUrl: application.instagramUrl,
+          tiktokUrl: application.tiktokUrl,
+          youtubeUrl: application.youtubeUrl,
+          twitterUrl: application.twitterUrl,
+          followerCount: application.followerCount ?? 0,
+        })
+        .onConflictDoNothing();
+      res.json({ success: true });
     } catch (error) {
       console.error("Approve influencer application error:", error);
       res.status(500).json({ error: "Failed to approve application" });
     }
   });
 
-  // Admin: Reject influencer application
   app.post("/api/admin/influencer-applications/:id/reject", requireAdmin, async (req, res) => {
     const { id } = req.params;
-    const { rejectionReason } = req.body;
-
+    const { rejectionReason, admin_notes: adminNotes } = req.body;
+    const reviewerId = (req as any).adminUser?.id || req.session?.userId;
     try {
       const application = await storage.getInfluencerApplication(id);
-      if (!application) {
-        return res.status(404).json({ error: "Application not found" });
-      }
-
-      if (application.status !== 'pending') {
-        return res.status(400).json({ error: "Application is not pending" });
-      }
-
+      if (!application) return res.status(404).json({ error: "Application not found" });
+      if (application.status !== 'pending') return res.status(400).json({ error: "Application is not pending" });
       await storage.updateInfluencerApplication(id, {
         status: 'rejected',
-        adminNotes: rejectionReason || null,
+        adminNotes: adminNotes || rejectionReason || null,
         reviewedAt: new Date(),
-        reviewedBy: req.session?.userId,
+        reviewedBy: reviewerId,
       });
-
       res.json({ success: true });
     } catch (error) {
       console.error("Reject influencer application error:", error);
