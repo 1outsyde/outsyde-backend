@@ -2368,9 +2368,11 @@ export async function registerRoutes(
         profilePhotoUrl: user.profileImageUrl,
         isVendor: false as boolean,
         isPhotographer: false as boolean,
+        isInfluencer: user.isInfluencer,
         businessId: null as string | null,
         photographerId: null as string | null,
         subscriptionTier: null as string | null,
+        influencerStatus: null as string | null,
         deletionStatus: user.deletionStatus ?? "active",
         scheduledDeletionAt: user.scheduledDeletionAt ?? null,
       };
@@ -2408,7 +2410,16 @@ export async function registerRoutes(
         }
       }
 
-      console.log(`[AUTH_ME] Session verified for userId: ${user.id} | isVendor: ${sessionState.isVendor} | isPhotographer: ${sessionState.isPhotographer}`);
+      // Fetch most recent influencer application status (single query, no extra round trips)
+      const influencerAppRows = await db
+        .select({ status: influencerApplications.status })
+        .from(influencerApplications)
+        .where(eq(influencerApplications.userId, user.id))
+        .orderBy(desc(influencerApplications.createdAt))
+        .limit(1);
+      sessionState.influencerStatus = influencerAppRows[0]?.status ?? null;
+
+      console.log(`[AUTH_ME] Session verified for userId: ${user.id} | isVendor: ${sessionState.isVendor} | isPhotographer: ${sessionState.isPhotographer} | isInfluencer: ${sessionState.isInfluencer}`);
       res.json(sessionState);
     } catch (error) {
       console.error("Get /api/auth/me error:", error);
