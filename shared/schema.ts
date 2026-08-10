@@ -2247,7 +2247,7 @@ export const customerSignupSchema = z.object({
   phone: z.string().optional(),
   // Home address
   address: z.string().optional(), // street address
-  aptUnit: z.string().optional(),
+  aptUnit: z.string().nullable().optional(),
   city: z.string().optional(),
   state: z.string().optional(),
   zipCode: z.string().optional(),
