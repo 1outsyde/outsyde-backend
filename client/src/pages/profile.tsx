@@ -68,14 +68,15 @@ interface InfluencerApplication {
   id: string;
   userId: string;
   status: "pending" | "approved" | "rejected";
-  socialMediaLinks: string;
-  followerCount: string;
-  bio: string;
-  niche: string;
-  whyJoin: string;
-  submittedAt: string;
-  reviewedAt: string | null;
+  instagramUrl: string | null;
+  tiktokUrl: string | null;
+  youtubeUrl: string | null;
+  twitterUrl: string | null;
+  followerCount: number | null;
+  contentNiche: string | null;
+  whyInfluencer: string | null;
   adminNotes: string | null;
+  createdAt: string;
 }
 
 interface ProfilePageProps {
@@ -101,11 +102,13 @@ export default function ProfilePage({ onLogout, onAdminDashboard }: ProfilePageP
   // Influencer application state
   const [showInfluencerForm, setShowInfluencerForm] = useState(false);
   const [influencerFormData, setInfluencerFormData] = useState({
-    socialMediaLinks: "",
+    instagramUrl: "",
+    tiktokUrl: "",
+    youtubeUrl: "",
+    twitterUrl: "",
     followerCount: "",
-    bio: "",
-    niche: "",
-    whyJoin: "",
+    contentNiche: "",
+    whyInfluencer: "",
   });
   const { toast } = useToast();
   
@@ -375,7 +378,7 @@ export default function ProfilePage({ onLogout, onAdminDashboard }: ProfilePageP
                           <div>
                             <p className="font-medium text-amber-800 dark:text-amber-200">Application Under Review</p>
                             <p className="text-sm text-amber-700 dark:text-amber-300 mt-1">
-                              Your influencer application was submitted on {new Date(existingApplication.application.submittedAt).toLocaleDateString()}. 
+                              Your influencer application was submitted on {new Date(existingApplication.application.createdAt).toLocaleDateString()}. 
                               We'll notify you once it's reviewed.
                             </p>
                           </div>
@@ -614,66 +617,76 @@ export default function ProfilePage({ onLogout, onAdminDashboard }: ProfilePageP
           </DialogHeader>
           
           <div className="space-y-4 py-4">
-            <div className="space-y-2">
-              <Label htmlFor="socialMediaLinks">Social Media Links *</Label>
-              <Textarea
-                id="socialMediaLinks"
-                placeholder="Instagram: @yourhandle&#10;TikTok: @yourhandle&#10;YouTube: youtube.com/c/yourchannel"
-                value={influencerFormData.socialMediaLinks}
-                onChange={(e) => setInfluencerFormData(prev => ({ ...prev, socialMediaLinks: e.target.value }))}
-                className="min-h-[80px]"
-                data-testid="input-social-links"
-              />
-              <p className="text-xs text-muted-foreground">List your active social media profiles (one per line)</p>
+            <div>
+              <Label className="text-sm font-medium">Social Media Profiles</Label>
+              <p className="text-xs text-muted-foreground mb-2">Add at least one platform URL.</p>
+              <div className="space-y-2">
+                <Input
+                  id="instagramUrl"
+                  placeholder="Instagram URL (e.g. https://instagram.com/yourhandle)"
+                  value={influencerFormData.instagramUrl}
+                  onChange={(e) => setInfluencerFormData(prev => ({ ...prev, instagramUrl: e.target.value }))}
+                  data-testid="input-instagram-url"
+                />
+                <Input
+                  id="tiktokUrl"
+                  placeholder="TikTok URL (e.g. https://tiktok.com/@yourhandle)"
+                  value={influencerFormData.tiktokUrl}
+                  onChange={(e) => setInfluencerFormData(prev => ({ ...prev, tiktokUrl: e.target.value }))}
+                  data-testid="input-tiktok-url"
+                />
+                <Input
+                  id="youtubeUrl"
+                  placeholder="YouTube URL (e.g. https://youtube.com/c/yourchannel)"
+                  value={influencerFormData.youtubeUrl}
+                  onChange={(e) => setInfluencerFormData(prev => ({ ...prev, youtubeUrl: e.target.value }))}
+                  data-testid="input-youtube-url"
+                />
+                <Input
+                  id="twitterUrl"
+                  placeholder="Twitter/X URL (e.g. https://twitter.com/yourhandle)"
+                  value={influencerFormData.twitterUrl}
+                  onChange={(e) => setInfluencerFormData(prev => ({ ...prev, twitterUrl: e.target.value }))}
+                  data-testid="input-twitter-url"
+                />
+              </div>
             </div>
-            
+
             <div className="space-y-2">
               <Label htmlFor="followerCount">Total Follower Count *</Label>
               <Input
                 id="followerCount"
-                placeholder="e.g., 10,000 across all platforms"
+                placeholder="e.g., 10000"
                 value={influencerFormData.followerCount}
                 onChange={(e) => setInfluencerFormData(prev => ({ ...prev, followerCount: e.target.value }))}
                 data-testid="input-follower-count"
               />
             </div>
-            
+
             <div className="space-y-2">
-              <Label htmlFor="niche">Content Niche *</Label>
+              <Label htmlFor="contentNiche">Content Niche *</Label>
               <Input
-                id="niche"
+                id="contentNiche"
                 placeholder="e.g., Local food, lifestyle, small business advocacy"
-                value={influencerFormData.niche}
-                onChange={(e) => setInfluencerFormData(prev => ({ ...prev, niche: e.target.value }))}
+                value={influencerFormData.contentNiche}
+                onChange={(e) => setInfluencerFormData(prev => ({ ...prev, contentNiche: e.target.value }))}
                 data-testid="input-niche"
               />
             </div>
-            
+
             <div className="space-y-2">
-              <Label htmlFor="bio">About You *</Label>
+              <Label htmlFor="whyInfluencer">Why do you want to join Outsyde? *</Label>
               <Textarea
-                id="bio"
-                placeholder="Tell us about yourself, your content style, and your audience..."
-                value={influencerFormData.bio}
-                onChange={(e) => setInfluencerFormData(prev => ({ ...prev, bio: e.target.value }))}
-                className="min-h-[80px]"
-                data-testid="input-bio"
-              />
-            </div>
-            
-            <div className="space-y-2">
-              <Label htmlFor="whyJoin">Why do you want to join Outsyde? *</Label>
-              <Textarea
-                id="whyJoin"
+                id="whyInfluencer"
                 placeholder="What excites you about promoting local businesses? How would you help them grow?"
-                value={influencerFormData.whyJoin}
-                onChange={(e) => setInfluencerFormData(prev => ({ ...prev, whyJoin: e.target.value }))}
+                value={influencerFormData.whyInfluencer}
+                onChange={(e) => setInfluencerFormData(prev => ({ ...prev, whyInfluencer: e.target.value }))}
                 className="min-h-[80px]"
                 data-testid="input-why-join"
               />
             </div>
           </div>
-          
+
           <DialogFooter>
             <Button
               variant="outline"
@@ -686,11 +699,13 @@ export default function ProfilePage({ onLogout, onAdminDashboard }: ProfilePageP
               onClick={() => submitApplicationMutation.mutate(influencerFormData)}
               disabled={
                 submitApplicationMutation.isPending ||
-                !influencerFormData.socialMediaLinks.trim() ||
+                (!influencerFormData.instagramUrl.trim() &&
+                  !influencerFormData.tiktokUrl.trim() &&
+                  !influencerFormData.youtubeUrl.trim() &&
+                  !influencerFormData.twitterUrl.trim()) ||
                 !influencerFormData.followerCount.trim() ||
-                !influencerFormData.niche.trim() ||
-                !influencerFormData.bio.trim() ||
-                !influencerFormData.whyJoin.trim()
+                !influencerFormData.contentNiche.trim() ||
+                !influencerFormData.whyInfluencer.trim()
               }
               data-testid="button-submit-application"
             >
