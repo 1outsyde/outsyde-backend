@@ -9255,15 +9255,16 @@ export async function registerRoutes(
         return res.status(400).json({ error: "Invalid target type" });
       }
 
-      const reviews = await storage.getReviewsByTarget(targetType, targetId);
+      const reviewList = await storage.getReviewsByTarget(targetType, targetId);
       
-      // Enrich reviews with reviewer names
+      // Enrich reviews with reviewer name and avatar — never expose email or other PII
       const enrichedReviews = await Promise.all(
-        reviews.map(async (review) => {
+        reviewList.map(async (review) => {
           const reviewer = await storage.getUser(review.reviewerId);
           return {
             ...review,
             reviewerName: reviewer?.name || "Anonymous",
+            reviewerProfileImageUrl: reviewer?.profileImageUrl ?? null,
           };
         })
       );
@@ -9276,8 +9277,9 @@ export async function registerRoutes(
   });
 
   // Get bookings that can be reviewed by the current user
-  app.get("/api/reviews/reviewable", async (req, res) => {
-    const userId = req.session?.userId;
+  app.get("/api/reviews/reviewable", hybridAuthMiddleware, async (req, res) => {
+    const authReq = req as AuthenticatedRequest;
+    const userId = authReq.user?.userId || req.session?.userId;
     if (!userId) {
       return res.status(401).json({ error: "Not authenticated" });
     }
@@ -9292,8 +9294,9 @@ export async function registerRoutes(
   });
 
   // Create a verified review (ONLY if customer has completed booking/order)
-  app.post("/api/reviews", async (req, res) => {
-    const userId = req.session?.userId;
+  app.post("/api/reviews", hybridAuthMiddleware, async (req, res) => {
+    const authReq = req as AuthenticatedRequest;
+    const userId = authReq.user?.userId || req.session?.userId;
     if (!userId) {
       return res.status(401).json({ error: "Not authenticated" });
     }
@@ -9337,8 +9340,9 @@ export async function registerRoutes(
   });
 
   // Check if user can review a specific booking
-  app.get("/api/reviews/can-review/:bookingType/:bookingId", async (req, res) => {
-    const userId = req.session?.userId;
+  app.get("/api/reviews/can-review/:bookingType/:bookingId", hybridAuthMiddleware, async (req, res) => {
+    const authReq = req as AuthenticatedRequest;
+    const userId = authReq.user?.userId || req.session?.userId;
     if (!userId) {
       return res.status(401).json({ error: "Not authenticated" });
     }
