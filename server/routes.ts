@@ -6818,7 +6818,46 @@ export async function registerRoutes(
     }
 
     try {
-      const { items, shippingAddress } = req.body;
+      const { items, shippingAddress: rawShippingAddress } = req.body;
+
+      // ── Address guard (validate structure + ensure address is present) ────────
+      const shippingAddrSchema = z.object({
+        line1: z.string().min(1),
+        city: z.string().min(1),
+        state: z.string().min(1),
+        zipCode: z.string().min(1),
+      }).passthrough();
+
+      let resolvedShippingAddress: Record<string, unknown>;
+      if (rawShippingAddress != null) {
+        // Inline address supplied by client — validate its structure
+        const addrParsed = shippingAddrSchema.safeParse(rawShippingAddress);
+        if (!addrParsed.success) {
+          return res.status(400).json({
+            error: "INVALID_ADDRESS",
+            message: "Shipping address must include line1, city, state, and zipCode.",
+          });
+        }
+        resolvedShippingAddress = addrParsed.data;
+      } else {
+        // No inline address — require a saved address in the DB
+        const savedAddresses = await storage.getConsumerAddresses(userId);
+        if (savedAddresses.length === 0) {
+          return res.status(400).json({
+            error: "ADDRESS_REQUIRED",
+            message: "A shipping address is required to complete your order.",
+          });
+        }
+        const defaultAddr = savedAddresses.find(a => a.isDefault) ?? savedAddresses[0];
+        resolvedShippingAddress = {
+          line1: defaultAddr.line1,
+          city: defaultAddr.city,
+          state: defaultAddr.state,
+          zipCode: defaultAddr.zipCode,
+          ...(defaultAddr.label ? { label: defaultAddr.label } : {}),
+        };
+      }
+      // ── End address guard ─────────────────────────────────────────────────────
 
       if (!Array.isArray(items) || items.length === 0) {
         return res.status(400).json({ success: false, error: { code: 'INVALID_INPUT', message: 'Items array is required and must not be empty' } });
@@ -6884,7 +6923,7 @@ export async function registerRoutes(
           influencerTransferStatus: isInfluencerAttributed ? 'pending' : null,
           feeModelVersion: feeBreakdown.feeModelVersion,
           status: 'pending',
-          shippingAddress: shippingAddress ? JSON.stringify(shippingAddress) : null,
+          shippingAddress: JSON.stringify(resolvedShippingAddress),
           items: items.map((i: { productId: string; name: string; quantity: number; priceCents: number }) => ({
             productId: i.productId,
             name: i.name,
@@ -6994,7 +7033,7 @@ export async function registerRoutes(
             influencerTransferStatus: isInfluencerAttributed ? 'pending' : null,
             feeModelVersion: feeBreakdown.feeModelVersion,
             status: 'pending',
-            shippingAddress: shippingAddress ? JSON.stringify(shippingAddress) : null,
+            shippingAddress: JSON.stringify(resolvedShippingAddress),
             items: vendorItems.map((i: { productId: string; name: string; quantity: number; priceCents: number }) => ({
               productId: i.productId,
               name: i.name,
@@ -13333,7 +13372,46 @@ export async function registerRoutes(
     }
 
     try {
-      const { shippingAddress } = req.body || {};
+      const { shippingAddress: rawShippingAddress } = req.body || {};
+
+      // ── Address guard (validate structure + ensure address is present) ────────
+      const shippingAddrSchema = z.object({
+        line1: z.string().min(1),
+        city: z.string().min(1),
+        state: z.string().min(1),
+        zipCode: z.string().min(1),
+      }).passthrough();
+
+      let resolvedShippingAddress: Record<string, unknown>;
+      if (rawShippingAddress != null) {
+        // Inline address supplied by client — validate its structure
+        const addrParsed = shippingAddrSchema.safeParse(rawShippingAddress);
+        if (!addrParsed.success) {
+          return res.status(400).json({
+            error: "INVALID_ADDRESS",
+            message: "Shipping address must include line1, city, state, and zipCode.",
+          });
+        }
+        resolvedShippingAddress = addrParsed.data;
+      } else {
+        // No inline address — require a saved address in the DB
+        const savedAddresses = await storage.getConsumerAddresses(userId);
+        if (savedAddresses.length === 0) {
+          return res.status(400).json({
+            error: "ADDRESS_REQUIRED",
+            message: "A shipping address is required to complete your order.",
+          });
+        }
+        const defaultAddr = savedAddresses.find(a => a.isDefault) ?? savedAddresses[0];
+        resolvedShippingAddress = {
+          line1: defaultAddr.line1,
+          city: defaultAddr.city,
+          state: defaultAddr.state,
+          zipCode: defaultAddr.zipCode,
+          ...(defaultAddr.label ? { label: defaultAddr.label } : {}),
+        };
+      }
+      // ── End address guard ─────────────────────────────────────────────────────
 
       const user = await storage.getUser(userId);
       if (!user) {
@@ -13509,7 +13587,7 @@ export async function registerRoutes(
           influencerTransferStatus: isInfluencerAttributed ? 'pending' : null,
           feeModelVersion: feeBreakdown.feeModelVersion,
           status: 'pending',
-          shippingAddress: shippingAddress ? JSON.stringify(shippingAddress) : null,
+          shippingAddress: JSON.stringify(resolvedShippingAddress),
           items: vendorItems.map(item => ({
             productId: item.productId,
             name: productMap.get(item.productId).name,
