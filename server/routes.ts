@@ -9,6 +9,7 @@ import {
   vendorSignupSchema,
   photographerSignupSchema,
   loginSchema,
+  supportContactSchema,
   insertReviewSchema,
   billingAddressSchema,
   subscriptionTiers,
@@ -25,7 +26,7 @@ import {
   type StaffInvite,
   type SubscriptionTier,
 } from "@shared/schema";
-import { sendStaffInviteEmail, sendStaffPayoutSetupEmail, sendStaffAcceptedOwnerEmail, sendDeletionConfirmationEmail } from "./services/resendService";
+import { sendStaffInviteEmail, sendStaffPayoutSetupEmail, sendStaffAcceptedOwnerEmail, sendDeletionConfirmationEmail, sendSupportContactEmail } from "./services/resendService";
 import { checkVendorStripeBalances, checkActiveOrders } from "./services/accountDeletionService";
 import { sendBookingAcceptedToConsumer, sendBookingDeclinedToConsumer, sendBookingRequestToVendor, sendBookingRequestReceivedToConsumer, sendAdminBookingAlert, sendShootBookingAcceptedToPhotographer, sendShootBookingDeclinedToPhotographer, sendShootBookingCanceledToPhotographer } from "./emailService";
 import { sendExpoPush } from "./expoPushService";
@@ -648,6 +649,32 @@ export async function registerRoutes(
 
   // Username availability check (public, rate-limited)
   const usernameCheckLimiter = rateLimit({ windowMs: 60 * 1000, max: 20, message: { success: false, message: "Too many requests" } });
+
+  const supportContactLimiter = rateLimit({
+    windowMs: 60 * 60 * 1000, // 1 hour
+    max: 3,
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: { success: false, message: "Too many support requests, please try again later" },
+  });
+
+  app.post("/api/support/contact", supportContactLimiter, async (req, res) => {
+    try {
+      const parsed = supportContactSchema.safeParse(req.body);
+      if (!parsed.success) {
+        return res.status(400).json({ success: false, error: parsed.error.errors[0]?.message || "Invalid request" });
+      }
+      const { name, email, userId, message } = parsed.data;
+      const result = await sendSupportContactEmail({ name, email, userId, message });
+      if (!result.sent) {
+        return res.status(500).json({ success: false, error: "Failed to send message" });
+      }
+      return res.json({ success: true });
+    } catch (error) {
+      console.error("Support contact error:", error);
+      return res.status(500).json({ success: false, error: "Failed to send message" });
+    }
+  });
 
   app.get("/api/users/check-username/:username", usernameCheckLimiter, async (req, res) => {
     try {
