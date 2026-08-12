@@ -2332,6 +2332,13 @@ export const loginSchema = z.object({
   password: z.string().min(1),
 });
 
+export const supportContactSchema = z.object({
+  name: z.string().min(1).max(100),
+  email: z.string().email(),
+  userId: z.string().optional(),
+  message: z.string().min(1).max(2000),
+});
+
 /* =====================================================
    TYPES
 ===================================================== */

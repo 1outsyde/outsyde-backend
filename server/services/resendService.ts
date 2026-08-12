@@ -368,6 +368,43 @@ function buildDeletionConfirmationHtml(scheduledDate: string): string {
   `;
 }
 
+export async function sendSupportContactEmail(params: {
+  name: string;
+  email: string;
+  userId?: string;
+  message: string;
+}): Promise<{ sent: boolean; error?: string }> {
+  const { name, email, userId, message } = params;
+  const apiKey = process.env.RESEND_API_KEY;
+  if (!apiKey) {
+    console.warn('[resendService] RESEND_API_KEY not set — skipping support contact email');
+    return { sent: false, error: 'RESEND_API_KEY not set' };
+  }
+  const text = `From: ${name} (${email})\nUser ID: ${userId ?? 'not logged in'}\n\nMessage:\n${message}\n\nSent from Go Outsyde app Help Center`;
+  try {
+    const resend = new Resend(apiKey);
+    const result = await resend.emails.send({
+      from: INVITE_FROM,
+      to: 'info@goutsyde.com',
+      subject: `Go Outsyde Support Request — ${name}`,
+      text,
+    });
+    if (result.error) {
+      const errMsg = typeof result.error === 'object' && result.error !== null
+        ? (result.error as { message?: string }).message ?? JSON.stringify(result.error)
+        : String(result.error);
+      console.warn('[resendService] Support contact email failed:', errMsg);
+      return { sent: false, error: errMsg };
+    }
+    console.log(`[resendService] Support contact email sent from ${email}`);
+    return { sent: true };
+  } catch (err) {
+    const errMsg = err instanceof Error ? err.message : String(err);
+    console.warn('[resendService] Unexpected error sending support contact email:', errMsg);
+    return { sent: false, error: errMsg };
+  }
+}
+
 export async function sendDeletionConfirmationEmail(params: {
   toEmail: string;
   scheduledDeletionAt: Date;
