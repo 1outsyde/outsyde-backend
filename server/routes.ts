@@ -8044,7 +8044,23 @@ export async function registerRoutes(
     }
 
     try {
-      const appointments = await storage.getAppointmentsByClientWithDetails(userId);
+      const { status: statusFilter, since } = req.query as { status?: string; since?: string };
+
+      let appointments = await storage.getAppointmentsByClientWithDetails(userId);
+
+      if (statusFilter) {
+        appointments = appointments.filter((a) => a.status === statusFilter);
+      }
+      if (since) {
+        const match = since.match(/^(\d+)(h|d)$/);
+        if (match) {
+          const amount = parseInt(match[1], 10);
+          const ms = match[2] === "h" ? amount * 3600000 : amount * 86400000;
+          const cutoff = new Date(Date.now() - ms);
+          appointments = appointments.filter((a) => new Date(a.appointmentDate) >= cutoff);
+        }
+      }
+
       res.json({ appointments });
     } catch (error) {
       console.error("Get appointments error:", error);
@@ -9373,6 +9389,13 @@ export async function registerRoutes(
         reviewerId: userId,
       });
 
+      // Validate booking reference before hitting the DB
+      if (!data.bookingId || !data.bookingType) {
+        return res.status(400).json({
+          error: 'bookingId and bookingType are required to submit a review',
+        });
+      }
+
       // CRITICAL: Verify the customer has a completed booking/order
       const verification = await storage.verifyCustomerCanReview(
         userId,
@@ -9426,6 +9449,133 @@ export async function registerRoutes(
     } catch (error) {
       console.error("Check can review error:", error);
       res.status(500).json({ error: "Failed to check review status" });
+    }
+  });
+
+  // ==================== RATINGS ROUTES ====================
+
+  app.post("/api/ratings", hybridAuthMiddleware, async (req, res) => {
+    const authReq = req as AuthenticatedRequest;
+    const userId = authReq.user?.userId || req.session?.userId;
+    if (!userId) return res.status(401).json({ error: "Unauthorized" });
+
+    try {
+      const { targetType, targetId, rating, purchaseId, purchaseType } = req.body;
+
+      if (!targetType || !targetId || rating === undefined) {
+        return res.status(400).json({ error: "targetType, targetId, and rating are required" });
+      }
+
+      const validTargetTypes = ["product", "service", "photographer_service"];
+      if (!validTargetTypes.includes(targetType)) {
+        return res.status(400).json({ error: `targetType must be one of: ${validTargetTypes.join(", ")}` });
+      }
+
+      const ratingValue = Number(rating);
+      if (!Number.isInteger(ratingValue) || ratingValue < 5 || ratingValue > 50) {
+        return res.status(400).json({ error: "rating must be an integer between 5 and 50 (rating × 10)" });
+      }
+
+      if (purchaseId && purchaseType) {
+        const verification = await storage.verifyPurchaseForRating(userId, targetType, targetId, purchaseType, purchaseId);
+        if (!verification.verified) {
+          return res.status(403).json({ error: verification.reason ?? "No qualifying purchase found" });
+        }
+      }
+
+      const result = await storage.upsertRating({
+        userId,
+        targetType,
+        targetId,
+        rating: ratingValue,
+        purchaseId: purchaseId ?? null,
+        purchaseType: purchaseType ?? null,
+      });
+
+      storage.scheduleAggregateRecompute(targetType, targetId);
+
+      return res.status(201).json(result);
+    } catch (error) {
+      console.error("POST /api/ratings error:", error);
+      return res.status(500).json({ error: "Internal server error" });
+    }
+  });
+
+  app.get("/api/ratings/check", hybridAuthMiddleware, async (req, res) => {
+    const authReq = req as AuthenticatedRequest;
+    const userId = authReq.user?.userId || req.session?.userId;
+    if (!userId) return res.status(401).json({ error: "Unauthorized" });
+
+    try {
+      const { targetType, targetId } = req.query as { targetType: string; targetId: string };
+      if (!targetType || !targetId) {
+        return res.status(400).json({ error: "targetType and targetId are required" });
+      }
+
+      const [verification, existingRating] = await Promise.all([
+        storage.verifyPurchaseForRating(userId, targetType, targetId),
+        storage.getRatingByUser(userId, targetType, targetId),
+      ]);
+
+      return res.json({
+        canRate: verification.verified,
+        purchases: verification.purchases,
+        existingRating: existingRating ?? null,
+      });
+    } catch (error) {
+      console.error("GET /api/ratings/check error:", error);
+      return res.status(500).json({ error: "Internal server error" });
+    }
+  });
+
+  app.get("/api/ratings/:targetType/:targetId", optionalAuthMiddleware, async (req, res) => {
+    try {
+      const { targetType, targetId } = req.params;
+      const authReq = req as AuthenticatedRequest;
+      const userId = authReq.user?.userId ?? null;
+
+      const [allRatings, userRating] = await Promise.all([
+        storage.getRatingsForTarget(targetType, targetId),
+        userId ? storage.getRatingByUser(userId, targetType, targetId) : Promise.resolve(undefined),
+      ]);
+
+      const distribution: Record<number, number> = { 10: 0, 20: 0, 30: 0, 40: 0, 50: 0 };
+      let total = 0;
+      for (const r of allRatings) {
+        const bucket = Math.round(r.rating / 10) * 10;
+        distribution[bucket] = (distribution[bucket] ?? 0) + 1;
+        total += r.rating;
+      }
+      const average = allRatings.length > 0 ? Math.round(total / allRatings.length) : 0;
+
+      return res.json({
+        count: allRatings.length,
+        average,
+        distribution,
+        userRating: userRating ?? null,
+      });
+    } catch (error) {
+      console.error("GET /api/ratings/:targetType/:targetId error:", error);
+      return res.status(500).json({ error: "Internal server error" });
+    }
+  });
+
+  app.post("/api/ratings/dismiss", hybridAuthMiddleware, async (req, res) => {
+    const authReq = req as AuthenticatedRequest;
+    const userId = authReq.user?.userId || req.session?.userId;
+    if (!userId) return res.status(401).json({ error: "Unauthorized" });
+
+    try {
+      const { purchaseId, purchaseType } = req.body;
+      if (!purchaseId || !purchaseType) {
+        return res.status(400).json({ error: "purchaseId and purchaseType are required" });
+      }
+
+      await storage.dismissRatingPrompt(userId, purchaseId, purchaseType);
+      return res.json({ success: true });
+    } catch (error) {
+      console.error("POST /api/ratings/dismiss error:", error);
+      return res.status(500).json({ error: "Internal server error" });
     }
   });
 
@@ -18563,8 +18713,23 @@ export async function registerRoutes(
     }
 
     try {
-      const orders = await storage.getUserOrders(userId);
-      
+      const { status: statusFilter, since } = req.query as { status?: string; since?: string };
+
+      let orders = await storage.getUserOrders(userId);
+
+      if (statusFilter) {
+        orders = orders.filter((o) => o.status === statusFilter);
+      }
+      if (since) {
+        const match = since.match(/^(\d+)(h|d)$/);
+        if (match) {
+          const amount = parseInt(match[1], 10);
+          const ms = match[2] === "h" ? amount * 3600000 : amount * 86400000;
+          const cutoff = new Date(Date.now() - ms);
+          orders = orders.filter((o) => o.createdAt >= cutoff);
+        }
+      }
+
       // Enrich orders with business names, shipment info, and item image URLs
       const enrichedOrders = await Promise.all(
         orders.map(async (order) => {

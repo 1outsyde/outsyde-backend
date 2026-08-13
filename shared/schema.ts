@@ -1,5 +1,5 @@
 import {
-  pgTable, text, varchar, boolean, integer, jsonb, timestamp, index, doublePrecision, unique
+  pgTable, text, varchar, boolean, integer, jsonb, timestamp, index, doublePrecision, unique, uuid
 } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
@@ -431,6 +431,10 @@ export const vendorProducts = pgTable("vendor_products", {
   stripeProductId: text("stripe_product_id"),
   stripePriceId: text("stripe_price_id"),
 
+  ratingCount: integer("rating_count").default(0).notNull(),
+  ratingAverage: integer("rating_average").default(0).notNull(),
+  // stored as rating * 10 — e.g. 4.5 stars = 45
+
   createdAt: timestamp("created_at").defaultNow().notNull(),
 });
 
@@ -473,6 +477,10 @@ export const vendorServices = pgTable("vendor_services", {
   alternateState: text("alternate_state"),
   alternateZipCode: text("alternate_zip_code"),
   virtualLink: text("virtual_link"),
+
+  ratingCount: integer("rating_count").default(0).notNull(),
+  ratingAverage: integer("rating_average").default(0).notNull(),
+  // stored as rating * 10 — e.g. 4.5 stars = 45
 
   createdAt: timestamp("created_at").defaultNow().notNull(),
 });
@@ -837,6 +845,10 @@ export const photographerServices = pgTable("photographer_services", {
   cancellationFeeType: text("cancellation_fee_type"), // nullable, 'flat'|'percentage'
   cancellationFeeAmount: integer("cancellation_fee_amount"), // nullable, cents if flat / whole percent if percentage
 
+  ratingCount: integer("rating_count").default(0).notNull(),
+  ratingAverage: integer("rating_average").default(0).notNull(),
+  // stored as rating * 10 — e.g. 4.5 stars = 45
+
   createdAt: timestamp("created_at").defaultNow().notNull(),
 });
 
@@ -1114,6 +1126,38 @@ export const reviews = pgTable("reviews", {
 
   createdAt: timestamp("created_at").defaultNow().notNull(),
 });
+
+/* =====================================================
+   RATINGS (Standalone star ratings, separate from reviews)
+===================================================== */
+export const ratings = pgTable('ratings', {
+  id: uuid('id').defaultRandom().primaryKey(),
+  userId: uuid('user_id').notNull(),
+  targetType: text('target_type').notNull(), // 'business' | 'photographer' | 'product' | 'service'
+  targetId: uuid('target_id').notNull(),
+  rating: integer('rating').notNull(), // 1-50 (stored as rating * 10, e.g. 4.5 = 45)
+  purchaseId: uuid('purchase_id'),     // orderId or appointmentId that verified this rating
+  purchaseType: text('purchase_type'), // 'order' | 'appointment' | 'shoot_booking'
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+  updatedAt: timestamp('updated_at').defaultNow().notNull(),
+}, (table) => ({
+  userTargetUnique: unique().on(table.userId, table.targetType, table.targetId),
+  targetIdx: index('ratings_target_idx').on(table.targetType, table.targetId),
+  userIdx: index('ratings_user_idx').on(table.userId),
+}));
+
+/* =====================================================
+   RATING PROMPT DISMISSALS
+===================================================== */
+export const ratingPromptDismissals = pgTable('rating_prompt_dismissals', {
+  id: uuid('id').defaultRandom().primaryKey(),
+  userId: uuid('user_id').notNull(),
+  purchaseId: uuid('purchase_id').notNull(),
+  purchaseType: text('purchase_type').notNull(),
+  dismissedAt: timestamp('dismissed_at').defaultNow().notNull(),
+}, (table) => ({
+  userPurchaseUnique: unique().on(table.userId, table.purchaseId, table.purchaseType),
+}));
 
 /* =====================================================
    POINT TRANSACTIONS (Loyalty System)
@@ -3203,3 +3247,9 @@ export const storyHighlights = pgTable("story_highlights", {
   uniqUserStory:     unique("story_highlights_unique").on(table.userId, table.storyId),
   idxUserHighlights: index("idx_story_highlights_user").on(table.userId, table.savedAt),
 }));
+
+
+export type Rating = typeof ratings.$inferSelect;
+export type InsertRating = typeof ratings.$inferInsert;
+export type RatingPromptDismissal = typeof ratingPromptDismissals.$inferSelect;
+export type InsertRatingPromptDismissal = typeof ratingPromptDismissals.$inferInsert;
