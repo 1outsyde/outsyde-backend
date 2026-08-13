@@ -13,6 +13,9 @@ import {
   type InsertPhotographerService,
   type Review,
   type InsertReview,
+  type Rating,
+  type InsertRating,
+  type RatingPromptDismissal,
   type ShootBooking,
   type Appointment,
   type InsertAppointment,
@@ -108,6 +111,8 @@ import {
   photographers,
   photographerServices,
   reviews,
+  ratings,
+  ratingPromptDismissals,
   shootBookings,
   appointments,
   orders,
@@ -169,6 +174,8 @@ import {
 import { db } from "./db";
 import { eq, ilike, or, and, sql, isNull, isNotNull, desc, asc, gte, lte, ne, inArray, notInArray } from "drizzle-orm";
 import { randomUUID, createHash } from "crypto";
+
+const pendingRecomputes = new Map<string, NodeJS.Timeout>();
 
 // Input type for creating a photographer (no need for InsertPhotographer in schema)
 export type NewPhotographerInput = {
@@ -825,6 +832,15 @@ export interface IStorage {
   createConsumerAddress(data: InsertConsumerAddress): Promise<ConsumerAddress>;
   updateConsumerAddress(id: string, userId: string, data: Partial<InsertConsumerAddress>): Promise<ConsumerAddress>;
   deleteConsumerAddress(id: string, userId: string): Promise<void>;
+
+  // Star Ratings (separate from text reviews)
+  getRatingByUser(userId: string, targetType: string, targetId: string): Promise<Rating | undefined>;
+  upsertRating(data: InsertRating): Promise<Rating>;
+  getRatingsForTarget(targetType: string, targetId: string): Promise<Rating[]>;
+  verifyPurchaseForRating(userId: string, targetType: string, targetId: string, purchaseType: string, purchaseId: string): Promise<{ verified: boolean; reason?: string }>;
+  dismissRatingPrompt(userId: string, purchaseId: string, purchaseType: string): Promise<RatingPromptDismissal>;
+  getRatingPromptDismissals(userId: string): Promise<RatingPromptDismissal[]>;
+  scheduleAggregateRecompute(targetType: string, targetId: string): void;
 }
 
 // ==================== UNIFIED SEARCH TYPES ====================
@@ -7346,6 +7362,156 @@ export class DatabaseStorage implements IStorage {
     await db
       .delete(consumerAddresses)
       .where(and(eq(consumerAddresses.id, id), eq(consumerAddresses.userId, userId)));
+  }
+
+  // =========================
+  // STAR RATINGS
+  // =========================
+
+  private async recomputeVendorAggregate(targetType: string, targetId: string): Promise<void> {
+    const result = await db
+      .select({
+        cnt: sql<number>`count(*)::int`,
+        avg: sql<number>`round(avg(${ratings.rating}))::int`,
+      })
+      .from(ratings)
+      .where(and(eq(ratings.targetType, targetType), eq(ratings.targetId, targetId)));
+
+    const cnt = result[0]?.cnt ?? 0;
+    const avg = result[0]?.avg ?? 0;
+
+    if (targetType === 'product') {
+      await db.update(vendorProducts)
+        .set({ ratingCount: cnt, ratingAverage: avg })
+        .where(eq(vendorProducts.id, targetId));
+    } else if (targetType === 'service') {
+      await db.update(vendorServices)
+        .set({ ratingCount: cnt, ratingAverage: avg })
+        .where(eq(vendorServices.id, targetId));
+    } else if (targetType === 'photographer_service') {
+      await db.update(photographerServices)
+        .set({ ratingCount: cnt, ratingAverage: avg })
+        .where(eq(photographerServices.id, targetId));
+    }
+  }
+
+  scheduleAggregateRecompute(targetType: string, targetId: string): void {
+    const key = `${targetType}:${targetId}`;
+    const existing = pendingRecomputes.get(key);
+    if (existing) clearTimeout(existing);
+    const timer = setTimeout(() => {
+      pendingRecomputes.delete(key);
+      this.recomputeVendorAggregate(targetType, targetId).catch(console.error);
+    }, 2000);
+    pendingRecomputes.set(key, timer);
+  }
+
+  async getRatingByUser(userId: string, targetType: string, targetId: string): Promise<Rating | undefined> {
+    const result = await db.select().from(ratings).where(
+      and(
+        eq(ratings.userId, userId),
+        eq(ratings.targetType, targetType),
+        eq(ratings.targetId, targetId),
+      )
+    );
+    return result[0];
+  }
+
+  async upsertRating(data: InsertRating): Promise<Rating> {
+    const result = await db.insert(ratings).values(data)
+      .onConflictDoUpdate({
+        target: [ratings.userId, ratings.targetType, ratings.targetId],
+        set: {
+          rating: data.rating,
+          purchaseId: data.purchaseId,
+          purchaseType: data.purchaseType,
+          updatedAt: new Date(),
+        },
+      })
+      .returning();
+    return result[0];
+  }
+
+  async getRatingsForTarget(targetType: string, targetId: string): Promise<Rating[]> {
+    return db.select().from(ratings).where(
+      and(eq(ratings.targetType, targetType), eq(ratings.targetId, targetId))
+    );
+  }
+
+  async verifyPurchaseForRating(
+    userId: string,
+    targetType: string,
+    targetId: string,
+    purchaseType: string,
+    purchaseId: string,
+  ): Promise<{ verified: boolean; reason?: string }> {
+    if (!purchaseId || purchaseId.trim() === '') {
+      return { verified: false, reason: 'No purchase reference provided' };
+    }
+
+    if (purchaseType === 'order' && targetType === 'product') {
+      const order = await db.select().from(orders).where(
+        and(
+          eq(orders.id, purchaseId),
+          eq(orders.customerId, userId),
+          sql`${orders.status} IN ('delivered', 'completed')`
+        )
+      );
+      if (order.length === 0) return { verified: false, reason: 'Order not found or not completed' };
+      const items = order[0].items as Array<{ productId: string }> | null;
+      if (!items?.some(item => item.productId === targetId)) {
+        return { verified: false, reason: 'Product not found in order' };
+      }
+    } else if (purchaseType === 'appointment' && targetType === 'service') {
+      const appt = await db.select().from(appointments).where(
+        and(
+          eq(appointments.id, purchaseId),
+          eq(appointments.clientId, userId),
+          eq(appointments.serviceId, targetId),
+          eq(appointments.status, 'completed')
+        )
+      );
+      if (appt.length === 0) return { verified: false, reason: 'Appointment not found or not completed' };
+    } else if (purchaseType === 'shoot_booking' && targetType === 'photographer_service') {
+      const booking = await db.select().from(shootBookings).where(
+        and(
+          eq(shootBookings.id, purchaseId),
+          eq(shootBookings.clientId, userId),
+          eq(shootBookings.status, 'completed')
+        )
+      );
+      if (booking.length === 0) return { verified: false, reason: 'Shoot booking not found or not completed' };
+    } else {
+      return { verified: false, reason: 'Invalid purchase type or target type combination' };
+    }
+
+    return { verified: true };
+  }
+
+  async dismissRatingPrompt(userId: string, purchaseId: string, purchaseType: string): Promise<RatingPromptDismissal> {
+    const result = await db.insert(ratingPromptDismissals).values({
+      userId,
+      purchaseId,
+      purchaseType,
+    })
+      .onConflictDoNothing()
+      .returning();
+    if (result[0]) return result[0];
+    // Already dismissed — return the existing row
+    const existing = await db.select().from(ratingPromptDismissals).where(
+      and(
+        eq(ratingPromptDismissals.userId, userId),
+        eq(ratingPromptDismissals.purchaseId, purchaseId),
+        eq(ratingPromptDismissals.purchaseType, purchaseType),
+      )
+    );
+    return existing[0];
+  }
+
+  async getRatingPromptDismissals(userId: string): Promise<RatingPromptDismissal[]> {
+    return db.select().from(ratingPromptDismissals).where(
+      eq(ratingPromptDismissals.userId, userId)
+    );
   }
 }
 
