@@ -9373,6 +9373,13 @@ export async function registerRoutes(
         reviewerId: userId,
       });
 
+      // Validate booking reference before hitting the DB
+      if (!data.bookingId || !data.bookingType) {
+        return res.status(400).json({
+          error: 'bookingId and bookingType are required to submit a review',
+        });
+      }
+
       // CRITICAL: Verify the customer has a completed booking/order
       const verification = await storage.verifyCustomerCanReview(
         userId,

@@ -1401,13 +1401,16 @@ export class DatabaseStorage implements IStorage {
   // Verify customer has a completed booking/order with the target
   // Reviews are locked after 30 days from completion
   async verifyCustomerCanReview(
-    customerId: string, 
-    targetType: string, 
-    targetId: string, 
-    bookingType: string, 
+    customerId: string,
+    targetType: string,
+    targetId: string,
+    bookingType: string,
     bookingId: string
   ): Promise<{ canReview: boolean; reason?: string }> {
-    
+    if (!bookingId || bookingId.trim() === '') {
+      return { canReview: false, reason: 'No booking reference provided' };
+    }
+
     // Check if already reviewed this booking
     const alreadyReviewed = await this.hasReviewedBooking(bookingType, bookingId);
     if (alreadyReviewed) {
