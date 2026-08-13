@@ -9513,7 +9513,7 @@ export async function registerRoutes(
       }
 
       const existingRating = await storage.getRatingByUser(userId, targetType, targetId);
-      return res.json({ existingRating: existingRating ?? null });
+      return res.json({ canRate: !existingRating, purchases: [], existingRating: existingRating ?? null });
     } catch (error) {
       console.error("GET /api/ratings/check error:", error);
       return res.status(500).json({ error: "Internal server error" });

@@ -837,7 +837,18 @@ export interface IStorage {
   getRatingByUser(userId: string, targetType: string, targetId: string): Promise<Rating | undefined>;
   upsertRating(data: InsertRating): Promise<Rating>;
   getRatingsForTarget(targetType: string, targetId: string): Promise<Rating[]>;
-  verifyPurchaseForRating(userId: string, targetType: string, targetId: string, purchaseType: string, purchaseId: string): Promise<{ verified: boolean; reason?: string }>;
+  verifyPurchaseForRating(userId: string, targetType: string, targetId: string, purchaseType: string, purchaseId: string): Promise<{
+    verified: boolean;
+    reason?: string;
+    purchases: Array<{
+      purchaseId: string;
+      purchaseType: 'order' | 'appointment' | 'shoot_booking';
+      targetId: string;
+      targetType: 'business' | 'photographer';
+      label: string;
+      date: string;
+    }>;
+  }>;
   dismissRatingPrompt(userId: string, purchaseId: string, purchaseType: string): Promise<RatingPromptDismissal>;
   getRatingPromptDismissals(userId: string): Promise<RatingPromptDismissal[]>;
   scheduleAggregateRecompute(targetType: string, targetId: string): void;
@@ -7444,9 +7455,20 @@ export class DatabaseStorage implements IStorage {
     targetId: string,
     purchaseType: string,
     purchaseId: string,
-  ): Promise<{ verified: boolean; reason?: string }> {
+  ): Promise<{
+    verified: boolean;
+    reason?: string;
+    purchases: Array<{
+      purchaseId: string;
+      purchaseType: 'order' | 'appointment' | 'shoot_booking';
+      targetId: string;
+      targetType: 'business' | 'photographer';
+      label: string;
+      date: string;
+    }>;
+  }> {
     if (!purchaseId || purchaseId.trim() === '') {
-      return { verified: false, reason: 'No purchase reference provided' };
+      return { verified: false, reason: 'No purchase reference provided', purchases: [] };
     }
 
     if (purchaseType === 'order' && targetType === 'product') {
@@ -7457,11 +7479,22 @@ export class DatabaseStorage implements IStorage {
           sql`${orders.status} IN ('delivered', 'completed')`
         )
       );
-      if (order.length === 0) return { verified: false, reason: 'Order not found or not completed' };
+      if (order.length === 0) return { verified: false, reason: 'Order not found or not completed', purchases: [] };
       const items = order[0].items as Array<{ productId: string }> | null;
       if (!items?.some(item => item.productId === targetId)) {
-        return { verified: false, reason: 'Product not found in order' };
+        return { verified: false, reason: 'Product not found in order', purchases: [] };
       }
+      return {
+        verified: true,
+        purchases: [{
+          purchaseId: order[0].id,
+          purchaseType: 'order',
+          targetId: order[0].businessId,
+          targetType: 'business',
+          label: `Order #${order[0].id.slice(-8).toUpperCase()}`,
+          date: order[0].createdAt?.toISOString() ?? '',
+        }],
+      };
     } else if (purchaseType === 'appointment' && targetType === 'service') {
       const appt = await db.select().from(appointments).where(
         and(
@@ -7471,7 +7504,18 @@ export class DatabaseStorage implements IStorage {
           eq(appointments.status, 'completed')
         )
       );
-      if (appt.length === 0) return { verified: false, reason: 'Appointment not found or not completed' };
+      if (appt.length === 0) return { verified: false, reason: 'Appointment not found or not completed', purchases: [] };
+      return {
+        verified: true,
+        purchases: [{
+          purchaseId: appt[0].id,
+          purchaseType: 'appointment',
+          targetId: appt[0].businessId,
+          targetType: 'business',
+          label: `Session on ${appt[0].appointmentDate}`,
+          date: appt[0].appointmentDate,
+        }],
+      };
     } else if (purchaseType === 'shoot_booking' && targetType === 'photographer_service') {
       const booking = await db.select().from(shootBookings).where(
         and(
@@ -7480,12 +7524,21 @@ export class DatabaseStorage implements IStorage {
           eq(shootBookings.status, 'completed')
         )
       );
-      if (booking.length === 0) return { verified: false, reason: 'Shoot booking not found or not completed' };
+      if (booking.length === 0) return { verified: false, reason: 'Shoot booking not found or not completed', purchases: [] };
+      return {
+        verified: true,
+        purchases: [{
+          purchaseId: booking[0].id,
+          purchaseType: 'shoot_booking',
+          targetId: booking[0].photographerId,
+          targetType: 'photographer',
+          label: `Shoot ${booking[0].id.slice(-8).toUpperCase()}`,
+          date: booking[0].date ?? '',
+        }],
+      };
     } else {
-      return { verified: false, reason: 'Invalid purchase type or target type combination' };
+      return { verified: false, reason: 'Invalid purchase type or target type combination', purchases: [] };
     }
-
-    return { verified: true };
   }
 
   async dismissRatingPrompt(userId: string, purchaseId: string, purchaseType: string): Promise<RatingPromptDismissal> {
