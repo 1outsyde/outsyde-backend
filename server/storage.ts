@@ -837,7 +837,7 @@ export interface IStorage {
   getRatingByUser(userId: string, targetType: string, targetId: string): Promise<Rating | undefined>;
   upsertRating(data: InsertRating): Promise<Rating>;
   getRatingsForTarget(targetType: string, targetId: string): Promise<Rating[]>;
-  verifyPurchaseForRating(userId: string, targetType: string, targetId: string, purchaseType: string, purchaseId: string): Promise<{
+  verifyPurchaseForRating(userId: string, targetType: string, targetId: string, purchaseType?: string, purchaseId?: string): Promise<{
     verified: boolean;
     reason?: string;
     purchases: Array<{
@@ -7453,8 +7453,8 @@ export class DatabaseStorage implements IStorage {
     userId: string,
     targetType: string,
     targetId: string,
-    purchaseType: string,
-    purchaseId: string,
+    purchaseType?: string,
+    purchaseId?: string,
   ): Promise<{
     verified: boolean;
     reason?: string;
@@ -7467,78 +7467,141 @@ export class DatabaseStorage implements IStorage {
       date: string;
     }>;
   }> {
-    if (!purchaseId || purchaseId.trim() === '') {
-      return { verified: false, reason: 'No purchase reference provided', purchases: [] };
+    // Verify a specific purchase when both identifiers are provided
+    if (purchaseId && purchaseType) {
+      if (purchaseType === 'order' && targetType === 'product') {
+        const order = await db.select().from(orders).where(
+          and(
+            eq(orders.id, purchaseId),
+            eq(orders.customerId, userId),
+            sql`${orders.status} IN ('delivered', 'completed')`
+          )
+        );
+        if (order.length === 0) return { verified: false, reason: 'Order not found or not completed', purchases: [] };
+        const items = order[0].items as Array<{ productId: string }> | null;
+        if (!items?.some(item => item.productId === targetId)) {
+          return { verified: false, reason: 'Product not found in order', purchases: [] };
+        }
+        return {
+          verified: true,
+          purchases: [{
+            purchaseId: order[0].id,
+            purchaseType: 'order',
+            targetId: order[0].businessId,
+            targetType: 'business',
+            label: `Order #${order[0].id.slice(-8).toUpperCase()}`,
+            date: order[0].createdAt?.toISOString() ?? '',
+          }],
+        };
+      } else if (purchaseType === 'appointment' && targetType === 'service') {
+        const appt = await db.select().from(appointments).where(
+          and(
+            eq(appointments.id, purchaseId),
+            eq(appointments.clientId, userId),
+            eq(appointments.serviceId, targetId),
+            eq(appointments.status, 'completed')
+          )
+        );
+        if (appt.length === 0) return { verified: false, reason: 'Appointment not found or not completed', purchases: [] };
+        return {
+          verified: true,
+          purchases: [{
+            purchaseId: appt[0].id,
+            purchaseType: 'appointment',
+            targetId: appt[0].businessId,
+            targetType: 'business',
+            label: `Session on ${appt[0].appointmentDate}`,
+            date: appt[0].appointmentDate,
+          }],
+        };
+      } else if (purchaseType === 'shoot_booking' && targetType === 'photographer_service') {
+        const booking = await db.select().from(shootBookings).where(
+          and(
+            eq(shootBookings.id, purchaseId),
+            eq(shootBookings.clientId, userId),
+            eq(shootBookings.status, 'completed')
+          )
+        );
+        if (booking.length === 0) return { verified: false, reason: 'Shoot booking not found or not completed', purchases: [] };
+        return {
+          verified: true,
+          purchases: [{
+            purchaseId: booking[0].id,
+            purchaseType: 'shoot_booking',
+            targetId: booking[0].photographerId,
+            targetType: 'photographer',
+            label: `Shoot ${booking[0].id.slice(-8).toUpperCase()}`,
+            date: booking[0].date ?? '',
+          }],
+        };
+      } else {
+        return { verified: false, reason: 'Invalid purchase type or target type combination', purchases: [] };
+      }
     }
 
-    if (purchaseType === 'order' && targetType === 'product') {
-      const order = await db.select().from(orders).where(
-        and(
-          eq(orders.id, purchaseId),
-          eq(orders.customerId, userId),
-          sql`${orders.status} IN ('delivered', 'completed')`
-        )
+    // No specific purchase — look up all eligible purchases for this user/target
+    type PurchaseItem = {
+      purchaseId: string;
+      purchaseType: 'order' | 'appointment' | 'shoot_booking';
+      targetId: string;
+      targetType: 'business' | 'photographer';
+      label: string;
+      date: string;
+    };
+    const found: PurchaseItem[] = [];
+
+    if (targetType === 'product') {
+      const userOrders = await db.select().from(orders).where(
+        and(eq(orders.customerId, userId), sql`${orders.status} IN ('delivered', 'completed')`)
       );
-      if (order.length === 0) return { verified: false, reason: 'Order not found or not completed', purchases: [] };
-      const items = order[0].items as Array<{ productId: string }> | null;
-      if (!items?.some(item => item.productId === targetId)) {
-        return { verified: false, reason: 'Product not found in order', purchases: [] };
+      for (const order of userOrders) {
+        const items = order.items as Array<{ productId: string }> | null;
+        if (items?.some(item => item.productId === targetId)) {
+          found.push({
+            purchaseId: order.id,
+            purchaseType: 'order',
+            targetId: order.businessId,
+            targetType: 'business',
+            label: `Order #${order.id.slice(-8).toUpperCase()}`,
+            date: order.createdAt?.toISOString() ?? '',
+          });
+        }
       }
-      return {
-        verified: true,
-        purchases: [{
-          purchaseId: order[0].id,
-          purchaseType: 'order',
-          targetId: order[0].businessId,
-          targetType: 'business',
-          label: `Order #${order[0].id.slice(-8).toUpperCase()}`,
-          date: order[0].createdAt?.toISOString() ?? '',
-        }],
-      };
-    } else if (purchaseType === 'appointment' && targetType === 'service') {
-      const appt = await db.select().from(appointments).where(
+    } else if (targetType === 'service') {
+      const appts = await db.select().from(appointments).where(
         and(
-          eq(appointments.id, purchaseId),
           eq(appointments.clientId, userId),
           eq(appointments.serviceId, targetId),
           eq(appointments.status, 'completed')
         )
       );
-      if (appt.length === 0) return { verified: false, reason: 'Appointment not found or not completed', purchases: [] };
-      return {
-        verified: true,
-        purchases: [{
-          purchaseId: appt[0].id,
+      for (const appt of appts) {
+        found.push({
+          purchaseId: appt.id,
           purchaseType: 'appointment',
-          targetId: appt[0].businessId,
+          targetId: appt.businessId,
           targetType: 'business',
-          label: `Session on ${appt[0].appointmentDate}`,
-          date: appt[0].appointmentDate,
-        }],
-      };
-    } else if (purchaseType === 'shoot_booking' && targetType === 'photographer_service') {
-      const booking = await db.select().from(shootBookings).where(
-        and(
-          eq(shootBookings.id, purchaseId),
-          eq(shootBookings.clientId, userId),
-          eq(shootBookings.status, 'completed')
-        )
+          label: `Session on ${appt.appointmentDate}`,
+          date: appt.appointmentDate,
+        });
+      }
+    } else if (targetType === 'photographer_service') {
+      const bookings = await db.select().from(shootBookings).where(
+        and(eq(shootBookings.clientId, userId), eq(shootBookings.status, 'completed'))
       );
-      if (booking.length === 0) return { verified: false, reason: 'Shoot booking not found or not completed', purchases: [] };
-      return {
-        verified: true,
-        purchases: [{
-          purchaseId: booking[0].id,
+      for (const booking of bookings) {
+        found.push({
+          purchaseId: booking.id,
           purchaseType: 'shoot_booking',
-          targetId: booking[0].photographerId,
+          targetId: booking.photographerId,
           targetType: 'photographer',
-          label: `Shoot ${booking[0].id.slice(-8).toUpperCase()}`,
-          date: booking[0].date ?? '',
-        }],
-      };
-    } else {
-      return { verified: false, reason: 'Invalid purchase type or target type combination', purchases: [] };
+          label: `Shoot ${booking.id.slice(-8).toUpperCase()}`,
+          date: booking.date ?? '',
+        });
+      }
     }
+
+    return { verified: found.length > 0, purchases: found };
   }
 
   async dismissRatingPrompt(userId: string, purchaseId: string, purchaseType: string): Promise<RatingPromptDismissal> {

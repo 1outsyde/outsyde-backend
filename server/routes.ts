@@ -9512,8 +9512,16 @@ export async function registerRoutes(
         return res.status(400).json({ error: "targetType and targetId are required" });
       }
 
-      const existingRating = await storage.getRatingByUser(userId, targetType, targetId);
-      return res.json({ canRate: !existingRating, purchases: [], existingRating: existingRating ?? null });
+      const [verification, existingRating] = await Promise.all([
+        storage.verifyPurchaseForRating(userId, targetType, targetId),
+        storage.getRatingByUser(userId, targetType, targetId),
+      ]);
+
+      return res.json({
+        canRate: verification.verified,
+        purchases: verification.purchases,
+        existingRating: existingRating ?? null,
+      });
     } catch (error) {
       console.error("GET /api/ratings/check error:", error);
       return res.status(500).json({ error: "Internal server error" });
