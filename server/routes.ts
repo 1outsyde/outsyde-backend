@@ -9685,7 +9685,7 @@ export async function registerRoutes(
         return res.status(400).json({ error: "targetType, targetId, and rating are required" });
       }
 
-      const validTargetTypes = ["product", "service", "photographer_service"];
+      const validTargetTypes = ["product", "service", "photographer_service", "business", "photographer"];
       if (!validTargetTypes.includes(targetType)) {
         return res.status(400).json({ error: `targetType must be one of: ${validTargetTypes.join(", ")}` });
       }
