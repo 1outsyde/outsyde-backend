@@ -1023,18 +1023,14 @@ export const appointments = pgTable("appointments", {
   serviceCancellationFeeType: text("service_cancellation_fee_type"),
   serviceCancellationFeeAmount: integer("service_cancellation_fee_amount"),
 
-  // Reminder tracking — null means not yet sent
-  reminder24hSentAt: timestamp("reminder_24h_sent_at"),
-  reminder2hSentAt: timestamp("reminder_2h_sent_at"),
-
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 }, (table) => ({
   // Prevent double bookings: unique constraint on staff + date + time for active bookings
   // Only one confirmed/pending_payment booking allowed per slot
   uniqueStaffSlot: unique("unique_staff_slot").on(
-    table.staffMemberId,
-    table.appointmentDate,
+    table.staffMemberId, 
+    table.appointmentDate, 
     table.appointmentTime
   ).nullsNotDistinct(),
   // Index for draft expiry cleanup job
@@ -2323,8 +2319,6 @@ export const customerSignupSchema = z.object({
   industryValues: z.record(z.string(), z.array(z.string())).default({}),
   // Optional: auto-accept a staff invite at signup time
   inviteCode: z.string().optional(),
-  // Optional: source identifier for the client site that initiated signup (e.g. 'xo-lashes-web')
-  source: z.string().optional(),
 });
 
 export const vendorSignupSchema = z.object({
