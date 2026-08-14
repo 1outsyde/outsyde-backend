@@ -18,6 +18,7 @@ import { startDraftCleanupJob } from "./bookingStateMachine";
 import { processScheduledDeletions } from "./services/accountDeletionService";
 import { cleanupExpiredStories } from "./services/stories";
 import passport from "passport";
+import { sendAppointmentReminderToConsumer } from "./emailService";
 
 // Global error handlers — prevent silent crashes
 process.on('unhandledRejection', (reason) => {
@@ -69,11 +70,15 @@ if (process.env.NODE_ENV === 'production') {
     /\.janeway\.replit\.dev$/,
     `http://localhost:${process.env.PORT || 5000}`,
     'http://localhost:3000',
+    'http://localhost:3001',
     'http://localhost:8081', // Expo
   );
   if (process.env.EXPO_DEV_URL) allowedOrigins.push(process.env.EXPO_DEV_URL);
   if (process.env.FRONTEND_URL) allowedOrigins.push(process.env.FRONTEND_URL);
 }
+
+// Client site origins always allowed (web clients for xo-lashes, etc.)
+allowedOrigins.push('https://xobeautyandlashes.com', 'https://www.xobeautyandlashes.com');
 
 app.use(cors({
   origin: function (origin, callback) {
@@ -284,6 +289,105 @@ if (process.env.NODE_ENV === 'production') {
   }
 
   setInterval(() => storage.cleanupExpiredTokens(), 60 * 60 * 1000);
+
+  // Appointment reminder cron — runs every 30 minutes, sends 24h and 2h reminders
+  async function sendAppointmentReminders() {
+    try {
+      const { db } = await import('./db');
+      const { appointments: appointmentsTable } = await import('../shared/schema');
+      const { eq, and, isNull, gte, lte, inArray } = await import('drizzle-orm');
+
+      const now = new Date();
+      const in24h = new Date(now.getTime() + 24 * 60 * 60 * 1000);
+      const in25h = new Date(now.getTime() + 25 * 60 * 60 * 1000);
+      const in2h = new Date(now.getTime() + 2 * 60 * 60 * 1000);
+      const in3h = new Date(now.getTime() + 3 * 60 * 60 * 1000);
+
+      // Find confirmed appointments in the 24h window that haven't had a 24h reminder
+      const appts24h = await db
+        .select()
+        .from(appointmentsTable)
+        .where(
+          and(
+            inArray(appointmentsTable.status, ['confirmed']),
+            isNull(appointmentsTable.reminder24hSentAt),
+          )
+        );
+
+      for (const appt of appts24h) {
+        try {
+          const apptDate = new Date(`${appt.appointmentDate}T${appt.appointmentTime}`);
+          if (apptDate >= in24h && apptDate <= in25h) {
+            const client = await storage.getUser(appt.clientId);
+            const business = await storage.getBusiness(appt.businessId);
+            if (client?.email) {
+              await sendAppointmentReminderToConsumer({
+                toEmail: client.email,
+                consumerName: client.name || client.firstName || 'there',
+                vendorName: business?.name ?? 'your provider',
+                serviceName: appt.serviceName ?? 'service',
+                date: appt.appointmentDate,
+                time: appt.appointmentTime,
+                appointmentId: appt.id,
+                hoursUntil: 24,
+              });
+            }
+            await db.update(appointmentsTable)
+              .set({ reminder24hSentAt: now })
+              .where(eq(appointmentsTable.id, appt.id));
+          }
+        } catch (err) {
+          console.error(`[Reminders] 24h reminder failed for appointment ${appt.id}:`, err);
+        }
+      }
+
+      // Find confirmed appointments in the 2h window that haven't had a 2h reminder
+      const appts2h = await db
+        .select()
+        .from(appointmentsTable)
+        .where(
+          and(
+            inArray(appointmentsTable.status, ['confirmed']),
+            isNull(appointmentsTable.reminder2hSentAt),
+          )
+        );
+
+      for (const appt of appts2h) {
+        try {
+          const apptDate = new Date(`${appt.appointmentDate}T${appt.appointmentTime}`);
+          if (apptDate >= in2h && apptDate <= in3h) {
+            const client = await storage.getUser(appt.clientId);
+            const business = await storage.getBusiness(appt.businessId);
+            if (client?.email) {
+              await sendAppointmentReminderToConsumer({
+                toEmail: client.email,
+                consumerName: client.name || client.firstName || 'there',
+                vendorName: business?.name ?? 'your provider',
+                serviceName: appt.serviceName ?? 'service',
+                date: appt.appointmentDate,
+                time: appt.appointmentTime,
+                appointmentId: appt.id,
+                hoursUntil: 2,
+              });
+            }
+            await db.update(appointmentsTable)
+              .set({ reminder2hSentAt: now })
+              .where(eq(appointmentsTable.id, appt.id));
+          }
+        } catch (err) {
+          console.error(`[Reminders] 2h reminder failed for appointment ${appt.id}:`, err);
+        }
+      }
+    } catch (err) {
+      console.error('[Reminders] Appointment reminder job failed:', err);
+    }
+  }
+
+  // Run immediately on start, then every 30 minutes
+  sendAppointmentReminders().catch(err => console.error('[Reminders] Initial run failed:', err));
+  setInterval(() => {
+    sendAppointmentReminders().catch(err => console.error('[Reminders] Scheduled run failed:', err));
+  }, 30 * 60 * 1000);
   // Hourly expired-stories cleanup — soft-deletes expired rows and purges media
   setInterval(() => {
     cleanupExpiredStories().catch(err => console.error("[Stories] Cleanup failed:", err));

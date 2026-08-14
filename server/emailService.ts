@@ -1350,3 +1350,83 @@ export async function sendAdminBookingAlert(params: {
     console.error('[Email] sendAdminBookingAlert failed:', err);
   }
 }
+
+export async function sendAftercareEmail(params: {
+  toEmail: string;
+  consumerName: string;
+  vendorName: string;
+  serviceName: string;
+  appointmentId: string;
+  pointsEarned?: number;
+}): Promise<void> {
+  try {
+    const pointsRow = params.pointsEarned
+      ? `<tr><td style="background:#1A3C34;padding:12px 32px;text-align:center;">
+           <p style="color:#E8B930;font-size:14px;margin:0;">
+             You earned <strong>${params.pointsEarned} Outsyde points</strong> for this visit!
+           </p>
+         </td></tr>`
+      : '';
+
+    const html = wrapEmail(`
+      ${emailHeader(`Thank You, ${params.consumerName}! 🌿`, `We hope you enjoyed your ${params.serviceName} with ${params.vendorName}.`)}
+      ${pointsRow}
+      <tr><td style="background:#1A1A1A;padding:24px 32px;">
+        <p style="color:#F5F0E8;font-size:15px;margin:0 0 12px 0;">Here are some aftercare tips to help you get the most out of your service:</p>
+        <ul style="color:#CCCCCC;font-size:14px;line-height:1.8;padding-left:20px;margin:0 0 20px 0;">
+          <li>Follow any specific aftercare instructions provided by your provider.</li>
+          <li>Stay hydrated and avoid touching the treated area for at least 24 hours.</li>
+          <li>Contact your provider if you have any concerns or reactions.</li>
+        </ul>
+        <p style="color:#888888;font-size:13px;margin:0;">
+          Booking reference: <span style="font-family:monospace;color:#AAAAAA;">${params.appointmentId.slice(0, 8).toUpperCase()}</span>
+        </p>
+      </td></tr>
+      ${emailCta('Leave a Review', 'https://goutsyde.com/account/bookings')}
+      ${emailFooter()}
+    `);
+
+    await sendBrandedEmail(params.toEmail, `How did it go? Aftercare tips from ${params.vendorName}`, html);
+    console.log(`[Email] Aftercare email sent to ${params.toEmail} for appointment ${params.appointmentId}`);
+  } catch (err) {
+    console.error('[Email] sendAftercareEmail failed:', err);
+  }
+}
+
+export async function sendAppointmentReminderToConsumer(params: {
+  toEmail: string;
+  consumerName: string;
+  vendorName: string;
+  serviceName: string;
+  date: string;
+  time: string;
+  appointmentId: string;
+  hoursUntil: 24 | 2;
+}): Promise<void> {
+  try {
+    const label = params.hoursUntil === 24 ? 'tomorrow' : 'in 2 hours';
+    const subject = params.hoursUntil === 24
+      ? `Reminder: Your appointment with ${params.vendorName} is tomorrow`
+      : `Heads up: Your appointment with ${params.vendorName} is in 2 hours`;
+
+    const rows = [
+      detailRow('Service', params.serviceName, true),
+      detailRow('Date', params.date, false),
+      detailRow('Time', params.time, true),
+    ].join('');
+
+    const html = wrapEmail(`
+      ${emailHeader(`Your appointment is ${label} ⏰`, `Don't forget your ${params.serviceName} with ${params.vendorName}.`)}
+      <tr><td style="background:#1A1A1A;padding:0 32px;">
+        <table width="100%" cellpadding="0" cellspacing="0" style="border-radius:6px;overflow:hidden;">${rows}</table>
+      </td></tr>
+      ${emailCta('View My Booking', 'https://goutsyde.com/account/bookings')}
+      ${emailFooter()}
+    `);
+
+    await sendBrandedEmail(params.toEmail, subject, html);
+    console.log(`[Email] Appointment ${params.hoursUntil}h reminder sent to ${params.toEmail} for appointment ${params.appointmentId}`);
+  } catch (err) {
+    console.error('[Email] sendAppointmentReminderToConsumer failed:', err);
+  }
+}

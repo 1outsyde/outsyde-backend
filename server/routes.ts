@@ -35,31 +35,48 @@ import { sendExpoPush } from "./expoPushService";
 // DOB: replaced with age range for privacy
 // Ethnicity/race: never exposed at individual level, only aggregated
 function sanitizeUserForResponse(user: User, options: { includeOwnData?: boolean } = {}) {
-  const { 
-    dateOfBirth, 
-    password, 
+  const {
+    dateOfBirth,
+    password,
     ethnicity,
     householdSize,
     incomeRange,
     education,
     occupation,
-    ...safeUser 
+    stripeCustomerId,
+    resetTokenHash,
+    googleSub,
+    appleId,
+    ...safeUser
   } = user;
-  
+
   // Users can see their own DOB but not ethnicity (that's for aggregation only)
   if (options.includeOwnData) {
     return {
       ...safeUser,
       dateOfBirth,
       ageRange: calculateAgeRange(dateOfBirth),
+      loyaltyPoints: safeUser.loyaltyPoints ?? 0,
     };
   }
-  
+
   return {
     ...safeUser,
     ageRange: calculateAgeRange(dateOfBirth),
+    loyaltyPoints: safeUser.loyaltyPoints ?? 0,
   };
 }
+
+function parseCookieHeader(cookieHeader?: string): Record<string, string> {
+  if (!cookieHeader) return {};
+  return Object.fromEntries(
+    cookieHeader.split(';').map(c => {
+      const [key, ...val] = c.trim().split('=');
+      return [key.trim(), decodeURIComponent(val.join('='))];
+    })
+  );
+}
+
 import { eq, desc, sql, gte, lte, or, isNull, gt, inArray } from "drizzle-orm";
 import { z } from "zod";
 import {
@@ -692,8 +709,7 @@ export async function registerRoutes(
     }
   });
 
-  // Customer signup
-  app.post("/api/auth/customer/signup", authRateLimiter, async (req, res) => {
+  const handleCustomerSignup: import('express').RequestHandler = async (req, res) => {
     try {
       const data = customerSignupSchema.parse(req.body);
 
@@ -769,9 +785,28 @@ export async function registerRoutes(
         req.session.isVendor = false;
       }
 
+      // Generate JWT tokens for immediate auth (web/mobile clients)
+      const tokenPayload: TokenPayload = {
+        userId: user.id,
+        isVendor: false,
+        isPhotographer: false,
+        isAdmin: false,
+      };
+      const accessToken = generateAccessToken(tokenPayload);
+      const refreshToken = generateRefreshToken(tokenPayload);
+      await storage.storeRefreshToken(user.id, refreshToken, new Date(Date.now() + REFRESH_TOKEN_EXPIRY_MS));
+
+      res.cookie('refreshToken', refreshToken, {
+        httpOnly: true,
+        secure: process.env.NODE_ENV === 'production',
+        sameSite: 'strict',
+        maxAge: REFRESH_TOKEN_EXPIRY_MS,
+        path: '/api/auth',
+      });
+
       // User sees their own data on signup (includes DOB, excludes ethnicity)
       const safeUser = sanitizeUserForResponse(user, { includeOwnData: true });
-      res.json({ user: safeUser });
+      res.json({ user: safeUser, accessToken, refreshToken, expiresIn: ACCESS_TOKEN_EXPIRY_SECONDS });
     } catch (error) {
       if (error instanceof z.ZodError) {
         return res
@@ -785,7 +820,12 @@ export async function registerRoutes(
         detail: error instanceof Error && process.env.NODE_ENV !== "production" ? error.stack : undefined,
       });
     }
-  });
+  };
+
+  // Customer signup
+  app.post("/api/auth/customer/signup", authRateLimiter, handleCustomerSignup);
+  // Alias: /api/auth/register → same as /api/auth/customer/signup (for xo-lashes-web compatibility)
+  app.post("/api/auth/register", authRateLimiter, handleCustomerSignup);
 
   // Vendor signup
   app.post("/api/auth/vendor/signup", authRateLimiter, async (req, res) => {
@@ -1166,7 +1206,25 @@ export async function registerRoutes(
   });
 
   // Logout
-  app.post("/api/auth/logout", (req, res) => {
+  app.post("/api/auth/logout", async (req, res) => {
+    try {
+      // Revoke refresh token from body or cookie
+      const cookieRefreshToken = parseCookieHeader(req.headers.cookie)['refreshToken'];
+      const refreshToken = req.body?.refreshToken || cookieRefreshToken;
+      if (refreshToken) {
+        try {
+          const tokenRecord = await storage.validateRefreshToken(refreshToken);
+          if (tokenRecord) await storage.revokeRefreshToken(tokenRecord.tokenId);
+        } catch {
+          // Non-fatal — continue logout
+        }
+      }
+      // Clear the httpOnly cookie
+      res.clearCookie('refreshToken', { path: '/api/auth' });
+    } catch {
+      // Non-fatal
+    }
+
     if (req.session) {
       req.session.destroy((err) => {
         if (err) {
@@ -1995,7 +2053,8 @@ export async function registerRoutes(
   // Mobile token refresh endpoint
   app.post("/api/auth/mobile/refresh", authRateLimiter, async (req, res) => {
     try {
-      const { refreshToken } = req.body;
+      const cookieRefreshToken = parseCookieHeader(req.headers.cookie)['refreshToken'];
+      const refreshToken = req.body.refreshToken || cookieRefreshToken;
 
       if (!refreshToken || typeof refreshToken !== 'string') {
         return res.status(400).json({
@@ -2064,6 +2123,14 @@ export async function registerRoutes(
       await storage.revokeRefreshToken(tokenRecord.tokenId);
       await storage.storeRefreshToken(user.id, newRefreshToken, new Date(Date.now() + REFRESH_TOKEN_EXPIRY_MS));
 
+      res.cookie('refreshToken', newRefreshToken, {
+        httpOnly: true,
+        secure: process.env.NODE_ENV === 'production',
+        sameSite: 'strict',
+        maxAge: REFRESH_TOKEN_EXPIRY_MS,
+        path: '/api/auth',
+      });
+
       res.json({
         success: true,
         accessToken: newAccessToken,
@@ -2084,7 +2151,8 @@ export async function registerRoutes(
   // Uses the same refresh token rotation logic
   app.post("/api/auth/refresh", authRateLimiter, async (req, res) => {
     try {
-      const { refreshToken } = req.body;
+      const cookieRefreshToken = parseCookieHeader(req.headers.cookie)['refreshToken'];
+      const refreshToken = req.body.refreshToken || cookieRefreshToken;
       if (!refreshToken || typeof refreshToken !== 'string') {
         return res.status(400).json({ success: false, message: "refreshToken is required" });
       }
@@ -2121,6 +2189,13 @@ export async function registerRoutes(
       const newRefreshToken = generateRefreshToken(tokenPayload);
       await storage.revokeRefreshToken(tokenRecord.tokenId);
       await storage.storeRefreshToken(user.id, newRefreshToken, new Date(Date.now() + REFRESH_TOKEN_EXPIRY_MS));
+      res.cookie('refreshToken', newRefreshToken, {
+        httpOnly: true,
+        secure: process.env.NODE_ENV === 'production',
+        sameSite: 'strict',
+        maxAge: REFRESH_TOKEN_EXPIRY_MS,
+        path: '/api/auth',
+      });
       res.json({ success: true, accessToken: newAccessToken, refreshToken: newRefreshToken, expiresIn: ACCESS_TOKEN_EXPIRY_SECONDS });
     } catch (error) {
       console.error("Token refresh error:", error);
@@ -2246,6 +2321,14 @@ export async function registerRoutes(
       });
 
       const safeUser = sanitizeUserForResponse(user, { includeOwnData: true });
+
+      res.cookie('refreshToken', refreshToken, {
+        httpOnly: true,
+        secure: process.env.NODE_ENV === 'production',
+        sameSite: 'strict',
+        maxAge: REFRESH_TOKEN_EXPIRY_MS,
+        path: '/api/auth',
+      });
 
       res.json({
         success: true,
@@ -2400,6 +2483,7 @@ export async function registerRoutes(
         photographerId: null as string | null,
         subscriptionTier: null as string | null,
         influencerStatus: null as string | null,
+        loyaltyPoints: user.loyaltyPoints ?? 0,
         deletionStatus: user.deletionStatus ?? "active",
         scheduledDeletionAt: user.scheduledDeletionAt ?? null,
       };
@@ -7680,6 +7764,130 @@ export async function registerRoutes(
     }
   });
 
+  // Mark an appointment as completed and award loyalty points to the client.
+  // Only the vendor (business owner) or an admin may call this endpoint.
+  app.patch("/api/bookings/appointments/:id/complete", async (req, res) => {
+    const actorId = req.session?.userId || getUserIdFromRequest(req);
+    if (!actorId) return res.status(401).json({ error: "Not authenticated" });
+
+    try {
+      const { id } = req.params;
+      const appointment = await storage.getAppointment(id);
+      if (!appointment) return res.status(404).json({ error: "Appointment not found" });
+
+      // Only the owning business or an admin may mark complete
+      const actor = await storage.getUser(actorId);
+      const business = await storage.getBusinessByOwnerId(actorId);
+      const isOwner = business?.id === appointment.businessId;
+      const isAdmin = actor?.isAdmin;
+      if (!isOwner && !isAdmin) {
+        return res.status(403).json({ error: "Only the vendor or an admin can mark appointments as complete" });
+      }
+
+      if (appointment.status === 'completed') {
+        return res.status(409).json({ error: "Appointment is already completed" });
+      }
+      if (!['confirmed', 'pending_provider'].includes(appointment.status)) {
+        return res.status(400).json({ error: `Cannot complete an appointment with status '${appointment.status}'` });
+      }
+
+      const updated = await storage.updateAppointment(id, {
+        status: 'completed',
+        stateChangedAt: new Date(),
+        stateChangedBy: actorId,
+        previousState: appointment.status,
+        updatedAt: new Date(),
+      });
+
+      // Award 250 loyalty points to the client for the completed appointment
+      const COMPLETION_BONUS_POINTS = 250;
+      await storage.earnPoints({
+        userId: appointment.clientId,
+        dollarAmountCents: COMPLETION_BONUS_POINTS,
+        transactionType: 'bonus',
+        referenceType: 'appointment_completion',
+        referenceId: id,
+        description: `Completed appointment at ${business?.name ?? 'vendor'}`,
+      });
+
+      // Send aftercare email to client (non-fatal)
+      try {
+        const client = await storage.getUser(appointment.clientId);
+        if (client?.email) {
+          const { sendAftercareEmail } = await import('./emailService');
+          await sendAftercareEmail({
+            toEmail: client.email,
+            consumerName: client.name || client.firstName || 'there',
+            vendorName: business?.name ?? 'your provider',
+            serviceName: appointment.serviceName ?? 'service',
+            appointmentId: id,
+            pointsEarned: COMPLETION_BONUS_POINTS,
+          });
+        }
+      } catch (emailErr) {
+        console.warn('[complete appointment] aftercare email failed:', emailErr);
+      }
+
+      res.json({ success: true, appointment: updated });
+    } catch (error: any) {
+      console.error("Complete appointment error:", error);
+      res.status(500).json({ error: "Failed to complete appointment", details: error.message });
+    }
+  });
+
+  // Update appointment status — handles vendor-side status changes such as
+  // late_cancel, no_show, and rescheduled.
+  app.patch("/api/bookings/appointments/:id/status", async (req, res) => {
+    const actorId = req.session?.userId || getUserIdFromRequest(req);
+    if (!actorId) return res.status(401).json({ error: "Not authenticated" });
+
+    try {
+      const { id } = req.params;
+      const { status, reason } = req.body as { status: string; reason?: string };
+
+      const ALLOWED_STATUSES = ['late_cancel', 'no_show', 'rescheduled', 'confirmed', 'canceled'];
+      if (!status || !ALLOWED_STATUSES.includes(status)) {
+        return res.status(400).json({ error: `status must be one of: ${ALLOWED_STATUSES.join(', ')}` });
+      }
+
+      const appointment = await storage.getAppointment(id);
+      if (!appointment) return res.status(404).json({ error: "Appointment not found" });
+
+      // Only vendor (business owner) or admin
+      const actor = await storage.getUser(actorId);
+      const business = await storage.getBusinessByOwnerId(actorId);
+      const isOwner = business?.id === appointment.businessId;
+      const isAdmin = actor?.isAdmin;
+      if (!isOwner && !isAdmin) {
+        return res.status(403).json({ error: "Only the vendor or an admin can update appointment status" });
+      }
+
+      const updates: Record<string, unknown> = {
+        status,
+        stateChangedAt: new Date(),
+        stateChangedBy: actorId,
+        previousState: appointment.status,
+        updatedAt: new Date(),
+      };
+
+      if (status === 'late_cancel' || status === 'canceled') {
+        updates.canceledAt = new Date();
+        updates.canceledBy = actorId;
+        if (reason) updates.cancellationReason = reason;
+      } else if (status === 'no_show') {
+        updates.canceledAt = new Date();
+        updates.canceledBy = actorId;
+        if (reason) updates.cancellationReason = reason;
+      }
+
+      const updated = await storage.updateAppointment(id, updates as Partial<import('../shared/schema').Appointment>);
+      res.json({ success: true, appointment: updated });
+    } catch (error: any) {
+      console.error("Update appointment status error:", error);
+      res.status(500).json({ error: "Failed to update appointment status", details: error.message });
+    }
+  });
+
   // Consumer-initiated cancel for photographer shoot bookings.
   // Mirrors the business appointment cancel route: applies the photographer service's
   // cancellation policy to determine refund tier, issues a best-effort refund,
@@ -12945,7 +13153,7 @@ export async function registerRoutes(
 
   // Get user's points balance and summary
   app.get("/api/points/balance", async (req, res) => {
-    const userId = req.session?.userId;
+    const userId = req.session?.userId || getUserIdFromRequest(req);
     if (!userId) {
       return res.status(401).json({ error: "Not authenticated" });
     }
@@ -12968,7 +13176,7 @@ export async function registerRoutes(
 
   // Get user's points transaction history
   app.get("/api/points/history", async (req, res) => {
-    const userId = req.session?.userId;
+    const userId = req.session?.userId || getUserIdFromRequest(req);
     if (!userId) {
       return res.status(401).json({ error: "Not authenticated" });
     }
@@ -13208,6 +13416,53 @@ export async function registerRoutes(
       }
       console.error("Earn points error:", error);
       res.status(500).json({ error: "Failed to earn points" });
+    }
+  });
+
+  // ==================== INTERNAL: REWARDS EVENTS ====================
+  // Server-to-server endpoint for trusted client sites (e.g. xo-lashes-web).
+  // Protected by X-Internal-Key header — caller must supply INTERNAL_API_KEY env value.
+  app.post("/api/internal/rewards/events", async (req, res) => {
+    const internalKey = process.env.INTERNAL_API_KEY;
+    if (!internalKey) {
+      return res.status(503).json({ error: "Internal rewards endpoint not configured" });
+    }
+    const suppliedKey = req.headers['x-internal-key'];
+    if (!suppliedKey || suppliedKey !== internalKey) {
+      return res.status(401).json({ error: "Invalid or missing X-Internal-Key" });
+    }
+
+    try {
+      const schema = z.object({
+        event: z.enum(['appointment_completed', 'bonus', 'referral']),
+        userId: z.string(),
+        points: z.number().int().positive(),
+        referenceType: z.string().optional(),
+        referenceId: z.string().optional(),
+        description: z.string().optional(),
+      });
+      const data = schema.parse(req.body);
+
+      const user = await storage.getUser(data.userId);
+      if (!user) return res.status(404).json({ error: "User not found" });
+
+      const transaction = await storage.earnPoints({
+        userId: data.userId,
+        dollarAmountCents: data.points,
+        transactionType: 'bonus',
+        referenceType: data.referenceType,
+        referenceId: data.referenceId,
+        description: data.description || `Internal reward: ${data.event}`,
+      });
+
+      const newBalance = await storage.getUserPointsBalance(data.userId);
+      res.json({ success: true, transaction, newBalance });
+    } catch (error) {
+      if (error instanceof z.ZodError) {
+        return res.status(400).json({ error: "Invalid data", details: error.errors });
+      }
+      console.error("Internal rewards event error:", error);
+      res.status(500).json({ error: "Failed to process rewards event" });
     }
   });
 
@@ -17154,7 +17409,7 @@ export async function registerRoutes(
   // Admin: Get all photographer bookings
   app.get("/api/admin/bookings", requireAdmin, async (req, res) => {
     try {
-      const { status, limit = "50", offset = "0" } = req.query;
+      const { status, businessId, limit = "50", offset = "0" } = req.query;
       let bookings = await storage.getAllShootBookings();
 
       // Status filter
@@ -17182,10 +17437,52 @@ export async function registerRoutes(
         };
       }));
 
-      res.json({ bookings: enrichedBookings, total: bookings.length });
+      // Also include service appointments when businessId filter is supplied
+      let appointments: typeof enrichedBookings = [];
+      if (businessId) {
+        const appts = await storage.getAppointmentsByBusiness(businessId as string);
+        const filteredAppts = status ? appts.filter(a => a.status === status) : appts;
+        appointments = await Promise.all(filteredAppts.map(async (appt) => {
+          const client = await storage.getUser(appt.clientId);
+          return {
+            ...appt,
+            type: 'appointment',
+            customerEmail: client?.email,
+            customerName: client?.name || `${client?.firstName || ''} ${client?.lastName || ''}`.trim(),
+            photographerName: undefined,
+          } as any;
+        }));
+      }
+
+      res.json({ bookings: businessId ? appointments : enrichedBookings, total: businessId ? appointments.length : bookings.length });
     } catch (error) {
       console.error("Get admin bookings error:", error);
       res.status(500).json({ error: "Failed to get bookings" });
+    }
+  });
+
+  // Business owner: get their own appointment bookings
+  app.get("/api/business/appointments", async (req, res) => {
+    const userId = req.session?.userId || getUserIdFromRequest(req);
+    if (!userId) return res.status(401).json({ error: "Not authenticated" });
+
+    try {
+      const business = await storage.getBusinessByOwnerId(userId);
+      if (!business) return res.status(403).json({ error: "No business associated with this account" });
+
+      const { status, limit = "50", offset = "0" } = req.query;
+      const appts = await storage.getAppointmentsByBusinessWithDetails(business.id);
+
+      const filtered = status ? appts.filter(a => a.status === status) : appts;
+
+      const start = parseInt(offset as string);
+      const end = start + parseInt(limit as string);
+      const paginated = filtered.slice(start, end);
+
+      res.json({ appointments: paginated, total: filtered.length });
+    } catch (error) {
+      console.error("Get business appointments error:", error);
+      res.status(500).json({ error: "Failed to get appointments" });
     }
   });
 
