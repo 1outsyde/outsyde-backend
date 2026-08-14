@@ -1023,6 +1023,10 @@ export const appointments = pgTable("appointments", {
   serviceCancellationFeeType: text("service_cancellation_fee_type"),
   serviceCancellationFeeAmount: integer("service_cancellation_fee_amount"),
 
+  // Reminder email tracking — set to true once the reminder has been sent
+  reminder24hSent: boolean("reminder_24h_sent").default(false),
+  reminder2hSent: boolean("reminder_2h_sent").default(false),
+
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 }, (table) => ({
@@ -2319,6 +2323,8 @@ export const customerSignupSchema = z.object({
   industryValues: z.record(z.string(), z.array(z.string())).default({}),
   // Optional: auto-accept a staff invite at signup time
   inviteCode: z.string().optional(),
+  // Optional: tag the signup source (e.g. 'xo-beauty-web') for analytics
+  source: z.string().optional(),
 });
 
 export const vendorSignupSchema = z.object({
