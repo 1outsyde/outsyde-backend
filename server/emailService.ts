@@ -1350,3 +1350,75 @@ export async function sendAdminBookingAlert(params: {
     console.error('[Email] sendAdminBookingAlert failed:', err);
   }
 }
+
+export async function sendAppointmentReminderEmail(params: {
+  toEmail: string;
+  customerName: string;
+  serviceName: string;
+  businessName: string;
+  appointmentDate: string;
+  appointmentTime: string;
+  windowLabel: '24h' | '2h';
+}): Promise<void> {
+  const timeLabel = params.windowLabel === '24h' ? 'tomorrow' : 'in about 2 hours';
+  const subject = `Your appointment is ${timeLabel} — ${params.businessName}`;
+  const html = wrapEmail(`
+    ${emailHeader(`Reminder: Your appointment is ${timeLabel} ✨`, params.businessName)}
+    <tr>
+      <td style="background:#1A1A1A;padding:16px 32px;">
+        <p style="color:#F5F0E8;font-size:15px;margin:0 0 12px 0;">Hi ${params.customerName},</p>
+        <p style="color:#AAAAAA;font-size:14px;margin:0 0 20px 0;">
+          Just a heads-up — your <strong style="color:#E8B930;">${params.serviceName}</strong> appointment at
+          <strong style="color:#E8B930;">${params.businessName}</strong> is coming up.
+        </p>
+        <table width="100%" cellpadding="0" cellspacing="0">
+          ${detailRow('Date', params.appointmentDate, true)}
+          ${detailRow('Time', params.appointmentTime, false)}
+          ${detailRow('Service', params.serviceName, true)}
+        </table>
+        <p style="color:#AAAAAA;font-size:13px;margin:20px 0 0 0;">
+          If you need to cancel or reschedule, please contact ${params.businessName} as soon as possible
+          to avoid a late-cancellation fee.
+        </p>
+      </td>
+    </tr>
+    ${emailFooter('See you soon!')}
+  `);
+  await sendBrandedEmail(params.toEmail, subject, html);
+}
+
+export async function sendAftercareEmail(params: {
+  toEmail: string;
+  customerName: string;
+  serviceName: string;
+  businessName: string;
+  loyaltyPointsEarned?: number;
+}): Promise<void> {
+  const subject = 'Your ritual is complete ✨ — XO Beauty & Lashes aftercare guide';
+  const html = wrapEmail(`
+    ${emailHeader('Your appointment is complete! ✨', `Thank you for choosing ${params.businessName}`)}
+    <tr>
+      <td style="background:#1A1A1A;padding:16px 32px;">
+        <p style="color:#F5F0E8;font-size:15px;margin:0 0 12px 0;">Hi ${params.customerName},</p>
+        <p style="color:#AAAAAA;font-size:14px;margin:0 0 20px 0;">
+          Your <strong style="color:#E8B930;">${params.serviceName}</strong> session is complete.
+          To keep your results looking their best, please follow these aftercare guidelines:
+        </p>
+        <table width="100%" cellpadding="0" cellspacing="0">
+          ${detailRow('First 24 hours', 'Avoid touching, rubbing, or getting your lashes wet.', true)}
+          ${detailRow('Avoid steam & heat', 'Stay away from saunas, steam rooms, and hot showers directly on your face.', false)}
+          ${detailRow('Cleansing', 'Use a gentle, oil-free cleanser around the eye area only.', true)}
+          ${detailRow('No mascara', 'Avoid mascara, especially waterproof formulas, to extend retention.', false)}
+          ${detailRow('Brush daily', 'Gently brush lashes with the provided spoolie every morning.', true)}
+          ${detailRow('Schedule fills', 'Book your next fill in 2–3 weeks to maintain fullness.', false)}
+        </table>
+        ${params.loyaltyPointsEarned ? `
+        <div style="margin-top:20px;background:#1A3C34;border-radius:8px;padding:14px 20px;text-align:center;">
+          <span style="color:#E8B930;font-size:14px;font-weight:700;">🎉 +${params.loyaltyPointsEarned} Outsyde Points earned!</span>
+        </div>` : ''}
+      </td>
+    </tr>
+    ${emailFooter('We look forward to seeing you again soon.')}
+  `);
+  await sendBrandedEmail(params.toEmail, subject, html);
+}

@@ -1,4 +1,4 @@
-import type { Express } from "express";
+import type { Express, RequestHandler } from "express";
 import type { Server } from "http";
 import { randomUUID } from "crypto";
 import multer from "multer";
@@ -28,36 +28,47 @@ import {
 } from "@shared/schema";
 import { sendStaffInviteEmail, sendStaffPayoutSetupEmail, sendStaffAcceptedOwnerEmail, sendDeletionConfirmationEmail, sendSupportContactEmail } from "./services/resendService";
 import { checkVendorStripeBalances, checkActiveOrders } from "./services/accountDeletionService";
-import { sendBookingAcceptedToConsumer, sendBookingDeclinedToConsumer, sendBookingRequestToVendor, sendBookingRequestReceivedToConsumer, sendAdminBookingAlert, sendShootBookingAcceptedToPhotographer, sendShootBookingDeclinedToPhotographer, sendShootBookingCanceledToPhotographer } from "./emailService";
+import { sendBookingAcceptedToConsumer, sendBookingDeclinedToConsumer, sendBookingRequestToVendor, sendBookingRequestReceivedToConsumer, sendAdminBookingAlert, sendShootBookingAcceptedToPhotographer, sendShootBookingDeclinedToPhotographer, sendShootBookingCanceledToPhotographer, sendAftercareEmail } from "./emailService";
 import { sendExpoPush } from "./expoPushService";
 
 // Helper to sanitize user data for non-admin responses (removes sensitive fields)
 // DOB: replaced with age range for privacy
 // Ethnicity/race: never exposed at individual level, only aggregated
 function sanitizeUserForResponse(user: User, options: { includeOwnData?: boolean } = {}) {
-  const { 
-    dateOfBirth, 
-    password, 
+  const {
+    dateOfBirth,
+    password,
     ethnicity,
     householdSize,
     incomeRange,
     education,
     occupation,
-    ...safeUser 
+    // Security-sensitive fields — never expose to clients
+    stripeCustomerId,
+    resetTokenHash,
+    resetTokenExpiresAt,
+    resetCodeHash,
+    resetCodeExpiresAt,
+    resetCodeAttempts,
+    googleSub,
+    appleId,
+    ...safeUser
   } = user;
-  
+
   // Users can see their own DOB but not ethnicity (that's for aggregation only)
   if (options.includeOwnData) {
     return {
       ...safeUser,
       dateOfBirth,
       ageRange: calculateAgeRange(dateOfBirth),
+      loyaltyPoints: user.loyaltyPoints ?? 0,
     };
   }
-  
+
   return {
     ...safeUser,
     ageRange: calculateAgeRange(dateOfBirth),
+    loyaltyPoints: user.loyaltyPoints ?? 0,
   };
 }
 import { eq, desc, sql, gte, lte, or, isNull, gt, inArray } from "drizzle-orm";
@@ -141,6 +152,7 @@ import {
   storyHighlights,
   follows,
   staffMembers,
+  pointTransactions,
 } from "@shared/schema";
 import { and, ilike, ne, asc } from "drizzle-orm";
 
@@ -693,7 +705,7 @@ export async function registerRoutes(
   });
 
   // Customer signup
-  app.post("/api/auth/customer/signup", authRateLimiter, async (req, res) => {
+  const handleCustomerSignup: RequestHandler = async (req, res) => {
     try {
       const data = customerSignupSchema.parse(req.body);
 
@@ -769,9 +781,34 @@ export async function registerRoutes(
         req.session.isVendor = false;
       }
 
+      // Generate JWT tokens so web clients are immediately authenticated after signup
+      const signupTokenPayload: TokenPayload = {
+        userId: user.id,
+        isVendor: false,
+        isPhotographer: false,
+        isAdmin: user.isAdmin || false,
+      };
+      const signupAccessToken = generateAccessToken(signupTokenPayload);
+      const signupRefreshToken = generateRefreshToken(signupTokenPayload);
+      await storage.storeRefreshToken(user.id, signupRefreshToken, new Date(Date.now() + REFRESH_TOKEN_EXPIRY_MS));
+
+      // Log source for analytics (stored in server logs; not persisted to DB yet)
+      if (data.source) {
+        console.log(`[signup] source=${data.source} userId=${user.id}`);
+      }
+
+      // Set httpOnly cookie for web clients
+      res.cookie('refreshToken', signupRefreshToken, {
+        httpOnly: true,
+        secure: process.env.NODE_ENV === 'production',
+        sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'lax',
+        maxAge: REFRESH_TOKEN_EXPIRY_MS,
+        path: '/',
+      });
+
       // User sees their own data on signup (includes DOB, excludes ethnicity)
       const safeUser = sanitizeUserForResponse(user, { includeOwnData: true });
-      res.json({ user: safeUser });
+      res.json({ success: true, user: safeUser, accessToken: signupAccessToken, refreshToken: signupRefreshToken, expiresIn: ACCESS_TOKEN_EXPIRY_SECONDS });
     } catch (error) {
       if (error instanceof z.ZodError) {
         return res
@@ -785,7 +822,11 @@ export async function registerRoutes(
         detail: error instanceof Error && process.env.NODE_ENV !== "production" ? error.stack : undefined,
       });
     }
-  });
+  };
+
+  app.post("/api/auth/customer/signup", authRateLimiter, handleCustomerSignup);
+  // Route alias used by client websites (xo-lashes-web etc.) for a consistent path
+  app.post("/api/auth/register", authRateLimiter, handleCustomerSignup);
 
   // Vendor signup
   app.post("/api/auth/vendor/signup", authRateLimiter, async (req, res) => {
@@ -1166,7 +1207,28 @@ export async function registerRoutes(
   });
 
   // Logout
-  app.post("/api/auth/logout", (req, res) => {
+  app.post("/api/auth/logout", async (req, res) => {
+    // Revoke refresh token from DB (works for both cookie and body delivery)
+    const tokenToRevoke: string | undefined = req.cookies?.refreshToken || req.body?.refreshToken;
+    if (tokenToRevoke) {
+      try {
+        const tokenRecord = await storage.validateRefreshToken(tokenToRevoke);
+        if (tokenRecord) {
+          await storage.revokeRefreshToken(tokenRecord.tokenId);
+        }
+      } catch (err) {
+        console.error('[logout] Failed to revoke refresh token:', err);
+      }
+    }
+
+    // Clear the httpOnly cookie
+    res.clearCookie('refreshToken', {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === 'production',
+      sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'lax',
+      path: '/',
+    });
+
     if (req.session) {
       req.session.destroy((err) => {
         if (err) {
@@ -1995,7 +2057,7 @@ export async function registerRoutes(
   // Mobile token refresh endpoint
   app.post("/api/auth/mobile/refresh", authRateLimiter, async (req, res) => {
     try {
-      const { refreshToken } = req.body;
+      const refreshToken: string | undefined = req.cookies?.refreshToken || req.body?.refreshToken;
 
       if (!refreshToken || typeof refreshToken !== 'string') {
         return res.status(400).json({
@@ -2064,6 +2126,15 @@ export async function registerRoutes(
       await storage.revokeRefreshToken(tokenRecord.tokenId);
       await storage.storeRefreshToken(user.id, newRefreshToken, new Date(Date.now() + REFRESH_TOKEN_EXPIRY_MS));
 
+      // Rotate cookie for web clients
+      res.cookie('refreshToken', newRefreshToken, {
+        httpOnly: true,
+        secure: process.env.NODE_ENV === 'production',
+        sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'lax',
+        maxAge: REFRESH_TOKEN_EXPIRY_MS,
+        path: '/',
+      });
+
       res.json({
         success: true,
         accessToken: newAccessToken,
@@ -2084,7 +2155,7 @@ export async function registerRoutes(
   // Uses the same refresh token rotation logic
   app.post("/api/auth/refresh", authRateLimiter, async (req, res) => {
     try {
-      const { refreshToken } = req.body;
+      const refreshToken: string | undefined = req.cookies?.refreshToken || req.body?.refreshToken;
       if (!refreshToken || typeof refreshToken !== 'string') {
         return res.status(400).json({ success: false, message: "refreshToken is required" });
       }
@@ -2121,6 +2192,13 @@ export async function registerRoutes(
       const newRefreshToken = generateRefreshToken(tokenPayload);
       await storage.revokeRefreshToken(tokenRecord.tokenId);
       await storage.storeRefreshToken(user.id, newRefreshToken, new Date(Date.now() + REFRESH_TOKEN_EXPIRY_MS));
+      res.cookie('refreshToken', newRefreshToken, {
+        httpOnly: true,
+        secure: process.env.NODE_ENV === 'production',
+        sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'lax',
+        maxAge: REFRESH_TOKEN_EXPIRY_MS,
+        path: '/',
+      });
       res.json({ success: true, accessToken: newAccessToken, refreshToken: newRefreshToken, expiresIn: ACCESS_TOKEN_EXPIRY_SECONDS });
     } catch (error) {
       console.error("Token refresh error:", error);
@@ -2246,6 +2324,15 @@ export async function registerRoutes(
       });
 
       const safeUser = sanitizeUserForResponse(user, { includeOwnData: true });
+
+      // Set httpOnly cookie for web clients (mobile clients use the body token)
+      res.cookie('refreshToken', refreshToken, {
+        httpOnly: true,
+        secure: process.env.NODE_ENV === 'production',
+        sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'lax',
+        maxAge: REFRESH_TOKEN_EXPIRY_MS,
+        path: '/',
+      });
 
       res.json({
         success: true,
@@ -2402,6 +2489,7 @@ export async function registerRoutes(
         influencerStatus: null as string | null,
         deletionStatus: user.deletionStatus ?? "active",
         scheduledDeletionAt: user.scheduledDeletionAt ?? null,
+        loyaltyPoints: user.loyaltyPoints ?? 0,
       };
 
       // Check for business ownership
@@ -7680,6 +7768,137 @@ export async function registerRoutes(
     }
   });
 
+  // Mark an appointment as completed — accessible only by the business owner.
+  // Awards 250 loyalty points to the client and sends the aftercare email.
+  app.patch("/api/bookings/appointments/:id/complete", async (req, res) => {
+    const userId = getUserIdFromRequest(req) ?? req.session?.userId;
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+    try {
+      const { id: appointmentId } = req.params;
+      const appointment = await storage.getAppointment(appointmentId);
+      if (!appointment) {
+        return res.status(404).json({ error: "Appointment not found" });
+      }
+
+      // Verify the requester owns the business associated with this appointment
+      const business = await storage.getBusiness(appointment.businessId);
+      if (!business || business.ownerId !== userId) {
+        return res.status(403).json({ error: "Not authorized to complete this appointment" });
+      }
+
+      if (appointment.status === BOOKING_STATES.COMPLETED) {
+        return res.status(400).json({ error: "Appointment is already completed" });
+      }
+      if (appointment.status !== BOOKING_STATES.CONFIRMED) {
+        return res.status(400).json({
+          error: "Appointment must be confirmed before it can be completed",
+          currentStatus: appointment.status,
+        });
+      }
+
+      await transitionAppointmentState(appointmentId, BOOKING_STATES.COMPLETED, {
+        triggeredBy: userId,
+        triggerSource: 'api',
+        metadata: { action: 'business_complete' },
+      });
+
+      // Award completion bonus points to the client
+      const COMPLETION_POINTS = 250;
+      try {
+        await storage.earnPoints({
+          userId: appointment.clientId,
+          dollarAmountCents: COMPLETION_POINTS,
+          transactionType: 'bonus',
+          referenceType: 'appointment',
+          referenceId: appointmentId,
+          description: `Appointment completed — ${appointment.serviceName ?? 'service'}`,
+        });
+      } catch (pointsErr) {
+        console.error('[complete] Failed to award completion points:', pointsErr);
+      }
+
+      // Send aftercare email to the client (best-effort)
+      try {
+        const client = await storage.getUser(appointment.clientId);
+        if (client?.email) {
+          await sendAftercareEmail({
+            toEmail: client.email,
+            customerName: client.name ?? client.email,
+            serviceName: appointment.serviceName ?? 'your service',
+            businessName: business.name,
+            loyaltyPointsEarned: COMPLETION_POINTS,
+          });
+        }
+      } catch (emailErr) {
+        console.error('[complete] Failed to send aftercare email:', emailErr);
+      }
+
+      res.json({ success: true, appointmentId, status: BOOKING_STATES.COMPLETED, pointsAwarded: COMPLETION_POINTS });
+    } catch (error: any) {
+      console.error('[complete] Error completing appointment:', error);
+      res.status(500).json({ error: 'Failed to complete appointment', details: error.message });
+    }
+  });
+
+  // Update appointment outcome status — business-owner only.
+  // Used for post-appointment resolution: no-show, late cancellation, rescheduling.
+  app.patch("/api/bookings/appointments/:id/status", async (req, res) => {
+    const userId = getUserIdFromRequest(req) ?? req.session?.userId;
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+    try {
+      const { id: appointmentId } = req.params;
+      const bodySchema = z.object({
+        status: z.enum(['no_show', 'late_cancel', 'rescheduled']),
+        note: z.string().max(500).optional(),
+      });
+      const { status: outcomeStatus, note } = bodySchema.parse(req.body);
+
+      const appointment = await storage.getAppointment(appointmentId);
+      if (!appointment) {
+        return res.status(404).json({ error: "Appointment not found" });
+      }
+
+      // Verify the requester owns the business associated with this appointment
+      const business = await storage.getBusiness(appointment.businessId);
+      if (!business || business.ownerId !== userId) {
+        return res.status(403).json({ error: "Not authorized to update this appointment" });
+      }
+
+      if (appointment.status !== BOOKING_STATES.CONFIRMED) {
+        return res.status(400).json({
+          error: "Appointment must be confirmed to update its outcome",
+          currentStatus: appointment.status,
+        });
+      }
+
+      // Map outcome to a terminal booking state
+      const targetState = outcomeStatus === 'no_show'
+        ? BOOKING_STATES.NO_SHOW
+        : BOOKING_STATES.CANCELED;
+
+      await transitionAppointmentState(appointmentId, targetState, {
+        triggeredBy: userId,
+        triggerSource: 'api',
+        metadata: {
+          action: outcomeStatus,
+          ...(note ? { note } : {}),
+        },
+      });
+
+      res.json({ success: true, appointmentId, status: targetState, outcome: outcomeStatus });
+    } catch (error: any) {
+      if (error instanceof z.ZodError) {
+        return res.status(400).json({ error: "Invalid data", details: error.errors });
+      }
+      console.error('[status] Error updating appointment status:', error);
+      res.status(500).json({ error: 'Failed to update appointment status', details: error.message });
+    }
+  });
+
   // Consumer-initiated cancel for photographer shoot bookings.
   // Mirrors the business appointment cancel route: applies the photographer service's
   // cancellation policy to determine refund tier, issues a best-effort refund,
@@ -12945,7 +13164,7 @@ export async function registerRoutes(
 
   // Get user's points balance and summary
   app.get("/api/points/balance", async (req, res) => {
-    const userId = req.session?.userId;
+    const userId = getUserIdFromRequest(req) ?? req.session?.userId;
     if (!userId) {
       return res.status(401).json({ error: "Not authenticated" });
     }
@@ -12968,7 +13187,7 @@ export async function registerRoutes(
 
   // Get user's points transaction history
   app.get("/api/points/history", async (req, res) => {
-    const userId = req.session?.userId;
+    const userId = getUserIdFromRequest(req) ?? req.session?.userId;
     if (!userId) {
       return res.status(401).json({ error: "Not authenticated" });
     }
@@ -17154,7 +17373,27 @@ export async function registerRoutes(
   // Admin: Get all photographer bookings
   app.get("/api/admin/bookings", requireAdmin, async (req, res) => {
     try {
-      const { status, limit = "50", offset = "0" } = req.query;
+      const { status, businessId, limit = "50", offset = "0" } = req.query;
+
+      if (businessId) {
+        // Return regular appointments for a specific business
+        let appts = await storage.getAppointmentsByBusiness(businessId as string);
+        if (status) appts = appts.filter(a => a.status === status);
+        appts.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+        const start = parseInt(offset as string);
+        const end = start + parseInt(limit as string);
+        const page = appts.slice(start, end);
+        const enriched = await Promise.all(page.map(async (appt) => {
+          const client = await storage.getUser(appt.clientId);
+          return {
+            ...appt,
+            clientEmail: client?.email,
+            clientName: client?.name ?? `${client?.firstName ?? ''} ${client?.lastName ?? ''}`.trim(),
+          };
+        }));
+        return res.json({ appointments: enriched, total: appts.length });
+      }
+
       let bookings = await storage.getAllShootBookings();
 
       // Status filter
@@ -17186,6 +17425,55 @@ export async function registerRoutes(
     } catch (error) {
       console.error("Get admin bookings error:", error);
       res.status(500).json({ error: "Failed to get bookings" });
+    }
+  });
+
+  // Vendor: list appointments for their own business with optional filters
+  app.get("/api/business/appointments", async (req, res) => {
+    const userId = getUserIdFromRequest(req) ?? req.session?.userId;
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+    try {
+      const business = await storage.getBusinessByOwnerId(userId);
+      if (!business) {
+        return res.status(403).json({ error: "No business associated with this account" });
+      }
+
+      const { status, page = "1", limit = "20" } = req.query;
+      let appts = await storage.getAppointmentsByBusiness(business.id);
+
+      if (status) {
+        appts = appts.filter(a => a.status === status);
+      }
+
+      appts.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+
+      const pageNum = Math.max(1, parseInt(page as string));
+      const pageSize = Math.min(100, Math.max(1, parseInt(limit as string)));
+      const start = (pageNum - 1) * pageSize;
+      const paged = appts.slice(start, start + pageSize);
+
+      const enriched = await Promise.all(paged.map(async (appt) => {
+        const client = await storage.getUser(appt.clientId);
+        return {
+          ...appt,
+          clientEmail: client?.email,
+          clientName: client?.name ?? `${client?.firstName ?? ''} ${client?.lastName ?? ''}`.trim(),
+          clientPhone: client?.phone,
+        };
+      }));
+
+      res.json({
+        appointments: enriched,
+        total: appts.length,
+        page: pageNum,
+        pageSize,
+        totalPages: Math.ceil(appts.length / pageSize),
+      });
+    } catch (error: any) {
+      console.error("Get business appointments error:", error);
+      res.status(500).json({ error: "Failed to get appointments" });
     }
   });
 
@@ -19789,6 +20077,64 @@ console.log(
     } catch (error: any) {
       console.error("Vendor bulk cancel by date error:", error);
       res.status(500).json({ error: "Failed to bulk cancel appointments", details: error.message });
+    }
+  });
+
+  // ── Internal rewards event endpoint ──────────────────────────────────────────
+  // Called server-side by xo-lashes-web (and future client sites) to award points
+  // for custom events (e.g. product purchases, referrals). Protected by a shared
+  // secret so it is never reachable by unauthenticated clients.
+  app.post("/api/internal/rewards/events", async (req, res) => {
+    const providedKey = req.headers['x-internal-key'];
+    const expectedKey = process.env.INTERNAL_API_KEY;
+    if (!expectedKey || providedKey !== expectedKey) {
+      return res.status(401).json({ error: "Unauthorized" });
+    }
+
+    const bodySchema = z.object({
+      userId: z.string().min(1),
+      event: z.string().min(1).max(100),
+      pointsDelta: z.number().int(),
+      referenceType: z.string().max(50).optional(),
+      referenceId: z.string().max(100).optional(),
+      description: z.string().max(500).optional(),
+    });
+
+    try {
+      const { userId, event, pointsDelta, referenceType, referenceId, description } = bodySchema.parse(req.body);
+
+      const user = await storage.getUser(userId);
+      if (!user) {
+        return res.status(404).json({ error: "User not found" });
+      }
+
+      // Apply delta to user's loyaltyPoints
+      const currentBalance = user.loyaltyPoints ?? 0;
+      const newBalance = Math.max(0, currentBalance + pointsDelta);
+      await db.update(users).set({ loyaltyPoints: newBalance }).where(eq(users.id, userId));
+
+      // Insert an immediate point transaction record
+      const [txn] = await db.insert(pointTransactions).values({
+        id: randomUUID(),
+        userId,
+        type: pointsDelta >= 0 ? 'earn' : 'reversal',
+        points: Math.abs(pointsDelta),
+        dollarAmountCents: Math.abs(pointsDelta),
+        referenceType: referenceType ?? 'internal_event',
+        referenceId: referenceId ?? null,
+        balanceAfter: newBalance,
+        description: description ?? `Internal event: ${event}`,
+        capped: false,
+      }).returning();
+
+      console.log(`[internal/rewards] event=${event} userId=${userId} delta=${pointsDelta} newBalance=${newBalance}`);
+      res.json({ success: true, transactionId: txn.id, newBalance });
+    } catch (error: any) {
+      if (error instanceof z.ZodError) {
+        return res.status(400).json({ error: "Invalid data", details: error.errors });
+      }
+      console.error('[internal/rewards] Error:', error);
+      res.status(500).json({ error: "Failed to process rewards event", details: error.message });
     }
   });
 

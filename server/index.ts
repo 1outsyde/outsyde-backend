@@ -1,6 +1,7 @@
 import express, { type Request, Response, NextFunction } from "express";
 import { createServer } from "http";
 import cors from "cors";
+import cookieParser from "cookie-parser";
 import helmet from "helmet";
 import compression from "compression";
 import { storage } from "./storage";
@@ -15,6 +16,7 @@ import { setupWebSocket } from "./websocket";
 import { setupAuth, getSession } from "./replitAuth";
 import { initializePushService, sendCartReminderNotifications, isPushConfigured } from "./pushService";
 import { startDraftCleanupJob } from "./bookingStateMachine";
+import { startReminderJob } from "./reminderService";
 import { processScheduledDeletions } from "./services/accountDeletionService";
 import { cleanupExpiredStories } from "./services/stories";
 import passport from "passport";
@@ -58,9 +60,18 @@ app.get("/api/health", async (_req, res) => {
 // CORS configuration — locked down in production, permissive in development
 const allowedOrigins: (string | RegExp)[] = [];
 
+// Client-site origins always allowed (both dev and prod)
+const clientSiteOrigins = [
+  'http://localhost:3001',           // xo-lashes-web local dev
+  'https://xobeautyandlashes.com',   // xo-lashes-web production
+];
+clientSiteOrigins.forEach(o => allowedOrigins.push(o));
+
 if (process.env.NODE_ENV === 'production') {
   if (process.env.FRONTEND_URL) allowedOrigins.push(process.env.FRONTEND_URL);
   if (process.env.API_BASE_URL) allowedOrigins.push(process.env.API_BASE_URL);
+  // Additional production client-site domains via env var
+  if (process.env.CLIENT_SITE_URL) allowedOrigins.push(process.env.CLIENT_SITE_URL);
 } else {
   // Development origins
   allowedOrigins.push(
@@ -91,8 +102,11 @@ app.use(cors({
   },
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'X-Internal-Key'],
 }));
+
+// Cookie parsing — must come before routes so req.cookies is populated
+app.use(cookieParser());
 
 // =======================
 // Stripe Webhook (RAW BODY)
@@ -298,6 +312,9 @@ if (process.env.NODE_ENV === 'production') {
   // Start booking draft cleanup job (runs every 60 seconds)
   startDraftCleanupJob(60000);
   console.log("Booking draft cleanup job started");
+
+  // Start appointment reminder job (runs every 15 minutes)
+  startReminderJob(15 * 60 * 1000);
 
   // Daily account deletion job — processes users whose 30-day grace period has expired
   processScheduledDeletions().catch(err => console.error("[accountDeletion] Initial run failed:", err));
