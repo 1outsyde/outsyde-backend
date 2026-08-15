@@ -837,6 +837,7 @@ export interface IStorage {
   getRatingByUser(userId: string, targetType: string, targetId: string): Promise<Rating | undefined>;
   upsertRating(data: InsertRating): Promise<Rating>;
   getRatingsForTarget(targetType: string, targetId: string): Promise<Rating[]>;
+  getRatingsForBusiness(businessId: string): Promise<Rating[]>;
   verifyPurchaseForRating(userId: string, targetType: string, targetId: string, purchaseType?: string, purchaseId?: string): Promise<{
     verified: boolean;
     reason?: string;
@@ -7447,6 +7448,28 @@ export class DatabaseStorage implements IStorage {
     return db.select().from(ratings).where(
       and(eq(ratings.targetType, targetType), eq(ratings.targetId, targetId))
     );
+  }
+
+  async getRatingsForBusiness(businessId: string): Promise<Rating[]> {
+    const [products, services] = await Promise.all([
+      db.select({ id: vendorProducts.id }).from(vendorProducts).where(eq(vendorProducts.businessId, businessId)),
+      db.select({ id: vendorServices.id }).from(vendorServices).where(eq(vendorServices.businessId, businessId)),
+    ]);
+
+    const productIds = products.map(p => p.id);
+    const serviceIds = services.map(s => s.id);
+
+    if (productIds.length === 0 && serviceIds.length === 0) return [];
+
+    const conditions = [];
+    if (productIds.length > 0) {
+      conditions.push(and(eq(ratings.targetType, 'product'), inArray(ratings.targetId, productIds)));
+    }
+    if (serviceIds.length > 0) {
+      conditions.push(and(eq(ratings.targetType, 'service'), inArray(ratings.targetId, serviceIds)));
+    }
+
+    return db.select().from(ratings).where(or(...conditions));
   }
 
   async verifyPurchaseForRating(
