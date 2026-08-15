@@ -9754,7 +9754,9 @@ export async function registerRoutes(
       const userId = authReq.user?.userId ?? null;
 
       const [allRatings, userRating] = await Promise.all([
-        storage.getRatingsForTarget(targetType, targetId),
+        targetType === 'business'
+          ? storage.getRatingsForBusiness(targetId)
+          : storage.getRatingsForTarget(targetType, targetId),
         userId ? storage.getRatingByUser(userId, targetType, targetId) : Promise.resolve(undefined),
       ]);
 
