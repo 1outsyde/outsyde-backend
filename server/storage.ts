@@ -7567,7 +7567,7 @@ export class DatabaseStorage implements IStorage {
       purchaseId: string;
       purchaseType: 'order' | 'appointment' | 'shoot_booking';
       targetId: string;
-      targetType: 'business' | 'photographer';
+      targetType: 'business' | 'photographer' | 'product' | 'service';
       label: string;
       date: string;
     };
@@ -7623,6 +7623,7 @@ export class DatabaseStorage implements IStorage {
         });
       }
     } else if (targetType === 'business') {
+      // Orders placed with this business — each order item is a ratable product
       const userOrders = await db.select().from(orders).where(
         and(
           eq(orders.customerId, userId),
@@ -7631,15 +7632,20 @@ export class DatabaseStorage implements IStorage {
         )
       );
       for (const order of userOrders) {
-        found.push({
-          purchaseId: order.id,
-          purchaseType: 'order',
-          targetType: 'business',
-          targetId: order.businessId,
-          label: `Order #${order.id.slice(-8).toUpperCase()}`,
-          date: order.createdAt?.toISOString() ?? '',
-        });
+        const items = (order.items ?? []) as Array<{ productId?: string; name?: string }>;
+        for (const item of items) {
+          if (!item.productId) continue;
+          found.push({
+            purchaseId: order.id,
+            purchaseType: 'order',
+            targetType: 'product',
+            targetId: item.productId,
+            label: item.name ?? 'Product',
+            date: order.createdAt?.toISOString() ?? '',
+          });
+        }
       }
+      // Appointments with this business — each is a ratable service
       const userAppts = await db.select().from(appointments).where(
         and(
           eq(appointments.clientId, userId),
@@ -7648,11 +7654,13 @@ export class DatabaseStorage implements IStorage {
         )
       );
       for (const appt of userAppts) {
+        const serviceId = appt.serviceId ?? appt.staffServiceId;
+        if (!serviceId) continue;
         found.push({
           purchaseId: appt.id,
           purchaseType: 'appointment',
-          targetType: 'business',
-          targetId: appt.businessId,
+          targetType: 'service',
+          targetId: serviceId,
           label: `Service on ${appt.appointmentDate}`,
           date: appt.appointmentDate?.toString() ?? '',
         });
