@@ -7665,6 +7665,24 @@ export class DatabaseStorage implements IStorage {
           date: appt.appointmentDate?.toString() ?? '',
         });
       }
+    } else if (targetType === 'photographer') {
+      const bookings = await db.select().from(shootBookings).where(
+        and(
+          eq(shootBookings.clientId, userId),
+          eq(shootBookings.photographerId, targetId),
+          eq(shootBookings.status, 'completed')
+        )
+      );
+      for (const booking of bookings) {
+        found.push({
+          purchaseId: booking.id,
+          purchaseType: 'shoot_booking',
+          targetType: 'photographer',
+          targetId: booking.photographerId,
+          label: `Shoot ${booking.id.slice(-8).toUpperCase()}`,
+          date: booking.date ?? '',
+        });
+      }
     }
 
     return { verified: found.length > 0, purchases: found };
