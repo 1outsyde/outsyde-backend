@@ -7567,7 +7567,7 @@ export class DatabaseStorage implements IStorage {
       purchaseId: string;
       purchaseType: 'order' | 'appointment' | 'shoot_booking';
       targetId: string;
-      targetType: 'business' | 'photographer' | 'product' | 'service';
+      targetType: 'business' | 'photographer';
       label: string;
       date: string;
     };
@@ -7623,7 +7623,6 @@ export class DatabaseStorage implements IStorage {
         });
       }
     } else if (targetType === 'business') {
-      // Orders placed with this business — each order item is a ratable product
       const userOrders = await db.select().from(orders).where(
         and(
           eq(orders.customerId, userId),
@@ -7632,20 +7631,15 @@ export class DatabaseStorage implements IStorage {
         )
       );
       for (const order of userOrders) {
-        const items = (order.items ?? []) as Array<{ productId?: string; name?: string }>;
-        for (const item of items) {
-          if (!item.productId) continue;
-          found.push({
-            purchaseId: order.id,
-            purchaseType: 'order',
-            targetType: 'product',
-            targetId: item.productId,
-            label: item.name ?? 'Product',
-            date: order.createdAt?.toISOString() ?? '',
-          });
-        }
+        found.push({
+          purchaseId: order.id,
+          purchaseType: 'order',
+          targetType: 'business',
+          targetId: order.businessId,
+          label: `Order #${order.id.slice(-8).toUpperCase()}`,
+          date: order.createdAt?.toISOString() ?? '',
+        });
       }
-      // Appointments with this business — each is a ratable service
       const userAppts = await db.select().from(appointments).where(
         and(
           eq(appointments.clientId, userId),
@@ -7654,15 +7648,31 @@ export class DatabaseStorage implements IStorage {
         )
       );
       for (const appt of userAppts) {
-        const serviceId = appt.serviceId ?? appt.staffServiceId;
-        if (!serviceId) continue;
         found.push({
           purchaseId: appt.id,
           purchaseType: 'appointment',
-          targetType: 'service',
-          targetId: serviceId,
+          targetType: 'business',
+          targetId: appt.businessId,
           label: `Service on ${appt.appointmentDate}`,
           date: appt.appointmentDate?.toString() ?? '',
+        });
+      }
+    } else if (targetType === 'photographer') {
+      const bookings = await db.select().from(shootBookings).where(
+        and(
+          eq(shootBookings.clientId, userId),
+          eq(shootBookings.photographerId, targetId),
+          eq(shootBookings.status, 'completed')
+        )
+      );
+      for (const booking of bookings) {
+        found.push({
+          purchaseId: booking.id,
+          purchaseType: 'shoot_booking',
+          targetType: 'photographer',
+          targetId: booking.photographerId,
+          label: `Shoot ${booking.id.slice(-8).toUpperCase()}`,
+          date: booking.date ?? '',
         });
       }
     }
