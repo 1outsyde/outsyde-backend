@@ -7630,7 +7630,7 @@ export class DatabaseStorage implements IStorage {
           eq(orders.businessId, targetId),
           sql`${orders.status} IN ('delivered', 'completed')`,
         )
-      );
+      ).orderBy(desc(orders.createdAt));
       for (const order of userOrders) {
         const items = (order.items ?? []) as Array<{ productId?: string; name?: string }>;
         for (const item of items) {
@@ -7652,7 +7652,7 @@ export class DatabaseStorage implements IStorage {
           eq(appointments.businessId, targetId),
           eq(appointments.status, 'completed'),
         )
-      );
+      ).orderBy(desc(appointments.appointmentDate));
       for (const appt of userAppts) {
         const serviceId = appt.serviceId ?? appt.staffServiceId;
         if (!serviceId) continue;
@@ -7672,7 +7672,7 @@ export class DatabaseStorage implements IStorage {
           eq(shootBookings.photographerId, targetId),
           eq(shootBookings.status, 'completed')
         )
-      );
+      ).orderBy(desc(shootBookings.date));
       for (const booking of bookings) {
         found.push({
           purchaseId: booking.id,
