@@ -272,6 +272,7 @@ export interface IStorage {
   // Reviews (verified purchases only)
   createReview(data: InsertReview): Promise<Review>;
   getReviewsByTarget(targetType: string, targetId: string): Promise<Review[]>;
+  getReviewsByReviewer(userId: string): Promise<Review[]>;
   getReviewByBooking(bookingType: string, bookingId: string): Promise<Review | undefined>;
   hasReviewedBooking(bookingType: string, bookingId: string): Promise<boolean>;
   verifyCustomerCanReview(customerId: string, targetType: string, targetId: string, bookingType: string, bookingId: string): Promise<{ canReview: boolean; reason?: string }>;
@@ -1397,6 +1398,12 @@ export class DatabaseStorage implements IStorage {
         eq(reviews.targetId, targetId)
       )
     );
+  }
+
+  async getReviewsByReviewer(userId: string): Promise<Review[]> {
+    return db.select().from(reviews)
+      .where(eq(reviews.reviewerId, userId))
+      .orderBy(desc(reviews.createdAt));
   }
 
   async getReviewByBooking(bookingType: string, bookingId: string): Promise<Review | undefined> {

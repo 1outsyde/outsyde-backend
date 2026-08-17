@@ -9594,6 +9594,51 @@ export async function registerRoutes(
     }
   });
 
+  // Get reviews written by a specific user (own history only)
+  app.get("/api/users/:userId/reviews", hybridAuthMiddleware, async (req, res) => {
+    const authReq = req as AuthenticatedRequest;
+    const authUserId = authReq.user?.userId || req.session?.userId;
+    if (!authUserId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+    const { userId } = req.params;
+    if (authUserId !== userId) {
+      return res.status(403).json({ error: "Forbidden" });
+    }
+
+    try {
+      const reviewList = await storage.getReviewsByReviewer(userId);
+
+      const enrichedReviews = await Promise.all(
+        reviewList.map(async (review) => {
+          let vendorName = review.targetType;
+          if (review.targetType === 'business') {
+            const biz = await storage.getBusiness(review.targetId);
+            if (biz) vendorName = biz.name;
+          } else if (review.targetType === 'photographer') {
+            const photo = await storage.getPhotographer(review.targetId);
+            if (photo) vendorName = photo.displayName;
+          }
+          return {
+            id: review.id,
+            targetType: review.targetType,
+            targetId: review.targetId,
+            vendorName,
+            rating: review.rating,
+            title: review.title ?? null,
+            comment: review.comment,
+            createdAt: review.createdAt,
+          };
+        })
+      );
+
+      res.json({ reviews: enrichedReviews });
+    } catch (error) {
+      console.error("Get user reviews error:", error);
+      res.status(500).json({ error: "Failed to get user reviews" });
+    }
+  });
+
   // Create a verified review (ONLY if customer has completed booking/order)
   app.post("/api/reviews", hybridAuthMiddleware, async (req, res) => {
     const authReq = req as AuthenticatedRequest;
