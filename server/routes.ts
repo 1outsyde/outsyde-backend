@@ -19344,7 +19344,12 @@ export async function registerRoutes(
   });
 
   // POST /api/media/upload-image — upload an image to Cloudflare R2 (auth required)
-  app.post("/api/media/upload-image", hybridAuthMiddleware, (req, res, next) => {
+  // Accepts JWT via hybridAuthMiddleware OR internal service-to-service calls via x-internal-key header
+  app.post("/api/media/upload-image", (req: Request, res: Response, next: NextFunction) => {
+    const internalKey = req.headers['x-internal-key'];
+    if (process.env.INTERNAL_API_KEY && internalKey === process.env.INTERNAL_API_KEY) return next();
+    hybridAuthMiddleware(req, res, next);
+  }, (req, res, next) => {
     multerUpload.single("file")(req as any, res as any, next);
   }, async (req, res) => {
     if (!(req as any).file) {
@@ -19352,7 +19357,7 @@ export async function registerRoutes(
     }
     const file = (req as any).file as Express.Multer.File;
     const folder = (req.body?.folder as string) || "posts";
-    const allowedFolders = ["posts", "profiles", "covers", "products", "logos", "stories"];
+    const allowedFolders = ["posts", "profiles", "covers", "products", "logos", "stories", "services"];
     if (!allowedFolders.includes(folder)) {
       return res.status(400).json({ error: "Invalid folder" });
     }
