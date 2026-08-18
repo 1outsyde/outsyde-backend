@@ -2536,7 +2536,17 @@ export async function registerRoutes(
       sessionState.isInfluencer = user.isInfluencer === true || influencerAppRows[0]?.status === 'approved';
 
       console.log('[AUTH_ME] returning isInfluencer:', sessionState.isInfluencer, 'influencerStatus:', sessionState.influencerStatus, 'for userId:', user.id);
-      res.json(sessionState);
+      res.json({
+        user: {
+          id: sessionState.userId,
+          email: sessionState.email,
+          firstName: sessionState.displayName,
+          lastName: '',
+          role: sessionState.isAdmin ? 'admin' : sessionState.isVendor ? 'vendor' : 'consumer',
+          rewardsPoints: sessionState.loyaltyPoints ?? 0,
+          profileImageUrl: sessionState.profilePhotoUrl ?? null,
+        },
+      });
     } catch (error) {
       console.error("Get /api/auth/me error:", error);
       res.status(500).json({ 
