@@ -393,6 +393,7 @@ export class StripeService {
       description: params.description,
       automatic_payment_methods: {
         enabled: true,
+        allow_redirects: 'never',
       },
     };
 
@@ -439,6 +440,7 @@ export class StripeService {
       description: params.description,
       automatic_payment_methods: {
         enabled: true,
+        allow_redirects: 'never',
       },
     };
 
