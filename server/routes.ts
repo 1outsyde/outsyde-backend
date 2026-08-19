@@ -4946,6 +4946,105 @@ export async function registerRoutes(
     }
   });
 
+  // POST /api/booking/:holdId/create-deposit-intent - Charge a flat $25 deposit
+  // on the platform balance (no Stripe Connect required). Creates the appointment
+  // in PENDING_PAYMENT status; the full balance is collected at the appointment.
+  app.post("/api/booking/:holdId/create-deposit-intent", async (req, res) => {
+    const userId = req.session?.userId || getUserIdFromRequest(req);
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    const DEPOSIT_CENTS = 2500; // $25 flat deposit
+
+    try {
+      const { holdId } = req.params;
+      const { hold } = await confirmBookingHold(holdId, userId);
+
+      if (hold.providerType !== 'business') {
+        return res.status(400).json({ error: "Deposit payments are only supported for business bookings" });
+      }
+
+      // Idempotency: if an appointment was already created for this hold, reuse it
+      const [existing] = await db.select().from(appointments).where(eq(appointments.holdId, holdId));
+      if (existing) {
+        if (existing.stripePaymentIntentId) {
+          try {
+            const existingPI = await stripeService.getPaymentIntent(existing.stripePaymentIntentId);
+            if (['requires_payment_method', 'requires_confirmation', 'requires_action'].includes(existingPI.status)) {
+              return res.json({
+                clientSecret: existingPI.client_secret,
+                paymentIntentId: existingPI.id,
+                appointmentId: existing.id,
+              });
+            }
+          } catch {}
+        }
+        return res.status(409).json({ error: "A payment attempt for this hold already exists." });
+      }
+
+      const appointment = await storage.createAppointment({
+        businessId: hold.providerId,
+        clientId: hold.userId,
+        serviceId: hold.serviceId ?? undefined,
+        holdId: hold.id,
+        appointmentDate: hold.holdDate,
+        appointmentTime: hold.startTime,
+        appointmentEndTime: hold.endTime,
+        durationMinutes: hold.durationMinutes,
+        totalPrice: hold.servicePriceCents,
+        platformFee: 0,
+        vendorNet: hold.servicePriceCents,
+        status: BOOKING_STATES.PENDING_PAYMENT,
+        paymentMethod: 'payment_intent',
+        captureMethod: 'automatic',
+        serviceName: hold.serviceName,
+        servicePriceCents: hold.servicePriceCents,
+        serviceDurationMinutes: hold.durationMinutes,
+      });
+
+      const user = await storage.getUser(userId);
+      if (!user) return res.status(404).json({ error: "User not found" });
+
+      let stripeCustomerId = user.stripeCustomerId;
+      if (!stripeCustomerId) {
+        const customer = await stripeService.createCustomer(user.email!, userId, user.name || user.email!);
+        stripeCustomerId = customer.id;
+        await storage.updateUser(userId, { stripeCustomerId: customer.id });
+      }
+
+      const paymentIntent = await stripeService.createPlatformPaymentIntent({
+        amountCents: DEPOSIT_CENTS,
+        customerId: stripeCustomerId,
+        captureMethod: 'automatic',
+        metadata: {
+          type: 'deposit',
+          appointmentId: appointment.id,
+          holdId: hold.id,
+          businessId: hold.providerId,
+        },
+        description: `$25 deposit for ${hold.serviceName} at ${hold.holdDate} ${hold.startTime}`,
+        saveForFutureUse: true,
+      });
+
+      await db.update(appointments).set({
+        stripePaymentIntentId: paymentIntent.id,
+        updatedAt: new Date(),
+      }).where(eq(appointments.id, appointment.id));
+
+      console.log(`[Booking] Created deposit PaymentIntent ${paymentIntent.id} from hold ${holdId} (appointment ${appointment.id}, charged: ${DEPOSIT_CENTS}¢, full price: ${hold.servicePriceCents}¢)`);
+
+      return res.json({
+        clientSecret: paymentIntent.client_secret,
+        paymentIntentId: paymentIntent.id,
+        appointmentId: appointment.id,
+      });
+    } catch (error) {
+      console.error("[Booking] Create deposit intent error:", error);
+      return res.status(500).json({ error: "Failed to create deposit payment" });
+    }
+  });
+
   // POST /api/booking/:holdId/create-payment-intent - Convert a confirmed hold
   // into a real booking record and create a platform-balance PaymentIntent for it.
   // Supports both business/staff holds (creates an `appointments` row) and
