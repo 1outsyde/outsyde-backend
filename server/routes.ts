@@ -20299,5 +20299,71 @@ console.log(
     }
   });
 
+  // ── Internal XO admin bookings endpoints ─────────────────────────────────────
+  // Called by xo-lashes-web /api/admin/bookings proxy. Protected by INTERNAL_API_KEY.
+  const requireInternalKey = (req: Request, res: Response, next: NextFunction) => {
+    const expectedKey = process.env.INTERNAL_API_KEY;
+    if (!expectedKey || req.headers['x-internal-key'] !== expectedKey) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+    return next();
+  };
+
+  app.get('/api/internal/xo/bookings', requireInternalKey, async (req, res) => {
+    try {
+      const { status, limit = '100', offset = '0' } = req.query;
+      const businessId = process.env.XO_BUSINESS_ID;
+      if (!businessId) return res.status(500).json({ error: 'XO_BUSINESS_ID not configured' });
+
+      let appts = await storage.getAppointmentsByBusiness(businessId);
+      if (status && status !== 'all') appts = appts.filter(a => a.status === status as string);
+      appts.sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime());
+
+      const start = parseInt(offset as string);
+      const page = appts.slice(start, start + parseInt(limit as string));
+
+      const enriched = await Promise.all(page.map(async (appt) => {
+        const client = await storage.getUser(appt.clientId).catch(() => undefined);
+        const name = client?.name || `${client?.firstName ?? ''} ${client?.lastName ?? ''}`.trim();
+        return {
+          ...appt,
+          date: appt.appointmentDate,
+          time: appt.appointmentTime,
+          servicePrice: appt.totalPrice,
+          customerFirstName: name.split(' ')[0] || '',
+          customerLastName: name.split(' ').slice(1).join(' ') || '',
+          customerEmail: client?.email ?? '',
+          customerPhone: (client as any)?.phone ?? '',
+          depositPaid: !!appt.stripePaymentIntentId,
+          depositAmount: appt.stripePaymentIntentId ? 2500 : 0,
+        };
+      }));
+
+      return res.json({ appointments: enriched, total: appts.length });
+    } catch (err) {
+      console.error('[internal/xo/bookings GET]', err);
+      return res.status(500).json({ error: 'Failed to fetch bookings' });
+    }
+  });
+
+  app.patch('/api/internal/xo/bookings/:id', requireInternalKey, async (req, res) => {
+    try {
+      const { id } = req.params;
+      const { status } = req.body as { status: string };
+      const ALLOWED_STATUSES = ['confirmed', 'completed', 'cancelled', 'no_show'];
+      if (!status || !ALLOWED_STATUSES.includes(status)) {
+        return res.status(400).json({ error: 'Invalid status' });
+      }
+      const appt = await storage.getAppointment(id);
+      if (!appt) return res.status(404).json({ error: 'Appointment not found' });
+
+      const updated = await storage.updateAppointment(id, { status: status as any });
+      return res.json({ appointment: updated });
+    } catch (err) {
+      console.error('[internal/xo/bookings PATCH]', err);
+      return res.status(500).json({ error: 'Failed to update booking' });
+    }
+  });
+
   return httpServer;
 }

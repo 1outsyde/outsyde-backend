@@ -19,6 +19,8 @@ import {
   sendInternalEventAlert,
   sendBookingRequestReceivedToConsumer,
   sendBookingRequestToVendor,
+  sendBookingConfirmationToCustomer,
+  sendNewBookingAlertToVendor,
 } from "../emailService";
 import { processInfluencerCommission, reverseInfluencerCommission } from "../influencerPayoutService";
 import { calculateBookingFees } from "../fees";
@@ -720,6 +722,77 @@ export class WebhookHandlers {
             location: appointment.locationDetails ?? undefined,
           }).catch(() => {});
 
+        }
+      } else if (type === 'deposit') {
+        // XO Beauty & Lashes flat-$25 deposit flow (POST /api/booking/:holdId/create-deposit-intent).
+        // Appointment and hold were already created in that route; here we confirm the
+        // appointment and fire XO-specific emails to the customer and Nik.
+        const appointmentId = appointmentIdFromMetadata;
+        const { holdId, businessId } = metadata;
+
+        if (!appointmentId) {
+          console.error('[Stripe] deposit PaymentIntent succeeded but missing appointmentId in metadata');
+          return;
+        }
+
+        const appt = await storage.getAppointment(appointmentId);
+        if (!appt) {
+          console.error(`[Stripe] deposit: Appointment ${appointmentId} not found`);
+          return;
+        }
+
+        if (appt.status === BOOKING_STATES.PENDING_PAYMENT || appt.status === BOOKING_STATES.PENDING_PROVIDER) {
+          const result = await transitionAppointmentState(
+            appointmentId,
+            BOOKING_STATES.CONFIRMED,
+            {
+              triggeredBy: 'stripe',
+              triggerSource: 'webhook',
+              metadata: { stripePaymentIntentId: paymentIntent.id, event: 'payment_intent.succeeded' }
+            }
+          );
+
+          if (!result.success) {
+            console.error(`[Stripe] deposit: Failed to confirm appointment ${appointmentId}: ${result.error}`);
+            return;
+          }
+
+          await db.update(appointments).set({
+            stripePaymentIntentId: paymentIntent.id,
+            updatedAt: new Date(),
+          }).where(eq(appointments.id, appointmentId));
+
+          if (holdId) {
+            markHoldAsConverted(holdId, appointmentId, 'appointment').catch(err =>
+              console.error(`[Stripe] deposit: Failed to convert hold ${holdId}:`, err)
+            );
+          }
+
+          const depositCustomer = await storage.getUser(appt.clientId).catch(() => undefined);
+
+          if (depositCustomer?.email) {
+            sendBookingConfirmationToCustomer({
+              toEmail: depositCustomer.email,
+              customerName: depositCustomer.name || depositCustomer.firstName || 'there',
+              serviceName: appt.serviceName || 'Appointment',
+              date: appt.appointmentDate,
+              time: appt.appointmentTime,
+              appointmentId,
+            }).catch(() => {});
+          }
+
+          sendNewBookingAlertToVendor({
+            customerName: depositCustomer?.name || depositCustomer?.firstName || 'Customer',
+            customerEmail: depositCustomer?.email || '',
+            serviceName: appt.serviceName || 'Appointment',
+            date: appt.appointmentDate,
+            time: appt.appointmentTime,
+            appointmentId,
+          }).catch(() => {});
+
+          console.log(`[Stripe] deposit: Appointment ${appointmentId} confirmed`);
+        } else {
+          console.log(`[Stripe] deposit: Appointment ${appointmentId} already in status ${appt.status} — skipping`);
         }
       } else if (type === 'product_purchase') {
         // Mobile PaymentSheet product cart flow (POST /api/cart/payment-intent).
