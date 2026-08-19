@@ -4946,6 +4946,105 @@ export async function registerRoutes(
     }
   });
 
+  // POST /api/booking/:holdId/create-deposit-intent - Charge a flat $25 deposit
+  // on the platform balance (no Stripe Connect required). Creates the appointment
+  // in PENDING_PAYMENT status; the full balance is collected at the appointment.
+  app.post("/api/booking/:holdId/create-deposit-intent", async (req, res) => {
+    const userId = req.session?.userId || getUserIdFromRequest(req);
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    const DEPOSIT_CENTS = 2500; // $25 flat deposit
+
+    try {
+      const { holdId } = req.params;
+      const { hold } = await confirmBookingHold(holdId, userId);
+
+      if (hold.providerType !== 'business') {
+        return res.status(400).json({ error: "Deposit payments are only supported for business bookings" });
+      }
+
+      // Idempotency: if an appointment was already created for this hold, reuse it
+      const [existing] = await db.select().from(appointments).where(eq(appointments.holdId, holdId));
+      if (existing) {
+        if (existing.stripePaymentIntentId) {
+          try {
+            const existingPI = await stripeService.getPaymentIntent(existing.stripePaymentIntentId);
+            if (['requires_payment_method', 'requires_confirmation', 'requires_action'].includes(existingPI.status)) {
+              return res.json({
+                clientSecret: existingPI.client_secret,
+                paymentIntentId: existingPI.id,
+                appointmentId: existing.id,
+              });
+            }
+          } catch {}
+        }
+        return res.status(409).json({ error: "A payment attempt for this hold already exists." });
+      }
+
+      const appointment = await storage.createAppointment({
+        businessId: hold.providerId,
+        clientId: hold.userId,
+        serviceId: hold.serviceId ?? undefined,
+        holdId: hold.id,
+        appointmentDate: hold.holdDate,
+        appointmentTime: hold.startTime,
+        appointmentEndTime: hold.endTime,
+        durationMinutes: hold.durationMinutes,
+        totalPrice: hold.servicePriceCents,
+        platformFee: 0,
+        vendorNet: hold.servicePriceCents,
+        status: BOOKING_STATES.PENDING_PAYMENT,
+        paymentMethod: 'payment_intent',
+        captureMethod: 'automatic',
+        serviceName: hold.serviceName,
+        servicePriceCents: hold.servicePriceCents,
+        serviceDurationMinutes: hold.durationMinutes,
+      });
+
+      const user = await storage.getUser(userId);
+      if (!user) return res.status(404).json({ error: "User not found" });
+
+      let stripeCustomerId = user.stripeCustomerId;
+      if (!stripeCustomerId) {
+        const customer = await stripeService.createCustomer(user.email!, userId, user.name || user.email!);
+        stripeCustomerId = customer.id;
+        await storage.updateUser(userId, { stripeCustomerId: customer.id });
+      }
+
+      const paymentIntent = await stripeService.createPlatformPaymentIntent({
+        amountCents: DEPOSIT_CENTS,
+        customerId: stripeCustomerId,
+        captureMethod: 'automatic',
+        metadata: {
+          type: 'deposit',
+          appointmentId: appointment.id,
+          holdId: hold.id,
+          businessId: hold.providerId,
+        },
+        description: `$25 deposit for ${hold.serviceName} at ${hold.holdDate} ${hold.startTime}`,
+        saveForFutureUse: true,
+      });
+
+      await db.update(appointments).set({
+        stripePaymentIntentId: paymentIntent.id,
+        updatedAt: new Date(),
+      }).where(eq(appointments.id, appointment.id));
+
+      console.log(`[Booking] Created deposit PaymentIntent ${paymentIntent.id} from hold ${holdId} (appointment ${appointment.id}, charged: ${DEPOSIT_CENTS}¢, full price: ${hold.servicePriceCents}¢)`);
+
+      return res.json({
+        clientSecret: paymentIntent.client_secret,
+        paymentIntentId: paymentIntent.id,
+        appointmentId: appointment.id,
+      });
+    } catch (error) {
+      console.error("[Booking] Create deposit intent error:", error);
+      return res.status(500).json({ error: "Failed to create deposit payment" });
+    }
+  });
+
   // POST /api/booking/:holdId/create-payment-intent - Convert a confirmed hold
   // into a real booking record and create a platform-balance PaymentIntent for it.
   // Supports both business/staff holds (creates an `appointments` row) and
@@ -20197,6 +20296,72 @@ console.log(
       }
       console.error('[internal/rewards] Error:', error);
       res.status(500).json({ error: "Failed to process rewards event", details: error.message });
+    }
+  });
+
+  // ── Internal XO admin bookings endpoints ─────────────────────────────────────
+  // Called by xo-lashes-web /api/admin/bookings proxy. Protected by INTERNAL_API_KEY.
+  const requireInternalKey = (req: Request, res: Response, next: NextFunction) => {
+    const expectedKey = process.env.INTERNAL_API_KEY;
+    if (!expectedKey || req.headers['x-internal-key'] !== expectedKey) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+    return next();
+  };
+
+  app.get('/api/internal/xo/bookings', requireInternalKey, async (req, res) => {
+    try {
+      const { status, limit = '100', offset = '0' } = req.query;
+      const businessId = process.env.XO_BUSINESS_ID;
+      if (!businessId) return res.status(500).json({ error: 'XO_BUSINESS_ID not configured' });
+
+      let appts = await storage.getAppointmentsByBusiness(businessId);
+      if (status && status !== 'all') appts = appts.filter(a => a.status === status as string);
+      appts.sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime());
+
+      const start = parseInt(offset as string);
+      const page = appts.slice(start, start + parseInt(limit as string));
+
+      const enriched = await Promise.all(page.map(async (appt) => {
+        const client = await storage.getUser(appt.clientId).catch(() => undefined);
+        const name = client?.name || `${client?.firstName ?? ''} ${client?.lastName ?? ''}`.trim();
+        return {
+          ...appt,
+          date: appt.appointmentDate,
+          time: appt.appointmentTime,
+          servicePrice: appt.totalPrice,
+          customerFirstName: name.split(' ')[0] || '',
+          customerLastName: name.split(' ').slice(1).join(' ') || '',
+          customerEmail: client?.email ?? '',
+          customerPhone: (client as any)?.phone ?? '',
+          depositPaid: !!appt.stripePaymentIntentId,
+          depositAmount: appt.stripePaymentIntentId ? 2500 : 0,
+        };
+      }));
+
+      return res.json({ appointments: enriched, total: appts.length });
+    } catch (err) {
+      console.error('[internal/xo/bookings GET]', err);
+      return res.status(500).json({ error: 'Failed to fetch bookings' });
+    }
+  });
+
+  app.patch('/api/internal/xo/bookings/:id', requireInternalKey, async (req, res) => {
+    try {
+      const { id } = req.params;
+      const { status } = req.body as { status: string };
+      const ALLOWED_STATUSES = ['confirmed', 'completed', 'cancelled', 'no_show'];
+      if (!status || !ALLOWED_STATUSES.includes(status)) {
+        return res.status(400).json({ error: 'Invalid status' });
+      }
+      const appt = await storage.getAppointment(id);
+      if (!appt) return res.status(404).json({ error: 'Appointment not found' });
+
+      const updated = await storage.updateAppointment(id, { status: status as any });
+      return res.json({ appointment: updated });
+    } catch (err) {
+      console.error('[internal/xo/bookings PATCH]', err);
+      return res.status(500).json({ error: 'Failed to update booking' });
     }
   });
 

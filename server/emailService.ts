@@ -1422,3 +1422,121 @@ export async function sendAftercareEmail(params: {
   `);
   await sendBrandedEmail(params.toEmail, subject, html);
 }
+
+// XO Beauty & Lashes — deposit booking confirmation to customer
+export async function sendBookingConfirmationToCustomer(params: {
+  toEmail: string
+  customerName: string
+  serviceName: string
+  date: string
+  time: string
+  appointmentId: string
+}): Promise<void> {
+  const apiKey = process.env.RESEND_API_KEY
+  if (!apiKey) {
+    console.warn('[XO Email] RESEND_API_KEY not set — skipping customer confirmation')
+    return
+  }
+
+  const { Resend } = await import('resend')
+  const resend = new Resend(apiKey)
+
+  const subject = `Your appointment is confirmed — XO Beauty & Lashes`
+  const html = `
+    <div style="font-family:Arial,sans-serif;max-width:560px;margin:0 auto;background:#fff;">
+      <div style="background:linear-gradient(135deg,#2e1a47,#c9b1d9);padding:32px;text-align:center;">
+        <h1 style="color:white;margin:0;font-size:22px;letter-spacing:-0.3px;">XO Beauty &amp; Lashes</h1>
+        <p style="color:rgba(255,255,255,0.8);margin:8px 0 0;font-size:14px;">Your ritual is confirmed</p>
+      </div>
+      <div style="padding:32px;">
+        <p style="font-size:15px;color:#1a0f2e;margin:0 0 24px;">Hi ${params.customerName},</p>
+        <p style="font-size:14px;color:#555;line-height:1.6;margin:0 0 24px;">
+          Your appointment has been confirmed. Nik will reach out if anything changes. See you soon!
+        </p>
+        <div style="background:#f7f2fc;border-radius:12px;padding:20px 24px;margin-bottom:24px;">
+          <p style="margin:0 0 12px;font-size:11px;font-weight:700;letter-spacing:0.1em;color:#888;">BOOKING DETAILS</p>
+          <table style="width:100%;border-collapse:collapse;">
+            <tr><td style="font-size:13px;color:#888;padding:4px 0;">Service</td><td style="font-size:13px;color:#1a0f2e;font-weight:500;text-align:right;">${params.serviceName}</td></tr>
+            <tr><td style="font-size:13px;color:#888;padding:4px 0;">Date</td><td style="font-size:13px;color:#1a0f2e;font-weight:500;text-align:right;">${params.date}</td></tr>
+            <tr><td style="font-size:13px;color:#888;padding:4px 0;">Time</td><td style="font-size:13px;color:#1a0f2e;font-weight:500;text-align:right;">${params.time}</td></tr>
+            <tr><td style="font-size:13px;color:#888;padding:4px 0;">Reference</td><td style="font-size:13px;color:#1a0f2e;font-weight:500;text-align:right;">#${params.appointmentId.slice(0,8).toUpperCase()}</td></tr>
+          </table>
+        </div>
+        <div style="background:#f0fdf9;border-radius:12px;padding:16px 20px;margin-bottom:24px;">
+          <p style="margin:0 0 8px;font-size:11px;font-weight:700;letter-spacing:0.1em;color:#888;">AFTERCARE REMINDER</p>
+          <ul style="margin:0;padding-left:16px;color:#555;font-size:13px;line-height:1.7;">
+            <li>No water, steam, or heat for 3 hours after your appointment</li>
+            <li>Avoid oil-based products near your eyes</li>
+            <li>Never use a lash curler on extensions</li>
+            <li>Brush daily with a clean spoolie</li>
+          </ul>
+        </div>
+        <p style="font-size:13px;color:#888;text-align:center;">Questions? Reply to this email or DM us on Instagram.</p>
+      </div>
+      <div style="background:#f5f5f5;padding:16px;text-align:center;">
+        <p style="margin:0;font-size:12px;color:#999;">XO Beauty &amp; Lashes · fleekbynik@gmail.com</p>
+      </div>
+    </div>
+  `
+
+  await resend.emails.send({
+    from: 'XO Beauty & Lashes <bookings@xobeautyandlashes.com>',
+    to: params.toEmail,
+    subject,
+    html,
+  }).catch(err => console.error('[XO Email] Customer confirmation failed:', err))
+}
+
+// XO Beauty & Lashes — new booking alert to Nik (vendor)
+export async function sendNewBookingAlertToVendor(params: {
+  customerName: string
+  customerEmail: string
+  serviceName: string
+  date: string
+  time: string
+  appointmentId: string
+}): Promise<void> {
+  const apiKey = process.env.RESEND_API_KEY
+  if (!apiKey) {
+    console.warn('[XO Email] RESEND_API_KEY not set — skipping vendor alert')
+    return
+  }
+
+  const { Resend } = await import('resend')
+  const resend = new Resend(apiKey)
+
+  const subject = `New booking: ${params.customerName} — ${params.serviceName}`
+  const html = `
+    <div style="font-family:Arial,sans-serif;max-width:560px;margin:0 auto;background:#fff;">
+      <div style="background:linear-gradient(135deg,#2e1a47,#c9b1d9);padding:32px;text-align:center;">
+        <h1 style="color:white;margin:0;font-size:22px;">New Booking</h1>
+        <p style="color:rgba(255,255,255,0.8);margin:8px 0 0;font-size:14px;">XO Beauty &amp; Lashes</p>
+      </div>
+      <div style="padding:32px;">
+        <p style="font-size:15px;color:#1a0f2e;margin:0 0 24px;">Hey Nik! A new appointment has been booked.</p>
+        <div style="background:#f7f2fc;border-radius:12px;padding:20px 24px;margin-bottom:24px;">
+          <p style="margin:0 0 12px;font-size:11px;font-weight:700;letter-spacing:0.1em;color:#888;">APPOINTMENT DETAILS</p>
+          <table style="width:100%;border-collapse:collapse;">
+            <tr><td style="font-size:13px;color:#888;padding:4px 0;">Customer</td><td style="font-size:13px;color:#1a0f2e;font-weight:500;text-align:right;">${params.customerName}</td></tr>
+            <tr><td style="font-size:13px;color:#888;padding:4px 0;">Email</td><td style="font-size:13px;color:#1a0f2e;font-weight:500;text-align:right;">${params.customerEmail}</td></tr>
+            <tr><td style="font-size:13px;color:#888;padding:4px 0;">Service</td><td style="font-size:13px;color:#1a0f2e;font-weight:500;text-align:right;">${params.serviceName}</td></tr>
+            <tr><td style="font-size:13px;color:#888;padding:4px 0;">Date</td><td style="font-size:13px;color:#1a0f2e;font-weight:500;text-align:right;">${params.date}</td></tr>
+            <tr><td style="font-size:13px;color:#888;padding:4px 0;">Time</td><td style="font-size:13px;color:#1a0f2e;font-weight:500;text-align:right;">${params.time}</td></tr>
+            <tr><td style="font-size:13px;color:#888;padding:4px 0;">Reference</td><td style="font-size:13px;color:#1a0f2e;font-weight:500;text-align:right;">#${params.appointmentId.slice(0,8).toUpperCase()}</td></tr>
+          </table>
+        </div>
+        <p style="font-size:13px;color:#888;text-align:center;">A $25 deposit was collected to secure this slot.</p>
+      </div>
+      <div style="background:#f5f5f5;padding:16px;text-align:center;">
+        <p style="margin:0;font-size:12px;color:#999;">XO Beauty &amp; Lashes Dashboard</p>
+      </div>
+    </div>
+  `
+
+  await resend.emails.send({
+    from: 'XO Beauty & Lashes <bookings@xobeautyandlashes.com>',
+    to: 'fleekbynik@gmail.com',
+    subject,
+    html,
+  }).catch(err => console.error('[XO Email] Vendor alert failed:', err))
+}
