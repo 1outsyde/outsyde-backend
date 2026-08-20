@@ -2480,6 +2480,7 @@ export async function registerRoutes(
         bio: user.bio ?? null,
         email: user.email,
         profilePhotoUrl: user.profileImageUrl,
+        isAdmin: user.isAdmin || false,
         isVendor: false as boolean,
         isPhotographer: false as boolean,
         isInfluencer: user.isInfluencer,
