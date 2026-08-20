@@ -2105,7 +2105,7 @@ export async function registerRoutes(
         isAdmin: user.isAdmin || false,
       };
 
-      if (user.isVendor) {
+      if (user.isVendor || user.isAdmin) {
         const business = await storage.getBusinessByOwnerId(user.id);
         if (business) {
           tokenPayload.businessId = business.id;
@@ -2273,7 +2273,7 @@ export async function registerRoutes(
         isAdmin: user.isAdmin || false,
       };
 
-      if (user.isVendor) {
+      if (user.isVendor || user.isAdmin) {
         const business = await storage.getBusinessByOwnerId(user.id);
         if (business) {
           tokenPayload.businessId = business.id;
