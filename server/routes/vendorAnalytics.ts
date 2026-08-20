@@ -22,7 +22,8 @@ interface BookingDayRow {
 
 router.get("/daily", async (req, res) => {
   const authReq = req as AuthenticatedRequest;
-  const businessId = authReq.user?.businessId;
+  const businessId = authReq.user?.businessId
+    ?? (authReq.user?.isAdmin ? req.headers['x-business-id'] as string : undefined);
   if (!businessId) return res.status(403).json({ error: "business_role_required" });
 
   try {
@@ -116,7 +117,8 @@ function ageBucket(dateOfBirth: string | null): string {
 
 router.get("/audience", async (req, res) => {
   const authReq = req as AuthenticatedRequest;
-  const businessId = authReq.user?.businessId;
+  const businessId = authReq.user?.businessId
+    ?? (authReq.user?.isAdmin ? req.headers['x-business-id'] as string : undefined);
   if (!businessId) return res.status(403).json({ error: "business_role_required" });
 
   const emptyResponse = {
@@ -227,7 +229,8 @@ interface PhotographerRow {
 
 router.get("/photographer-match", async (req, res) => {
   const authReq = req as AuthenticatedRequest;
-  const businessId = authReq.user?.businessId;
+  const businessId = authReq.user?.businessId
+    ?? (authReq.user?.isAdmin ? req.headers['x-business-id'] as string : undefined);
   if (!businessId) return res.status(403).json({ error: "business_role_required" });
 
   try {
@@ -321,7 +324,8 @@ interface BookedMinutesRow {
 
 router.get("/booking-health", async (req, res) => {
   const authReq = req as AuthenticatedRequest;
-  const businessId = authReq.user?.businessId;
+  const businessId = authReq.user?.businessId
+    ?? (authReq.user?.isAdmin ? req.headers['x-business-id'] as string : undefined);
   if (!businessId) return res.status(403).json({ error: "business_role_required" });
 
   try {
@@ -391,7 +395,8 @@ interface RevenueServiceRow {
 
 router.get("/revenue-by-service", async (req, res) => {
   const authReq = req as AuthenticatedRequest;
-  const businessId = authReq.user?.businessId;
+  const businessId = authReq.user?.businessId
+    ?? (authReq.user?.isAdmin ? req.headers['x-business-id'] as string : undefined);
   if (!businessId) return res.status(403).json({ error: "business_role_required" });
 
   try {
@@ -433,7 +438,8 @@ interface PeakTimesRow {
 
 router.get("/peak-times", async (req, res) => {
   const authReq = req as AuthenticatedRequest;
-  const businessId = authReq.user?.businessId;
+  const businessId = authReq.user?.businessId
+    ?? (authReq.user?.isAdmin ? req.headers['x-business-id'] as string : undefined);
   if (!businessId) return res.status(403).json({ error: "business_role_required" });
 
   try {
@@ -502,7 +508,8 @@ interface MtdRow {
 
 router.get("/revenue-forecast", async (req, res) => {
   const authReq = req as AuthenticatedRequest;
-  const businessId = authReq.user?.businessId;
+  const businessId = authReq.user?.businessId
+    ?? (authReq.user?.isAdmin ? req.headers['x-business-id'] as string : undefined);
   if (!businessId) return res.status(403).json({ error: "business_role_required" });
 
   try {
@@ -561,7 +568,8 @@ interface YoyRow {
 
 router.get("/year-over-year", async (req, res) => {
   const authReq = req as AuthenticatedRequest;
-  const businessId = authReq.user?.businessId;
+  const businessId = authReq.user?.businessId
+    ?? (authReq.user?.isAdmin ? req.headers['x-business-id'] as string : undefined);
   if (!businessId) return res.status(403).json({ error: "business_role_required" });
 
   try {
@@ -625,7 +633,8 @@ interface WeeklyRow {
 
 router.get("/weekly", async (req, res) => {
   const authReq = req as AuthenticatedRequest;
-  const businessId = authReq.user?.businessId;
+  const businessId = authReq.user?.businessId
+    ?? (authReq.user?.isAdmin ? req.headers['x-business-id'] as string : undefined);
   if (!businessId) return res.status(403).json({ error: "business_role_required" });
 
   try {
@@ -674,7 +683,8 @@ interface MonthlyRow {
 
 router.get("/monthly", async (req, res) => {
   const authReq = req as AuthenticatedRequest;
-  const businessId = authReq.user?.businessId;
+  const businessId = authReq.user?.businessId
+    ?? (authReq.user?.isAdmin ? req.headers['x-business-id'] as string : undefined);
   if (!businessId) return res.status(403).json({ error: "business_role_required" });
 
   try {
