@@ -28,7 +28,7 @@ import {
 } from "@shared/schema";
 import { sendStaffInviteEmail, sendStaffPayoutSetupEmail, sendStaffAcceptedOwnerEmail, sendDeletionConfirmationEmail, sendSupportContactEmail } from "./services/resendService";
 import { checkVendorStripeBalances, checkActiveOrders } from "./services/accountDeletionService";
-import { sendBookingAcceptedToConsumer, sendBookingDeclinedToConsumer, sendBookingRequestToVendor, sendBookingRequestReceivedToConsumer, sendAdminBookingAlert, sendShootBookingAcceptedToPhotographer, sendShootBookingDeclinedToPhotographer, sendShootBookingCanceledToPhotographer, sendAftercareEmail } from "./emailService";
+import { sendBookingAcceptedToConsumer, sendBookingDeclinedToConsumer, sendBookingRequestToVendor, sendBookingRequestReceivedToConsumer, sendAdminBookingAlert, sendShootBookingAcceptedToPhotographer, sendShootBookingDeclinedToPhotographer, sendShootBookingCanceledToPhotographer, sendAftercareEmail, sendLHBOrderConfirmation, sendLHBShipmentNotification, sendLHBCancellationEmail } from "./emailService";
 import { sendExpoPush } from "./expoPushService";
 
 // Helper to sanitize user data for non-admin responses (removes sensitive fields)
@@ -20363,6 +20363,39 @@ console.log(
     } catch (err) {
       console.error('[internal/xo/bookings PATCH]', err);
       return res.status(500).json({ error: 'Failed to update booking' });
+    }
+  });
+
+  // ─── LHB EMAIL TRIGGER ────────────────────────────────────────────────────
+  app.post('/api/internal/email', requireInternalKey, async (req, res) => {
+    try {
+      const { type, payload } = req.body as {
+        type: 'order_confirmation' | 'shipment_notification' | 'cancellation';
+        payload: any;
+      };
+
+      if (!type || !payload) {
+        return res.status(400).json({ error: 'type and payload are required' });
+      }
+
+      switch (type) {
+        case 'order_confirmation':
+          await sendLHBOrderConfirmation(payload);
+          break;
+        case 'shipment_notification':
+          await sendLHBShipmentNotification(payload);
+          break;
+        case 'cancellation':
+          await sendLHBCancellationEmail(payload);
+          break;
+        default:
+          return res.status(400).json({ error: `Unknown email type: ${type}` });
+      }
+
+      return res.json({ success: true });
+    } catch (err: any) {
+      console.error('[/api/internal/email] Error:', err);
+      return res.status(500).json({ error: err.message ?? 'Email send failed' });
     }
   });
 

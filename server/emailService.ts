@@ -1540,3 +1540,151 @@ export async function sendNewBookingAlertToVendor(params: {
     html,
   }).catch(err => console.error('[XO Email] Vendor alert failed:', err))
 }
+
+// ─── LOTUS HOUSE BLENDS EMAIL FUNCTIONS ─────────────────────────────────────
+
+interface LHBOrderEmailPayload {
+  orderId: string;
+  customerName: string;
+  customerEmail: string;
+  vendorEmail: string;
+  adminEmail: string;
+  items: Array<{ name: string; quantity: number; price_cents: number }>;
+  totalCents: number;
+  shippingAddress: {
+    line1: string;
+    city: string;
+    state: string;
+    zip: string;
+  };
+  trackingNumber?: string;
+  carrier?: string;
+  trackingUrl?: string | null;
+}
+
+async function sendLHBEmail(
+  to: string | string[],
+  subject: string,
+  html: string
+): Promise<void> {
+  const apiKey = process.env.RESEND_API_KEY;
+  if (!apiKey) throw new Error('[emailService] RESEND_API_KEY not set');
+  const resend = new Resend(apiKey);
+  const result = await resend.emails.send({ from: FROM_ORDERS, to: to as any, subject, html });
+  if (result.error) {
+    const msg = typeof result.error === 'object' && result.error !== null
+      ? (result.error as { message?: string }).message ?? JSON.stringify(result.error)
+      : String(result.error);
+    throw new Error(`Resend error: ${msg}`);
+  }
+}
+
+export async function sendLHBOrderConfirmation(
+  payload: LHBOrderEmailPayload
+): Promise<void> {
+  const { orderId, customerName, customerEmail, vendorEmail, adminEmail,
+          items, totalCents, shippingAddress } = payload;
+  const ref = `#${orderId.slice(0, 8).toUpperCase()}`;
+
+  const itemsHtml = items.map(i =>
+    `<tr>
+      <td style="padding:6px 12px">${i.name}</td>
+      <td style="padding:6px 12px;text-align:center">${i.quantity}</td>
+      <td style="padding:6px 12px;text-align:right">$${(i.price_cents / 100).toFixed(2)}</td>
+    </tr>`
+  ).join('');
+
+  const html = `
+    <div style="background:#EDE3CC;padding:32px;font-family:sans-serif;color:#2A1E0E;max-width:600px;margin:0 auto">
+      <h2 style="color:#2A1E0E;border-bottom:2px solid #E8B930;padding-bottom:8px">
+        New Order — Lotus House Blends
+      </h2>
+      <p><strong>Order:</strong> ${ref}</p>
+      <p><strong>Customer:</strong> ${customerName} (${customerEmail})</p>
+      <p><strong>Ship to:</strong> ${shippingAddress.line1}, ${shippingAddress.city}, ${shippingAddress.state} ${shippingAddress.zip}</p>
+      <table style="width:100%;border-collapse:collapse;margin:16px 0">
+        <thead>
+          <tr style="background:#2A1E0E;color:#EDE3CC">
+            <th style="padding:8px 12px;text-align:left">Item</th>
+            <th style="padding:8px 12px;text-align:center">Qty</th>
+            <th style="padding:8px 12px;text-align:right">Price</th>
+          </tr>
+        </thead>
+        <tbody>${itemsHtml}</tbody>
+      </table>
+      <p style="font-size:18px;font-weight:bold">Total: $${(totalCents / 100).toFixed(2)}</p>
+      <p style="color:#666;font-size:12px;margin-top:24px">Powered by Outsyde</p>
+    </div>`;
+
+  await sendLHBEmail(
+    [vendorEmail, adminEmail],
+    `New Order ${ref} — ${customerName} | Lotus House Blends`,
+    html
+  );
+}
+
+export async function sendLHBShipmentNotification(
+  payload: LHBOrderEmailPayload
+): Promise<void> {
+  const { orderId, customerName, customerEmail, vendorEmail, adminEmail,
+          trackingNumber, carrier, trackingUrl } = payload;
+  const ref = `#${orderId.slice(0, 8).toUpperCase()}`;
+
+  const trackingBlock = trackingNumber ? `
+    <p><strong>Carrier:</strong> ${carrier}</p>
+    <p><strong>Tracking #:</strong> <code>${trackingNumber}</code></p>
+    ${trackingUrl ? `<p><a href="${trackingUrl}">${trackingUrl}</a></p>` : ''}` : '';
+
+  const trackingBtn = trackingUrl ? `
+    <a href="${trackingUrl}" style="display:inline-block;background:#2A1E0E;color:#EDE3CC;
+       padding:12px 24px;text-decoration:none;margin-top:12px">
+      Track Package →
+    </a>` : '';
+
+  await sendLHBEmail(
+    [vendorEmail, adminEmail],
+    `Order Shipped — ${customerName} | ${ref}`,
+    `<div style="background:#EDE3CC;padding:32px;font-family:sans-serif;color:#2A1E0E;max-width:600px;margin:0 auto">
+      <h2 style="color:#2A1E0E;border-bottom:2px solid #E8B930;padding-bottom:8px">Order Marked as Shipped</h2>
+      <p><strong>Order:</strong> ${ref}</p>
+      <p><strong>Customer:</strong> ${customerName} (${customerEmail})</p>
+      ${trackingBlock}
+      <p style="color:#666;font-size:12px;margin-top:24px">Powered by Outsyde</p>
+    </div>`
+  );
+
+  await sendLHBEmail(
+    customerEmail,
+    `Your Lotus House Blends order has shipped! ${ref}`,
+    `<div style="background:#EDE3CC;padding:32px;font-family:sans-serif;color:#2A1E0E;max-width:600px;margin:0 auto">
+      <h2 style="color:#2A1E0E;border-bottom:2px solid #E8B930;padding-bottom:8px">Your order is on its way 🌿</h2>
+      <p>Hi ${customerName},</p>
+      <p>Your Lotus House Blends order has shipped via <strong>${carrier}</strong>.</p>
+      <p><strong>Tracking number:</strong> <code>${trackingNumber}</code></p>
+      ${trackingBtn}
+      <p style="color:#666;font-size:12px;margin-top:32px">— Lotus House Blends · Powered by Outsyde</p>
+    </div>`
+  );
+}
+
+export async function sendLHBCancellationEmail(
+  payload: LHBOrderEmailPayload
+): Promise<void> {
+  const { orderId, customerName, customerEmail, vendorEmail, adminEmail, totalCents } = payload;
+  const ref = `#${orderId.slice(0, 8).toUpperCase()}`;
+
+  const html = `
+    <div style="background:#EDE3CC;padding:32px;font-family:sans-serif;color:#2A1E0E;max-width:600px;margin:0 auto">
+      <h2 style="color:#2A1E0E;border-bottom:2px solid #E8B930;padding-bottom:8px">Order Cancelled</h2>
+      <p><strong>Order:</strong> ${ref}</p>
+      <p><strong>Customer:</strong> ${customerName} (${customerEmail})</p>
+      <p><strong>Refund amount:</strong> $${(totalCents / 100).toFixed(2)}</p>
+      <p style="color:#666;font-size:12px;margin-top:24px">Powered by Outsyde</p>
+    </div>`;
+
+  await sendLHBEmail(
+    [vendorEmail, adminEmail, customerEmail],
+    `Order Cancelled — ${ref}`,
+    html
+  );
+}
