@@ -13362,10 +13362,8 @@ export async function registerRoutes(
 
   // Calculate points value (for checkout preview)
   app.post("/api/points/calculate", async (req, res) => {
-    const userId = req.session?.userId;
-    if (!userId) {
-      return res.status(401).json({ error: "Not authenticated" });
-    }
+    const userId = getUserIdFromRequest(req);
+    if (!userId) return res.status(401).json({ error: 'Unauthorized' });
 
     try {
       const pointsSchema = z.object({
@@ -13395,10 +13393,8 @@ export async function registerRoutes(
 
   // Redeem points for discount
   app.post("/api/points/redeem", async (req, res) => {
-    const userId = req.session?.userId;
-    if (!userId) {
-      return res.status(401).json({ error: "Not authenticated" });
-    }
+    const userId = getUserIdFromRequest(req);
+    if (!userId) return res.status(401).json({ error: 'Unauthorized' });
 
     try {
       const redeemSchema = z.object({
