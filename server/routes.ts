@@ -2544,7 +2544,7 @@ export async function registerRoutes(
           firstName: sessionState.displayName,
           lastName: '',
           role: sessionState.isAdmin ? 'admin' : sessionState.isVendor ? 'vendor' : 'consumer',
-          rewardsPoints: sessionState.loyaltyPoints ?? 0,
+          loyaltyPoints: sessionState.loyaltyPoints ?? 0,
           profileImageUrl: sessionState.profilePhotoUrl ?? null,
         },
       });
