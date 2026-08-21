@@ -2279,29 +2279,34 @@ export class DatabaseStorage implements IStorage {
     const isCapped = rawPoints > this.MAX_POINTS_PER_TRANSACTION;
     const pointsEarned = isCapped ? this.MAX_POINTS_PER_TRANSACTION : rawPoints;
 
-    const currentBalance = await this.getUserPointsBalance(data.userId);
-    const newBalance = currentBalance + pointsEarned;
+    return db.transaction(async (tx) => {
+      const [userRow] = await tx.select({ loyaltyPoints: users.loyaltyPoints })
+        .from(users)
+        .where(eq(users.id, data.userId));
+      const currentBalance = userRow?.loyaltyPoints ?? 0;
+      const newBalance = currentBalance + pointsEarned;
 
-    await db.update(users)
-      .set({ loyaltyPoints: newBalance })
-      .where(eq(users.id, data.userId));
+      await tx.update(users)
+        .set({ loyaltyPoints: newBalance })
+        .where(eq(users.id, data.userId));
 
-    const result = await db.insert(pointTransactions).values({
-      id: randomUUID(),
-      userId: data.userId,
-      type: 'earn',
-      points: pointsEarned,
-      dollarAmountCents: data.dollarAmountCents,
-      businessId: data.businessId || null,
-      businessName: data.businessName || null,
-      referenceType: data.referenceType || null,
-      referenceId: data.referenceId || null,
-      balanceAfter: newBalance,
-      description: data.description || `Earned ${pointsEarned} points${isCapped ? ' (capped)' : ''}`,
-      capped: isCapped,
-    }).returning();
+      const [result] = await tx.insert(pointTransactions).values({
+        id: randomUUID(),
+        userId: data.userId,
+        type: 'earn',
+        points: pointsEarned,
+        dollarAmountCents: data.dollarAmountCents,
+        businessId: data.businessId || null,
+        businessName: data.businessName || null,
+        referenceType: data.referenceType || null,
+        referenceId: data.referenceId || null,
+        balanceAfter: newBalance,
+        description: data.description || `Earned ${pointsEarned} points${isCapped ? ' (capped)' : ''}`,
+        capped: isCapped,
+      }).returning();
 
-    return result[0];
+      return result;
+    });
   }
 
   async getPendingPointTransactions(opts: { userId?: string; status?: string; limit?: number } = {}): Promise<PendingPointTransaction[]> {
@@ -2324,36 +2329,41 @@ export class DatabaseStorage implements IStorage {
     const pointsToCredit = Math.min(pending.pointsEarned, this.MAX_POINTS_PER_TRANSACTION);
     const isCapped = pointsToCredit < pending.pointsEarned;
 
-    const currentBalance = await this.getUserPointsBalance(pending.userId);
-    const newBalance = currentBalance + pointsToCredit;
+    return db.transaction(async (tx) => {
+      const [userRow] = await tx.select({ loyaltyPoints: users.loyaltyPoints })
+        .from(users)
+        .where(eq(users.id, pending.userId));
+      const currentBalance = userRow?.loyaltyPoints ?? 0;
+      const newBalance = currentBalance + pointsToCredit;
 
-    await db.update(users)
-      .set({ loyaltyPoints: newBalance })
-      .where(eq(users.id, pending.userId));
+      await tx.update(users)
+        .set({ loyaltyPoints: newBalance })
+        .where(eq(users.id, pending.userId));
 
-    const liveId = randomUUID();
-    const [live] = await db.insert(pointTransactions).values({
-      id: liveId,
-      userId: pending.userId,
-      type: 'earn',
-      points: pointsToCredit,
-      dollarAmountCents: pending.dollarAmountCents,
-      businessId: pending.businessId || null,
-      businessName: pending.businessName || null,
-      referenceType: pending.referenceType || null,
-      referenceId: pending.referenceId || null,
-      balanceAfter: newBalance,
-      description: pending.description || `Earned ${pointsToCredit} points`,
-      capped: isCapped,
-    }).returning();
+      const liveId = randomUUID();
+      const [live] = await tx.insert(pointTransactions).values({
+        id: liveId,
+        userId: pending.userId,
+        type: 'earn',
+        points: pointsToCredit,
+        dollarAmountCents: pending.dollarAmountCents,
+        businessId: pending.businessId || null,
+        businessName: pending.businessName || null,
+        referenceType: pending.referenceType || null,
+        referenceId: pending.referenceId || null,
+        balanceAfter: newBalance,
+        description: pending.description || `Earned ${pointsToCredit} points`,
+        capped: isCapped,
+      }).returning();
 
-    const now = new Date();
-    const [updatedPending] = await db.update(pendingPointTransactions)
-      .set({ status: 'approved', reviewedAt: now, reviewedBy: reviewerId, reviewNote: note || null, liveTransactionId: liveId, updatedAt: now })
-      .where(eq(pendingPointTransactions.id, pendingId))
-      .returning();
+      const now = new Date();
+      const [updatedPending] = await tx.update(pendingPointTransactions)
+        .set({ status: 'approved', reviewedAt: now, reviewedBy: reviewerId, reviewNote: note || null, liveTransactionId: liveId, updatedAt: now })
+        .where(eq(pendingPointTransactions.id, pendingId))
+        .returning();
 
-    return { pending: updatedPending, live };
+      return { pending: updatedPending, live };
+    });
   }
 
   async rejectPendingPointTransaction(pendingId: string, reviewerId: string, note?: string): Promise<PendingPointTransaction> {
@@ -2377,7 +2387,6 @@ export class DatabaseStorage implements IStorage {
     { points: 2500,  valueCents: 2500 },
     { points: 5000,  valueCents: 5000 },
     { points: 10000, valueCents: 10000 },
-    { points: 25000, valueCents: 25000 }
   ];
   
   // Max discount as percentage of order total
@@ -2447,32 +2456,32 @@ export class DatabaseStorage implements IStorage {
     const discountCents = tier.valueCents;
     const newBalance = currentBalance - data.points;
 
-    // Update user's loyalty points
-    await db.update(users)
-      .set({ loyaltyPoints: newBalance })
-      .where(eq(users.id, data.userId));
+    return db.transaction(async (tx) => {
+      await tx.update(users)
+        .set({ loyaltyPoints: newBalance })
+        .where(eq(users.id, data.userId));
 
-    // Create transaction record
-    const id = randomUUID();
-    const result = await db.insert(pointTransactions).values({
-      id,
-      userId: data.userId,
-      type: 'redeem',
-      points: data.points,
-      dollarAmountCents: discountCents,
-      businessId: data.businessId || null,
-      businessName: data.businessName || null,
-      referenceType: data.referenceType || null,
-      referenceId: data.referenceId || null,
-      balanceAfter: newBalance,
-      description: data.description || `Redeemed ${data.points} points for $${(discountCents / 100).toFixed(2)} discount`,
-      capped: false,
-    }).returning();
+      const id = randomUUID();
+      const [result] = await tx.insert(pointTransactions).values({
+        id,
+        userId: data.userId,
+        type: 'redeem',
+        points: data.points,
+        dollarAmountCents: discountCents,
+        businessId: data.businessId || null,
+        businessName: data.businessName || null,
+        referenceType: data.referenceType || null,
+        referenceId: data.referenceId || null,
+        balanceAfter: newBalance,
+        description: data.description || `Redeemed ${data.points} points for $${(discountCents / 100).toFixed(2)} discount`,
+        capped: false,
+      }).returning();
 
-    return { 
-      transaction: result[0], 
-      discountCents 
-    };
+      return {
+        transaction: result,
+        discountCents
+      };
+    });
   }
   
   // Get available redemption tiers for a user based on their balance
@@ -2527,29 +2536,29 @@ export class DatabaseStorage implements IStorage {
       return { error: 'Cannot reverse a reversal transaction' };
     }
     
-    // Update user's balance
-    await db.update(users)
-      .set({ loyaltyPoints: newBalance })
-      .where(eq(users.id, data.userId));
-    
-    // Create reversal transaction record
-    const id = randomUUID();
-    const result = await db.insert(pointTransactions).values({
-      id,
-      userId: data.userId,
-      type: 'reversal',
-      points: pointsToReverse,
-      dollarAmountCents: originalTransaction.dollarAmountCents,
-      businessId: originalTransaction.businessId,
-      businessName: originalTransaction.businessName,
-      referenceType: 'reversal',
-      referenceId: data.originalTransactionId,
-      balanceAfter: newBalance,
-      description: `Reversal: ${data.reason}`,
-      capped: false,
-    }).returning();
-    
-    return result[0];
+    return db.transaction(async (tx) => {
+      await tx.update(users)
+        .set({ loyaltyPoints: newBalance })
+        .where(eq(users.id, data.userId));
+
+      const id = randomUUID();
+      const [result] = await tx.insert(pointTransactions).values({
+        id,
+        userId: data.userId,
+        type: 'reversal',
+        points: pointsToReverse,
+        dollarAmountCents: originalTransaction.dollarAmountCents,
+        businessId: originalTransaction.businessId,
+        businessName: originalTransaction.businessName,
+        referenceType: 'reversal',
+        referenceId: data.originalTransactionId,
+        balanceAfter: newBalance,
+        description: `Reversal: ${data.reason}`,
+        capped: false,
+      }).returning();
+
+      return result;
+    });
   }
 
   async getPointTransactions(userId: string, limit: number = 50): Promise<PointTransaction[]> {
