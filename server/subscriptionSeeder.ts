@@ -14,7 +14,7 @@ const TIERS = [
     description: 'Perfect for new businesses ready to start selling.',
     priceInCents: 2900, // $29/mo
     platformFeeBps: 800,
-    stripePriceId: 'price_1TNP3CBXLHe4A1FGCux43w00',
+    stripePriceId: 'price_1U73BmRxWOny76kZPUKzAcme',
     features: [
       'Product & service listings',
       'Basic analytics',
@@ -31,7 +31,7 @@ const TIERS = [
     description: 'For businesses ready to grow with real tools.',
     priceInCents: 5900, // $59/mo
     platformFeeBps: 800,
-    stripePriceId: 'price_1TNP4DBXLHe4A1FGIga6ZQ0k',
+    stripePriceId: 'price_1U73DQRxWOny76kZhoEcEEUC',
     features: [
       'Everything in Starter',
       'Advanced analytics',
@@ -48,7 +48,7 @@ const TIERS = [
     description: 'For established businesses that want maximum impact.',
     priceInCents: 9900, // $99/mo
     platformFeeBps: 800,
-    stripePriceId: 'price_1TNP4VBXLHe4A1FGREAhrzSU',
+    stripePriceId: 'price_1U73E8RxWOny76kZkFLcOo6T',
     features: [
       'Everything in Growth',
       '1 Silver or 2 Bronze tier influencers per month',
