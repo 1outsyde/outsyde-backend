@@ -128,9 +128,17 @@ const handleStripeWebhook = async (req: any, res: any) => {
     }
 
     const uuid = req.params.uuid || "external";
-    await WebhookHandlers.processWebhook(req.body as Buffer, sig, uuid);
+    const event = await WebhookHandlers.verifyAndParseEvent(req.body as Buffer, sig, uuid);
 
+    // ACK Stripe immediately — before any DB or network work
     res.status(200).json({ received: true });
+
+    // Process event async — Stripe already has its 200
+    setImmediate(() => {
+      WebhookHandlers.handleEvent(event).catch((err) => {
+        console.error('[Webhook] Async handler error:', err);
+      });
+    });
   } catch (error: any) {
     console.error("Webhook error:", error.message);
     res.status(400).json({ error: "Webhook processing error" });

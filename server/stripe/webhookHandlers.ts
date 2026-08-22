@@ -75,6 +75,45 @@ export class WebhookHandlers {
     await this.handleEvent(event);
   }
 
+  static async verifyAndParseEvent(
+    payload: Buffer,
+    signature: string,
+    _uuid: string
+  ): Promise<any> {
+    const primarySecret = process.env.STRIPE_WEBHOOK_SECRET;
+    const connectSecret = process.env.STRIPE_CONNECT_WEBHOOK_SECRET;
+
+    if (!primarySecret && !connectSecret) {
+      console.error("[Stripe] No webhook secret configured (STRIPE_WEBHOOK_SECRET or STRIPE_CONNECT_WEBHOOK_SECRET)");
+      throw new Error("Webhook secret not configured");
+    }
+
+    const stripe = await getUncachableStripeClient();
+    const secrets = [primarySecret, connectSecret].filter(Boolean) as string[];
+    let event: any;
+    let lastErr: unknown;
+
+    for (const secret of secrets) {
+      try {
+        event = stripe.webhooks.constructEvent(payload, signature, secret);
+        break;
+      } catch (err: any) {
+        if (err?.type === "StripeSignatureVerificationError") {
+          lastErr = err;
+          continue;
+        }
+        throw err;
+      }
+    }
+
+    if (!event) {
+      console.error("[Stripe] Signature verification failed against all configured secrets");
+      throw lastErr;
+    }
+
+    return event;
+  }
+
   static async handleEvent(event: any): Promise<void> {
 
 
