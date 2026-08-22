@@ -13360,32 +13360,32 @@ export async function registerRoutes(
     }
   });
 
+  // Valid redemption tiers: points → cents (1 pt = $0.01)
+  const VALID_TIERS: Record<number, number> = { 500: 500, 1000: 1000, 2500: 2500, 5000: 5000, 10000: 10000 };
+  const availableTiersResponse = Object.entries(VALID_TIERS).map(([pts, cents]) => ({
+    points: Number(pts),
+    discountDollars: cents / 100,
+  }));
+
   // Calculate points value (for checkout preview)
   app.post("/api/points/calculate", async (req, res) => {
     const userId = getUserIdFromRequest(req);
     if (!userId) return res.status(401).json({ error: 'Unauthorized' });
 
+    const { pointsToRedeem } = req.body;
+    if (!VALID_TIERS[pointsToRedeem]) {
+      return res.status(400).json({
+        error: `${pointsToRedeem} is not a valid tier. Choose one of: ${Object.keys(VALID_TIERS).map(p => `${p} pts ($${Number(p) / 100})`).join(', ')}.`,
+        availableTiers: availableTiersResponse,
+      });
+    }
+
     try {
-      const pointsSchema = z.object({
-        points: z.number().int().positive(),
-      });
-      const { points } = pointsSchema.parse(req.body);
-      
-      const balance = await storage.getUserPointsBalance(userId);
-      const availablePoints = Math.min(points, balance);
-      const discountCents = storage.calculatePointsValue(availablePoints);
-      
-      res.json({
-        requestedPoints: points,
-        availablePoints,
-        discountCents,
-        formattedDiscount: `$${(discountCents / 100).toFixed(2)}`,
-        remainingBalance: balance - availablePoints,
-      });
+      const discountCents = VALID_TIERS[pointsToRedeem];
+      const discountDollars = discountCents / 100;
+
+      res.json({ pointsToRedeem, discountDollars, discountCents });
     } catch (error) {
-      if (error instanceof z.ZodError) {
-        return res.status(400).json({ error: "Invalid data", details: error.errors });
-      }
       console.error("Calculate points error:", error);
       res.status(500).json({ error: "Failed to calculate points" });
     }
@@ -13396,9 +13396,17 @@ export async function registerRoutes(
     const userId = getUserIdFromRequest(req);
     if (!userId) return res.status(401).json({ error: 'Unauthorized' });
 
+    const { pointsToRedeem } = req.body;
+    if (!VALID_TIERS[pointsToRedeem]) {
+      return res.status(400).json({
+        error: `${pointsToRedeem} is not a valid tier. Choose one of: ${Object.keys(VALID_TIERS).map(p => `${p} pts ($${Number(p) / 100})`).join(', ')}.`,
+        availableTiers: availableTiersResponse,
+      });
+    }
+
     try {
       const redeemSchema = z.object({
-        points: z.number().int().positive(),
+        pointsToRedeem: z.number().int().positive(),
         businessId: z.string().optional(),
         businessName: z.string().optional(),
         referenceType: z.string().optional(),
@@ -13408,7 +13416,7 @@ export async function registerRoutes(
 
       const result = await storage.redeemPoints({
         userId,
-        points: data.points,
+        points: data.pointsToRedeem,
         businessId: data.businessId,
         businessName: data.businessName,
         referenceType: data.referenceType,
