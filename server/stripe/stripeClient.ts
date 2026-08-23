@@ -23,6 +23,9 @@ function getCredentials() {
 
 export async function getUncachableStripeClient() {
   const { secretKey } = getCredentials();
+  const key = process.env.STRIPE_SECRET_KEY ?? '';
+  console.log('[STRIPE_KEY_DIAG] length:', key.length);
+  console.log('[STRIPE_KEY_DIAG] charCodes:', [...key].map(c => c.charCodeAt(0)));
   return new Stripe(secretKey);
 }
 
