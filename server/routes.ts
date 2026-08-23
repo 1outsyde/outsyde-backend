@@ -6788,8 +6788,19 @@ export async function registerRoutes(
       const consumerUpchargeCents = Math.round(basePriceCents * 0.08);
       const totalChargedToConsumerCents = basePriceCents + consumerUpchargeCents;
       const platformFeeCents = totalChargedToConsumerCents - vendorPayoutCents;
-      // points_earned = base_charge * 4  (4% of base at 100:1 ratio)
-      const outsydePointsEarned = Math.round(basePriceCents * 4 / 100);
+      const outsydePointsEarned = Math.round(totalChargedToConsumerCents * 40 / 108);
+
+      // Optional promo code — validated here, marked used only after payment succeeds
+      const { promoCodeId } = req.body;
+      let discountCents = 0;
+      if (promoCodeId) {
+        const promoCode = await storage.getPromoCodeById(promoCodeId);
+        if (!promoCode || promoCode.status !== 'active' || promoCode.usedAt !== null) {
+          return res.status(400).json({ error: 'Invalid or already used promo code' });
+        }
+        discountCents = promoCode.discountCents;
+      }
+      const chargedToConsumer = Math.max(totalChargedToConsumerCents - discountCents, 50);
 
       // Get or create Stripe customer for the user
       const user = await storage.getUser(userId);
@@ -6810,7 +6821,7 @@ export async function registerRoutes(
 
       // Create PaymentIntent with explicit vendor payout via transfer_data.amount
       const paymentIntent = await stripeService.createBookingPaymentIntent({
-        totalChargedCents: totalChargedToConsumerCents,
+        totalChargedCents: chargedToConsumer,
         vendorPayoutCents,
         customerId: stripeCustomerId,
         connectedAccountId: business.stripeAccountId,
@@ -6827,6 +6838,9 @@ export async function registerRoutes(
           consumerUpchargeCents: String(consumerUpchargeCents),
           platformFeeCents: String(platformFeeCents),
           outsydePointsEarned: String(outsydePointsEarned),
+          promoCodeId: promoCodeId || '',
+          discountCents: String(discountCents),
+          originalConsumerTotalCents: String(totalChargedToConsumerCents),
         },
         description: `Appointment booking at ${business.name}`,
       });
@@ -6950,8 +6964,19 @@ export async function registerRoutes(
       const consumerUpchargeCents = Math.round(basePriceCents * 0.08);
       const totalChargedToConsumerCents = basePriceCents + consumerUpchargeCents;
       const platformFeeCents = totalChargedToConsumerCents - vendorPayoutCents;
-      // points_earned = base_charge * 4  (4% of base at 100:1 ratio)
-      const outsydePointsEarned = Math.round(basePriceCents * 4 / 100);
+      const outsydePointsEarned = Math.round(totalChargedToConsumerCents * 40 / 108);
+
+      // Optional promo code — validated here, marked used only after payment succeeds
+      const { promoCodeId } = req.body;
+      let discountCents = 0;
+      if (promoCodeId) {
+        const promoCode = await storage.getPromoCodeById(promoCodeId);
+        if (!promoCode || promoCode.status !== 'active' || promoCode.usedAt !== null) {
+          return res.status(400).json({ error: 'Invalid or already used promo code' });
+        }
+        discountCents = promoCode.discountCents;
+      }
+      const chargedToConsumer = Math.max(totalChargedToConsumerCents - discountCents, 50);
 
       // Get user for Stripe customer
       const user = await storage.getUser(userId);
@@ -6982,7 +7007,7 @@ export async function registerRoutes(
       // fee). Centralising all fee schedules into fees.ts is tracked separately —
       // do not change these rates here.
       const paymentIntent = await stripeService.createPlatformPaymentIntent({
-        amountCents: totalChargedToConsumerCents,
+        amountCents: chargedToConsumer,
         customerId: stripeCustomerId,
         captureMethod,
         saveForFutureUse: true,
@@ -6997,6 +7022,9 @@ export async function registerRoutes(
           consumerUpchargeCents: String(consumerUpchargeCents),
           platformFeeCents: String(platformFeeCents),
           outsydePointsEarned: String(outsydePointsEarned),
+          promoCodeId: promoCodeId || '',
+          discountCents: String(discountCents),
+          originalConsumerTotalCents: String(totalChargedToConsumerCents),
         },
         description: `Photography shoot booking with ${photographer.displayName}`,
       });
@@ -7044,7 +7072,7 @@ export async function registerRoutes(
     }
 
     try {
-      const { items, shippingAddress: rawShippingAddress } = req.body;
+      const { items, shippingAddress: rawShippingAddress, promoCodeId } = req.body;
 
       // ── Address guard (validate structure + ensure address is present) ────────
       const shippingAddrSchema = z.object({
@@ -7129,8 +7157,18 @@ export async function registerRoutes(
         const feeBreakdown = calculateProductFees(basePriceCents, { influencerAttributed: isInfluencerAttributed });
 
         const totalChargedToConsumerCents = feeBreakdown.customerTotalBeforeTaxCents;
-        // points_earned = base_charge * 4  (4% of base at 100:1 ratio)
-        const outsydePointsEarned = Math.round(basePriceCents * 4 / 100);
+        const outsydePointsEarned = Math.round(totalChargedToConsumerCents * 40 / 108);
+
+        // Optional promo code — validated here, marked used only after payment succeeds
+        let discountCents = 0;
+        if (promoCodeId) {
+          const promoCode = await storage.getPromoCodeById(promoCodeId);
+          if (!promoCode || promoCode.status !== 'active' || promoCode.usedAt !== null) {
+            return res.status(400).json({ success: false, error: { code: 'INVALID_PROMO', message: 'Invalid or already used promo code' } });
+          }
+          discountCents = promoCode.discountCents;
+        }
+        const chargedToConsumer = Math.max(totalChargedToConsumerCents - discountCents, 50);
 
         // Create the order row BEFORE touching Stripe so a record always exists
         const order = await storage.createOrder({
@@ -7174,7 +7212,7 @@ export async function registerRoutes(
         }
 
         const paymentIntent = await stripeService.createBookingPaymentIntent({
-          totalChargedCents: totalChargedToConsumerCents,
+          totalChargedCents: chargedToConsumer,
           vendorPayoutCents: feeBreakdown.vendorNetCents,
           customerId: stripeCustomerId,
           connectedAccountId: business.stripeAccountId,
@@ -7190,6 +7228,9 @@ export async function registerRoutes(
             vendorPayoutCents: String(feeBreakdown.vendorNetCents),
             platformFeeCents: String(feeBreakdown.platformFeeCents),
             outsydePointsEarned: String(outsydePointsEarned),
+            promoCodeId: promoCodeId || '',
+            discountCents: String(discountCents),
+            originalConsumerTotalCents: String(totalChargedToConsumerCents),
             itemCount: String(items.length),
             itemSummary: items.map((i: { name: string; quantity: number }) => `${i.name} x${i.quantity}`).join(', ').substring(0, 490),
           },
