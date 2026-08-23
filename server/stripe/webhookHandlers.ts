@@ -224,12 +224,19 @@ export class WebhookHandlers {
             updatedAt: new Date()
           }).where(eq(appointments.id, bookingId));
 
-          // Award points
+          // Mark promo code used and award points on original pre-discount total
+          const { promoCodeId: abPromoCodeId, originalConsumerTotalCents: abOriginalTotal } = metadata;
+          if (abPromoCodeId) {
+            await storage.applyPromoCode(abPromoCodeId, 'appointment', bookingId).catch(err =>
+              console.error(`[Stripe] Failed to apply promo code ${abPromoCodeId} for appointment ${bookingId}:`, err)
+            );
+          }
+          const abPointsBase = abOriginalTotal ? Number(abOriginalTotal) : paymentIntent.amount;
           const user = clientId ? await storage.getUser(clientId) : null;
           if (user) {
             await storage.earnPoints({
               userId: user.id,
-              dollarAmountCents: paymentIntent.amount,
+              dollarAmountCents: abPointsBase,
               transactionType: 'business_transaction',
               referenceType: 'appointment',
               referenceId: bookingId,
@@ -428,12 +435,19 @@ export class WebhookHandlers {
           }
         }
 
-        // Award points
+        // Mark promo code used and award points on original pre-discount total
+        const { promoCodeId: sbPromoCodeId, originalConsumerTotalCents: sbOriginalTotal } = metadata;
+        if (sbPromoCodeId) {
+          await storage.applyPromoCode(sbPromoCodeId, 'shoot_booking', bookingId).catch(err =>
+            console.error(`[Stripe] Failed to apply promo code ${sbPromoCodeId} for shoot booking ${bookingId}:`, err)
+          );
+        }
+        const sbPointsBase = sbOriginalTotal ? Number(sbOriginalTotal) : paymentIntent.amount;
         const user = clientId ? await storage.getUser(clientId) : null;
         if (user) {
           await storage.earnPoints({
             userId: user.id,
-            dollarAmountCents: paymentIntent.amount,
+            dollarAmountCents: sbPointsBase,
             transactionType: 'photographer_booking',
             referenceType: 'shoot_booking',
             referenceId: bookingId,
@@ -885,12 +899,19 @@ export class WebhookHandlers {
           await storage.clearCart(userIdFromMeta);
         }
 
-        // Award loyalty points (same referenceType as single-vendor web checkout)
+        // Mark promo code used and award points on original pre-discount total
+        const { promoCodeId: ppPromoCodeId, originalConsumerTotalCents: ppOriginalTotal } = metadata;
+        if (ppPromoCodeId) {
+          await storage.applyPromoCode(ppPromoCodeId, 'order', orderId).catch(err =>
+            console.error(`[Stripe] Failed to apply promo code ${ppPromoCodeId} for order ${orderId}:`, err)
+          );
+        }
+        const ppPointsBase = ppOriginalTotal ? Number(ppOriginalTotal) : paymentIntent.amount;
         const purchaser = userIdFromMeta ? await storage.getUser(userIdFromMeta) : null;
         if (purchaser) {
           await storage.earnPoints({
             userId: purchaser.id,
-            dollarAmountCents: paymentIntent.amount,
+            dollarAmountCents: ppPointsBase,
             transactionType: 'business_transaction',
             referenceType: 'cart_order',
             referenceId: orderId,

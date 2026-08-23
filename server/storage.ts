@@ -2611,6 +2611,10 @@ export class DatabaseStorage implements IStorage {
     });
   }
 
+  async getPromoCodeById(id: string) {
+    return db.query.promoCodes.findFirst({ where: eq(promoCodes.id, id) });
+  }
+
   // Reverse points for refunds and cancellations
   async reversePoints(data: {
     userId: string;
