@@ -21,6 +21,7 @@ import {
   refreshTokens,
   influencerApplications,
   influencerProfiles,
+  promoCodes,
   type User,
   type StaffMember,
   type StaffInvite,
@@ -13427,15 +13428,17 @@ export async function registerRoutes(
         return res.status(400).json({ success: false, error: result.error });
       }
 
+      const { discountCents } = result;
+      const code = await storage.generatePromoCode(userId, data.pointsToRedeem, discountCents);
       const newBalance = await storage.getUserPointsBalance(userId);
 
       res.json({
         success: true,
-        transaction: result.transaction,
-        discountCents: result.discountCents,
-        formattedDiscount: `$${(result.discountCents / 100).toFixed(2)}`,
+        code,
+        discountDollars: discountCents / 100,
+        discountCents,
+        expiresInDays: 30,
         newBalance,
-        formattedNewBalance: newBalance.toLocaleString(),
       });
     } catch (error) {
       if (error instanceof z.ZodError) {
@@ -13443,6 +13446,62 @@ export async function registerRoutes(
       }
       console.error("Redeem points error:", error);
       res.status(500).json({ error: "Failed to redeem points" });
+    }
+  });
+
+  // Validate a promo code at checkout
+  app.post("/api/points/validate-code", async (req, res) => {
+    const userId = getUserIdFromRequest(req);
+    if (!userId) return res.status(401).json({ error: 'Unauthorized' });
+
+    const { code } = req.body;
+    if (!code || typeof code !== 'string') {
+      return res.status(400).json({ error: 'code is required' });
+    }
+
+    try {
+      const result = await storage.validatePromoCode(code, userId);
+
+      if (!result.valid) {
+        return res.status(400).json({ error: result.reason });
+      }
+
+      return res.json({
+        valid: true,
+        discountDollars: result.discountCents! / 100,
+        discountCents: result.discountCents,
+        codeId: result.codeId,
+      });
+    } catch (error) {
+      console.error("Validate promo code error:", error);
+      res.status(500).json({ error: "Failed to validate code" });
+    }
+  });
+
+  // List all active unused promo codes for the logged-in user
+  app.get("/api/points/my-codes", async (req, res) => {
+    const userId = getUserIdFromRequest(req);
+    if (!userId) return res.status(401).json({ error: 'Unauthorized' });
+
+    try {
+      const codes = await db.query.promoCodes.findMany({
+        where: and(
+          eq(promoCodes.userId, userId),
+          eq(promoCodes.status, 'active'),
+        ),
+        orderBy: [desc(promoCodes.createdAt)],
+      });
+
+      return res.json({
+        codes: codes.map(c => ({
+          code: c.code,
+          discountDollars: c.discountCents / 100,
+          expiresAt: c.expiresAt,
+        })),
+      });
+    } catch (error) {
+      console.error("My codes error:", error);
+      res.status(500).json({ error: "Failed to fetch codes" });
     }
   });
 

@@ -169,7 +169,8 @@ import {
   pendingPointTransactions,
   type PendingPointTransaction,
   isValidOrderTransition,
-  isValidBookingTransition
+  isValidBookingTransition,
+  promoCodes,
 } from "@shared/schema";
 import { db } from "./db";
 import { eq, ilike, or, and, sql, isNull, isNotNull, desc, asc, gte, lte, ne, inArray, notInArray } from "drizzle-orm";
@@ -2487,6 +2488,127 @@ export class DatabaseStorage implements IStorage {
   // Get available redemption tiers for a user based on their balance
   getAvailableRedemptionTiers(balance: number): { points: number; valueCents: number }[] {
     return this.REDEMPTION_TIERS.filter(tier => tier.points <= balance);
+  }
+
+  async generatePromoCode(
+    userId: string,
+    pointsCost: number,
+    discountCents: number
+  ): Promise<string> {
+    const existing = await db.query.promoCodes.findFirst({
+      where: and(
+        eq(promoCodes.userId, userId),
+        eq(promoCodes.discountCents, discountCents),
+        eq(promoCodes.status, 'active')
+      ),
+    });
+    if (existing) {
+      throw new Error(`You already have an active $${discountCents / 100} code: ${existing.code}. Use it before generating a new one.`);
+    }
+
+    const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+    const random = Array.from({ length: 4 }, () =>
+      chars[Math.floor(Math.random() * chars.length)]
+    ).join('');
+    const dollarValue = discountCents / 100;
+    const code = `OP-${random}-${dollarValue}`;
+
+    const expiresAt = new Date();
+    expiresAt.setDate(expiresAt.getDate() + 30);
+
+    await db.insert(promoCodes).values({
+      code,
+      userId,
+      pointsCost,
+      discountCents,
+      status: 'active',
+      expiresAt,
+    });
+
+    return code;
+  }
+
+  async validatePromoCode(
+    code: string,
+    requestingUserId: string
+  ): Promise<{
+    valid: boolean;
+    reason?: string;
+    discountCents?: number;
+    codeId?: string;
+  }> {
+    const promo = await db.query.promoCodes.findFirst({
+      where: eq(promoCodes.code, code),
+    });
+
+    if (!promo) return { valid: false, reason: 'Code not found' };
+
+    if (promo.userId !== requestingUserId) {
+      return { valid: false, reason: 'This code does not belong to your account' };
+    }
+
+    if (promo.status === 'used') {
+      return { valid: false, reason: 'This code has already been used' };
+    }
+
+    if (promo.status === 'expired') {
+      return { valid: false, reason: 'This code has expired' };
+    }
+
+    if (new Date() > promo.expiresAt) {
+      await db.update(promoCodes)
+        .set({ status: 'expired' })
+        .where(eq(promoCodes.id, promo.id));
+      return { valid: false, reason: 'This code has expired' };
+    }
+
+    return {
+      valid: true,
+      discountCents: promo.discountCents,
+      codeId: promo.id,
+    };
+  }
+
+  async applyPromoCode(
+    codeId: string,
+    referenceType: 'order' | 'appointment' | 'shoot_booking',
+    referenceId: string
+  ): Promise<void> {
+    await db.transaction(async (tx) => {
+      const promo = await tx.query.promoCodes.findFirst({
+        where: eq(promoCodes.id, codeId),
+      });
+      if (!promo || promo.status !== 'active') {
+        throw new Error('Code is no longer valid');
+      }
+
+      await tx.update(promoCodes).set({
+        status: 'used',
+        usedAt: new Date(),
+        usedOnOrderId: referenceId,
+        usedOnReferenceType: referenceType,
+      }).where(eq(promoCodes.id, codeId));
+
+      if (referenceType === 'order') {
+        await tx.update(orders).set({
+          promoCodeUsed: promo.code,
+          discountAmountCents: promo.discountCents,
+          pointsRedeemed: promo.pointsCost,
+        }).where(eq(orders.id, referenceId));
+      } else if (referenceType === 'appointment') {
+        await tx.update(appointments).set({
+          promoCodeUsed: promo.code,
+          discountAmountCents: promo.discountCents,
+          pointsRedeemed: promo.pointsCost,
+        }).where(eq(appointments.id, referenceId));
+      } else if (referenceType === 'shoot_booking') {
+        await tx.update(shootBookings).set({
+          promoCodeUsed: promo.code,
+          discountAmountCents: promo.discountCents,
+          pointsRedeemed: promo.pointsCost,
+        }).where(eq(shootBookings.id, referenceId));
+      }
+    });
   }
 
   // Reverse points for refunds and cancellations
