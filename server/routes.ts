@@ -13362,7 +13362,7 @@ export async function registerRoutes(
   });
 
   // Valid redemption tiers: points → cents (1 pt = $0.01)
-  const VALID_TIERS: Record<number, number> = { 500: 500, 1000: 1000, 2500: 2500, 5000: 5000, 10000: 10000 };
+  const VALID_TIERS: Record<number, number> = { 2500: 500, 5000: 1000, 12500: 2500, 25000: 5000, 50000: 10000 };
   const availableTiersResponse = Object.entries(VALID_TIERS).map(([pts, cents]) => ({
     points: Number(pts),
     discountDollars: cents / 100,

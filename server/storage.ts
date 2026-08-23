@@ -2258,7 +2258,7 @@ export class DatabaseStorage implements IStorage {
   //   points_earned = base_charge * 0.04 * 100  =  consumer_total_cents * 4 / 108
   //   outsyde_revenue_cents = points_earned  (same numeric value; 100 pts == $1)
   private calcPurchasePoints(consumerTotalCents: number): { pointsEarned: number; outsydeRevenueCents: number } {
-    const pointsEarned = Math.round(consumerTotalCents * 4 / 108);
+    const pointsEarned = Math.round(consumerTotalCents * 40 / 108);
     return { pointsEarned, outsydeRevenueCents: pointsEarned };
   }
 
@@ -2383,11 +2383,11 @@ export class DatabaseStorage implements IStorage {
 
   // Fixed redemption tiers - NO custom amounts allowed
   private readonly REDEMPTION_TIERS = [
-    { points: 500,   valueCents: 500 },
-    { points: 1000,  valueCents: 1000 },
-    { points: 2500,  valueCents: 2500 },
-    { points: 5000,  valueCents: 5000 },
-    { points: 10000, valueCents: 10000 },
+    { points: 2500,  valueCents: 500  },   // $5
+    { points: 5000,  valueCents: 1000 },   // $10
+    { points: 12500, valueCents: 2500 },   // $25
+    { points: 25000, valueCents: 5000 },   // $50
+    { points: 50000, valueCents: 10000 },  // $100
   ];
   
   // Max discount as percentage of order total
