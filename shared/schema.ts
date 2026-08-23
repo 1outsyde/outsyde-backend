@@ -913,6 +913,11 @@ export const shootBookings = pgTable("shoot_bookings", {
   stateChangedBy: varchar("state_changed_by", { length: 36 }), // 'system', 'stripe', or userId
   previousState: text("previous_state"),
 
+  // Promo code / points redemption tracking
+  promoCodeUsed: text("promo_code_used"),
+  discountAmountCents: integer("discount_amount_cents").default(0),
+  pointsRedeemed: integer("points_redeemed").default(0),
+
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 }, (table) => ({
@@ -1027,6 +1032,11 @@ export const appointments = pgTable("appointments", {
   reminder24hSent: boolean("reminder_24h_sent").default(false),
   reminder2hSent: boolean("reminder_2h_sent").default(false),
 
+  // Promo code / points redemption tracking
+  promoCodeUsed: text("promo_code_used"),
+  discountAmountCents: integer("discount_amount_cents").default(0),
+  pointsRedeemed: integer("points_redeemed").default(0),
+
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 }, (table) => ({
@@ -1069,7 +1079,7 @@ export const orders = pgTable("orders", {
   id: varchar("id", { length: 36 }).primaryKey().default(sql`gen_random_uuid()`),
   businessId: varchar("business_id", { length: 36 }).notNull().references(() => businesses.id),
   customerId: varchar("customer_id", { length: 36 }).notNull().references(() => users.id),
-  
+
   orderGroupId: varchar("order_group_id", { length: 36 }).references(() => orderGroups.id),
 
   items: jsonb("items").$type<{ productId: string; name: string; quantity: number; price: number }[]>().notNull(),
@@ -1098,6 +1108,11 @@ export const orders = pgTable("orders", {
   status: text("status").default("pending"),
 
   shippingAddress: text("shipping_address"),
+
+  // Promo code / points redemption tracking
+  promoCodeUsed: text("promo_code_used"),
+  discountAmountCents: integer("discount_amount_cents").default(0),
+  pointsRedeemed: integer("points_redeemed").default(0),
 
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
@@ -3259,3 +3274,26 @@ export type Rating = typeof ratings.$inferSelect;
 export type InsertRating = typeof ratings.$inferInsert;
 export type RatingPromptDismissal = typeof ratingPromptDismissals.$inferSelect;
 export type InsertRatingPromptDismissal = typeof ratingPromptDismissals.$inferInsert;
+
+/* =====================================================
+   PROMO CODES (Points Redemption)
+===================================================== */
+export const promoCodes = pgTable("promo_codes", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  code: text("code").unique().notNull(),
+  userId: varchar("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
+  pointsCost: integer("points_cost").notNull(),
+  discountCents: integer("discount_cents").notNull(),
+  status: text("status").notNull().default("active"), // 'active' | 'used' | 'expired'
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  expiresAt: timestamp("expires_at").notNull(),
+  usedAt: timestamp("used_at"),
+  usedOnOrderId: varchar("used_on_order_id"),
+  usedOnReferenceType: text("used_on_reference_type"), // 'order' | 'appointment' | 'shoot_booking'
+}, (table) => ({
+  idxPromoCodesUserId: index("idx_promo_codes_user_id").on(table.userId),
+  idxPromoCodesCode: index("idx_promo_codes_code").on(table.code),
+  idxPromoCodesUserStatus: index("idx_promo_codes_user_status").on(table.userId, table.status),
+}));
+
+export type PromoCode = typeof promoCodes.$inferSelect;
