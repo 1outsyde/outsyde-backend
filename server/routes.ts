@@ -2712,7 +2712,8 @@ export async function registerRoutes(
 
       // Build reset deep link for mobile app
       const resetLink = `outsyde://reset-password?token=${rawToken}&email=${encodeURIComponent(email)}`;
-      const webResetLink = `${req.protocol}://${req.get('host')}/reset-password?token=${rawToken}&email=${encodeURIComponent(email)}`;
+      const frontendBase = process.env.FRONTEND_URL || 'https://www.goutsyde.com';
+      const webResetLink = `${frontendBase}/reset-password?token=${rawToken}&email=${encodeURIComponent(email)}`;
 
       // Send email via Resend if configured
       try {
@@ -2721,7 +2722,7 @@ export async function registerRoutes(
         if (resendApiKey) {
           const resend = new Resend(resendApiKey);
           await resend.emails.send({
-            from: process.env.RESEND_FROM_EMAIL || 'noreply@outsyde.com',
+            from: process.env.RESEND_FROM_EMAIL || 'noreply@info.goutsyde.com',
             to: email,
             subject: 'Reset your Outsyde password',
             html: `
