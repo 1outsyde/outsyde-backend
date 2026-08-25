@@ -4,7 +4,7 @@
  */
 
 import { db } from "./db";
-import { subscriptionTiers } from "@shared/schema";
+import { subscriptionTiers, vendorSubscriptions } from "@shared/schema";
 import { eq } from "drizzle-orm";
 
 const TIERS = [
@@ -87,11 +87,17 @@ export async function seedSubscriptionTiers(): Promise<void> {
     }
   }
 
-  // Remove legacy tiers that are no longer in the config
+  // Remove legacy tiers that are no longer in the config, but only if no
+  // vendor subscriptions still reference them (e.g. grandfathered plans).
   const validNames = TIERS.map(t => t.name);
   const allTiers = await db.select().from(subscriptionTiers);
   for (const tier of allTiers) {
     if (!validNames.includes(tier.name)) {
+      const refs = await db.select().from(vendorSubscriptions).where(eq(vendorSubscriptions.tierId, tier.id));
+      if (refs.length > 0) {
+        console.log(`[Subscriptions] Skipping deletion of legacy tier "${tier.name}" — ${refs.length} active subscription(s) still reference it.`);
+        continue;
+      }
       await db.delete(subscriptionTiers).where(eq(subscriptionTiers.id, tier.id));
       console.log(`[Subscriptions] Removed legacy tier: ${tier.name}`);
     }
