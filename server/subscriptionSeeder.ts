@@ -9,6 +9,23 @@ import { eq } from "drizzle-orm";
 
 const TIERS = [
   {
+    name: 'grandfathered',
+    displayName: 'Grandfathered',
+    description: 'Legacy discounted plan equivalent to Growth.',
+    priceInCents: 4099, // $40.99/mo — discounted Growth rate
+    platformFeeBps: 800,
+    stripePriceId: null as string | null,
+    features: [
+      'Everything in Starter',
+      'Advanced analytics',
+      '1 complimentary Unranked influencer per month',
+      'Shoot credits (1 credit/month)',
+    ],
+    alaCarteDiscountPercent: 10,
+    sortOrder: -1, // not shown to new signups
+    maxStaff: 8,
+  },
+  {
     name: 'starter',
     displayName: 'Starter',
     description: 'Perfect for new businesses ready to start selling.',
@@ -68,14 +85,16 @@ export async function seedSubscriptionTiers(): Promise<void> {
       .where(eq(subscriptionTiers.name, tier.name));
 
     if (existing) {
-      // Update existing tier to match current config
+      // Update existing tier to match current config.
+      // Preserve the DB's stripePriceId when the tier definition has none
+      // (e.g. grandfathered plan whose Stripe price was set manually).
       await db.update(subscriptionTiers)
         .set({
           displayName: tier.displayName,
           description: tier.description,
           priceInCents: tier.priceInCents,
           platformFeeBps: tier.platformFeeBps,
-          stripePriceId: tier.stripePriceId,
+          ...(tier.stripePriceId != null ? { stripePriceId: tier.stripePriceId } : {}),
           features: tier.features,
           alaCarteDiscountPercent: tier.alaCarteDiscountPercent,
           sortOrder: tier.sortOrder,
@@ -103,5 +122,5 @@ export async function seedSubscriptionTiers(): Promise<void> {
     }
   }
 
-  console.log("[Subscriptions] Tiers synced: Starter ($29), Growth ($59), Pro ($99)");
+  console.log("[Subscriptions] Tiers synced: Grandfathered ($40.99), Starter ($29), Growth ($59), Pro ($99)");
 }
