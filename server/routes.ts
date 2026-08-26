@@ -2687,7 +2687,7 @@ export async function registerRoutes(
 
   app.post("/api/auth/forgot-password", strictAuthRateLimiter, async (req, res) => {
     try {
-      const { email } = req.body;
+      const { email, redirect_uri } = req.body;
       if (!email || typeof email !== 'string') {
         return res.status(400).json({ success: false, message: "Email is required" });
       }
@@ -2712,7 +2712,7 @@ export async function registerRoutes(
 
       // Build reset deep link for mobile app
       const resetLink = `outsyde://reset-password?token=${rawToken}&email=${encodeURIComponent(email)}`;
-      const frontendBase = process.env.FRONTEND_URL || 'https://www.goutsyde.com';
+      const frontendBase = (typeof redirect_uri === 'string' && redirect_uri) ? redirect_uri : (process.env.FRONTEND_URL || 'https://www.goutsyde.com');
       const webResetLink = `${frontendBase}/reset-password?token=${rawToken}&email=${encodeURIComponent(email)}`;
 
       // Send email via Resend if configured
