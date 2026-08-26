@@ -1,5 +1,5 @@
 import {
-  pgTable, text, varchar, boolean, integer, jsonb, timestamp, index, doublePrecision, unique, uuid
+  pgTable, text, varchar, boolean, integer, serial, jsonb, timestamp, index, doublePrecision, unique, uuid
 } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
@@ -1077,6 +1077,7 @@ export const orderGroups = pgTable("order_groups", {
 ===================================================== */
 export const orders = pgTable("orders", {
   id: varchar("id", { length: 36 }).primaryKey().default(sql`gen_random_uuid()`),
+  orderNumber: serial("order_number").notNull(),
   businessId: varchar("business_id", { length: 36 }).notNull().references(() => businesses.id),
   customerId: varchar("customer_id", { length: 36 }).notNull().references(() => users.id),
 

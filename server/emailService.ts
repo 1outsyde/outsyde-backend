@@ -842,6 +842,7 @@ export async function sendOrderConfirmationToConsumer(params: {
   toEmail: string;
   consumerName: string;
   orderId: string;
+  orderNumber: number;
   items: Array<{
     productName: string;
     vendorName: string;
@@ -851,7 +852,7 @@ export async function sendOrderConfirmationToConsumer(params: {
   }>;
 }): Promise<void> {
   try {
-    const orderRef = `#${params.orderId.slice(-8).toUpperCase()}`;
+    const orderRef = `#${String(params.orderNumber).padStart(4, '0')}`;
     let grandTotal = 0;
 
     const itemCards = params.items.map(item => {
@@ -909,6 +910,7 @@ export async function sendOrderNotificationToVendor(params: {
   consumerUsername?: string;
   consumerDisplayName?: string;
   orderId: string;
+  orderNumber: number;
   items: Array<{
     productName: string;
     quantity: number;
@@ -916,7 +918,7 @@ export async function sendOrderNotificationToVendor(params: {
   }>;
 }): Promise<void> {
   try {
-    const orderRef = `#${params.orderId.slice(-8).toUpperCase()}`;
+    const orderRef = `#${String(params.orderNumber).padStart(4, '0')}`;
     const customerDisplay = params.consumerDisplayName || params.consumerName;
     const usernameDisplay = params.consumerUsername ? `@${params.consumerUsername}` : '';
 
@@ -1070,12 +1072,14 @@ export async function sendOrderShippedEmail(params: {
   vendorName: string;
   productName: string;
   orderId: string;
+  orderNumber: number;
   carrier: string;
   trackingNumber: string;
   trackingUrl: string;
 }): Promise<void> {
   try {
     const subject = `Your order from ${params.vendorName} has shipped!`;
+    const orderRef = `#${String(params.orderNumber).padStart(4, '0')}`;
     const html = wrapEmail(`
       ${emailHeader('Your Order Has Shipped 📦', `${params.vendorName} is on the way`)}
       <tr><td style="background:#1A1A1A;padding:24px 32px;">
@@ -1085,7 +1089,7 @@ export async function sendOrderShippedEmail(params: {
           <strong style="color:#F5F0E8;">${params.productName}</strong>.
         </p>
         <table width="100%" cellpadding="0" cellspacing="0" style="border-radius:6px;overflow:hidden;margin-bottom:24px;">
-          ${detailRow('Order ID', '#' + params.orderId.slice(0, 8).toUpperCase(), true)}
+          ${detailRow('Order', orderRef, true)}
           ${detailRow('Carrier', params.carrier, false)}
           ${detailRow('Tracking #', `<span style="font-family:monospace;">${params.trackingNumber}</span>`, true)}
         </table>
