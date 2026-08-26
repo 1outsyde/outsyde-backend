@@ -5043,6 +5043,7 @@ export async function registerRoutes(
         clientSecret: paymentIntent.client_secret,
         paymentIntentId: paymentIntent.id,
         appointmentId: appointment.id,
+        bookingNumber: appointment.bookingNumber,
       });
     } catch (error) {
       console.error("[Booking] Create deposit intent error:", error);
@@ -5225,6 +5226,7 @@ export async function registerRoutes(
           clientSecret: photographerPI.client_secret,
           paymentIntentId: photographerPI.id,
           shootBookingId: shootBooking.id,
+          bookingNumber: shootBooking.bookingNumber,
           captureMethod,
           feeBreakdown: {
             subtotalAmount: photographerFees.subtotalCents,
@@ -5255,6 +5257,7 @@ export async function registerRoutes(
                 clientSecret: existingPI.client_secret,
                 paymentIntentId: existingPI.id,
                 appointmentId: existing.id,
+                bookingNumber: existing.bookingNumber,
                 captureMethod: existingPI.capture_method,
               });
             }
@@ -5452,6 +5455,7 @@ export async function registerRoutes(
         clientSecret: paymentIntent.client_secret,
         paymentIntentId: paymentIntent.id,
         appointmentId: appointment.id,
+        bookingNumber: appointment.bookingNumber,
         captureMethod,
         requiresApproval: !isAutoAccept,
         status: isAutoAccept ? BOOKING_STATES.PENDING_PAYMENT : BOOKING_STATES.PENDING_PROVIDER,
@@ -6569,6 +6573,7 @@ export async function registerRoutes(
           consumerName: shootAcceptClient?.name || 'Client',
           shootType: booking.shootType,
           bookingId,
+          bookingNumber: booking.bookingNumber,
           date: booking.date,
           time: booking.startTime,
         }).catch(() => {});
@@ -6684,6 +6689,7 @@ export async function registerRoutes(
           consumerName: shootDeclClient?.name || 'Client',
           shootType: booking.shootType,
           bookingId,
+          bookingNumber: booking.bookingNumber,
           date: booking.date,
           reason: reason ?? undefined,
         }).catch(() => {});
@@ -8237,6 +8243,7 @@ export async function registerRoutes(
               consumerName: cancelConsumerForNotify?.name || 'Client',
               shootType: booking.shootType,
               bookingId,
+              bookingNumber: booking.bookingNumber,
               date: booking.date,
               time: booking.startTime,
             }).catch(() => {});
@@ -8483,6 +8490,7 @@ export async function registerRoutes(
         ]);
         return {
           id: booking.id,
+          bookingNumber: booking.bookingNumber,
           photographerId: booking.photographerId,
           photographerName: photographer?.displayName ?? "Photographer",
           photographerAvatar: photographer?.logoImage ?? "",

@@ -520,6 +520,7 @@ export async function sendAppointmentConfirmationToConsumer(params: {
   vendorContactEmail?: string;
   serviceName: string;
   bookingId: string;
+  bookingNumber: number;
   date: string;
   time: string;
   location?: string;
@@ -528,8 +529,10 @@ export async function sendAppointmentConfirmationToConsumer(params: {
   try {
     const consumerUpcharge = params.basePrice * 0.08;
     const consumerTotal = params.basePrice + consumerUpcharge;
+    const bookingRef = `#A${String(params.bookingNumber).padStart(4, '0')}`;
 
     const rows = [
+      { label: 'Booking', value: bookingRef },
       { label: 'Service', value: params.serviceName },
       { label: 'Date', value: params.date },
       { label: 'Time', value: params.time },
@@ -570,6 +573,7 @@ export async function sendAppointmentNotificationToVendor(params: {
   consumerDisplayName?: string;
   serviceName: string;
   bookingId: string;
+  bookingNumber: number;
   date: string;
   time: string;
   location?: string;
@@ -578,11 +582,13 @@ export async function sendAppointmentNotificationToVendor(params: {
   try {
     const vendorFee = params.basePrice * 0.02;
     const vendorPayout = params.basePrice - vendorFee;
+    const bookingRef = `#A${String(params.bookingNumber).padStart(4, '0')}`;
 
     const customerDisplay = params.consumerDisplayName || params.consumerName;
     const usernameDisplay = params.consumerUsername ? `@${params.consumerUsername}` : '';
 
     const rows = [
+      { label: 'Booking', value: bookingRef },
       { label: 'Customer Name', value: customerDisplay },
       ...(usernameDisplay ? [{ label: 'Customer Username', value: usernameDisplay }] : []),
       { label: 'Service', value: params.serviceName },
@@ -618,6 +624,7 @@ export async function sendShootBookingConfirmationToConsumer(params: {
   photographerContactEmail?: string;
   shootType: string;
   bookingId: string;
+  bookingNumber: number;
   date: string;
   time: string;
   location?: string;
@@ -626,8 +633,10 @@ export async function sendShootBookingConfirmationToConsumer(params: {
   try {
     const consumerUpcharge = params.basePrice * 0.08;
     const consumerTotal = params.basePrice + consumerUpcharge;
+    const bookingRef = `#S${String(params.bookingNumber).padStart(4, '0')}`;
 
     const rows = [
+      { label: 'Booking', value: bookingRef },
       { label: 'Shoot Type', value: params.shootType },
       { label: 'Photographer', value: params.photographerName },
       { label: 'Date', value: params.date },
@@ -669,6 +678,7 @@ export async function sendShootBookingNotificationToPhotographer(params: {
   consumerDisplayName?: string;
   shootType: string;
   bookingId: string;
+  bookingNumber: number;
   date: string;
   time: string;
   location?: string;
@@ -677,11 +687,13 @@ export async function sendShootBookingNotificationToPhotographer(params: {
   try {
     const vendorFee = params.basePrice * 0.02;
     const vendorPayout = params.basePrice - vendorFee;
+    const bookingRef = `#S${String(params.bookingNumber).padStart(4, '0')}`;
 
     const clientDisplay = params.consumerDisplayName || params.consumerName;
     const usernameDisplay = params.consumerUsername ? `@${params.consumerUsername}` : '';
 
     const rows = [
+      { label: 'Booking', value: bookingRef },
       { label: 'Client Name', value: clientDisplay },
       ...(usernameDisplay ? [{ label: 'Client Username', value: usernameDisplay }] : []),
       { label: 'Shoot Type', value: params.shootType },
@@ -716,18 +728,21 @@ export async function sendShootBookingAcceptedToPhotographer(params: {
   consumerName: string;
   shootType: string;
   bookingId: string;
+  bookingNumber: number;
   date: string;
   time: string;
 }): Promise<void> {
   try {
+    const bookingRef = `#S${String(params.bookingNumber).padStart(4, '0')}`;
     const html = wrapEmail(`
       ${emailHeader('Booking Confirmed ✅', `You confirmed the shoot with ${params.consumerName}.`)}
       <tr><td style="background:#1A1A1A;padding:0 32px;">
         <table width="100%" cellpadding="0" cellspacing="0" style="border-radius:6px;overflow:hidden;">
-          ${detailRow('Client', params.consumerName, true)}
-          ${detailRow('Shoot Type', params.shootType, false)}
-          ${detailRow('Date', params.date, true)}
-          ${detailRow('Time', params.time, false)}
+          ${detailRow('Booking', bookingRef, true)}
+          ${detailRow('Client', params.consumerName, false)}
+          ${detailRow('Shoot Type', params.shootType, true)}
+          ${detailRow('Date', params.date, false)}
+          ${detailRow('Time', params.time, true)}
         </table>
       </td></tr>
       <tr><td style="background:#1A1A1A;padding:12px 32px 4px;">
@@ -749,18 +764,21 @@ export async function sendShootBookingDeclinedToPhotographer(params: {
   consumerName: string;
   shootType: string;
   bookingId: string;
+  bookingNumber: number;
   date: string;
   reason?: string;
 }): Promise<void> {
   try {
+    const bookingRef = `#S${String(params.bookingNumber).padStart(4, '0')}`;
     const html = wrapEmail(`
       ${emailHeader('Booking Declined', `You declined the request from ${params.consumerName}.`)}
       <tr><td style="background:#1A1A1A;padding:0 32px;">
         <table width="100%" cellpadding="0" cellspacing="0" style="border-radius:6px;overflow:hidden;">
-          ${detailRow('Client', params.consumerName, true)}
-          ${detailRow('Shoot Type', params.shootType, false)}
-          ${detailRow('Date', params.date, true)}
-          ${params.reason ? detailRow('Reason', params.reason, false) : ''}
+          ${detailRow('Booking', bookingRef, true)}
+          ${detailRow('Client', params.consumerName, false)}
+          ${detailRow('Shoot Type', params.shootType, true)}
+          ${detailRow('Date', params.date, false)}
+          ${params.reason ? detailRow('Reason', params.reason, true) : ''}
         </table>
       </td></tr>
       <tr><td style="background:#1A1A1A;padding:16px 32px;">
@@ -782,18 +800,21 @@ export async function sendShootBookingCanceledToPhotographer(params: {
   consumerName: string;
   shootType: string;
   bookingId: string;
+  bookingNumber: number;
   date: string;
   time: string;
 }): Promise<void> {
   try {
+    const bookingRef = `#S${String(params.bookingNumber).padStart(4, '0')}`;
     const html = wrapEmail(`
       ${emailHeader('Booking Canceled', `${params.consumerName} has canceled their session with you.`)}
       <tr><td style="background:#1A1A1A;padding:0 32px;">
         <table width="100%" cellpadding="0" cellspacing="0" style="border-radius:6px;overflow:hidden;">
-          ${detailRow('Client', params.consumerName, true)}
-          ${detailRow('Shoot Type', params.shootType, false)}
-          ${detailRow('Date', params.date, true)}
-          ${detailRow('Time', params.time, false)}
+          ${detailRow('Booking', bookingRef, true)}
+          ${detailRow('Client', params.consumerName, false)}
+          ${detailRow('Shoot Type', params.shootType, true)}
+          ${detailRow('Date', params.date, false)}
+          ${detailRow('Time', params.time, true)}
         </table>
       </td></tr>
       <tr><td style="background:#1A1A1A;padding:16px 32px;">

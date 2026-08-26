@@ -857,6 +857,7 @@ export const photographerServices = pgTable("photographer_services", {
 ===================================================== */
 export const shootBookings = pgTable("shoot_bookings", {
   id: varchar("id", { length: 36 }).primaryKey().default(sql`gen_random_uuid()`),
+  bookingNumber: serial("booking_number").notNull(),
   photographerId: varchar("photographer_id", { length: 36 }).notNull().references(() => photographers.id),
   clientId: varchar("client_id", { length: 36 }).notNull().references(() => users.id),
   serviceId: varchar("service_id", { length: 36 }).references(() => photographerServices.id),
@@ -940,6 +941,7 @@ export const shootBookings = pgTable("shoot_bookings", {
 ===================================================== */
 export const appointments = pgTable("appointments", {
   id: varchar("id", { length: 36 }).primaryKey().default(sql`gen_random_uuid()`),
+  bookingNumber: serial("booking_number").notNull(),
   businessId: varchar("business_id", { length: 36 }).notNull().references(() => businesses.id),
   clientId: varchar("client_id", { length: 36 }).notNull().references(() => users.id),
   // Null when booking is for a staff-owned service (staffServiceId is set instead)
