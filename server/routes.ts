@@ -16808,6 +16808,7 @@ export async function registerRoutes(
                 vendorName: business.name,
                 productName: firstItem?.name || 'your item',
                 orderId,
+                orderNumber: existingOrder.orderNumber,
                 carrier,
                 trackingNumber,
                 trackingUrl,
@@ -19293,6 +19294,7 @@ export async function registerRoutes(
 
           return {
             id: order.id,
+            orderNumber: order.orderNumber,
             businessId: order.businessId,
             businessName: business?.name || "Unknown Business",
             items: (order.items ?? []).map((item) => ({

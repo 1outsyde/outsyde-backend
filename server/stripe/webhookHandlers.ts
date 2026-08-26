@@ -956,6 +956,7 @@ export class WebhookHandlers {
               toEmail: customer.email,
               consumerName: customer.name || customer.email,
               orderId,
+              orderNumber: order.orderNumber,
               items: piOrderItems,
             }).catch(() => {});
           }
@@ -966,6 +967,7 @@ export class WebhookHandlers {
               consumerName: customer?.name || 'Customer',
               consumerUsername: customer?.username ?? undefined,
               orderId,
+              orderNumber: order.orderNumber,
               items: piOrderItems.map(({ vendorName: _vn, vendorContactEmail: _vce, ...rest }) => rest),
             }).catch(() => {});
           }
@@ -1071,6 +1073,7 @@ export class WebhookHandlers {
                 consumerName: customer?.name || 'Customer',
                 consumerUsername: customer?.username ?? undefined,
                 orderId: vendorOrder.orderId,
+                orderNumber: order.orderNumber,
                 items: piMvItems,
               }).catch(() => {});
             }
@@ -1112,9 +1115,11 @@ export class WebhookHandlers {
         if (purchaser?.email) {
           // Gather all items across all vendor orders for consumer email
           const allMvPiItems: Array<{ productName: string; vendorName: string; vendorContactEmail?: string; quantity: number; basePrice: number }> = [];
+          let firstMvPiOrderNumber = 0;
           for (const vo of vendorOrders) {
             const voOrder = await storage.getOrder(vo.orderId);
             const voBusiness = await storage.getBusiness(vo.businessId);
+            if (!firstMvPiOrderNumber && voOrder?.orderNumber) firstMvPiOrderNumber = voOrder.orderNumber;
             for (const i of ((voOrder?.items as any[]) || [])) {
               allMvPiItems.push({
                 productName: i.name || i.title || i.productId || 'Item',
@@ -1129,6 +1134,7 @@ export class WebhookHandlers {
             toEmail: purchaser.email,
             consumerName: purchaser.name || purchaser.email,
             orderId: vendorOrders[0]?.orderId || metadata.orderGroupId || '',
+            orderNumber: firstMvPiOrderNumber,
             items: allMvPiItems,
           }).catch(() => {});
           sendInternalEventAlert({
@@ -1719,6 +1725,7 @@ export class WebhookHandlers {
           toEmail: customer.email,
           consumerName: customer.name || customer.email,
           orderId,
+          orderNumber: order.orderNumber,
           items: cartItems,
         }).catch(() => {});
       }
@@ -1729,6 +1736,7 @@ export class WebhookHandlers {
           consumerName: customer?.name || 'Customer',
           consumerUsername: customer?.username ?? undefined,
           orderId,
+          orderNumber: order.orderNumber,
           items: cartItems.map(({ vendorName: _vn, vendorContactEmail: _vce, ...rest }) => rest),
         }).catch(() => {});
       }
@@ -1848,6 +1856,7 @@ export class WebhookHandlers {
             consumerName: customer?.name || 'Customer',
             consumerUsername: customer?.username ?? undefined,
             orderId,
+            orderNumber: order.orderNumber,
             items: wcMvItems,
           }).catch(() => {});
         }
@@ -1883,9 +1892,11 @@ export class WebhookHandlers {
       // Email consumer consolidated confirmation + internal alert
       if (user.email) {
         const wcAllItems: Array<{ productName: string; vendorName: string; vendorContactEmail?: string; quantity: number; basePrice: number }> = [];
+        let firstWcMvOrderNumber = 0;
         for (const vo of vendorOrders) {
           const voOrder = await storage.getOrder(vo.orderId);
           const voBusiness = await storage.getBusiness(vo.businessId);
+          if (!firstWcMvOrderNumber && voOrder?.orderNumber) firstWcMvOrderNumber = voOrder.orderNumber;
           for (const i of ((voOrder?.items as any[]) || [])) {
             wcAllItems.push({
               productName: i.name || i.title || i.productId || 'Item',
@@ -1900,6 +1911,7 @@ export class WebhookHandlers {
           toEmail: user.email,
           consumerName: user.name || user.email,
           orderId: vendorOrders[0]?.orderId || orderGroupId,
+          orderNumber: firstWcMvOrderNumber,
           items: wcAllItems,
         }).catch(() => {});
         sendInternalEventAlert({
