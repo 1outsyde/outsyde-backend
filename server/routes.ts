@@ -16643,9 +16643,21 @@ export async function registerRoutes(
       const enrichedOrders = await Promise.all(
         orders.map(async (order) => {
           const shipments = await storage.getShipmentsByOrder(order.id);
+          const shipment = shipments.length > 0 ? shipments[0] : null;
           return {
-            ...order,
-            shipment: shipments.length > 0 ? shipments[0] : null,
+            id: order.id,
+            order_number: order.orderNumber,
+            customer_id: order.customerId,
+            customer_name: order.customerName,
+            items: Array.isArray(order.items)
+              ? order.items.map((it) => ({ name: it.name, qty: it.quantity, price: it.price }))
+              : [],
+            total_amount: order.totalAmount,
+            status: order.status ?? "pending",
+            shipping_address: order.shippingAddress ?? null,
+            created_at: order.createdAt instanceof Date ? order.createdAt.toISOString() : order.createdAt,
+            tracking_number: shipment?.trackingNumber ?? null,
+            carrier: shipment?.carrier ?? null,
           };
         })
       );
