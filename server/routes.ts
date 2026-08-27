@@ -16628,7 +16628,14 @@ export async function registerRoutes(
       const userId = authReq.user?.userId || req.session?.userId;
       if (!userId) return res.status(401).json({ error: "Not authenticated" });
 
-      const business = await storage.getBusinessByOwnerId(userId);
+      const isAdmin = (authReq.user as any)?.role === 'admin';
+      const overrideBusinessId = req.query.businessId as string | undefined;
+      let business;
+      if (isAdmin && overrideBusinessId) {
+        business = await storage.getBusiness(overrideBusinessId);
+      } else {
+        business = await storage.getBusinessByOwnerId(userId);
+      }
       if (!business) return res.status(404).json({ error: "Business not found" });
 
       const orders = await storage.getVendorOrders(business.id);
