@@ -20512,5 +20512,108 @@ console.log(
     }
   });
 
+  // ── Receipt endpoints (read-only) ─────────────────────────────────────────
+
+  app.get('/api/orders/:id/receipt', requireAuth, async (req: any, res: any) => {
+    try {
+      const { id } = req.params;
+      const order = await storage.getOrder(id);
+      if (!order) return res.status(404).json({ error: 'Order not found' });
+
+      const requestingUserId: string = req.userId || req.session?.userId;
+      const isBusinessAdmin = req.headers['x-business-id'] === order.businessId;
+      if (!isBusinessAdmin && order.customerId !== requestingUserId) {
+        return res.status(403).json({ error: 'Forbidden' });
+      }
+
+      const [customer, business] = await Promise.all([
+        storage.getUser(order.customerId).catch(() => undefined),
+        storage.getBusiness(order.businessId).catch(() => undefined),
+      ]);
+
+      return res.json({
+        order,
+        customer: customer
+          ? { id: customer.id, name: customer.name || [customer.firstName, customer.lastName].filter(Boolean).join(' ').trim() || customer.email, email: customer.email }
+          : null,
+        business: business
+          ? { id: business.id, name: business.name, contactEmail: business.contactEmail, logoImage: business.logoImage }
+          : null,
+        items: order.items,
+      });
+    } catch (err) {
+      console.error('[GET /api/orders/:id/receipt]', err);
+      return res.status(500).json({ error: 'Failed to fetch order receipt' });
+    }
+  });
+
+  app.get('/api/appointments/:id/receipt', requireAuth, async (req: any, res: any) => {
+    try {
+      const { id } = req.params;
+      const appointment = await storage.getAppointment(id);
+      if (!appointment) return res.status(404).json({ error: 'Appointment not found' });
+
+      const requestingUserId: string = req.userId || req.session?.userId;
+      const isBusinessAdmin = req.headers['x-business-id'] === appointment.businessId;
+      if (!isBusinessAdmin && appointment.clientId !== requestingUserId) {
+        return res.status(403).json({ error: 'Forbidden' });
+      }
+
+      const [customer, business, service] = await Promise.all([
+        storage.getUser(appointment.clientId).catch(() => undefined),
+        storage.getBusiness(appointment.businessId).catch(() => undefined),
+        appointment.serviceId ? storage.getVendorService(appointment.serviceId).catch(() => undefined) : Promise.resolve(undefined),
+      ]);
+
+      return res.json({
+        appointment,
+        customer: customer
+          ? { id: customer.id, name: customer.name || [customer.firstName, customer.lastName].filter(Boolean).join(' ').trim() || customer.email, email: customer.email }
+          : null,
+        business: business
+          ? { id: business.id, name: business.name, contactEmail: business.contactEmail, logoImage: business.logoImage }
+          : null,
+        service: service ? { id: service.id, name: service.name } : null,
+      });
+    } catch (err) {
+      console.error('[GET /api/appointments/:id/receipt]', err);
+      return res.status(500).json({ error: 'Failed to fetch appointment receipt' });
+    }
+  });
+
+  app.get('/api/shoot-bookings/:id/receipt', requireAuth, async (req: any, res: any) => {
+    try {
+      const { id } = req.params;
+      const booking = await storage.getShootBooking(id);
+      if (!booking) return res.status(404).json({ error: 'Shoot booking not found' });
+
+      const requestingUserId: string = req.userId || req.session?.userId;
+      const photographer = await storage.getPhotographer(booking.photographerId).catch(() => undefined);
+      const isPhotographer = photographer && photographer.userId === requestingUserId;
+      if (!isPhotographer && booking.clientId !== requestingUserId) {
+        return res.status(403).json({ error: 'Forbidden' });
+      }
+
+      const [customer, service] = await Promise.all([
+        storage.getUser(booking.clientId).catch(() => undefined),
+        booking.serviceId ? storage.getPhotographerService(booking.serviceId).catch(() => undefined) : Promise.resolve(undefined),
+      ]);
+
+      return res.json({
+        booking,
+        customer: customer
+          ? { id: customer.id, name: customer.name || [customer.firstName, customer.lastName].filter(Boolean).join(' ').trim() || customer.email, email: customer.email }
+          : null,
+        photographer: photographer
+          ? { id: photographer.id, userId: photographer.userId, displayName: photographer.displayName }
+          : null,
+        service: service ? { id: service.id, name: service.name } : null,
+      });
+    } catch (err) {
+      console.error('[GET /api/shoot-bookings/:id/receipt]', err);
+      return res.status(500).json({ error: 'Failed to fetch shoot booking receipt' });
+    }
+  });
+
   return httpServer;
 }

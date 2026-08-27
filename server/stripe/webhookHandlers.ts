@@ -678,12 +678,14 @@ export class WebhookHandlers {
             console.error(`[Notify:appointment] Customer notification failed for appointment ${appointmentId}:`, err);
           }
 
-          // Business owner in-app — capture owner id for the push call below
+          // Business owner in-app — capture owner id and email for the push/email calls below
           let apptOwnerId: string | undefined;
+          let apptOwnerEmail: string | undefined;
           try {
             const apptOwner = business ? await storage.getUserByBusinessOwnerId(businessId) : undefined;
             if (apptOwner) {
               apptOwnerId = apptOwner.id;
+              apptOwnerEmail = apptOwner.email || undefined;
               console.log(`[Notify:appointment] Sending business owner notification to ${apptOwner.id} (appointment ${appointmentId})`);
               await NotificationTriggers.paymentSucceeded({
                 userId: apptOwner.id,
@@ -774,7 +776,7 @@ export class WebhookHandlers {
             consumerName: apptCustomer?.name || 'Customer',
             consumerEmail: apptCustomer?.email || '',
             vendorName: business?.name || 'Business',
-            vendorEmail: '',
+            vendorEmail: apptOwnerEmail || '',
             basePrice: appointment.totalPrice,
             date: appointment.appointmentDate,
             time: appointment.appointmentTime,
@@ -829,6 +831,11 @@ export class WebhookHandlers {
 
           const depositCustomer = await storage.getUser(appt.clientId).catch(() => undefined);
 
+          // Fetch vendor data so emails are branded per-business, not hardcoded to XO.
+          const depositBusiness = businessId ? await storage.getBusiness(businessId).catch(() => undefined) : undefined;
+          const depositVendorOwner = businessId ? await storage.getUserByBusinessOwnerId(businessId).catch(() => undefined) : undefined;
+          const depositAmountCents = paymentIntent.amount ?? undefined;
+
           if (depositCustomer?.email) {
             sendBookingConfirmationToCustomer({
               toEmail: depositCustomer.email,
@@ -837,6 +844,8 @@ export class WebhookHandlers {
               date: appt.appointmentDate,
               time: appt.appointmentTime,
               appointmentId,
+              businessName: depositBusiness?.name,
+              vendorContactEmail: depositBusiness?.contactEmail ?? undefined,
             }).catch(() => {});
           }
 
@@ -847,6 +856,9 @@ export class WebhookHandlers {
             date: appt.appointmentDate,
             time: appt.appointmentTime,
             appointmentId,
+            vendorOwnerEmail: depositVendorOwner?.email,
+            businessName: depositBusiness?.name,
+            depositAmountCents,
           }).catch(() => {});
 
           console.log(`[Stripe] deposit: Appointment ${appointmentId} confirmed`);
@@ -964,6 +976,9 @@ export class WebhookHandlers {
               orderId,
               orderNumber: order.orderNumber,
               items: piOrderItems,
+              // Pass stored DB amounts so the email reflects what Stripe actually charged.
+              totalAmountCents: order.grossChargeAmount ?? undefined,
+              platformFeeCents: order.consumerServiceFee ?? undefined,
             }).catch(() => {});
           }
           if (vendor.email) {
@@ -975,6 +990,7 @@ export class WebhookHandlers {
               orderId,
               orderNumber: order.orderNumber,
               items: piOrderItems.map(({ vendorName: _vn, vendorContactEmail: _vce, ...rest }) => rest),
+              vendorNetCents: order.vendorNet ?? undefined,
             }).catch(() => {});
           }
           sendInternalEventAlert({
@@ -1081,6 +1097,7 @@ export class WebhookHandlers {
                 orderId: vendorOrder.orderId,
                 orderNumber: order.orderNumber,
                 items: piMvItems,
+                vendorNetCents: order.vendorNet ?? undefined,
               }).catch(() => {});
             }
           }
@@ -1122,10 +1139,19 @@ export class WebhookHandlers {
           // Gather all items across all vendor orders for consumer email
           const allMvPiItems: Array<{ productName: string; vendorName: string; vendorContactEmail?: string; quantity: number; basePrice: number }> = [];
           let firstMvPiOrderNumber = 0;
+          let mvTotalAmountCents = 0;
+          let mvServiceFeeCents = 0;
+          let hasMvStoredTotals = true;
           for (const vo of vendorOrders) {
             const voOrder = await storage.getOrder(vo.orderId);
             const voBusiness = await storage.getBusiness(vo.businessId);
             if (!firstMvPiOrderNumber && voOrder?.orderNumber) firstMvPiOrderNumber = voOrder.orderNumber;
+            if (voOrder?.grossChargeAmount != null && voOrder?.consumerServiceFee != null) {
+              mvTotalAmountCents += voOrder.grossChargeAmount;
+              mvServiceFeeCents += voOrder.consumerServiceFee;
+            } else {
+              hasMvStoredTotals = false;
+            }
             for (const i of ((voOrder?.items as any[]) || [])) {
               allMvPiItems.push({
                 productName: i.name || i.title || i.productId || 'Item',
@@ -1142,6 +1168,7 @@ export class WebhookHandlers {
             orderId: vendorOrders[0]?.orderId || metadata.orderGroupId || '',
             orderNumber: firstMvPiOrderNumber,
             items: allMvPiItems,
+            ...(hasMvStoredTotals ? { totalAmountCents: mvTotalAmountCents, platformFeeCents: mvServiceFeeCents } : {}),
           }).catch(() => {});
           sendInternalEventAlert({
             eventType: 'product_order',
@@ -1733,6 +1760,8 @@ export class WebhookHandlers {
           orderId,
           orderNumber: order.orderNumber,
           items: cartItems,
+          totalAmountCents: order.grossChargeAmount ?? undefined,
+          platformFeeCents: order.consumerServiceFee ?? undefined,
         }).catch(() => {});
       }
       if (vendor.email) {
@@ -1744,6 +1773,7 @@ export class WebhookHandlers {
           orderId,
           orderNumber: order.orderNumber,
           items: cartItems.map(({ vendorName: _vn, vendorContactEmail: _vce, ...rest }) => rest),
+          vendorNetCents: order.vendorNet ?? undefined,
         }).catch(() => {});
       }
       sendInternalEventAlert({

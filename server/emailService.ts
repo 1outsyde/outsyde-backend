@@ -871,23 +871,38 @@ export async function sendOrderConfirmationToConsumer(params: {
     quantity: number;
     basePrice: number;
   }>;
+  // Pre-computed amounts from the DB orders row — preferred over recomputing from basePrice.
+  totalAmountCents?: number;
+  platformFeeCents?: number;
 }): Promise<void> {
   try {
     const orderRef = `#${String(params.orderNumber).padStart(4, '0')}`;
-    let grandTotal = 0;
 
     const itemCards = params.items.map(item => {
       const itemBase = item.basePrice * item.quantity;
-      const upcharge = itemBase * 0.08;
-      const itemTotal = itemBase + upcharge;
-      grandTotal += itemTotal;
       return `<tr style="background:#1E1E1E;">
         <td style="padding:12px 14px;border-bottom:1px solid #2A2A2A;">
           <div style="color:#FFFFFF;font-size:14px;font-weight:600;">${item.productName}</div>
-          <div style="color:#888888;font-size:12px;margin-top:2px;">by ${item.vendorName} &nbsp;·&nbsp; Qty: ${item.quantity} &nbsp;·&nbsp; ${cents(itemTotal)}</div>
+          <div style="color:#888888;font-size:12px;margin-top:2px;">by ${item.vendorName} &nbsp;·&nbsp; Qty: ${item.quantity} &nbsp;·&nbsp; ${cents(itemBase)}</div>
         </td>
       </tr>`;
     }).join('');
+
+    // Use stored DB totals when available; fall back to recomputing for backward compat.
+    const hasTotals = typeof params.totalAmountCents === 'number' && typeof params.platformFeeCents === 'number';
+    let totalRows: string;
+    if (hasTotals) {
+      const subtotalCents = params.totalAmountCents! - params.platformFeeCents!;
+      totalRows = `
+        ${detailRow('Subtotal', cents(subtotalCents), true)}
+        ${detailRow('Outsyde fee', cents(params.platformFeeCents!), false)}
+        ${detailRow('Total charged', cents(params.totalAmountCents!), true)}
+      `;
+    } else {
+      let computed = 0;
+      params.items.forEach(i => { computed += i.basePrice * i.quantity * 1.08; });
+      totalRows = detailRow('Order Total', cents(computed), true);
+    }
 
     const contactLines = [
       ...Array.from(new Map(params.items
@@ -905,7 +920,7 @@ export async function sendOrderConfirmationToConsumer(params: {
         <p style="color:#888888;font-size:12px;margin:0 0 8px 0;">Order ${orderRef}</p>
         <table width="100%" cellpadding="0" cellspacing="0" style="border-radius:6px;overflow:hidden;border:1px solid #2A2A2A;">${itemCards}</table>
         <table width="100%" cellpadding="0" cellspacing="0" style="margin-top:8px;">
-          ${detailRow('Order Total', cents(grandTotal), true)}
+          ${totalRows}
         </table>
       </td></tr>
       <tr><td style="background:#1A1A1A;padding:16px 32px;">
@@ -937,25 +952,30 @@ export async function sendOrderNotificationToVendor(params: {
     quantity: number;
     basePrice: number;
   }>;
+  // Pre-computed payout from the DB orders.vendorNet column — preferred over recomputing.
+  vendorNetCents?: number;
 }): Promise<void> {
   try {
     const orderRef = `#${String(params.orderNumber).padStart(4, '0')}`;
     const customerDisplay = params.consumerDisplayName || params.consumerName;
     const usernameDisplay = params.consumerUsername ? `@${params.consumerUsername}` : '';
 
-    let totalPayout = 0;
+    let computedPayout = 0;
     const itemRows = params.items.map((item, i) => {
       const itemBase = item.basePrice * item.quantity;
-      const fee = itemBase * 0.02;
-      const payout = itemBase - fee;
-      totalPayout += payout;
+      computedPayout += itemBase;
       const bg = i % 2 === 0 ? '#1A1A1A' : '#212121';
       return `<tr style="background:${bg};">
         <td style="padding:10px 14px;color:#FFFFFF;font-size:13px;">${item.productName}</td>
         <td style="padding:10px 14px;color:#888888;font-size:13px;text-align:center;">${item.quantity}</td>
-        <td style="padding:10px 14px;color:#E8B930;font-size:13px;text-align:right;">${cents(payout)}</td>
+        <td style="padding:10px 14px;color:#E8B930;font-size:13px;text-align:right;">${cents(itemBase)}</td>
       </tr>`;
     }).join('');
+
+    // Use the stored DB vendor net when available; fall back to computed for backward compat.
+    const totalPayout = typeof params.vendorNetCents === 'number'
+      ? params.vendorNetCents
+      : computedPayout * 0.98;
 
     const html = wrapEmail(`
       ${emailHeader('You Made a Sale! 🎉', 'Congratulations! Here\'s what was ordered.')}
@@ -969,15 +989,15 @@ export async function sendOrderNotificationToVendor(params: {
           <tr style="background:#252525;">
             <th style="padding:8px 14px;color:#E8B930;font-size:12px;text-align:left;font-weight:600;">Product</th>
             <th style="padding:8px 14px;color:#E8B930;font-size:12px;text-align:center;font-weight:600;">Qty</th>
-            <th style="padding:8px 14px;color:#E8B930;font-size:12px;text-align:right;font-weight:600;">Your Payout</th>
+            <th style="padding:8px 14px;color:#E8B930;font-size:12px;text-align:right;font-weight:600;">Item Total</th>
           </tr>
           ${itemRows}
           <tr style="background:#1E2E2A;">
-            <td colspan="2" style="padding:10px 14px;color:#E8B930;font-size:14px;font-weight:700;">Total Payout</td>
+            <td colspan="2" style="padding:10px 14px;color:#E8B930;font-size:14px;font-weight:700;">Your Payout</td>
             <td style="padding:10px 14px;color:#E8B930;font-size:14px;font-weight:700;text-align:right;">${cents(totalPayout)}</td>
           </tr>
         </table>
-        <p style="color:#555555;font-size:12px;margin:8px 0 0 0;">Outsyde platform fee: 2% per item</p>
+        <p style="color:#555555;font-size:12px;margin:8px 0 0 0;">Outsyde platform fee deducted from payout</p>
       </td></tr>
       ${emailCta('View in Dashboard', 'https://goutsyde.com/vendor/orders')}
       ${emailFooter()}
@@ -1448,7 +1468,7 @@ export async function sendAftercareEmail(params: {
   await sendBrandedEmail(params.toEmail, subject, html);
 }
 
-// XO Beauty & Lashes — deposit booking confirmation to customer
+// Deposit booking confirmation to customer — parameterized for any vendor using the deposit flow.
 export async function sendBookingConfirmationToCustomer(params: {
   toEmail: string
   customerName: string
@@ -1456,27 +1476,35 @@ export async function sendBookingConfirmationToCustomer(params: {
   date: string
   time: string
   appointmentId: string
+  // Dynamic vendor branding — required for new callers; legacy callers get XO defaults.
+  businessName?: string
+  fromAddress?: string   // e.g. 'XO Beauty & Lashes <bookings@xobeautyandlashes.com>'
+  vendorContactEmail?: string
 }): Promise<void> {
   const apiKey = process.env.RESEND_API_KEY
   if (!apiKey) {
-    console.warn('[XO Email] RESEND_API_KEY not set — skipping customer confirmation')
+    console.warn('[Email] RESEND_API_KEY not set — skipping deposit customer confirmation')
     return
   }
+
+  const displayName = params.businessName || 'XO Beauty & Lashes'
+  const from = params.fromAddress || 'XO Beauty & Lashes <bookings@xobeautyandlashes.com>'
+  const contactEmail = params.vendorContactEmail || 'fleekbynik@gmail.com'
 
   const { Resend } = await import('resend')
   const resend = new Resend(apiKey)
 
-  const subject = `Your appointment is confirmed — XO Beauty & Lashes`
+  const subject = `Your appointment is confirmed — ${displayName}`
   const html = `
     <div style="font-family:Arial,sans-serif;max-width:560px;margin:0 auto;background:#fff;">
       <div style="background:linear-gradient(135deg,#2e1a47,#c9b1d9);padding:32px;text-align:center;">
-        <h1 style="color:white;margin:0;font-size:22px;letter-spacing:-0.3px;">XO Beauty &amp; Lashes</h1>
-        <p style="color:rgba(255,255,255,0.8);margin:8px 0 0;font-size:14px;">Your ritual is confirmed</p>
+        <h1 style="color:white;margin:0;font-size:22px;letter-spacing:-0.3px;">${displayName}</h1>
+        <p style="color:rgba(255,255,255,0.8);margin:8px 0 0;font-size:14px;">Your appointment is confirmed</p>
       </div>
       <div style="padding:32px;">
         <p style="font-size:15px;color:#1a0f2e;margin:0 0 24px;">Hi ${params.customerName},</p>
         <p style="font-size:14px;color:#555;line-height:1.6;margin:0 0 24px;">
-          Your appointment has been confirmed. Nik will reach out if anything changes. See you soon!
+          Your appointment has been confirmed. The team will reach out if anything changes. See you soon!
         </p>
         <div style="background:#f7f2fc;border-radius:12px;padding:20px 24px;margin-bottom:24px;">
           <p style="margin:0 0 12px;font-size:11px;font-weight:700;letter-spacing:0.1em;color:#888;">BOOKING DETAILS</p>
@@ -1487,32 +1515,23 @@ export async function sendBookingConfirmationToCustomer(params: {
             <tr><td style="font-size:13px;color:#888;padding:4px 0;">Reference</td><td style="font-size:13px;color:#1a0f2e;font-weight:500;text-align:right;">#${params.appointmentId.slice(0,8).toUpperCase()}</td></tr>
           </table>
         </div>
-        <div style="background:#f0fdf9;border-radius:12px;padding:16px 20px;margin-bottom:24px;">
-          <p style="margin:0 0 8px;font-size:11px;font-weight:700;letter-spacing:0.1em;color:#888;">AFTERCARE REMINDER</p>
-          <ul style="margin:0;padding-left:16px;color:#555;font-size:13px;line-height:1.7;">
-            <li>No water, steam, or heat for 3 hours after your appointment</li>
-            <li>Avoid oil-based products near your eyes</li>
-            <li>Never use a lash curler on extensions</li>
-            <li>Brush daily with a clean spoolie</li>
-          </ul>
-        </div>
-        <p style="font-size:13px;color:#888;text-align:center;">Questions? Reply to this email or DM us on Instagram.</p>
+        <p style="font-size:13px;color:#888;text-align:center;">Questions? Reply to this email or contact <a href="mailto:${contactEmail}" style="color:#6b46c1;">${contactEmail}</a></p>
       </div>
       <div style="background:#f5f5f5;padding:16px;text-align:center;">
-        <p style="margin:0;font-size:12px;color:#999;">XO Beauty &amp; Lashes · fleekbynik@gmail.com</p>
+        <p style="margin:0;font-size:12px;color:#999;">${displayName} · ${contactEmail}</p>
       </div>
     </div>
   `
 
   await resend.emails.send({
-    from: 'XO Beauty & Lashes <bookings@xobeautyandlashes.com>',
+    from,
     to: params.toEmail,
     subject,
     html,
-  }).catch(err => console.error('[XO Email] Customer confirmation failed:', err))
+  }).catch(err => console.error('[Email] Deposit customer confirmation failed:', err))
 }
 
-// XO Beauty & Lashes — new booking alert to Nik (vendor)
+// Deposit booking alert to vendor — parameterized for any vendor using the deposit flow.
 export async function sendNewBookingAlertToVendor(params: {
   customerName: string
   customerEmail: string
@@ -1520,12 +1539,24 @@ export async function sendNewBookingAlertToVendor(params: {
   date: string
   time: string
   appointmentId: string
+  // Dynamic vendor params — required for new callers; legacy callers get XO defaults.
+  vendorOwnerEmail?: string
+  businessName?: string
+  fromAddress?: string
+  depositAmountCents?: number // stored deposit amount; falls back to display text if absent
 }): Promise<void> {
   const apiKey = process.env.RESEND_API_KEY
   if (!apiKey) {
-    console.warn('[XO Email] RESEND_API_KEY not set — skipping vendor alert')
+    console.warn('[Email] RESEND_API_KEY not set — skipping deposit vendor alert')
     return
   }
+
+  const toEmail = params.vendorOwnerEmail || 'fleekbynik@gmail.com'
+  const displayName = params.businessName || 'XO Beauty & Lashes'
+  const from = params.fromAddress || 'XO Beauty & Lashes <bookings@xobeautyandlashes.com>'
+  const depositLabel = params.depositAmountCents != null
+    ? `$${(params.depositAmountCents / 100).toFixed(2)} deposit`
+    : 'A deposit'
 
   const { Resend } = await import('resend')
   const resend = new Resend(apiKey)
@@ -1535,10 +1566,10 @@ export async function sendNewBookingAlertToVendor(params: {
     <div style="font-family:Arial,sans-serif;max-width:560px;margin:0 auto;background:#fff;">
       <div style="background:linear-gradient(135deg,#2e1a47,#c9b1d9);padding:32px;text-align:center;">
         <h1 style="color:white;margin:0;font-size:22px;">New Booking</h1>
-        <p style="color:rgba(255,255,255,0.8);margin:8px 0 0;font-size:14px;">XO Beauty &amp; Lashes</p>
+        <p style="color:rgba(255,255,255,0.8);margin:8px 0 0;font-size:14px;">${displayName}</p>
       </div>
       <div style="padding:32px;">
-        <p style="font-size:15px;color:#1a0f2e;margin:0 0 24px;">Hey Nik! A new appointment has been booked.</p>
+        <p style="font-size:15px;color:#1a0f2e;margin:0 0 24px;">A new appointment has been booked.</p>
         <div style="background:#f7f2fc;border-radius:12px;padding:20px 24px;margin-bottom:24px;">
           <p style="margin:0 0 12px;font-size:11px;font-weight:700;letter-spacing:0.1em;color:#888;">APPOINTMENT DETAILS</p>
           <table style="width:100%;border-collapse:collapse;">
@@ -1550,18 +1581,18 @@ export async function sendNewBookingAlertToVendor(params: {
             <tr><td style="font-size:13px;color:#888;padding:4px 0;">Reference</td><td style="font-size:13px;color:#1a0f2e;font-weight:500;text-align:right;">#${params.appointmentId.slice(0,8).toUpperCase()}</td></tr>
           </table>
         </div>
-        <p style="font-size:13px;color:#888;text-align:center;">A $25 deposit was collected to secure this slot.</p>
+        <p style="font-size:13px;color:#888;text-align:center;">${depositLabel} was collected to secure this slot.</p>
       </div>
       <div style="background:#f5f5f5;padding:16px;text-align:center;">
-        <p style="margin:0;font-size:12px;color:#999;">XO Beauty &amp; Lashes Dashboard</p>
+        <p style="margin:0;font-size:12px;color:#999;">${displayName} Dashboard</p>
       </div>
     </div>
   `
 
   await resend.emails.send({
-    from: 'XO Beauty & Lashes <bookings@xobeautyandlashes.com>',
-    to: 'fleekbynik@gmail.com',
+    from,
+    to: toEmail,
     subject,
     html,
-  }).catch(err => console.error('[XO Email] Vendor alert failed:', err))
+  }).catch(err => console.error('[Email] Deposit vendor alert failed:', err))
 }
