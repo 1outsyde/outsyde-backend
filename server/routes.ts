@@ -20513,6 +20513,14 @@ console.log(
   });
 
   // ── Receipt endpoints (read-only) ─────────────────────────────────────────
+  const OUTSYDE_LLC_ADDRESS = {
+    name: 'Outsyde LLC',
+    line1: '54 State Street, Ste 804 #13315',
+    city: 'Albany',
+    state: 'New York',
+    zip: '12207',
+    country: 'US',
+  } as const;
 
   app.get('/api/orders/:id/receipt', requireAuth, async (req: any, res: any) => {
     try {
@@ -20540,6 +20548,7 @@ console.log(
           ? { id: business.id, name: business.name, contactEmail: business.contactEmail, logoImage: business.logoImage }
           : null,
         items: order.items,
+        platform: OUTSYDE_LLC_ADDRESS,
       });
     } catch (err) {
       console.error('[GET /api/orders/:id/receipt]', err);
@@ -20574,6 +20583,7 @@ console.log(
           ? { id: business.id, name: business.name, contactEmail: business.contactEmail, logoImage: business.logoImage }
           : null,
         service: service ? { id: service.id, name: service.name } : null,
+        platform: OUTSYDE_LLC_ADDRESS,
       });
     } catch (err) {
       console.error('[GET /api/appointments/:id/receipt]', err);
@@ -20608,6 +20618,7 @@ console.log(
           ? { id: photographer.id, userId: photographer.userId, displayName: photographer.displayName }
           : null,
         service: service ? { id: service.id, name: service.name } : null,
+        platform: OUTSYDE_LLC_ADDRESS,
       });
     } catch (err) {
       console.error('[GET /api/shoot-bookings/:id/receipt]', err);
