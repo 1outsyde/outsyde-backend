@@ -16970,7 +16970,12 @@ export async function registerRoutes(
       if (!userId) return res.status(401).json({ error: "Not authenticated" });
 
       const xBusinessId = req.headers['x-business-id'] as string | undefined;
-      const isAdmin = authReq.user?.isAdmin === true;
+      const ALLOWED_ADMIN_EMAILS = ['info@goutsyde.com', 'jamesmeyers2304@gmail.com'];
+      let isAdmin = authReq.user?.isAdmin === true;
+      if (!isAdmin && xBusinessId && userId) {
+        const userRecord = await storage.getUser(userId);
+        isAdmin = ALLOWED_ADMIN_EMAILS.includes((userRecord?.email ?? '').toLowerCase());
+      }
       let businessId: string;
       if (xBusinessId && isAdmin) {
         businessId = xBusinessId;
