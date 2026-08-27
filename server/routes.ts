@@ -16628,7 +16628,7 @@ export async function registerRoutes(
       const userId = authReq.user?.userId || req.session?.userId;
       if (!userId) return res.status(401).json({ error: "Not authenticated" });
 
-      const isAdmin = (authReq.user as any)?.role === 'admin';
+      const isAdmin = authReq.user?.isAdmin === true;
       const overrideBusinessId = req.query.businessId as string | undefined;
       let business;
       if (isAdmin && overrideBusinessId) {
