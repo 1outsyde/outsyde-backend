@@ -16966,14 +16966,26 @@ export async function registerRoutes(
   app.get("/api/business/stats", authMiddleware, async (req, res) => {
     try {
       const authReq = req as AuthenticatedRequest;
-      const userId = authReq.user?.userId || req.session?.userId;
+      const userId = getUserIdFromRequest(req);
       if (!userId) return res.status(401).json({ error: "Not authenticated" });
 
-      const business = await storage.getBusinessByOwnerId(userId);
-      if (!business) return res.status(404).json({ error: "Business not found" });
+      const xBusinessId = req.headers['x-business-id'] as string | undefined;
+      const isAdmin = authReq.user?.isAdmin === true;
+      let businessId: string;
+      if (xBusinessId && isAdmin) {
+        businessId = xBusinessId;
+      } else {
+        const business = await storage.getBusinessByOwnerId(userId);
+        if (!business) return res.status(404).json({ error: "Business not found" });
+        businessId = business.id;
+      }
 
-      const allOrders = await storage.getVendorOrders(business.id);
-      const bookings = await storage.getAppointmentsByBusiness(business.id);
+      const [bizRecord, allOrders, bookings] = await Promise.all([
+        storage.getBusiness(businessId),
+        storage.getVendorOrders(businessId),
+        storage.getAppointmentsByBusiness(businessId),
+      ]);
+      if (!bizRecord) return res.status(404).json({ error: "Business not found" });
 
       const now = new Date();
       const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
@@ -16997,8 +17009,8 @@ export async function registerRoutes(
           orderCount: paidOrders.length,
           bookingCount: confirmedBookings.length,
           monthlyRevenueCents: monthlyRevenue + monthlyBookingRevenue,
-          reviewCount: business.reviewCount || 0,
-          averageRating: business.rating ? (business.rating / 10) : 0,
+          reviewCount: bizRecord.reviewCount || 0,
+          averageRating: bizRecord.rating ? (bizRecord.rating / 10) : 0,
         },
       });
     } catch (error) {
