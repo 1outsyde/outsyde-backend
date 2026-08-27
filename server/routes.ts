@@ -16639,25 +16639,35 @@ export async function registerRoutes(
       if (!business) return res.status(404).json({ error: "Business not found" });
 
       const orders = await storage.getVendorOrders(business.id);
+      const snakeFormat = req.query.format === "snake";
 
       const enrichedOrders = await Promise.all(
         orders.map(async (order) => {
           const shipments = await storage.getShipmentsByOrder(order.id);
           const shipment = shipments.length > 0 ? shipments[0] : null;
+          if (snakeFormat) {
+            return {
+              id: order.id,
+              order_number: order.orderNumber,
+              customer_id: order.customerId,
+              customer_name: order.customerName,
+              items: Array.isArray(order.items)
+                ? order.items.map((it) => ({ name: it.name, qty: it.quantity, price: it.price }))
+                : [],
+              total_amount: order.totalAmount,
+              status: order.status ?? "pending",
+              shipping_address: order.shippingAddress ?? null,
+              created_at: order.createdAt instanceof Date ? order.createdAt.toISOString() : (order.createdAt ?? null),
+              tracking_number: shipment?.trackingNumber ?? null,
+              carrier: shipment?.carrier ?? null,
+            };
+          }
+          // Default: camelCase shape for mobile (unchanged from before Task 4)
+          const createdAtStr = order.createdAt instanceof Date ? order.createdAt.toISOString() : (order.createdAt ?? null);
           return {
-            id: order.id,
-            order_number: order.orderNumber,
-            customer_id: order.customerId,
-            customer_name: order.customerName,
-            items: Array.isArray(order.items)
-              ? order.items.map((it) => ({ name: it.name, qty: it.quantity, price: it.price }))
-              : [],
-            total_amount: order.totalAmount,
-            status: order.status ?? "pending",
-            shipping_address: order.shippingAddress ?? null,
-            created_at: order.createdAt instanceof Date ? order.createdAt.toISOString() : order.createdAt,
-            tracking_number: shipment?.trackingNumber ?? null,
-            carrier: shipment?.carrier ?? null,
+            ...order,
+            orderDate: createdAtStr,
+            shipment,
           };
         })
       );
