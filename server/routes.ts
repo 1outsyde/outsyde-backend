@@ -10810,7 +10810,19 @@ export async function registerRoutes(
     }
 
     try {
-      const business = await storage.getBusinessByOwnerId(userId);
+      // Admin bypass: platform admin passes x-business-id header to access any business's products.
+      const headerBizId = req.headers['x-business-id'] as string | undefined;
+      const authHeader = req.headers.authorization;
+      const isAdmin = authHeader?.startsWith('Bearer ')
+        ? (verifyAccessToken(authHeader.substring(7))?.isAdmin === true)
+        : false;
+
+      let business;
+      if (isAdmin && headerBizId) {
+        business = await storage.getBusiness(headerBizId);
+      } else {
+        business = await storage.getBusinessByOwnerId(userId);
+      }
       if (!business) {
         return res.status(404).json({ error: "No business found" });
       }
@@ -10825,14 +10837,26 @@ export async function registerRoutes(
 
   // Create vendor product
   app.post("/api/vendor/products", async (req, res) => {
-    const userId = req.session?.userId;
+    const userId = getUserIdFromRequest(req);
     if (!userId) {
       return res.status(401).json({ error: "Not authenticated" });
     }
 
     try {
+      // Admin bypass: platform admin passes x-business-id header to access any business's products.
+      const headerBizId = req.headers['x-business-id'] as string | undefined;
+      const authHeader = req.headers.authorization;
+      const isAdmin = authHeader?.startsWith('Bearer ')
+        ? (verifyAccessToken(authHeader.substring(7))?.isAdmin === true)
+        : false;
+
       // Vendors can create products before subscribing (content hidden until subscription active)
-      const business = await storage.getBusinessByOwnerId(userId);
+      let business;
+      if (isAdmin && headerBizId) {
+        business = await storage.getBusiness(headerBizId);
+      } else {
+        business = await storage.getBusinessByOwnerId(userId);
+      }
       if (!business) {
         return res.status(404).json({ error: "No business found" });
       }
@@ -10874,14 +10898,26 @@ export async function registerRoutes(
 
   // Update vendor product
   app.patch("/api/vendor/products/:id", async (req, res) => {
-    const userId = req.session?.userId;
+    const userId = getUserIdFromRequest(req);
     if (!userId) {
       return res.status(401).json({ error: "Not authenticated" });
     }
 
     try {
+      // Admin bypass: platform admin passes x-business-id header to access any business's products.
+      const headerBizId = req.headers['x-business-id'] as string | undefined;
+      const authHeader = req.headers.authorization;
+      const isAdmin = authHeader?.startsWith('Bearer ')
+        ? (verifyAccessToken(authHeader.substring(7))?.isAdmin === true)
+        : false;
+
       // Vendors can update products before subscribing (content hidden until subscription active)
-      const business = await storage.getBusinessByOwnerId(userId);
+      let business;
+      if (isAdmin && headerBizId) {
+        business = await storage.getBusiness(headerBizId);
+      } else {
+        business = await storage.getBusinessByOwnerId(userId);
+      }
       if (!business) {
         return res.status(404).json({ error: "No business found" });
       }
@@ -10954,14 +10990,26 @@ export async function registerRoutes(
 
   // Delete vendor product
   app.delete("/api/vendor/products/:id", async (req, res) => {
-    const userId = req.session?.userId;
+    const userId = getUserIdFromRequest(req);
     if (!userId) {
       return res.status(401).json({ error: "Not authenticated" });
     }
 
     try {
+      // Admin bypass: platform admin passes x-business-id header to access any business's products.
+      const headerBizId = req.headers['x-business-id'] as string | undefined;
+      const authHeader = req.headers.authorization;
+      const isAdmin = authHeader?.startsWith('Bearer ')
+        ? (verifyAccessToken(authHeader.substring(7))?.isAdmin === true)
+        : false;
+
       // Vendors can delete products before subscribing (content hidden until subscription active)
-      const business = await storage.getBusinessByOwnerId(userId);
+      let business;
+      if (isAdmin && headerBizId) {
+        business = await storage.getBusiness(headerBizId);
+      } else {
+        business = await storage.getBusinessByOwnerId(userId);
+      }
       if (!business) {
         return res.status(404).json({ error: "No business found" });
       }
