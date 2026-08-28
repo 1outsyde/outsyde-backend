@@ -689,6 +689,7 @@ export const photographers = pgTable("photographers", {
 
   stripeAccountId: text("stripe_account_id"),
   stripeOnboardingComplete: boolean("stripe_onboarding_complete").default(false),
+  stripeOnboardingLastEventAt: timestamp("stripe_onboarding_last_event_at"),
   stripeOnboardingUrl: text("stripe_onboarding_url"),
   specialties: text("specialties").array(),
 
