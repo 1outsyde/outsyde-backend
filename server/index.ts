@@ -64,6 +64,8 @@ const allowedOrigins: (string | RegExp)[] = [];
 const clientSiteOrigins = [
   'http://localhost:3001',           // xo-lashes-web local dev
   'https://xobeautyandlashes.com',   // xo-lashes-web production
+  'https://lotushouseblends.com',    // LHB custom domain
+  'https://www.lotushouseblends.com',
 ];
 clientSiteOrigins.forEach(o => allowedOrigins.push(o));
 
