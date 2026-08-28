@@ -284,8 +284,8 @@ export class PhotographerController {
 
       const accountLink = await stripeService.createConnectOnboardingLink(
         stripeAccountId,
-        `${baseUrl}/photographer/onboarding?refresh=true`,
-        `${baseUrl}/photographer/dashboard?stripe=success`
+        `${baseUrl}/photographer-onboarding?refresh=true`,
+        `${baseUrl}/photographer-dashboard?stripe=success`
       );
 
       res.json({ url: accountLink.url });
