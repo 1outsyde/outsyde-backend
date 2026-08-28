@@ -19202,6 +19202,39 @@ export async function registerRoutes(
         metadata: { shipmentId: shipments[0]?.id ?? null },
       }).catch(err => console.error('Audit log error (confirm_delivery):', err));
 
+      // Fire delivery emails to consumer and vendor (fire-and-forget)
+      ;(async () => {
+        try {
+          const { sendOrderDeliveredEmail, sendOrderDeliveredVendorEmail } = await import('./emailService');
+          const consumer = await storage.getUser(order.customerId);
+          const business = order.businessId ? await storage.getBusiness(order.businessId) : undefined;
+          const vendor = business ? await storage.getUser(business.ownerId) : undefined;
+          const consumerName = consumer?.name || consumer?.firstName || 'there';
+          const vendorName = business?.name || 'the vendor';
+          const consumerName2 = consumer?.name || consumer?.firstName || 'the customer';
+          if (consumer?.email) {
+            await sendOrderDeliveredEmail({
+              toEmail: consumer.email,
+              consumerName,
+              vendorName,
+              orderId,
+              orderNumber: order.orderNumber,
+            });
+          }
+          if (vendor?.email) {
+            await sendOrderDeliveredVendorEmail({
+              toEmail: vendor.email,
+              vendorName,
+              consumerName: consumerName2,
+              orderId,
+              orderNumber: order.orderNumber,
+            });
+          }
+        } catch (emailErr) {
+          console.error('Order delivered email error:', emailErr);
+        }
+      })();
+
       return res.json({ message: "Delivery confirmed" });
     } catch (error) {
       console.error("Confirm delivery error:", error);

@@ -1145,6 +1145,75 @@ export async function sendOrderShippedEmail(params: {
   }
 }
 
+export async function sendOrderDeliveredEmail(params: {
+  toEmail: string;
+  consumerName: string;
+  vendorName: string;
+  orderId: string;
+  orderNumber: number;
+}): Promise<void> {
+  try {
+    const orderRef = `#${String(params.orderNumber).padStart(4, '0')}`;
+    const html = wrapEmail(`
+      ${emailHeader('Order Delivered ✅', `Your order from ${params.vendorName} has arrived`)}
+      <tr><td style="background:#1A1A1A;padding:24px 32px;">
+        <p style="color:#F5F0E8;font-size:15px;margin:0 0 16px 0;">Hi ${params.consumerName},</p>
+        <p style="color:#CCCCCC;font-size:14px;margin:0 0 24px 0;">
+          Your order from <strong style="color:#F5F0E8;">${params.vendorName}</strong> has been marked as delivered.
+          We hope you love what you received!
+        </p>
+        <table width="100%" cellpadding="0" cellspacing="0" style="border-radius:6px;overflow:hidden;margin-bottom:24px;">
+          ${detailRow('Order', orderRef, true)}
+          ${detailRow('Vendor', params.vendorName, false)}
+          ${detailRow('Status', 'Delivered', true)}
+        </table>
+        <p style="color:#888888;font-size:13px;margin:0;">
+          If anything is wrong with your order, please reach out to
+          <a href="mailto:info@goutsyde.com" style="color:#E8B930;">info@goutsyde.com</a> and we'll make it right.
+        </p>
+      </td></tr>
+      ${emailCta('View My Orders', 'https://goutsyde.com/account/orders')}
+      ${emailFooter()}
+    `);
+    await sendBrandedEmail(params.toEmail, `✅ Order ${`#${String(params.orderNumber).padStart(4, '0')}`} delivered — enjoy!`, html);
+    console.log(`[Email] Order delivered email sent to ${params.toEmail} for order ${params.orderId}`);
+  } catch (err) {
+    console.error('[Email] sendOrderDeliveredEmail failed:', err);
+  }
+}
+
+export async function sendOrderDeliveredVendorEmail(params: {
+  toEmail: string;
+  vendorName: string;
+  consumerName: string;
+  orderId: string;
+  orderNumber: number;
+}): Promise<void> {
+  try {
+    const orderRef = `#${String(params.orderNumber).padStart(4, '0')}`;
+    const html = wrapEmail(`
+      ${emailHeader('Order Delivered ✅', 'Your customer confirmed delivery')}
+      <tr><td style="background:#1A1A1A;padding:24px 32px;">
+        <p style="color:#CCCCCC;font-size:14px;margin:0 0 24px 0;">
+          <strong style="color:#F5F0E8;">${params.consumerName}</strong> has confirmed delivery of their order.
+          The transaction is complete.
+        </p>
+        <table width="100%" cellpadding="0" cellspacing="0" style="border-radius:6px;overflow:hidden;">
+          ${detailRow('Order', orderRef, true)}
+          ${detailRow('Customer', params.consumerName, false)}
+          ${detailRow('Status', 'Delivered', true)}
+        </table>
+      </td></tr>
+      ${emailCta('View in Dashboard', 'https://goutsyde.com/vendor/orders')}
+      ${emailFooter()}
+    `);
+    await sendBrandedEmail(params.toEmail, `✅ Order ${orderRef} delivered — ${params.consumerName} confirmed receipt`, html);
+    console.log(`[Email] Order delivered vendor email sent to ${params.toEmail} for order ${params.orderId}`);
+  } catch (err) {
+    console.error('[Email] sendOrderDeliveredVendorEmail failed:', err);
+  }
+}
+
 export async function sendCancellationAdminEmail(params: {
   adminEmail: string;
   eventType: 'appointment_canceled' | 'shoot_booking_canceled' | 'appointment_refunded' | 'shoot_booking_refunded' | 'order_canceled' | 'refund_approved';
