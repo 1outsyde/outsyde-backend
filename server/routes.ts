@@ -18836,7 +18836,8 @@ export async function registerRoutes(
         return res.status(404).json({ error: "Post not found" });
       }
       
-      if (post.authorId !== userId) {
+      const isAdmin = req.session?.role === "admin";
+      if (!isAdmin && post.authorId !== userId) {
         return res.status(403).json({ error: "You can only delete your own posts" });
       }
       
