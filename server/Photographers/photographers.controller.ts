@@ -440,7 +440,10 @@ export class PhotographerController {
       }
 
       const bookings = await storage.getPhotographerBookingRecords(photographer.id);
-      res.json({ bookings });
+      const totalEarnedCents = bookings
+        .filter(b => b.status === 'confirmed' || b.status === 'completed')
+        .reduce((sum, b) => sum + (b.vendorNet || 0), 0);
+      res.json({ bookings, totalEarnedCents });
     } catch (error) {
       console.error("Get photographer booking records error:", error);
       res.status(500).json({ error: "Failed to get booking records" });
