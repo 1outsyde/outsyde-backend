@@ -2289,25 +2289,33 @@ export class WebhookHandlers {
       }
     }
     
-    // Update photographer onboarding status
+    // Update photographer onboarding status (with event-ordering guard)
     if (photographer && photographer.stripeAccountId === accountId) {
-      console.log(`[Stripe] Updating photographer ${photographer.id} stripeOnboardingComplete=${isOnboardingComplete}`);
-      await storage.updatePhotographer(photographer.id, {
-        stripeOnboardingComplete: isOnboardingComplete,
-      });
-      console.log(`[Stripe] Photographer ${photographer.id} stripeOnboardingComplete updated to ${isOnboardingComplete}`);
-      
-      if (isOnboardingComplete) {
-        console.log(`[Stripe] Photographer ${photographer.id} (${photographer.displayName}) completed Stripe onboarding`);
-        
-        // Get photographer user and send notification
-        const photographerUser = await storage.getUser(photographer.userId);
-        if (photographerUser) {
-          await NotificationTriggers.stripeOnboardingComplete({
-            userId: photographerUser.id,
-            accountType: 'photographer',
-            businessName: photographer.displayName,
-          });
+      const incomingEventTime = new Date(eventCreatedAt * 1000);
+      const lastAppliedTime = photographer.stripeOnboardingLastEventAt;
+      if (lastAppliedTime && incomingEventTime <= new Date(lastAppliedTime)) {
+        console.log(`[Stripe] Ignoring stale/out-of-order account.updated for photographer ${photographer.id} — event time ${incomingEventTime.toISOString()} <= last applied ${new Date(lastAppliedTime).toISOString()}`);
+      } else {
+        const wasAlreadyComplete = photographer.stripeOnboardingComplete === true;
+        console.log(`[Stripe] Updating photographer ${photographer.id} (${photographer.displayName}) stripeOnboardingComplete=${isOnboardingComplete}`);
+        await storage.updatePhotographer(photographer.id, {
+          stripeOnboardingComplete: isOnboardingComplete,
+          stripeOnboardingLastEventAt: incomingEventTime,
+        });
+        console.log(`[Stripe] Photographer ${photographer.id} stripeOnboardingComplete updated to ${isOnboardingComplete}`);
+
+        if (isOnboardingComplete && !wasAlreadyComplete) {
+          console.log(`[Stripe] Photographer ${photographer.id} (${photographer.displayName}) completed Stripe onboarding`);
+
+          // Get photographer user and send notification
+          const photographerUser = await storage.getUser(photographer.userId);
+          if (photographerUser) {
+            await NotificationTriggers.stripeOnboardingComplete({
+              userId: photographerUser.id,
+              accountType: 'photographer',
+              businessName: photographer.displayName,
+            });
+          }
         }
       }
     }
