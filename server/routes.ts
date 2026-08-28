@@ -31,6 +31,7 @@ import { sendStaffInviteEmail, sendStaffPayoutSetupEmail, sendStaffAcceptedOwner
 import { checkVendorStripeBalances, checkActiveOrders } from "./services/accountDeletionService";
 import { sendBookingAcceptedToConsumer, sendBookingDeclinedToConsumer, sendBookingRequestToVendor, sendBookingRequestReceivedToConsumer, sendAdminBookingAlert, sendShootBookingAcceptedToPhotographer, sendShootBookingDeclinedToPhotographer, sendShootBookingCanceledToPhotographer, sendAftercareEmail, sendPhotographerWelcomeEmail } from "./emailService";
 import { sendExpoPush } from "./expoPushService";
+import { mux } from "./services/mux";
 
 // Helper to sanitize user data for non-admin responses (removes sensitive fields)
 // DOB: replaced with age range for privacy
@@ -20068,8 +20069,28 @@ export async function registerRoutes(
   // the right row once the asset is ready.
   app.post("/api/webhooks/mux", async (req, res) => {
     try {
-      const payload = req.body;
-      const { type, data } = payload ?? {};
+      // Signature verification — requires raw body (express.raw middleware applied in index.ts)
+      const secret = process.env.MUX_WEBHOOK_SECRET;
+      let event: { type: string; data: any };
+      if (secret) {
+        try {
+          event = mux.webhooks.unwrap(req.body, req.headers, secret) as { type: string; data: any };
+        } catch {
+          console.warn("[Mux] Webhook signature verification failed");
+          return res.status(400).json({ error: "Invalid Mux webhook signature" });
+        }
+      } else {
+        if (process.env.NODE_ENV !== "production") {
+          console.warn("[Mux] MUX_WEBHOOK_SECRET not set — skipping signature verification (dev only)");
+          const raw = req.body instanceof Buffer ? req.body.toString("utf8") : req.body;
+          event = (typeof raw === "string" ? JSON.parse(raw) : raw) as { type: string; data: any };
+        } else {
+          console.error("[Mux] MUX_WEBHOOK_SECRET not set in production — rejecting webhook");
+          return res.status(400).json({ error: "Webhook secret not configured" });
+        }
+      }
+
+      const { type, data } = event;
 
       if (type === "video.asset.ready") {
         const playbackId: string | undefined = data?.playback_ids?.[0]?.id;
@@ -20083,7 +20104,7 @@ export async function registerRoutes(
             .update(feedPosts)
             .set({
               mediaUrl: videoUrl,
-              imageUrl: videoUrl,
+              imageUrl: thumbnailUrl,
               thumbnailUrl,
               updatedAt: new Date(),
             })
@@ -20093,33 +20114,30 @@ export async function registerRoutes(
             `[Mux] webhook: updated post for uploadId=${uploadId} → playbackId=${playbackId}`
           );
 
-          // Update businesses whose coverImage was set to the Mux uploadId
-          const businessResult = await db
+          await db
             .update(businesses)
             .set({ coverImage: videoUrl })
             .where(eq(businesses.coverImage, uploadId));
 
           console.log(
-           `[Mux] webhook: updated businesses coverImage for uploadId=${uploadId} -> ${videoUrl}`
+            `[Mux] webhook: updated businesses coverImage for uploadId=${uploadId} -> ${videoUrl}`
           );
 
-         // Update photographers whose coverImage was set to the Mux uploadId
-const photographerResult = await db
-  .update(photographers)
-  .set({ coverImage: videoUrl })
-  .where(eq(photographers.coverImage, uploadId));
-console.log(
-  `[Mux] webhook: updated photographers coverImage for uploadId=${uploadId} -> ${videoUrl}`
-);
+          await db
+            .update(photographers)
+            .set({ coverImage: videoUrl })
+            .where(eq(photographers.coverImage, uploadId));
+          console.log(
+            `[Mux] webhook: updated photographers coverImage for uploadId=${uploadId} -> ${videoUrl}`
+          );
 
-// Update staff whose coverImage was set to the Mux uploadId
-await db
-  .update(staffMembers)
-  .set({ coverImage: videoUrl })
-  .where(eq(staffMembers.coverImage, uploadId));
-console.log(
-  `[Mux] webhook: updated staff coverImage for uploadId=${uploadId} -> ${videoUrl}`
-);
+          await db
+            .update(staffMembers)
+            .set({ coverImage: videoUrl })
+            .where(eq(staffMembers.coverImage, uploadId));
+          console.log(
+            `[Mux] webhook: updated staff coverImage for uploadId=${uploadId} -> ${videoUrl}`
+          );
 
           // At story creation time the mobile app stores the Mux upload_id in
           // mux_asset_id as a temporary placeholder (same pattern feed_posts uses
@@ -20138,6 +20156,8 @@ console.log(
             console.log(
               `[Mux] webhook: updated story for uploadId=${uploadId} → assetId=${muxAssetId}`
             );
+          } else {
+            console.warn("[Mux] video.asset.ready received but data.id missing — story row not updated", { uploadId });
           }
         }
       }
