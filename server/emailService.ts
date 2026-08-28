@@ -923,6 +923,29 @@ export async function sendShootBookingExpiredToPhotographer(params: {
   }
 }
 
+export async function sendPhotographerWelcomeEmail(toEmail: string, displayName: string): Promise<void> {
+  try {
+    const html = wrapEmail(`
+      ${emailHeader('Welcome to Outsyde! 📸', `You're almost ready to start shooting, ${displayName}.`)}
+      <tr><td style="background:#1A1A1A;padding:20px 32px 8px;">
+        <p style="color:#AAAAAA;font-size:14px;line-height:1.7;margin:0 0 14px 0;">
+          Your photographer profile has been created. The next step is connecting your Stripe account so you can accept bookings and receive payouts directly.
+        </p>
+        <p style="color:#AAAAAA;font-size:14px;line-height:1.7;margin:0 0 14px 0;">
+          Once connected, your profile will go live and clients will be able to book sessions with you through the Outsyde platform.
+        </p>
+        <p style="color:#666666;font-size:13px;margin:0;">Head to your dashboard to connect Stripe and complete your setup.</p>
+      </td></tr>
+      ${emailCta('Go to My Dashboard', 'https://www.goutsyde.com/photographer-dashboard')}
+      ${emailFooter('Welcome to the Outsyde community — we\'re glad to have you.')}
+    `);
+    await sendBrandedEmail(toEmail, `Welcome to Outsyde — you're almost ready to shoot`, html);
+    console.log(`[Email] Photographer welcome email sent to ${toEmail}`);
+  } catch (err) {
+    console.error('[Email] sendPhotographerWelcomeEmail failed:', err);
+  }
+}
+
 export async function sendOrderConfirmationToConsumer(params: {
   toEmail: string;
   consumerName: string;
