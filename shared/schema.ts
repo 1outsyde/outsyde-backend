@@ -3300,3 +3300,17 @@ export const promoCodes = pgTable("promo_codes", {
 }));
 
 export type PromoCode = typeof promoCodes.$inferSelect;
+
+/* =====================================================
+   WAITLIST SIGNUPS (Coming-soon vendor email capture)
+===================================================== */
+export const waitlistSignups = pgTable("waitlist_signups", {
+  id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
+  email: text("email").notNull(),
+  vendor: text("vendor").notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow(),
+}, (table) => ({
+  waitlistSignupsEmailVendorUniq: unique("waitlist_signups_email_vendor_key").on(table.email, table.vendor),
+}));
+
+export type WaitlistSignup = typeof waitlistSignups.$inferSelect;
