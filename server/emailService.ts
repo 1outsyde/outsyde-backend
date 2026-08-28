@@ -94,6 +94,70 @@ export async function sendAdminEmail(params: AdminEmailParams): Promise<boolean>
   }
 }
 
+export async function sendNewConsumerSignupEmail(params: {
+  adminEmail: string;
+  userName: string;
+  userEmail: string;
+  username: string;
+  city?: string | null;
+  state?: string | null;
+  userId: string;
+}): Promise<boolean> {
+  const subject = `New Consumer Signup: ${params.userName}`;
+  const location = params.city && params.state ? `${params.city}, ${params.state}` : null;
+
+  const html = `
+    <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+      <div style="background: linear-gradient(135deg, #f5a623, #f7b84b); padding: 20px; text-align: center;">
+        <h1 style="color: white; margin: 0;">New Consumer Signup</h1>
+      </div>
+
+      <div style="padding: 30px; background: #ffffff;">
+        <p style="font-size: 16px; color: #333;">A new consumer has joined Outsyde:</p>
+
+        <div style="background: #f9f9f9; padding: 20px; border-radius: 8px; margin: 20px 0;">
+          <h2 style="color: #333; margin-top: 0;">${params.userName}</h2>
+          <p style="margin: 8px 0;"><strong>Username:</strong> @${params.username}</p>
+          <p style="margin: 8px 0;"><strong>Email:</strong> ${params.userEmail}</p>
+          ${location ? `<p style="margin: 8px 0;"><strong>Location:</strong> ${location}</p>` : ''}
+        </div>
+
+        <div style="text-align: center; margin-top: 30px;">
+          <a href="${getAppBaseUrl()}/admin/users/${params.userId}"
+             style="background: #f5a623; color: white; padding: 12px 30px; text-decoration: none; border-radius: 6px; font-weight: bold;">
+            View User
+          </a>
+        </div>
+      </div>
+
+      <div style="background: #f5f5f5; padding: 15px; text-align: center; color: #666; font-size: 12px;">
+        <p>This is an automated notification from Outsyde.</p>
+      </div>
+    </div>
+  `;
+
+  const baseUrl = getAppBaseUrl();
+  const text = `
+New Consumer Signup: ${params.userName}
+
+A new consumer has joined Outsyde:
+
+Name: ${params.userName}
+Username: @${params.username}
+Email: ${params.userEmail}
+${location ? `Location: ${location}` : ''}
+
+${baseUrl ? `View User: ${baseUrl}/admin/users/${params.userId}` : 'Log in to the admin panel to view this user.'}
+  `;
+
+  return sendAdminEmail({
+    to: params.adminEmail,
+    subject,
+    html,
+    text,
+  });
+}
+
 export async function sendNewVendorApplicationEmail(params: {
   adminEmail: string;
   businessName: string;
