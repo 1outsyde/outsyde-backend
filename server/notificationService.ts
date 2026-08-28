@@ -1,6 +1,6 @@
 import { storage } from './storage';
 import { sendPushNotification, isPushConfigured } from './pushService';
-import { isEmailConfigured, sendNewVendorApplicationEmail, sendNewPhotographerApplicationEmail, sendVendorApprovalEmail, sendVendorRejectionEmail, sendCancellationAdminEmail } from './emailService';
+import { isEmailConfigured, sendNewConsumerSignupEmail, sendNewVendorApplicationEmail, sendNewPhotographerApplicationEmail, sendVendorApprovalEmail, sendVendorRejectionEmail, sendCancellationAdminEmail } from './emailService';
 import { sendExpoPush } from './expoPushService';
 import type { InsertNotification } from '@shared/schema';
 
@@ -26,7 +26,8 @@ export type NotificationType =
   | 'vendor_rejected'
   | 'staff_invite_accepted'
   | 'staff_onboarding_complete'
-  | 'staff_bookable';
+  | 'staff_bookable'
+  | 'new_consumer_signup';
 
 interface NotificationData {
   userId: string;
@@ -98,6 +99,8 @@ function getNotificationUrl(type: NotificationType, referenceType?: string, refe
       return '/vendor/dashboard?tab=staff';
     case 'staff_bookable':
       return '/staff/dashboard';
+    case 'new_consumer_signup':
+      return referenceId ? `/admin/users/${referenceId}` : '/admin/users';
     default:
       return '/';
   }
@@ -462,6 +465,76 @@ export const NotificationTriggers = {
     });
   },
 
+  async newConsumerSignup(params: {
+    userId: string;
+    userName: string;
+    userEmail: string;
+    username: string;
+    city?: string | null;
+    state?: string | null;
+  }): Promise<void> {
+    const adminUsers = await storage.getAdminUsers();
+    const location = params.city && params.state ? `${params.city}, ${params.state}` : null;
+    const adminTitle = 'New Consumer Signup';
+    const adminMessage = `${params.userName} (@${params.username}) just joined Outsyde.${location ? ` Location: ${location}` : ''}`;
+
+    for (const admin of adminUsers) {
+      // In-app notification
+      try {
+        await sendNotification({
+          userId: admin.id,
+          type: 'new_consumer_signup',
+          title: adminTitle,
+          message: adminMessage,
+          referenceType: 'user',
+          referenceId: params.userId,
+          metadata: {
+            userId: params.userId,
+            userName: params.userName,
+            userEmail: params.userEmail,
+            username: params.username,
+            location,
+          },
+        });
+      } catch (err) {
+        console.error(`[AdminSignupNotify] In-app failed for admin ${admin.id}:`, err);
+      }
+
+      // Expo push
+      try {
+        await sendExpoPush({
+          userId: admin.id,
+          title: adminTitle,
+          body: adminMessage,
+          data: { type: 'new_consumer_signup', referenceId: params.userId },
+        });
+      } catch (err) {
+        console.error(`[AdminSignupNotify] Expo push failed for admin ${admin.id}:`, err);
+      }
+
+      // Email
+      if (admin.email) {
+        try {
+          if (await isEmailConfigured()) {
+            await sendNewConsumerSignupEmail({
+              adminEmail: admin.email,
+              userName: params.userName,
+              userEmail: params.userEmail,
+              username: params.username,
+              city: params.city,
+              state: params.state,
+              userId: params.userId,
+            });
+          }
+        } catch (err) {
+          console.error(`[AdminSignupNotify] Email failed for ${admin.email}:`, err);
+        }
+      }
+    }
+
+    console.log(`[AdminSignupNotify] Fired consumer signup notifications for user ${params.userId} to ${adminUsers.length} admin(s)`);
+  },
+
   async newVendorApplication(params: {
     businessId: string;
     businessName: string;
@@ -473,38 +546,64 @@ export const NotificationTriggers = {
   }): Promise<void> {
     const adminUsers = await storage.getAdminUsers();
     const location = params.city && params.state ? `${params.city}, ${params.state}` : null;
-    
-    for (const admin of adminUsers) {
-      await sendNotification({
-        userId: admin.id,
-        type: 'new_vendor_application',
-        title: 'New Vendor Application',
-        message: `${params.businessName} (${params.businessCategory}) has applied to join Outsyde. Owner: ${params.ownerName}`,
-        referenceType: 'business',
-        referenceId: params.businessId,
-        metadata: {
-          businessId: params.businessId,
-          businessName: params.businessName,
-          businessCategory: params.businessCategory,
-          ownerName: params.ownerName,
-          ownerEmail: params.ownerEmail,
-          location,
-        },
-      });
+    const adminTitle = 'New Vendor Application';
+    const adminMessage = `${params.businessName} (${params.businessCategory}) has applied to join Outsyde. Owner: ${params.ownerName}`;
 
-      if (admin.email && await isEmailConfigured()) {
-        await sendNewVendorApplicationEmail({
-          adminEmail: admin.email,
-          businessName: params.businessName,
-          businessCategory: params.businessCategory,
-          ownerName: params.ownerName,
-          ownerEmail: params.ownerEmail,
-          location,
-          businessId: params.businessId,
+    for (const admin of adminUsers) {
+      // In-app notification
+      try {
+        await sendNotification({
+          userId: admin.id,
+          type: 'new_vendor_application',
+          title: adminTitle,
+          message: adminMessage,
+          referenceType: 'business',
+          referenceId: params.businessId,
+          metadata: {
+            businessId: params.businessId,
+            businessName: params.businessName,
+            businessCategory: params.businessCategory,
+            ownerName: params.ownerName,
+            ownerEmail: params.ownerEmail,
+            location,
+          },
         });
+      } catch (err) {
+        console.error(`[AdminSignupNotify] In-app failed for admin ${admin.id}:`, err);
+      }
+
+      // Expo push
+      try {
+        await sendExpoPush({
+          userId: admin.id,
+          title: adminTitle,
+          body: adminMessage,
+          data: { type: 'new_vendor_application', referenceId: params.businessId },
+        });
+      } catch (err) {
+        console.error(`[AdminSignupNotify] Expo push failed for admin ${admin.id}:`, err);
+      }
+
+      // Email
+      if (admin.email) {
+        try {
+          if (await isEmailConfigured()) {
+            await sendNewVendorApplicationEmail({
+              adminEmail: admin.email,
+              businessName: params.businessName,
+              businessCategory: params.businessCategory,
+              ownerName: params.ownerName,
+              ownerEmail: params.ownerEmail,
+              location,
+              businessId: params.businessId,
+            });
+          }
+        } catch (err) {
+          console.error(`[AdminSignupNotify] Email failed for ${admin.email}:`, err);
+        }
       }
     }
-    
+
     console.log(`[Admin Notification] Notified ${adminUsers.length} admin(s) about new vendor: ${params.businessName}`);
   },
 
@@ -519,38 +618,64 @@ export const NotificationTriggers = {
   }): Promise<void> {
     const adminUsers = await storage.getAdminUsers();
     const location = params.city && params.state ? `${params.city}, ${params.state}` : null;
-    
-    for (const admin of adminUsers) {
-      await sendNotification({
-        userId: admin.id,
-        type: 'new_photographer_application',
-        title: 'New Photographer Application',
-        message: `${params.displayName} has applied to join Outsyde as a photographer. Location: ${params.city || 'Unknown'}, ${params.state || 'Unknown'}`,
-        referenceType: 'photographer',
-        referenceId: params.photographerId,
-        metadata: {
-          photographerId: params.photographerId,
-          displayName: params.displayName,
-          ownerName: params.ownerName,
-          ownerEmail: params.ownerEmail,
-          location,
-          specialties: params.specialties,
-        },
-      });
+    const adminTitle = 'New Photographer Application';
+    const adminMessage = `${params.displayName} has applied to join Outsyde as a photographer. Location: ${params.city || 'Unknown'}, ${params.state || 'Unknown'}`;
 
-      if (admin.email && await isEmailConfigured()) {
-        await sendNewPhotographerApplicationEmail({
-          adminEmail: admin.email,
-          displayName: params.displayName,
-          ownerName: params.ownerName,
-          ownerEmail: params.ownerEmail,
-          location,
-          specialties: params.specialties,
-          photographerId: params.photographerId,
+    for (const admin of adminUsers) {
+      // In-app notification
+      try {
+        await sendNotification({
+          userId: admin.id,
+          type: 'new_photographer_application',
+          title: adminTitle,
+          message: adminMessage,
+          referenceType: 'photographer',
+          referenceId: params.photographerId,
+          metadata: {
+            photographerId: params.photographerId,
+            displayName: params.displayName,
+            ownerName: params.ownerName,
+            ownerEmail: params.ownerEmail,
+            location,
+            specialties: params.specialties,
+          },
         });
+      } catch (err) {
+        console.error(`[AdminSignupNotify] In-app failed for admin ${admin.id}:`, err);
+      }
+
+      // Expo push
+      try {
+        await sendExpoPush({
+          userId: admin.id,
+          title: adminTitle,
+          body: adminMessage,
+          data: { type: 'new_photographer_application', referenceId: params.photographerId },
+        });
+      } catch (err) {
+        console.error(`[AdminSignupNotify] Expo push failed for admin ${admin.id}:`, err);
+      }
+
+      // Email
+      if (admin.email) {
+        try {
+          if (await isEmailConfigured()) {
+            await sendNewPhotographerApplicationEmail({
+              adminEmail: admin.email,
+              displayName: params.displayName,
+              ownerName: params.ownerName,
+              ownerEmail: params.ownerEmail,
+              location,
+              specialties: params.specialties,
+              photographerId: params.photographerId,
+            });
+          }
+        } catch (err) {
+          console.error(`[AdminSignupNotify] Email failed for ${admin.email}:`, err);
+        }
       }
     }
-    
+
     console.log(`[Admin Notification] Notified ${adminUsers.length} admin(s) about new photographer: ${params.displayName}`);
   },
 

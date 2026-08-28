@@ -793,6 +793,16 @@ export async function registerRoutes(
       const signupRefreshToken = generateRefreshToken(signupTokenPayload);
       await storage.storeRefreshToken(user.id, signupRefreshToken, new Date(Date.now() + REFRESH_TOKEN_EXPIRY_MS));
 
+      // Notify admins — fire-and-forget, never blocks signup
+      NotificationTriggers.newConsumerSignup({
+        userId: user.id,
+        userName: user.name || data.email,
+        userEmail: user.email || data.email,
+        username: unValidation.cleaned!,
+        city: data.city,
+        state: data.state,
+      }).catch(err => console.error('[signup] admin notification failed:', err));
+
       // Log source for analytics (stored in server logs; not persisted to DB yet)
       if (data.source) {
         console.log(`[signup] source=${data.source} userId=${user.id}`);
@@ -1333,6 +1343,16 @@ export async function registerRoutes(
       const refreshToken = generateRefreshToken(tokenPayload);
       await storage.storeRefreshToken(fullUser.id, refreshToken, new Date(Date.now() + REFRESH_TOKEN_EXPIRY_MS));
 
+      // Notify admins — fire-and-forget, never blocks signup
+      NotificationTriggers.newConsumerSignup({
+        userId: fullUser.id,
+        userName: fullUser.name || email,
+        userEmail: fullUser.email || email,
+        username: unVal.cleaned!,
+        city: fullUser.city,
+        state: fullUser.state,
+      }).catch(err => console.error('[oauth-signup] admin notification failed:', err));
+
       if (req.session) {
         req.session.userId = fullUser.id;
         req.session.isVendor = fullUser.isVendor;
@@ -1488,6 +1508,16 @@ export async function registerRoutes(
       const accessToken = generateAccessToken(tokenPayload);
       const refreshToken = generateRefreshToken(tokenPayload);
       await storage.storeRefreshToken(fullUser.id, refreshToken, new Date(Date.now() + REFRESH_TOKEN_EXPIRY_MS));
+
+      // Notify admins — fire-and-forget, never blocks signup
+      NotificationTriggers.newConsumerSignup({
+        userId: fullUser.id,
+        userName: fullUser.name || email || 'New User',
+        userEmail: fullUser.email || email || '',
+        username: unVal.cleaned!,
+        city: fullUser.city,
+        state: fullUser.state,
+      }).catch(err => console.error('[apple-signup] admin notification failed:', err));
 
       const safeUser = sanitizeUserForResponse(fullUser, { includeOwnData: true });
       res.json({ success: true, user: safeUser, accessToken, refreshToken, expiresIn: ACCESS_TOKEN_EXPIRY_SECONDS, isNewUser: false });
