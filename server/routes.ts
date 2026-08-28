@@ -9519,7 +9519,7 @@ export async function registerRoutes(
         subscription: {
           ...sub,
           status: liveStatus ?? sub.status,
-          currentPeriodEnd: liveCurrentPeriodEnd ?? sub.currentPeriodEnd,
+          currentPeriodEnd: liveCurrentPeriodEnd ?? (sub.currentPeriodEnd ?? null),
           tierId: liveTierId ?? sub.tierId,
           tierName: liveTierName ?? sub.tierName,
           tierDisplayName: liveTierDisplayName ?? sub.tierDisplayName,
