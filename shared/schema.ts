@@ -2462,6 +2462,24 @@ export type UpdateBusinessProfile = z.infer<typeof updateBusinessProfileSchema>;
 export type InsertVendorProduct = z.infer<typeof insertVendorProductSchema>;
 export type VendorProduct = typeof vendorProducts.$inferSelect;
 
+export interface ProductVariantPublic {
+  id: string;
+  productId: string;
+  label: string;
+  priceCents: number;
+  compareAtPriceCents?: number | null;
+  inventory?: number | null;
+  trackInventory: boolean;
+  sku?: string | null;
+  sortOrder: number;
+  isActive: boolean;
+  createdAt: string;
+}
+
+export type VendorProductWithVariants = VendorProduct & {
+  variants: ProductVariantPublic[];
+};
+
 export type InsertVendorService = z.infer<typeof insertVendorServiceSchema>;
 export type VendorService = typeof vendorServices.$inferSelect;
 
