@@ -22,6 +22,7 @@ import {
   influencerApplications,
   influencerProfiles,
   promoCodes,
+  waitlistSignups,
   type User,
   type StaffMember,
   type StaffInvite,
@@ -686,6 +687,35 @@ export async function registerRoutes(
     } catch (error) {
       console.error("Support contact error:", error);
       return res.status(500).json({ success: false, error: "Failed to send message" });
+    }
+  });
+
+  // ==================== WAITLIST SIGNUPS ====================
+
+  app.post("/waitlist-signups", async (req, res) => {
+    try {
+      const rawEmail: unknown = req.body?.email;
+      const rawVendor: unknown = req.body?.vendor;
+
+      if (typeof rawEmail !== "string" || !rawEmail.includes("@")) {
+        return res.status(400).json({ success: false, error: "Invalid email address" });
+      }
+      if (typeof rawVendor !== "string" || rawVendor.trim().length === 0) {
+        return res.status(400).json({ success: false, error: "vendor is required" });
+      }
+
+      const email = rawEmail.trim().toLowerCase();
+      const vendor = rawVendor.trim().toLowerCase();
+
+      await db
+        .insert(waitlistSignups)
+        .values({ email, vendor })
+        .onConflictDoNothing();
+
+      return res.json({ success: true });
+    } catch (error) {
+      console.error("[POST /waitlist-signups] DB error:", error);
+      return res.status(500).json({ success: false, error: "Failed to save signup" });
     }
   });
 
