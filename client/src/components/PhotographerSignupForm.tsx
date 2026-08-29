@@ -179,8 +179,7 @@ export default function PhotographerSignupForm({ onComplete }: PhotographerSignu
       formData.city.trim() &&
       formData.state.trim() &&
       formData.hourlyRate.trim() &&
-      Number(formData.hourlyRate) > 0 &&
-      formData.portfolioUrl.trim()
+      Number(formData.hourlyRate) > 0
     );
   };
 
@@ -355,7 +354,7 @@ export default function PhotographerSignupForm({ onComplete }: PhotographerSignu
             />
           </div>
           <div>
-            <Label htmlFor="portfolioUrl">Portfolio URL *</Label>
+            <Label htmlFor="portfolioUrl">Portfolio URL</Label>
             <Input
               id="portfolioUrl"
               type="url"

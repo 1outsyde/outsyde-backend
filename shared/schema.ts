@@ -2425,7 +2425,7 @@ export const photographerSignupSchema = z.object({
   city: z.string().optional(),
   state: z.string().optional(),
   hourlyRate: z.number().min(1),
-  portfolioUrl: z.string().min(1),
+  portfolioUrl: z.string().optional().or(z.literal('')),
   specialties: z.array(z.string()).default([]),
 });
 
