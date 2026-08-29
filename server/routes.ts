@@ -20071,14 +20071,6 @@ export async function registerRoutes(
       const { type, data } = req.body ?? {};
 
       if (type === "video.asset.ready") {
-        console.log('[Mux] video.asset.ready payload:', JSON.stringify({
-          type,
-          assetId: data?.id,
-          uploadId: data?.upload_id,
-          playbackIds: data?.playback_ids,
-          status: data?.status
-        }, null, 2));
-
         const playbackId: string | undefined = data?.playback_ids?.[0]?.id;
         const uploadId: string | undefined = data?.upload_id;
 
@@ -20131,16 +20123,14 @@ export async function registerRoutes(
           // media_url/thumbnail_url now that Mux has finished processing the video.
           const muxAssetId: string | undefined = data?.id;
           if (muxAssetId) {
-            const storiesResult = await db
+            await db
               .update(stories)
               .set({
                 mediaUrl: videoUrl,
                 thumbnailUrl,
                 muxAssetId,
               })
-              .where(eq(stories.muxAssetId, uploadId))
-              .returning();
-            console.log('[Mux] stories update result:', storiesResult);
+              .where(eq(stories.muxAssetId, uploadId));
             console.log(
               `[Mux] webhook: updated story for uploadId=${uploadId} → assetId=${muxAssetId}`
             );
