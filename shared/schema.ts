@@ -1358,6 +1358,11 @@ export const notifications = pgTable("notifications", {
   isRead: boolean("is_read").default(false).notNull(),
   readAt: timestamp("read_at"),
 
+  // The user whose action caused this notification (nullable — system-generated
+  // notifications such as payment confirmations have no human actor).
+  triggeredByUserId: varchar("triggered_by_user_id", { length: 36 })
+    .references(() => users.id),
+
   metadata: jsonb("metadata").$type<Record<string, any>>(),
 
   createdAt: timestamp("created_at").defaultNow().notNull(),

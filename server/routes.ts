@@ -3858,8 +3858,36 @@ export async function registerRoutes(
         limit: limit ? parseInt(limit as string, 10) : 50,
         unreadOnly: unreadOnly === 'true',
       };
-      const notifications = await storage.getUserNotifications(userId, options);
+      const rawNotifications = await storage.getUserNotifications(userId, options);
       const unreadCount = await storage.getUnreadNotificationCount(userId);
+
+      const notifications = await Promise.all(
+        rawNotifications.map(async (n) => {
+          const triggeredByUserId = n.triggeredByUserId ?? null;
+
+          if (!triggeredByUserId) {
+            return { ...n, triggeringUser: null };
+          }
+
+          try {
+            const triggeringUser = await storage.getUser(triggeredByUserId);
+            return {
+              ...n,
+              triggeringUser: triggeringUser
+                ? {
+                    id: triggeringUser.id,
+                    displayName: triggeringUser.name ?? triggeringUser.firstName ?? null,
+                    profilePhotoUrl: triggeringUser.profileImageUrl ?? null,
+                    profileImageUrl: triggeringUser.profileImageUrl ?? null,
+                  }
+                : null,
+            };
+          } catch {
+            return { ...n, triggeringUser: null };
+          }
+        })
+      );
+
       res.json({ notifications, unreadCount });
     } catch (error) {
       console.error("Get notifications error:", error);
