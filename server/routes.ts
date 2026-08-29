@@ -14168,6 +14168,7 @@ export async function registerRoutes(
         quantity: z.number().int().positive().default(1),
         businessId: z.string().optional(),
         businessName: z.string().optional(),
+        variantId: z.string().optional().nullable(),
       });
       const data = schema.parse(req.body);
 
@@ -14179,11 +14180,49 @@ export async function registerRoutes(
         }
       }
 
+      // Resolve price server-side; enforce variant selection when required
+      let resolvedPriceCents = data.priceInCents;
+      let resolvedVariantLabel: string | null = null;
+
+      if (data.variantId) {
+        // Variant supplied — validate it and take price from DB (never trust client)
+        const [variant] = await db
+          .select()
+          .from(productVariants)
+          .where(and(
+            eq(productVariants.id, data.variantId),
+            eq(productVariants.productId, data.productId),
+            eq(productVariants.isActive, true)
+          ))
+          .limit(1);
+
+        if (!variant) {
+          return res.status(400).json({ success: false, error: { code: 'INVALID_VARIANT', message: 'Invalid or inactive variant' } });
+        }
+
+        resolvedPriceCents = variant.priceCents;
+        resolvedVariantLabel = variant.label;
+      } else {
+        // No variantId — check if this product requires one
+        const [requiresVariant] = await db
+          .select({ id: productVariants.id })
+          .from(productVariants)
+          .where(and(
+            eq(productVariants.productId, data.productId),
+            eq(productVariants.isActive, true)
+          ))
+          .limit(1);
+
+        if (requiresVariant) {
+          return res.status(400).json({ success: false, error: { code: 'VARIANT_REQUIRED', message: 'This product requires a variant selection' } });
+        }
+      }
+
       // Check stock before adding to cart
       const product = await storage.getVendorProduct(data.productId);
       if (product?.trackInventory) {
         const currentCart = await storage.getCartItems(userId);
-        const existingQty = currentCart.find(i => i.productId === data.productId)?.quantity || 0;
+        const existingQty = currentCart.find(i => i.productId === data.productId && i.variantId === (data.variantId ?? null))?.quantity || 0;
         const totalRequested = existingQty + data.quantity;
         const available = product.inventory ?? 0;
         if (available <= 0) {
@@ -14196,12 +14235,20 @@ export async function registerRoutes(
 
       const item = await storage.addCartItem({
         userId,
-        ...data,
+        productId: data.productId,
+        productName: data.productName,
+        productImage: data.productImage,
+        priceInCents: resolvedPriceCents,
+        quantity: data.quantity,
+        businessId: data.businessId,
+        businessName: data.businessName,
+        variantId: data.variantId ?? null,
+        variantLabel: resolvedVariantLabel,
       });
 
       const items = await storage.getCartItems(userId);
-      res.json({ 
-        success: true, 
+      res.json({
+        success: true,
         item,
         itemCount: items.reduce((sum, i) => sum + i.quantity, 0)
       });

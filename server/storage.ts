@@ -124,6 +124,7 @@ import {
   pushSubscriptions,
   notifications,
   cartItems,
+  productVariants,
   vendorSubscriptions,
   subscriptionTiers,
   tierBenefits,
@@ -3985,18 +3986,25 @@ export class DatabaseStorage implements IStorage {
   }
 
   async addCartItem(data: InsertCartItem): Promise<CartItem> {
+    // Dedup key: (userId + productId + variantId) — distinct variants of the same
+    // product must be separate cart rows; null variantId deduplicates with itself.
+    const variantCondition = data.variantId
+      ? eq(cartItems.variantId, data.variantId)
+      : isNull(cartItems.variantId);
+
     const existing = await db
       .select()
       .from(cartItems)
       .where(and(
         eq(cartItems.userId, data.userId),
-        eq(cartItems.productId, data.productId)
+        eq(cartItems.productId, data.productId),
+        variantCondition
       ));
-    
+
     if (existing.length > 0) {
       const [updated] = await db
         .update(cartItems)
-        .set({ 
+        .set({
           quantity: existing[0].quantity + (data.quantity || 1),
           updatedAt: new Date()
         })
@@ -4004,7 +4012,7 @@ export class DatabaseStorage implements IStorage {
         .returning();
       return updated;
     }
-    
+
     const [item] = await db.insert(cartItems).values(data).returning();
     return item;
   }
