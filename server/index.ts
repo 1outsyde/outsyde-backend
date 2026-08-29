@@ -161,9 +161,6 @@ app.post(
   handleStripeWebhook
 );
 
-// Raw body for Mux webhook signature verification (must be before express.json())
-app.use('/api/webhooks/mux', express.raw({ type: 'application/json' }));
-
 // =======================
 // Standard Middleware
 // =======================

@@ -31,7 +31,6 @@ import { sendStaffInviteEmail, sendStaffPayoutSetupEmail, sendStaffAcceptedOwner
 import { checkVendorStripeBalances, checkActiveOrders } from "./services/accountDeletionService";
 import { sendBookingAcceptedToConsumer, sendBookingDeclinedToConsumer, sendBookingRequestToVendor, sendBookingRequestReceivedToConsumer, sendAdminBookingAlert, sendShootBookingAcceptedToPhotographer, sendShootBookingDeclinedToPhotographer, sendShootBookingCanceledToPhotographer, sendAftercareEmail, sendPhotographerWelcomeEmail } from "./emailService";
 import { sendExpoPush } from "./expoPushService";
-import { mux } from "./services/mux";
 
 // Helper to sanitize user data for non-admin responses (removes sensitive fields)
 // DOB: replaced with age range for privacy
@@ -20069,35 +20068,7 @@ export async function registerRoutes(
   // the right row once the asset is ready.
   app.post("/api/webhooks/mux", async (req, res) => {
     try {
-      // Normalize req.body to raw bytes for signature verification.
-      // express.raw() in index.ts provides a Buffer when it intercepts before
-      // express.json(). The fallback covers cases where the body arrives
-      // pre-parsed (object), which loses exact bytes but prevents a crash.
-      const rawBody: Buffer | string = Buffer.isBuffer(req.body)
-        ? req.body
-        : Buffer.from(typeof req.body === "string" ? req.body : JSON.stringify(req.body));
-
-      const secret = process.env.MUX_WEBHOOK_SECRET;
-      let event: { type: string; data: any };
-      if (secret) {
-        try {
-          event = mux.webhooks.unwrap(rawBody, req.headers, secret) as { type: string; data: any };
-        } catch (err) {
-          console.warn("[Mux] Webhook signature verification failed:", err);
-          return res.status(400).json({ error: "Invalid Mux webhook signature" });
-        }
-      } else {
-        if (process.env.NODE_ENV !== "production") {
-          console.warn("[Mux] MUX_WEBHOOK_SECRET not set — skipping signature verification (dev only)");
-          const bodyStr = Buffer.isBuffer(rawBody) ? rawBody.toString("utf-8") : rawBody;
-          event = JSON.parse(bodyStr) as { type: string; data: any };
-        } else {
-          console.error("[Mux] MUX_WEBHOOK_SECRET not set in production — rejecting webhook");
-          return res.status(400).json({ error: "Webhook secret not configured" });
-        }
-      }
-
-      const { type, data } = event;
+      const { type, data } = req.body ?? {};
 
       if (type === "video.asset.ready") {
         const playbackId: string | undefined = data?.playback_ids?.[0]?.id;
