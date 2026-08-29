@@ -1422,6 +1422,17 @@ export class WebhookHandlers {
     const metadata = paymentIntent.metadata || {};
     const { type, bookingId } = metadata;
 
+    // Handle product order cancellation
+    if (metadata.orderId && !metadata.bookingId) {
+      try {
+        await storage.updateOrder(metadata.orderId, { status: 'cancelled' });
+        console.log(`[Stripe] Order ${metadata.orderId} marked cancelled`);
+      } catch (err) {
+        console.error('[Stripe] Failed to cancel order:', metadata.orderId, err);
+      }
+      return;
+    }
+
     if (!type || !bookingId) {
       return;
     }
@@ -1480,6 +1491,17 @@ export class WebhookHandlers {
   static async handlePaymentIntentFailed(paymentIntent: any) {
     const metadata = paymentIntent.metadata || {};
     const { type, bookingId } = metadata;
+
+    // Handle product order payment failure
+    if (metadata.orderId && !metadata.bookingId) {
+      try {
+        await storage.updateOrder(metadata.orderId, { status: 'cancelled' });
+        console.log(`[Stripe] Order ${metadata.orderId} marked cancelled (payment failed)`);
+      } catch (err) {
+        console.error('[Stripe] Failed to cancel order:', metadata.orderId, err);
+      }
+      return;
+    }
 
     if (!type || !bookingId) {
       return;
