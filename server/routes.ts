@@ -22,6 +22,8 @@ import {
   influencerApplications,
   influencerProfiles,
   promoCodes,
+  productVariants,
+  vendorProducts,
   type User,
   type StaffMember,
   type StaffInvite,
@@ -72,7 +74,7 @@ function sanitizeUserForResponse(user: User, options: { includeOwnData?: boolean
     loyaltyPoints: user.loyaltyPoints ?? 0,
   };
 }
-import { eq, desc, sql, gte, lte, or, isNull, gt, inArray } from "drizzle-orm";
+import { eq, desc, sql, gte, lte, or, isNull, gt, inArray, and } from "drizzle-orm";
 import { z } from "zod";
 import {
   hashPassword,
@@ -11172,6 +11174,181 @@ export async function registerRoutes(
     }
   });
 
+  // ==================== PRODUCT VARIANTS ====================
+
+  // Public single product detail (new — no existing endpoint)
+  app.get("/api/products/:productId", async (req, res) => {
+    try {
+      const { productId } = req.params;
+      const product = await storage.getVendorProduct(productId);
+      if (!product || !product.isActive) {
+        return res.status(404).json({ error: "Product not found" });
+      }
+      const variants = await db
+        .select()
+        .from(productVariants)
+        .where(and(
+          eq(productVariants.productId, productId),
+          eq(productVariants.isActive, true)
+        ))
+        .orderBy(productVariants.sortOrder);
+      res.json({ ...product, variants });
+    } catch (error) {
+      console.error("Get product detail error:", error);
+      res.status(500).json({ error: "Failed to get product" });
+    }
+  });
+
+  // Public variant list for a product (used by consumer pill selector)
+  app.get("/api/products/:productId/variants", async (req, res) => {
+    try {
+      const { productId } = req.params;
+      const variants = await db
+        .select()
+        .from(productVariants)
+        .where(and(
+          eq(productVariants.productId, productId),
+          eq(productVariants.isActive, true)
+        ))
+        .orderBy(productVariants.sortOrder);
+      res.json({ variants });
+    } catch (error) {
+      console.error("Get product variants error:", error);
+      res.status(500).json({ error: "Failed to get variants" });
+    }
+  });
+
+  // Vendor creates a variant
+  app.post("/api/business/products/:productId/variants", async (req, res) => {
+    const userId = getUserIdFromRequest(req);
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+    try {
+      const { productId } = req.params;
+      const business = await storage.getBusinessByOwnerId(userId);
+      if (!business) {
+        return res.status(404).json({ error: "No business found" });
+      }
+      const product = await storage.getVendorProduct(productId);
+      if (!product || product.businessId !== business.id) {
+        return res.status(403).json({ error: "Forbidden" });
+      }
+      const bodySchema = z.object({
+        label: z.string().min(1),
+        priceCents: z.number().int().positive(),
+        compareAtPriceCents: z.number().int().optional().nullable(),
+        inventory: z.number().int().optional().nullable(),
+        sku: z.string().optional().nullable(),
+        sortOrder: z.number().int().optional(),
+      });
+      const body = bodySchema.parse(req.body);
+      let sortOrder = body.sortOrder;
+      if (sortOrder === undefined) {
+        const [maxRow] = await db
+          .select({ max: sql<number>`COALESCE(MAX(${productVariants.sortOrder}), -1)` })
+          .from(productVariants)
+          .where(eq(productVariants.productId, productId));
+        sortOrder = (maxRow?.max ?? -1) + 1;
+      }
+      const [created] = await db
+        .insert(productVariants)
+        .values({
+          productId,
+          label: body.label,
+          priceCents: body.priceCents,
+          compareAtPriceCents: body.compareAtPriceCents ?? null,
+          inventory: body.inventory ?? null,
+          sku: body.sku ?? null,
+          sortOrder,
+        })
+        .returning();
+      res.status(201).json({ variant: created });
+    } catch (error) {
+      if (error instanceof z.ZodError) {
+        return res.status(400).json({ error: "Invalid data", details: error.errors });
+      }
+      console.error("Create variant error:", error);
+      res.status(500).json({ error: "Failed to create variant" });
+    }
+  });
+
+  // Vendor updates a variant
+  app.patch("/api/business/products/:productId/variants/:variantId", async (req, res) => {
+    const userId = getUserIdFromRequest(req);
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+    try {
+      const { productId, variantId } = req.params;
+      const business = await storage.getBusinessByOwnerId(userId);
+      if (!business) {
+        return res.status(404).json({ error: "No business found" });
+      }
+      const product = await storage.getVendorProduct(productId);
+      if (!product || product.businessId !== business.id) {
+        return res.status(403).json({ error: "Forbidden" });
+      }
+      const bodySchema = z.object({
+        label: z.string().min(1).optional(),
+        priceCents: z.number().int().positive().optional(),
+        compareAtPriceCents: z.number().int().optional().nullable(),
+        inventory: z.number().int().optional().nullable(),
+        isActive: z.boolean().optional(),
+        sortOrder: z.number().int().optional(),
+      });
+      const body = bodySchema.parse(req.body);
+      const [updated] = await db
+        .update(productVariants)
+        .set({ ...body })
+        .where(and(
+          eq(productVariants.id, variantId),
+          eq(productVariants.productId, productId)
+        ))
+        .returning();
+      if (!updated) {
+        return res.status(404).json({ error: "Variant not found" });
+      }
+      res.json({ variant: updated });
+    } catch (error) {
+      if (error instanceof z.ZodError) {
+        return res.status(400).json({ error: "Invalid data", details: error.errors });
+      }
+      console.error("Update variant error:", error);
+      res.status(500).json({ error: "Failed to update variant" });
+    }
+  });
+
+  // Vendor soft-deletes a variant
+  app.delete("/api/business/products/:productId/variants/:variantId", async (req, res) => {
+    const userId = getUserIdFromRequest(req);
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+    try {
+      const { productId, variantId } = req.params;
+      const business = await storage.getBusinessByOwnerId(userId);
+      if (!business) {
+        return res.status(404).json({ error: "No business found" });
+      }
+      const product = await storage.getVendorProduct(productId);
+      if (!product || product.businessId !== business.id) {
+        return res.status(403).json({ error: "Forbidden" });
+      }
+      await db
+        .update(productVariants)
+        .set({ isActive: false })
+        .where(and(
+          eq(productVariants.id, variantId),
+          eq(productVariants.productId, productId)
+        ));
+      res.json({ success: true });
+    } catch (error) {
+      console.error("Delete variant error:", error);
+      res.status(500).json({ error: "Failed to delete variant" });
+    }
+  });
+
   // Get vendor's services
   app.get("/api/vendor/services", async (req, res) => {
     const userId = getUserIdFromRequest(req);
@@ -14000,6 +14177,7 @@ export async function registerRoutes(
         quantity: z.number().int().positive().default(1),
         businessId: z.string().optional(),
         businessName: z.string().optional(),
+        variantId: z.string().optional().nullable(),
       });
       const data = schema.parse(req.body);
 
@@ -14011,11 +14189,49 @@ export async function registerRoutes(
         }
       }
 
+      // Resolve price server-side; enforce variant selection when required
+      let resolvedPriceCents = data.priceInCents;
+      let resolvedVariantLabel: string | null = null;
+
+      if (data.variantId) {
+        // Variant supplied — validate it and take price from DB (never trust client)
+        const [variant] = await db
+          .select()
+          .from(productVariants)
+          .where(and(
+            eq(productVariants.id, data.variantId),
+            eq(productVariants.productId, data.productId),
+            eq(productVariants.isActive, true)
+          ))
+          .limit(1);
+
+        if (!variant) {
+          return res.status(400).json({ success: false, error: { code: 'INVALID_VARIANT', message: 'Invalid or inactive variant' } });
+        }
+
+        resolvedPriceCents = variant.priceCents;
+        resolvedVariantLabel = variant.label;
+      } else {
+        // No variantId — check if this product requires one
+        const [requiresVariant] = await db
+          .select({ id: productVariants.id })
+          .from(productVariants)
+          .where(and(
+            eq(productVariants.productId, data.productId),
+            eq(productVariants.isActive, true)
+          ))
+          .limit(1);
+
+        if (requiresVariant) {
+          return res.status(400).json({ success: false, error: { code: 'VARIANT_REQUIRED', message: 'This product requires a variant selection' } });
+        }
+      }
+
       // Check stock before adding to cart
       const product = await storage.getVendorProduct(data.productId);
       if (product?.trackInventory) {
         const currentCart = await storage.getCartItems(userId);
-        const existingQty = currentCart.find(i => i.productId === data.productId)?.quantity || 0;
+        const existingQty = currentCart.find(i => i.productId === data.productId && i.variantId === (data.variantId ?? null))?.quantity || 0;
         const totalRequested = existingQty + data.quantity;
         const available = product.inventory ?? 0;
         if (available <= 0) {
@@ -14028,12 +14244,20 @@ export async function registerRoutes(
 
       const item = await storage.addCartItem({
         userId,
-        ...data,
+        productId: data.productId,
+        productName: data.productName,
+        productImage: data.productImage,
+        priceInCents: resolvedPriceCents,
+        quantity: data.quantity,
+        businessId: data.businessId,
+        businessName: data.businessName,
+        variantId: data.variantId ?? null,
+        variantLabel: resolvedVariantLabel,
       });
 
       const items = await storage.getCartItems(userId);
-      res.json({ 
-        success: true, 
+      res.json({
+        success: true,
         item,
         itemCount: items.reduce((sum, i) => sum + i.quantity, 0)
       });

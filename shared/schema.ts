@@ -439,6 +439,27 @@ export const vendorProducts = pgTable("vendor_products", {
 });
 
 /* =====================================================
+   PRODUCT VARIANTS
+===================================================== */
+export const productVariants = pgTable("product_variants", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  productId: varchar("product_id").notNull()
+    .references(() => vendorProducts.id, { onDelete: "cascade" }),
+  label: text("label").notNull(),
+  priceCents: integer("price_cents").notNull(),
+  compareAtPriceCents: integer("compare_at_price_cents"),
+  inventory: integer("inventory"),
+  trackInventory: boolean("track_inventory").default(true),
+  sku: text("sku"),
+  sortOrder: integer("sort_order").notNull().default(0),
+  isActive: boolean("is_active").default(true),
+  createdAt: timestamp("created_at").default(sql`now()`),
+});
+
+export type ProductVariant = typeof productVariants.$inferSelect;
+export type InsertProductVariant = typeof productVariants.$inferInsert;
+
+/* =====================================================
    VENDOR SERVICES
 ===================================================== */
 export const vendorServices = pgTable("vendor_services", {
@@ -1086,7 +1107,14 @@ export const orders = pgTable("orders", {
 
   orderGroupId: varchar("order_group_id", { length: 36 }).references(() => orderGroups.id),
 
-  items: jsonb("items").$type<{ productId: string; name: string; quantity: number; price: number }[]>().notNull(),
+  items: jsonb("items").$type<{
+    productId: string;
+    name: string;
+    quantity: number;
+    price: number;
+    variantId?: string | null;
+    variantLabel?: string | null;
+  }[]>().notNull(),
   totalAmount: integer("total_amount").notNull(), // subtotal (product prices × qty)
   platformFee: integer("platform_fee").default(0), // 8% product fee (Outsyde revenue)
   vendorNet: integer("vendor_net").default(0), // subtotal - platformFee - influencerCommission
@@ -1392,6 +1420,11 @@ export const cartItems = pgTable("cart_items", {
 
   businessId: varchar("business_id", { length: 36 }).references(() => businesses.id),
   businessName: text("business_name"),
+
+  variantId: varchar("variant_id")
+    .references(() => productVariants.id, { onDelete: "set null" }),
+  variantLabel: text("variant_label"),
+  selectedAddons: jsonb("selected_addons").$type<unknown[]>().default([]),
 
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
@@ -2428,6 +2461,24 @@ export type UpdateBusinessProfile = z.infer<typeof updateBusinessProfileSchema>;
 
 export type InsertVendorProduct = z.infer<typeof insertVendorProductSchema>;
 export type VendorProduct = typeof vendorProducts.$inferSelect;
+
+export interface ProductVariantPublic {
+  id: string;
+  productId: string;
+  label: string;
+  priceCents: number;
+  compareAtPriceCents?: number | null;
+  inventory?: number | null;
+  trackInventory: boolean;
+  sku?: string | null;
+  sortOrder: number;
+  isActive: boolean;
+  createdAt: string;
+}
+
+export type VendorProductWithVariants = VendorProduct & {
+  variants: ProductVariantPublic[];
+};
 
 export type InsertVendorService = z.infer<typeof insertVendorServiceSchema>;
 export type VendorService = typeof vendorServices.$inferSelect;

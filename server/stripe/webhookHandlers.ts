@@ -1,7 +1,7 @@
 import { getUncachableStripeClient } from "./stripeClient";
 import { storage } from "../storage";
 import { db } from "../db";
-import { fulfillmentTasks, subscriptionTiers, appointments, shootBookings, bookingAuditLog, BOOKING_STATES } from "@shared/schema";
+import { fulfillmentTasks, subscriptionTiers, appointments, shootBookings, bookingAuditLog, BOOKING_STATES, productVariants, vendorProducts } from "@shared/schema";
 import { sql, eq, and, inArray } from "drizzle-orm";
 import { NotificationTriggers } from "../notificationService";
 import { sendStaffOnboardingCompleteOwnerEmail } from "../services/resendService";
@@ -27,6 +27,44 @@ import { calculateBookingFees } from "../fees";
 
 function isOnReplit(): boolean {
   return !!(process.env.REPL_IDENTITY || process.env.WEB_REPL_RENEWAL || process.env.REPL_ID);
+}
+
+async function decrementInventory(
+  item: { productId?: string | null; variantId?: string | null; quantity: number },
+): Promise<void> {
+  if (!item.productId) return;
+
+  if (item.variantId) {
+    const [variant] = await db
+      .select({ inventory: productVariants.inventory, trackInventory: productVariants.trackInventory })
+      .from(productVariants)
+      .where(eq(productVariants.id, item.variantId))
+      .limit(1);
+
+    if (variant?.trackInventory && variant.inventory !== null) {
+      await db
+        .update(productVariants)
+        .set({ inventory: sql`GREATEST(0, ${productVariants.inventory} - ${item.quantity})` })
+        .where(eq(productVariants.id, item.variantId));
+      console.log(`[Inventory] Decremented variant ${item.variantId} by ${item.quantity}`);
+      return;
+    }
+  }
+
+  // No variant, or variant.inventory IS NULL → decrement product level
+  const [product] = await db
+    .select({ trackInventory: vendorProducts.trackInventory, inventory: vendorProducts.inventory })
+    .from(vendorProducts)
+    .where(eq(vendorProducts.id, item.productId))
+    .limit(1);
+
+  if (product?.trackInventory && product.inventory !== null) {
+    await db
+      .update(vendorProducts)
+      .set({ inventory: sql`GREATEST(0, ${vendorProducts.inventory} - ${item.quantity})` })
+      .where(eq(vendorProducts.id, item.productId));
+    console.log(`[Inventory] Decremented product ${item.productId} by ${item.quantity}`);
+  }
 }
 
 export class WebhookHandlers {
@@ -899,12 +937,7 @@ export class WebhookHandlers {
         if (order.items && Array.isArray(order.items)) {
           for (const item of order.items) {
             try {
-              const product = await storage.getVendorProduct(item.productId);
-              if (product?.trackInventory && product.inventory !== null) {
-                const newInventory = Math.max(0, (product.inventory ?? 0) - item.quantity);
-                await storage.updateVendorProduct(item.productId, { inventory: newInventory });
-                console.log(`[Inventory] Decremented ${item.productId}: ${product.inventory} → ${newInventory} (ordered: ${item.quantity})`);
-              }
+              await decrementInventory(item);
             } catch (invError) {
               console.error(`[Inventory] Failed to decrement ${item.productId}:`, invError);
             }
@@ -1032,12 +1065,7 @@ export class WebhookHandlers {
           if (order.items && Array.isArray(order.items)) {
             for (const item of order.items) {
               try {
-                const product = await storage.getVendorProduct(item.productId);
-                if (product?.trackInventory && product.inventory !== null) {
-                  const newInventory = Math.max(0, (product.inventory ?? 0) - item.quantity);
-                  await storage.updateVendorProduct(item.productId, { inventory: newInventory });
-                  console.log(`[Inventory] Decremented ${item.productId}: ${product.inventory} → ${newInventory} (ordered: ${item.quantity})`);
-                }
+                await decrementInventory(item);
               } catch (invError) {
                 console.error(`[Inventory] Failed to decrement ${item.productId}:`, invError);
               }
@@ -1394,6 +1422,17 @@ export class WebhookHandlers {
     const metadata = paymentIntent.metadata || {};
     const { type, bookingId } = metadata;
 
+    // Handle product order cancellation
+    if (metadata.orderId && !metadata.bookingId) {
+      try {
+        await storage.updateOrder(metadata.orderId, { status: 'cancelled' });
+        console.log(`[Stripe] Order ${metadata.orderId} marked cancelled`);
+      } catch (err) {
+        console.error('[Stripe] Failed to cancel order:', metadata.orderId, err);
+      }
+      return;
+    }
+
     if (!type || !bookingId) {
       return;
     }
@@ -1452,6 +1491,17 @@ export class WebhookHandlers {
   static async handlePaymentIntentFailed(paymentIntent: any) {
     const metadata = paymentIntent.metadata || {};
     const { type, bookingId } = metadata;
+
+    // Handle product order payment failure
+    if (metadata.orderId && !metadata.bookingId) {
+      try {
+        await storage.updateOrder(metadata.orderId, { status: 'cancelled' });
+        console.log(`[Stripe] Order ${metadata.orderId} marked cancelled (payment failed)`);
+      } catch (err) {
+        console.error('[Stripe] Failed to cancel order:', metadata.orderId, err);
+      }
+      return;
+    }
 
     if (!type || !bookingId) {
       return;
@@ -1691,12 +1741,7 @@ export class WebhookHandlers {
     if (order.items && Array.isArray(order.items)) {
       for (const item of order.items) {
         try {
-          const product = await storage.getVendorProduct(item.productId);
-          if (product?.trackInventory && product.inventory !== null) {
-            const newInventory = Math.max(0, (product.inventory ?? 0) - item.quantity);
-            await storage.updateVendorProduct(item.productId, { inventory: newInventory });
-            console.log(`[Inventory] Decremented ${item.productId}: ${product.inventory} → ${newInventory} (ordered: ${item.quantity})`);
-          }
+          await decrementInventory(item);
         } catch (invError) {
           console.error(`[Inventory] Failed to decrement ${item.productId}:`, invError);
         }
@@ -1832,12 +1877,7 @@ export class WebhookHandlers {
       if (order.items && Array.isArray(order.items)) {
         for (const item of order.items) {
           try {
-            const product = await storage.getVendorProduct(item.productId);
-            if (product?.trackInventory && product.inventory !== null) {
-              const newInventory = Math.max(0, (product.inventory ?? 0) - item.quantity);
-              await storage.updateVendorProduct(item.productId, { inventory: newInventory });
-              console.log(`[Inventory] Decremented ${item.productId}: ${product.inventory} → ${newInventory} (ordered: ${item.quantity})`);
-            }
+            await decrementInventory(item);
           } catch (invError) {
             console.error(`[Inventory] Failed to decrement ${item.productId}:`, invError);
           }
