@@ -2570,7 +2570,14 @@ export async function registerRoutes(
       sessionState.influencerStatus = influencerAppRows[0]?.status ?? null;
       sessionState.isInfluencer = user.isInfluencer === true || influencerAppRows[0]?.status === 'approved';
 
-      console.log('[AUTH_ME] returning isInfluencer:', sessionState.isInfluencer, 'influencerStatus:', sessionState.influencerStatus, 'for userId:', user.id);
+      console.log(
+        '[AUTH_ME] userId:', user.id,
+        'isAdmin:', sessionState.isAdmin,
+        'isVendor:', sessionState.isVendor,
+        'isInfluencer:', sessionState.isInfluencer,
+        'influencerStatus:', sessionState.influencerStatus,
+        'businessId:', sessionState.businessId
+      );
       res.json({
         user: {
           id: sessionState.userId,
@@ -2578,6 +2585,8 @@ export async function registerRoutes(
           firstName: sessionState.displayName,
           lastName: '',
           role: sessionState.isAdmin ? 'admin' : sessionState.isVendor ? 'vendor' : sessionState.isPhotographer ? 'photographer' : 'consumer',
+          isAdmin: sessionState.isAdmin || false,
+          isVendor: sessionState.isVendor || false,
           businessId: sessionState.businessId,
           photographerId: sessionState.photographerId,
           loyaltyPoints: sessionState.loyaltyPoints ?? 0,
@@ -14933,10 +14942,11 @@ export async function registerRoutes(
   app.post("/api/admin/applications/:id/reject", requireAdmin, async (req, res) => {
     try {
       const { id } = req.params;
-      const { notes } = req.body;
+      const { notes, reason } = req.body;
       const adminUser = (req as any).adminUser;
 
-      if (!notes) {
+      const rejectionReason = notes || reason;
+      if (!rejectionReason) {
         return res.status(400).json({ error: "Rejection reason is required" });
       }
 
@@ -14949,12 +14959,21 @@ export async function registerRoutes(
         return res.status(400).json({ error: "Business is already rejected" });
       }
 
+      // approvedAt is intentionally omitted — this is a rejection, not an approval.
+      // The rejection timestamp is captured in audit_logs.created_at.
       const updated = await storage.updateBusiness(id, {
         approvalStatus: "rejected",
-        approvalNotes: notes,
-        approvedAt: new Date(),
+        approvalNotes: rejectionReason,
         approvedBy: adminUser.id,
       });
+
+      // Revoke monetization — guards the case where a previously-approved
+      // business is subsequently rejected.
+      const ownerId = (business as any).ownerId;
+      if (ownerId) {
+        await storage.updateUser(ownerId, { canMonetize: false });
+        console.log(`[Admin] Disabled canMonetize for user ${ownerId} (business ${id} rejected)`);
+      }
 
       // Create audit log
       await storage.createAuditLog({
@@ -14964,7 +14983,7 @@ export async function registerRoutes(
         targetType: "business",
         targetId: id,
         beforeState: { approvalStatus: (business as any).approvalStatus },
-        afterState: { approvalStatus: "rejected", reason: notes },
+        afterState: { approvalStatus: "rejected", reason: rejectionReason },
       });
 
       // Send rejection notification to business owner
@@ -14976,11 +14995,11 @@ export async function registerRoutes(
           ownerEmail: owner.email || '',
           businessId: business.id,
           businessName: business.name,
-          rejectionReason: notes,
+          rejectionReason: rejectionReason,
         });
       }
       
-      console.log(`[Admin] Rejected vendor: ${business.name} by ${adminUser.email} - Reason: ${notes}`);
+      console.log(`[Admin] Rejected vendor: ${business.name} by ${adminUser.email} - Reason: ${rejectionReason}`);
 
       res.json({ success: true, business: updated });
     } catch (error) {
@@ -17595,27 +17614,24 @@ export async function registerRoutes(
       if (!business) {
         return res.status(404).json({ error: "Business not found" });
       }
-
       if ((business as any).approvalStatus === "approved") {
         return res.status(400).json({ error: "Business is already approved" });
       }
 
-      const updated = await storage.updateBusiness(id, {
-        approvalStatus: "approved",
-        approvalNotes: notes || null,
-        approvedAt: new Date(),
-        approvedBy: adminUser.id,
-        // subscriptionActive NOT set here — only set when real Stripe subscription activates
-      });
+      // Operations are ordered so the most visible write (updateBusiness) is LAST.
+      // If an earlier step fails, the business remains pending and the admin can retry.
+      // If updateBusiness fails after canMonetize is set, canMonetize reverts on the
+      // next rejection or can be corrected via the admin user edit endpoint.
+      // Note: neon-http does not support db.transaction(), so we use careful ordering.
 
-      // Enable monetization on the business owner's user record
+      // 1. Enable monetization on the owner's user record first
       const ownerId = (business as any).ownerId;
       if (ownerId) {
         await storage.updateUser(ownerId, { canMonetize: true });
         console.log(`[Admin] Enabled canMonetize for user ${ownerId} (business ${id} approved)`);
       }
 
-      // Create audit log
+      // 2. Write audit log before marking business approved
       await storage.createAuditLog({
         actorId: adminUser.id,
         actorType: "admin",
@@ -17626,7 +17642,17 @@ export async function registerRoutes(
         afterState: { approvalStatus: "approved" },
       });
 
-      // Send approval notification to business owner
+      // 3. Mark the business approved — most critical write, runs last
+      // subscriptionActive NOT set here — only set when real Stripe subscription activates
+      const updated = await storage.updateBusiness(id, {
+        approvalStatus: "approved",
+        approvalNotes: notes || null,
+        approvedAt: new Date(),
+        approvedBy: adminUser.id,
+      });
+
+      // 4. Send notifications after all DB writes succeed — external services
+      //    should not affect the approval outcome.
       const owner = await storage.getUser((business as any).ownerId);
       if (owner) {
         await NotificationTriggers.vendorApplicationApproved({
@@ -17640,7 +17666,6 @@ export async function registerRoutes(
       }
 
       console.log(`[Admin] Approved business: ${business.name} by ${adminUser.email}`);
-
       res.json({ success: true, business: updated });
     } catch (error) {
       console.error("Approve business error:", error);
@@ -17669,12 +17694,21 @@ export async function registerRoutes(
         return res.status(400).json({ error: "Business is already rejected" });
       }
 
+      // approvedAt is intentionally omitted — this is a rejection, not an approval.
+      // The rejection timestamp is captured in audit_logs.created_at.
       const updated = await storage.updateBusiness(id, {
         approvalStatus: "rejected",
         approvalNotes: rejectionReason,
-        approvedAt: new Date(),
         approvedBy: adminUser.id,
       });
+
+      // Revoke monetization — guards the case where a previously-approved
+      // business is subsequently rejected.
+      const ownerId = (business as any).ownerId;
+      if (ownerId) {
+        await storage.updateUser(ownerId, { canMonetize: false });
+        console.log(`[Admin] Disabled canMonetize for user ${ownerId} (business ${id} rejected)`);
+      }
 
       // Create audit log
       await storage.createAuditLog({
@@ -17684,7 +17718,7 @@ export async function registerRoutes(
         targetType: "business",
         targetId: id,
         beforeState: { approvalStatus: (business as any).approvalStatus },
-        afterState: { approvalStatus: "rejected" },
+        afterState: { approvalStatus: "rejected", reason: rejectionReason },
       });
 
       // Send rejection notification to business owner
