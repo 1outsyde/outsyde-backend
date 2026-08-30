@@ -37,6 +37,7 @@ interface NotificationData {
   referenceType?: string;
   referenceId?: string;
   metadata?: Record<string, any>;
+  triggeredByUserId?: string;
 }
 
 async function sendNotification(data: NotificationData): Promise<void> {
@@ -48,6 +49,7 @@ async function sendNotification(data: NotificationData): Promise<void> {
     referenceType: data.referenceType,
     referenceId: data.referenceId,
     metadata: data.metadata,
+    triggeredByUserId: data.triggeredByUserId,
   };
 
   await storage.createNotification(notificationData);
@@ -691,6 +693,7 @@ export const NotificationTriggers = {
       message: `${params.followerName} started following you.`,
       referenceType: 'user',
       referenceId: params.followerUserId,
+      triggeredByUserId: params.followerUserId,
       metadata: {
         followerUserId: params.followerUserId,
         followerName: params.followerName,
