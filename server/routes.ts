@@ -11110,13 +11110,25 @@ export async function registerRoutes(
 
   // Go Live - Publish vendor product to Stripe
   app.post("/api/vendor/products/:id/go-live", async (req, res) => {
-    const userId = req.session?.userId;
+    const userId = getUserIdFromRequest(req);
     if (!userId) {
       return res.status(401).json({ error: "Not authenticated" });
     }
 
     try {
-      const business = await storage.getBusinessByOwnerId(userId);
+      // Admin bypass: platform admin passes x-business-id header to publish on behalf of a vendor.
+      const headerBizId = req.headers['x-business-id'] as string | undefined;
+      const authHeader = req.headers.authorization;
+      const isAdmin = authHeader?.startsWith('Bearer ')
+        ? (verifyAccessToken(authHeader.substring(7))?.isAdmin === true)
+        : false;
+
+      let business;
+      if (isAdmin && headerBizId) {
+        business = await storage.getBusiness(headerBizId);
+      } else {
+        business = await storage.getBusinessByOwnerId(userId);
+      }
       if (!business) {
         return res.status(404).json({ error: "No business found" });
       }
