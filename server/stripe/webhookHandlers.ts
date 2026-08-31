@@ -2309,23 +2309,31 @@ export class WebhookHandlers {
       }
     }
     
-    // Update business onboarding status
+    // Update business onboarding status (with event-ordering guard)
     if (business && business.stripeAccountId === accountId) {
-      await storage.updateBusiness(business.id, {
-        stripeOnboardingComplete: isOnboardingComplete,
-      });
-      
-      if (isOnboardingComplete) {
-        console.log(`[Stripe] Business ${business.id} (${business.name}) completed Stripe onboarding`);
-        
-        // Get vendor user and send notification
-        const vendorUser = await storage.getUserByBusinessOwnerId(business.id);
-        if (vendorUser) {
-          await NotificationTriggers.stripeOnboardingComplete({
-            userId: vendorUser.id,
-            accountType: 'business',
-            businessName: business.name,
-          });
+      const incomingEventTime = new Date(eventCreatedAt * 1000);
+      const lastAppliedTime = business.stripeOnboardingLastEventAt;
+      if (lastAppliedTime && incomingEventTime <= new Date(lastAppliedTime)) {
+        console.log(`[Stripe] Ignoring stale/out-of-order account.updated for business ${business.id} — event time ${incomingEventTime.toISOString()} <= last applied ${new Date(lastAppliedTime).toISOString()}`);
+      } else {
+        const wasAlreadyComplete = business.stripeOnboardingComplete === true;
+        await storage.updateBusiness(business.id, {
+          stripeOnboardingComplete: isOnboardingComplete,
+          stripeOnboardingLastEventAt: incomingEventTime,
+        });
+
+        if (isOnboardingComplete && !wasAlreadyComplete) {
+          console.log(`[Stripe] Business ${business.id} (${business.name}) completed Stripe onboarding`);
+
+          // Get vendor user and send notification
+          const vendorUser = await storage.getUserByBusinessOwnerId(business.id);
+          if (vendorUser) {
+            await NotificationTriggers.stripeOnboardingComplete({
+              userId: vendorUser.id,
+              accountType: 'business',
+              businessName: business.name,
+            });
+          }
         }
       }
     }
