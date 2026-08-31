@@ -559,6 +559,7 @@ function emailFooter(extra?: string): string {
       ${extra ? `<p style="color:#AAAAAA;font-size:13px;margin:0 0 10px 0;">${extra}</p>` : ''}
       <p style="color:#555555;font-size:12px;margin:0 0 4px 0;">For questions contact us at <a href="mailto:info@goutsyde.com" style="color:#E8B930;text-decoration:none;">info@goutsyde.com</a></p>
       <p style="color:#444444;font-size:11px;margin:0;">info@goutsyde.com &nbsp;·&nbsp; Culture meets commerce &nbsp;·&nbsp; Go Outsyde</p>
+      <p style="color:#333333;font-size:11px;margin:8px 0 0 0;">Outsyde LLC &nbsp;·&nbsp; Long Island, NY</p>
     </td>
   </tr>`;
 }
@@ -953,6 +954,7 @@ export async function sendOrderConfirmationToConsumer(params: {
   orderNumber: number;
   items: Array<{
     productName: string;
+    variantLabel?: string;
     vendorName: string;
     vendorContactEmail?: string;
     quantity: number;
@@ -970,6 +972,7 @@ export async function sendOrderConfirmationToConsumer(params: {
       return `<tr style="background:#1E1E1E;">
         <td style="padding:12px 14px;border-bottom:1px solid #2A2A2A;">
           <div style="color:#FFFFFF;font-size:14px;font-weight:600;">${item.productName}</div>
+          ${item.variantLabel ? `<div style="color:#E8B930;font-size:12px;margin-top:2px;">${item.variantLabel}</div>` : ''}
           <div style="color:#888888;font-size:12px;margin-top:2px;">by ${item.vendorName} &nbsp;·&nbsp; Qty: ${item.quantity} &nbsp;·&nbsp; ${cents(itemBase)}</div>
         </td>
       </tr>`;
@@ -1036,6 +1039,7 @@ export async function sendOrderNotificationToVendor(params: {
   orderNumber: number;
   items: Array<{
     productName: string;
+    variantLabel?: string;
     quantity: number;
     basePrice: number;
   }>;
@@ -1052,8 +1056,11 @@ export async function sendOrderNotificationToVendor(params: {
       const itemBase = item.basePrice * item.quantity;
       computedPayout += itemBase;
       const bg = i % 2 === 0 ? '#1A1A1A' : '#212121';
+      const nameCell = item.variantLabel
+        ? `${item.productName}<br/><span style="color:#888888;font-size:12px;">${item.variantLabel}</span>`
+        : item.productName;
       return `<tr style="background:${bg};">
-        <td style="padding:10px 14px;color:#FFFFFF;font-size:13px;">${item.productName}</td>
+        <td style="padding:10px 14px;color:#FFFFFF;font-size:13px;">${nameCell}</td>
         <td style="padding:10px 14px;color:#888888;font-size:13px;text-align:center;">${item.quantity}</td>
         <td style="padding:10px 14px;color:#E8B930;font-size:13px;text-align:right;">${cents(itemBase)}</td>
       </tr>`;
@@ -1682,4 +1689,84 @@ export async function sendNewBookingAlertToVendor(params: {
     subject,
     html,
   }).catch(err => console.error('[Email] Deposit vendor alert failed:', err))
+}
+
+export async function sendOrderDeliveredEmail(params: {
+  toEmail: string;
+  consumerName: string;
+  vendorName: string;
+  orderId: string;
+  orderNumber: number;
+  items: Array<{ productName: string; variantLabel?: string; quantity: number }>;
+}): Promise<void> {
+  try {
+    const orderRef = `#${String(params.orderNumber).padStart(4, '0')}`;
+    const itemRows = params.items.map((item, i) => {
+      const nameCell = item.variantLabel
+        ? `${item.productName}<br/><span style="color:#888888;font-size:12px;">${item.variantLabel}</span>`
+        : item.productName;
+      return detailRow(nameCell, `Qty: ${item.quantity}`, i % 2 === 0);
+    }).join('');
+    const html = wrapEmail(`
+      ${emailHeader('Order Delivered! ✅', `Your order from ${params.vendorName} has arrived.`)}
+      <tr><td style="background:#1A1A1A;padding:0 32px;">
+        <p style="color:#888888;font-size:12px;margin:0 0 8px 0;">Order ${orderRef}</p>
+        <table width="100%" cellpadding="0" cellspacing="0" style="border-radius:6px;overflow:hidden;">
+          ${itemRows}
+        </table>
+      </td></tr>
+      <tr><td style="background:#1A1A1A;padding:16px 32px;">
+        <p style="color:#888888;font-size:13px;margin:0;">
+          Enjoying your purchase? Leave a review for ${params.vendorName} and earn Outsyde points.
+        </p>
+      </td></tr>
+      ${emailCta('View My Orders', 'https://goutsyde.com/account/orders')}
+      ${emailFooter()}
+    `);
+    await sendBrandedEmail(params.toEmail, `Your order ${orderRef} has been delivered!`, html);
+    console.log(`[Email] Order delivered email sent to ${params.toEmail} for order ${params.orderId}`);
+  } catch (err) {
+    console.error('[Email] sendOrderDeliveredEmail failed:', err);
+  }
+}
+
+export async function sendOrderDeliveredVendorEmail(params: {
+  toEmail: string;
+  vendorName: string;
+  consumerName: string;
+  orderId: string;
+  orderNumber: number;
+  items: Array<{ productName: string; variantLabel?: string; quantity: number }>;
+}): Promise<void> {
+  try {
+    const orderRef = `#${String(params.orderNumber).padStart(4, '0')}`;
+    const itemRows = params.items.map((item, i) => {
+      const nameCell = item.variantLabel
+        ? `${item.productName}<br/><span style="color:#888888;font-size:12px;">${item.variantLabel}</span>`
+        : item.productName;
+      return detailRow(nameCell, `Qty: ${item.quantity}`, i % 2 === 0);
+    }).join('');
+    const html = wrapEmail(`
+      ${emailHeader('Order Delivered ✅', `${params.consumerName} confirmed receipt of order ${orderRef}.`)}
+      <tr><td style="background:#1A1A1A;padding:0 32px;">
+        <table width="100%" cellpadding="0" cellspacing="0" style="border-radius:6px;overflow:hidden;">
+          ${detailRow('Customer', params.consumerName, true)}
+          ${detailRow('Order', orderRef, false)}
+        </table>
+        <p style="color:#888888;font-size:12px;margin:12px 0 8px 0;">Items delivered:</p>
+        <table width="100%" cellpadding="0" cellspacing="0" style="border-radius:6px;overflow:hidden;">
+          ${itemRows}
+        </table>
+      </td></tr>
+      <tr><td style="background:#1A1A1A;padding:12px 32px 4px;">
+        <p style="color:#888888;font-size:13px;margin:0;">Your payout for this order has been processed.</p>
+      </td></tr>
+      ${emailCta('View in Dashboard', 'https://goutsyde.com/vendor/orders')}
+      ${emailFooter()}
+    `);
+    await sendBrandedEmail(params.toEmail, `Order ${orderRef} confirmed delivered`, html);
+    console.log(`[Email] Order delivered vendor email sent to ${params.toEmail} for order ${params.orderId}`);
+  } catch (err) {
+    console.error('[Email] sendOrderDeliveredVendorEmail failed:', err);
+  }
 }

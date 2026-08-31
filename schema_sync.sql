@@ -117,6 +117,7 @@ ALTER TABLE businesses ADD COLUMN IF NOT EXISTS has_services BOOLEAN DEFAULT fal
 ALTER TABLE businesses ADD COLUMN IF NOT EXISTS stripe_account_id TEXT;
 ALTER TABLE businesses ADD COLUMN IF NOT EXISTS stripe_onboarding_complete BOOLEAN DEFAULT false;
 ALTER TABLE businesses ADD COLUMN IF NOT EXISTS stripe_onboarding_url TEXT;
+ALTER TABLE businesses ADD COLUMN IF NOT EXISTS stripe_onboarding_last_event_at TIMESTAMP;
 ALTER TABLE businesses ADD COLUMN IF NOT EXISTS billing_address JSONB;
 ALTER TABLE businesses ADD COLUMN IF NOT EXISTS approval_status TEXT DEFAULT 'pending';
 ALTER TABLE businesses ADD COLUMN IF NOT EXISTS approval_notes TEXT;
