@@ -997,11 +997,22 @@ export class WebhookHandlers {
           // Transactional emails
           const piOrderItems = ((order.items as any[]) || []).map((i: any) => ({
             productName: i.name || i.title || i.productId || 'Item',
+            variantLabel: i.variantLabel ?? null,
             vendorName: orderBusiness?.name || vendor.name || 'Business',
             vendorContactEmail: orderBusiness?.contactEmail ?? undefined,
             quantity: i.quantity || 1,
             basePrice: i.price || i.unitPrice || 0,
           }));
+          // Format shippingAddress for email display
+          let shippingAddressDisplay: string | undefined;
+          try {
+            const sa = typeof order.shippingAddress === 'string'
+              ? JSON.parse(order.shippingAddress)
+              : order.shippingAddress;
+            if (sa?.line1) {
+              shippingAddressDisplay = `${sa.line1}, ${sa.city}, ${sa.state} ${sa.zipCode}`;
+            }
+          } catch { /* leave undefined */ }
           if (customer?.email) {
             sendOrderConfirmationToConsumer({
               toEmail: customer.email,
@@ -1024,6 +1035,7 @@ export class WebhookHandlers {
               orderNumber: order.orderNumber,
               items: piOrderItems.map(({ vendorName: _vn, vendorContactEmail: _vce, ...rest }) => rest),
               vendorNetCents: order.vendorNet ?? undefined,
+              shippingAddress: shippingAddressDisplay,
             }).catch(() => {});
           }
           sendInternalEventAlert({

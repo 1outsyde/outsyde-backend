@@ -502,7 +502,8 @@ function buildEmailShell(
             </tr>
             <tr>
               <td style="padding:20px 0;text-align:center;color:#888888;font-size:12px;">
-                This is an automated message from Outsyde. Please do not reply to this email.
+                <p style="margin:0 0 4px 0;">This is an automated message from Outsyde. Please do not reply to this email.</p>
+                <p style="margin:0;font-size:11px;color:#555555;">Outsyde LLC &nbsp;·&nbsp; [OUTSYDE LLC ADDRESS] &nbsp;·&nbsp; Long Island, NY</p>
               </td>
             </tr>
           </table>
@@ -559,6 +560,7 @@ function emailFooter(extra?: string): string {
       ${extra ? `<p style="color:#AAAAAA;font-size:13px;margin:0 0 10px 0;">${extra}</p>` : ''}
       <p style="color:#555555;font-size:12px;margin:0 0 4px 0;">For questions contact us at <a href="mailto:info@goutsyde.com" style="color:#E8B930;text-decoration:none;">info@goutsyde.com</a></p>
       <p style="color:#444444;font-size:11px;margin:0;">info@goutsyde.com &nbsp;·&nbsp; Culture meets commerce &nbsp;·&nbsp; Go Outsyde</p>
+      <p style="color:#333333;font-size:10px;margin:8px 0 0 0;">Outsyde LLC &nbsp;·&nbsp; [OUTSYDE LLC ADDRESS] &nbsp;·&nbsp; Long Island, NY</p>
     </td>
   </tr>`;
 }
@@ -953,6 +955,7 @@ export async function sendOrderConfirmationToConsumer(params: {
   orderNumber: number;
   items: Array<{
     productName: string;
+    variantLabel?: string | null;
     vendorName: string;
     vendorContactEmail?: string;
     quantity: number;
@@ -970,6 +973,7 @@ export async function sendOrderConfirmationToConsumer(params: {
       return `<tr style="background:#1E1E1E;">
         <td style="padding:12px 14px;border-bottom:1px solid #2A2A2A;">
           <div style="color:#FFFFFF;font-size:14px;font-weight:600;">${item.productName}</div>
+          ${item.variantLabel ? `<div style="color:#E8B930;font-size:12px;margin-top:2px;">${item.variantLabel}</div>` : ''}
           <div style="color:#888888;font-size:12px;margin-top:2px;">by ${item.vendorName} &nbsp;·&nbsp; Qty: ${item.quantity} &nbsp;·&nbsp; ${cents(itemBase)}</div>
         </td>
       </tr>`;
@@ -1036,11 +1040,13 @@ export async function sendOrderNotificationToVendor(params: {
   orderNumber: number;
   items: Array<{
     productName: string;
+    variantLabel?: string | null;
     quantity: number;
     basePrice: number;
   }>;
   // Pre-computed payout from the DB orders.vendorNet column — preferred over recomputing.
   vendorNetCents?: number;
+  shippingAddress?: string | null;
 }): Promise<void> {
   try {
     const orderRef = `#${String(params.orderNumber).padStart(4, '0')}`;
@@ -1053,7 +1059,10 @@ export async function sendOrderNotificationToVendor(params: {
       computedPayout += itemBase;
       const bg = i % 2 === 0 ? '#1A1A1A' : '#212121';
       return `<tr style="background:${bg};">
-        <td style="padding:10px 14px;color:#FFFFFF;font-size:13px;">${item.productName}</td>
+        <td style="padding:10px 14px;color:#FFFFFF;font-size:13px;">
+          ${item.productName}
+          ${item.variantLabel ? `<br/><span style="color:#E8B930;font-size:11px;">${item.variantLabel}</span>` : ''}
+        </td>
         <td style="padding:10px 14px;color:#888888;font-size:13px;text-align:center;">${item.quantity}</td>
         <td style="padding:10px 14px;color:#E8B930;font-size:13px;text-align:right;">${cents(itemBase)}</td>
       </tr>`;
@@ -1086,6 +1095,10 @@ export async function sendOrderNotificationToVendor(params: {
         </table>
         <p style="color:#555555;font-size:12px;margin:8px 0 0 0;">Outsyde platform fee deducted from payout</p>
       </td></tr>
+      ${params.shippingAddress ? `<tr><td style="background:#1A1A1A;padding:0 32px 16px;">
+        <p style="color:#888888;font-size:12px;font-weight:600;margin:0 0 4px 0;text-transform:uppercase;letter-spacing:1px;">Ship To</p>
+        <p style="color:#CCCCCC;font-size:13px;margin:0;">${params.shippingAddress}</p>
+      </td></tr>` : ''}
       ${emailCta('View in Dashboard', 'https://goutsyde.com/vendor/orders')}
       ${emailFooter()}
     `);
@@ -1229,6 +1242,96 @@ export async function sendOrderShippedEmail(params: {
     console.log(`[Email] Order shipped email sent to ${params.toEmail} for order ${params.orderId}`);
   } catch (err) {
     console.error('[Email] sendOrderShippedEmail failed:', err);
+  }
+}
+
+export async function sendOrderDeliveredEmail(params: {
+  toEmail: string;
+  consumerName: string;
+  vendorName: string;
+  orderId: string;
+  orderNumber: number;
+  items: Array<{ productName: string; variantLabel?: string | null; quantity: number; basePrice: number }>;
+}): Promise<void> {
+  try {
+    const orderRef = `#${String(params.orderNumber).padStart(4, '0')}`;
+    const itemRows = params.items.map((item, i) => {
+      const bg = i % 2 === 0 ? '#1A1A1A' : '#212121';
+      return `<tr style="background:${bg};">
+        <td style="padding:10px 14px;color:#FFFFFF;font-size:13px;border-bottom:1px solid #2A2A2A;">
+          ${item.productName}
+          ${item.variantLabel ? `<br/><span style="color:#E8B930;font-size:11px;">${item.variantLabel}</span>` : ''}
+        </td>
+        <td style="padding:10px 14px;color:#888888;font-size:13px;text-align:right;border-bottom:1px solid #2A2A2A;">${cents(item.basePrice * item.quantity)}</td>
+      </tr>`;
+    }).join('');
+    const html = wrapEmail(`
+      ${emailHeader('Your Order Has Been Delivered! ✅', `Order ${orderRef} from ${params.vendorName}`)}
+      <tr><td style="background:#1A1A1A;padding:16px 32px;">
+        <p style="color:#F5F0E8;font-size:15px;margin:0 0 16px 0;">Hi ${params.consumerName},</p>
+        <p style="color:#CCCCCC;font-size:14px;margin:0 0 20px 0;">Your order has been delivered. We hope you love it!</p>
+        <table width="100%" cellpadding="0" cellspacing="0" style="border-radius:6px;overflow:hidden;border:1px solid #2A2A2A;">
+          ${itemRows}
+        </table>
+      </td></tr>
+      ${emailCta('Leave a Review', 'https://goutsyde.com/account/orders')}
+      ${emailFooter()}
+    `);
+    await sendBrandedEmail(params.toEmail, `✅ Delivered — Order ${orderRef} from ${params.vendorName}`, html);
+    console.log(`[Email] Order delivered email sent to ${params.toEmail} for order ${params.orderId}`);
+  } catch (err) {
+    console.error('[Email] sendOrderDeliveredEmail failed:', err);
+  }
+}
+
+export async function sendOrderDeliveredVendorEmail(params: {
+  toEmail: string;
+  vendorName: string;
+  consumerName: string;
+  orderId: string;
+  orderNumber: number;
+  items: Array<{ productName: string; variantLabel?: string | null; quantity: number; basePrice: number }>;
+  vendorNetCents?: number;
+}): Promise<void> {
+  try {
+    const orderRef = `#${String(params.orderNumber).padStart(4, '0')}`;
+    let computedNet = 0;
+    const itemRows = params.items.map((item, i) => {
+      const itemBase = item.basePrice * item.quantity;
+      computedNet += itemBase;
+      const bg = i % 2 === 0 ? '#1A1A1A' : '#212121';
+      return `<tr style="background:${bg};">
+        <td style="padding:10px 14px;color:#FFFFFF;font-size:13px;">
+          ${item.productName}
+          ${item.variantLabel ? `<br/><span style="color:#E8B930;font-size:11px;">${item.variantLabel}</span>` : ''}
+        </td>
+        <td style="padding:10px 14px;color:#888888;font-size:13px;text-align:right;">${cents(itemBase)}</td>
+      </tr>`;
+    }).join('');
+    const payout = typeof params.vendorNetCents === 'number' ? params.vendorNetCents : computedNet * 0.98;
+    const html = wrapEmail(`
+      ${emailHeader('Order Delivered ✅', `Order ${orderRef} — ${params.consumerName} confirmed receipt`)}
+      <tr><td style="background:#1A1A1A;padding:16px 32px;">
+        <table width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:16px;">
+          ${detailRow('Customer', params.consumerName, true)}
+          ${detailRow('Order', orderRef, false)}
+        </table>
+        <table width="100%" cellpadding="0" cellspacing="0" style="border-radius:6px;overflow:hidden;border:1px solid #2A2A2A;">
+          ${itemRows}
+          <tr style="background:#1E2E2A;">
+            <td style="padding:10px 14px;color:#E8B930;font-size:14px;font-weight:700;">Your Payout</td>
+            <td style="padding:10px 14px;color:#E8B930;font-size:14px;font-weight:700;text-align:right;">${cents(payout)}</td>
+          </tr>
+        </table>
+        <p style="color:#555555;font-size:12px;margin:8px 0 0 0;">Payouts are processed through Stripe Connect on your normal schedule.</p>
+      </td></tr>
+      ${emailCta('View Dashboard', 'https://goutsyde.com/vendor/orders')}
+      ${emailFooter()}
+    `);
+    await sendBrandedEmail(params.toEmail, `✅ Order ${orderRef} delivered — payout processing`, html);
+    console.log(`[Email] Order delivered vendor email sent to ${params.toEmail} for order ${params.orderId}`);
+  } catch (err) {
+    console.error('[Email] sendOrderDeliveredVendorEmail failed:', err);
   }
 }
 

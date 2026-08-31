@@ -19460,6 +19460,47 @@ export async function registerRoutes(
         metadata: { shipmentId: shipments[0]?.id ?? null },
       }).catch(err => console.error('Audit log error (confirm_delivery):', err));
 
+      // Fire-and-forget delivered emails to consumer and vendor
+      ;(async () => {
+        try {
+          const { sendOrderDeliveredEmail, sendOrderDeliveredVendorEmail } = await import('./emailService');
+          const [consumer, business] = await Promise.all([
+            storage.getUser(order.customerId),
+            order.businessId ? storage.getBusiness(order.businessId) : Promise.resolve(null),
+          ]);
+          const emailItems = ((order.items as any[]) || []).map((i: any) => ({
+            productName: i.name || i.title || i.productId || 'Item',
+            variantLabel: i.variantLabel ?? null,
+            quantity: i.quantity || 1,
+            basePrice: i.price || i.unitPrice || 0,
+          }));
+          if (consumer?.email) {
+            await sendOrderDeliveredEmail({
+              toEmail: consumer.email,
+              consumerName: consumer.name || consumer.firstName || 'there',
+              vendorName: business?.name || 'the vendor',
+              orderId,
+              orderNumber: order.orderNumber,
+              items: emailItems,
+            });
+          }
+          const vendorEmail = business?.contactEmail;
+          if (vendorEmail) {
+            await sendOrderDeliveredVendorEmail({
+              toEmail: vendorEmail,
+              vendorName: business!.name,
+              consumerName: consumer?.name || consumer?.firstName || 'Customer',
+              orderId,
+              orderNumber: order.orderNumber,
+              items: emailItems,
+              vendorNetCents: typeof order.vendorNet === 'number' ? order.vendorNet : undefined,
+            });
+          }
+        } catch (emailErr) {
+          console.error('[Email] Delivered email error:', emailErr);
+        }
+      })();
+
       return res.json({ message: "Delivery confirmed" });
     } catch (error) {
       console.error("Confirm delivery error:", error);
