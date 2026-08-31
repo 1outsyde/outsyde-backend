@@ -19522,6 +19522,43 @@ export async function registerRoutes(
         metadata: { shipmentId: shipments[0]?.id ?? null },
       }).catch(err => console.error('Audit log error (confirm_delivery):', err));
 
+      // Fire delivery confirmation emails (fire-and-forget)
+      ;(async () => {
+        try {
+          const { sendOrderDeliveredEmail, sendOrderDeliveredVendorEmail } = await import('./emailService');
+          const consumer = await storage.getUser(order.customerId);
+          const business = order.businessId ? await storage.getBusiness(order.businessId) : null;
+          const vendorOwner = business ? await storage.getUser(business.ownerId) : null;
+          const orderItems = ((order.items as Array<{ name?: string; variantLabel?: string; quantity?: number }>) || []).map(i => ({
+            productName: i.name || 'Item',
+            variantLabel: i.variantLabel,
+            quantity: i.quantity || 1,
+          }));
+          if (consumer?.email) {
+            await sendOrderDeliveredEmail({
+              toEmail: consumer.email,
+              consumerName: consumer.name || consumer.firstName || 'there',
+              vendorName: business?.name || 'the vendor',
+              orderId,
+              orderNumber: order.orderNumber,
+              items: orderItems,
+            });
+          }
+          if (vendorOwner?.email) {
+            await sendOrderDeliveredVendorEmail({
+              toEmail: vendorOwner.email,
+              vendorName: business?.name || 'Business',
+              consumerName: consumer?.name || 'Customer',
+              orderId,
+              orderNumber: order.orderNumber,
+              items: orderItems,
+            });
+          }
+        } catch (emailErr) {
+          console.error('Order delivered email error:', emailErr);
+        }
+      })();
+
       return res.json({ message: "Delivery confirmed" });
     } catch (error) {
       console.error("Confirm delivery error:", error);

@@ -997,6 +997,7 @@ export class WebhookHandlers {
           // Transactional emails
           const piOrderItems = ((order.items as any[]) || []).map((i: any) => ({
             productName: i.name || i.title || i.productId || 'Item',
+            variantLabel: i.variantLabel ?? undefined,
             vendorName: orderBusiness?.name || vendor.name || 'Business',
             vendorContactEmail: orderBusiness?.contactEmail ?? undefined,
             quantity: i.quantity || 1,
