@@ -9373,7 +9373,15 @@ export async function registerRoutes(
       return res.status(401).json({ error: "Not authenticated" });
     }
     try {
-      const business = await storage.getBusinessByOwnerId(userId);
+      let business: Awaited<ReturnType<typeof storage.getBusinessByOwnerId>> | null = null;
+      const bypassBusinessId = authReq.user?.isAdmin
+        ? (req.headers['x-business-id'] as string | undefined)
+        : undefined;
+      if (bypassBusinessId) {
+        business = await storage.getBusiness(bypassBusinessId);
+      } else {
+        business = await storage.getBusinessByOwnerId(userId);
+      }
       if (!business?.stripeAccountId || !business?.stripeOnboardingComplete) {
         return res.status(403).json({ error: "Stripe onboarding not complete", requiresOnboarding: true });
       }
