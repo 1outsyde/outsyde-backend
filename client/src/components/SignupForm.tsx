@@ -313,6 +313,9 @@ export default function SignupForm({ onComplete, isVendor = false }: SignupFormP
         websiteUrl: data.websiteUrl || undefined,
         socialMedia: data.socialMedia || undefined,
         acceptedSubscription: data.acceptedSubscription,
+        username: data.username || undefined,
+        vendorAgreementAccepted: true,
+        vendorAgreementAcceptedAt: new Date().toISOString(),
       });
       return response.json();
     },
