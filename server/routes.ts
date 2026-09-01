@@ -844,18 +844,58 @@ export async function registerRoutes(
   // Vendor signup
   app.post("/api/auth/vendor/signup", authRateLimiter, async (req, res) => {
     try {
+      const { password: _pw, ...bodyWithoutPassword } = req.body ?? {};
+      console.log("[VendorSignup] req.body (password redacted):", JSON.stringify(bodyWithoutPassword));
+      console.log("[VendorSignup] field presence:", {
+        username: req.body?.username != null && req.body?.username !== "",
+        vendorAgreementAccepted: req.body?.vendorAgreementAccepted,
+        acceptedSubscription: req.body?.acceptedSubscription,
+        keys: Object.keys(req.body ?? {}),
+      });
+
       const data = vendorSignupSchema.parse(req.body);
 
-      // Validate username (mandatory)
-      const { validateUsername: valUnV } = await import('./usernameUtils');
-      const unV = valUnV(req.body.username);
+      const {
+        validateUsername: valUnV,
+        generateUsernameFromEmail,
+        nextUsernameCandidate,
+      } = await import('./usernameUtils');
+
+      const providedUsername = typeof req.body.username === "string" ? req.body.username.trim() : "";
+      let usernameSource = providedUsername || generateUsernameFromEmail(data.email);
+      let unV = valUnV(usernameSource);
+      if (!unV.valid) {
+        if (providedUsername) {
+          return res.status(400).json({ success: false, message: unV.reason || 'Username is required' });
+        }
+        unV = valUnV(`vendor${Date.now().toString(36).slice(-8)}`);
+      }
       if (!unV.valid) {
         return res.status(400).json({ success: false, message: unV.reason || 'Username is required' });
       }
-      const existingUn = await storage.getUserByUsername(unV.cleaned!);
-      if (existingUn) {
-        return res.status(409).json({ success: false, message: "Username is already taken" });
+
+      let cleanedUsername = unV.cleaned!;
+      if (providedUsername) {
+        const existingUn = await storage.getUserByUsername(cleanedUsername);
+        if (existingUn) {
+          return res.status(409).json({ success: false, message: "Username is already taken" });
+        }
+      } else {
+        let attempt = 0;
+        while (await storage.getUserByUsername(cleanedUsername)) {
+          attempt += 1;
+          if (attempt > 50) {
+            return res.status(409).json({ success: false, message: "Username is already taken" });
+          }
+          const next = valUnV(nextUsernameCandidate(unV.cleaned!, attempt));
+          if (!next.valid || !next.cleaned) {
+            continue;
+          }
+          cleanedUsername = next.cleaned;
+        }
+        console.log("[VendorSignup] auto-generated username:", cleanedUsername);
       }
+      unV = { valid: true, cleaned: cleanedUsername };
 
       const existing = await storage.getUserByEmail(data.email);
       if (existing) {
@@ -900,10 +940,10 @@ export async function registerRoutes(
         logoImage: data.logoImage,
         subscriptionActive: false,
         approvalStatus: "pending",
-        vendorAgreementAccepted: data.vendorAgreementAccepted,
-        vendorAgreementAcceptedAt: data.vendorAgreementAcceptedAt
-          ? new Date(data.vendorAgreementAcceptedAt)
-          : new Date(),
+        vendorAgreementAccepted: data.vendorAgreementAccepted === true,
+        vendorAgreementAcceptedAt: data.vendorAgreementAccepted === true
+          ? (data.vendorAgreementAcceptedAt ? new Date(data.vendorAgreementAcceptedAt) : new Date())
+          : null,
       });
 
       if (data.billingAddress || data.billingCity || data.billingState || data.billingZipCode) {
@@ -955,6 +995,7 @@ export async function registerRoutes(
       });
     } catch (error) {
       if (error instanceof z.ZodError) {
+        console.error("[VendorSignup] Zod validation failed:", JSON.stringify(error.errors));
         return res
           .status(400)
           .json({ error: "Invalid data", details: error.errors });

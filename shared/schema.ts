@@ -2415,9 +2415,14 @@ export const vendorSignupSchema = z.object({
   acceptedSubscription: z.boolean().refine((val) => val === true, {
     message: "You must accept the subscription terms",
   }),
-  vendorAgreementAccepted: z.boolean().refine((val) => val === true, {
-    message: "You must accept the Vendor Marketplace Agreement",
-  }),
+  // Optional: older web/mobile clients omit this even after the user accepts
+  // terms in their own UI. When present it must be true.
+  vendorAgreementAccepted: z
+    .boolean()
+    .optional()
+    .refine((val) => val === undefined || val === true, {
+      message: "You must accept the Vendor Marketplace Agreement",
+    }),
   vendorAgreementAcceptedAt: z.string().datetime().optional(),
 });
 
