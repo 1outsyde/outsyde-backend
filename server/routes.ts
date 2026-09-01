@@ -1140,7 +1140,7 @@ export async function registerRoutes(
         const v = valUn(username);
         if (v.valid && v.cleaned) user = await storage.getUserByUsername(v.cleaned);
       } else if (identifier) {
-        const isEmail = identifier.includes('@') && identifier.includes('.');
+        const isEmail = identifier.includes('@') && identifier.indexOf('@') > 0 && identifier.slice(identifier.indexOf('@')).includes('.');
         if (isEmail) {
           user = await storage.getUserByEmail(identifier);
         } else {
@@ -2260,7 +2260,7 @@ export async function registerRoutes(
         const v = valUn(username);
         if (v.valid && v.cleaned) user = await storage.getUserByUsername(v.cleaned);
       } else if (identifier) {
-        const isEmail = identifier.includes('@') && identifier.includes('.');
+        const isEmail = identifier.includes('@') && identifier.indexOf('@') > 0 && identifier.slice(identifier.indexOf('@')).includes('.');
         if (isEmail) {
           user = await storage.getUserByEmail(identifier);
         } else {
@@ -2996,7 +2996,7 @@ export async function registerRoutes(
 
     try {
       const schema = z.object({
-        username: z.string().min(3).max(30).regex(/^[a-zA-Z0-9_]+$/, "Username can only contain letters, numbers, and underscores").optional(),
+        username: z.string().min(3).max(20).regex(/^[a-z0-9_.]{3,20}$/, "Username can only contain lowercase letters, numbers, underscores, and periods").optional(),
         displayName: z.string().min(1).max(50).optional(),
         name: z.string().min(1).max(100).optional(), // Alias for displayName
       });

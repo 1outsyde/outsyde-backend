@@ -2349,7 +2349,7 @@ export const customerSignupSchema = z.object({
   name: z.string().min(1),
   firstName: z.string().optional(),
   lastName: z.string().optional(),
-  username: z.string().min(3).max(30).regex(/^[a-zA-Z0-9_]+$/, "Username can only contain letters, numbers, and underscores").optional(),
+  username: z.string().min(3).max(20).regex(/^[a-z0-9_.]{3,20}$/, "Username can only contain lowercase letters, numbers, underscores, and periods").optional(),
   phone: z.string().optional(),
   // Home address
   address: z.string().optional(), // street address
