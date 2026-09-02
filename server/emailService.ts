@@ -559,7 +559,7 @@ function emailFooter(extra?: string): string {
       ${extra ? `<p style="color:#AAAAAA;font-size:13px;margin:0 0 10px 0;">${extra}</p>` : ''}
       <p style="color:#555555;font-size:12px;margin:0 0 4px 0;">For questions contact us at <a href="mailto:info@goutsyde.com" style="color:#E8B930;text-decoration:none;">info@goutsyde.com</a></p>
       <p style="color:#444444;font-size:11px;margin:0;">info@goutsyde.com &nbsp;·&nbsp; Culture meets commerce &nbsp;·&nbsp; Go Outsyde</p>
-      <p style="color:#333333;font-size:11px;margin:8px 0 0 0;">Outsyde LLC &nbsp;·&nbsp; Long Island, NY</p>
+      <p style="color:#333333;font-size:11px;margin:8px 0 0 0;">Outsyde LLC &nbsp;·&nbsp; 54 State Street, Ste 804 #13315, Albany, New York 12207, US</p>
     </td>
   </tr>`;
 }
