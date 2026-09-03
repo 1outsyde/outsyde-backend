@@ -710,17 +710,46 @@ export async function registerRoutes(
   // Customer signup
   const handleCustomerSignup: RequestHandler = async (req, res) => {
     try {
+      if (!req.body.name && (req.body.firstName || req.body.lastName)) {
+        req.body.name = `${req.body.firstName ?? ''} ${req.body.lastName ?? ''}`.trim();
+      }
+
       const data = customerSignupSchema.parse(req.body);
 
-      // Validate username (mandatory)
-      const { validateUsername: valUn } = await import('./usernameUtils');
-      const unValidation = valUn(data.username);
-      if (!unValidation.valid) {
-        return res.status(400).json({ success: false, message: unValidation.reason });
+      const {
+        validateUsername: valUn,
+        generateUsernameFromEmail,
+        nextUsernameCandidate,
+      } = await import('./usernameUtils');
+
+      const providedUsername = typeof data.username === 'string' ? data.username.trim() : '';
+      let usernameSource = providedUsername || generateUsernameFromEmail(data.email);
+      let unV = valUn(usernameSource);
+      if (!unV.valid) {
+        if (providedUsername) {
+          return res.status(400).json({ success: false, message: unV.reason });
+        }
+        // Last resort timestamp fallback
+        const fallback = `user${Date.now().toString(36).slice(-8)}`;
+        unV = valUn(fallback);
       }
-      const existingUsername = await storage.getUserByUsername(unValidation.cleaned!);
-      if (existingUsername) {
-        return res.status(409).json({ success: false, message: "Username is already taken" });
+      let cleanedUsername = unV.cleaned!;
+      // Collision retry loop (only when auto-generating)
+      if (!providedUsername) {
+        let attempt = 0;
+        while (await storage.getUserByUsername(cleanedUsername)) {
+          attempt += 1;
+          if (attempt > 50) {
+            return res.status(409).json({ success: false, message: 'Could not generate a unique username. Please try again.' });
+          }
+          const next = valUn(nextUsernameCandidate(unV.cleaned!, attempt));
+          if (next.valid && next.cleaned) cleanedUsername = next.cleaned;
+        }
+      } else {
+        const existingUsername = await storage.getUserByUsername(cleanedUsername);
+        if (existingUsername) {
+          return res.status(409).json({ success: false, message: "Username is already taken" });
+        }
       }
 
       const existing = await storage.getUserByEmail(data.email);
@@ -757,7 +786,7 @@ export async function registerRoutes(
         billingState: effectiveBillingState,
         billingZip: effectiveBillingZip,
         billingCountry: effectiveBillingCountry,
-        username: unValidation.cleaned!,
+        username: cleanedUsername,
         dateOfBirth: data.dateOfBirth ? new Date(data.dateOfBirth) : undefined,
         gender: data.gender,
         ethnicity: data.ethnicity,
@@ -800,7 +829,7 @@ export async function registerRoutes(
         userId: user.id,
         userName: user.name || data.email,
         userEmail: user.email || data.email,
-        username: unValidation.cleaned!,
+        username: cleanedUsername,
         city: data.city,
         state: data.state,
       }).catch(err => console.error('[signup] admin notification failed:', err));
