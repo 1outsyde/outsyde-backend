@@ -163,6 +163,7 @@ import { createStory, getStoriesByUser, getStory, deleteStory, recordView, creat
 // ✅ CORRECT IMPORT (default export)
 import { photographersRouter } from "./Photographers/photographers.routes";
 import { toPublicBusinessDTO } from "./serializers/business";
+import { grantToken } from "./utils/grantToken";
 
 // =========================
 // PAYMENTS CONFIGURATION
@@ -21142,6 +21143,48 @@ export async function registerRoutes(
     } catch (err) {
       console.error('[GET /api/shoot-bookings/:id/receipt]', err);
       return res.status(500).json({ error: 'Failed to fetch shoot booking receipt' });
+    }
+  });
+
+  // POST /api/admin/subscription/grant-link
+  // Generates a signed 48h grant URL for a specific vendor + grandfathered tier.
+  // Admin-only.
+  app.post("/api/admin/subscription/grant-link", requireAdmin, async (req, res) => {
+    try {
+      const { businessId, tierId } = req.body as {
+        businessId?: string;
+        tierId?: string;
+      };
+      if (!businessId || !tierId) {
+        return res.status(400).json({ error: "businessId and tierId are required" });
+      }
+
+      const business = await storage.getBusiness(businessId);
+      if (!business) {
+        return res.status(404).json({ error: "Business not found" });
+      }
+
+      const [tier] = await db
+        .select()
+        .from(subscriptionTiers)
+        .where(eq(subscriptionTiers.id, tierId));
+      if (!tier) {
+        return res.status(404).json({ error: "Tier not found" });
+      }
+      if (tier.name !== "grandfathered") {
+        return res.status(400).json({
+          error: "Grant links are only supported for the grandfathered tier",
+        });
+      }
+
+      const token = grantToken.generate(businessId, tierId);
+      const expiresAt = new Date(Date.now() + 48 * 60 * 60 * 1000).toISOString();
+      const grantUrl = `${process.env.FRONTEND_URL}/subscribe/grant/${token}`;
+
+      return res.json({ grantUrl, expiresAt });
+    } catch (err) {
+      console.error("[GRANT_LINK_GENERATE]", err);
+      return res.status(500).json({ error: "Failed to generate grant link" });
     }
   });
 
