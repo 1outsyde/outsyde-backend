@@ -8852,7 +8852,7 @@ export async function registerRoutes(
           customerId: stripeCustomerId,
         });
       } else {
-        const baseUrl = process.env.API_BASE_URL || process.env.FRONTEND_URL || 'https://outsyde-backend.onrender.com';
+        const baseUrl = process.env.FRONTEND_URL || process.env.API_BASE_URL || 'https://outsyde-backend.onrender.com';
         const session = await stripeService.createTierSubscriptionCheckout(
           stripeCustomerId,
           tierId,
