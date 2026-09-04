@@ -21188,5 +21188,61 @@ export async function registerRoutes(
     }
   });
 
+  // POST /api/subscription/grant-link/redeem
+  // Validates a signed grant token for the authenticated vendor.
+  // Returns tierId so the web page can redirect to /subscription/manage?tier=<tierId>.
+  app.post("/api/subscription/grant-link/redeem", optionalAuthMiddleware, async (req, res) => {
+    try {
+      const authReq = req as AuthenticatedRequest;
+      const userId = authReq.user?.userId || req.session?.userId;
+      if (!userId) {
+        return res.status(401).json({ error: "Authentication required" });
+      }
+
+      const { token } = req.body as { token?: string };
+      if (!token) {
+        return res.status(400).json({ error: "Token is required" });
+      }
+
+      let payload: { businessId: string; tierId: string; exp: number };
+      try {
+        payload = grantToken.verify(token);
+      } catch (err: any) {
+        const message =
+          err.message === "TOKEN_EXPIRED"
+            ? "This grant link has expired. Please request a new one."
+            : "Invalid grant link.";
+        return res.status(400).json({ error: message });
+      }
+
+      const business = await storage.getBusiness(payload.businessId);
+      if (!business) {
+        return res.status(404).json({ error: "Business not found" });
+      }
+      if (business.ownerId !== userId) {
+        return res.status(403).json({
+          error: "This grant link is for a different account.",
+        });
+      }
+
+      const [tier] = await db
+        .select()
+        .from(subscriptionTiers)
+        .where(eq(subscriptionTiers.id, payload.tierId));
+      if (!tier || tier.name !== "grandfathered") {
+        return res.status(400).json({ error: "Invalid tier in grant link." });
+      }
+
+      return res.json({
+        tierId: tier.id,
+        tierName: tier.name,
+        businessId: business.id,
+      });
+    } catch (err) {
+      console.error("[GRANT_LINK_REDEEM]", err);
+      return res.status(500).json({ error: "Redemption failed" });
+    }
+  });
+
   return httpServer;
 }
