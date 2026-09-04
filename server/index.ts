@@ -66,6 +66,8 @@ const clientSiteOrigins = [
   'https://xobeautyandlashes.com',   // xo-lashes-web production
   'https://lotushouseblends.com',    // LHB custom domain
   'https://www.lotushouseblends.com',
+  'https://braids-with-love-site.vercel.app',
+  'https://www.braids-with-love-site.vercel.app',
 ];
 clientSiteOrigins.forEach(o => allowedOrigins.push(o));
 
