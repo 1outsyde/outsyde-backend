@@ -504,6 +504,8 @@ export const vendorServices = pgTable("vendor_services", {
   ratingAverage: integer("rating_average").default(0).notNull(),
   // stored as rating * 10 — e.g. 4.5 stars = 45
 
+  imageUrl: text("image_url"),
+
   createdAt: timestamp("created_at").defaultNow().notNull(),
 });
 
