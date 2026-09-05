@@ -10495,7 +10495,16 @@ export async function registerRoutes(
     }
 
     try {
-      const business = await storage.getBusinessByOwnerId(userId);
+      const xBusinessId = req.headers['x-business-id'] as string | undefined;
+      const ALLOWED_ADMIN_EMAILS = ['info@goutsyde.com', 'jamesmeyers2304@gmail.com'];
+      let isAdmin = authReq.user?.isAdmin === true;
+      if (!isAdmin && xBusinessId && userId) {
+        const userRecord = await storage.getUser(userId);
+        isAdmin = ALLOWED_ADMIN_EMAILS.includes((userRecord?.email ?? '').toLowerCase());
+      }
+      const business = xBusinessId && isAdmin
+        ? await storage.getBusiness(xBusinessId)
+        : await storage.getBusinessByOwnerId(userId);
       if (!business) {
         return res.status(404).json({ error: "No business found for this account" });
       }
