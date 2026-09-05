@@ -11679,17 +11679,23 @@ export async function registerRoutes(
 
   // Delete vendor service
   app.delete("/api/vendor/services/:id", async (req, res) => {
-    const userId = req.session?.userId;
-    if (!userId) {
-      return res.status(401).json({ error: "Not authenticated" });
-    }
+    const xBusinessId = req.headers['x-business-id'] as string | undefined;
+    const ALLOWED_ADMIN_EMAILS = ['info@goutsyde.com', 'jamesmeyers2304@gmail.com'];
+    const userId = req.session?.userId || (req as any).user?.userId;
+    if (!userId) return res.status(401).json({ error: 'Not authenticated' });
+
+    const userRecord = await storage.getUser(userId);
+    const isAdmin = ALLOWED_ADMIN_EMAILS.includes((userRecord?.email ?? '').toLowerCase());
 
     try {
       // Vendors can delete services before subscribing (content hidden until subscription active)
-      const business = await storage.getBusinessByOwnerId(userId);
-      if (!business) {
-        return res.status(404).json({ error: "No business found" });
+      let business;
+      if (xBusinessId && isAdmin) {
+        business = await storage.getBusiness(xBusinessId);
+      } else {
+        business = await storage.getBusinessByOwnerId(userId);
       }
+      if (!business) return res.status(404).json({ error: 'No business found' });
 
       const service = await storage.getVendorService(req.params.id);
       if (!service || service.businessId !== business.id) {
@@ -11706,16 +11712,22 @@ export async function registerRoutes(
 
   // Go Live - Publish vendor service to Stripe
   app.post("/api/vendor/services/:id/go-live", async (req, res) => {
-    const userId = req.session?.userId;
-    if (!userId) {
-      return res.status(401).json({ error: "Not authenticated" });
-    }
+    const xBusinessId = req.headers['x-business-id'] as string | undefined;
+    const ALLOWED_ADMIN_EMAILS = ['info@goutsyde.com', 'jamesmeyers2304@gmail.com'];
+    const userId = req.session?.userId || (req as any).user?.userId;
+    if (!userId) return res.status(401).json({ error: 'Not authenticated' });
+
+    const userRecord = await storage.getUser(userId);
+    const isAdmin = ALLOWED_ADMIN_EMAILS.includes((userRecord?.email ?? '').toLowerCase());
 
     try {
-      const business = await storage.getBusinessByOwnerId(userId);
-      if (!business) {
-        return res.status(404).json({ error: "No business found" });
+      let business;
+      if (xBusinessId && isAdmin) {
+        business = await storage.getBusiness(xBusinessId);
+      } else {
+        business = await storage.getBusinessByOwnerId(userId);
       }
+      if (!business) return res.status(404).json({ error: 'No business found' });
 
       // Approval gate (separate from Connect/subscription — remains a 403)
       if ((business as any).approvalStatus !== 'approved') {
@@ -11760,16 +11772,22 @@ export async function registerRoutes(
 
   // Archive vendor service
   app.post("/api/vendor/services/:id/archive", async (req, res) => {
-    const userId = req.session?.userId;
-    if (!userId) {
-      return res.status(401).json({ error: "Not authenticated" });
-    }
+    const xBusinessId = req.headers['x-business-id'] as string | undefined;
+    const ALLOWED_ADMIN_EMAILS = ['info@goutsyde.com', 'jamesmeyers2304@gmail.com'];
+    const userId = req.session?.userId || (req as any).user?.userId;
+    if (!userId) return res.status(401).json({ error: 'Not authenticated' });
+
+    const userRecord = await storage.getUser(userId);
+    const isAdmin = ALLOWED_ADMIN_EMAILS.includes((userRecord?.email ?? '').toLowerCase());
 
     try {
-      const business = await storage.getBusinessByOwnerId(userId);
-      if (!business) {
-        return res.status(404).json({ error: "No business found" });
+      let business;
+      if (xBusinessId && isAdmin) {
+        business = await storage.getBusiness(xBusinessId);
+      } else {
+        business = await storage.getBusinessByOwnerId(userId);
       }
+      if (!business) return res.status(404).json({ error: 'No business found' });
 
       const service = await storage.getVendorService(req.params.id);
       if (!service || service.businessId !== business.id) {
