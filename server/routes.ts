@@ -11818,16 +11818,22 @@ export async function registerRoutes(
 
   // Apply one service's cancellation policy to all other services for this business
   app.post("/api/vendor/services/:id/apply-cancellation-policy-to-all", async (req, res) => {
-    const userId = req.session?.userId;
-    if (!userId) {
-      return res.status(401).json({ error: "Not authenticated" });
-    }
+    const xBusinessId = req.headers['x-business-id'] as string | undefined;
+    const ALLOWED_ADMIN_EMAILS = ['info@goutsyde.com', 'jamesmeyers2304@gmail.com'];
+    const userId = req.session?.userId || (req as any).user?.userId;
+    if (!userId) return res.status(401).json({ error: 'Not authenticated' });
+
+    const userRecord = await storage.getUser(userId);
+    const isAdmin = ALLOWED_ADMIN_EMAILS.includes((userRecord?.email ?? '').toLowerCase());
 
     try {
-      const business = await storage.getBusinessByOwnerId(userId);
-      if (!business) {
-        return res.status(404).json({ error: "No business found" });
+      let business;
+      if (xBusinessId && isAdmin) {
+        business = await storage.getBusiness(xBusinessId);
+      } else {
+        business = await storage.getBusinessByOwnerId(userId);
       }
+      if (!business) return res.status(404).json({ error: 'No business found' });
 
       const service = await storage.getVendorService(req.params.id);
       if (!service || service.businessId !== business.id) {
