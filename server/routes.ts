@@ -11476,7 +11476,19 @@ export async function registerRoutes(
     }
 
     try {
-      const business = await storage.getBusinessByOwnerId(userId);
+      // Admin bypass: platform admin passes x-business-id header to access any business's services.
+      const headerBizId = req.headers['x-business-id'] as string | undefined;
+      const authHeader = req.headers.authorization;
+      const isAdmin = authHeader?.startsWith('Bearer ')
+        ? (verifyAccessToken(authHeader.substring(7))?.isAdmin === true)
+        : false;
+
+      let business;
+      if (isAdmin && headerBizId) {
+        business = await storage.getBusiness(headerBizId);
+      } else {
+        business = await storage.getBusinessByOwnerId(userId);
+      }
       if (!business) {
         return res.status(404).json({ error: "No business found" });
       }
@@ -18221,7 +18233,19 @@ export async function registerRoutes(
       return res.status(401).json({ error: "Not authenticated" });
     }
     try {
-      const business = await storage.getBusinessByOwnerId(userId);
+      // Admin bypass: platform admin passes x-business-id header to access any business's appointments.
+      const headerBizId = req.headers['x-business-id'] as string | undefined;
+      const authHeader = req.headers.authorization;
+      const isAdmin = authHeader?.startsWith('Bearer ')
+        ? (verifyAccessToken(authHeader.substring(7))?.isAdmin === true)
+        : false;
+
+      let business;
+      if (isAdmin && headerBizId) {
+        business = await storage.getBusiness(headerBizId);
+      } else {
+        business = await storage.getBusinessByOwnerId(userId);
+      }
       if (!business) {
         return res.status(403).json({ error: "No business associated with this account" });
       }
