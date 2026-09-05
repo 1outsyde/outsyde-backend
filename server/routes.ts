@@ -5103,7 +5103,7 @@ export async function registerRoutes(
       return res.status(401).json({ error: "Not authenticated" });
     }
 
-    const DEPOSIT_CENTS = 3000; // $25 flat deposit
+    const DEPOSIT_CENTS = 3000; // $30 flat deposit
 
     try {
       const { holdId } = req.params;
