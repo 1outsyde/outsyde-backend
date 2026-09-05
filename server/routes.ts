@@ -21026,7 +21026,7 @@ export async function registerRoutes(
           customerEmail: client?.email ?? '',
           customerPhone: (client as any)?.phone ?? '',
           depositPaid: !!appt.stripePaymentIntentId,
-          depositAmount: appt.stripePaymentIntentId ? 2500 : 0,
+          depositAmount: appt.stripePaymentIntentId ? 3000 : 0,
         };
       }));
 
