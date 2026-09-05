@@ -10393,8 +10393,15 @@ export async function registerRoutes(
         return res.status(404).json({ error: "Business not found" });
       }
       
+      // Internal API key bypass — whitelabel vendor sites reading their own record
+      // before subscription is active (e.g. during onboarding). Key is server-side only;
+      // never exposed in any NEXT_PUBLIC_ var. Listing routes (/api/businesses, /api/vendors)
+      // are intentionally excluded from this bypass.
+      const internalKey = req.headers['x-internal-api-key'];
+      const isInternalRequest = process.env.INTERNAL_API_KEY !== undefined && internalKey === process.env.INTERNAL_API_KEY;
+
       // Server-side filtering: check visibility for public access
-      if (!(await isBusinessVisibleToPublic(business))) {
+      if (!isInternalRequest && !(await isBusinessVisibleToPublic(business))) {
         return res.status(404).json({ error: "This business is currently unavailable" });
       }
 
@@ -10442,11 +10449,15 @@ export async function registerRoutes(
         return res.status(404).json({ error: "Business not found" });
       }
       
+      // Internal API key bypass — same scope as GET /api/businesses/:id above.
+      const internalKey = req.headers['x-internal-api-key'];
+      const isInternalRequest = process.env.INTERNAL_API_KEY !== undefined && internalKey === process.env.INTERNAL_API_KEY;
+
       // Server-side filtering: check visibility for public access
-      if (!(await isBusinessVisibleToPublic(business))) {
+      if (!isInternalRequest && !(await isBusinessVisibleToPublic(business))) {
         return res.status(404).json({ error: "This business is currently unavailable" });
       }
-      
+
       const services = await storage.getVendorServicesByBusiness(req.params.id);
       // Only return active AND live services for public view
       const liveServices = services.filter(s => s.isActive && s.status === 'live');
