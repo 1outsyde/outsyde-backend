@@ -5689,7 +5689,13 @@ export async function registerRoutes(
     }
 
     try {
-      const business = await storage.getBusinessByOwnerId(userId);
+      const ALLOWED_ADMIN_EMAILS = ['info@goutsyde.com', 'jamesmeyers2304@gmail.com'];
+      const xBusinessId = req.headers['x-business-id'] as string | undefined;
+      const userRecord = await storage.getUser(userId);
+      const isAdmin = ALLOWED_ADMIN_EMAILS.includes((userRecord?.email ?? '').toLowerCase());
+      const business = (xBusinessId && isAdmin)
+        ? await storage.getBusiness(xBusinessId)
+        : await storage.getBusinessByOwnerId(userId);
       if (!business) {
         return res.status(404).json({ error: "Business not found" });
       }
@@ -5716,7 +5722,13 @@ export async function registerRoutes(
     }
 
     try {
-      const business = await storage.getBusinessByOwnerId(userId);
+      const ALLOWED_ADMIN_EMAILS = ['info@goutsyde.com', 'jamesmeyers2304@gmail.com'];
+      const xBusinessId = req.headers['x-business-id'] as string | undefined;
+      const userRecord = await storage.getUser(userId);
+      const isAdmin = ALLOWED_ADMIN_EMAILS.includes((userRecord?.email ?? '').toLowerCase());
+      const business = (xBusinessId && isAdmin)
+        ? await storage.getBusiness(xBusinessId)
+        : await storage.getBusinessByOwnerId(userId);
       if (!business) {
         return res.status(404).json({ error: "Business not found" });
       }
@@ -5841,7 +5853,13 @@ export async function registerRoutes(
     }
 
     try {
-      const business = await storage.getBusinessByOwnerId(userId);
+      const ALLOWED_ADMIN_EMAILS = ['info@goutsyde.com', 'jamesmeyers2304@gmail.com'];
+      const xBusinessId = req.headers['x-business-id'] as string | undefined;
+      const userRecord = await storage.getUser(userId);
+      const isAdmin = ALLOWED_ADMIN_EMAILS.includes((userRecord?.email ?? '').toLowerCase());
+      const business = (xBusinessId && isAdmin)
+        ? await storage.getBusiness(xBusinessId)
+        : await storage.getBusinessByOwnerId(userId);
       if (!business) {
         return res.status(404).json({ error: "Business not found" });
       }
@@ -5874,7 +5892,13 @@ export async function registerRoutes(
     }
 
     try {
-      const business = await storage.getBusinessByOwnerId(userId);
+      const ALLOWED_ADMIN_EMAILS = ['info@goutsyde.com', 'jamesmeyers2304@gmail.com'];
+      const xBusinessId = req.headers['x-business-id'] as string | undefined;
+      const userRecord = await storage.getUser(userId);
+      const isAdmin = ALLOWED_ADMIN_EMAILS.includes((userRecord?.email ?? '').toLowerCase());
+      const business = (xBusinessId && isAdmin)
+        ? await storage.getBusiness(xBusinessId)
+        : await storage.getBusinessByOwnerId(userId);
       if (!business) {
         return res.status(404).json({ error: "Business not found" });
       }
@@ -5911,7 +5935,13 @@ export async function registerRoutes(
     }
 
     try {
-      const business = await storage.getBusinessByOwnerId(userId);
+      const ALLOWED_ADMIN_EMAILS = ['info@goutsyde.com', 'jamesmeyers2304@gmail.com'];
+      const xBusinessId = req.headers['x-business-id'] as string | undefined;
+      const userRecord = await storage.getUser(userId);
+      const isAdmin = ALLOWED_ADMIN_EMAILS.includes((userRecord?.email ?? '').toLowerCase());
+      const business = (xBusinessId && isAdmin)
+        ? await storage.getBusiness(xBusinessId)
+        : await storage.getBusinessByOwnerId(userId);
       if (!business) {
         return res.status(404).json({ error: "Business not found" });
       }
@@ -5946,7 +5976,13 @@ export async function registerRoutes(
     }
 
     try {
-      const business = await storage.getBusinessByOwnerId(userId);
+      const ALLOWED_ADMIN_EMAILS = ['info@goutsyde.com', 'jamesmeyers2304@gmail.com'];
+      const xBusinessId = req.headers['x-business-id'] as string | undefined;
+      const userRecord = await storage.getUser(userId);
+      const isAdmin = ALLOWED_ADMIN_EMAILS.includes((userRecord?.email ?? '').toLowerCase());
+      const business = (xBusinessId && isAdmin)
+        ? await storage.getBusiness(xBusinessId)
+        : await storage.getBusinessByOwnerId(userId);
       if (!business) {
         return res.status(404).json({ error: "Business not found" });
       }
