@@ -5427,12 +5427,6 @@ export async function registerRoutes(
         }
       }
 
-      // fees.ts subtotal/consumer-fee breakdown, matching the preview already
-      // shown to the customer at /api/booking/hold. appointments.totalPrice
-      // stores the subtotal (matches existing convention elsewhere in this
-      // file); the actual Stripe charge is subtotal + consumer service fee.
-      const feeBreakdown = calculateBookingFees(hold.servicePriceCents);
-
       // Respect autoAcceptBookings: when false the card is authorized only
       // (manual capture). The appointment is created directly in
       // pending_provider so the business sees it immediately. The business
@@ -5456,6 +5450,7 @@ export async function registerRoutes(
         hasCancellationFee: boolean | null;
         cancellationFeeType: string | null;
         cancellationFeeAmount: number | null;
+        depositAmountCents?: number | null;
       };
       let serviceForSnapshot: ServiceForSnapshot | undefined;
       if (hold.staffMemberId && hold.serviceId) {
@@ -5465,6 +5460,23 @@ export async function registerRoutes(
         const vendorService = await storage.getVendorService(hold.serviceId);
         if (vendorService) serviceForSnapshot = vendorService as ServiceForSnapshot;
       }
+
+      // fees.ts subtotal/consumer-fee breakdown, matching the preview already
+      // shown to the customer at /api/booking/hold. appointments.totalPrice
+      // stores the subtotal (matches existing convention elsewhere in this
+      // file); the actual Stripe charge is subtotal + consumer service fee.
+      //
+      // When a deposit is configured the customer is charged only the deposit
+      // now; the remainder is collected in person. chargeAmountCents is what
+      // actually flows to Stripe; servicePriceCents is the full-service value
+      // stored on the appointment for display and reconciliation.
+      const serviceDepositAmountCents = typeof serviceForSnapshot?.depositAmountCents === 'number'
+        ? serviceForSnapshot.depositAmountCents
+        : null;
+      const chargeAmountCents = serviceDepositAmountCents !== null
+        ? serviceDepositAmountCents
+        : hold.servicePriceCents;
+      const feeBreakdown = calculateBookingFees(chargeAmountCents);
 
       const isCustomerLocation = serviceForSnapshot?.serviceLocationType === 'customer';
       const customerAddress = isCustomerLocation ? {
@@ -5505,6 +5517,7 @@ export async function registerRoutes(
         serviceHasCancellationFee: serviceForSnapshot?.hasCancellationFee ?? null,
         serviceCancellationFeeType: serviceForSnapshot?.cancellationFeeType ?? null,
         serviceCancellationFeeAmount: serviceForSnapshot?.cancellationFeeAmount ?? null,
+        depositAmountCents: serviceDepositAmountCents,
       });
 
       const user = await storage.getUser(userId);
@@ -5602,6 +5615,10 @@ export async function registerRoutes(
         captureMethod,
         requiresApproval: !isAutoAccept,
         status: isAutoAccept ? BOOKING_STATES.PENDING_PAYMENT : BOOKING_STATES.PENDING_PROVIDER,
+        // Deposit fields — null when full price is charged at booking
+        depositAmountCents: serviceDepositAmountCents,
+        servicePriceCents: hold.servicePriceCents,
+        chargeAmountCents,
         feeBreakdown: {
           subtotalAmount: feeBreakdown.subtotalCents,
           consumerServiceFeeAmount: feeBreakdown.consumerServiceFeeCents,
@@ -11599,6 +11616,7 @@ export async function registerRoutes(
         alternateState: z.string().nullable().optional(),
         alternateZipCode: z.string().nullable().optional(),
         virtualLink: z.string().nullable().optional(),
+        depositAmountCents: z.number().int().min(0).nullable().optional(),
       });
 
       const validated = serviceSchema.parse(req.body);
@@ -11669,6 +11687,7 @@ export async function registerRoutes(
         alternateState: z.string().nullable().optional(),
         alternateZipCode: z.string().nullable().optional(),
         virtualLink: z.string().nullable().optional(),
+        depositAmountCents: z.number().int().min(0).nullable().optional(),
       });
 
       const validated = updateSchema.parse(req.body);
@@ -11897,6 +11916,41 @@ export async function registerRoutes(
     } catch (error) {
       console.error("Apply cancellation policy to all error:", error);
       res.status(500).json({ error: "Failed to apply cancellation policy" });
+    }
+  });
+
+  // Apply a deposit amount to all services for this business
+  app.post("/api/vendor/services/apply-deposit-to-all", async (req, res) => {
+    const xBusinessId = req.headers['x-business-id'] as string | undefined;
+    const ALLOWED_ADMIN_EMAILS = ['info@goutsyde.com', 'jamesmeyers2304@gmail.com'];
+    const userId = req.session?.userId || (req as any).user?.userId;
+    if (!userId) return res.status(401).json({ error: 'Not authenticated' });
+
+    const userRecord = await storage.getUser(userId);
+    const isAdmin = ALLOWED_ADMIN_EMAILS.includes((userRecord?.email ?? '').toLowerCase());
+
+    try {
+      let business;
+      if (xBusinessId && isAdmin) {
+        business = await storage.getBusiness(xBusinessId);
+      } else {
+        business = await storage.getBusinessByOwnerId(userId);
+      }
+      if (!business) return res.status(404).json({ error: 'No business found' });
+
+      const bodySchema = z.object({
+        depositAmountCents: z.number().int().min(0).nullable(),
+      });
+      const { depositAmountCents } = bodySchema.parse(req.body);
+
+      const updatedCount = await storage.updateAllVendorServicesDepositAmount(business.id, depositAmountCents);
+      res.json({ success: true, updatedCount });
+    } catch (error) {
+      if (error instanceof z.ZodError) {
+        return res.status(400).json({ error: "Invalid data", details: error.errors });
+      }
+      console.error("Apply deposit to all error:", error);
+      res.status(500).json({ error: "Failed to apply deposit" });
     }
   });
 
@@ -21120,7 +21174,7 @@ export async function registerRoutes(
           customerEmail: client?.email ?? '',
           customerPhone: (client as any)?.phone ?? '',
           depositPaid: !!appt.stripePaymentIntentId,
-          depositAmount: appt.stripePaymentIntentId ? 2500 : 0,
+          depositAmountCents: appt.depositAmountCents ?? null,
         };
       }));
 
