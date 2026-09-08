@@ -537,6 +537,7 @@ export interface IStorage {
     cancellationFeeType: string | null;
     cancellationFeeAmount: number | null;
   }): Promise<number>;
+  updateAllVendorServicesDepositAmount(businessId: string, depositAmountCents: number | null): Promise<number>;
 
   // Subscription enforcement - pause/unpause items
   pauseBusinessLiveItems(businessId: string): Promise<{ pausedProducts: number; pausedServices: number }>;
@@ -4805,6 +4806,17 @@ export class DatabaseStorage implements IStorage {
         eq(vendorServices.businessId, businessId),
         ne(vendorServices.id, excludeServiceId),
       ))
+      .returning({ id: vendorServices.id });
+    return result.length;
+  }
+
+  async updateAllVendorServicesDepositAmount(
+    businessId: string,
+    depositAmountCents: number | null,
+  ): Promise<number> {
+    const result = await db.update(vendorServices)
+      .set({ depositAmountCents })
+      .where(eq(vendorServices.businessId, businessId))
       .returning({ id: vendorServices.id });
     return result.length;
   }

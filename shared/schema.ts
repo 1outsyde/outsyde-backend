@@ -505,6 +505,7 @@ export const vendorServices = pgTable("vendor_services", {
   // stored as rating * 10 — e.g. 4.5 stars = 45
 
   imageUrl: text("image_url"),
+  depositAmountCents: integer('deposit_amount_cents'),
 
   createdAt: timestamp("created_at").defaultNow().notNull(),
 });
@@ -1054,6 +1055,7 @@ export const appointments = pgTable("appointments", {
   serviceHasCancellationFee: boolean("service_has_cancellation_fee"),
   serviceCancellationFeeType: text("service_cancellation_fee_type"),
   serviceCancellationFeeAmount: integer("service_cancellation_fee_amount"),
+  depositAmountCents: integer("deposit_amount_cents"),
 
   // Reminder email tracking — set to true once the reminder has been sent
   reminder24hSent: boolean("reminder_24h_sent").default(false),
