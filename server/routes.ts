@@ -11697,10 +11697,17 @@ export async function registerRoutes(
       if (service.status === 'live' && service.stripeProductId) {
         // Name/description sync (metadata only — no provisioning, no gates).
         if (validated.name || validated.description !== undefined) {
-          await stripeService.updateStripeProduct(service.stripeProductId, {
-            name: validated.name || service.name,
-            description: validated.description !== undefined ? (validated.description || undefined) : (service.description || undefined),
-          });
+          try {
+            await stripeService.updateStripeProduct(service.stripeProductId, {
+              name: validated.name || service.name,
+              description: validated.description !== undefined ? (validated.description || undefined) : (service.description || undefined),
+            });
+          } catch (stripeErr) {
+            console.warn(
+              `[PATCH service] Stripe product sync failed for ${service.stripeProductId} — continuing with DB update.`,
+              stripeErr instanceof Error ? stripeErr.message : stripeErr
+            );
+          }
         }
 
         // Price change: route through the chokepoint so the new Price is created on
