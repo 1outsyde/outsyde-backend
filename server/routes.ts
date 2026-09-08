@@ -11766,7 +11766,10 @@ export async function registerRoutes(
         return res.status(404).json({ error: "Service not found" });
       }
 
-      await storage.deleteVendorService(req.params.id);
+      await storage.updateVendorService(req.params.id, {
+        status: 'archived',
+        stripePriceId: null,
+      });
       res.json({ success: true });
     } catch (error) {
       console.error("Delete vendor service error:", error);
@@ -11860,11 +11863,25 @@ export async function registerRoutes(
 
       // Archive in Stripe if it exists
       if (service.stripeProductId) {
-        await stripeService.archiveStripeProduct(service.stripeProductId);
+        try {
+          await stripeService.archiveStripeProduct(service.stripeProductId);
+        } catch (stripeErr) {
+          console.warn(
+            `[archive service] Stripe archive failed for ${service.stripeProductId} — continuing.`,
+            stripeErr instanceof Error ? stripeErr.message : stripeErr
+          );
+        }
       }
       // Deactivate the price if it exists
       if (service.stripePriceId) {
-        await stripeService.deactivateStripePrice(service.stripePriceId);
+        try {
+          await stripeService.deactivateStripePrice(service.stripePriceId);
+        } catch (stripeErr) {
+          console.warn(
+            `[archive service] Stripe price deactivate failed for ${service.stripePriceId} — continuing.`,
+            stripeErr instanceof Error ? stripeErr.message : stripeErr
+          );
+        }
       }
 
       // Clear Stripe IDs and set status to archived
