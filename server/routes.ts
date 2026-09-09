@@ -11643,13 +11643,12 @@ export async function registerRoutes(
   app.patch("/api/vendor/services/:id", async (req, res) => {
     const xBusinessId = req.headers['x-business-id'] as string | undefined;
     const ALLOWED_ADMIN_EMAILS = ['info@goutsyde.com', 'jamesmeyers2304@gmail.com'];
-    const userId = req.session?.userId || (req as any).user?.userId;
+    const userId = req.session?.userId || getUserIdFromRequest(req);
     if (!userId) return res.status(401).json({ error: 'Not authenticated' });
 
-    const userRecord = await storage.getUser(userId);
-    const isAdmin = ALLOWED_ADMIN_EMAILS.includes((userRecord?.email ?? '').toLowerCase());
-
     try {
+      const userRecord = await storage.getUser(userId);
+      const isAdmin = ALLOWED_ADMIN_EMAILS.includes((userRecord?.email ?? '').toLowerCase());
       // Vendors can update services before subscribing (content hidden until subscription active)
       let business;
       if (xBusinessId && isAdmin) {
@@ -11745,13 +11744,12 @@ export async function registerRoutes(
   app.delete("/api/vendor/services/:id", async (req, res) => {
     const xBusinessId = req.headers['x-business-id'] as string | undefined;
     const ALLOWED_ADMIN_EMAILS = ['info@goutsyde.com', 'jamesmeyers2304@gmail.com'];
-    const userId = req.session?.userId || (req as any).user?.userId;
+    const userId = req.session?.userId || getUserIdFromRequest(req);
     if (!userId) return res.status(401).json({ error: 'Not authenticated' });
 
-    const userRecord = await storage.getUser(userId);
-    const isAdmin = ALLOWED_ADMIN_EMAILS.includes((userRecord?.email ?? '').toLowerCase());
-
     try {
+      const userRecord = await storage.getUser(userId);
+      const isAdmin = ALLOWED_ADMIN_EMAILS.includes((userRecord?.email ?? '').toLowerCase());
       // Vendors can delete services before subscribing (content hidden until subscription active)
       let business;
       if (xBusinessId && isAdmin) {
@@ -11841,13 +11839,12 @@ export async function registerRoutes(
   app.post("/api/vendor/services/:id/archive", async (req, res) => {
     const xBusinessId = req.headers['x-business-id'] as string | undefined;
     const ALLOWED_ADMIN_EMAILS = ['info@goutsyde.com', 'jamesmeyers2304@gmail.com'];
-    const userId = req.session?.userId || (req as any).user?.userId;
+    const userId = req.session?.userId || getUserIdFromRequest(req);
     if (!userId) return res.status(401).json({ error: 'Not authenticated' });
 
-    const userRecord = await storage.getUser(userId);
-    const isAdmin = ALLOWED_ADMIN_EMAILS.includes((userRecord?.email ?? '').toLowerCase());
-
     try {
+      const userRecord = await storage.getUser(userId);
+      const isAdmin = ALLOWED_ADMIN_EMAILS.includes((userRecord?.email ?? '').toLowerCase());
       let business;
       if (xBusinessId && isAdmin) {
         business = await storage.getBusiness(xBusinessId);
@@ -11947,13 +11944,12 @@ export async function registerRoutes(
   app.post("/api/vendor/services/apply-deposit-to-all", async (req, res) => {
     const xBusinessId = req.headers['x-business-id'] as string | undefined;
     const ALLOWED_ADMIN_EMAILS = ['info@goutsyde.com', 'jamesmeyers2304@gmail.com'];
-    const userId = req.session?.userId || (req as any).user?.userId;
+    const userId = req.session?.userId || getUserIdFromRequest(req);
     if (!userId) return res.status(401).json({ error: 'Not authenticated' });
 
-    const userRecord = await storage.getUser(userId);
-    const isAdmin = ALLOWED_ADMIN_EMAILS.includes((userRecord?.email ?? '').toLowerCase());
-
     try {
+      const userRecord = await storage.getUser(userId);
+      const isAdmin = ALLOWED_ADMIN_EMAILS.includes((userRecord?.email ?? '').toLowerCase());
       let business;
       if (xBusinessId && isAdmin) {
         business = await storage.getBusiness(xBusinessId);
