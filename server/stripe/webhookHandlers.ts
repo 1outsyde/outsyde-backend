@@ -957,7 +957,9 @@ export class WebhookHandlers {
             console.error(`[Stripe] Failed to apply promo code ${ppPromoCodeId} for order ${orderId}:`, err)
           );
         }
-        const ppPointsBase = ppOriginalTotal ? Number(ppOriginalTotal) : paymentIntent.amount;
+        // Use stored gross_charge_amount for the earn formula; fall back to total_amount then PI amount
+        const grossForPoints = order.grossChargeAmount ?? order.totalAmount;
+        const ppPointsBase = ppOriginalTotal ? Number(ppOriginalTotal) : grossForPoints;
         const purchaser = userIdFromMeta ? await storage.getUser(userIdFromMeta) : null;
         if (purchaser) {
           await storage.earnPoints({
@@ -971,11 +973,44 @@ export class WebhookHandlers {
           await this.tryCompleteReferral(purchaser.id, orderId, 'cart_order');
         }
 
-        // Notify the business of the new order
+        // Resolve business, vendor, and customer once for both notifications and emails
         const orderBusinessId = metadata.businessId;
+        const orderBusiness = orderBusinessId ? await storage.getBusiness(orderBusinessId) : null;
         const vendor = orderBusinessId ? await storage.getUserByBusinessOwnerId(orderBusinessId) : null;
+        const customer = purchaser ?? await storage.getUser(order.customerId);
+
+        // Build order item list shared by consumer and vendor emails
+        const piOrderItems = ((order.items as any[]) || []).map((i: any) => ({
+          productName: i.name || i.title || i.productId || 'Item',
+          variantLabel: i.variantLabel ?? undefined,
+          vendorName: orderBusiness?.name || vendor?.name || 'Business',
+          vendorContactEmail: orderBusiness?.contactEmail ?? undefined,
+          quantity: i.quantity || 1,
+          basePrice: i.price || i.unitPrice || 0,
+        }));
+
+        // Send order confirmation to consumer — independent of vendor lookup
+        if (customer?.email) {
+          const consumerName = customer.firstName
+            ? `${customer.firstName} ${customer.lastName ?? ''}`.trim()
+            : customer.name || customer.email.split('@')[0];
+          try {
+            await sendOrderConfirmationToConsumer({
+              toEmail: customer.email,
+              consumerName,
+              orderId,
+              orderNumber: order.orderNumber,
+              items: piOrderItems,
+              totalAmountCents: order.grossChargeAmount ?? undefined,
+              platformFeeCents: order.consumerServiceFee ?? undefined,
+            });
+          } catch (emailErr) {
+            console.error('[webhook] sendOrderConfirmationToConsumer failed:', emailErr);
+          }
+        }
+
+        // Notify the business of the new order
         if (vendor) {
-          const customer = await storage.getUser(order.customerId);
           const itemCount = order.items?.length || 1;
           await NotificationTriggers.newOrderReceived({
             vendorUserId: vendor.id,
@@ -985,8 +1020,7 @@ export class WebhookHandlers {
             itemCount,
           });
 
-          // Notify the customer that their order is confirmed
-          const orderBusiness = orderBusinessId ? await storage.getBusiness(orderBusinessId) : null;
+          // Notify the customer that their order is confirmed (app push)
           NotificationTriggers.orderConfirmed({
             customerId: order.customerId,
             orderId,
@@ -994,48 +1028,36 @@ export class WebhookHandlers {
             itemCount: order.items?.length || 1,
           }).catch(err => console.error('Notification error:', err));
 
-          // Transactional emails
-          const piOrderItems = ((order.items as any[]) || []).map((i: any) => ({
-            productName: i.name || i.title || i.productId || 'Item',
-            variantLabel: i.variantLabel ?? undefined,
-            vendorName: orderBusiness?.name || vendor.name || 'Business',
-            vendorContactEmail: orderBusiness?.contactEmail ?? undefined,
-            quantity: i.quantity || 1,
-            basePrice: i.price || i.unitPrice || 0,
-          }));
-          if (customer?.email) {
-            sendOrderConfirmationToConsumer({
-              toEmail: customer.email,
-              consumerName: customer.name || customer.email,
-              orderId,
-              orderNumber: order.orderNumber,
-              items: piOrderItems,
-              // Pass stored DB amounts so the email reflects what Stripe actually charged.
-              totalAmountCents: order.grossChargeAmount ?? undefined,
-              platformFeeCents: order.consumerServiceFee ?? undefined,
-            }).catch(() => {});
-          }
           if (vendor.email) {
-            sendOrderNotificationToVendor({
-              toEmail: vendor.email,
-              vendorName: orderBusiness?.name || vendor.name || 'Business',
-              consumerName: customer?.name || 'Customer',
-              consumerUsername: customer?.username ?? undefined,
-              orderId,
-              orderNumber: order.orderNumber,
-              items: piOrderItems.map(({ vendorName: _vn, vendorContactEmail: _vce, ...rest }) => rest),
-              vendorNetCents: order.vendorNet ?? undefined,
-            }).catch(() => {});
+            try {
+              await sendOrderNotificationToVendor({
+                toEmail: vendor.email,
+                vendorName: orderBusiness?.name || vendor.name || 'Business',
+                consumerName: customer?.name || 'Customer',
+                consumerUsername: customer?.username ?? undefined,
+                orderId,
+                orderNumber: order.orderNumber,
+                items: piOrderItems.map(({ vendorName: _vn, vendorContactEmail: _vce, ...rest }) => rest),
+                vendorNetCents: order.vendorNet ?? undefined,
+              });
+            } catch (vendorEmailErr) {
+              console.error('[webhook] sendOrderNotificationToVendor failed:', vendorEmailErr);
+            }
           }
-          sendInternalEventAlert({
+        }
+
+        try {
+          await sendInternalEventAlert({
             eventType: 'product_order',
             bookingOrOrderId: orderId,
             consumerName: customer?.name || 'Customer',
             consumerEmail: customer?.email || '',
-            vendorName: orderBusiness?.name || vendor.name || 'Business',
-            vendorEmail: vendor.email || '',
+            vendorName: orderBusiness?.name || vendor?.name || 'Business',
+            vendorEmail: vendor?.email || '',
             items: piOrderItems.map(({ vendorName: _vn, vendorContactEmail: _vce, ...rest }) => rest),
-          }).catch(() => {});
+          });
+        } catch (alertErr) {
+          console.error('[webhook] sendInternalEventAlert failed:', alertErr);
         }
 
         console.log(`[Stripe] Product purchase completed: Order ${orderId} marked as paid`);

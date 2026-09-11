@@ -2252,12 +2252,9 @@ export class DatabaseStorage implements IStorage {
     return user?.loyaltyPoints || 0;
   }
 
-  // Hard cap per transaction (bonus awards bypass pending queue so keep cap here too)
-  private readonly MAX_POINTS_PER_TRANSACTION = 5000;
-
   // Calculate points for a purchase/booking using the canonical formula:
   //   base_charge = consumer_total / 1.08  (reverse the 8% upcharge)
-  //   points_earned = base_charge * 0.04 * 100  =  consumer_total_cents * 4 / 108
+  //   points_earned = base_charge * 0.04 * 100  =  consumer_total_cents * 40 / 108
   //   outsyde_revenue_cents = points_earned  (same numeric value; 100 pts == $1)
   private calcPurchasePoints(consumerTotalCents: number): { pointsEarned: number; outsydeRevenueCents: number } {
     const pointsEarned = Math.round(consumerTotalCents * 40 / 108);
@@ -2275,12 +2272,9 @@ export class DatabaseStorage implements IStorage {
     description?: string;
   }): Promise<PointTransaction> {
     // Bonus = direct point award (referrals, promotions); purchase/booking = formula-derived.
-    const rawPoints = data.transactionType === 'bonus'
+    const pointsEarned = data.transactionType === 'bonus'
       ? data.dollarAmountCents
       : this.calcPurchasePoints(data.dollarAmountCents).pointsEarned;
-
-    const isCapped = rawPoints > this.MAX_POINTS_PER_TRANSACTION;
-    const pointsEarned = isCapped ? this.MAX_POINTS_PER_TRANSACTION : rawPoints;
 
     return db.transaction(async (tx) => {
       const [userRow] = await tx.select({ loyaltyPoints: users.loyaltyPoints })
@@ -2304,8 +2298,8 @@ export class DatabaseStorage implements IStorage {
         referenceType: data.referenceType || null,
         referenceId: data.referenceId || null,
         balanceAfter: newBalance,
-        description: data.description || `Earned ${pointsEarned} points${isCapped ? ' (capped)' : ''}`,
-        capped: isCapped,
+        description: data.description || `Earned ${pointsEarned} points`,
+        capped: false,
       }).returning();
 
       return result;
@@ -2329,8 +2323,7 @@ export class DatabaseStorage implements IStorage {
     if (!pending) throw new Error(`Pending transaction ${pendingId} not found`);
     if (pending.status !== 'pending') throw new Error(`Transaction ${pendingId} is already ${pending.status}`);
 
-    const pointsToCredit = Math.min(pending.pointsEarned, this.MAX_POINTS_PER_TRANSACTION);
-    const isCapped = pointsToCredit < pending.pointsEarned;
+    const pointsToCredit = pending.pointsEarned;
 
     return db.transaction(async (tx) => {
       const [userRow] = await tx.select({ loyaltyPoints: users.loyaltyPoints })
@@ -2356,7 +2349,7 @@ export class DatabaseStorage implements IStorage {
         referenceId: pending.referenceId || null,
         balanceAfter: newBalance,
         description: pending.description || `Earned ${pointsToCredit} points`,
-        capped: isCapped,
+        capped: false,
       }).returning();
 
       const now = new Date();

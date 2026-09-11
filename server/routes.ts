@@ -795,6 +795,7 @@ export async function registerRoutes(
         selectedIndustries: data.selectedIndustries,
         industryNiches: data.industryNiches,
         industryValues: data.industryValues,
+        source: data.source || null,
       });
 
       // Auto-accept a staff invite if one was supplied — never blocks signup on failure
@@ -835,7 +836,6 @@ export async function registerRoutes(
         state: data.state,
       }).catch(err => console.error('[signup] admin notification failed:', err));
 
-      // Log source for analytics (stored in server logs; not persisted to DB yet)
       if (data.source) {
         console.log(`[signup] source=${data.source} userId=${user.id}`);
       }
