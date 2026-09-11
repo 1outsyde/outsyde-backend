@@ -253,6 +253,9 @@ export const users = pgTable("users", {
   resetCodeExpiresAt: timestamp("reset_code_expires_at"),
   resetCodeAttempts: integer("reset_code_attempts").default(0),
 
+  // Registration source (e.g. 'lotus-house-blends', 'outsyde-web', 'mobile-app')
+  source: text("source"),
+
   // Account status (isActive = admin ban only; deletionStatus drives the self-service deletion flow)
   isActive: boolean("is_active").default(true).notNull(),
 
