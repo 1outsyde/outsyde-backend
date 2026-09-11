@@ -2584,6 +2584,8 @@ export async function registerRoutes(
         userId: user.id,
         username: user.username,
         displayName: user.name,
+        firstName: user.firstName ?? null,
+        lastName: user.lastName ?? null,
         bio: user.bio ?? null,
         email: user.email,
         profilePhotoUrl: user.profileImageUrl,
@@ -2645,6 +2647,8 @@ export async function registerRoutes(
 
       console.log(
         '[AUTH_ME] userId:', user.id,
+        'firstName:', sessionState.firstName,
+        'lastName:', sessionState.lastName,
         'isAdmin:', sessionState.isAdmin,
         'isVendor:', sessionState.isVendor,
         'isInfluencer:', sessionState.isInfluencer,
@@ -2655,8 +2659,8 @@ export async function registerRoutes(
         user: {
           id: sessionState.userId,
           email: sessionState.email,
-          firstName: sessionState.displayName,
-          lastName: '',
+          firstName: sessionState.firstName,
+          lastName: sessionState.lastName,
           role: sessionState.isAdmin ? 'admin' : sessionState.isVendor ? 'vendor' : sessionState.isPhotographer ? 'photographer' : 'consumer',
           isAdmin: sessionState.isAdmin || false,
           isVendor: sessionState.isVendor || false,
