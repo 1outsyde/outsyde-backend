@@ -2584,6 +2584,8 @@ export async function registerRoutes(
         userId: user.id,
         username: user.username,
         displayName: user.name,
+        firstName: user.firstName ?? null,
+        lastName: user.lastName ?? null,
         bio: user.bio ?? null,
         email: user.email,
         profilePhotoUrl: user.profileImageUrl,
@@ -2645,6 +2647,8 @@ export async function registerRoutes(
 
       console.log(
         '[AUTH_ME] userId:', user.id,
+        'firstName:', sessionState.firstName,
+        'lastName:', sessionState.lastName,
         'isAdmin:', sessionState.isAdmin,
         'isVendor:', sessionState.isVendor,
         'isInfluencer:', sessionState.isInfluencer,
@@ -2655,8 +2659,8 @@ export async function registerRoutes(
         user: {
           id: sessionState.userId,
           email: sessionState.email,
-          firstName: sessionState.displayName,
-          lastName: '',
+          firstName: sessionState.firstName,
+          lastName: sessionState.lastName,
           role: sessionState.isAdmin ? 'admin' : sessionState.isVendor ? 'vendor' : sessionState.isPhotographer ? 'photographer' : 'consumer',
           isAdmin: sessionState.isAdmin || false,
           isVendor: sessionState.isVendor || false,
@@ -3242,6 +3246,9 @@ export async function registerRoutes(
         coverMediaUrl: z.string().url().optional().nullable(),
         coverMediaType: z.enum(['image', 'video']).optional().nullable(),
         bio: z.string().optional().nullable(),
+        firstName: z.string().max(100).optional().nullable(),
+        lastName: z.string().max(100).optional().nullable(),
+        phone: z.string().max(30).optional().nullable(),
       });
 
       const validated = updateSchema.safeParse(req.body);
@@ -3271,6 +3278,15 @@ export async function registerRoutes(
       }
       if (validated.data.bio !== undefined) {
         updateData.bio = validated.data.bio;
+      }
+      if (validated.data.firstName !== undefined) {
+        updateData.firstName = validated.data.firstName;
+      }
+      if (validated.data.lastName !== undefined) {
+        updateData.lastName = validated.data.lastName;
+      }
+      if (validated.data.phone !== undefined) {
+        updateData.phone = validated.data.phone;
       }
 
       if (Object.keys(updateData).length === 0) {
