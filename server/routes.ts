@@ -8925,7 +8925,7 @@ export async function registerRoutes(
         const session = await stripeService.createTierSubscriptionCheckout(
           stripeCustomerId,
           tierId,
-          `${baseUrl}/vendor-dashboard?subscription=success`,
+          `${baseUrl}/subscription/success`,
           `${baseUrl}/vendor-dashboard?subscription=cancelled`,
           userId,
           business.id
