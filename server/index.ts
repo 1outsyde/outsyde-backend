@@ -68,6 +68,9 @@ const clientSiteOrigins = [
   'https://www.lotushouseblends.com',
   'https://braids-with-love-site.vercel.app',
   'https://www.braids-with-love-site.vercel.app',
+  'https://braidsbylana.com',
+  'https://www.braidsbylana.com',
+  'https://braids-with-lana-site.vercel.app',
 ];
 clientSiteOrigins.forEach(o => allowedOrigins.push(o));
 
