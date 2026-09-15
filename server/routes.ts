@@ -10589,8 +10589,12 @@ export async function registerRoutes(
         return res.status(404).json({ error: "No business found for this account" });
       }
 
-      const { coverImage, coverMediaType, ctaConfig, ...otherFields } = req.body;
+      const { coverImage, coverMediaType, ctaConfig, siteConfig, ...otherFields } = req.body;
       const updates: Record<string, any> = { ...otherFields };
+
+      if (siteConfig !== undefined) {
+        updates.siteConfig = siteConfig;
+      }
 
       // Resolve best_selling product before persisting ctaConfig
       if (ctaConfig !== undefined) {

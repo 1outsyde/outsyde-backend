@@ -71,6 +71,14 @@ export const oauthStates = pgTable(
 );
 
 /* =====================================================
+   SITE CONFIG TYPE
+===================================================== */
+export interface SiteConfig {
+  stylistPhoto?: string | null;
+  galleryPhotos?: (string | null)[];
+}
+
+/* =====================================================
    CTA CONFIG TYPE
 ===================================================== */
 export interface CtaConfig {
@@ -395,6 +403,9 @@ export const businesses = pgTable("businesses", {
 
   // Floating CTA button configuration (set by vendor on their profile screen)
   ctaConfig: jsonb("cta_config").$type<CtaConfig>(),
+
+  // Vendor whitelabel site media config (stylist photo + gallery slots)
+  siteConfig: jsonb("site_config").$type<SiteConfig>(),
 
   createdAt: timestamp("created_at").defaultNow().notNull(),
 }, (table) => ({
