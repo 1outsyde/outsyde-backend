@@ -73,5 +73,6 @@ export function toPublicBusinessDTO(
     acceptsOnlinePayments: !!(business.stripeAccountId && business.stripeOnboardingComplete),
 
     ctaConfig: business.ctaConfig ?? null,
+    siteConfig: business.siteConfig ?? null,
   };
 }
