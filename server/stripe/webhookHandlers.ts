@@ -2339,8 +2339,18 @@ export class WebhookHandlers {
         console.log(`[Stripe] Ignoring stale/out-of-order account.updated for business ${business.id} — event time ${incomingEventTime.toISOString()} <= last applied ${new Date(lastAppliedTime).toISOString()}`);
       } else {
         const wasAlreadyComplete = business.stripeOnboardingComplete === true;
+        // Never downgrade stripe_onboarding_complete true → false. That flag
+        // controls public visibility via isBusinessVisibleToPublic, so an
+        // incomplete account.updated (e.g. Express account just created,
+        // charges_enabled/details_submitted still false) would take a live
+        // vendor storefront offline mid-onboarding. Still write
+        // stripeOnboardingLastEventAt so the stale-event guard stays accurate.
+        const skipCompleteDowngrade = wasAlreadyComplete && !isOnboardingComplete;
+        if (skipCompleteDowngrade) {
+          console.log(`[Stripe] Skipping stripeOnboardingComplete downgrade for business ${business.id} — keeping true; writing lastEventAt only`);
+        }
         await storage.updateBusiness(business.id, {
-          stripeOnboardingComplete: isOnboardingComplete,
+          ...(skipCompleteDowngrade ? {} : { stripeOnboardingComplete: isOnboardingComplete }),
           stripeOnboardingLastEventAt: incomingEventTime,
         });
 
@@ -2399,9 +2409,19 @@ export class WebhookHandlers {
         console.log(`[Stripe] Ignoring stale/out-of-order account.updated for staff ${staffMember.id} — event time ${incomingEventTime.toISOString()} <= last applied ${new Date(lastAppliedTime).toISOString()}`);
       } else {
         const wasAlreadyComplete = staffMember.stripeOnboardingComplete === true;
-        console.log(`[Stripe] Updating staff ${staffMember.id} (${staffMember.displayName}) stripeOnboardingComplete=${isOnboardingComplete}`);
+        // Never downgrade stripe_onboarding_complete true → false. Public
+        // staff listing/availability gates on staff.stripeOnboardingComplete,
+        // so an incomplete account.updated would hide a bookable staff
+        // member mid-onboarding. Still write stripeOnboardingLastEventAt
+        // so the stale-event guard stays accurate.
+        const skipCompleteDowngrade = wasAlreadyComplete && !isOnboardingComplete;
+        if (skipCompleteDowngrade) {
+          console.log(`[Stripe] Skipping stripeOnboardingComplete downgrade for staff ${staffMember.id} — keeping true; writing lastEventAt only`);
+        } else {
+          console.log(`[Stripe] Updating staff ${staffMember.id} (${staffMember.displayName}) stripeOnboardingComplete=${isOnboardingComplete}`);
+        }
         await storage.updateStaffMember(staffMember.id, {
-          stripeOnboardingComplete: isOnboardingComplete,
+          ...(skipCompleteDowngrade ? {} : { stripeOnboardingComplete: isOnboardingComplete }),
           stripeOnboardingLastEventAt: incomingEventTime,
         });
         if (isOnboardingComplete) {
