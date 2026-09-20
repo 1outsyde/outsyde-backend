@@ -9177,23 +9177,26 @@ export async function registerRoutes(
   // ==================== STRIPE EXPRESS ONBOARDING ====================
 
   // Get vendor's Stripe onboarding status (supports vendors, photographers, and influencers)
-  app.get("/api/vendor/stripe-onboarding/status", async (req, res) => {
-    const userId = req.session?.userId;
+  app.get("/api/vendor/stripe-onboarding/status", optionalAuthMiddleware, async (req, res) => {
+    const authReq = req as AuthenticatedRequest;
+    const userId = authReq.user?.userId || req.session?.userId;
     if (!userId) {
       return res.status(401).json({ error: "Not authenticated" });
     }
 
     const user = await storage.getUser(userId);
     const isInfluencer = user?.isInfluencer;
+    const isVendor = user?.isVendor || req.session?.isVendor;
+    const isPhotographer = user?.isPhotographer || req.session?.isPhotographer;
 
-    if (!req.session?.isVendor && !req.session?.isPhotographer && !isInfluencer) {
+    if (!isVendor && !isPhotographer && !isInfluencer) {
       return res.status(403).json({ error: "Only vendors, photographers, or influencers can access this" });
     }
 
     try {
       const baseUrl = process.env.API_BASE_URL || `https://${process.env.REPLIT_DOMAINS?.split(',')[0] || 'localhost:5000'}`;
       
-      if (req.session?.isVendor) {
+      if (isVendor) {
         const business = await storage.getBusinessByOwnerId(userId);
         if (!business) {
           return res.status(404).json({ error: "Business not found" });
@@ -9230,7 +9233,7 @@ export async function registerRoutes(
         });
       }
 
-      if (req.session?.isPhotographer) {
+      if (isPhotographer) {
         const photographer = await storage.getPhotographerByUserId(userId);
         if (!photographer) {
           return res.status(404).json({ error: "Photographer profile not found" });
