@@ -5337,15 +5337,14 @@ export async function registerRoutes(
         if (!photographerUser) {
           return res.status(404).json({ error: "User not found" });
         }
-        let photographerStripeCustomerId = photographerUser.stripeCustomerId;
-        if (!photographerStripeCustomerId) {
-          const customer = await stripeService.createCustomer(
-            photographerUser.email!,
-            userId,
-            photographerUser.name || photographerUser.email!
-          );
-          photographerStripeCustomerId = customer.id;
-          await storage.updateUser(userId, { stripeCustomerId: customer.id });
+        const photographerStripeCustomerId = await stripeService.getOrCreateStripeCustomer({
+          userId,
+          email: photographerUser.email!,
+          name: photographerUser.name || undefined,
+          existingStripeCustomerId: photographerUser.stripeCustomerId,
+        });
+        if (!photographerUser.stripeCustomerId || photographerUser.stripeCustomerId !== photographerStripeCustomerId) {
+          await storage.updateUser(userId, { stripeCustomerId: photographerStripeCustomerId });
         }
 
         // PaymentIntent on platform balance — no transfer_data. After
@@ -5541,12 +5540,15 @@ export async function registerRoutes(
         return res.status(404).json({ error: "User not found" });
       }
 
-      // Get or create Stripe customer (platform customer, NOT Connect)
-      let stripeCustomerId = user.stripeCustomerId;
-      if (!stripeCustomerId) {
-        const customer = await stripeService.createCustomer(user.email!, userId, user.name || user.email!);
-        stripeCustomerId = customer.id;
-        await storage.updateUser(userId, { stripeCustomerId: customer.id });
+      // Get or create Stripe customer — recovers stale/deleted IDs, not just null
+      const stripeCustomerId = await stripeService.getOrCreateStripeCustomer({
+        userId,
+        email: user.email!,
+        name: user.name || undefined,
+        existingStripeCustomerId: user.stripeCustomerId,
+      });
+      if (!user.stripeCustomerId || user.stripeCustomerId !== stripeCustomerId) {
+        await storage.updateUser(userId, { stripeCustomerId });
       }
 
       const paymentIntent = await stripeService.createPlatformPaymentIntent({
