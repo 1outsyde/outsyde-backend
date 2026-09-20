@@ -9402,10 +9402,15 @@ export async function registerRoutes(
         }
 
         // Generate onboarding link with HTTPS redirect URLs (Stripe rejects deep links)
+        const webRedirect = req.body?.webRedirect === true;
         const onboardingLink = await stripeService.createConnectOnboardingLink(
           stripeAccountId,
-          `${baseUrl}/api/stripe/connect-refresh?account=${stripeAccountId}&type=vendor`,
-          `${baseUrl}/api/stripe/connect-return?account=${stripeAccountId}&type=vendor`
+          webRedirect
+            ? `${baseUrl}/api/stripe/connect-refresh?account=${stripeAccountId}&type=vendor-web`
+            : `${baseUrl}/api/stripe/connect-refresh?account=${stripeAccountId}&type=vendor`,
+          webRedirect
+            ? `${baseUrl}/api/stripe/connect-return?account=${stripeAccountId}&type=vendor-web`
+            : `${baseUrl}/api/stripe/connect-return?account=${stripeAccountId}&type=vendor`
         );
 
         // Store the URL for reference
@@ -9547,6 +9552,11 @@ export async function registerRoutes(
             if (business) {
               await storage.updateBusiness(business.id, { stripeOnboardingComplete: true });
             }
+          } else if (type === 'vendor-web') {
+            const business = await storage.getBusinessByStripeAccountId(account as string);
+            if (business) {
+              await storage.updateBusiness(business.id, { stripeOnboardingComplete: true });
+            }
           } else if (type === 'photographer') {
             const photographer = await storage.getPhotographerByStripeAccountId(account as string);
             if (photographer) {
@@ -9563,6 +9573,9 @@ export async function registerRoutes(
         console.error("[Stripe Connect] Failed to retrieve account on return:", e);
       }
     }
+    if (type === 'vendor-web') {
+      return res.redirect(`${process.env.FRONTEND_URL}/vendor-dashboard/stripe/return?status=complete`);
+    }
     let deepLink = `outsyde://stripe-return?status=complete&type=${type || 'vendor'}`;
     if (type === 'staff' && staffId) {
       deepLink += `&staffId=${staffId}`;
@@ -9573,6 +9586,9 @@ export async function registerRoutes(
   // Stripe Connect refresh — called when onboarding link expires
   app.get("/api/stripe/connect-refresh", async (req, res) => {
     const { type, staffId } = req.query;
+    if (type === 'vendor-web') {
+      return res.redirect(`${process.env.FRONTEND_URL}/vendor-dashboard/stripe/refresh`);
+    }
     let deepLink = `outsyde://stripe-return?status=refresh&type=${type || 'vendor'}`;
     if (type === 'staff' && staffId) {
       deepLink += `&staffId=${staffId}`;
