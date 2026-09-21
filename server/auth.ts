@@ -38,6 +38,15 @@ export async function verifyPassword(password: string, hash: string): Promise<bo
   return bcrypt.compare(password, hash);
 }
 
+// bcrypt hashes always start with $2b$ or $2a$
+export function isLegacyPassword(storedHash: string): boolean {
+  return !storedHash.startsWith("$2b$") && !storedHash.startsWith("$2a$");
+}
+
+export function verifyLegacyPassword(plaintext: string, storedBase64: string): boolean {
+  return Buffer.from(plaintext).toString("base64") === storedBase64;
+}
+
 export function generateAccessToken(payload: TokenPayload): string {
   return jwt.sign(payload, JWT_SECRET, { expiresIn: ACCESS_TOKEN_EXPIRY });
 }

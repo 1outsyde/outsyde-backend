@@ -88,6 +88,8 @@ import {
   optionalAuthMiddleware,
   getUserIdFromRequest,
   isUserAllowedToAuthenticate,
+  isLegacyPassword,
+  verifyLegacyPassword,
   ACCESS_TOKEN_EXPIRY_SECONDS,
   REFRESH_TOKEN_EXPIRY_MS,
   type AuthenticatedRequest,
@@ -173,10 +175,8 @@ import { grantToken } from "./utils/grantToken";
 // This flag only affects PaymentIntent creation - booking flows still work normally
 const PAYMENTS_ENABLED = process.env.PAYMENTS_ENABLED !== 'false'; // Default: true unless explicitly set to 'false'
 
-// Legacy password functions for backward compatibility with existing users
-function legacyHashPassword(password: string): string {
-  return Buffer.from(password).toString("base64");
-}
+// Legacy password functions kept for internal reference only — canonical
+// implementations are in auth.ts (isLegacyPassword, verifyLegacyPassword)
 
 // Helper to check if vendor has active subscription (for mutation endpoints)
 async function requireActiveVendorSubscription(userId: string): Promise<{ allowed: boolean; error?: string }> {
@@ -233,14 +233,6 @@ async function getStaffSeatWarning(businessId: string): Promise<string | null> {
   return uncappedTier ? `${base} — ${uncappedTier.displayName} removes the cap` : base;
 }
 
-function legacyVerifyPassword(password: string, hash: string): boolean {
-  return legacyHashPassword(password) === hash;
-}
-
-// Check if password is legacy (base64) or new (bcrypt)
-function isLegacyHash(hash: string): boolean {
-  return !hash.startsWith("$2");
-}
 
 function detectDeviceFromRequest(req: any): string {
   const ua = (req.headers['user-agent'] || '').toLowerCase();
@@ -1236,14 +1228,22 @@ export async function registerRoutes(
       }
 
       let isValidPassword = false;
-      if (isLegacyHash(user.password)) {
-        isValidPassword = legacyVerifyPassword(password, user.password);
+      const legacy = isLegacyPassword(user.password);
+      if (legacy) {
+        isValidPassword = verifyLegacyPassword(password, user.password);
       } else {
         isValidPassword = await verifyPassword(password, user.password);
       }
 
       if (!isValidPassword) {
         return res.status(401).json({ success: false, message: "Invalid credentials" });
+      }
+
+      // Transparent migration: upgrade legacy Base64 hash to bcrypt on first successful login
+      if (legacy) {
+        const bcryptHash = await hashPassword(password);
+        await storage.updateUser(user.id, { password: bcryptHash });
+        console.log(`[auth] migrated legacy password for user ${user.id}`);
       }
 
       if (!isUserAllowedToAuthenticate(user)) {
@@ -2358,14 +2358,22 @@ export async function registerRoutes(
       }
 
       let isValidPassword = false;
-      if (isLegacyHash(user.password)) {
-        isValidPassword = legacyVerifyPassword(password, user.password);
+      const legacy = isLegacyPassword(user.password);
+      if (legacy) {
+        isValidPassword = verifyLegacyPassword(password, user.password);
       } else {
         isValidPassword = await verifyPassword(password, user.password);
       }
 
       if (!isValidPassword) {
         return res.status(401).json({ success: false, error: { code: "INVALID_CREDENTIALS", message: "Invalid credentials" } });
+      }
+
+      // Transparent migration: upgrade legacy Base64 hash to bcrypt on first successful login
+      if (legacy) {
+        const bcryptHash = await hashPassword(password);
+        await storage.updateUser(user.id, { password: bcryptHash });
+        console.log(`[auth] migrated legacy password for user ${user.id}`);
       }
 
       if (!isUserAllowedToAuthenticate(user)) {
@@ -2418,17 +2426,6 @@ export async function registerRoutes(
           req.session.photographerId = tokenPayload.photographerId;
         }
       }
-
-      // TEMP DEBUG: Log session state after login
-      console.log("LOGIN SESSION SET:", {
-        userId: req.session?.userId,
-        role: req.session?.role,
-        isPhotographer: req.session?.isPhotographer,
-        isVendor: req.session?.isVendor,
-        businessId: req.session?.businessId,
-        photographerId: req.session?.photographerId,
-        sessionID: req.sessionID,
-      });
 
       const safeUser = sanitizeUserForResponse(user, { includeOwnData: true });
 
