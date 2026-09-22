@@ -629,7 +629,10 @@ export class WebhookHandlers {
           // Uses calculateBookingFees() from fees.ts (8% consumer fee / 2% booking fee —
           // universal rate as of the fee-model migration). vendorNetCents from this
           // breakdown is transferred to the business/staff connected account below.
-          const feeBreakdown = calculateBookingFees(appointment.totalPrice);
+          // Use the amount actually charged: depositAmountCents when a deposit was
+          // configured, otherwise the full service price (no deposit = full charge).
+          const chargedAmountCents = appointment.depositAmountCents ?? appointment.totalPrice;
+          const feeBreakdown = calculateBookingFees(chargedAmountCents);
           const vendorNetCents = feeBreakdown.vendorNetCents;
 
           const business = businessId ? await storage.getBusiness(businessId) : undefined;
@@ -685,8 +688,10 @@ export class WebhookHandlers {
             }
           }
 
-          // Points + referral
-          await storage.earnPoints({
+          // Points: create a pending transaction on totalPrice (full service value).
+          // Points are held until the appointment is marked completed — they are
+          // approved in PATCH /api/bookings/appointments/:id/complete.
+          await storage.createPendingPointTransaction({
             userId: appointment.clientId,
             dollarAmountCents: appointment.totalPrice,
             transactionType: 'business_transaction',

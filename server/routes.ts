@@ -8179,6 +8179,17 @@ export async function registerRoutes(
         metadata: { action: 'business_complete' },
       });
 
+      // Approve the pending loyalty points transaction created at booking payment time.
+      // The pending transaction holds points on totalPrice until the appointment completes.
+      try {
+        const pendingTx = await storage.getPendingPointTransactionByReference('appointment', appointmentId);
+        if (pendingTx) {
+          await storage.approvePendingPointTransaction(pendingTx.id, userId);
+        }
+      } catch (pointsErr) {
+        console.error('[complete] Failed to approve pending loyalty points:', pointsErr);
+      }
+
       // Award completion bonus points to the client
       const COMPLETION_POINTS = 250;
       try {

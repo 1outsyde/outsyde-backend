@@ -421,6 +421,17 @@ export interface IStorage {
     referenceId?: string;
     description?: string;
   }): Promise<PointTransaction>;
+  createPendingPointTransaction(data: {
+    userId: string;
+    dollarAmountCents: number;
+    transactionType: 'photographer_booking' | 'business_transaction' | 'bonus';
+    businessId?: string;
+    businessName?: string;
+    referenceType?: string;
+    referenceId?: string;
+    description?: string;
+  }): Promise<PendingPointTransaction>;
+  getPendingPointTransactionByReference(referenceType: string, referenceId: string): Promise<PendingPointTransaction | null>;
   getPendingPointTransactions(opts?: { userId?: string; status?: string; limit?: number }): Promise<PendingPointTransaction[]>;
   approvePendingPointTransaction(pendingId: string, reviewerId: string, note?: string): Promise<{ pending: PendingPointTransaction; live: PointTransaction }>;
   rejectPendingPointTransaction(pendingId: string, reviewerId: string, note?: string): Promise<PendingPointTransaction>;
@@ -2304,6 +2315,46 @@ export class DatabaseStorage implements IStorage {
 
       return result;
     });
+  }
+
+  async createPendingPointTransaction(data: {
+    userId: string;
+    dollarAmountCents: number;
+    transactionType: 'photographer_booking' | 'business_transaction' | 'bonus';
+    businessId?: string;
+    businessName?: string;
+    referenceType?: string;
+    referenceId?: string;
+    description?: string;
+  }): Promise<PendingPointTransaction> {
+    const { pointsEarned, outsydeRevenueCents } = this.calcPurchasePoints(data.dollarAmountCents);
+    const [result] = await db.insert(pendingPointTransactions).values({
+      id: randomUUID(),
+      userId: data.userId,
+      dollarAmountCents: data.dollarAmountCents,
+      transactionType: data.transactionType,
+      pointsEarned,
+      outsydeRevenueCents,
+      businessId: data.businessId || null,
+      businessName: data.businessName || null,
+      referenceType: data.referenceType || null,
+      referenceId: data.referenceId || null,
+      description: data.description || `Pending ${pointsEarned} points`,
+      status: 'pending',
+    }).returning();
+    return result;
+  }
+
+  async getPendingPointTransactionByReference(referenceType: string, referenceId: string): Promise<PendingPointTransaction | null> {
+    const [row] = await db.select()
+      .from(pendingPointTransactions)
+      .where(and(
+        eq(pendingPointTransactions.referenceType, referenceType),
+        eq(pendingPointTransactions.referenceId, referenceId),
+        eq(pendingPointTransactions.status, 'pending'),
+      ))
+      .limit(1);
+    return row ?? null;
   }
 
   async getPendingPointTransactions(opts: { userId?: string; status?: string; limit?: number } = {}): Promise<PendingPointTransaction[]> {
