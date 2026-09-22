@@ -789,9 +789,18 @@ export class StripeService {
   /**
    * Archive a Stripe Product (set active=false)
    * Used when vendor archives their product/service
+   * Pass connectedAccountId when the product lives on a Connect account.
    */
-  async archiveStripeProduct(productId: string) {
+  async archiveStripeProduct(productId: string, connectedAccountId?: string) {
     const stripe = await getUncachableStripeClient();
+
+    if (connectedAccountId) {
+      return stripe.products.update(
+        productId,
+        { active: false },
+        { stripeAccount: connectedAccountId },
+      );
+    }
 
     return stripe.products.update(productId, {
       active: false,

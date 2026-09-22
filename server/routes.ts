@@ -11221,14 +11221,28 @@ export async function registerRoutes(
       
       // Handle Stripe catalog updates for live products.
       let stripeUpdates: any = {};
-      if (product.status === 'live' && product.stripeProductId) {
+      if (product.status === 'live' && product.stripeProductId && business.stripeAccountId) {
         // Name/description/image sync (metadata only — no provisioning, no gates).
+        // The Product lives on the vendor's Connect account, so the account must be
+        // passed through — without it Stripe resolves the ID against the platform
+        // account and every rename fails with resource_missing.
         if (validated.name || validated.description !== undefined || validated.images !== undefined) {
-          await stripeService.updateStripeProduct(product.stripeProductId, {
-            name: validated.name || product.name,
-            description: validated.description !== undefined ? (validated.description || undefined) : (product.description || undefined),
-            images: validated.images || product.images || (product.imageUrl ? [product.imageUrl] : undefined),
-          });
+          try {
+            await stripeService.updateStripeProduct(
+              product.stripeProductId,
+              {
+                name: validated.name || product.name,
+                description: validated.description !== undefined ? (validated.description || undefined) : (product.description || undefined),
+                images: validated.images || product.images || (product.imageUrl ? [product.imageUrl] : undefined),
+              },
+              business.stripeAccountId,
+            );
+          } catch (stripeErr) {
+            console.error(
+              `[PATCH product] Stripe product sync failed for ${product.stripeProductId} on ${business.stripeAccountId} — continuing with DB update.`,
+              stripeErr instanceof Error ? stripeErr.message : stripeErr
+            );
+          }
         }
 
         // Price change: route through the chokepoint so the new Price is created on
@@ -11385,13 +11399,20 @@ export async function registerRoutes(
         return res.status(404).json({ error: "Product not found" });
       }
 
-      // Archive in Stripe if it exists
+      // Archive in Stripe if it exists. Catalog items live on the vendor's Connect
+      // account, so the account has to be passed through on both calls.
       if (product.stripeProductId) {
-        await stripeService.archiveStripeProduct(product.stripeProductId);
+        await stripeService.archiveStripeProduct(
+          product.stripeProductId,
+          business.stripeAccountId ?? undefined,
+        );
       }
       // Deactivate the price if it exists
       if (product.stripePriceId) {
-        await stripeService.deactivateStripePrice(product.stripePriceId);
+        await stripeService.deactivateStripePrice(
+          product.stripePriceId,
+          business.stripeAccountId ?? undefined,
+        );
       }
 
       // Clear Stripe IDs and set status to archived
@@ -11734,17 +11755,24 @@ export async function registerRoutes(
 
       // Handle Stripe catalog updates for live services.
       let stripeUpdates: any = {};
-      if (service.status === 'live' && service.stripeProductId) {
+      if (service.status === 'live' && service.stripeProductId && business.stripeAccountId) {
         // Name/description sync (metadata only — no provisioning, no gates).
+        // The Product lives on the vendor's Connect account, so the account must be
+        // passed through — without it Stripe resolves the ID against the platform
+        // account and every rename fails with resource_missing.
         if (validated.name || validated.description !== undefined) {
           try {
-            await stripeService.updateStripeProduct(service.stripeProductId, {
-              name: validated.name || service.name,
-              description: validated.description !== undefined ? (validated.description || undefined) : (service.description || undefined),
-            });
+            await stripeService.updateStripeProduct(
+              service.stripeProductId,
+              {
+                name: validated.name || service.name,
+                description: validated.description !== undefined ? (validated.description || undefined) : (service.description || undefined),
+              },
+              business.stripeAccountId,
+            );
           } catch (stripeErr) {
-            console.warn(
-              `[PATCH service] Stripe product sync failed for ${service.stripeProductId} — continuing with DB update.`,
+            console.error(
+              `[PATCH service] Stripe product sync failed for ${service.stripeProductId} on ${business.stripeAccountId} — continuing with DB update.`,
               stripeErr instanceof Error ? stripeErr.message : stripeErr
             );
           }
@@ -11899,12 +11927,16 @@ export async function registerRoutes(
         return res.status(404).json({ error: "Service not found" });
       }
 
-      // Archive in Stripe if it exists
+      // Archive in Stripe if it exists. Catalog items live on the vendor's Connect
+      // account, so the account has to be passed through on both calls.
       if (service.stripeProductId) {
         try {
-          await stripeService.archiveStripeProduct(service.stripeProductId);
+          await stripeService.archiveStripeProduct(
+            service.stripeProductId,
+            business.stripeAccountId ?? undefined,
+          );
         } catch (stripeErr) {
-          console.warn(
+          console.error(
             `[archive service] Stripe archive failed for ${service.stripeProductId} — continuing.`,
             stripeErr instanceof Error ? stripeErr.message : stripeErr
           );
@@ -11913,9 +11945,12 @@ export async function registerRoutes(
       // Deactivate the price if it exists
       if (service.stripePriceId) {
         try {
-          await stripeService.deactivateStripePrice(service.stripePriceId);
+          await stripeService.deactivateStripePrice(
+            service.stripePriceId,
+            business.stripeAccountId ?? undefined,
+          );
         } catch (stripeErr) {
-          console.warn(
+          console.error(
             `[archive service] Stripe price deactivate failed for ${service.stripePriceId} — continuing.`,
             stripeErr instanceof Error ? stripeErr.message : stripeErr
           );
