@@ -11,43 +11,56 @@
  * It is idempotent: products whose Stripe name already matches are skipped.
  *
  * Dry run (default), scoped to one business:
- *   npx tsx scripts/resync-stripe-product-names.ts --business=<businessId>
+ *   npx tsx scripts/resync-stripe-catalog-names.ts --business=<businessId>
  *
- * Apply, platform-wide:
- *   npx tsx scripts/resync-stripe-product-names.ts --apply
+ * Apply platform-wide, excluding one or more businesses:
+ *   npx tsx scripts/resync-stripe-catalog-names.ts --apply --skip-business=<id>,<id>
  *
  * Requires DATABASE_URL and STRIPE_SECRET_KEY.
  */
 
-import { and, eq, isNotNull } from "drizzle-orm";
+import { and, eq, notInArray } from "drizzle-orm";
 import { db } from "../server/db";
 import { businesses, vendorServices } from "@shared/schema";
 import { getUncachableStripeClient } from "../server/stripe/stripeClient";
 
 const APPLY = process.argv.includes("--apply");
-const businessArg = process.argv.find((a) => a.startsWith("--business="));
-const BUSINESS_ID = businessArg ? businessArg.split("=")[1] : null;
 
-const LOG_PREFIX = "[resync-product-names]";
+function readArg(flag: string): string | null {
+  const match = process.argv.find((a) => a.startsWith(`${flag}=`));
+  return match ? match.slice(flag.length + 1) : null;
+}
+
+const BUSINESS_ID = readArg("--business");
+const SKIP_BUSINESS_IDS = (readArg("--skip-business") ?? "")
+  .split(",")
+  .map((id) => id.trim())
+  .filter(Boolean);
+
+const LOG_PREFIX = "[resync-catalog-names]";
 
 async function main() {
   console.log(
     `${LOG_PREFIX} Running in ${APPLY ? "APPLY" : "DRY-RUN"} mode` +
       (BUSINESS_ID ? ` for business ${BUSINESS_ID}` : " platform-wide"),
   );
+  if (SKIP_BUSINESS_IDS.length > 0) {
+    console.log(`${LOG_PREFIX} Excluding ${SKIP_BUSINESS_IDS.length} business(es): ${SKIP_BUSINESS_IDS.join(", ")}`);
+  }
 
-  const filters = [
-    eq(vendorServices.status, "live"),
-    isNotNull(vendorServices.stripeProductId),
-  ];
+  const filters = [eq(vendorServices.status, "live")];
   if (BUSINESS_ID) {
     filters.push(eq(vendorServices.businessId, BUSINESS_ID));
+  }
+  if (SKIP_BUSINESS_IDS.length > 0) {
+    filters.push(notInArray(vendorServices.businessId, SKIP_BUSINESS_IDS));
   }
 
   const rows = await db
     .select({
       serviceId: vendorServices.id,
       serviceName: vendorServices.name,
+      price: vendorServices.price,
       stripeProductId: vendorServices.stripeProductId,
       businessId: businesses.id,
       businessName: businesses.name,
@@ -59,7 +72,7 @@ async function main() {
     .orderBy(businesses.name, vendorServices.createdAt);
 
   if (rows.length === 0) {
-    console.log(`${LOG_PREFIX} No live services with a Stripe product found. Nothing to do.`);
+    console.log(`${LOG_PREFIX} No live services found. Nothing to do.`);
     return;
   }
 
@@ -74,13 +87,25 @@ async function main() {
   for (const row of rows) {
     const label = `${row.businessName ?? row.businessId} / ${row.serviceId}`;
 
+    // A live service can still be unprovisioned (never went live through Stripe)
+    // or priced at zero, in which case there is no Product to rename.
+    if (!row.stripeProductId) {
+      console.log(`  SKIP  ${label} — no Stripe product`);
+      skipped++;
+      continue;
+    }
+    if (row.price <= 0) {
+      console.log(`  SKIP  ${label} — price is ${row.price}`);
+      skipped++;
+      continue;
+    }
     if (!row.stripeAccountId) {
-      console.warn(`  SKIP  ${label} — business has no Stripe Connect account`);
+      console.log(`  SKIP  ${label} — business has no Stripe Connect account`);
       skipped++;
       continue;
     }
 
-    const productId = row.stripeProductId!;
+    const productId = row.stripeProductId;
     const acct = { stripeAccount: row.stripeAccountId } as const;
     // Several names carry stray whitespace from vendor input; Stripe is the
     // customer-facing surface, so push the trimmed form.
