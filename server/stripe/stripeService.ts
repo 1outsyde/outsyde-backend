@@ -429,6 +429,10 @@ export class StripeService {
     metadata: Record<string, string>;
     description?: string;
     saveForFutureUse?: boolean;
+    // Deterministic key so a retry returns the PaymentIntent an earlier
+    // attempt created instead of creating a second one. Stripe rejects a
+    // reused key sent with different parameters. Default: random per call.
+    idempotencyKey?: string;
   }) {
     const stripe = await getUncachableStripeClient();
 
@@ -453,7 +457,7 @@ export class StripeService {
     }
 
     return stripe.paymentIntents.create(paymentIntentData as any, {
-      idempotencyKey: idempotencyKey('pi'),
+      idempotencyKey: params.idempotencyKey ?? idempotencyKey('pi'),
     });
   }
 

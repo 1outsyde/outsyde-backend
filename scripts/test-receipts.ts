@@ -361,6 +361,327 @@ async function main() {
     return results;
   }
 
+  // ── App deposit prerequisites (Fix 2) ─────────────────────────────────────
+  // Real routes and stripeService; Stripe mocked only at the SDK resource
+  // prototypes. Each check is tagged with its test id and reported as a
+  // PASS/FAIL table (no early exit), so the same file run against main shows
+  // exactly which ids fail there.
+  async function runDepositTests(): Promise<{ failed: string[] }> {
+    const express = (await import("express")).default;
+    const { createServer } = await import("node:http");
+    const { registerRoutes } = await import("../server/routes");
+    const { generateAccessToken } = await import("../server/auth");
+    const Stripe: any = (await import("stripe")).default;
+    const R = Stripe.resources;
+
+    const results = new Map<string, string[]>();
+    const check = (id: string, cond: unknown, msg: string) => {
+      if (!results.has(id)) results.set(id, []);
+      if (!cond) results.get(id)!.push(msg);
+    };
+
+    const app = express();
+    app.use(express.json());
+    const server = createServer(app);
+    await registerRoutes(server, app);
+    await new Promise<void>(r => server.listen(0, "127.0.0.1", () => r()));
+    const port = (server.address() as any).port;
+
+    // ── Fixtures ────────────────────────────────────────────────────────────
+    const dtag = randomUUID().slice(0, 8);
+    const [vendor2] = await db.insert(schema.users).values({ username: `v2_${dtag}`, email: `vendor2-${dtag}@example.com`, name: "Vendor Two" } as any).returning();
+    const [business2] = await db.insert(schema.businesses).values({ ownerId: vendor2.id, name: "Second Braids", category: "beauty" } as any).returning();
+    await db.update(schema.businesses).set({ stripeAccountId: `acct_biz_${dtag}`, autoAcceptBookings: true } as any).where(eq(schema.businesses.id, business.id));
+    await db.update(schema.photographers).set({ stripeAccountId: `acct_ph_${dtag}`, stripeOnboardingComplete: true, autoAcceptBookings: true } as any).where(eq(schema.photographers.id, photographer.id));
+    await db.update(schema.users).set({ stripeCustomerId: `cus_dep_${dtag}` } as any).where(eq(schema.users.id, consumer.id));
+    const [staff] = await db.insert(schema.staffMembers).values({ businessId: business.id, displayName: "Test Staff", status: "active", stripeOnboardingComplete: true, stripeAccountId: `acct_staff_${dtag}` } as any).returning();
+    const [staffSvc] = await db.insert(schema.staffServices).values({ staffMemberId: staff.id, businessId: business.id, name: "Staff braids", priceCents: 12500, durationMinutes: 60, status: "live" } as any).returning();
+    const [photoSvc] = await db.insert(schema.photographerServices).values({ photographerId: photographer.id, name: "Portrait", priceCents: 15000, estimatedDurationMinutes: 60, status: "live" } as any).returning();
+    const [bizDep] = await db.insert(schema.vendorServices).values({ businessId: business.id, name: "Knotless (deposit)", price: 27500, durationMinutes: 60, depositAmountCents: 3000 } as any).returning();
+    const [bizFull] = await db.insert(schema.vendorServices).values({ businessId: business.id, name: "Knotless (full)", price: 27500, durationMinutes: 60 } as any).returning();
+    for (let day = 0; day < 7; day++) {
+      await db.insert(schema.weeklyAvailability).values([
+        { providerType: "business", providerId: business.id, dayOfWeek: day, startTime: "00:00", endTime: "23:59", isActive: true },
+        { providerType: "business", providerId: business.id, staffMemberId: staff.id, dayOfWeek: day, startTime: "00:00", endTime: "23:59", isActive: true },
+        { providerType: "photographer", providerId: photographer.id, dayOfWeek: day, startTime: "00:00", endTime: "23:59", isActive: true },
+      ] as any);
+    }
+    const tok = {
+      consumer: generateAccessToken({ userId: consumer.id, isVendor: false }),
+      vendor: generateAccessToken({ userId: vendorUser.id, isVendor: true, businessId: business.id }),
+      vendor2: generateAccessToken({ userId: vendor2.id, isVendor: true, businessId: business2.id }),
+    };
+    async function http(method: string, path: string, who: keyof typeof tok, body?: unknown) {
+      const res = await fetch(`http://127.0.0.1:${port}${path}`, {
+        method, headers: { Authorization: `Bearer ${tok[who]}`, "Content-Type": "application/json" },
+        ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
+      });
+      return { status: res.status, body: (await res.json().catch(() => ({}))) as any };
+    }
+
+    // ── Faithful Stripe SDK mock ─────────────────────────────────────────────
+    const canon = (v: any): any => Array.isArray(v) ? v.map(canon)
+      : v && typeof v === "object" ? Object.fromEntries(Object.keys(v).sort().map(k => [k, canon(v[k])])) : v;
+    const same = (a: unknown, b: unknown) => JSON.stringify(canon(a)) === JSON.stringify(canon(b));
+    const byKey = new Map<string, { params: any; pi: any }>();
+    const piById = new Map<string, any>();
+    const createCalls: Array<{ key: string | undefined; params: any }> = [];
+    const createdIds: string[] = [];
+    let nextCreateMode: "normal" | "fail_before" | "created_then_lost" = "normal";
+    let retrieveStatus = "requires_payment_method";
+    const orig = {
+      piCreate: R.PaymentIntents.prototype.create, piRetrieve: R.PaymentIntents.prototype.retrieve,
+      piCancel: R.PaymentIntents.prototype.cancel, custRetrieve: R.Customers.prototype.retrieve,
+      custCreate: R.Customers.prototype.create, trCreate: R.Transfers.prototype.create,
+    };
+    R.PaymentIntents.prototype.create = async function (params: any, opts: any) {
+      const key: string | undefined = opts?.idempotencyKey;
+      createCalls.push({ key, params: canon(params) });
+      const mode = nextCreateMode; nextCreateMode = "normal";
+      if (mode === "fail_before") throw Object.assign(new Error("connection error before Stripe executed"), { type: "StripeConnectionError" });
+      if (key && byKey.has(key)) {
+        const prior = byKey.get(key)!;
+        if (!same(prior.params, params)) {
+          throw Object.assign(new Error("Keys for idempotent requests can only be used with the same parameters"),
+            { type: "StripeIdempotencyError", rawType: "idempotency_error" });
+        }
+        return prior.pi;
+      }
+      const id = `pi_mock_${randomUUID().slice(0, 12)}`;
+      const pi = { id, object: "payment_intent", client_secret: `${id}_secret`, amount: params.amount, amount_received: 0,
+        capture_method: params.capture_method, status: "requires_payment_method", metadata: params.metadata };
+      createdIds.push(id); piById.set(id, pi);
+      if (key) byKey.set(key, { params: canon(params), pi });
+      if (mode === "created_then_lost") throw Object.assign(new Error("connection lost after Stripe created the PaymentIntent"), { type: "StripeConnectionError" });
+      return pi;
+    };
+    R.PaymentIntents.prototype.retrieve = async function (id: string) {
+      const pi = piById.get(id);
+      return { ...(pi ?? { id, amount: 0 }), status: retrieveStatus };
+    };
+    R.PaymentIntents.prototype.cancel = async function (id: string) { return { id, status: "canceled" }; };
+    R.Customers.prototype.retrieve = async function (id: string) { return { id, deleted: false }; };
+    R.Customers.prototype.create = async function () { return { id: `cus_new_${randomUUID().slice(0, 8)}` }; };
+    R.Transfers.prototype.create = async function (p: any) { return { id: `tr_${randomUUID().slice(0, 8)}`, amount: p.amount }; };
+
+    async function hold(kind: "dep" | "full" | "staff" | "photo") {
+      const { date, time } = nextSlot();
+      const body = kind === "photo"
+        ? { providerType: "photographer", providerId: photographer.id, serviceId: photoSvc.id, date, startTime: time }
+        : kind === "staff"
+          ? { providerType: "business", providerId: business.id, staffMemberId: staff.id, serviceId: staffSvc.id, date, startTime: time }
+          : { providerType: "business", providerId: business.id, serviceId: kind === "dep" ? bizDep.id : bizFull.id, date, startTime: time };
+      return http("POST", "/api/booking/hold", "consumer", body);
+    }
+    const pay = (holdId: string) => http("POST", `/api/booking/${holdId}/create-payment-intent`, "consumer", {});
+    const lastCreate = () => createCalls[createCalls.length - 1];
+    const apptsForHold = async (holdId: string) => db.select().from(schema.appointments).where(eq(schema.appointments.holdId, holdId));
+
+    // ── T-2a: POST /api/vendor/services with Bearer only ────────────────────
+    {
+      const r = await http("POST", "/api/vendor/services", "vendor", { name: `Bearer svc ${dtag}`, price: 9000, durationMinutes: 60 });
+      check("T-2a", r.status === 200 && r.body?.service?.businessId === business.id, `vendor Bearer POST → ${r.status} ${JSON.stringify(r.body).slice(0, 120)}`);
+      const r2 = await http("POST", "/api/vendor/services", "vendor2", { name: `Bearer svc2 ${dtag}`, price: 9000, durationMinutes: 60 });
+      check("T-2a", r2.status === 200 && r2.body?.service?.businessId === business2.id, `second vendor Bearer POST → ${r2.status}, businessId ${r2.body?.service?.businessId}`);
+    }
+
+    // ── T-2b: deposit validation ────────────────────────────────────────────
+    {
+      const post = (dep: number) => http("POST", "/api/vendor/services", "vendor", { name: `Dep ${dep} ${randomUUID().slice(0, 4)}`, price: 27500, durationMinutes: 60, depositAmountCents: dep });
+      let r = await post(500);
+      check("T-2b", r.status === 400 && r.body?.code === "INVALID_DEPOSIT" && !!r.body?.message && !!r.body?.error, `POST D=500 → ${r.status} ${r.body?.code}`);
+      r = await post(27500);
+      check("T-2b", r.status === 400 && r.body?.code === "INVALID_DEPOSIT", `POST D=B → ${r.status} ${r.body?.code}`);
+      r = await post(0);
+      check("T-2b", r.status === 200 && r.body?.service?.depositAmountCents === null, `POST D=0 → ${r.status}, stored ${r.body?.service?.depositAmountCents}`);
+      r = await post(3000);
+      check("T-2b", r.status === 200 && r.body?.service?.depositAmountCents === 3000, `POST D=3000 → ${r.status}, stored ${r.body?.service?.depositAmountCents}`);
+
+      const [pSvc] = await db.insert(schema.vendorServices).values({ businessId: business.id, name: "Patch target", price: 27500, durationMinutes: 60, depositAmountCents: 3000 } as any).returning();
+      r = await http("PATCH", `/api/vendor/services/${pSvc.id}`, "vendor", { price: 2500 });
+      const [pAfter] = await db.select().from(schema.vendorServices).where(eq(schema.vendorServices.id, pSvc.id));
+      check("T-2b", r.status === 400 && r.body?.code === "INVALID_DEPOSIT" && (pAfter as any).price === 27500, `PATCH price below stored D → ${r.status}, price now ${(pAfter as any).price}`);
+      const [legacy] = await db.insert(schema.vendorServices).values({ businessId: business.id, name: "Legacy D=500", price: 27500, durationMinutes: 60, depositAmountCents: 500 } as any).returning();
+      r = await http("PATCH", `/api/vendor/services/${legacy.id}`, "vendor", { name: "Legacy renamed" });
+      check("T-2b", r.status === 200, `PATCH name only on legacy D=500 row → ${r.status}`);
+
+      const [a1] = await db.insert(schema.vendorServices).values({ businessId: business2.id, name: "B2 big", price: 27500, durationMinutes: 60 } as any).returning();
+      const [a2] = await db.insert(schema.vendorServices).values({ businessId: business2.id, name: "B2 small", price: 2500, durationMinutes: 60 } as any).returning();
+      r = await http("POST", "/api/vendor/services/apply-deposit-to-all", "vendor2", { depositAmountCents: 3000 });
+      const rowsAfter = await db.select().from(schema.vendorServices).where(eq(schema.vendorServices.businessId, business2.id));
+      check("T-2b", r.status === 400 && r.body?.code === "INVALID_DEPOSIT"
+        && Array.isArray(r.body?.invalidServices) && r.body.invalidServices.some((s: any) => s.id === a2.id)
+        && rowsAfter.every((s: any) => s.depositAmountCents == null), `apply-to-all D=3000 with a $25 service → ${r.status}, invalid ${JSON.stringify(r.body?.invalidServices)}`);
+      r = await http("POST", "/api/vendor/services/apply-deposit-to-all", "vendor2", { depositAmountCents: null });
+      check("T-2b", r.status === 200 && r.body?.updatedCount === rowsAfter.length, `apply-to-all null → ${r.status} updated ${r.body?.updatedCount}`);
+      void a1;
+    }
+
+    // ── T-2c: hold response is deposit-aware and matches the PI amount ──────
+    const holdIds: Record<string, string> = {};
+    const cases = [
+      { kind: "dep" as const, B: 27500, D: 3000, due: 3240, rest: 24500 },
+      { kind: "full" as const, B: 27500, D: null, due: 29700, rest: 0 },
+      { kind: "staff" as const, B: 12500, D: null, due: 13500, rest: 0 },
+      { kind: "photo" as const, B: 15000, D: null, due: 16200, rest: 0 },
+    ];
+    let seedingFailed = false;
+    for (const c of cases) {
+      const h = await hold(c.kind);
+      if (h.status !== 200 || !h.body?.holdId) {
+        seedingFailed = true;
+        check("T-2c", false, `SEEDING: real hold for ${c.kind} → ${h.status} ${JSON.stringify(h.body).slice(0, 160)}`);
+        continue;
+      }
+      holdIds[c.kind] = h.body.holdId;
+      const hb = h.body;
+      check("T-2c", hb.serviceTotalCents === c.B && hb.depositAmountCents === c.D && hb.chargeAmountCents === (c.D ?? c.B)
+        && hb.dueNowCents === c.due && hb.dueAtAppointmentCents === c.rest && hb.depositNonRefundable === (c.D != null)
+        && hb.dueNowFeeBreakdown?.grossChargeAmount === c.due,
+        `${c.kind} hold fields: ${JSON.stringify({ s: hb.serviceTotalCents, d: hb.depositAmountCents, c: hb.chargeAmountCents, n: hb.dueNowCents, r: hb.dueAtAppointmentCents, nr: hb.depositNonRefundable })}`);
+      check("T-2c", hb.feeBreakdown?.grossChargeAmount === Math.round(c.B * 1.08) && hb.servicePriceCents === c.B, `${c.kind} existing feeBreakdown (on B) unchanged: ${hb.feeBreakdown?.grossChargeAmount}`);
+      const before = createCalls.length;
+      const p = await pay(hb.holdId);
+      const call = createCalls.length > before ? lastCreate() : undefined;
+      check("T-2c", p.status === 200 && call && call.params.amount === hb.dueNowCents,
+        `${c.kind} PI amount ${call?.params.amount} vs hold dueNowCents ${hb.dueNowCents} (PI http ${p.status})`);
+      if (c.kind === "dep") (holdIds as any).depFirstPI = p.body;
+    }
+
+    // ── T-2d: reuse response carries the same money fields ──────────────────
+    if (holdIds.dep) {
+      const first = (holdIds as any).depFirstPI;
+      retrieveStatus = "requires_payment_method";
+      const again = await pay(holdIds.dep);
+      const pick = (b: any) => ({ d: b?.depositAmountCents, s: b?.servicePriceCents, c: b?.chargeAmountCents, f: b?.feeBreakdown });
+      check("T-2d", again.status === 200 && again.body?.paymentIntentId === first?.paymentIntentId && same(pick(again.body), pick(first))
+        && again.body?.feeBreakdown?.grossChargeAmount === 3240 && again.body?.requiresApproval === false,
+        `reuse money fields ${JSON.stringify(pick(again.body))} vs first ${JSON.stringify(pick(first))}`);
+    } else check("T-2d", false, "no deposit hold (seeding failed)");
+
+    // ── T-2f: PaymentIntent creation failure → resume ───────────────────────
+    async function failThenRetry(kind: "full" | "dep", mode: "fail_before" | "created_then_lost", between?: () => Promise<void>) {
+      const h = await hold(kind);
+      if (h.status !== 200) return null;
+      const holdId = h.body.holdId;
+      const c0 = createCalls.length, ids0 = createdIds.length;
+      nextCreateMode = mode;
+      const a1 = await pay(holdId);
+      if (between) await between();
+      const a2 = await pay(holdId);
+      const calls = createCalls.slice(c0);
+      const rows = await apptsForHold(holdId);
+      return { a1, a2, calls, rows, created: createdIds.slice(ids0) };
+    }
+    {
+      const A = await failThenRetry("full", "fail_before");
+      const apptId = A?.rows[0]?.id;
+      check("T-2f", A && A.a1.status === 500 && A.a2.status === 200 && !!A.a2.body?.clientSecret, `A: attempt1 ${A?.a1.status}, attempt2 ${A?.a2.status}`);
+      check("T-2f", A && A.calls.length === 2 && A.calls[0].key === `hold_pi_${apptId}` && A.calls[1].key === A.calls[0].key, `A: keys ${JSON.stringify(A?.calls.map(c => c.key))}`);
+      check("T-2f", A && A.calls.length === 2 && same(A.calls[0].params, A.calls[1].params), `A: params deep-equal across attempts`);
+      check("T-2f", A && A.calls[0]?.params && !("transfer_data" in A.calls[0].params) && A.calls[0].params.currency === "usd", `A: no transfer_data, currency usd`);
+      check("T-2f", A && A.rows.length === 1 && (A.rows[0] as any).stripePaymentIntentId === A.a2.body?.paymentIntentId, `A: rows ${A?.rows.length}, saved PI ${(A?.rows[0] as any)?.stripePaymentIntentId}`);
+
+      const B = await failThenRetry("full", "created_then_lost");
+      check("T-2f", B && B.a1.status === 500 && B.a2.status === 200 && B.created.length === 1 && B.a2.body?.paymentIntentId === B.created[0],
+        `B: attempt2 ${B?.a2.status}, returned ${B?.a2.body?.paymentIntentId}, created ${JSON.stringify(B?.created)}`);
+      check("T-2f", B && B.calls.length === 2 && B.calls[0].key === B.calls[1].key && B.calls[0].key === `hold_pi_${B.rows[0]?.id}` && same(B.calls[0].params, B.calls[1].params),
+        `B: identical key and deep-equal params`);
+      check("T-2f", B && B.rows.length === 1, `B: rows ${B?.rows.length}`);
+
+      const origName = business.name;
+      const C = await failThenRetry("full", "created_then_lost", async () => {
+        await db.update(schema.businesses).set({ name: `${origName} Renamed` } as any).where(eq(schema.businesses.id, business.id));
+      });
+      await db.update(schema.businesses).set({ name: origName } as any).where(eq(schema.businesses.id, business.id));
+      check("T-2f", C && C.a2.status === 502 && C.a2.body?.code === "PI_IDEMPOTENCY_CONFLICT" && C.created.length === 1
+        && C.rows.length === 1 && (C.rows[0] as any).status === BOOKING_STATES.PENDING_PAYMENT,
+        `C: attempt2 ${C?.a2.status} ${C?.a2.body?.code}, created ${C?.created.length}, rows ${C?.rows.length}`);
+
+      const sdk = new Stripe("sk_test_mock_selftest");
+      const k = `selftest_${randomUUID()}`;
+      await sdk.paymentIntents.create({ amount: 100, currency: "usd" }, { idempotencyKey: k });
+      let threw: any = null;
+      try { await sdk.paymentIntents.create({ amount: 200, currency: "usd" }, { idempotencyKey: k }); } catch (e) { threw = e; }
+      check("T-2f", threw?.rawType === "idempotency_error", `D: mock self-test same key, different amount → ${threw?.rawType ?? "no error"}`);
+
+      const E = await failThenRetry("dep", "fail_before");
+      check("T-2f", E && E.a2.status === 200 && E.calls.length === 2 && E.calls[1].params.amount === 3240 && same(E.calls[0].params, E.calls[1].params),
+        `E: deposit resume amount ${E?.calls[1]?.params.amount}, http ${E?.a2.status}`);
+    }
+
+    // ── Confirm the deposit and full bookings through the webhook ───────────
+    const { WebhookHandlers: WH } = await import("../server/stripe/webhookHandlers");
+    async function confirmedBooking(kind: "dep" | "full") {
+      const h = await hold(kind);
+      if (h.status !== 200) return null;
+      const before = createCalls.length;
+      const p = await pay(h.body.holdId);
+      const call = createCalls[before];
+      if (p.status !== 200 || !call) return null;
+      await WH.handlePaymentIntentSucceeded({ id: p.body.paymentIntentId, amount: call.params.amount, metadata: call.params.metadata });
+      const [row] = await apptsForHold(h.body.holdId);
+      return { id: (row as any)?.id as string, status: (row as any)?.status, amount: call.params.amount as number };
+    }
+    const depBk = await confirmedBooking("dep");
+    const fullBk = await confirmedBooking("full");
+    check("T-2g", depBk?.status === BOOKING_STATES.CONFIRMED && fullBk?.status === BOOKING_STATES.CONFIRMED, `bookings confirmed via webhook: ${depBk?.status}, ${fullBk?.status}`);
+
+    // ── T-2g: cancel-preview ────────────────────────────────────────────────
+    if (depBk && fullBk) {
+      const pv = await http("GET", `/api/bookings/appointments/${depBk.id}/cancel-preview`, "consumer");
+      const b = pv.body;
+      check("T-2g", pv.status === 200 && b.chargedAmountCents === depBk.amount && b.chargedAmountCents === 3240 && b.isDepositBooking === true
+        && b.depositAmountCents === 3000 && b.depositNonRefundable === true,
+        `deposit preview new fields ${JSON.stringify({ c: b.chargedAmountCents, i: b.isDepositBooking, d: b.depositAmountCents, n: b.depositNonRefundable })}`);
+      check("T-2g", b.refundTier === "none" && b.refundAmountCents === 0 && b.feeAmountCents === 0 && b.feeWouldBeCharged === false
+        && b.subtotalCents === 27500 && b.grossChargeAmountCents === 29700, `deposit preview existing fields unchanged ${JSON.stringify({ t: b.refundTier, r: b.refundAmountCents, f: b.feeAmountCents, s: b.subtotalCents, g: b.grossChargeAmountCents })}`);
+      const pf = await http("GET", `/api/bookings/appointments/${fullBk.id}/cancel-preview`, "consumer");
+      check("T-2g", pf.status === 200 && pf.body.chargedAmountCents === 29700 && pf.body.isDepositBooking === false && pf.body.depositAmountCents === null
+        && pf.body.grossChargeAmountCents === 29700 && pf.body.subtotalCents === 27500, `no-deposit preview ${JSON.stringify(pf.body)}`);
+    } else check("T-2g", false, "could not create confirmed bookings");
+
+    // ── T-2h: appointment payloads ──────────────────────────────────────────
+    if (depBk && fullBk) {
+      const mine = await http("GET", "/api/my-appointments", "consumer");
+      const list: any[] = mine.body?.appointments ?? [];
+      const md = list.find(a => a.id === depBk.id), mf = list.find(a => a.id === fullBk.id);
+      check("T-2h", md && md.chargedAmountCents === depBk.amount && md.chargedAmountCents === 3240 && md.dueAtAppointmentCents === 24500
+        && md.depositAmountCents === 3000 && md.serviceTotalCents === 27500 && md.totalPrice === 27500,
+        `my-appointments deposit ${JSON.stringify(md && { c: md.chargedAmountCents, r: md.dueAtAppointmentCents, d: md.depositAmountCents, t: md.totalPrice })}`);
+      check("T-2h", mf && mf.chargedAmountCents === 29700 && mf.dueAtAppointmentCents === 0 && mf.depositAmountCents === null && mf.totalPrice === 27500,
+        `my-appointments full ${JSON.stringify(mf && { c: mf.chargedAmountCents, r: mf.dueAtAppointmentCents })}`);
+      const biz = await http("GET", "/api/business/bookings", "vendor");
+      const bl: any[] = biz.body?.bookings ?? [];
+      const bd = bl.find(a => a.id === depBk.id), bf = bl.find(a => a.id === fullBk.id);
+      check("T-2h", bd && bd.chargedAmountCents === depBk.amount && bd.dueAtAppointmentCents === 24500 && bd.depositAmountCents === 3000
+        && bd.amount === 275 && bd.subtotalAmount === 275 && bd.bookingFeeAmount === 0.6 && bd.vendorNetAmount === 29.4,
+        `business/bookings deposit ${JSON.stringify(bd && { c: bd.chargedAmountCents, r: bd.dueAtAppointmentCents, d: bd.depositAmountCents, a: bd.amount, f: bd.bookingFeeAmount, v: bd.vendorNetAmount })}`);
+      check("T-2h", bf && bf.chargedAmountCents === 29700 && bf.dueAtAppointmentCents === 0 && bf.amount === 275 && bf.vendorNetAmount === 269.5,
+        `business/bookings full ${JSON.stringify(bf && { c: bf.chargedAmountCents, a: bf.amount, v: bf.vendorNetAmount })}`);
+    } else check("T-2h", false, "could not create confirmed bookings");
+
+    Object.assign(R.PaymentIntents.prototype, { create: orig.piCreate, retrieve: orig.piRetrieve, cancel: orig.piCancel });
+    Object.assign(R.Customers.prototype, { retrieve: orig.custRetrieve, create: orig.custCreate });
+    R.Transfers.prototype.create = orig.trCreate;
+    server.close();
+
+    const failed: string[] = [];
+    for (const id of ["T-2a", "T-2b", "T-2c", "T-2d", "T-2f", "T-2g", "T-2h"]) {
+      const errs = results.get(id) ?? ["no checks ran"];
+      if (errs.length) failed.push(id);
+      origLog(`${errs.length ? "FAIL" : "PASS"}  ${id}${errs.length ? "\n        - " + errs.join("\n        - ") : ""}`);
+    }
+    if (seedingFailed) origLog("SEEDING FAILED: real holds could not be created — stop and report.");
+    return { failed };
+  }
+
+  if (process.env.ONLY === "deposits") {
+    const { failed } = await runDepositTests();
+    origLog(failed.length ? `\nDeposit tests failing: ${failed.join(", ")}` : "\nAll deposit tests passed.");
+    process.exit(failed.length ? 1 : 0);
+  }
+
   // ── Consumer cancel: deposit rule, refund cap, failures ──────────────────
   // Real route and stripeService; Stripe is mocked only at the SDK boundary
   // (resource prototypes), so every wrapper runs as in production.
@@ -923,6 +1244,9 @@ async function main() {
   }
 
   await runCancelTests();
+
+  const deposits = await runDepositTests();
+  assert(deposits.failed.length === 0, `deposit tests pass (failing: ${deposits.failed.join(", ") || "none"})`);
 
   server.close();
   origLog(`\nAll ${passed} assertions passed.`);

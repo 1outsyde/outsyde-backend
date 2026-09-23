@@ -111,6 +111,39 @@ export function calculateBookingFees(subtotalCents: number): FeeBreakdown {
   return breakdown;
 }
 
+export interface DepositQuote {
+  serviceTotalCents: number;
+  depositAmountCents: number | null;
+  chargeAmountCents: number;
+  dueNowCents: number;
+  dueAtAppointmentCents: number;
+  depositNonRefundable: boolean;
+  feeBreakdown: FeeBreakdown;
+}
+
+/**
+ * What a booking charges now versus in person. Deposit bookings charge the
+ * deposit plus the consumer fee now; the rest of the service price is paid at
+ * the appointment with no Outsyde fee.
+ * Read-only: mirrors the booking PaymentIntent exactly (any stored number is
+ * the charge base, as in create-payment-intent), so dueNowCents always equals
+ * the amount that PaymentIntent charges. Deposit writes now store 0 as null.
+ */
+export function quoteDeposit(serviceTotalCents: number, depositAmountCents: number | null | undefined): DepositQuote {
+  const deposit = typeof depositAmountCents === 'number' ? depositAmountCents : null;
+  const chargeAmountCents = deposit !== null ? deposit : serviceTotalCents;
+  const feeBreakdown = calculateBookingFees(chargeAmountCents);
+  return {
+    serviceTotalCents,
+    depositAmountCents: deposit,
+    chargeAmountCents,
+    dueNowCents: feeBreakdown.customerTotalBeforeTaxCents,
+    dueAtAppointmentCents: deposit !== null ? Math.max(0, serviceTotalCents - deposit) : 0,
+    depositNonRefundable: deposit !== null,
+    feeBreakdown,
+  };
+}
+
 // =====================================================
 //  LEGACY COMPAT — simple fee calculators (used by existing routes)
 // =====================================================

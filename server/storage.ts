@@ -176,6 +176,7 @@ import {
 import { db } from "./db";
 import { eq, ilike, or, and, sql, isNull, isNotNull, desc, asc, gte, lte, ne, inArray, notInArray } from "drizzle-orm";
 import { randomUUID, createHash } from "crypto";
+import { quoteDeposit } from "./fees";
 
 const pendingRecomputes = new Map<string, NodeJS.Timeout>();
 
@@ -912,6 +913,19 @@ export interface UnifiedSearchResponse {
   results: UnifiedSearchResult[];
   total: number;
   personalized: boolean;
+}
+
+// Deposit/charge amounts for an appointment list row, in integer cents. The
+// charged amount is recomputed with the same calculateBookingFees() rounding
+// the hold-based booking PaymentIntent used (no stored column exists).
+function appointmentChargeFields(totalPrice: number, depositAmountCents: number | null) {
+  const quote = quoteDeposit(totalPrice, depositAmountCents);
+  return {
+    serviceTotalCents: quote.serviceTotalCents,
+    depositAmountCents: quote.depositAmountCents,
+    chargedAmountCents: quote.dueNowCents,
+    dueAtAppointmentCents: quote.dueAtAppointmentCents,
+  };
 }
 
 export class DatabaseStorage implements IStorage {
@@ -1817,6 +1831,10 @@ export class DatabaseStorage implements IStorage {
     subtotalAmount: number;
     bookingFeeAmount: number;
     vendorNetAmount: number;
+    serviceTotalCents: number;
+    depositAmountCents: number | null;
+    chargedAmountCents: number;
+    dueAtAppointmentCents: number;
   }[]> {
     const rows = await db.select({
       id: appointments.id,
@@ -1824,6 +1842,7 @@ export class DatabaseStorage implements IStorage {
       time: appointments.appointmentTime,
       status: appointments.status,
       totalPrice: appointments.totalPrice,
+      depositAmountCents: appointments.depositAmountCents,
       platformFee: appointments.platformFee,
       vendorNet: appointments.vendorNet,
       name: users.name,
@@ -1854,6 +1873,10 @@ export class DatabaseStorage implements IStorage {
         bookingFeeAmount: (row.platformFee ?? 0) / 100,
         vendorNetAmount: (row.vendorNet ?? 0) / 100,
         staffMemberId: row.staffMemberId ?? null,
+        // Integer cents. chargedAmountCents is what the booking PaymentIntent
+        // charged (deposit or full price, plus the consumer fee); the rest is
+        // due in person at the appointment.
+        ...appointmentChargeFields(row.totalPrice ?? 0, row.depositAmountCents),
       };
     });
   }
@@ -1884,13 +1907,18 @@ export class DatabaseStorage implements IStorage {
     serviceDurationMinutes: number | null;
     staffDisplayName: string | null;
     staffProfileImageUrl: string | null;
+    serviceTotalCents: number;
+    depositAmountCents: number | null;
+    chargedAmountCents: number;
+    dueAtAppointmentCents: number;
   }[]> {
-    return db.select({
+    const rows = await db.select({
       id: appointments.id,
       appointmentDate: appointments.appointmentDate,
       appointmentTime: appointments.appointmentTime,
       appointmentEndTime: appointments.appointmentEndTime,
       totalPrice: appointments.totalPrice,
+      depositAmountCents: appointments.depositAmountCents,
       status: appointments.status,
       businessId: appointments.businessId,
       serviceId: appointments.serviceId,
@@ -1928,6 +1956,11 @@ export class DatabaseStorage implements IStorage {
       .leftJoin(staffMembers, eq(appointments.staffMemberId, staffMembers.id))
       .where(eq(appointments.clientId, clientId))
       .orderBy(desc(appointments.createdAt));
+
+    return rows.map((row) => ({
+      ...row,
+      ...appointmentChargeFields(row.totalPrice, row.depositAmountCents),
+    }));
   }
 
   async getAppointmentsByStaffMember(staffMemberId: string): Promise<Appointment[]> {
