@@ -13,7 +13,7 @@ import { expireOldHolds } from "./availabilityService";
 
 const PENDING_PROVIDER_TTL_HOURS = 48;
 
-export type BookingErrorCode = 'BOOKING_NOT_FOUND' | 'BOOKING_EXPIRED' | 'INVALID_STATE' | 'ALREADY_CONFIRMED' | 'PENDING_PROVIDER_EXPIRED' | 'DECLINED';
+export type BookingErrorCode = 'BOOKING_NOT_FOUND' | 'BOOKING_EXPIRED' | 'INVALID_STATE' | 'ALREADY_CONFIRMED' | 'PENDING_PROVIDER_EXPIRED' | 'DECLINED' | 'CONCURRENT_TRANSITION';
 
 export interface StateTransitionResult {
   success: boolean;
@@ -188,9 +188,21 @@ export async function transitionAppointmentState(
     updateData.declineReason = context.metadata?.reason;
   }
 
-  await db.update(appointments)
+  // Conditional on the state read above so two concurrent transitions
+  // (e.g. duplicate webhook deliveries) cannot both succeed.
+  const updated = await db.update(appointments)
     .set(updateData)
-    .where(eq(appointments.id, appointmentId));
+    .where(and(eq(appointments.id, appointmentId), eq(appointments.status, currentState)))
+    .returning({ id: appointments.id });
+
+  if (updated.length === 0) {
+    return {
+      success: false,
+      code: 'CONCURRENT_TRANSITION',
+      error: "Booking state changed during this update. Please retry.",
+      previousState: currentState,
+    };
+  }
 
   await logAuditEntry(
     { 
@@ -329,9 +341,21 @@ export async function transitionShootBookingState(
     updateData.declineReason = context.metadata?.reason;
   }
 
-  await db.update(shootBookings)
+  // Conditional on the state read above so two concurrent transitions
+  // (e.g. duplicate webhook deliveries) cannot both succeed.
+  const updated = await db.update(shootBookings)
     .set(updateData)
-    .where(eq(shootBookings.id, shootBookingId));
+    .where(and(eq(shootBookings.id, shootBookingId), eq(shootBookings.status, currentState)))
+    .returning({ id: shootBookings.id });
+
+  if (updated.length === 0) {
+    return {
+      success: false,
+      code: 'CONCURRENT_TRANSITION',
+      error: "Booking state changed during this update. Please retry.",
+      previousState: currentState,
+    };
+  }
 
   await logAuditEntry(
     { 
