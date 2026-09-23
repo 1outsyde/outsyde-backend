@@ -159,6 +159,216 @@ async function main() {
   const pi = (amount: number, metadata: Record<string, string>) => ({ id: `pi_test_${randomUUID()}`, amount, metadata });
   const receiptSentCount = () => receiptLogs.filter(l => / → (consumer|vendor|admin) sent$/.test(l)).length;
 
+  // ── Non-payment transitions: parity harness ──────────────────────────────
+  // Uses only APIs present on both main (8500932) and this branch, so the same
+  // file can run against a main worktree with ONLY=transitions. Each scenario
+  // records a normalized result; TRANSITIONS_OUT writes them as JSON for diffing.
+  async function runTransitions(): Promise<Record<string, unknown>> {
+    const express = (await import("express")).default;
+    const { createServer } = await import("node:http");
+    const { registerRoutes } = await import("../server/routes");
+    const { stripeService } = await import("../server/stripe/stripeService");
+    const { generateAccessToken } = await import("../server/auth");
+    const sm = await import("../server/bookingStateMachine");
+    const { expireOldHolds } = await import("../server/availabilityService");
+    const { startReminderJob } = await import("../server/reminderService");
+
+    const app = express();
+    app.use(express.json());
+    const server = createServer(app);
+    await registerRoutes(server, app);
+    await new Promise<void>(r => server.listen(0, "127.0.0.1", () => r()));
+    const port = (server.address() as any).port;
+    const tokens = {
+      vendor: generateAccessToken({ userId: vendorUser.id, isVendor: true, businessId: business.id }),
+      photographer: generateAccessToken({ userId: photogUser.id, isVendor: false, isPhotographer: true, photographerId: photographer.id }),
+      consumer: generateAccessToken({ userId: consumer.id, isVendor: false }),
+    };
+    await db.update(schema.users).set({ stripeCustomerId: `cus_test_${tag}` } as any).where(eq(schema.users.id, consumer.id));
+    // One admin user so the per-admin notification paths (cancellation admin
+    // email) run. Emails to it are recorded under the "admin-user" role.
+    const adminUserEmail = `admin-${tag}@example.com`;
+    await db.insert(schema.users).values({ username: `a_${tag}`, email: adminUserEmail, name: "Test Admin", isAdmin: true } as any);
+
+    // Stripe stub: record every call the routes/jobs make.
+    const stripeCalls: string[] = [];
+    const stubs: Record<string, (...a: any[]) => any> = {
+      capturePaymentIntent: async (id: string) => { stripeCalls.push("capturePaymentIntent"); return { id, amount: 16200, amount_received: 16200, status: "succeeded", metadata: {} }; },
+      cancelPaymentIntent: async (id: string) => { stripeCalls.push("cancelPaymentIntent"); return { id, status: "canceled" }; },
+      createBookingRefund: async (a: any) => { stripeCalls.push(`createBookingRefund:${a?.amountCents ?? "full"}`); return { id: "re_test", amount: a?.amountCents }; },
+      refundPayment: async (_id: string, amt?: number) => { stripeCalls.push(`refundPayment:${amt ?? "full"}`); return { id: "re_test" }; },
+      getPaymentMethodIdFromIntent: async () => { stripeCalls.push("getPaymentMethodIdFromIntent"); return "pm_test"; },
+      chargeSavedPaymentMethod: async (a: any) => { stripeCalls.push(`chargeSavedPaymentMethod:${a?.amountCents}`); return { id: "pi_fee", status: "succeeded" }; },
+      getPaymentIntent: async (id: string) => { stripeCalls.push("getPaymentIntent"); return { id, status: "requires_capture", amount: 16200 }; },
+    };
+    const originals: Record<string, any> = {};
+    for (const [k, fn] of Object.entries(stubs)) { originals[k] = (stripeService as any)[k]; (stripeService as any)[k] = fn; }
+
+    const role = (to: string) => to === consumerEmail ? "consumer" : to === vendorEmail ? "vendor" : to === photogEmail ? "photographer" : to === ADMIN ? "admin" : to === adminUserEmail ? "admin-user" : "other";
+    const norm = (subj: string) => subj.replace(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/g, "<id>").replace(/\d{4}-\d{2}-\d{2}/g, "<date>");
+    async function settle() {
+      let last = -1, stable = 0;
+      for (let i = 0; i < 400 && stable < 8; i++) {
+        await new Promise(r => setTimeout(r, 10));
+        if (sent.length === last) stable++; else { stable = 0; last = sent.length; }
+      }
+    }
+    async function call(method: string, path: string, who: keyof typeof tokens, body: unknown = {}) {
+      const res = await fetch(`http://127.0.0.1:${port}${path}`, { method, headers: { Authorization: `Bearer ${tokens[who]}`, "Content-Type": "application/json" }, body: JSON.stringify(body) });
+      const json: any = await res.json().catch(() => ({}));
+      return { http: res.status, success: json?.success ?? null };
+    }
+    async function apptRow(id: string) { return (await db.select().from(schema.appointments).where(eq(schema.appointments.id, id)))[0] as any; }
+    async function shootRow(id: string) { return (await db.select().from(schema.shootBookings).where(eq(schema.shootBookings.id, id)))[0] as any; }
+    async function service(policy: Record<string, unknown>) {
+      const [svc] = await db.insert(schema.vendorServices).values({ businessId: business.id, name: "Policy test", price: 12500, durationMinutes: 60, ...policy } as any).returning();
+      return svc;
+    }
+    async function appt(status: string, extra: Record<string, unknown> = {}) {
+      const a = await newAppointment({ totalPrice: 12500 });
+      await db.update(schema.appointments).set({ status, captureMethod: "manual", stripePaymentIntentId: `pi_test_${randomUUID()}`, pendingProviderExpiresAt: new Date(Date.now() + 86_400_000), ...extra } as any).where(eq(schema.appointments.id, a.id));
+      return a.id;
+    }
+    async function shoot(status: string, extra: Record<string, unknown> = {}) {
+      const b = await newShoot();
+      await db.update(schema.shootBookings).set({ status, captureMethod: "manual", stripePaymentIntentId: `pi_test_${randomUUID()}`, pendingProviderExpiresAt: new Date(Date.now() + 86_400_000), ...extra } as any).where(eq(schema.shootBookings.id, b.id));
+      return b.id;
+    }
+    function snapshot(r: { http?: number; success?: unknown }, row: any) {
+      return {
+        http: r.http ?? null,
+        success: r.success ?? null,
+        status: row?.status ?? null,
+        stripe: [...stripeCalls].sort(),
+        emails: sent.map(e => `${role(e.to)} | ${norm(e.subject)}`).sort(),
+        refundAmount: row?.refundAmount ?? null,
+        hasRefundId: !!row?.stripeRefundId,
+        cancellationReason: row?.cancellationReason ?? null,
+        reminder24hSent: row?.reminder24hSent ?? null,
+      };
+    }
+    const results: Record<string, any> = {};
+    async function scenario(name: string, fn: () => Promise<any>) {
+      reset(); stripeCalls.length = 0;
+      results[name] = await fn();
+    }
+    // Far-future dates so refund windows are open; the fixtures use year 3000+.
+
+    await scenario("appt: vendor declines pending request", async () => {
+      const id = await appt(BOOKING_STATES.PENDING_PROVIDER);
+      const r = await call("POST", `/api/bookings/appointments/${id}/decline`, "vendor", { reason: "Unavailable" });
+      await settle(); return snapshot(r, await apptRow(id));
+    });
+    await scenario("appt: vendor accepts pending request", async () => {
+      const id = await appt(BOOKING_STATES.PENDING_PROVIDER);
+      const r = await call("POST", `/api/bookings/appointments/${id}/accept`, "vendor");
+      await settle(); return snapshot(r, await apptRow(id));
+    });
+    await scenario("appt: consumer cancels confirmed (full refund window)", async () => {
+      const svc = await service({ fullRefundWindow: "24_hours" });
+      const id = await appt(BOOKING_STATES.CONFIRMED, { serviceId: svc.id });
+      const r = await call("POST", `/api/bookings/appointments/${id}/cancel`, "consumer");
+      await settle(); return snapshot(r, await apptRow(id));
+    });
+    await scenario("appt: consumer cancels confirmed (no refund, $5 fee)", async () => {
+      const svc = await service({ fullRefundWindow: "never", hasCancellationFee: true, cancellationFeeType: "flat", cancellationFeeAmount: 500 });
+      const id = await appt(BOOKING_STATES.CONFIRMED, { serviceId: svc.id });
+      const r = await call("POST", `/api/bookings/appointments/${id}/cancel`, "consumer");
+      await settle(); return snapshot(r, await apptRow(id));
+    });
+    await scenario("appt: vendor cancels with refund", async () => {
+      const id = await appt(BOOKING_STATES.CONFIRMED);
+      const r = await call("POST", `/api/bookings/appointments/${id}/refund`, "vendor", { reason: "Vendor canceled" });
+      await settle(); return snapshot(r, await apptRow(id));
+    });
+    await scenario("appt: vendor cancels without refund (no-show)", async () => {
+      const id = await appt(BOOKING_STATES.CONFIRMED);
+      const r = await call("POST", `/api/bookings/appointments/${id}/cancel-no-refund`, "vendor", { reason: "No-show" });
+      await settle(); return snapshot(r, await apptRow(id));
+    });
+    await scenario("appt: request expires (cleanupExpiredPendingProvider)", async () => {
+      const id = await appt(BOOKING_STATES.PENDING_PROVIDER, { pendingProviderExpiresAt: new Date(Date.now() - 60_000) });
+      await sm.cleanupExpiredPendingProvider();
+      await settle(); return snapshot({}, await apptRow(id));
+    });
+    await scenario("appt: draft expires (cleanupExpiredDrafts)", async () => {
+      const id = await appt(BOOKING_STATES.DRAFT, { draftExpiresAt: new Date(Date.now() - 60_000) });
+      await sm.cleanupExpiredDrafts();
+      await settle(); return snapshot({}, await apptRow(id));
+    });
+    await scenario("hold expires (expireOldHolds)", async () => {
+      const [h] = await db.insert(schema.bookingHolds).values({
+        providerType: "business", providerId: business.id, userId: consumer.id, serviceId: randomUUID(), serviceName: "Hold test",
+        servicePriceCents: 12500, durationMinutes: 60, holdDate: `${runYear}-02-01`, startTime: "09:00", endTime: "10:00",
+        startAt: new Date(Date.now() + 86_400_000), endAt: new Date(Date.now() + 90_000_000), expiresAt: new Date(Date.now() - 60_000), status: "active",
+      } as any).returning();
+      await expireOldHolds();
+      await settle();
+      const [row] = await db.select().from(schema.bookingHolds).where(eq(schema.bookingHolds.id, h.id));
+      return snapshot({}, row);
+    });
+    await scenario("appt: reminder job (24h)", async () => {
+      // Any free minute inside the ±15 min reminder window (reruns leave rows behind).
+      let a: any;
+      for (const off of [...Array(21).keys()].map(i => i - 10).sort(() => Math.random() - 0.5)) {
+        const when = new Date(Date.now() + 24 * 3600_000 + off * 60_000);
+        try {
+          [a] = await db.insert(schema.appointments).values({
+            businessId: business.id, clientId: consumer.id, appointmentDate: when.toISOString().slice(0, 10), appointmentTime: when.toISOString().slice(11, 16),
+            totalPrice: 12500, serviceName: "Reminder test", status: BOOKING_STATES.CONFIRMED,
+          } as any).returning();
+          break;
+        } catch { /* slot taken; try the next minute */ }
+      }
+      startReminderJob(2_000_000_000);
+      for (let i = 0; i < 300 && !(await apptRow(a.id)).reminder24hSent; i++) await new Promise(r => setTimeout(r, 20));
+      await settle();
+      const snap = snapshot({}, await apptRow(a.id));
+      // Other test rows could fall in the window; keep only this appointment's reminder.
+      snap.emails = snap.emails.filter((e: string) => e.startsWith("consumer"));
+      return snap;
+    });
+    await scenario("shoot: photographer declines pending request", async () => {
+      const id = await shoot(BOOKING_STATES.PENDING_PROVIDER);
+      const r = await call("POST", `/api/bookings/photographer/${id}/decline`, "photographer", { reason: "Unavailable" });
+      await settle(); return snapshot(r, await shootRow(id));
+    });
+    await scenario("shoot: photographer accepts pending request", async () => {
+      const id = await shoot(BOOKING_STATES.PENDING_PROVIDER);
+      const r = await call("POST", `/api/bookings/photographer/${id}/accept`, "photographer");
+      await settle(); return snapshot(r, await shootRow(id));
+    });
+    await scenario("shoot: photographer cancels with refund", async () => {
+      const id = await shoot(BOOKING_STATES.CONFIRMED);
+      const r = await call("POST", `/api/bookings/photographer/${id}/refund`, "photographer", { reason: "Photographer canceled" });
+      await settle(); return snapshot(r, await shootRow(id));
+    });
+    await scenario("shoot: consumer cancels confirmed", async () => {
+      const id = await shoot(BOOKING_STATES.CONFIRMED);
+      const r = await call("POST", `/api/bookings/shoot/${id}/cancel`, "consumer");
+      await settle(); return snapshot(r, await shootRow(id));
+    });
+    await scenario("shoot: request expires (cleanupExpiredPendingProvider)", async () => {
+      const id = await shoot(BOOKING_STATES.PENDING_PROVIDER, { pendingProviderExpiresAt: new Date(Date.now() - 60_000) });
+      await sm.cleanupExpiredPendingProvider();
+      await settle(); return snapshot({}, await shootRow(id));
+    });
+
+    for (const [k, fn] of Object.entries(originals)) (stripeService as any)[k] = fn;
+    server.close();
+    return results;
+  }
+
+  if (process.env.ONLY === "transitions") {
+    const results = await runTransitions();
+    if (process.env.TRANSITIONS_OUT) {
+      const { writeFileSync } = await import("node:fs");
+      writeFileSync(process.env.TRANSITIONS_OUT, JSON.stringify(results, null, 2));
+    }
+    origLog(JSON.stringify(results, null, 2));
+    return;
+  }
+
   // ── Case 1 + 5: each type sends exactly 3, and a duplicate adds none ─────
   const cases: Array<{ name: string; run: () => Promise<{ first: () => Promise<void>; again: () => Promise<void> }> }> = [
     { name: "appointment (deposit)", run: async () => {
@@ -307,6 +517,75 @@ async function main() {
     await WebhookHandlers.handlePaymentIntentSucceeded(pi(3000, { type: "deposit", appointmentId: a.id, businessId: business.id }));
     assert(sent.every(s => !s.from.includes("xobeautyandlashes")), "deposit emails no longer sent from the XO domain");
     assert(!sent.some(s => s.to === "fleekbynik@gmail.com"), "deposit vendor alert never falls back to XO owner");
+  }
+
+  // ── Order row parity: new conditional claim vs old storage.updateOrder ────
+  // For each paid path, the order row written by the webhook must match a row
+  // updated with the old call (status 'paid' + stripePaymentIntentId) in every
+  // column except identity/creation columns.
+  {
+    const skip = new Set(["id", "order_number", "created_at", "order_group_id"]);
+    // Raw row as JSON so timestamps compare as text (the local Neon proxy
+    // returns timestamps drizzle can't parse, which would hide differences).
+    const { sql } = await import("drizzle-orm");
+    const rowOf = async (id: string) => ((await db.execute(sql`SELECT to_jsonb(o) AS r FROM orders o WHERE o.id = ${id}`)) as any).rows[0].r;
+    const parity = async (label: string, run: (orderId: string, piId: string) => Promise<void>) => {
+      const piId = `pi_test_${randomUUID()}`;
+      const viaNew = await newOrder();
+      const viaOld = await newOrder();
+      const beforeNew = await rowOf(viaNew.id), beforeOld = await rowOf(viaOld.id);
+      await run(viaNew.id, piId);
+      await storage.updateOrder(viaOld.id, { status: "paid", stripePaymentIntentId: piId } as any);
+      const afterNew = await rowOf(viaNew.id), afterOld = await rowOf(viaOld.id);
+      // Compare what each path wrote: the changed columns and their new values.
+      const changes = (before: any, after: any) => Object.fromEntries(
+        Object.keys(after).filter(k => !skip.has(k) && JSON.stringify(before[k]) !== JSON.stringify(after[k])).map(k => [k, after[k]]));
+      const cNew = changes(beforeNew, afterNew), cOld = changes(beforeOld, afterOld);
+      const same = JSON.stringify(Object.keys(cNew).sort()) === JSON.stringify(Object.keys(cOld).sort())
+        && Object.keys(cOld).every(k => JSON.stringify(cNew[k]) === JSON.stringify(cOld[k]));
+      assert(same, `order row parity (${label}): same columns and values as old updateOrder (new=${JSON.stringify(Object.keys(cNew))} old=${JSON.stringify(Object.keys(cOld))})`);
+    };
+    await parity("product_purchase PI", (id, piId) =>
+      WebhookHandlers.handlePaymentIntentSucceeded({ id: piId, amount: 2160, metadata: { type: "product_purchase", orderId: id, businessId: business.id, userId: consumer.id } }));
+    await parity("cart checkout", (id, piId) =>
+      WebhookHandlers.handleCheckoutCompleted({ id: `cs_${randomUUID()}`, payment_intent: piId, amount_total: 2160, customer: null,
+        metadata: { type: "cart_checkout", orderId: id, userId: consumer.id, businessId: business.id } }));
+    await parity("multi-vendor PI", (id, piId) =>
+      WebhookHandlers.handlePaymentIntentSucceeded({ id: piId, amount: 2160, metadata: {
+        type: "multi_vendor_product_purchase", orderGroupId: randomUUID(), userId: consumer.id,
+        vendorOrders: JSON.stringify([{ orderId: id, businessId: business.id, vendorNetCents: 1960 }]) } }));
+    await parity("multi-vendor checkout", (id, piId) =>
+      WebhookHandlers.handleCheckoutCompleted({ id: `cs_${randomUUID()}`, payment_intent: piId, amount_total: 2160, customer: null,
+        metadata: { type: "multi_vendor_cart_checkout", orderGroupId: randomUUID(), userId: consumer.id,
+          vendorData: JSON.stringify([{ orderId: id, businessId: business.id, vendorNet: 1960 }]) } }));
+  }
+
+  // ── Non-payment transitions (same harness used for the main-vs-branch diff) ─
+  {
+    const t: Record<string, any> = await runTransitions();
+    const expect = (name: string, status: string, stripe: string[], mustEmail: string[] = []) => {
+      const r = t[name];
+      assert(r && r.status === status, `${name}: status ${status} (got ${r?.status})`);
+      assert(JSON.stringify(r.stripe) === JSON.stringify([...stripe].sort()), `${name}: Stripe calls ${JSON.stringify(stripe)} (got ${JSON.stringify(r.stripe)})`);
+      for (const m of mustEmail) assert(r.emails.some((e: string) => e.startsWith(m)), `${name}: email "${m}"`);
+      if (r.http != null) assert(r.http === 200, `${name}: HTTP 200 (got ${r.http})`);
+    };
+    expect("appt: vendor declines pending request", "declined", ["cancelPaymentIntent"], ["consumer | Booking request not accepted", "admin | [Outsyde] Booking Declined"]);
+    expect("appt: vendor accepts pending request", "confirmed", ["capturePaymentIntent"], ["consumer | 🎉 Your appointment is confirmed", "vendor | 🎉 New booking received", "admin | [Outsyde] appointment_booking"]);
+    expect("appt: consumer cancels confirmed (full refund window)", "canceled", ["createBookingRefund:12500"], ["admin | [Outsyde Admin] Appointment Refunded"]);
+    expect("appt: consumer cancels confirmed (no refund, $5 fee)", "canceled", ["chargeSavedPaymentMethod:500", "getPaymentMethodIdFromIntent"], ["admin | [Outsyde Admin] Appointment Canceled"]);
+    expect("appt: vendor cancels with refund", "canceled", ["createBookingRefund:12500"]);
+    expect("appt: vendor cancels without refund (no-show)", "no_show", []);
+    expect("appt: request expires (cleanupExpiredPendingProvider)", "expired", ["cancelPaymentIntent"], ["consumer | Booking request expired"]);
+    expect("appt: draft expires (cleanupExpiredDrafts)", "expired", []);
+    expect("hold expires (expireOldHolds)", "expired", []);
+    expect("appt: reminder job (24h)", "confirmed", [], ["consumer | Your appointment is tomorrow"]);
+    assert(t["appt: reminder job (24h)"].reminder24hSent === true, "reminder job: reminder_24h_sent set, status unchanged");
+    expect("shoot: photographer declines pending request", "declined", ["cancelPaymentIntent"], ["consumer | Booking request not accepted"]);
+    expect("shoot: photographer accepts pending request", "confirmed", ["capturePaymentIntent"], ["consumer | 🎉 Your shoot is confirmed", "photographer | 🎉 New shoot booked", "admin | [Outsyde] shoot_booking"]);
+    expect("shoot: photographer cancels with refund", "canceled", ["createBookingRefund:15000"]);
+    expect("shoot: consumer cancels confirmed", "canceled", [], ["photographer | Your Booking Was Canceled"]);
+    expect("shoot: request expires (cleanupExpiredPendingProvider)", "expired", ["cancelPaymentIntent"], ["consumer | Booking request expired", "photographer | Booking Request Expired"]);
   }
 
   // ── Multi-vendor checkout: points only via the Stripe-customer lookup ─────
