@@ -25,6 +25,11 @@ import {
 import { processInfluencerCommission, reverseInfluencerCommission } from "../influencerPayoutService";
 import { calculateBookingFees } from "../fees";
 
+// XO Beauty & Lashes' own deposit-email sender (the legacy
+// create-deposit-intent flow's pre-existing behavior).
+const XO_BUSINESS_ID = process.env.XO_BUSINESS_ID || 'bfe25a03-a9e9-4126-a47d-9bd4c85383ea';
+const XO_FROM_ADDRESS = 'XO Beauty & Lashes <bookings@xobeautyandlashes.com>';
+
 function isOnReplit(): boolean {
   return !!(process.env.REPL_IDENTITY || process.env.WEB_REPL_RENEWAL || process.env.REPL_ID);
 }
@@ -1029,6 +1034,9 @@ export class WebhookHandlers {
         const depositBusiness = businessId ? await storage.getBusiness(businessId).catch(() => undefined) : undefined;
         const depositVendorOwner = businessId ? await storage.getUserByBusinessOwnerId(businessId).catch(() => undefined) : undefined;
         const depositAmountCents = paymentIntent.amount ?? undefined;
+        // XO keeps its own sender on its deposit emails; every other vendor
+        // gets the Outsyde default.
+        const depositFromAddress = businessId && businessId === XO_BUSINESS_ID ? XO_FROM_ADDRESS : undefined;
 
         await sendTransactionReceipts('deposit', appointmentId, {
           consumer: {
@@ -1042,6 +1050,7 @@ export class WebhookHandlers {
               appointmentId,
               businessName: depositBusiness?.name,
               vendorContactEmail: depositBusiness?.contactEmail ?? undefined,
+              fromAddress: depositFromAddress,
             }),
           },
           vendor: {
@@ -1055,6 +1064,7 @@ export class WebhookHandlers {
               appointmentId,
               vendorOwnerEmail: depositVendorOwner?.email ?? undefined,
               businessName: depositBusiness?.name,
+              fromAddress: depositFromAddress,
               depositAmountCents,
             }),
           },
@@ -2064,8 +2074,11 @@ export class WebhookHandlers {
       return;
     }
 
-    const user = (await this.findUserByStripeCustomer(session.customer).catch(() => undefined))
-      ?? (userId ? await storage.getUser(userId).catch(() => undefined) : undefined);
+    // Points, referral and the in-app confirmation use the original Stripe
+    // customer lookup only. The metadata userId fallback is used solely to
+    // address the consumer receipt.
+    const user = await this.findUserByStripeCustomer(session.customer).catch(() => undefined);
+    const receiptUser = user ?? (userId ? await storage.getUser(userId).catch(() => undefined) : undefined);
     let claimedOrders = 0;
 
     // Process each order and initiate transfers
@@ -2183,10 +2196,10 @@ export class WebhookHandlers {
 
     await sendTransactionReceipts('multi_vendor_cart_checkout', orderGroupId, {
       consumer: {
-        email: user?.email,
+        email: receiptUser?.email,
         send: () => sendOrderConfirmationToConsumer({
-          toEmail: user!.email!,
-          consumerName: user!.name || user!.email!,
+          toEmail: receiptUser!.email!,
+          consumerName: receiptUser!.name || receiptUser!.email!,
           orderId: vendorOrders[0]?.orderId || orderGroupId,
           orderNumber: firstWcMvOrderNumber,
           items: wcAllItems,
@@ -2195,8 +2208,8 @@ export class WebhookHandlers {
       admin: () => sendInternalEventAlert({
         eventType: 'product_order',
         bookingOrOrderId: orderGroupId,
-        consumerName: user?.name || 'Customer',
-        consumerEmail: user?.email || '',
+        consumerName: receiptUser?.name || 'Customer',
+        consumerEmail: receiptUser?.email || '',
         vendorName: `${vendorOrders.length} vendors`,
         vendorEmail: '',
         items: wcAllItems.map(({ vendorName: _vn, vendorContactEmail: _vce, ...rest }) => rest),

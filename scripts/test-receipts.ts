@@ -27,6 +27,11 @@ if (!ADMIN || !process.env.RESEND_API_KEY) {
   process.exit(2);
 }
 
+// A dedicated fixture business plays XO, so the XO sender rule is testable
+// without touching the real XO row. Must be set before server modules load.
+const XO_TEST_BUSINESS_ID = randomUUID();
+process.env.XO_BUSINESS_ID = XO_TEST_BUSINESS_ID;
+
 // ─── Outbound HTTP stub ─────────────────────────────────────────────────────
 interface SentEmail { to: string; from: string; subject: string; html: string }
 const sent: SentEmail[] = [];
@@ -152,6 +157,7 @@ async function main() {
     return b;
   }
   const pi = (amount: number, metadata: Record<string, string>) => ({ id: `pi_test_${randomUUID()}`, amount, metadata });
+  const receiptSentCount = () => receiptLogs.filter(l => / → (consumer|vendor|admin) sent$/.test(l)).length;
 
   // ── Case 1 + 5: each type sends exactly 3, and a duplicate adds none ─────
   const cases: Array<{ name: string; run: () => Promise<{ first: () => Promise<void>; again: () => Promise<void> }> }> = [
@@ -303,6 +309,65 @@ async function main() {
     assert(!sent.some(s => s.to === "fleekbynik@gmail.com"), "deposit vendor alert never falls back to XO owner");
   }
 
+  // ── Multi-vendor checkout: points only via the Stripe-customer lookup ─────
+  {
+    const origEarn = storage.earnPoints.bind(storage);
+    const origFind = WebhookHandlers.findUserByStripeCustomer;
+    const earnCalls: any[] = [];
+    (storage as any).earnPoints = async (data: any) => { earnCalls.push(data); return origEarn(data); };
+    try {
+      const runCheckout = async () => {
+        const o = await newOrder();
+        const groupId = randomUUID();
+        await WebhookHandlers.handleCheckoutCompleted({
+          id: `cs_${randomUUID()}`, payment_intent: `pi_${randomUUID()}`, amount_total: 2160, customer: null,
+          metadata: {
+            type: "multi_vendor_cart_checkout", orderGroupId: groupId, userId: consumer.id,
+            vendorData: JSON.stringify([{ orderId: o.id, businessId: business.id, vendorNet: 1960 }]),
+          },
+        });
+        return groupId;
+      };
+
+      reset(); earnCalls.length = 0;
+      const g1 = await runCheckout();
+      assert(!earnCalls.some(c => c.referenceId === g1), "multi-vendor checkout: no points when the Stripe-customer lookup finds no user");
+      assert(sent.some(e => e.to === consumerEmail), "multi-vendor checkout: consumer receipt still sent via the metadata userId fallback");
+      assert(receiptSentCount() === 3, "multi-vendor checkout: 3 receipts (consumer, vendor, admin)");
+
+      reset(); earnCalls.length = 0;
+      (WebhookHandlers as any).findUserByStripeCustomer = async () => storage.getUser(consumer.id);
+      const g2 = await runCheckout();
+      assert(earnCalls.filter(c => c.referenceId === g2).length === 1, "multi-vendor checkout: points awarded once when the Stripe-customer lookup finds the user");
+    } finally {
+      (storage as any).earnPoints = origEarn;
+      (WebhookHandlers as any).findUserByStripeCustomer = origFind;
+    }
+  }
+
+  // ── Legacy deposit sender: XO keeps its own, other vendors get Outsyde ────
+  {
+    const [xoOwner] = await db.insert(schema.users).values({ username: `xo_${tag}`, email: `xo-${tag}@example.com`, name: "XO Owner" } as any).returning();
+    const [xo] = await db.insert(schema.businesses).values({ id: XO_TEST_BUSINESS_ID, ownerId: xoOwner.id, name: "XO Beauty & Lashes", category: "beauty", contactEmail: `xo-${tag}@example.com` } as any).returning();
+    const { date, time } = nextSlot();
+    const [xoAppt] = await db.insert(schema.appointments).values({
+      businessId: xo.id, clientId: consumer.id, appointmentDate: date, appointmentTime: time,
+      totalPrice: 12500, serviceName: "Lash Bath", status: BOOKING_STATES.PENDING_PAYMENT,
+    } as any).returning();
+    reset();
+    await WebhookHandlers.handlePaymentIntentSucceeded(pi(3000, { type: "deposit", appointmentId: xoAppt.id, businessId: xo.id }));
+    const xoConsumer = sent.find(e => e.to === consumerEmail);
+    const xoVendor = sent.find(e => e.to === `xo-${tag}@example.com`);
+    assert(xoConsumer?.from === "XO Beauty & Lashes <bookings@xobeautyandlashes.com>", "XO deposit consumer email keeps XO's sender");
+    assert(xoVendor?.from === "XO Beauty & Lashes <bookings@xobeautyandlashes.com>", "XO deposit vendor alert keeps XO's sender");
+    assert(sent.find(e => e.to === ADMIN)?.from === "orders@info.goutsyde.com", "XO deposit admin copy comes from Outsyde");
+
+    reset();
+    const other = await newAppointment({ totalPrice: 12500 });
+    await WebhookHandlers.handlePaymentIntentSucceeded(pi(3000, { type: "deposit", appointmentId: other.id, businessId: business.id }));
+    assert(sent.filter(e => e.to !== ADMIN).every(e => e.from === "orders@info.goutsyde.com"), "non-XO deposit emails come from orders@info.goutsyde.com");
+  }
+
   // ── Request-then-accept (vendor auto-accept OFF) ─────────────────────────
   // Mounts the real routes in-process; only the Stripe capture call is stubbed.
   // The stub can fire the payment_intent.succeeded webhook before the accept
@@ -334,7 +399,6 @@ async function main() {
   };
   const capturable = new Map<string, any>();
 
-  const receiptSentCount = () => receiptLogs.filter(l => / → (consumer|vendor|admin) sent$/.test(l)).length;
   const receiptSubjects = (kind: "appt" | "shoot") => sent.filter(e =>
     kind === "appt"
       ? /Your appointment is confirmed|New booking received|\[Outsyde\] appointment_booking/.test(e.subject)
