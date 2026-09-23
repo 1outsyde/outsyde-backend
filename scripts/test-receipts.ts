@@ -200,6 +200,8 @@ async function main() {
       getPaymentMethodIdFromIntent: async () => { stripeCalls.push("getPaymentMethodIdFromIntent"); return "pm_test"; },
       chargeSavedPaymentMethod: async (a: any) => { stripeCalls.push(`chargeSavedPaymentMethod:${a?.amountCents}`); return { id: "pi_fee", status: "succeeded" }; },
       getPaymentIntent: async (id: string) => { stripeCalls.push("getPaymentIntent"); return { id, status: "requires_capture", amount: 16200 }; },
+      // Consumer cancel reads what a refund can still return (absent on main).
+      getPaymentIntentForRefund: async () => { stripeCalls.push("getPaymentIntentForRefund"); return { status: "succeeded", amountReceived: 13500, amountRefunded: 0 }; },
     };
     const originals: Record<string, any> = {};
     for (const [k, fn] of Object.entries(stubs)) { originals[k] = (stripeService as any)[k]; (stripeService as any)[k] = fn; }
@@ -357,6 +359,179 @@ async function main() {
     for (const [k, fn] of Object.entries(originals)) (stripeService as any)[k] = fn;
     server.close();
     return results;
+  }
+
+  // ── Consumer cancel: deposit rule, refund cap, failures ──────────────────
+  // Real route and stripeService; Stripe is mocked only at the SDK boundary
+  // (resource prototypes), so every wrapper runs as in production.
+  async function runCancelTests(): Promise<void> {
+    const express = (await import("express")).default;
+    const { createServer } = await import("node:http");
+    const { registerRoutes } = await import("../server/routes");
+    const { generateAccessToken } = await import("../server/auth");
+    const Stripe: any = (await import("stripe")).default;
+    const R = Stripe.resources;
+
+    const app = express();
+    app.use(express.json());
+    const server = createServer(app);
+    await registerRoutes(server, app);
+    await new Promise<void>(r => server.listen(0, "127.0.0.1", () => r()));
+    const port = (server.address() as any).port;
+    const token = generateAccessToken({ userId: consumer.id, isVendor: false });
+    await db.update(schema.users).set({ stripeCustomerId: `cus_test_${tag}` } as any).where(eq(schema.users.id, consumer.id));
+
+    const calls: string[] = [];
+    let pi = { status: "succeeded", amount_received: 0, amount_refunded: 0 };
+    let refundThrows = false;
+    let cancelThrows = false;
+    const originals = {
+      refundCreate: R.Refunds.prototype.create,
+      piRetrieve: R.PaymentIntents.prototype.retrieve,
+      piCancel: R.PaymentIntents.prototype.cancel,
+      piCreate: R.PaymentIntents.prototype.create,
+    };
+    R.Refunds.prototype.create = async function (p: any, o: any) {
+      calls.push(`refunds.create:${p?.amount}`);
+      if (refundThrows) throw new Error("forced refund failure");
+      assert(typeof o?.idempotencyKey === "string" && o.idempotencyKey.includes(String(p?.amount)), "refund carries a per-amount idempotency key");
+      return { id: `re_${randomUUID()}`, amount: p?.amount };
+    };
+    R.PaymentIntents.prototype.retrieve = async function (id: string, p: any) {
+      calls.push(p?.expand ? "paymentIntents.retrieve(expand)" : "paymentIntents.retrieve");
+      return { id, status: pi.status, amount_received: pi.amount_received, payment_method: "pm_test", latest_charge: { id: "ch_test", amount_refunded: pi.amount_refunded } };
+    };
+    R.PaymentIntents.prototype.cancel = async function (id: string) {
+      calls.push("paymentIntents.cancel");
+      if (cancelThrows) throw new Error("forced cancel failure");
+      return { id, status: "canceled" };
+    };
+    // Cancellation fee charges go through paymentIntents.create.
+    R.PaymentIntents.prototype.create = async function (p: any) {
+      calls.push(`paymentIntents.create:${p?.amount}`);
+      return { id: `pi_fee_${randomUUID()}`, status: "succeeded", amount: p?.amount };
+    };
+
+    async function svc(policy: Record<string, unknown>) {
+      const [s] = await db.insert(schema.vendorServices).values({ businessId: business.id, name: "Cancel test", price: 12500, durationMinutes: 60, ...policy } as any).returning();
+      return s;
+    }
+    const FULL = { fullRefundWindow: "1_week", hasCancellationFee: true, cancellationFeeType: "flat", cancellationFeeAmount: 500 };
+    const HALF = { fullRefundWindow: "never", hasPartialRefund: true, partialRefundWindow: "24_hours", partialRefundPercentage: 50, hasCancellationFee: true, cancellationFeeType: "flat", cancellationFeeAmount: 500 };
+    const NONE_WITH_FEE = { fullRefundWindow: "never", hasCancellationFee: true, cancellationFeeType: "flat", cancellationFeeAmount: 500 };
+    async function confirmed(opts: { totalPrice: number; deposit?: number | null; policy: Record<string, unknown>; capture?: "automatic" | "manual"; extra?: Record<string, unknown> }) {
+      const s = await svc(opts.policy);
+      const a = await newAppointment({ totalPrice: opts.totalPrice, deposit: opts.deposit });
+      await db.update(schema.appointments).set({
+        status: BOOKING_STATES.CONFIRMED, serviceId: s.id, captureMethod: opts.capture ?? "automatic",
+        stripePaymentIntentId: `pi_test_${randomUUID()}`, ...(opts.extra ?? {}),
+      } as any).where(eq(schema.appointments.id, a.id));
+      return a.id;
+    }
+    async function cancel(id: string, method = "POST", suffix = "cancel") {
+      const res = await fetch(`http://127.0.0.1:${port}/api/bookings/appointments/${id}/${suffix}`, { method, headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }, ...(method === "POST" ? { body: "{}" } : {}) });
+      return { http: res.status, body: (await res.json().catch(() => ({}))) as any };
+    }
+    async function row(id: string) { return (await db.select().from(schema.appointments).where(eq(schema.appointments.id, id)))[0] as any; }
+    function start(state: Partial<typeof pi> = {}) {
+      calls.length = 0; refundThrows = false; cancelThrows = false;
+      pi = { status: "succeeded", amount_received: 0, amount_refunded: 0, ...state };
+    }
+    const noFee = () => !calls.some(c => c.startsWith("paymentIntents.create"));
+
+    // B 27500 / D 3000 / auto capture: deposit is non-refundable, no fee, no Stripe call.
+    {
+      start();
+      const id = await confirmed({ totalPrice: 27500, deposit: 3000, policy: NONE_WITH_FEE });
+      const r = await cancel(id); const a = await row(id);
+      assert(r.http === 200 && r.body.refundAmountCents === 0 && r.body.feeAmountCents === 0 && r.body.feeCharged === false, "deposit cancel: 200, refund 0, fee 0, fee not charged");
+      assert(calls.length === 0, `deposit cancel (auto capture): no Stripe calls (got ${JSON.stringify(calls)})`);
+      assert(a.status === BOOKING_STATES.CANCELED && !!a.canceledAt && !a.stripeRefundId, "deposit cancel: status canceled, canceledAt set, no refund recorded");
+    }
+    // Preview for B 27500 / D 3000.
+    {
+      start();
+      const id = await confirmed({ totalPrice: 27500, deposit: 3000, policy: FULL });
+      const r = await cancel(id, "GET", "cancel-preview");
+      assert(r.http === 200 && r.body.cancellable === true && r.body.refundAmountCents === 0 && r.body.feeAmountCents === 0 && r.body.feeWouldBeCharged === false, "deposit preview: refund 0, fee 0");
+      assert(calls.length === 0, "deposit preview: no Stripe calls");
+    }
+    // B 27500 / depositAmountCents 0: treated as no deposit.
+    {
+      start({ amount_received: 29700 });
+      const id = await confirmed({ totalPrice: 27500, deposit: 0, policy: FULL });
+      const r = await cancel(id); const a = await row(id);
+      assert(r.http === 200 && r.body.refundAmountCents === 27500 && calls.includes("refunds.create:27500"), "deposit 0 is no deposit: refund 27500 at 100%");
+      assert(a.status === BOOKING_STATES.CANCELED && a.refundAmount === 27500, "deposit 0: canceled, refundAmount 27500");
+    }
+    // B 12500 / no deposit / 100%.
+    {
+      start({ amount_received: 13500 });
+      const id = await confirmed({ totalPrice: 12500, policy: FULL });
+      const r = await cancel(id); const a = await row(id);
+      assert(r.http === 200 && r.body.refundAmountCents === 12500 && calls.filter(c => c.startsWith("refunds.create")).join() === "refunds.create:12500", "no deposit 100%: refund 12500");
+      assert(noFee() && a.status === BOOKING_STATES.CANCELED && !!a.canceledAt && !!a.stripeRefundId, "no deposit 100%: no fee, canceled, refund recorded");
+    }
+    // B 12500 / no deposit / 50%: refund 6250, fee charged only after refund and cancel.
+    {
+      start({ amount_received: 13500 });
+      const id = await confirmed({ totalPrice: 12500, policy: HALF });
+      const r = await cancel(id); const a = await row(id);
+      assert(r.http === 200 && r.body.refundAmountCents === 6250 && calls.includes("refunds.create:6250"), "no deposit 50%: refund 6250");
+      const refundAt = calls.indexOf("refunds.create:6250"), feeAt = calls.indexOf("paymentIntents.create:500");
+      assert(feeAt > refundAt && r.body.feeCharged === true && a.status === BOOKING_STATES.CANCELED, "no deposit 50%: $5 fee charged after the refund, status canceled");
+    }
+    // Cap: received 13500, already refunded 9000 → at most 4500.
+    {
+      start({ amount_received: 13500, amount_refunded: 9000 });
+      const id = await confirmed({ totalPrice: 12500, policy: FULL });
+      const r = await cancel(id); const a = await row(id);
+      assert(r.http === 200 && r.body.refundAmountCents === 4500 && calls.includes("refunds.create:4500") && a.refundAmount === 4500, "refund capped at amount_received minus prior refunds (4500)");
+    }
+    // No-deposit refund throws: error returned, nothing else happens.
+    {
+      start({ amount_received: 13500 }); refundThrows = true;
+      const id = await confirmed({ totalPrice: 12500, policy: HALF });
+      const r = await cancel(id); const a = await row(id);
+      assert(r.http === 502 && r.body.code === "REFUND_FAILED", "refund failure: 502 REFUND_FAILED");
+      assert(a.status === BOOKING_STATES.CONFIRMED && !a.canceledAt && !a.stripeRefundId && noFee(), "refund failure: still confirmed, no canceledAt, no refund, no fee");
+    }
+    // Retry after a refund succeeded but the status change did not.
+    {
+      start({ amount_received: 13500 });
+      const id = await confirmed({ totalPrice: 12500, policy: FULL, extra: { stripeRefundId: "re_prior", refundAmount: 12500, refundedAt: new Date() } });
+      const r = await cancel(id); const a = await row(id);
+      assert(!calls.some(c => c.startsWith("refunds.create")), "retry with stripeRefundId set: no second refund");
+      assert(r.http === 200 && r.body.refundAmountCents === 12500 && a.status === BOOKING_STATES.CANCELED && a.stripeRefundId === "re_prior", "retry: canceled, keeps the prior refund");
+    }
+    // Uncaptured authorization: release it, never refund, never charge a fee.
+    for (const [label, deposit] of [["deposit", 3000], ["no deposit", null]] as const) {
+      start({ status: "requires_capture", amount_received: 0 });
+      const id = await confirmed({ totalPrice: label === "deposit" ? 27500 : 12500, deposit, policy: HALF, capture: "manual" });
+      const r = await cancel(id); const a = await row(id);
+      assert(calls.filter(c => c === "paymentIntents.cancel").length === 1 && !calls.some(c => c.startsWith("refunds.create")) && noFee(), `${label} requires_capture: paymentIntents.cancel once, no refund, no fee`);
+      assert(r.http === 200 && r.body.refundAmountCents === 0 && a.status === BOOKING_STATES.CANCELED && !!a.canceledAt, `${label} requires_capture: refund 0, status canceled`);
+    }
+    // Releasing the authorization fails.
+    {
+      start({ status: "requires_capture", amount_received: 0 }); cancelThrows = true;
+      const id = await confirmed({ totalPrice: 12500, policy: FULL, capture: "manual" });
+      const r = await cancel(id); const a = await row(id);
+      assert(r.http === 502 && r.body.code === "AUTH_RELEASE_FAILED", "authorization release failure: 502 AUTH_RELEASE_FAILED");
+      assert(a.status === BOOKING_STATES.CONFIRMED && !a.canceledAt, "authorization release failure: still confirmed, no canceledAt");
+    }
+
+    R.Refunds.prototype.create = originals.refundCreate;
+    R.PaymentIntents.prototype.retrieve = originals.piRetrieve;
+    R.PaymentIntents.prototype.cancel = originals.piCancel;
+    R.PaymentIntents.prototype.create = originals.piCreate;
+    server.close();
+  }
+
+  if (process.env.ONLY === "cancel") {
+    await runCancelTests();
+    origLog(`\nAll ${passed} assertions passed.`);
+    return;
   }
 
   if (process.env.ONLY === "transitions") {
@@ -572,8 +747,8 @@ async function main() {
     };
     expect("appt: vendor declines pending request", "declined", ["cancelPaymentIntent"], ["consumer | Booking request not accepted", "admin | [Outsyde] Booking Declined"]);
     expect("appt: vendor accepts pending request", "confirmed", ["capturePaymentIntent"], ["consumer | 🎉 Your appointment is confirmed", "vendor | 🎉 New booking received", "admin | [Outsyde] appointment_booking"]);
-    expect("appt: consumer cancels confirmed (full refund window)", "canceled", ["createBookingRefund:12500"], ["admin | [Outsyde Admin] Appointment Refunded"]);
-    expect("appt: consumer cancels confirmed (no refund, $5 fee)", "canceled", ["chargeSavedPaymentMethod:500", "getPaymentMethodIdFromIntent"], ["admin | [Outsyde Admin] Appointment Canceled"]);
+    expect("appt: consumer cancels confirmed (full refund window)", "canceled", ["createBookingRefund:12500", "getPaymentIntentForRefund"], ["admin | [Outsyde Admin] Appointment Refunded"]);
+    expect("appt: consumer cancels confirmed (no refund, $5 fee)", "canceled", ["chargeSavedPaymentMethod:500", "getPaymentIntentForRefund", "getPaymentMethodIdFromIntent"], ["admin | [Outsyde Admin] Appointment Canceled"]);
     expect("appt: vendor cancels with refund", "canceled", ["createBookingRefund:12500"]);
     expect("appt: vendor cancels without refund (no-show)", "no_show", []);
     expect("appt: request expires (cleanupExpiredPendingProvider)", "expired", ["cancelPaymentIntent"], ["consumer | Booking request expired"]);
@@ -746,6 +921,8 @@ async function main() {
     const src = readFileSync(new URL("../server/emailService.ts", import.meta.url), "utf8");
     assert(!/getUncachableResendClient|REPLIT_CONNECTORS_HOSTNAME|X_REPLIT_TOKEN|api\/v2\/connection/.test(src), "emailService.ts has no Replit connector call");
   }
+
+  await runCancelTests();
 
   server.close();
   origLog(`\nAll ${passed} assertions passed.`);

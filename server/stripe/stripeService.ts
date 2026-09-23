@@ -546,6 +546,23 @@ export class StripeService {
     return stripe.paymentIntents.retrieve(paymentIntentId);
   }
 
+  /**
+   * What a refund against this PaymentIntent can still return: the amount
+   * Stripe actually received minus anything already refunded on its charge.
+   * `status` lets callers spot an uncaptured authorization (requires_capture),
+   * which must be canceled rather than refunded.
+   */
+  async getPaymentIntentForRefund(paymentIntentId: string): Promise<{ status: string; amountReceived: number; amountRefunded: number }> {
+    const stripe = await getUncachableStripeClient();
+    const pi = await stripe.paymentIntents.retrieve(paymentIntentId, { expand: ['latest_charge'] });
+    const charge = pi.latest_charge && typeof pi.latest_charge === 'object' ? pi.latest_charge : null;
+    return {
+      status: pi.status,
+      amountReceived: pi.amount_received ?? 0,
+      amountRefunded: charge?.amount_refunded ?? 0,
+    };
+  }
+
   async getPaymentMethodIdFromIntent(paymentIntentId: string): Promise<string | null> {
     const stripe = await getUncachableStripeClient();
     const pi = await stripe.paymentIntents.retrieve(paymentIntentId);
