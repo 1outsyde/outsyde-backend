@@ -137,6 +137,151 @@ async function claimOrderPaid(orderId: string, paymentIntentId: string): Promise
   return rows.length > 0;
 }
 
+/**
+ * Receipts for a confirmed appointment. Call only from the code path that
+ * performed the transition to confirmed (webhook or provider accept), so
+ * exactly one path sends them.
+ *
+ * `forceFullPayment` is for the legacy appointment_booking PaymentIntent,
+ * which always charges the full service price even if the appointment row
+ * carries a deposit snapshot.
+ */
+export async function sendAppointmentReceipts(
+  appointmentId: string,
+  opts: { txnType: string; stripeChargeCents?: number; forceFullPayment?: boolean },
+): Promise<void> {
+  const appointment = await storage.getAppointment(appointmentId).catch(() => undefined);
+  if (!appointment) {
+    console.error(`[Receipt] ${opts.txnType} ${appointmentId} SKIPPED: appointment not found`);
+    return;
+  }
+  const business = await storage.getBusiness(appointment.businessId).catch(() => undefined);
+  const owner = await storage.getUserByBusinessOwnerId(appointment.businessId).catch(() => undefined);
+  const customer = await storage.getUser(appointment.clientId).catch(() => undefined);
+
+  // Deposit bookings charge D (+8%) now; the remainder is paid in person and
+  // is display only.
+  const depositCents = opts.forceFullPayment ? undefined : appointment.depositAmountCents ?? undefined;
+  const remainderCents = depositCents != null ? Math.max(0, appointment.totalPrice - depositCents) : undefined;
+
+  await sendTransactionReceipts(opts.txnType, appointmentId, {
+    consumer: {
+      email: customer?.email,
+      send: () => sendAppointmentConfirmationToConsumer({
+        toEmail: customer!.email!,
+        consumerName: customer!.name || customer!.email!,
+        vendorName: business?.name || 'Business',
+        vendorContactEmail: business?.contactEmail ?? undefined,
+        serviceName: appointment.serviceName || 'Appointment',
+        bookingId: appointmentId,
+        bookingNumber: appointment.bookingNumber,
+        date: appointment.appointmentDate,
+        time: appointment.appointmentTime,
+        basePrice: appointment.totalPrice,
+        depositAmountCents: depositCents,
+        remainderDueCents: remainderCents,
+      }),
+    },
+    vendor: {
+      email: owner?.email,
+      send: () => sendAppointmentNotificationToVendor({
+        toEmail: owner!.email!,
+        vendorName: business?.name || 'Business',
+        consumerName: customer?.name || 'Customer',
+        consumerUsername: customer?.username ?? undefined,
+        serviceName: appointment.serviceName || 'Appointment',
+        bookingId: appointmentId,
+        bookingNumber: appointment.bookingNumber,
+        date: appointment.appointmentDate,
+        time: appointment.appointmentTime,
+        basePrice: appointment.totalPrice,
+        depositAmountCents: depositCents,
+        remainderDueCents: remainderCents,
+      }),
+    },
+    admin: () => sendInternalEventAlert({
+      eventType: 'appointment_booking',
+      bookingOrOrderId: appointmentId,
+      consumerName: customer?.name || 'Customer',
+      consumerEmail: customer?.email || '',
+      vendorName: business?.name || 'Business',
+      vendorEmail: owner?.email || '',
+      basePrice: appointment.totalPrice,
+      paymentType: depositCents != null ? 'deposit' : 'full',
+      amountChargedCents: depositCents ?? appointment.totalPrice,
+      serviceTotalCents: appointment.totalPrice,
+      stripeChargeCents: opts.stripeChargeCents,
+      date: appointment.appointmentDate,
+      time: appointment.appointmentTime,
+    }),
+  });
+}
+
+/**
+ * Receipts for a confirmed shoot booking. Same single-sender rule as
+ * sendAppointmentReceipts.
+ */
+export async function sendShootBookingReceipts(
+  bookingId: string,
+  opts: { txnType: string; stripeChargeCents?: number },
+): Promise<void> {
+  const booking = await storage.getShootBooking(bookingId).catch(() => undefined);
+  if (!booking) {
+    console.error(`[Receipt] ${opts.txnType} ${bookingId} SKIPPED: shoot booking not found`);
+    return;
+  }
+  const photographer = await storage.getPhotographer(booking.photographerId).catch(() => undefined);
+  const photographerUser = photographer ? await storage.getUser(photographer.userId).catch(() => undefined) : undefined;
+  const customer = await storage.getUser(booking.clientId).catch(() => undefined);
+
+  await sendTransactionReceipts(opts.txnType, bookingId, {
+    consumer: {
+      email: customer?.email,
+      send: () => sendShootBookingConfirmationToConsumer({
+        toEmail: customer!.email!,
+        consumerName: customer!.name || customer!.email!,
+        photographerName: photographer?.displayName || 'Photographer',
+        photographerContactEmail: photographerUser?.email ?? undefined,
+        shootType: booking.shootType || 'session',
+        bookingId,
+        bookingNumber: booking.bookingNumber || 0,
+        date: booking.date || '',
+        time: booking.startTime || '',
+        basePrice: booking.totalPrice || 0,
+      }),
+    },
+    vendor: {
+      email: photographerUser?.email,
+      send: () => sendShootBookingNotificationToPhotographer({
+        toEmail: photographerUser!.email!,
+        photographerName: photographer?.displayName || 'Photographer',
+        consumerName: customer?.name || 'Customer',
+        consumerUsername: customer?.username ?? undefined,
+        shootType: booking.shootType || 'session',
+        bookingId,
+        bookingNumber: booking.bookingNumber || 0,
+        date: booking.date || '',
+        time: booking.startTime || '',
+        basePrice: booking.totalPrice || 0,
+      }),
+    },
+    admin: () => sendInternalEventAlert({
+      eventType: 'shoot_booking',
+      bookingOrOrderId: bookingId,
+      consumerName: customer?.name || 'Customer',
+      consumerEmail: customer?.email || '',
+      vendorName: photographer?.displayName || 'Photographer',
+      vendorEmail: photographerUser?.email || '',
+      basePrice: booking.totalPrice || 0,
+      paymentType: 'full',
+      amountChargedCents: booking.totalPrice || 0,
+      stripeChargeCents: opts.stripeChargeCents,
+      date: booking.date || '',
+      time: booking.startTime || '',
+    }),
+  });
+}
+
 export class WebhookHandlers {
   static async processWebhook(
     payload: Buffer,
@@ -513,56 +658,10 @@ export class WebhookHandlers {
 
         const sb_booking = await storage.getShootBooking(bookingId).catch(() => undefined);
         const sb_photographer = sb_booking ? await storage.getPhotographer(sb_booking.photographerId).catch(() => undefined) : undefined;
-        const sb_photographerUser = sb_photographer ? await storage.getUser(sb_photographer.userId).catch(() => undefined) : undefined;
         const user = clientId ? await storage.getUser(clientId).catch(() => undefined) : undefined;
 
         // Receipts first, so later side effects can never skip them.
-        await sendTransactionReceipts('shoot_booking', bookingId, {
-          consumer: {
-            email: user?.email,
-            send: () => sendShootBookingConfirmationToConsumer({
-              toEmail: user!.email!,
-              consumerName: user!.name || user!.email!,
-              photographerName: sb_photographer?.displayName || 'Photographer',
-              photographerContactEmail: sb_photographerUser?.email ?? undefined,
-              shootType: sb_booking?.shootType || 'session',
-              bookingId,
-              bookingNumber: sb_booking?.bookingNumber || 0,
-              date: sb_booking?.date || '',
-              time: sb_booking?.startTime || '',
-              basePrice: sb_booking?.totalPrice || 0,
-            }),
-          },
-          vendor: {
-            email: sb_photographerUser?.email,
-            send: () => sendShootBookingNotificationToPhotographer({
-              toEmail: sb_photographerUser!.email!,
-              photographerName: sb_photographer?.displayName || 'Photographer',
-              consumerName: user?.name || 'Customer',
-              consumerUsername: user?.username ?? undefined,
-              shootType: sb_booking?.shootType || 'session',
-              bookingId,
-              bookingNumber: sb_booking?.bookingNumber || 0,
-              date: sb_booking?.date || '',
-              time: sb_booking?.startTime || '',
-              basePrice: sb_booking?.totalPrice || 0,
-            }),
-          },
-          admin: () => sendInternalEventAlert({
-            eventType: 'shoot_booking',
-            bookingOrOrderId: bookingId,
-            consumerName: user?.name || 'Customer',
-            consumerEmail: user?.email || '',
-            vendorName: sb_photographer?.displayName || 'Photographer',
-            vendorEmail: sb_photographerUser?.email || '',
-            basePrice: sb_booking?.totalPrice || 0,
-            paymentType: 'full',
-            amountChargedCents: sb_booking?.totalPrice || 0,
-            stripeChargeCents: paymentIntent.amount,
-            date: sb_booking?.date || '',
-            time: sb_booking?.startTime || '',
-          }),
-        });
+        await sendShootBookingReceipts(bookingId, { txnType: 'shoot_booking', stripeChargeCents: paymentIntent.amount });
 
         // Transfer payout to photographer's connected account. vendorPayoutCents
         // was stored in PI metadata at creation time so the webhook uses the
@@ -717,63 +816,8 @@ export class WebhookHandlers {
           const apptCustomer = await storage.getUser(appointment.clientId).catch(() => undefined);
           const apptOwner = businessId ? await storage.getUserByBusinessOwnerId(businessId).catch(() => undefined) : undefined;
 
-          // Deposit bookings charge D (+8%) now; the remainder is paid in
-          // person and is display only.
-          const depositCents = appointment.depositAmountCents ?? undefined;
-          const remainderCents = depositCents != null ? Math.max(0, appointment.totalPrice - depositCents) : undefined;
-
           // Receipts first, so later side effects can never skip them.
-          await sendTransactionReceipts('appointment', appointmentId, {
-            consumer: {
-              email: apptCustomer?.email,
-              send: () => sendAppointmentConfirmationToConsumer({
-                toEmail: apptCustomer!.email!,
-                consumerName: apptCustomer!.name || apptCustomer!.email!,
-                vendorName: business?.name || 'Business',
-                vendorContactEmail: business?.contactEmail ?? undefined,
-                serviceName: appointment.serviceName || 'Appointment',
-                bookingId: appointmentId,
-                bookingNumber: appointment.bookingNumber,
-                date: appointment.appointmentDate,
-                time: appointment.appointmentTime,
-                basePrice: appointment.totalPrice,
-                depositAmountCents: depositCents,
-                remainderDueCents: remainderCents,
-              }),
-            },
-            vendor: {
-              email: apptOwner?.email,
-              send: () => sendAppointmentNotificationToVendor({
-                toEmail: apptOwner!.email!,
-                vendorName: business?.name || 'Business',
-                consumerName: apptCustomer?.name || 'Customer',
-                consumerUsername: apptCustomer?.username ?? undefined,
-                serviceName: appointment.serviceName || 'Appointment',
-                bookingId: appointmentId,
-                bookingNumber: appointment.bookingNumber,
-                date: appointment.appointmentDate,
-                time: appointment.appointmentTime,
-                basePrice: appointment.totalPrice,
-                depositAmountCents: depositCents,
-                remainderDueCents: remainderCents,
-              }),
-            },
-            admin: () => sendInternalEventAlert({
-              eventType: 'appointment_booking',
-              bookingOrOrderId: appointmentId,
-              consumerName: apptCustomer?.name || 'Customer',
-              consumerEmail: apptCustomer?.email || '',
-              vendorName: business?.name || 'Business',
-              vendorEmail: apptOwner?.email || '',
-              basePrice: appointment.totalPrice,
-              paymentType: depositCents != null ? 'deposit' : 'full',
-              amountChargedCents: depositCents ?? appointment.totalPrice,
-              serviceTotalCents: appointment.totalPrice,
-              stripeChargeCents: paymentIntent.amount,
-              date: appointment.appointmentDate,
-              time: appointment.appointmentTime,
-            }),
-          });
+          await sendAppointmentReceipts(appointmentId, { txnType: 'appointment', stripeChargeCents: paymentIntent.amount });
 
           // Convert the hold now that the appointment is confirmed. This is
           // the first place holdId is ever set in Stripe metadata, so this

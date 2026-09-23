@@ -303,6 +303,108 @@ async function main() {
     assert(!sent.some(s => s.to === "fleekbynik@gmail.com"), "deposit vendor alert never falls back to XO owner");
   }
 
+  // ── Request-then-accept (vendor auto-accept OFF) ─────────────────────────
+  // Mounts the real routes in-process; only the Stripe capture call is stubbed.
+  // The stub can fire the payment_intent.succeeded webhook before the accept
+  // route's transition, after it, or concurrently with it.
+  const express = (await import("express")).default;
+  const { createServer } = await import("node:http");
+  const { registerRoutes } = await import("../server/routes");
+  const { stripeService } = await import("../server/stripe/stripeService");
+  const { generateAccessToken } = await import("../server/auth");
+
+  const app = express();
+  app.use(express.json());
+  const server = createServer(app);
+  await registerRoutes(server, app);
+  await new Promise<void>(r => server.listen(0, "127.0.0.1", () => r()));
+  const port = (server.address() as any).port;
+  const vendorToken = generateAccessToken({ userId: vendorUser.id, isVendor: true, businessId: business.id });
+  const photogToken = generateAccessToken({ userId: photogUser.id, isVendor: false, isPhotographer: true, photographerId: photographer.id });
+
+  type WebhookTiming = "none" | "before" | "after" | "concurrent";
+  let webhookTiming: WebhookTiming = "none";
+  let pendingWebhook: Promise<void> | null = null;
+  (stripeService as any).capturePaymentIntent = async (paymentIntentId: string) => {
+    const captured = { ...capturable.get(paymentIntentId)!, status: "succeeded" };
+    const fire = () => WebhookHandlers.handlePaymentIntentSucceeded(captured);
+    if (webhookTiming === "before") await fire();
+    if (webhookTiming === "concurrent") pendingWebhook = fire();
+    return captured;
+  };
+  const capturable = new Map<string, any>();
+
+  const receiptSentCount = () => receiptLogs.filter(l => / → (consumer|vendor|admin) sent$/.test(l)).length;
+  const receiptSubjects = (kind: "appt" | "shoot") => sent.filter(e =>
+    kind === "appt"
+      ? /Your appointment is confirmed|New booking received|\[Outsyde\] appointment_booking/.test(e.subject)
+      : /Your shoot is confirmed|New shoot booked|\[Outsyde\] shoot_booking/.test(e.subject));
+
+  async function pendingProviderAppointment() {
+    const a = await newAppointment({ totalPrice: 27500, deposit: 3000 });
+    const piId = `pi_test_${randomUUID()}`;
+    await db.update(schema.appointments).set({ status: BOOKING_STATES.PENDING_PROVIDER, captureMethod: "manual", stripePaymentIntentId: piId, pendingProviderExpiresAt: new Date(Date.now() + 86_400_000) } as any).where(eq(schema.appointments.id, a.id));
+    capturable.set(piId, { id: piId, amount: 3240, amount_received: 3240, metadata: { type: "appointment", appointmentId: a.id, businessId: business.id, staffMemberId: "" } });
+    return { id: a.id, piId };
+  }
+  async function pendingProviderShoot() {
+    const b = await newShoot();
+    const piId = `pi_test_${randomUUID()}`;
+    await db.update(schema.shootBookings).set({ status: BOOKING_STATES.PENDING_PROVIDER, captureMethod: "manual", stripePaymentIntentId: piId, pendingProviderExpiresAt: new Date(Date.now() + 86_400_000) } as any).where(eq(schema.shootBookings.id, b.id));
+    capturable.set(piId, { id: piId, amount: 16200, amount_received: 16200, metadata: { type: "shoot_booking", bookingId: b.id, clientId: consumer.id } });
+    return { id: b.id, piId };
+  }
+  async function accept(kind: "appt" | "shoot", id: string) {
+    const url = kind === "appt"
+      ? `http://127.0.0.1:${port}/api/bookings/appointments/${id}/accept`
+      : `http://127.0.0.1:${port}/api/bookings/photographer/${id}/accept`;
+    const res = await fetch(url, { method: "POST", headers: { Authorization: `Bearer ${kind === "appt" ? vendorToken : photogToken}`, "Content-Type": "application/json" } });
+    return { status: res.status, body: await res.json().catch(() => ({})) };
+  }
+
+  for (const kind of ["appt", "shoot"] as const) {
+    const label = kind === "appt" ? "appointment" : "shoot";
+    for (const timing of ["none", "after", "before", "concurrent"] as const) {
+      reset();
+      webhookTiming = timing;
+      pendingWebhook = null;
+      const { id, piId } = kind === "appt" ? await pendingProviderAppointment() : await pendingProviderShoot();
+      const res = await accept(kind, id);
+      if (timing === "after") await WebhookHandlers.handlePaymentIntentSucceeded({ ...capturable.get(piId), status: "succeeded" });
+      if (pendingWebhook) await pendingWebhook;
+      const name = timing === "none" ? "vendor accepts (no webhook yet)" : `vendor accept + webhook ${timing}`;
+      assert(res.status === 200 && res.body?.success === true, `${label} ${name}: vendor gets success (HTTP ${res.status})`);
+      assert(receiptSentCount() === 3, `${label} ${name}: exactly 3 receipts sent (got ${receiptSentCount()})`);
+      assert(receiptSubjects(kind).length === 3, `${label} ${name}: 3 receipt emails (consumer, vendor, admin)`);
+      const row = kind === "appt"
+        ? (await db.select().from(schema.appointments).where(eq(schema.appointments.id, id)))[0]
+        : (await db.select().from(schema.shootBookings).where(eq(schema.shootBookings.id, id)))[0];
+      assert(row.status === BOOKING_STATES.CONFIRMED, `${label} ${name}: status confirmed`);
+      if (timing !== "none") {
+        assert(receiptLogs.some(l => l.includes("SKIPPED: already processed")), `${label} ${name}: the losing path logs SKIPPED`);
+      }
+    }
+  }
+
+  // ── Admin email transport: RESEND_API_KEY, never the Replit connector ────
+  {
+    reset();
+    const { id } = await pendingProviderAppointment();
+    webhookTiming = "none";
+    await accept("appt", id);
+    // sendAdminBookingAlert is fire-and-forget in the accept route; give it a tick.
+    for (let i = 0; i < 50 && !sent.some(e => e.subject.startsWith("[Outsyde] Booking Accepted")); i++) {
+      await new Promise(r => setImmediate(r));
+    }
+    const alert = sent.find(e => e.subject.startsWith("[Outsyde] Booking Accepted"));
+    assert(alert && alert.to === ADMIN, "admin booking alert sent via RESEND_API_KEY to ADMIN_NOTIFICATION_EMAIL");
+    assert(alert && alert.from === "orders@info.goutsyde.com", "admin booking alert from orders@info.goutsyde.com");
+    const { readFileSync } = await import("node:fs");
+    const src = readFileSync(new URL("../server/emailService.ts", import.meta.url), "utf8");
+    assert(!/getUncachableResendClient|REPLIT_CONNECTORS_HOSTNAME|X_REPLIT_TOKEN|api\/v2\/connection/.test(src), "emailService.ts has no Replit connector call");
+  }
+
+  server.close();
   origLog(`\nAll ${passed} assertions passed.`);
 }
 

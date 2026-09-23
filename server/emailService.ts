@@ -1,38 +1,9 @@
 import { Resend } from 'resend';
 
-async function getCredentials() {
-  const hostname = process.env.REPLIT_CONNECTORS_HOSTNAME;
-  const xReplitToken = process.env.REPL_IDENTITY 
-    ? 'repl ' + process.env.REPL_IDENTITY 
-    : process.env.WEB_REPL_RENEWAL 
-    ? 'depl ' + process.env.WEB_REPL_RENEWAL 
-    : null;
+const FROM_ORDERS = 'orders@info.goutsyde.com';
 
-  if (!xReplitToken) {
-    throw new Error('X_REPLIT_TOKEN not found for repl/depl');
-  }
-
-  const connectionSettings = await fetch(
-    'https://' + hostname + '/api/v2/connection?include_secrets=true&connector_names=resend',
-    {
-      headers: {
-        'Accept': 'application/json',
-        'X_REPLIT_TOKEN': xReplitToken
-      }
-    }
-  ).then(res => res.json()).then(data => data.items?.[0]);
-
-  if (!connectionSettings || (!connectionSettings.settings.api_key)) {
-    throw new Error('Resend not connected');
-  }
-  
-  const fromEmail = connectionSettings.settings.from_email;
-  if (!fromEmail) {
-    throw new Error('Resend from_email not configured');
-  }
-  
-  return { apiKey: connectionSettings.settings.api_key, fromEmail };
-}
+// Platform admin copy of every paid-transaction receipt and internal alert.
+export const ADMIN_NOTIFICATION_EMAIL = process.env.ADMIN_NOTIFICATION_EMAIL || 'info@goutsyde.com';
 
 function getAppBaseUrl(): string {
   if (process.env.APP_BASE_URL) {
@@ -45,21 +16,8 @@ function getAppBaseUrl(): string {
   return '';
 }
 
-export async function getUncachableResendClient() {
-  const { apiKey, fromEmail } = await getCredentials();
-  return {
-    client: new Resend(apiKey),
-    fromEmail
-  };
-}
-
 export async function isEmailConfigured(): Promise<boolean> {
-  try {
-    await getCredentials();
-    return true;
-  } catch {
-    return false;
-  }
+  return !!process.env.RESEND_API_KEY;
 }
 
 export interface AdminEmailParams {
@@ -71,10 +29,14 @@ export interface AdminEmailParams {
 
 export async function sendAdminEmail(params: AdminEmailParams): Promise<boolean> {
   try {
-    const { client, fromEmail } = await getUncachableResendClient();
-    
+    const apiKey = process.env.RESEND_API_KEY;
+    if (!apiKey) {
+      throw new Error('[emailService] RESEND_API_KEY not set');
+    }
+    const client = new Resend(apiKey);
+
     const result = await client.emails.send({
-      from: fromEmail,
+      from: FROM_ORDERS,
       to: params.to,
       subject: params.subject,
       html: params.html,
@@ -151,7 +113,7 @@ ${baseUrl ? `View User: ${baseUrl}/admin/users/${params.userId}` : 'Log in to th
   `;
 
   return sendAdminEmail({
-    to: params.adminEmail,
+    to: ADMIN_NOTIFICATION_EMAIL,
     subject,
     html,
     text,
@@ -216,7 +178,7 @@ ${baseUrl ? `Review: ${baseUrl}/admin/applications/${params.businessId}` : 'Plea
   `;
 
   return sendAdminEmail({
-    to: params.adminEmail,
+    to: ADMIN_NOTIFICATION_EMAIL,
     subject,
     html,
     text,
@@ -281,7 +243,7 @@ ${baseUrl ? `Review: ${baseUrl}/admin/photographer-applications/${params.photogr
   `;
 
   return sendAdminEmail({
-    to: params.adminEmail,
+    to: ADMIN_NOTIFICATION_EMAIL,
     subject,
     html,
     text,
@@ -451,10 +413,6 @@ const BRAND = {
   border: '#2A2A2A',
 } as const;
 
-const FROM_ORDERS = 'orders@info.goutsyde.com';
-
-// Platform admin copy of every paid-transaction receipt.
-export const ADMIN_NOTIFICATION_EMAIL = process.env.ADMIN_NOTIFICATION_EMAIL || 'info@goutsyde.com';
 
 async function sendBrandedEmail(to: string, subject: string, html: string): Promise<void> {
   const apiKey = process.env.RESEND_API_KEY;
@@ -1326,7 +1284,7 @@ export async function sendCancellationAdminEmail(params: {
     ${emailFooter('This is an automated admin alert from Outsyde.')}
   `);
 
-  await sendAdminEmail({ to: params.adminEmail, subject, html });
+  await sendAdminEmail({ to: ADMIN_NOTIFICATION_EMAIL, subject, html });
 }
 
 // ============================================================

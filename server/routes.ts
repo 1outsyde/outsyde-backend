@@ -95,6 +95,7 @@ import {
 } from "./auth";
 import rateLimit from "express-rate-limit";
 import { stripeService } from "./stripe/stripeService";
+import { sendAppointmentReceipts, sendShootBookingReceipts } from "./stripe/webhookHandlers";
 import { getStripePublishableKey, getUncachableStripeClient } from "./stripe/stripeClient";
 import { authorizeAndProvisionGoLive, GoLiveError } from "./services/goLiveGate";
 import { ObjectStorageService, ObjectNotFoundError } from "./objectStorage";
@@ -6524,10 +6525,11 @@ export async function registerRoutes(
       }
 
       // Capture the PaymentIntent if using manual capture
+      let capturedPaymentIntent: Awaited<ReturnType<typeof stripeService.capturePaymentIntent>> | undefined;
       if (appointment.captureMethod === 'manual' && appointment.stripePaymentIntentId) {
         try {
           console.log(`[Booking] Capturing PaymentIntent ${appointment.stripePaymentIntentId} for appointment ${appointmentId}`);
-          await stripeService.capturePaymentIntent(appointment.stripePaymentIntentId);
+          capturedPaymentIntent = await stripeService.capturePaymentIntent(appointment.stripePaymentIntentId);
           console.log(`[Booking] PaymentIntent captured successfully`);
         } catch (stripeError: any) {
           console.error(`[Booking] Failed to capture PaymentIntent:`, stripeError);
@@ -6545,7 +6547,24 @@ export async function registerRoutes(
       });
 
       if (!result.success) {
-        return res.status(400).json({ error: result.error });
+        // The payment_intent.succeeded webhook for the capture above can
+        // confirm the booking first. The money is captured and the booking
+        // is confirmed, so the vendor gets success; the webhook sent receipts.
+        const current = await storage.getAppointment(appointmentId);
+        const confirmedElsewhere = (result.code === 'CONCURRENT_TRANSITION' || result.code === 'ALREADY_CONFIRMED')
+          && current?.status === BOOKING_STATES.CONFIRMED;
+        if (!confirmedElsewhere) {
+          return res.status(400).json({ error: result.error });
+        }
+        console.log(`[Receipt] provider_accept ${appointmentId} SKIPPED: already processed`);
+      } else if (capturedPaymentIntent) {
+        // This request performed the transition, so it owns the receipts;
+        // the webhook for the capture will log SKIPPED.
+        await sendAppointmentReceipts(appointmentId, {
+          txnType: 'provider_accept',
+          stripeChargeCents: capturedPaymentIntent.amount_received ?? capturedPaymentIntent.amount,
+          forceFullPayment: capturedPaymentIntent.metadata?.type === 'appointment_booking',
+        });
       }
 
       // Notify customer — booking accepted
@@ -6713,10 +6732,11 @@ export async function registerRoutes(
       }
 
       // Capture the PaymentIntent if using manual capture
+      let capturedPaymentIntent: Awaited<ReturnType<typeof stripeService.capturePaymentIntent>> | undefined;
       if (booking.captureMethod === 'manual' && booking.stripePaymentIntentId) {
         try {
           console.log(`[Booking] Capturing PaymentIntent ${booking.stripePaymentIntentId} for shoot booking ${bookingId}`);
-          await stripeService.capturePaymentIntent(booking.stripePaymentIntentId);
+          capturedPaymentIntent = await stripeService.capturePaymentIntent(booking.stripePaymentIntentId);
           console.log(`[Booking] PaymentIntent captured successfully`);
         } catch (stripeError: any) {
           console.error(`[Booking] Failed to capture PaymentIntent:`, stripeError);
@@ -6734,7 +6754,23 @@ export async function registerRoutes(
       });
 
       if (!result.success) {
-        return res.status(400).json({ error: result.error });
+        // The payment_intent.succeeded webhook for the capture above can
+        // confirm the booking first. The money is captured and the booking
+        // is confirmed, so the photographer gets success; the webhook sent receipts.
+        const current = await storage.getShootBooking(bookingId);
+        const confirmedElsewhere = (result.code === 'CONCURRENT_TRANSITION' || result.code === 'ALREADY_CONFIRMED')
+          && current?.status === BOOKING_STATES.CONFIRMED;
+        if (!confirmedElsewhere) {
+          return res.status(400).json({ error: result.error });
+        }
+        console.log(`[Receipt] provider_accept ${bookingId} SKIPPED: already processed`);
+      } else if (capturedPaymentIntent) {
+        // This request performed the transition, so it owns the receipts;
+        // the webhook for the capture will log SKIPPED.
+        await sendShootBookingReceipts(bookingId, {
+          txnType: 'provider_accept',
+          stripeChargeCents: capturedPaymentIntent.amount_received ?? capturedPaymentIntent.amount,
+        });
       }
 
       // Notify customer — shoot booking accepted
