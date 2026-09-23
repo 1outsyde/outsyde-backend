@@ -608,6 +608,32 @@ async function main() {
       const E = await failThenRetry("dep", "fail_before");
       check("T-2f", E && E.a2.status === 200 && E.calls.length === 2 && E.calls[1].params.amount === 3240 && same(E.calls[0].params, E.calls[1].params),
         `E: deposit resume amount ${E?.calls[1]?.params.amount}, http ${E?.a2.status}`);
+
+      // F / F2: manual-accept business. The vendor's "New booking request"
+      // email must go out exactly once across both attempts.
+      await db.update(schema.businesses).set({ autoAcceptBookings: false } as any).where(eq(schema.businesses.id, business.id));
+      const settleEmails = async () => {
+        let last = -1, stable = 0;
+        for (let i = 0; i < 400 && stable < 10; i++) {
+          await new Promise(r => setTimeout(r, 10));
+          if (sent.length === last) stable++; else { stable = 0; last = sent.length; }
+        }
+      };
+      for (const [label, mode] of [["F", "fail_before"], ["F2", "created_then_lost"]] as const) {
+        // Only emails sent during this case (F and F2 can share a date).
+        await settleEmails();
+        const sentBefore = sent.length;
+        const r = await failThenRetry("full", mode);
+        await settleEmails();
+        const requests = sent.slice(sentBefore).filter(e => e.to === vendorEmail && e.subject.startsWith("New booking request"));
+        check("T-2f", r && r.a1.status === 500 && r.a2.status === 200, `${label}: attempt1 ${r?.a1.status}, attempt2 ${r?.a2.status}`);
+        check("T-2f", r && r.calls.length === 2 && r.calls[0].params.capture_method === "manual" && r.calls[1].params.capture_method === "manual"
+          && r.calls[0].key === `hold_pi_${r.rows[0]?.id}` && r.calls[1].key === r.calls[0].key && same(r.calls[0].params, r.calls[1].params),
+          `${label}: capture ${JSON.stringify(r?.calls.map(c => c.params.capture_method))}, keys ${JSON.stringify(r?.calls.map(c => c.key))}`);
+        check("T-2f", r && r.rows.length === 1 && (r.rows[0] as any).status === BOOKING_STATES.PENDING_PROVIDER, `${label}: rows ${r?.rows.length}, status ${(r?.rows[0] as any)?.status}`);
+        check("T-2f", requests.length === 1, `${label}: vendor "New booking request" emails ${requests.length} (want exactly 1)`);
+      }
+      await db.update(schema.businesses).set({ autoAcceptBookings: true } as any).where(eq(schema.businesses.id, business.id));
     }
 
     // ── Confirm the deposit and full bookings through the webhook ───────────
