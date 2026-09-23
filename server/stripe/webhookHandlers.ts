@@ -1,7 +1,7 @@
 import { getUncachableStripeClient } from "./stripeClient";
 import { storage } from "../storage";
 import { db } from "../db";
-import { fulfillmentTasks, subscriptionTiers, appointments, shootBookings, bookingAuditLog, BOOKING_STATES, productVariants, vendorProducts } from "@shared/schema";
+import { fulfillmentTasks, subscriptionTiers, appointments, shootBookings, bookingAuditLog, BOOKING_STATES, productVariants, vendorProducts, orders } from "@shared/schema";
 import { sql, eq, and, inArray } from "drizzle-orm";
 import { NotificationTriggers } from "../notificationService";
 import { sendStaffOnboardingCompleteOwnerEmail } from "../services/resendService";
@@ -24,6 +24,11 @@ import {
 } from "../emailService";
 import { processInfluencerCommission, reverseInfluencerCommission } from "../influencerPayoutService";
 import { calculateBookingFees } from "../fees";
+
+// XO Beauty & Lashes' own deposit-email sender (the legacy
+// create-deposit-intent flow's pre-existing behavior).
+const XO_BUSINESS_ID = process.env.XO_BUSINESS_ID || 'bfe25a03-a9e9-4126-a47d-9bd4c85383ea';
+const XO_FROM_ADDRESS = 'XO Beauty & Lashes <bookings@xobeautyandlashes.com>';
 
 function isOnReplit(): boolean {
   return !!(process.env.REPL_IDENTITY || process.env.WEB_REPL_RENEWAL || process.env.REPL_ID);
@@ -65,6 +70,221 @@ async function decrementInventory(
       .where(eq(vendorProducts.id, item.productId));
     console.log(`[Inventory] Decremented product ${item.productId} by ${item.quantity}`);
   }
+}
+
+/* =====================================================
+   TRANSACTION RECEIPTS
+   Every paid transaction emails the consumer, the vendor and the platform
+   admin. Each send is isolated: one failure is logged with the transaction
+   id and recipient role and never blocks the others.
+===================================================== */
+
+type ReceiptRole = 'consumer' | 'vendor' | 'admin';
+
+interface ReceiptTarget {
+  email: string | null | undefined;
+  send: () => Promise<unknown>;
+}
+
+async function sendReceipt(
+  role: ReceiptRole,
+  txnType: string,
+  txnId: string,
+  target: ReceiptTarget,
+): Promise<void> {
+  if (!target.email) {
+    console.error(`[Receipt] ${txnType} ${txnId} → ${role} SKIPPED: no recipient email`);
+    return;
+  }
+  try {
+    await target.send();
+    console.log(`[Receipt] ${txnType} ${txnId} → ${role} sent`);
+  } catch (err) {
+    console.error(`[Receipt] ${txnType} ${txnId} → ${role} FAILED:`, err);
+  }
+}
+
+export async function sendTransactionReceipts(
+  txnType: string,
+  txnId: string,
+  receipts: { consumer?: ReceiptTarget; vendor?: ReceiptTarget; admin?: () => Promise<unknown> },
+): Promise<void> {
+  const sends: Promise<void>[] = [];
+  if (receipts.consumer) sends.push(sendReceipt('consumer', txnType, txnId, receipts.consumer));
+  if (receipts.vendor) sends.push(sendReceipt('vendor', txnType, txnId, receipts.vendor));
+  if (receipts.admin) sends.push(sendReceipt('admin', txnType, txnId, { email: 'admin', send: receipts.admin }));
+  await Promise.allSettled(sends);
+}
+
+function logReceiptsSkipped(txnType: string, txnId: string): void {
+  console.log(`[Receipt] ${txnType} ${txnId} SKIPPED: already processed`);
+}
+
+/** Run a post-payment side effect without letting its failure abort the rest. */
+async function bestEffort(label: string, fn: () => Promise<unknown>): Promise<void> {
+  try {
+    await fn();
+  } catch (err) {
+    console.error(`[Stripe] ${label} failed:`, err);
+  }
+}
+
+/**
+ * Atomically mark an order paid. Returns true only for the delivery that
+ * actually flipped it, so duplicate webhook deliveries do not re-run
+ * post-payment work or re-send receipts.
+ */
+async function claimOrderPaid(orderId: string, paymentIntentId: string): Promise<boolean> {
+  const rows = await db.update(orders)
+    .set({ status: 'paid', stripePaymentIntentId: paymentIntentId })
+    .where(and(eq(orders.id, orderId), sql`${orders.status} IS DISTINCT FROM 'paid'`))
+    .returning({ id: orders.id });
+  return rows.length > 0;
+}
+
+/**
+ * Receipts for a confirmed appointment. Call only from the code path that
+ * performed the transition to confirmed (webhook or provider accept), so
+ * exactly one path sends them.
+ *
+ * `forceFullPayment` is for the legacy appointment_booking PaymentIntent,
+ * which always charges the full service price even if the appointment row
+ * carries a deposit snapshot.
+ */
+export async function sendAppointmentReceipts(
+  appointmentId: string,
+  opts: { txnType: string; stripeChargeCents?: number; forceFullPayment?: boolean },
+): Promise<void> {
+  const appointment = await storage.getAppointment(appointmentId).catch(() => undefined);
+  if (!appointment) {
+    console.error(`[Receipt] ${opts.txnType} ${appointmentId} SKIPPED: appointment not found`);
+    return;
+  }
+  const business = await storage.getBusiness(appointment.businessId).catch(() => undefined);
+  const owner = await storage.getUserByBusinessOwnerId(appointment.businessId).catch(() => undefined);
+  const customer = await storage.getUser(appointment.clientId).catch(() => undefined);
+
+  // Deposit bookings charge D (+8%) now; the remainder is paid in person and
+  // is display only.
+  const depositCents = opts.forceFullPayment ? undefined : appointment.depositAmountCents ?? undefined;
+  const remainderCents = depositCents != null ? Math.max(0, appointment.totalPrice - depositCents) : undefined;
+
+  await sendTransactionReceipts(opts.txnType, appointmentId, {
+    consumer: {
+      email: customer?.email,
+      send: () => sendAppointmentConfirmationToConsumer({
+        toEmail: customer!.email!,
+        consumerName: customer!.name || customer!.email!,
+        vendorName: business?.name || 'Business',
+        vendorContactEmail: business?.contactEmail ?? undefined,
+        serviceName: appointment.serviceName || 'Appointment',
+        bookingId: appointmentId,
+        bookingNumber: appointment.bookingNumber,
+        date: appointment.appointmentDate,
+        time: appointment.appointmentTime,
+        basePrice: appointment.totalPrice,
+        depositAmountCents: depositCents,
+        remainderDueCents: remainderCents,
+      }),
+    },
+    vendor: {
+      email: owner?.email,
+      send: () => sendAppointmentNotificationToVendor({
+        toEmail: owner!.email!,
+        vendorName: business?.name || 'Business',
+        consumerName: customer?.name || 'Customer',
+        consumerUsername: customer?.username ?? undefined,
+        serviceName: appointment.serviceName || 'Appointment',
+        bookingId: appointmentId,
+        bookingNumber: appointment.bookingNumber,
+        date: appointment.appointmentDate,
+        time: appointment.appointmentTime,
+        basePrice: appointment.totalPrice,
+        depositAmountCents: depositCents,
+        remainderDueCents: remainderCents,
+      }),
+    },
+    admin: () => sendInternalEventAlert({
+      eventType: 'appointment_booking',
+      bookingOrOrderId: appointmentId,
+      consumerName: customer?.name || 'Customer',
+      consumerEmail: customer?.email || '',
+      vendorName: business?.name || 'Business',
+      vendorEmail: owner?.email || '',
+      basePrice: appointment.totalPrice,
+      paymentType: depositCents != null ? 'deposit' : 'full',
+      amountChargedCents: depositCents ?? appointment.totalPrice,
+      serviceTotalCents: appointment.totalPrice,
+      stripeChargeCents: opts.stripeChargeCents,
+      date: appointment.appointmentDate,
+      time: appointment.appointmentTime,
+    }),
+  });
+}
+
+/**
+ * Receipts for a confirmed shoot booking. Same single-sender rule as
+ * sendAppointmentReceipts.
+ */
+export async function sendShootBookingReceipts(
+  bookingId: string,
+  opts: { txnType: string; stripeChargeCents?: number },
+): Promise<void> {
+  const booking = await storage.getShootBooking(bookingId).catch(() => undefined);
+  if (!booking) {
+    console.error(`[Receipt] ${opts.txnType} ${bookingId} SKIPPED: shoot booking not found`);
+    return;
+  }
+  const photographer = await storage.getPhotographer(booking.photographerId).catch(() => undefined);
+  const photographerUser = photographer ? await storage.getUser(photographer.userId).catch(() => undefined) : undefined;
+  const customer = await storage.getUser(booking.clientId).catch(() => undefined);
+
+  await sendTransactionReceipts(opts.txnType, bookingId, {
+    consumer: {
+      email: customer?.email,
+      send: () => sendShootBookingConfirmationToConsumer({
+        toEmail: customer!.email!,
+        consumerName: customer!.name || customer!.email!,
+        photographerName: photographer?.displayName || 'Photographer',
+        photographerContactEmail: photographerUser?.email ?? undefined,
+        shootType: booking.shootType || 'session',
+        bookingId,
+        bookingNumber: booking.bookingNumber || 0,
+        date: booking.date || '',
+        time: booking.startTime || '',
+        basePrice: booking.totalPrice || 0,
+      }),
+    },
+    vendor: {
+      email: photographerUser?.email,
+      send: () => sendShootBookingNotificationToPhotographer({
+        toEmail: photographerUser!.email!,
+        photographerName: photographer?.displayName || 'Photographer',
+        consumerName: customer?.name || 'Customer',
+        consumerUsername: customer?.username ?? undefined,
+        shootType: booking.shootType || 'session',
+        bookingId,
+        bookingNumber: booking.bookingNumber || 0,
+        date: booking.date || '',
+        time: booking.startTime || '',
+        basePrice: booking.totalPrice || 0,
+      }),
+    },
+    admin: () => sendInternalEventAlert({
+      eventType: 'shoot_booking',
+      bookingOrOrderId: bookingId,
+      consumerName: customer?.name || 'Customer',
+      consumerEmail: customer?.email || '',
+      vendorName: photographer?.displayName || 'Photographer',
+      vendorEmail: photographerUser?.email || '',
+      basePrice: booking.totalPrice || 0,
+      paymentType: 'full',
+      amountChargedCents: booking.totalPrice || 0,
+      stripeChargeCents: opts.stripeChargeCents,
+      date: booking.date || '',
+      time: booking.startTime || '',
+    }),
+  });
 }
 
 export class WebhookHandlers {
@@ -236,101 +456,52 @@ export class WebhookHandlers {
 
         // If status is pending_payment (automatic capture) -> CONFIRMED
         // If status is pending_provider (manual capture just captured) -> CONFIRMED
-        if (appointment.status === BOOKING_STATES.PENDING_PAYMENT || 
-            appointment.status === BOOKING_STATES.PENDING_PROVIDER) {
-          const result = await transitionAppointmentState(
-            bookingId,
-            BOOKING_STATES.CONFIRMED,
-            {
-              triggeredBy: 'stripe',
-              triggerSource: 'webhook',
-              metadata: {
-                stripePaymentIntentId: paymentIntent.id,
-                event: 'payment_intent.succeeded'
-              }
-            }
-          );
+        if (appointment.status !== BOOKING_STATES.PENDING_PAYMENT &&
+            appointment.status !== BOOKING_STATES.PENDING_PROVIDER) {
+          logReceiptsSkipped('appointment_booking', bookingId);
+          return;
+        }
 
-          if (!result.success) {
+        const result = await transitionAppointmentState(
+          bookingId,
+          BOOKING_STATES.CONFIRMED,
+          {
+            triggeredBy: 'stripe',
+            triggerSource: 'webhook',
+            metadata: {
+              stripePaymentIntentId: paymentIntent.id,
+              event: 'payment_intent.succeeded'
+            }
+          }
+        );
+
+        if (!result.success) {
+          if (result.code === 'ALREADY_CONFIRMED' || result.code === 'CONCURRENT_TRANSITION') {
+            logReceiptsSkipped('appointment_booking', bookingId);
+          } else {
             console.error(`[Stripe] Failed to confirm appointment ${bookingId}: ${result.error}`);
-            return;
           }
+          return;
+        }
 
-          // Update appointment with payment details
-          await db.update(appointments).set({
-            stripePaymentIntentId: paymentIntent.id,
-            updatedAt: new Date()
-          }).where(eq(appointments.id, bookingId));
+        // Update appointment with payment details
+        await db.update(appointments).set({
+          stripePaymentIntentId: paymentIntent.id,
+          updatedAt: new Date()
+        }).where(eq(appointments.id, bookingId));
 
-          // Mark promo code used and award points on original pre-discount total
-          const { promoCodeId: abPromoCodeId, originalConsumerTotalCents: abOriginalTotal } = metadata;
-          if (abPromoCodeId) {
-            await storage.applyPromoCode(abPromoCodeId, 'appointment', bookingId).catch(err =>
-              console.error(`[Stripe] Failed to apply promo code ${abPromoCodeId} for appointment ${bookingId}:`, err)
-            );
-          }
-          const abPointsBase = abOriginalTotal ? Number(abOriginalTotal) : paymentIntent.amount;
-          const user = clientId ? await storage.getUser(clientId) : null;
-          if (user) {
-            await storage.earnPoints({
-              userId: user.id,
-              dollarAmountCents: abPointsBase,
-              transactionType: 'business_transaction',
-              referenceType: 'appointment',
-              referenceId: bookingId,
-              description: 'Points earned from appointment booking',
-            });
-            await this.tryCompleteReferral(user.id, bookingId, 'appointment');
-          }
+        const user = clientId ? await storage.getUser(clientId).catch(() => undefined) : undefined;
+        const ab_business = await storage.getBusiness(appointment.businessId).catch(() => undefined);
+        const ab_owner = await storage.getUserByBusinessOwnerId(appointment.businessId).catch(() => undefined);
 
-          // Notifications (best-effort: each recipient is independently try/catch'd)
-          const ab_business = await storage.getBusiness(appointment.businessId).catch(() => undefined);
-
-          try {
-            console.log(`[Notify:appointment_booking] Sending customer notification to ${clientId} (appointment ${bookingId})`);
-            await NotificationTriggers.paymentSucceeded({
-              userId: clientId,
-              amount: appointment.totalPrice,
-              referenceType: 'appointment',
-              referenceId: bookingId,
-              description: `Booking confirmed at ${ab_business?.name || 'business'}`,
-            });
-            console.log(`[Notify:appointment_booking] Customer ${clientId} notified`);
-          } catch (err) {
-            console.error(`[Notify:appointment_booking] Customer notification failed for appointment ${bookingId}:`, err);
-          }
-
-          try {
-            const ab_owner = await storage.getUserByBusinessOwnerId(appointment.businessId);
-            if (ab_owner) {
-              console.log(`[Notify:appointment_booking] Sending business owner notification to ${ab_owner.id} (appointment ${bookingId})`);
-              await NotificationTriggers.paymentSucceeded({
-                userId: ab_owner.id,
-                amount: appointment.totalPrice,
-                referenceType: 'appointment',
-                referenceId: bookingId,
-                description: `New booking from ${user?.name || 'customer'}`,
-              });
-              console.log(`[Notify:appointment_booking] Business owner ${ab_owner.id} notified`);
-
-              sendBookingConfirmationPush({
-                customerId: clientId,
-                providerName: ab_business?.name || 'business',
-                date: appointment.appointmentDate,
-                time: appointment.appointmentTime,
-                businessOwnerId: ab_owner.id,
-                customerName: user?.name || undefined,
-              }).catch(err => console.error(`[Notify:appointment_booking] Push failed for appointment ${bookingId}:`, err));
-            }
-          } catch (err) {
-            console.error(`[Notify:appointment_booking] Business owner notification failed for appointment ${bookingId}:`, err);
-          }
-
-          // Transactional emails — each independently try/catch'd
-          if (user?.email) {
-            sendAppointmentConfirmationToConsumer({
-              toEmail: user.email,
-              consumerName: user.name || user.email,
+        // Receipts first, so later side effects can never skip them.
+        // This legacy route always charges the full service price.
+        await sendTransactionReceipts('appointment_booking', bookingId, {
+          consumer: {
+            email: user?.email,
+            send: () => sendAppointmentConfirmationToConsumer({
+              toEmail: user!.email!,
+              consumerName: user!.name || user!.email!,
               vendorName: ab_business?.name || 'Business',
               vendorContactEmail: ab_business?.contactEmail ?? undefined,
               serviceName: appointment.serviceName || 'Appointment',
@@ -338,13 +509,13 @@ export class WebhookHandlers {
               bookingNumber: appointment.bookingNumber,
               date: appointment.appointmentDate,
               time: appointment.appointmentTime,
-              location: appointment.locationDetails ?? undefined,
               basePrice: appointment.totalPrice,
-            }).catch(() => {});
-          }
-          if (ab_owner?.email) {
-            sendAppointmentNotificationToVendor({
-              toEmail: ab_owner.email,
+            }),
+          },
+          vendor: {
+            email: ab_owner?.email,
+            send: () => sendAppointmentNotificationToVendor({
+              toEmail: ab_owner!.email!,
               vendorName: ab_business?.name || 'Business',
               consumerName: user?.name || 'Customer',
               consumerUsername: user?.username ?? undefined,
@@ -353,11 +524,10 @@ export class WebhookHandlers {
               bookingNumber: appointment.bookingNumber,
               date: appointment.appointmentDate,
               time: appointment.appointmentTime,
-              location: appointment.locationDetails ?? undefined,
               basePrice: appointment.totalPrice,
-            }).catch(() => {});
-          }
-          sendInternalEventAlert({
+            }),
+          },
+          admin: () => sendInternalEventAlert({
             eventType: 'appointment_booking',
             bookingOrOrderId: bookingId,
             consumerName: user?.name || 'Customer',
@@ -365,13 +535,76 @@ export class WebhookHandlers {
             vendorName: ab_business?.name || 'Business',
             vendorEmail: ab_owner?.email || '',
             basePrice: appointment.totalPrice,
+            paymentType: 'full',
+            amountChargedCents: appointment.totalPrice,
+            serviceTotalCents: appointment.totalPrice,
+            stripeChargeCents: paymentIntent.amount,
             date: appointment.appointmentDate,
             time: appointment.appointmentTime,
-            location: appointment.locationDetails ?? undefined,
-          }).catch(() => {});
+          }),
+        });
 
-          console.log(`[Stripe] Appointment ${bookingId} confirmed via PaymentIntent`);
+        // Mark promo code used and award points on original pre-discount total
+        const { promoCodeId: abPromoCodeId, originalConsumerTotalCents: abOriginalTotal } = metadata;
+        if (abPromoCodeId) {
+          await storage.applyPromoCode(abPromoCodeId, 'appointment', bookingId).catch(err =>
+            console.error(`[Stripe] Failed to apply promo code ${abPromoCodeId} for appointment ${bookingId}:`, err)
+          );
         }
+        const abPointsBase = abOriginalTotal ? Number(abOriginalTotal) : paymentIntent.amount;
+        if (user) {
+          await bestEffort(`earnPoints for appointment ${bookingId}`, () => storage.earnPoints({
+            userId: user.id,
+            dollarAmountCents: abPointsBase,
+            transactionType: 'business_transaction',
+            referenceType: 'appointment',
+            referenceId: bookingId,
+            description: 'Points earned from appointment booking',
+          }));
+          await bestEffort(`tryCompleteReferral for appointment ${bookingId}`, () => this.tryCompleteReferral(user.id, bookingId, 'appointment'));
+        }
+
+        // In-app notifications (best-effort: each recipient is independently try/catch'd)
+        try {
+          console.log(`[Notify:appointment_booking] Sending customer notification to ${clientId} (appointment ${bookingId})`);
+          await NotificationTriggers.paymentSucceeded({
+            userId: clientId,
+            amount: appointment.totalPrice,
+            referenceType: 'appointment',
+            referenceId: bookingId,
+            description: `Booking confirmed at ${ab_business?.name || 'business'}`,
+          });
+          console.log(`[Notify:appointment_booking] Customer ${clientId} notified`);
+        } catch (err) {
+          console.error(`[Notify:appointment_booking] Customer notification failed for appointment ${bookingId}:`, err);
+        }
+
+        try {
+          if (ab_owner) {
+            console.log(`[Notify:appointment_booking] Sending business owner notification to ${ab_owner.id} (appointment ${bookingId})`);
+            await NotificationTriggers.paymentSucceeded({
+              userId: ab_owner.id,
+              amount: appointment.totalPrice,
+              referenceType: 'appointment',
+              referenceId: bookingId,
+              description: `New booking from ${user?.name || 'customer'}`,
+            });
+            console.log(`[Notify:appointment_booking] Business owner ${ab_owner.id} notified`);
+
+            sendBookingConfirmationPush({
+              customerId: clientId,
+              providerName: ab_business?.name || 'business',
+              date: appointment.appointmentDate,
+              time: appointment.appointmentTime,
+              businessOwnerId: ab_owner.id,
+              customerName: user?.name || undefined,
+            }).catch(err => console.error(`[Notify:appointment_booking] Push failed for appointment ${bookingId}:`, err));
+          }
+        } catch (err) {
+          console.error(`[Notify:appointment_booking] Business owner notification failed for appointment ${bookingId}:`, err);
+        }
+
+        console.log(`[Stripe] Appointment ${bookingId} confirmed via PaymentIntent`);
       } else if (type === 'shoot_booking') {
         // Capture current status before the atomic claim for the audit log
         // fromState. Safe: if the UPDATE succeeds, this value is the correct
@@ -403,6 +636,7 @@ export class WebhookHandlers {
 
         if (claimed.length === 0) {
           console.log(`[Stripe] Shoot booking ${bookingId} already confirmed or not in expected state — skipping duplicate webhook`);
+          logReceiptsSkipped('shoot_booking', bookingId);
           return;
         }
 
@@ -427,6 +661,13 @@ export class WebhookHandlers {
           console.error(`[Stripe] Failed to write audit log for shoot booking ${bookingId}:`, auditErr);
         }
 
+        const sb_booking = await storage.getShootBooking(bookingId).catch(() => undefined);
+        const sb_photographer = sb_booking ? await storage.getPhotographer(sb_booking.photographerId).catch(() => undefined) : undefined;
+        const user = clientId ? await storage.getUser(clientId).catch(() => undefined) : undefined;
+
+        // Receipts first, so later side effects can never skip them.
+        await sendShootBookingReceipts(bookingId, { txnType: 'shoot_booking', stripeChargeCents: paymentIntent.amount });
+
         // Transfer payout to photographer's connected account. vendorPayoutCents
         // was stored in PI metadata at creation time so the webhook uses the
         // exact figure computed in the create-payment-intent route — no
@@ -436,8 +677,7 @@ export class WebhookHandlers {
           : 0;
 
         if (vendorPayoutCents > 0) {
-          const booking = await storage.getShootBooking(bookingId);
-          const photographer = booking ? await storage.getPhotographer(booking.photographerId) : null;
+          const photographer = sb_photographer;
 
           if (!photographer?.stripeAccountId) {
             console.error(`[Stripe] Cannot transfer payout for shoot booking ${bookingId}: photographer has no stripeAccountId. Funds remain on platform balance — manual reconciliation required.`);
@@ -483,24 +723,20 @@ export class WebhookHandlers {
           );
         }
         const sbPointsBase = sbOriginalTotal ? Number(sbOriginalTotal) : paymentIntent.amount;
-        const user = clientId ? await storage.getUser(clientId) : null;
         if (user) {
-          await storage.earnPoints({
+          await bestEffort(`earnPoints for shoot booking ${bookingId}`, () => storage.earnPoints({
             userId: user.id,
             dollarAmountCents: sbPointsBase,
             transactionType: 'photographer_booking',
             referenceType: 'shoot_booking',
             referenceId: bookingId,
             description: 'Points earned from photographer booking',
-          });
-          await this.tryCompleteReferral(user.id, bookingId, 'shoot_booking');
+          }));
+          await bestEffort(`tryCompleteReferral for shoot booking ${bookingId}`, () => this.tryCompleteReferral(user.id, bookingId, 'shoot_booking'));
         }
 
-        // Notifications (best-effort: each recipient is independently try/catch'd)
+        // In-app + push notifications (best-effort)
         try {
-          const sb_booking = await storage.getShootBooking(bookingId);
-          const sb_photographer = sb_booking ? await storage.getPhotographer(sb_booking.photographerId) : null;
-
           console.log(`[Notify:shoot_booking] Sending notifications for shoot booking ${bookingId}`);
           await NotificationTriggers.bookingConfirmed({
             customerId: clientId,
@@ -521,49 +757,6 @@ export class WebhookHandlers {
             businessOwnerId: sb_photographer?.userId,
             customerName: user?.name || undefined,
           }).catch(err => console.error(`[Notify:shoot_booking] Push failed for shoot booking ${bookingId}:`, err));
-
-          // Transactional emails
-          const sb_photographerUser = sb_photographer ? await storage.getUser(sb_photographer.userId) : null;
-          if (user?.email) {
-            sendShootBookingConfirmationToConsumer({
-              toEmail: user.email,
-              consumerName: user.name || user.email,
-              photographerName: sb_photographer?.displayName || 'Photographer',
-              photographerContactEmail: sb_photographerUser?.email ?? undefined,
-              shootType: sb_booking?.shootType || 'session',
-              bookingId,
-              bookingNumber: sb_booking?.bookingNumber || 0,
-              date: sb_booking?.date || '',
-              time: sb_booking?.startTime || '',
-              basePrice: sb_booking?.totalPrice || 0,
-            }).catch(() => {});
-          }
-          console.log('[Email] Photographer toEmail:', sb_photographerUser?.email);
-          if (sb_photographerUser?.email) {
-            sendShootBookingNotificationToPhotographer({
-              toEmail: sb_photographerUser.email,
-              photographerName: sb_photographer?.displayName || 'Photographer',
-              consumerName: user?.name || 'Customer',
-              consumerUsername: user?.username ?? undefined,
-              shootType: sb_booking?.shootType || 'session',
-              bookingId,
-              bookingNumber: sb_booking?.bookingNumber || 0,
-              date: sb_booking?.date || '',
-              time: sb_booking?.startTime || '',
-              basePrice: sb_booking?.totalPrice || 0,
-            }).catch(() => {});
-          }
-          sendInternalEventAlert({
-            eventType: 'shoot_booking',
-            bookingOrOrderId: bookingId,
-            consumerName: user?.name || 'Customer',
-            consumerEmail: user?.email || '',
-            vendorName: sb_photographer?.displayName || 'Photographer',
-            vendorEmail: sb_photographerUser?.email || '',
-            basePrice: sb_booking?.totalPrice || 0,
-            date: sb_booking?.date || '',
-            time: sb_booking?.startTime || '',
-          }).catch(() => {});
         } catch (err) {
           console.error(`[Notify:shoot_booking] Notifications failed for shoot booking ${bookingId}:`, err);
         }
@@ -588,8 +781,13 @@ export class WebhookHandlers {
           return;
         }
 
-        if (appointment.status === BOOKING_STATES.PENDING_PAYMENT ||
-            appointment.status === BOOKING_STATES.PENDING_PROVIDER) {
+        if (appointment.status !== BOOKING_STATES.PENDING_PAYMENT &&
+            appointment.status !== BOOKING_STATES.PENDING_PROVIDER) {
+          logReceiptsSkipped('appointment', appointmentId);
+          return;
+        }
+
+        {
           const result = await transitionAppointmentState(
             appointmentId,
             BOOKING_STATES.CONFIRMED,
@@ -604,7 +802,11 @@ export class WebhookHandlers {
           );
 
           if (!result.success) {
-            console.error(`[Stripe] Failed to confirm appointment ${appointmentId}: ${result.error}`);
+            if (result.code === 'ALREADY_CONFIRMED' || result.code === 'CONCURRENT_TRANSITION') {
+              logReceiptsSkipped('appointment', appointmentId);
+            } else {
+              console.error(`[Stripe] Failed to confirm appointment ${appointmentId}: ${result.error}`);
+            }
             return;
           }
 
@@ -614,6 +816,13 @@ export class WebhookHandlers {
           }).where(eq(appointments.id, appointmentId));
 
           console.log(`[Stripe] Appointment ${appointmentId} confirmed via platform-balance PaymentIntent`);
+
+          const business = businessId ? await storage.getBusiness(businessId).catch(() => undefined) : undefined;
+          const apptCustomer = await storage.getUser(appointment.clientId).catch(() => undefined);
+          const apptOwner = businessId ? await storage.getUserByBusinessOwnerId(businessId).catch(() => undefined) : undefined;
+
+          // Receipts first, so later side effects can never skip them.
+          await sendAppointmentReceipts(appointmentId, { txnType: 'appointment', stripeChargeCents: paymentIntent.amount });
 
           // Convert the hold now that the appointment is confirmed. This is
           // the first place holdId is ever set in Stripe metadata, so this
@@ -635,7 +844,6 @@ export class WebhookHandlers {
           const feeBreakdown = calculateBookingFees(chargedAmountCents);
           const vendorNetCents = feeBreakdown.vendorNetCents;
 
-          const business = businessId ? await storage.getBusiness(businessId) : undefined;
           if (!business?.stripeAccountId) {
             console.error(`[Stripe] Cannot pay out appointment ${appointmentId}: business ${businessId} has no stripeAccountId. Funds remain on platform balance -- manual reconciliation required.`);
           } else if (staffMemberId) {
@@ -691,7 +899,7 @@ export class WebhookHandlers {
           // Points: create a pending transaction on totalPrice (full service value).
           // Points are held until the appointment is marked completed — they are
           // approved in PATCH /api/bookings/appointments/:id/complete.
-          await storage.createPendingPointTransaction({
+          await bestEffort(`createPendingPointTransaction for appointment ${appointmentId}`, () => storage.createPendingPointTransaction({
             userId: appointment.clientId,
             dollarAmountCents: appointment.totalPrice,
             transactionType: 'business_transaction',
@@ -699,12 +907,11 @@ export class WebhookHandlers {
             referenceId: appointmentId,
             description: 'Points earned from service booking',
             businessId,
-          });
-          await this.tryCompleteReferral(appointment.clientId, appointmentId, 'appointment');
+          }));
+          await bestEffort(`tryCompleteReferral for appointment ${appointmentId}`, () => this.tryCompleteReferral(appointment.clientId, appointmentId, 'appointment'));
 
           // Notifications (best-effort: each recipient is independently try/catch'd so
           // one failure does not prevent the others from firing or block the booking)
-          const apptCustomer = await storage.getUser(appointment.clientId).catch(() => undefined);
 
           // Customer in-app
           try {
@@ -721,14 +928,10 @@ export class WebhookHandlers {
             console.error(`[Notify:appointment] Customer notification failed for appointment ${appointmentId}:`, err);
           }
 
-          // Business owner in-app — capture owner id and email for the push/email calls below
-          let apptOwnerId: string | undefined;
-          let apptOwnerEmail: string | undefined;
+          // Business owner in-app
+          const apptOwnerId: string | undefined = apptOwner?.id;
           try {
-            const apptOwner = business ? await storage.getUserByBusinessOwnerId(businessId) : undefined;
             if (apptOwner) {
-              apptOwnerId = apptOwner.id;
-              apptOwnerEmail = apptOwner.email || undefined;
               console.log(`[Notify:appointment] Sending business owner notification to ${apptOwner.id} (appointment ${appointmentId})`);
               await NotificationTriggers.paymentSucceeded({
                 userId: apptOwner.id,
@@ -778,59 +981,11 @@ export class WebhookHandlers {
             customerName: apptCustomer?.name || undefined,
           }).catch(err => console.error(`[Notify:appointment] Push failed for appointment ${appointmentId}:`, err));
 
-          // Transactional emails
-          if (apptCustomer?.email) {
-            sendAppointmentConfirmationToConsumer({
-              toEmail: apptCustomer.email,
-              consumerName: apptCustomer.name || apptCustomer.email,
-              vendorName: business?.name || 'Business',
-              vendorContactEmail: business?.contactEmail ?? undefined,
-              serviceName: appointment.serviceName || 'Appointment',
-              bookingId: appointmentId,
-              bookingNumber: appointment.bookingNumber,
-              date: appointment.appointmentDate,
-              time: appointment.appointmentTime,
-              location: appointment.locationDetails ?? undefined,
-              basePrice: appointment.totalPrice,
-            }).catch(() => {});
-          }
-          if (apptOwnerId) {
-            storage.getUser(apptOwnerId).then(apptOwner => {
-              if (apptOwner?.email) {
-                sendAppointmentNotificationToVendor({
-                  toEmail: apptOwner.email,
-                  vendorName: business?.name || 'Business',
-                  consumerName: apptCustomer?.name || 'Customer',
-                  consumerUsername: apptCustomer?.username ?? undefined,
-                  serviceName: appointment.serviceName || 'Appointment',
-                  bookingId: appointmentId,
-                  bookingNumber: appointment.bookingNumber,
-                  date: appointment.appointmentDate,
-                  time: appointment.appointmentTime,
-                  location: appointment.locationDetails ?? undefined,
-                  basePrice: appointment.totalPrice,
-                }).catch(() => {});
-              }
-            }).catch(() => {});
-          }
-          sendInternalEventAlert({
-            eventType: 'appointment_booking',
-            bookingOrOrderId: appointmentId,
-            consumerName: apptCustomer?.name || 'Customer',
-            consumerEmail: apptCustomer?.email || '',
-            vendorName: business?.name || 'Business',
-            vendorEmail: apptOwnerEmail || '',
-            basePrice: appointment.totalPrice,
-            date: appointment.appointmentDate,
-            time: appointment.appointmentTime,
-            location: appointment.locationDetails ?? undefined,
-          }).catch(() => {});
-
         }
       } else if (type === 'deposit') {
-        // XO Beauty & Lashes flat-$25 deposit flow (POST /api/booking/:holdId/create-deposit-intent).
+        // Legacy XO Beauty & Lashes deposit flow (POST /api/booking/:holdId/create-deposit-intent).
         // Appointment and hold were already created in that route; here we confirm the
-        // appointment and fire XO-specific emails to the customer and Nik.
+        // appointment and send the receipts.
         const appointmentId = appointmentIdFromMetadata;
         const { holdId, businessId } = metadata;
 
@@ -845,69 +1000,97 @@ export class WebhookHandlers {
           return;
         }
 
-        if (appt.status === BOOKING_STATES.PENDING_PAYMENT || appt.status === BOOKING_STATES.PENDING_PROVIDER) {
-          const result = await transitionAppointmentState(
-            appointmentId,
-            BOOKING_STATES.CONFIRMED,
-            {
-              triggeredBy: 'stripe',
-              triggerSource: 'webhook',
-              metadata: { stripePaymentIntentId: paymentIntent.id, event: 'payment_intent.succeeded' }
-            }
-          );
+        if (appt.status !== BOOKING_STATES.PENDING_PAYMENT && appt.status !== BOOKING_STATES.PENDING_PROVIDER) {
+          console.log(`[Stripe] deposit: Appointment ${appointmentId} already in status ${appt.status} — skipping`);
+          logReceiptsSkipped('deposit', appointmentId);
+          return;
+        }
 
-          if (!result.success) {
+        const result = await transitionAppointmentState(
+          appointmentId,
+          BOOKING_STATES.CONFIRMED,
+          {
+            triggeredBy: 'stripe',
+            triggerSource: 'webhook',
+            metadata: { stripePaymentIntentId: paymentIntent.id, event: 'payment_intent.succeeded' }
+          }
+        );
+
+        if (!result.success) {
+          if (result.code === 'ALREADY_CONFIRMED' || result.code === 'CONCURRENT_TRANSITION') {
+            logReceiptsSkipped('deposit', appointmentId);
+          } else {
             console.error(`[Stripe] deposit: Failed to confirm appointment ${appointmentId}: ${result.error}`);
-            return;
           }
+          return;
+        }
 
-          await db.update(appointments).set({
-            stripePaymentIntentId: paymentIntent.id,
-            updatedAt: new Date(),
-          }).where(eq(appointments.id, appointmentId));
+        await db.update(appointments).set({
+          stripePaymentIntentId: paymentIntent.id,
+          updatedAt: new Date(),
+        }).where(eq(appointments.id, appointmentId));
 
-          if (holdId) {
-            markHoldAsConverted(holdId, appointmentId, 'appointment').catch(err =>
-              console.error(`[Stripe] deposit: Failed to convert hold ${holdId}:`, err)
-            );
-          }
+        const depositCustomer = await storage.getUser(appt.clientId).catch(() => undefined);
+        const depositBusiness = businessId ? await storage.getBusiness(businessId).catch(() => undefined) : undefined;
+        const depositVendorOwner = businessId ? await storage.getUserByBusinessOwnerId(businessId).catch(() => undefined) : undefined;
+        const depositAmountCents = paymentIntent.amount ?? undefined;
+        // XO keeps its own sender on its deposit emails; every other vendor
+        // gets the Outsyde default.
+        const depositFromAddress = businessId && businessId === XO_BUSINESS_ID ? XO_FROM_ADDRESS : undefined;
 
-          const depositCustomer = await storage.getUser(appt.clientId).catch(() => undefined);
-
-          // Fetch vendor data so emails are branded per-business, not hardcoded to XO.
-          const depositBusiness = businessId ? await storage.getBusiness(businessId).catch(() => undefined) : undefined;
-          const depositVendorOwner = businessId ? await storage.getUserByBusinessOwnerId(businessId).catch(() => undefined) : undefined;
-          const depositAmountCents = paymentIntent.amount ?? undefined;
-
-          if (depositCustomer?.email) {
-            sendBookingConfirmationToCustomer({
-              toEmail: depositCustomer.email,
-              customerName: depositCustomer.name || depositCustomer.firstName || 'there',
+        await sendTransactionReceipts('deposit', appointmentId, {
+          consumer: {
+            email: depositCustomer?.email,
+            send: () => sendBookingConfirmationToCustomer({
+              toEmail: depositCustomer!.email!,
+              customerName: depositCustomer!.name || depositCustomer!.firstName || 'there',
               serviceName: appt.serviceName || 'Appointment',
               date: appt.appointmentDate,
               time: appt.appointmentTime,
               appointmentId,
               businessName: depositBusiness?.name,
               vendorContactEmail: depositBusiness?.contactEmail ?? undefined,
-            }).catch(() => {});
-          }
-
-          sendNewBookingAlertToVendor({
-            customerName: depositCustomer?.name || depositCustomer?.firstName || 'Customer',
-            customerEmail: depositCustomer?.email || '',
-            serviceName: appt.serviceName || 'Appointment',
+              fromAddress: depositFromAddress,
+            }),
+          },
+          vendor: {
+            email: depositVendorOwner?.email,
+            send: () => sendNewBookingAlertToVendor({
+              customerName: depositCustomer?.name || depositCustomer?.firstName || 'Customer',
+              customerEmail: depositCustomer?.email || '',
+              serviceName: appt.serviceName || 'Appointment',
+              date: appt.appointmentDate,
+              time: appt.appointmentTime,
+              appointmentId,
+              vendorOwnerEmail: depositVendorOwner?.email ?? undefined,
+              businessName: depositBusiness?.name,
+              fromAddress: depositFromAddress,
+              depositAmountCents,
+            }),
+          },
+          admin: () => sendInternalEventAlert({
+            eventType: 'appointment_booking',
+            bookingOrOrderId: appointmentId,
+            consumerName: depositCustomer?.name || depositCustomer?.firstName || 'Customer',
+            consumerEmail: depositCustomer?.email || '',
+            vendorName: depositBusiness?.name || 'Business',
+            vendorEmail: depositVendorOwner?.email || '',
+            paymentType: 'deposit',
+            amountChargedCents: paymentIntent.amount,
+            serviceTotalCents: appt.totalPrice,
+            stripeChargeCents: paymentIntent.amount,
             date: appt.appointmentDate,
             time: appt.appointmentTime,
-            appointmentId,
-            vendorOwnerEmail: depositVendorOwner?.email,
-            businessName: depositBusiness?.name,
-            depositAmountCents,
-          }).catch(() => {});
+          }),
+        });
 
-          console.log(`[Stripe] deposit: Appointment ${appointmentId} confirmed`);
-        } else {
-          console.log(`[Stripe] deposit: Appointment ${appointmentId} already in status ${appt.status} — skipping`);
+        if (holdId) {
+          markHoldAsConverted(holdId, appointmentId, 'appointment').catch(err =>
+            console.error(`[Stripe] deposit: Failed to convert hold ${holdId}:`, err)
+          );
         }
+
+        console.log(`[Stripe] deposit: Appointment ${appointmentId} confirmed`);
       } else if (type === 'product_purchase') {
         // Mobile PaymentSheet product cart flow (POST /api/cart/payment-intent).
         // The order row was created before the PaymentIntent, so all we do here
@@ -922,11 +1105,74 @@ export class WebhookHandlers {
         }
 
         const order = await storage.getOrder(orderId);
-        if (!order || order.status === 'paid') return;
+        if (!order) {
+          console.error(`[Stripe] product_purchase: Order ${orderId} not found`);
+          return;
+        }
 
-        await storage.updateOrder(orderId, {
-          status: 'paid',
-          stripePaymentIntentId: paymentIntent.id,
+        if (!(await claimOrderPaid(orderId, paymentIntent.id))) {
+          logReceiptsSkipped('product_purchase', orderId);
+          return;
+        }
+
+        // Resolve business, vendor, and customer once for receipts and notifications
+        const userIdFromMeta = metadata.userId;
+        const orderBusinessId = metadata.businessId;
+        const orderBusiness = orderBusinessId ? await storage.getBusiness(orderBusinessId).catch(() => undefined) : undefined;
+        const vendor = orderBusinessId ? await storage.getUserByBusinessOwnerId(orderBusinessId).catch(() => undefined) : undefined;
+        const purchaser = userIdFromMeta ? await storage.getUser(userIdFromMeta).catch(() => undefined) : undefined;
+        const customer = purchaser ?? await storage.getUser(order.customerId).catch(() => undefined);
+
+        // Build order item list shared by consumer and vendor emails
+        const piOrderItems = ((order.items as any[]) || []).map((i: any) => ({
+          productName: i.name || i.title || i.productId || 'Item',
+          variantLabel: i.variantLabel ?? undefined,
+          vendorName: orderBusiness?.name || vendor?.name || 'Business',
+          vendorContactEmail: orderBusiness?.contactEmail ?? undefined,
+          quantity: i.quantity || 1,
+          basePrice: i.price || i.unitPrice || 0,
+        }));
+        const piVendorItems = piOrderItems.map(({ vendorName: _vn, vendorContactEmail: _vce, ...rest }) => rest);
+
+        // Receipts first, so later side effects can never skip them.
+        await sendTransactionReceipts('product_purchase', orderId, {
+          consumer: {
+            email: customer?.email,
+            send: () => sendOrderConfirmationToConsumer({
+              toEmail: customer!.email!,
+              consumerName: customer!.firstName
+                ? `${customer!.firstName} ${customer!.lastName ?? ''}`.trim()
+                : customer!.name || customer!.email!.split('@')[0],
+              orderId,
+              orderNumber: order.orderNumber,
+              items: piOrderItems,
+              totalAmountCents: order.grossChargeAmount ?? undefined,
+              platformFeeCents: order.consumerServiceFee ?? undefined,
+            }),
+          },
+          vendor: {
+            email: vendor?.email,
+            send: () => sendOrderNotificationToVendor({
+              toEmail: vendor!.email!,
+              vendorName: orderBusiness?.name || vendor!.name || 'Business',
+              consumerName: customer?.name || 'Customer',
+              consumerUsername: customer?.username ?? undefined,
+              orderId,
+              orderNumber: order.orderNumber,
+              items: piVendorItems,
+              vendorNetCents: order.vendorNet ?? undefined,
+            }),
+          },
+          admin: () => sendInternalEventAlert({
+            eventType: 'product_order',
+            bookingOrOrderId: orderId,
+            consumerName: customer?.name || 'Customer',
+            consumerEmail: customer?.email || '',
+            vendorName: orderBusiness?.name || vendor?.name || 'Business',
+            vendorEmail: vendor?.email || '',
+            items: piVendorItems,
+            stripeChargeCents: paymentIntent.amount,
+          }),
         });
 
         // Process influencer commission if attributed
@@ -950,9 +1196,8 @@ export class WebhookHandlers {
         }
 
         // Clear the user's cart
-        const userIdFromMeta = metadata.userId;
         if (userIdFromMeta) {
-          await storage.clearCart(userIdFromMeta);
+          await bestEffort(`clearCart for order ${orderId}`, () => storage.clearCart(userIdFromMeta));
         }
 
         // Mark promo code used and award points on original pre-discount total
@@ -965,65 +1210,28 @@ export class WebhookHandlers {
         // Use stored gross_charge_amount for the earn formula; fall back to total_amount then PI amount
         const grossForPoints = order.grossChargeAmount ?? order.totalAmount;
         const ppPointsBase = ppOriginalTotal ? Number(ppOriginalTotal) : grossForPoints;
-        const purchaser = userIdFromMeta ? await storage.getUser(userIdFromMeta) : null;
         if (purchaser) {
-          await storage.earnPoints({
+          await bestEffort(`earnPoints for order ${orderId}`, () => storage.earnPoints({
             userId: purchaser.id,
             dollarAmountCents: ppPointsBase,
             transactionType: 'business_transaction',
             referenceType: 'cart_order',
             referenceId: orderId,
             description: 'Points earned from purchase',
-          });
-          await this.tryCompleteReferral(purchaser.id, orderId, 'cart_order');
-        }
-
-        // Resolve business, vendor, and customer once for both notifications and emails
-        const orderBusinessId = metadata.businessId;
-        const orderBusiness = orderBusinessId ? await storage.getBusiness(orderBusinessId) : null;
-        const vendor = orderBusinessId ? await storage.getUserByBusinessOwnerId(orderBusinessId) : null;
-        const customer = purchaser ?? await storage.getUser(order.customerId);
-
-        // Build order item list shared by consumer and vendor emails
-        const piOrderItems = ((order.items as any[]) || []).map((i: any) => ({
-          productName: i.name || i.title || i.productId || 'Item',
-          variantLabel: i.variantLabel ?? undefined,
-          vendorName: orderBusiness?.name || vendor?.name || 'Business',
-          vendorContactEmail: orderBusiness?.contactEmail ?? undefined,
-          quantity: i.quantity || 1,
-          basePrice: i.price || i.unitPrice || 0,
-        }));
-
-        // Send order confirmation to consumer — independent of vendor lookup
-        if (customer?.email) {
-          const consumerName = customer.firstName
-            ? `${customer.firstName} ${customer.lastName ?? ''}`.trim()
-            : customer.name || customer.email.split('@')[0];
-          try {
-            await sendOrderConfirmationToConsumer({
-              toEmail: customer.email,
-              consumerName,
-              orderId,
-              orderNumber: order.orderNumber,
-              items: piOrderItems,
-              totalAmountCents: order.grossChargeAmount ?? undefined,
-              platformFeeCents: order.consumerServiceFee ?? undefined,
-            });
-          } catch (emailErr) {
-            console.error('[webhook] sendOrderConfirmationToConsumer failed:', emailErr);
-          }
+          }));
+          await bestEffort(`tryCompleteReferral for order ${orderId}`, () => this.tryCompleteReferral(purchaser.id, orderId, 'cart_order'));
         }
 
         // Notify the business of the new order
         if (vendor) {
           const itemCount = order.items?.length || 1;
-          await NotificationTriggers.newOrderReceived({
+          await bestEffort(`newOrderReceived for order ${orderId}`, () => NotificationTriggers.newOrderReceived({
             vendorUserId: vendor.id,
             orderId,
             customerName: customer?.name || customer?.email || 'Customer',
             orderTotal: order.totalAmount,
             itemCount,
-          });
+          }));
 
           // Notify the customer that their order is confirmed (app push)
           NotificationTriggers.orderConfirmed({
@@ -1032,37 +1240,6 @@ export class WebhookHandlers {
             businessName: orderBusiness?.name || vendor.name || 'the business',
             itemCount: order.items?.length || 1,
           }).catch(err => console.error('Notification error:', err));
-
-          if (vendor.email) {
-            try {
-              await sendOrderNotificationToVendor({
-                toEmail: vendor.email,
-                vendorName: orderBusiness?.name || vendor.name || 'Business',
-                consumerName: customer?.name || 'Customer',
-                consumerUsername: customer?.username ?? undefined,
-                orderId,
-                orderNumber: order.orderNumber,
-                items: piOrderItems.map(({ vendorName: _vn, vendorContactEmail: _vce, ...rest }) => rest),
-                vendorNetCents: order.vendorNet ?? undefined,
-              });
-            } catch (vendorEmailErr) {
-              console.error('[webhook] sendOrderNotificationToVendor failed:', vendorEmailErr);
-            }
-          }
-        }
-
-        try {
-          await sendInternalEventAlert({
-            eventType: 'product_order',
-            bookingOrOrderId: orderId,
-            consumerName: customer?.name || 'Customer',
-            consumerEmail: customer?.email || '',
-            vendorName: orderBusiness?.name || vendor?.name || 'Business',
-            vendorEmail: vendor?.email || '',
-            items: piOrderItems.map(({ vendorName: _vn, vendorContactEmail: _vce, ...rest }) => rest),
-          });
-        } catch (alertErr) {
-          console.error('[webhook] sendInternalEventAlert failed:', alertErr);
         }
 
         console.log(`[Stripe] Product purchase completed: Order ${orderId} marked as paid`);
@@ -1080,13 +1257,43 @@ export class WebhookHandlers {
           return;
         }
 
+        const orderGroupTxnId = metadata.orderGroupId || vendorOrders[0]?.orderId || paymentIntent.id;
+        const purchaser = metadata.userId ? await storage.getUser(metadata.userId).catch(() => undefined) : undefined;
+        let claimedOrders = 0;
+
         for (const vendorOrder of vendorOrders) {
           const order = await storage.getOrder(vendorOrder.orderId);
-          if (!order || order.status === 'paid') continue;
+          if (!order) continue;
 
-          await storage.updateOrder(vendorOrder.orderId, {
-            status: 'paid',
-            stripePaymentIntentId: paymentIntent.id,
+          if (!(await claimOrderPaid(vendorOrder.orderId, paymentIntent.id))) {
+            logReceiptsSkipped('multi_vendor_product_purchase', vendorOrder.orderId);
+            continue;
+          }
+          claimedOrders++;
+
+          const piVendorBusiness = await storage.getBusiness(vendorOrder.businessId).catch(() => undefined);
+          const vendorUser = await storage.getUserByBusinessOwnerId(vendorOrder.businessId).catch(() => undefined);
+          const customer = purchaser ?? await storage.getUser(order.customerId).catch(() => undefined);
+
+          // Vendor receipt for this vendor's portion — first, before side effects.
+          await sendTransactionReceipts('multi_vendor_product_purchase', vendorOrder.orderId, {
+            vendor: {
+              email: vendorUser?.email,
+              send: () => sendOrderNotificationToVendor({
+                toEmail: vendorUser!.email!,
+                vendorName: piVendorBusiness?.name || vendorUser!.name || 'Business',
+                consumerName: customer?.name || 'Customer',
+                consumerUsername: customer?.username ?? undefined,
+                orderId: vendorOrder.orderId,
+                orderNumber: order.orderNumber,
+                items: ((order.items as any[]) || []).map((i: any) => ({
+                  productName: i.name || i.title || i.productId || 'Item',
+                  quantity: i.quantity || 1,
+                  basePrice: i.price || i.unitPrice || 0,
+                })),
+                vendorNetCents: order.vendorNet ?? undefined,
+              }),
+            },
           });
 
           // Decrement inventory for this vendor's items
@@ -1110,132 +1317,112 @@ export class WebhookHandlers {
           }
 
           // Transfer vendor's net payout to their connected account
-          const business = await storage.getBusiness(vendorOrder.businessId);
-          if (business?.stripeAccountId && vendorOrder.vendorNetCents > 0) {
+          if (piVendorBusiness?.stripeAccountId && vendorOrder.vendorNetCents > 0) {
             try {
               await stripeService.transferToVendor({
                 amountInCents: vendorOrder.vendorNetCents,
-                connectedAccountId: business.stripeAccountId,
+                connectedAccountId: piVendorBusiness.stripeAccountId,
                 orderId: vendorOrder.orderId,
                 orderGroupId: metadata.orderGroupId,
               });
-              console.log(`[Stripe] Transfer completed for order ${vendorOrder.orderId}: ${vendorOrder.vendorNetCents}¢ → ${business.stripeAccountId}`);
+              console.log(`[Stripe] Transfer completed for order ${vendorOrder.orderId}: ${vendorOrder.vendorNetCents}¢ → ${piVendorBusiness.stripeAccountId}`);
             } catch (transferErr) {
-              console.error(`[Stripe] TRANSFER FAILED for order ${vendorOrder.orderId} (${vendorOrder.vendorNetCents}¢ → ${business.stripeAccountId}) — manual reconciliation required:`, transferErr);
+              console.error(`[Stripe] TRANSFER FAILED for order ${vendorOrder.orderId} (${vendorOrder.vendorNetCents}¢ → ${piVendorBusiness.stripeAccountId}) — manual reconciliation required:`, transferErr);
               // Do not throw: the consumer payment succeeded, payout failure must be reconciled separately
             }
           }
 
-          // Notify this vendor of their new order
-          const vendorUser = await storage.getUserByBusinessOwnerId(vendorOrder.businessId);
+          // Notify this vendor of their new order (in-app)
           if (vendorUser) {
-            const customer = await storage.getUser(order.customerId);
-            await NotificationTriggers.newOrderReceived({
+            await bestEffort(`newOrderReceived for order ${vendorOrder.orderId}`, () => NotificationTriggers.newOrderReceived({
               vendorUserId: vendorUser.id,
               orderId: vendorOrder.orderId,
               customerName: customer?.name || customer?.email || 'Customer',
               orderTotal: order.totalAmount,
               itemCount: order.items?.length || 1,
-            });
-            // Email vendor about their portion
-            if (vendorUser.email) {
-              const piVendorBusiness = await storage.getBusiness(vendorOrder.businessId);
-              const piMvItems = ((order.items as any[]) || []).map((i: any) => ({
-                productName: i.name || i.title || i.productId || 'Item',
-                quantity: i.quantity || 1,
-                basePrice: i.price || i.unitPrice || 0,
-              }));
-              sendOrderNotificationToVendor({
-                toEmail: vendorUser.email,
-                vendorName: piVendorBusiness?.name || vendorUser.name || 'Business',
-                consumerName: customer?.name || 'Customer',
-                consumerUsername: customer?.username ?? undefined,
-                orderId: vendorOrder.orderId,
-                orderNumber: order.orderNumber,
-                items: piMvItems,
-                vendorNetCents: order.vendorNet ?? undefined,
-              }).catch(() => {});
-            }
+            }));
           }
         }
 
-        // Post-loop: clear cart, award points, notify customer, close order group
-        if (metadata.userId) {
-          await storage.clearCart(metadata.userId);
+        if (claimedOrders === 0) {
+          logReceiptsSkipped('multi_vendor_product_purchase', orderGroupTxnId);
+          return;
         }
 
-        const purchaser = metadata.userId ? await storage.getUser(metadata.userId) : null;
+        // Consolidated consumer receipt + admin copy — not gated on any other lookup.
+        const allMvPiItems: Array<{ productName: string; vendorName: string; vendorContactEmail?: string; quantity: number; basePrice: number }> = [];
+        let firstMvPiOrderNumber = 0;
+        let mvTotalAmountCents = 0;
+        let mvServiceFeeCents = 0;
+        let hasMvStoredTotals = true;
+        for (const vo of vendorOrders) {
+          const voOrder = await storage.getOrder(vo.orderId).catch(() => undefined);
+          const voBusiness = await storage.getBusiness(vo.businessId).catch(() => undefined);
+          if (!firstMvPiOrderNumber && voOrder?.orderNumber) firstMvPiOrderNumber = voOrder.orderNumber;
+          if (voOrder?.grossChargeAmount != null && voOrder?.consumerServiceFee != null) {
+            mvTotalAmountCents += voOrder.grossChargeAmount;
+            mvServiceFeeCents += voOrder.consumerServiceFee;
+          } else {
+            hasMvStoredTotals = false;
+          }
+          for (const i of ((voOrder?.items as any[]) || [])) {
+            allMvPiItems.push({
+              productName: i.name || i.title || i.productId || 'Item',
+              vendorName: voBusiness?.name || 'Business',
+              vendorContactEmail: voBusiness?.contactEmail ?? undefined,
+              quantity: i.quantity || 1,
+              basePrice: i.price || i.unitPrice || 0,
+            });
+          }
+        }
+
+        await sendTransactionReceipts('multi_vendor_product_purchase', orderGroupTxnId, {
+          consumer: {
+            email: purchaser?.email,
+            send: () => sendOrderConfirmationToConsumer({
+              toEmail: purchaser!.email!,
+              consumerName: purchaser!.name || purchaser!.email!,
+              orderId: vendorOrders[0]?.orderId || metadata.orderGroupId || '',
+              orderNumber: firstMvPiOrderNumber,
+              items: allMvPiItems,
+              ...(hasMvStoredTotals ? { totalAmountCents: mvTotalAmountCents, platformFeeCents: mvServiceFeeCents } : {}),
+            }),
+          },
+          admin: () => sendInternalEventAlert({
+            eventType: 'product_order',
+            bookingOrOrderId: orderGroupTxnId,
+            consumerName: purchaser?.name || 'Customer',
+            consumerEmail: purchaser?.email || '',
+            vendorName: `${vendorOrders.length} vendors`,
+            vendorEmail: '',
+            items: allMvPiItems.map(({ vendorName: _vn, vendorContactEmail: _vce, ...rest }) => rest),
+            stripeChargeCents: paymentIntent.amount,
+          }),
+        });
+
+        // Post-loop: clear cart, award points, notify customer
+        if (metadata.userId) {
+          await bestEffort(`clearCart for order group ${orderGroupTxnId}`, () => storage.clearCart(metadata.userId));
+        }
+
         if (purchaser) {
-          await storage.earnPoints({
+          await bestEffort(`earnPoints for order group ${orderGroupTxnId}`, () => storage.earnPoints({
             userId: purchaser.id,
             dollarAmountCents: paymentIntent.amount,
             transactionType: 'business_transaction',
             referenceType: 'multi_vendor_order',
             referenceId: metadata.orderGroupId,
             description: 'Points earned from purchase',
-          });
-          await this.tryCompleteReferral(purchaser.id, metadata.orderGroupId, 'multi_vendor_order');
+          }));
+          await bestEffort(`tryCompleteReferral for order group ${orderGroupTxnId}`, () => this.tryCompleteReferral(purchaser.id, metadata.orderGroupId, 'multi_vendor_order'));
         }
-
-        const totalItemCount = vendorOrders.reduce(async (accPromise, vo) => {
-          const acc = await accPromise;
-          const o = await storage.getOrder(vo.orderId);
-          return acc + (o?.items?.length || 0);
-        }, Promise.resolve(0));
 
         NotificationTriggers.orderConfirmed({
           customerId: metadata.userId,
           orderId: vendorOrders[0]?.orderId || '',
           businessName: 'Outsyde',
-          itemCount: await totalItemCount,
+          itemCount: allMvPiItems.length,
         }).catch(err => console.error('Notification error:', err));
-
-        // Email consumer consolidated confirmation + internal alert
-        if (purchaser?.email) {
-          // Gather all items across all vendor orders for consumer email
-          const allMvPiItems: Array<{ productName: string; vendorName: string; vendorContactEmail?: string; quantity: number; basePrice: number }> = [];
-          let firstMvPiOrderNumber = 0;
-          let mvTotalAmountCents = 0;
-          let mvServiceFeeCents = 0;
-          let hasMvStoredTotals = true;
-          for (const vo of vendorOrders) {
-            const voOrder = await storage.getOrder(vo.orderId);
-            const voBusiness = await storage.getBusiness(vo.businessId);
-            if (!firstMvPiOrderNumber && voOrder?.orderNumber) firstMvPiOrderNumber = voOrder.orderNumber;
-            if (voOrder?.grossChargeAmount != null && voOrder?.consumerServiceFee != null) {
-              mvTotalAmountCents += voOrder.grossChargeAmount;
-              mvServiceFeeCents += voOrder.consumerServiceFee;
-            } else {
-              hasMvStoredTotals = false;
-            }
-            for (const i of ((voOrder?.items as any[]) || [])) {
-              allMvPiItems.push({
-                productName: i.name || i.title || i.productId || 'Item',
-                vendorName: voBusiness?.name || 'Business',
-                vendorContactEmail: voBusiness?.contactEmail ?? undefined,
-                quantity: i.quantity || 1,
-                basePrice: i.price || i.unitPrice || 0,
-              });
-            }
-          }
-          sendOrderConfirmationToConsumer({
-            toEmail: purchaser.email,
-            consumerName: purchaser.name || purchaser.email,
-            orderId: vendorOrders[0]?.orderId || metadata.orderGroupId || '',
-            orderNumber: firstMvPiOrderNumber,
-            items: allMvPiItems,
-            ...(hasMvStoredTotals ? { totalAmountCents: mvTotalAmountCents, platformFeeCents: mvServiceFeeCents } : {}),
-          }).catch(() => {});
-          sendInternalEventAlert({
-            eventType: 'product_order',
-            bookingOrOrderId: metadata.orderGroupId || vendorOrders[0]?.orderId || '',
-            consumerName: purchaser.name || 'Customer',
-            consumerEmail: purchaser.email,
-            vendorName: `${vendorOrders.length} vendors`,
-            vendorEmail: '',
-            items: allMvPiItems.map(({ vendorName: _vn, vendorContactEmail: _vce, ...rest }) => rest),
-          }).catch(() => {});
-        }
 
         if (metadata.orderGroupId) {
           await storage.updateOrderGroup(metadata.orderGroupId, {
@@ -1747,13 +1934,65 @@ export class WebhookHandlers {
     const { orderId, userId, businessId } = session.metadata || {};
     if (!orderId) return;
 
-    // Update order status to paid
     const order = await storage.getOrder(orderId);
-    if (!order || order.status === 'paid') return;
+    if (!order) return;
 
-    await storage.updateOrder(orderId, {
-      status: 'paid',
-      stripePaymentIntentId: session.payment_intent,
+    // Atomically mark paid; only the delivery that flips it continues.
+    if (!(await claimOrderPaid(orderId, session.payment_intent))) {
+      logReceiptsSkipped('cart_checkout', orderId);
+      return;
+    }
+
+    const business = businessId ? await storage.getBusiness(businessId).catch(() => undefined) : undefined;
+    const vendor = businessId ? await storage.getUserByBusinessOwnerId(businessId).catch(() => undefined) : undefined;
+    const customer = await storage.getUser(order.customerId).catch(() => undefined);
+
+    const cartItems = ((order.items as any[]) || []).map((i: any) => ({
+      productName: i.name || i.title || i.productId || 'Item',
+      vendorName: business?.name || vendor?.name || 'Business',
+      vendorContactEmail: business?.contactEmail ?? undefined,
+      quantity: i.quantity || 1,
+      basePrice: i.price || i.unitPrice || 0,
+    }));
+    const cartVendorItems = cartItems.map(({ vendorName: _vn, vendorContactEmail: _vce, ...rest }) => rest);
+
+    // Receipts first, so later side effects can never skip them.
+    await sendTransactionReceipts('cart_checkout', orderId, {
+      consumer: {
+        email: customer?.email,
+        send: () => sendOrderConfirmationToConsumer({
+          toEmail: customer!.email!,
+          consumerName: customer!.name || customer!.email!,
+          orderId,
+          orderNumber: order.orderNumber,
+          items: cartItems,
+          totalAmountCents: order.grossChargeAmount ?? undefined,
+          platformFeeCents: order.consumerServiceFee ?? undefined,
+        }),
+      },
+      vendor: {
+        email: vendor?.email,
+        send: () => sendOrderNotificationToVendor({
+          toEmail: vendor!.email!,
+          vendorName: business?.name || vendor!.name || 'Business',
+          consumerName: customer?.name || 'Customer',
+          consumerUsername: customer?.username ?? undefined,
+          orderId,
+          orderNumber: order.orderNumber,
+          items: cartVendorItems,
+          vendorNetCents: order.vendorNet ?? undefined,
+        }),
+      },
+      admin: () => sendInternalEventAlert({
+        eventType: 'product_order',
+        bookingOrOrderId: orderId,
+        consumerName: customer?.name || 'Customer',
+        consumerEmail: customer?.email || '',
+        vendorName: business?.name || vendor?.name || 'Business',
+        vendorEmail: vendor?.email || '',
+        items: cartVendorItems,
+        stripeChargeCents: session.amount_total ?? undefined,
+      }),
     });
 
     // Process influencer commission if attributed (idempotent, handles transfer + logging)
@@ -1778,37 +2017,34 @@ export class WebhookHandlers {
 
     // Clear the user's cart
     if (userId) {
-      await storage.clearCart(userId);
+      await bestEffort(`clearCart for order ${orderId}`, () => storage.clearCart(userId));
     }
 
     // Award points to the customer
-    const user = await this.findUserByStripeCustomer(session.customer);
+    const user = await this.findUserByStripeCustomer(session.customer).catch(() => undefined);
     if (user) {
-      await storage.earnPoints({
+      await bestEffort(`earnPoints for order ${orderId}`, () => storage.earnPoints({
         userId: user.id,
         dollarAmountCents: session.amount_total,
         transactionType: 'business_transaction',
         referenceType: "cart_order",
         referenceId: orderId,
         description: "Points earned from purchase",
-      });
+      }));
 
-      await this.tryCompleteReferral(user.id, orderId, 'cart_order');
+      await bestEffort(`tryCompleteReferral for order ${orderId}`, () => this.tryCompleteReferral(user.id, orderId, 'cart_order'));
     }
 
     // Notify the business of the new order
-    const business = await storage.getBusiness(businessId);
-    const vendor = await storage.getUserByBusinessOwnerId(businessId);
-    if (vendor && order) {
-      const customer = await storage.getUser(order.customerId);
+    if (vendor) {
       const itemCount = order.items?.length || 1;
-      await NotificationTriggers.newOrderReceived({
+      await bestEffort(`newOrderReceived for order ${orderId}`, () => NotificationTriggers.newOrderReceived({
         vendorUserId: vendor.id,
         orderId,
         customerName: customer?.name || customer?.email || 'Customer',
         orderTotal: order.totalAmount,
         itemCount,
-      });
+      }));
 
       // Notify the customer that their order is confirmed
       NotificationTriggers.orderConfirmed({
@@ -1817,47 +2053,6 @@ export class WebhookHandlers {
         businessName: business?.name || vendor.name || 'the business',
         itemCount,
       }).catch(err => console.error('Notification error:', err));
-
-      // Transactional emails
-      const cartItems = ((order.items as any[]) || []).map((i: any) => ({
-        productName: i.name || i.title || i.productId || 'Item',
-        vendorName: business?.name || vendor.name || 'Business',
-        vendorContactEmail: business?.contactEmail ?? undefined,
-        quantity: i.quantity || 1,
-        basePrice: i.price || i.unitPrice || 0,
-      }));
-      if (customer?.email) {
-        sendOrderConfirmationToConsumer({
-          toEmail: customer.email,
-          consumerName: customer.name || customer.email,
-          orderId,
-          orderNumber: order.orderNumber,
-          items: cartItems,
-          totalAmountCents: order.grossChargeAmount ?? undefined,
-          platformFeeCents: order.consumerServiceFee ?? undefined,
-        }).catch(() => {});
-      }
-      if (vendor.email) {
-        sendOrderNotificationToVendor({
-          toEmail: vendor.email,
-          vendorName: business?.name || vendor.name || 'Business',
-          consumerName: customer?.name || 'Customer',
-          consumerUsername: customer?.username ?? undefined,
-          orderId,
-          orderNumber: order.orderNumber,
-          items: cartItems.map(({ vendorName: _vn, vendorContactEmail: _vce, ...rest }) => rest),
-          vendorNetCents: order.vendorNet ?? undefined,
-        }).catch(() => {});
-      }
-      sendInternalEventAlert({
-        eventType: 'product_order',
-        bookingOrOrderId: orderId,
-        consumerName: customer?.name || 'Customer',
-        consumerEmail: customer?.email || '',
-        vendorName: business?.name || vendor.name || 'Business',
-        vendorEmail: vendor.email || '',
-        items: cartItems.map(({ vendorName: _vn, vendorContactEmail: _vce, ...rest }) => rest),
-      }).catch(() => {});
     }
 
     console.log(`[Stripe] Cart checkout completed: Order ${orderId} marked as paid`);
@@ -1879,17 +2074,49 @@ export class WebhookHandlers {
       return;
     }
 
+    // Points, referral and the in-app confirmation use the original Stripe
+    // customer lookup only. The metadata userId fallback is used solely to
+    // address the consumer receipt.
+    const user = await this.findUserByStripeCustomer(session.customer).catch(() => undefined);
+    const receiptUser = user ?? (userId ? await storage.getUser(userId).catch(() => undefined) : undefined);
+    let claimedOrders = 0;
+
     // Process each order and initiate transfers
     for (const vendorOrder of vendorOrders) {
       const { orderId, businessId, vendorNet } = vendorOrder;
-      
-      // Update order status to paid
-      const order = await storage.getOrder(orderId);
-      if (!order || order.status === 'paid') continue;
 
-      await storage.updateOrder(orderId, {
-        status: 'paid',
-        stripePaymentIntentId: session.payment_intent,
+      const order = await storage.getOrder(orderId);
+      if (!order) continue;
+
+      // Atomically mark paid; only the delivery that flips it continues.
+      if (!(await claimOrderPaid(orderId, session.payment_intent))) {
+        logReceiptsSkipped('multi_vendor_cart_checkout', orderId);
+        continue;
+      }
+      claimedOrders++;
+
+      const business = await storage.getBusiness(businessId).catch(() => undefined);
+      const vendorUser = await storage.getUserByBusinessOwnerId(businessId).catch(() => undefined);
+      const customer = await storage.getUser(order.customerId).catch(() => undefined);
+
+      // Vendor receipt for this vendor's portion — first, before side effects.
+      await sendTransactionReceipts('multi_vendor_cart_checkout', orderId, {
+        vendor: {
+          email: vendorUser?.email,
+          send: () => sendOrderNotificationToVendor({
+            toEmail: vendorUser!.email!,
+            vendorName: business?.name || vendorUser!.name || 'Business',
+            consumerName: customer?.name || 'Customer',
+            consumerUsername: customer?.username ?? undefined,
+            orderId,
+            orderNumber: order.orderNumber,
+            items: ((order.items as any[]) || []).map((i: any) => ({
+              productName: i.name || i.title || i.productId || 'Item',
+              quantity: i.quantity || 1,
+              basePrice: i.price || i.unitPrice || 0,
+            })),
+          }),
+        },
       });
 
       // Process influencer commission if attributed
@@ -1912,11 +2139,9 @@ export class WebhookHandlers {
         }
       }
 
-      // Get the vendor's connected account for transfer (from business, not user)
-      const business = await storage.getBusiness(businessId);
+      // Transfer the vendor's share to their connected account (from business, not user)
       if (business?.stripeAccountId && vendorNet > 0) {
         try {
-          // Transfer the vendor's share to their connected account
           // Uses platform balance (no source_transaction needed)
           await stripeService.transferToVendor({
             amountInCents: vendorNet,
@@ -1928,106 +2153,94 @@ export class WebhookHandlers {
         } catch (transferError) {
           console.error(`Failed to transfer to vendor for order ${orderId}:`, transferError);
           // Mark the order as needing manual transfer review
-          await storage.updateOrder(orderId, {
+          await bestEffort(`mark transfer_failed for order ${orderId}`, () => storage.updateOrder(orderId, {
             status: 'transfer_failed',
-          });
+          }));
         }
       }
 
-      // Notify the business owner of the new order
-      const vendorUser = await storage.getUserByBusinessOwnerId(businessId);
-      if (vendorUser && order) {
-        const customer = await storage.getUser(order.customerId);
-        const itemCount = order.items?.length || 1;
-        await NotificationTriggers.newOrderReceived({
+      // Notify the business owner of the new order (in-app)
+      if (vendorUser) {
+        await bestEffort(`newOrderReceived for order ${orderId}`, () => NotificationTriggers.newOrderReceived({
           vendorUserId: vendorUser.id,
           orderId,
           customerName: customer?.name || customer?.email || 'Customer',
           orderTotal: order.totalAmount,
-          itemCount,
-        });
-        // Email vendor about their portion of the multi-vendor order
-        if (vendorUser.email) {
-          const vendorBusiness = await storage.getBusiness(businessId);
-          const wcMvItems = ((order.items as any[]) || []).map((i: any) => ({
-            productName: i.name || i.title || i.productId || 'Item',
-            quantity: i.quantity || 1,
-            basePrice: i.price || i.unitPrice || 0,
-          }));
-          sendOrderNotificationToVendor({
-            toEmail: vendorUser.email,
-            vendorName: vendorBusiness?.name || vendorUser.name || 'Business',
-            consumerName: customer?.name || 'Customer',
-            consumerUsername: customer?.username ?? undefined,
-            orderId,
-            orderNumber: order.orderNumber,
-            items: wcMvItems,
-          }).catch(() => {});
-        }
+          itemCount: order.items?.length || 1,
+        }));
       }
     }
 
+    if (claimedOrders === 0) {
+      logReceiptsSkipped('multi_vendor_cart_checkout', orderGroupId);
+      return;
+    }
+
+    // Consolidated consumer receipt + admin copy — not gated on any other lookup.
+    const wcAllItems: Array<{ productName: string; vendorName: string; vendorContactEmail?: string; quantity: number; basePrice: number }> = [];
+    let firstWcMvOrderNumber = 0;
+    for (const vo of vendorOrders) {
+      const voOrder = await storage.getOrder(vo.orderId).catch(() => undefined);
+      const voBusiness = await storage.getBusiness(vo.businessId).catch(() => undefined);
+      if (!firstWcMvOrderNumber && voOrder?.orderNumber) firstWcMvOrderNumber = voOrder.orderNumber;
+      for (const i of ((voOrder?.items as any[]) || [])) {
+        wcAllItems.push({
+          productName: i.name || i.title || i.productId || 'Item',
+          vendorName: voBusiness?.name || 'Business',
+          vendorContactEmail: voBusiness?.contactEmail ?? undefined,
+          quantity: i.quantity || 1,
+          basePrice: i.price || i.unitPrice || 0,
+        });
+      }
+    }
+
+    await sendTransactionReceipts('multi_vendor_cart_checkout', orderGroupId, {
+      consumer: {
+        email: receiptUser?.email,
+        send: () => sendOrderConfirmationToConsumer({
+          toEmail: receiptUser!.email!,
+          consumerName: receiptUser!.name || receiptUser!.email!,
+          orderId: vendorOrders[0]?.orderId || orderGroupId,
+          orderNumber: firstWcMvOrderNumber,
+          items: wcAllItems,
+        }),
+      },
+      admin: () => sendInternalEventAlert({
+        eventType: 'product_order',
+        bookingOrOrderId: orderGroupId,
+        consumerName: receiptUser?.name || 'Customer',
+        consumerEmail: receiptUser?.email || '',
+        vendorName: `${vendorOrders.length} vendors`,
+        vendorEmail: '',
+        items: wcAllItems.map(({ vendorName: _vn, vendorContactEmail: _vce, ...rest }) => rest),
+        stripeChargeCents: session.amount_total ?? undefined,
+      }),
+    });
+
     // Update order group status to completed
-    await storage.updateOrderGroup(orderGroupId, {
+    await bestEffort(`updateOrderGroup ${orderGroupId}`, () => storage.updateOrderGroup(orderGroupId, {
       status: 'completed',
       completedVendors: vendorOrders.length,
-    });
+    }));
 
     // Clear the user's cart
     if (userId) {
-      await storage.clearCart(userId);
+      await bestEffort(`clearCart for order group ${orderGroupId}`, () => storage.clearCart(userId));
     }
 
     // Award points to the customer
-    const user = await this.findUserByStripeCustomer(session.customer);
     if (user) {
-      await storage.earnPoints({
+      await bestEffort(`earnPoints for order group ${orderGroupId}`, () => storage.earnPoints({
         userId: user.id,
         dollarAmountCents: session.amount_total,
         transactionType: 'business_transaction',
         referenceType: "multi_vendor_order",
         referenceId: orderGroupId,
         description: "Points earned from multi-vendor purchase",
-      });
+      }));
 
       // Complete referral bonus if this is the user's first transaction
-      await this.tryCompleteReferral(user.id, orderGroupId, 'multi_vendor_order');
-
-      // Email consumer consolidated confirmation + internal alert
-      if (user.email) {
-        const wcAllItems: Array<{ productName: string; vendorName: string; vendorContactEmail?: string; quantity: number; basePrice: number }> = [];
-        let firstWcMvOrderNumber = 0;
-        for (const vo of vendorOrders) {
-          const voOrder = await storage.getOrder(vo.orderId);
-          const voBusiness = await storage.getBusiness(vo.businessId);
-          if (!firstWcMvOrderNumber && voOrder?.orderNumber) firstWcMvOrderNumber = voOrder.orderNumber;
-          for (const i of ((voOrder?.items as any[]) || [])) {
-            wcAllItems.push({
-              productName: i.name || i.title || i.productId || 'Item',
-              vendorName: voBusiness?.name || 'Business',
-              vendorContactEmail: voBusiness?.contactEmail ?? undefined,
-              quantity: i.quantity || 1,
-              basePrice: i.price || i.unitPrice || 0,
-            });
-          }
-        }
-        sendOrderConfirmationToConsumer({
-          toEmail: user.email,
-          consumerName: user.name || user.email,
-          orderId: vendorOrders[0]?.orderId || orderGroupId,
-          orderNumber: firstWcMvOrderNumber,
-          items: wcAllItems,
-        }).catch(() => {});
-        sendInternalEventAlert({
-          eventType: 'product_order',
-          bookingOrOrderId: orderGroupId,
-          consumerName: user.name || 'Customer',
-          consumerEmail: user.email,
-          vendorName: `${vendorOrders.length} vendors`,
-          vendorEmail: '',
-          items: wcAllItems.map(({ vendorName: _vn, vendorContactEmail: _vce, ...rest }) => rest),
-        }).catch(() => {});
-      }
+      await bestEffort(`tryCompleteReferral for order group ${orderGroupId}`, () => this.tryCompleteReferral(user.id, orderGroupId, 'multi_vendor_order'));
 
       // In-app notification for consumer
       NotificationTriggers.orderConfirmed({
@@ -2514,7 +2727,11 @@ export class WebhookHandlers {
       );
 
       if (!result.success) {
-        console.error(`[Stripe] Failed to confirm appointment ${appointmentId}: ${result.error}`);
+        if (result.code === 'ALREADY_CONFIRMED' || result.code === 'CONCURRENT_TRANSITION') {
+          logReceiptsSkipped('appointment_checkout', appointmentId);
+        } else {
+          console.error(`[Stripe] Failed to confirm appointment ${appointmentId}: ${result.error}`);
+        }
         return;
       }
 
@@ -2529,6 +2746,62 @@ export class WebhookHandlers {
 
       console.log(`[Stripe] Appointment ${appointmentId} confirmed successfully`);
 
+      const [appointment] = await db.select().from(appointments).where(eq(appointments.id, appointmentId));
+      if (!appointment) return;
+
+      const business = await storage.getBusiness(appointment.businessId).catch(() => undefined);
+      const owner = await storage.getUserByBusinessOwnerId(appointment.businessId).catch(() => undefined);
+      const customer = clientId ? await storage.getUser(clientId).catch(() => undefined) : undefined;
+
+      // Receipts first, so later side effects can never skip them.
+      await sendTransactionReceipts('appointment_checkout', appointmentId, {
+        consumer: {
+          email: customer?.email,
+          send: () => sendAppointmentConfirmationToConsumer({
+            toEmail: customer!.email!,
+            consumerName: customer!.name || customer!.email!,
+            vendorName: business?.name || 'Business',
+            vendorContactEmail: business?.contactEmail ?? undefined,
+            serviceName: appointment.serviceName || 'Appointment',
+            bookingId: appointmentId,
+            bookingNumber: appointment.bookingNumber,
+            date: appointment.appointmentDate,
+            time: appointment.appointmentTime,
+            basePrice: appointment.totalPrice,
+          }),
+        },
+        vendor: {
+          email: owner?.email,
+          send: () => sendAppointmentNotificationToVendor({
+            toEmail: owner!.email!,
+            vendorName: business?.name || 'Business',
+            consumerName: customer?.name || 'Customer',
+            consumerUsername: customer?.username ?? undefined,
+            serviceName: appointment.serviceName || 'Appointment',
+            bookingId: appointmentId,
+            bookingNumber: appointment.bookingNumber,
+            date: appointment.appointmentDate,
+            time: appointment.appointmentTime,
+            basePrice: appointment.totalPrice,
+          }),
+        },
+        admin: () => sendInternalEventAlert({
+          eventType: 'appointment_booking',
+          bookingOrOrderId: appointmentId,
+          consumerName: customer?.name || 'Customer',
+          consumerEmail: customer?.email || '',
+          vendorName: business?.name || 'Business',
+          vendorEmail: owner?.email || '',
+          basePrice: appointment.totalPrice,
+          paymentType: 'full',
+          amountChargedCents: appointment.totalPrice,
+          serviceTotalCents: appointment.totalPrice,
+          stripeChargeCents: session.amount_total ?? undefined,
+          date: appointment.appointmentDate,
+          time: appointment.appointmentTime,
+        }),
+      });
+
       // Mark any associated hold as converted
       const holdId = session.metadata?.holdId;
       if (holdId) {
@@ -2539,13 +2812,8 @@ export class WebhookHandlers {
         }
       }
 
-      // Award points for the booking
-      const [appointment] = await db.select().from(appointments).where(eq(appointments.id, appointmentId));
-
-      // Send booking confirmation notification (async, non-blocking)
-      if (clientId && appointment) {
-        // Notify customer
-        const business = await storage.getBusiness(appointment.businessId);
+      // Send booking confirmation notifications (async, non-blocking)
+      if (clientId) {
         NotificationTriggers.paymentSucceeded({
           userId: clientId,
           amount: appointment.totalPrice,
@@ -2554,77 +2822,28 @@ export class WebhookHandlers {
           description: `Booking confirmed at ${business?.name || 'business'}`,
         }).catch(err => console.error("[Stripe] Failed to send booking notification:", err));
 
-        // Notify business owner
-        if (business) {
-          const owner = await storage.getUserByBusinessOwnerId(appointment.businessId);
-          if (owner) {
-            const customer = await storage.getUser(clientId);
-            NotificationTriggers.paymentSucceeded({
-              userId: owner.id,
-              amount: appointment.totalPrice,
-              referenceType: 'appointment',
-              referenceId: appointmentId,
-              description: `New booking from ${customer?.name || 'customer'}`,
-            }).catch(err => console.error("[Stripe] Failed to send business notification:", err));
+        if (owner) {
+          NotificationTriggers.paymentSucceeded({
+            userId: owner.id,
+            amount: appointment.totalPrice,
+            referenceType: 'appointment',
+            referenceId: appointmentId,
+            description: `New booking from ${customer?.name || 'customer'}`,
+          }).catch(err => console.error("[Stripe] Failed to send business notification:", err));
 
-            // Mobile push notification (Expo) — failures never crash the booking flow
-            sendBookingConfirmationPush({
-              customerId: clientId,
-              providerName: business.name,
-              date: appointment.appointmentDate,
-              time: appointment.appointmentTime,
-              businessOwnerId: owner.id,
-              customerName: customer?.name || undefined,
-            }).catch(err => console.error("[ExpoPush] Appointment push error:", err));
-
-            // Transactional emails
-            if (customer?.email) {
-              sendAppointmentConfirmationToConsumer({
-                toEmail: customer.email,
-                consumerName: customer.name || customer.email,
-                vendorName: business.name,
-                vendorContactEmail: business.contactEmail ?? undefined,
-                serviceName: appointment.serviceName || 'Appointment',
-                bookingId: appointmentId,
-                bookingNumber: appointment.bookingNumber,
-                date: appointment.appointmentDate,
-                time: appointment.appointmentTime,
-                location: appointment.locationDetails ?? undefined,
-                basePrice: appointment.totalPrice,
-              }).catch(() => {});
-            }
-            if (owner.email) {
-              sendAppointmentNotificationToVendor({
-                toEmail: owner.email,
-                vendorName: business.name,
-                consumerName: customer?.name || 'Customer',
-                consumerUsername: customer?.username ?? undefined,
-                serviceName: appointment.serviceName || 'Appointment',
-                bookingId: appointmentId,
-                bookingNumber: appointment.bookingNumber,
-                date: appointment.appointmentDate,
-                time: appointment.appointmentTime,
-                location: appointment.locationDetails ?? undefined,
-                basePrice: appointment.totalPrice,
-              }).catch(() => {});
-            }
-            sendInternalEventAlert({
-              eventType: 'appointment_booking',
-              bookingOrOrderId: appointmentId,
-              consumerName: customer?.name || 'Customer',
-              consumerEmail: customer?.email || '',
-              vendorName: business.name,
-              vendorEmail: owner.email || '',
-              basePrice: appointment.totalPrice,
-              date: appointment.appointmentDate,
-              time: appointment.appointmentTime,
-              location: appointment.locationDetails ?? undefined,
-            }).catch(() => {});
-          }
+          // Mobile push notification (Expo) — failures never crash the booking flow
+          sendBookingConfirmationPush({
+            customerId: clientId,
+            providerName: business?.name || 'business',
+            date: appointment.appointmentDate,
+            time: appointment.appointmentTime,
+            businessOwnerId: owner.id,
+            customerName: customer?.name || undefined,
+          }).catch(err => console.error("[ExpoPush] Appointment push error:", err));
         }
-      }
-      if (appointment && clientId) {
-        await storage.earnPoints({
+
+        // Award points for the booking
+        await bestEffort(`earnPoints for appointment ${appointmentId}`, () => storage.earnPoints({
           userId: clientId,
           dollarAmountCents: appointment.totalPrice,
           transactionType: 'business_transaction',
@@ -2632,10 +2851,10 @@ export class WebhookHandlers {
           referenceId: appointmentId,
           description: "Points earned from service booking",
           businessId: appointment.businessId,
-        });
+        }));
 
         // Complete referral bonus if applicable
-        await this.tryCompleteReferral(clientId, appointmentId, 'appointment');
+        await bestEffort(`tryCompleteReferral for appointment ${appointmentId}`, () => this.tryCompleteReferral(clientId, appointmentId, 'appointment'));
       }
     } catch (error) {
       console.error(`[Stripe] Error confirming appointment ${appointmentId}:`, error);
@@ -2671,7 +2890,11 @@ export class WebhookHandlers {
       );
 
       if (!result.success) {
-        console.error(`[Stripe] Failed to confirm shoot booking ${shootBookingId}: ${result.error}`);
+        if (result.code === 'ALREADY_CONFIRMED' || result.code === 'CONCURRENT_TRANSITION') {
+          logReceiptsSkipped('shoot_checkout', shootBookingId);
+        } else {
+          console.error(`[Stripe] Failed to confirm shoot booking ${shootBookingId}: ${result.error}`);
+        }
         return;
       }
 
@@ -2686,6 +2909,61 @@ export class WebhookHandlers {
 
       console.log(`[Stripe] Shoot booking ${shootBookingId} confirmed successfully`);
 
+      const [booking] = await db.select().from(shootBookings).where(eq(shootBookings.id, shootBookingId));
+      if (!booking) return;
+
+      const photographer = await storage.getPhotographer(booking.photographerId).catch(() => undefined);
+      const photographerUser = photographer ? await storage.getUser(photographer.userId).catch(() => undefined) : undefined;
+      const sbCustomer = clientId ? await storage.getUser(clientId).catch(() => undefined) : undefined;
+
+      // Receipts first, so later side effects can never skip them.
+      await sendTransactionReceipts('shoot_checkout', shootBookingId, {
+        consumer: {
+          email: sbCustomer?.email,
+          send: () => sendShootBookingConfirmationToConsumer({
+            toEmail: sbCustomer!.email!,
+            consumerName: sbCustomer!.name || sbCustomer!.email!,
+            photographerName: photographer?.displayName || 'Photographer',
+            photographerContactEmail: photographerUser?.email ?? undefined,
+            shootType: booking.shootType,
+            bookingId: shootBookingId,
+            bookingNumber: booking.bookingNumber,
+            date: booking.date,
+            time: booking.startTime,
+            basePrice: booking.totalPrice,
+          }),
+        },
+        vendor: {
+          email: photographerUser?.email,
+          send: () => sendShootBookingNotificationToPhotographer({
+            toEmail: photographerUser!.email!,
+            photographerName: photographer?.displayName || 'Photographer',
+            consumerName: sbCustomer?.name || 'Customer',
+            consumerUsername: sbCustomer?.username ?? undefined,
+            shootType: booking.shootType,
+            bookingId: shootBookingId,
+            bookingNumber: booking.bookingNumber,
+            date: booking.date,
+            time: booking.startTime,
+            basePrice: booking.totalPrice,
+          }),
+        },
+        admin: () => sendInternalEventAlert({
+          eventType: 'shoot_booking',
+          bookingOrOrderId: shootBookingId,
+          consumerName: sbCustomer?.name || 'Customer',
+          consumerEmail: sbCustomer?.email || '',
+          vendorName: photographer?.displayName || 'Photographer',
+          vendorEmail: photographerUser?.email || '',
+          basePrice: booking.totalPrice,
+          paymentType: 'full',
+          amountChargedCents: booking.totalPrice,
+          stripeChargeCents: session.amount_total ?? undefined,
+          date: booking.date,
+          time: booking.startTime,
+        }),
+      });
+
       // Mark any associated hold as converted
       const holdId = session.metadata?.holdId;
       if (holdId) {
@@ -2696,12 +2974,8 @@ export class WebhookHandlers {
         }
       }
 
-      // Award points for the booking
-      const [booking] = await db.select().from(shootBookings).where(eq(shootBookings.id, shootBookingId));
-
-      // Send booking confirmation notification (async, non-blocking)
-      if (clientId && booking) {
-        const photographer = await storage.getPhotographer(booking.photographerId);
+      // Send booking confirmation notifications (async, non-blocking)
+      if (clientId) {
         NotificationTriggers.bookingConfirmed({
           customerId: clientId,
           photographerId: booking.photographerId,
@@ -2722,62 +2996,18 @@ export class WebhookHandlers {
           customerName: undefined,
         }).catch(err => console.error("[ExpoPush] Shoot booking push error:", err));
 
-        // Transactional emails
-        const sbCustomer = await storage.getUser(clientId);
-        const photographerUser = photographer ? await storage.getUser(photographer.userId) : null;
-        if (sbCustomer?.email) {
-          sendShootBookingConfirmationToConsumer({
-            toEmail: sbCustomer.email,
-            consumerName: sbCustomer.name || sbCustomer.email,
-            photographerName: photographer?.displayName || 'Photographer',
-            photographerContactEmail: photographerUser?.email ?? undefined,
-            shootType: booking.shootType,
-            bookingId: shootBookingId,
-            bookingNumber: booking.bookingNumber,
-            date: booking.date,
-            time: booking.startTime,
-            basePrice: booking.totalPrice,
-          }).catch(() => {});
-        }
-        console.log('[Email] Photographer toEmail:', photographerUser?.email);
-        if (photographerUser?.email) {
-          sendShootBookingNotificationToPhotographer({
-            toEmail: photographerUser.email,
-            photographerName: photographer?.displayName || 'Photographer',
-            consumerName: sbCustomer?.name || 'Customer',
-            consumerUsername: sbCustomer?.username ?? undefined,
-            shootType: booking.shootType,
-            bookingId: shootBookingId,
-            bookingNumber: booking.bookingNumber,
-            date: booking.date,
-            time: booking.startTime,
-            basePrice: booking.totalPrice,
-          }).catch(() => {});
-        }
-        sendInternalEventAlert({
-          eventType: 'shoot_booking',
-          bookingOrOrderId: shootBookingId,
-          consumerName: sbCustomer?.name || 'Customer',
-          consumerEmail: sbCustomer?.email || '',
-          vendorName: photographer?.displayName || 'Photographer',
-          vendorEmail: photographerUser?.email || '',
-          basePrice: booking.totalPrice,
-          date: booking.date,
-          time: booking.startTime,
-        }).catch(() => {});
-      }
-      if (booking && clientId) {
-        await storage.earnPoints({
+        // Award points for the booking
+        await bestEffort(`earnPoints for shoot booking ${shootBookingId}`, () => storage.earnPoints({
           userId: clientId,
           dollarAmountCents: booking.totalPrice,
           transactionType: 'photographer_booking',
           referenceType: "shoot_booking",
           referenceId: shootBookingId,
           description: "Points earned from photography booking",
-        });
+        }));
 
         // Complete referral bonus if applicable
-        await this.tryCompleteReferral(clientId, shootBookingId, 'shoot_booking');
+        await bestEffort(`tryCompleteReferral for shoot booking ${shootBookingId}`, () => this.tryCompleteReferral(clientId, shootBookingId, 'shoot_booking'));
       }
     } catch (error) {
       console.error(`[Stripe] Error confirming shoot booking ${shootBookingId}:`, error);

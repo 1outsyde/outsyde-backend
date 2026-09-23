@@ -1,38 +1,9 @@
 import { Resend } from 'resend';
 
-async function getCredentials() {
-  const hostname = process.env.REPLIT_CONNECTORS_HOSTNAME;
-  const xReplitToken = process.env.REPL_IDENTITY 
-    ? 'repl ' + process.env.REPL_IDENTITY 
-    : process.env.WEB_REPL_RENEWAL 
-    ? 'depl ' + process.env.WEB_REPL_RENEWAL 
-    : null;
+const FROM_ORDERS = 'orders@info.goutsyde.com';
 
-  if (!xReplitToken) {
-    throw new Error('X_REPLIT_TOKEN not found for repl/depl');
-  }
-
-  const connectionSettings = await fetch(
-    'https://' + hostname + '/api/v2/connection?include_secrets=true&connector_names=resend',
-    {
-      headers: {
-        'Accept': 'application/json',
-        'X_REPLIT_TOKEN': xReplitToken
-      }
-    }
-  ).then(res => res.json()).then(data => data.items?.[0]);
-
-  if (!connectionSettings || (!connectionSettings.settings.api_key)) {
-    throw new Error('Resend not connected');
-  }
-  
-  const fromEmail = connectionSettings.settings.from_email;
-  if (!fromEmail) {
-    throw new Error('Resend from_email not configured');
-  }
-  
-  return { apiKey: connectionSettings.settings.api_key, fromEmail };
-}
+// Platform admin copy of every paid-transaction receipt and internal alert.
+export const ADMIN_NOTIFICATION_EMAIL = process.env.ADMIN_NOTIFICATION_EMAIL || 'info@goutsyde.com';
 
 function getAppBaseUrl(): string {
   if (process.env.APP_BASE_URL) {
@@ -45,21 +16,8 @@ function getAppBaseUrl(): string {
   return '';
 }
 
-export async function getUncachableResendClient() {
-  const { apiKey, fromEmail } = await getCredentials();
-  return {
-    client: new Resend(apiKey),
-    fromEmail
-  };
-}
-
 export async function isEmailConfigured(): Promise<boolean> {
-  try {
-    await getCredentials();
-    return true;
-  } catch {
-    return false;
-  }
+  return !!process.env.RESEND_API_KEY;
 }
 
 export interface AdminEmailParams {
@@ -71,10 +29,14 @@ export interface AdminEmailParams {
 
 export async function sendAdminEmail(params: AdminEmailParams): Promise<boolean> {
   try {
-    const { client, fromEmail } = await getUncachableResendClient();
-    
+    const apiKey = process.env.RESEND_API_KEY;
+    if (!apiKey) {
+      throw new Error('[emailService] RESEND_API_KEY not set');
+    }
+    const client = new Resend(apiKey);
+
     const result = await client.emails.send({
-      from: fromEmail,
+      from: FROM_ORDERS,
       to: params.to,
       subject: params.subject,
       html: params.html,
@@ -151,7 +113,7 @@ ${baseUrl ? `View User: ${baseUrl}/admin/users/${params.userId}` : 'Log in to th
   `;
 
   return sendAdminEmail({
-    to: params.adminEmail,
+    to: ADMIN_NOTIFICATION_EMAIL,
     subject,
     html,
     text,
@@ -216,7 +178,7 @@ ${baseUrl ? `Review: ${baseUrl}/admin/applications/${params.businessId}` : 'Plea
   `;
 
   return sendAdminEmail({
-    to: params.adminEmail,
+    to: ADMIN_NOTIFICATION_EMAIL,
     subject,
     html,
     text,
@@ -281,7 +243,7 @@ ${baseUrl ? `Review: ${baseUrl}/admin/photographer-applications/${params.photogr
   `;
 
   return sendAdminEmail({
-    to: params.adminEmail,
+    to: ADMIN_NOTIFICATION_EMAIL,
     subject,
     html,
     text,
@@ -451,7 +413,6 @@ const BRAND = {
   border: '#2A2A2A',
 } as const;
 
-const FROM_ORDERS = 'orders@info.goutsyde.com';
 
 async function sendBrandedEmail(to: string, subject: string, html: string): Promise<void> {
   const apiKey = process.env.RESEND_API_KEY;
@@ -590,11 +551,16 @@ export async function sendAppointmentConfirmationToConsumer(params: {
   time: string;
   location?: string;
   basePrice: number;
+  // Set only when a deposit was charged instead of the full service price.
+  depositAmountCents?: number;
+  remainderDueCents?: number;
 }): Promise<void> {
   try {
-    const consumerUpcharge = params.basePrice * 0.08;
-    const consumerTotal = params.basePrice + consumerUpcharge;
+    const chargedBase = params.depositAmountCents ?? params.basePrice;
+    const consumerUpcharge = chargedBase * 0.08;
+    const consumerTotal = chargedBase + consumerUpcharge;
     const bookingRef = `#A${String(params.bookingNumber).padStart(4, '0')}`;
+    const isDeposit = params.depositAmountCents != null;
 
     const rows = [
       { label: 'Booking', value: bookingRef },
@@ -602,7 +568,13 @@ export async function sendAppointmentConfirmationToConsumer(params: {
       { label: 'Date', value: params.date },
       { label: 'Time', value: params.time },
       ...(params.location ? [{ label: 'Location', value: params.location }] : []),
-      { label: 'Total Paid', value: cents(consumerTotal) },
+      ...(isDeposit ? [
+        { label: 'Service Total', value: cents(params.basePrice) },
+        { label: 'Deposit Paid', value: cents(consumerTotal) },
+        { label: 'Due at Appointment', value: cents(params.remainderDueCents ?? 0) },
+      ] : [
+        { label: 'Total Paid', value: cents(consumerTotal) },
+      ]),
     ].map((r, i) => detailRow(r.label, r.value, i % 2 === 0)).join('');
 
     const contactLines = [
@@ -627,6 +599,7 @@ export async function sendAppointmentConfirmationToConsumer(params: {
     console.log(`[Email] Appointment confirmation sent to ${params.toEmail}`);
   } catch (err) {
     console.error('[Email] sendAppointmentConfirmationToConsumer failed:', err);
+    throw err;
   }
 }
 
@@ -643,11 +616,16 @@ export async function sendAppointmentNotificationToVendor(params: {
   time: string;
   location?: string;
   basePrice: number;
+  // Set only when a deposit was charged instead of the full service price.
+  depositAmountCents?: number;
+  remainderDueCents?: number;
 }): Promise<void> {
   try {
-    const vendorFee = params.basePrice * 0.02;
-    const vendorPayout = params.basePrice - vendorFee;
+    const chargedBase = params.depositAmountCents ?? params.basePrice;
+    const vendorFee = chargedBase * 0.02;
+    const vendorPayout = chargedBase - vendorFee;
     const bookingRef = `#A${String(params.bookingNumber).padStart(4, '0')}`;
+    const isDeposit = params.depositAmountCents != null;
 
     const customerDisplay = params.consumerDisplayName || params.consumerName;
     const usernameDisplay = params.consumerUsername ? `@${params.consumerUsername}` : '';
@@ -660,7 +638,14 @@ export async function sendAppointmentNotificationToVendor(params: {
       { label: 'Date', value: params.date },
       { label: 'Time', value: params.time },
       ...(params.location ? [{ label: 'Location', value: params.location }] : []),
-      { label: 'Your Payout', value: cents(vendorPayout) },
+      ...(isDeposit ? [
+        { label: 'Service Total', value: cents(params.basePrice) },
+        { label: 'Deposit Collected', value: cents(chargedBase) },
+        { label: 'Your Deposit Payout', value: cents(vendorPayout) },
+        { label: 'Balance to Collect in Person', value: cents(params.remainderDueCents ?? 0) },
+      ] : [
+        { label: 'Your Payout', value: cents(vendorPayout) },
+      ]),
     ].map((r, i) => detailRow(r.label, r.value, i % 2 === 0)).join('');
 
     const html = wrapEmail(`
@@ -679,6 +664,7 @@ export async function sendAppointmentNotificationToVendor(params: {
     console.log(`[Email] Appointment vendor notification sent to ${params.toEmail}`);
   } catch (err) {
     console.error('[Email] sendAppointmentNotificationToVendor failed:', err);
+    throw err;
   }
 }
 
@@ -732,6 +718,7 @@ export async function sendShootBookingConfirmationToConsumer(params: {
     console.log(`[Email] Shoot confirmation sent to ${params.toEmail}`);
   } catch (err) {
     console.error('[Email] sendShootBookingConfirmationToConsumer failed:', err);
+    throw err;
   }
 }
 
@@ -784,6 +771,7 @@ export async function sendShootBookingNotificationToPhotographer(params: {
     console.log(`[Email] Shoot photographer notification sent to ${params.toEmail}`);
   } catch (err) {
     console.error('[Email] sendShootBookingNotificationToPhotographer failed:', err);
+    throw err;
   }
 }
 
@@ -1026,6 +1014,7 @@ export async function sendOrderConfirmationToConsumer(params: {
     console.log(`[Email] Order confirmation sent to ${params.toEmail}`);
   } catch (err) {
     console.error('[Email] sendOrderConfirmationToConsumer failed:', err);
+    throw err;
   }
 }
 
@@ -1103,6 +1092,7 @@ export async function sendOrderNotificationToVendor(params: {
     console.log(`[Email] Order vendor notification sent to ${params.toEmail}`);
   } catch (err) {
     console.error('[Email] sendOrderNotificationToVendor failed:', err);
+    throw err;
   }
 }
 
@@ -1118,10 +1108,19 @@ export async function sendInternalEventAlert(params: {
   date?: string;
   time?: string;
   location?: string;
+  // Pre-fee amount actually charged (D for a deposit, B for full pay). Fee
+  // lines below are computed on this, never on the full service price.
+  amountChargedCents?: number;
+  paymentType?: 'deposit' | 'full';
+  serviceTotalCents?: number;
+  // PaymentIntent amount as Stripe recorded it, shown for reconciliation.
+  stripeChargeCents?: number;
 }): Promise<void> {
-  const OPS_EMAIL = 'info@goutsyde.com';
   try {
-    const totalBase = params.basePrice ?? (params.items?.reduce((s, i) => s + i.basePrice * i.quantity, 0) ?? 0);
+    const totalBase = params.amountChargedCents
+      ?? params.basePrice
+      ?? (params.items?.reduce((s, i) => s + i.basePrice * i.quantity, 0) ?? 0);
+    const isDeposit = params.paymentType === 'deposit';
     const consumerUpcharge = totalBase * 0.08;
     const consumerTotal = totalBase + consumerUpcharge;
     const vendorFee = totalBase * 0.02;
@@ -1134,6 +1133,12 @@ export async function sendInternalEventAlert(params: {
       ...(params.date ? [detailRow('Date', params.date, true)] : []),
       ...(params.time ? [detailRow('Time', params.time, false)] : []),
       ...(params.location ? [detailRow('Location', params.location, true)] : []),
+      ...(params.paymentType ? [detailRow('Payment Type', isDeposit ? 'Deposit' : 'Full payment', false)] : []),
+      ...(isDeposit && params.serviceTotalCents != null ? [
+        detailRow('Service Total', cents(params.serviceTotalCents), true),
+        detailRow('Due at Appointment (in person, no fee)', cents(Math.max(0, params.serviceTotalCents - totalBase)), false),
+      ] : []),
+      ...(params.stripeChargeCents != null ? [detailRow('Stripe Charge (actual)', cents(params.stripeChargeCents), true)] : []),
     ].join('');
 
     let itemBreakdown = '';
@@ -1153,7 +1158,7 @@ export async function sendInternalEventAlert(params: {
     }
 
     const financialRows = [
-      detailRow('Base Amount', cents(totalBase), true),
+      detailRow(isDeposit ? 'Deposit Amount' : 'Base Amount', cents(totalBase), true),
       detailRow('Consumer Upcharge (8%)', `+${cents(consumerUpcharge)}`, false),
       detailRow('Consumer Total Paid', cents(consumerTotal), true),
       detailRow('Vendor Fee (2%)', `-${cents(vendorFee)}`, false),
@@ -1194,10 +1199,11 @@ export async function sendInternalEventAlert(params: {
       ${emailFooter()}
     `);
 
-    await sendBrandedEmail(OPS_EMAIL, `[Outsyde] ${params.eventType} — ${params.bookingOrOrderId}`, html);
+    await sendBrandedEmail(ADMIN_NOTIFICATION_EMAIL, `[Outsyde] ${params.eventType} — ${params.bookingOrOrderId}${isDeposit ? ' (deposit)' : ''}`, html);
     console.log(`[Email] Internal alert sent for: ${params.eventType} ${params.bookingOrOrderId}`);
   } catch (err) {
     console.error('[Email] sendInternalEventAlert failed:', err);
+    throw err;
   }
 }
 
@@ -1278,7 +1284,7 @@ export async function sendCancellationAdminEmail(params: {
     ${emailFooter('This is an automated admin alert from Outsyde.')}
   `);
 
-  await sendAdminEmail({ to: params.adminEmail, subject, html });
+  await sendAdminEmail({ to: ADMIN_NOTIFICATION_EMAIL, subject, html });
 }
 
 // ============================================================
@@ -1444,7 +1450,6 @@ export async function sendAdminBookingAlert(params: {
   bookingId: string;
   reason?: string;
 }): Promise<void> {
-  const OPS_EMAIL = 'info@goutsyde.com';
   const subjects: Record<typeof params.type, string> = {
     new_pending: `[Outsyde] New Booking Request — ${params.businessName}`,
     accepted:    `[Outsyde] Booking Accepted — ${params.businessName}`,
@@ -1484,7 +1489,7 @@ export async function sendAdminBookingAlert(params: {
       </td></tr>
       ${emailFooter()}
     `);
-    await sendAdminEmail({ to: OPS_EMAIL, subject: subjects[params.type], html });
+    await sendAdminEmail({ to: ADMIN_NOTIFICATION_EMAIL, subject: subjects[params.type], html });
   } catch (err) {
     console.error('[Email] sendAdminBookingAlert failed:', err);
   }
@@ -1570,20 +1575,19 @@ export async function sendBookingConfirmationToCustomer(params: {
   date: string
   time: string
   appointmentId: string
-  // Dynamic vendor branding — required for new callers; legacy callers get XO defaults.
+  // Vendor branding. Defaults are Outsyde's, never another vendor's.
   businessName?: string
   fromAddress?: string   // e.g. 'XO Beauty & Lashes <bookings@xobeautyandlashes.com>'
   vendorContactEmail?: string
 }): Promise<void> {
   const apiKey = process.env.RESEND_API_KEY
   if (!apiKey) {
-    console.warn('[Email] RESEND_API_KEY not set — skipping deposit customer confirmation')
-    return
+    throw new Error('[emailService] RESEND_API_KEY not set')
   }
 
-  const displayName = params.businessName || 'XO Beauty & Lashes'
-  const from = params.fromAddress || 'XO Beauty & Lashes <bookings@xobeautyandlashes.com>'
-  const contactEmail = params.vendorContactEmail || 'fleekbynik@gmail.com'
+  const displayName = params.businessName || 'Outsyde'
+  const from = params.fromAddress || FROM_ORDERS
+  const contactEmail = params.vendorContactEmail || 'info@goutsyde.com'
 
   const { Resend } = await import('resend')
   const resend = new Resend(apiKey)
@@ -1617,12 +1621,15 @@ export async function sendBookingConfirmationToCustomer(params: {
     </div>
   `
 
-  await resend.emails.send({
+  const result = await resend.emails.send({
     from,
     to: params.toEmail,
     subject,
     html,
-  }).catch(err => console.error('[Email] Deposit customer confirmation failed:', err))
+  })
+  if (result.error) {
+    throw new Error(`Resend error: ${result.error.message ?? JSON.stringify(result.error)}`)
+  }
 }
 
 // Deposit booking alert to vendor — parameterized for any vendor using the deposit flow.
@@ -1633,7 +1640,7 @@ export async function sendNewBookingAlertToVendor(params: {
   date: string
   time: string
   appointmentId: string
-  // Dynamic vendor params — required for new callers; legacy callers get XO defaults.
+  // Vendor params. Defaults are Outsyde's, never another vendor's.
   vendorOwnerEmail?: string
   businessName?: string
   fromAddress?: string
@@ -1641,13 +1648,15 @@ export async function sendNewBookingAlertToVendor(params: {
 }): Promise<void> {
   const apiKey = process.env.RESEND_API_KEY
   if (!apiKey) {
-    console.warn('[Email] RESEND_API_KEY not set — skipping deposit vendor alert')
-    return
+    throw new Error('[emailService] RESEND_API_KEY not set')
+  }
+  if (!params.vendorOwnerEmail) {
+    throw new Error('[emailService] no vendor owner email for deposit booking alert')
   }
 
-  const toEmail = params.vendorOwnerEmail || 'fleekbynik@gmail.com'
-  const displayName = params.businessName || 'XO Beauty & Lashes'
-  const from = params.fromAddress || 'XO Beauty & Lashes <bookings@xobeautyandlashes.com>'
+  const toEmail = params.vendorOwnerEmail
+  const displayName = params.businessName || 'Outsyde'
+  const from = params.fromAddress || FROM_ORDERS
   const depositLabel = params.depositAmountCents != null
     ? `$${(params.depositAmountCents / 100).toFixed(2)} deposit`
     : 'A deposit'
@@ -1683,12 +1692,15 @@ export async function sendNewBookingAlertToVendor(params: {
     </div>
   `
 
-  await resend.emails.send({
+  const result = await resend.emails.send({
     from,
     to: toEmail,
     subject,
     html,
-  }).catch(err => console.error('[Email] Deposit vendor alert failed:', err))
+  })
+  if (result.error) {
+    throw new Error(`Resend error: ${result.error.message ?? JSON.stringify(result.error)}`)
+  }
 }
 
 export async function sendOrderDeliveredEmail(params: {
