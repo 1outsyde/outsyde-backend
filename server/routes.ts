@@ -125,7 +125,7 @@ import {
   transitionShootBookingState,
   getPendingProviderExpiryTime
 } from "./bookingStateMachine";
-import { calculateProductFee, calculateBookingFee, calculateConsumerServiceFee, calculateBookingFees } from "./fees";
+import { calculateProductFee, calculateBookingFee, calculateConsumerServiceFee, calculateBookingFees, quoteDeposit } from "./fees";
 import {
   trackLinkClick,
   recordAttribution,
@@ -5027,6 +5027,16 @@ export async function registerRoutes(
       const { calculateBookingFees } = await import('./fees');
       const feePreview = calculateBookingFees(result.servicePriceCents);
 
+      // What create-payment-intent will charge for this hold. The deposit is
+      // read from the same place that route reads it: vendor services only
+      // (staff services and photographers have no deposit).
+      let holdDepositAmountCents: number | null = null;
+      if (providerType === 'business' && !staffMemberId) {
+        const vendorService = await storage.getVendorService(serviceId as string);
+        holdDepositAmountCents = typeof vendorService?.depositAmountCents === 'number' ? vendorService.depositAmountCents : null;
+      }
+      const dueNow = quoteDeposit(result.servicePriceCents, holdDepositAmountCents);
+
       res.json({
         success: true,
         holdId: result.holdId,
@@ -5046,6 +5056,24 @@ export async function registerRoutes(
           taxAmount: 0,
           outsydeGrossRevenueAmount: feePreview.outsydeGrossRevenueCents,
           feeModelVersion: feePreview.feeModelVersion,
+        },
+        // Deposit-aware amounts: feeBreakdown above is on the full service
+        // price; these describe what is charged now and what is paid in person.
+        serviceTotalCents: dueNow.serviceTotalCents,
+        depositAmountCents: dueNow.depositAmountCents,
+        chargeAmountCents: dueNow.chargeAmountCents,
+        dueNowCents: dueNow.dueNowCents,
+        dueAtAppointmentCents: dueNow.dueAtAppointmentCents,
+        depositNonRefundable: dueNow.depositNonRefundable,
+        dueNowFeeBreakdown: {
+          subtotalAmount: dueNow.feeBreakdown.subtotalCents,
+          consumerServiceFeeAmount: dueNow.feeBreakdown.consumerServiceFeeCents,
+          bookingFeeAmount: dueNow.feeBreakdown.platformFeeCents,
+          vendorNetAmount: dueNow.feeBreakdown.vendorNetCents,
+          grossChargeAmount: dueNow.feeBreakdown.customerTotalBeforeTaxCents,
+          taxAmount: 0,
+          outsydeGrossRevenueAmount: dueNow.feeBreakdown.outsydeGrossRevenueCents,
+          feeModelVersion: dueNow.feeBreakdown.feeModelVersion,
         },
       });
     } catch (error) {
@@ -5210,6 +5238,155 @@ export async function registerRoutes(
       return res.status(500).json({ error: "Failed to create deposit payment" });
     }
   });
+
+  // ── Hold-based appointment PaymentIntents ─────────────────────────────────
+  // The first request and a retry that resumes an appointment whose
+  // PaymentIntent was never saved both build every Stripe parameter from the
+  // appointment row, so a retry sends identical parameters under the same
+  // idempotency key and Stripe returns the PaymentIntent it already created.
+  type HoldAppointmentRow = {
+    id: string;
+    holdId: string | null;
+    businessId: string;
+    staffMemberId: string | null;
+    totalPrice: number;
+    depositAmountCents: number | null;
+    captureMethod: string | null;
+    status: string;
+    bookingNumber: number;
+  };
+
+  // Get or create the Stripe customer — recovers stale/deleted IDs, not just null.
+  async function resolveBookingStripeCustomer(userId: string, user: User): Promise<string> {
+    const stripeCustomerId = await stripeService.getOrCreateStripeCustomer({
+      userId,
+      email: user.email!,
+      name: user.name || undefined,
+      existingStripeCustomerId: user.stripeCustomerId,
+    });
+    if (!user.stripeCustomerId || user.stripeCustomerId !== stripeCustomerId) {
+      await storage.updateUser(userId, { stripeCustomerId });
+    }
+    return stripeCustomerId;
+  }
+
+  function buildAppointmentPaymentIntentParams(appt: HoldAppointmentRow, businessName: string, stripeCustomerId: string) {
+    return {
+      amountCents: quoteDeposit(appt.totalPrice, appt.depositAmountCents).dueNowCents,
+      customerId: stripeCustomerId,
+      captureMethod: (appt.captureMethod === 'manual' ? 'manual' : 'automatic') as 'automatic' | 'manual',
+      metadata: {
+        type: 'appointment',
+        appointmentId: appt.id,
+        holdId: appt.holdId ?? '',
+        businessId: appt.businessId,
+        staffMemberId: appt.staffMemberId || '',
+      },
+      description: `Appointment booking at ${businessName}`,
+      saveForFutureUse: true,
+      idempotencyKey: `hold_pi_${appt.id}`,
+    };
+  }
+
+  // Deposit/fee fields of a hold-based appointment, from its stored row.
+  function appointmentPaymentMoneyFields(appt: HoldAppointmentRow) {
+    const quote = quoteDeposit(appt.totalPrice, appt.depositAmountCents);
+    const fb = quote.feeBreakdown;
+    return {
+      requiresApproval: appt.captureMethod === 'manual',
+      status: appt.status,
+      depositAmountCents: quote.depositAmountCents,
+      servicePriceCents: appt.totalPrice,
+      chargeAmountCents: quote.chargeAmountCents,
+      feeBreakdown: {
+        subtotalAmount: fb.subtotalCents,
+        consumerServiceFeeAmount: fb.consumerServiceFeeCents,
+        bookingFeeAmount: fb.platformFeeCents,
+        vendorNetAmount: fb.vendorNetCents,
+        grossChargeAmount: fb.customerTotalBeforeTaxCents,
+        feeModelVersion: fb.feeModelVersion,
+      },
+    };
+  }
+
+  // A failed PaymentIntent create leaves the appointment pending with no
+  // PaymentIntent; the next request for the same hold resumes it.
+  function sendPaymentIntentFailure(res: import("express").Response, appt: HoldAppointmentRow, idempotencyKeyUsed: string, error: any) {
+    if (error?.type === 'StripeIdempotencyError' || error?.rawType === 'idempotency_error') {
+      console.error(`[Booking] PI idempotency conflict appointment=${appt.id} hold=${appt.holdId} key=${idempotencyKeyUsed}:`, error?.message);
+      return res.status(502).json({
+        error: "Payment could not be started for this booking. Please try again later.",
+        code: "PI_IDEMPOTENCY_CONFLICT",
+        appointmentId: appt.id,
+      });
+    }
+    console.error(`[Booking] PI creation FAILED appointment=${appt.id} hold=${appt.holdId} key=${idempotencyKeyUsed}:`, error);
+    return res.status(500).json({ error: "Failed to create payment intent" });
+  }
+
+  // When manual acceptance is required, notify the business owner and the
+  // customer immediately so neither party is left waiting silently.
+  async function notifyPendingBookingRequest(params: {
+    hold: { providerId: string; serviceName: string; holdDate: string; startTime: string; servicePriceCents: number };
+    business: { name: string };
+    user: User;
+    appointmentId: string;
+    expiresAt: Date;
+    amountCents: number;
+  }) {
+    const { hold, business, user, appointmentId, expiresAt, amountCents } = params;
+    {
+      const owner = await storage.getUserByBusinessOwnerId(hold.providerId).catch(() => undefined);
+      const clientUser = user;
+
+      if (owner) {
+        sendExpoPush({
+          userId: owner.id,
+          title: 'New Booking Request',
+          body: `${clientUser?.name || 'A customer'} requested ${hold.serviceName} on ${hold.holdDate} at ${hold.startTime}`,
+          data: { type: 'booking_request', screen: 'dashboard' },
+        }).catch(() => {});
+
+        if (owner.email) {
+          sendBookingRequestToVendor({
+            toEmail: owner.email,
+            vendorName: business.name,
+            consumerName: clientUser?.name || 'Customer',
+            consumerUsername: (clientUser as any)?.username ?? undefined,
+            serviceName: hold.serviceName,
+            bookingId: appointmentId,
+            date: hold.holdDate,
+            time: hold.startTime,
+            basePrice: hold.servicePriceCents,
+            expiresAt,
+          }).catch(() => {});
+        }
+      }
+
+      if (user?.email) {
+        sendBookingRequestReceivedToConsumer({
+          toEmail: user.email,
+          consumerName: user.name || user.email,
+          vendorName: business.name,
+          serviceName: hold.serviceName,
+          bookingId: appointmentId,
+          date: hold.holdDate,
+          time: hold.startTime,
+          expiresAt,
+        }).catch(() => {});
+      }
+
+      sendAdminBookingAlert({
+        type: 'new_pending',
+        businessName: business.name,
+        customerName: user?.name || 'Unknown Customer',
+        serviceName: hold.serviceName,
+        date: hold.holdDate,
+        amount: `$${(amountCents / 100).toFixed(2)}`,
+        bookingId: appointmentId,
+      }).catch(() => {});
+    }
+  }
 
   // POST /api/booking/:holdId/create-payment-intent - Convert a confirmed hold
   // into a real booking record and create a platform-balance PaymentIntent for it.
@@ -5418,11 +5595,58 @@ export async function registerRoutes(
                 appointmentId: existing.id,
                 bookingNumber: existing.bookingNumber,
                 captureMethod: existingPI.capture_method,
+                ...appointmentPaymentMoneyFields(existing),
               });
             }
           } catch (piError) {
             console.log(`[Booking] Existing PaymentIntent ${existing.stripePaymentIntentId} for hold ${holdId} not found or invalid`);
           }
+        } else if (existing.status === BOOKING_STATES.PENDING_PAYMENT || existing.status === BOOKING_STATES.PENDING_PROVIDER) {
+          // Resume: an earlier attempt created this appointment but never saved
+          // its PaymentIntent. Same parameters and key as that attempt, so
+          // Stripe returns the PaymentIntent it may already have created.
+          const resumeBusiness = await storage.getBusiness(existing.businessId);
+          if (!resumeBusiness) {
+            return res.status(404).json({ error: "Business not found" });
+          }
+          const resumeUser = await storage.getUser(userId);
+          if (!resumeUser) {
+            return res.status(404).json({ error: "User not found" });
+          }
+          const resumeCustomerId = await resolveBookingStripeCustomer(userId, resumeUser);
+          const resumeParams = buildAppointmentPaymentIntentParams(existing, resumeBusiness.name, resumeCustomerId);
+          let resumedPI: Awaited<ReturnType<typeof stripeService.createPlatformPaymentIntent>>;
+          try {
+            resumedPI = await stripeService.createPlatformPaymentIntent(resumeParams);
+          } catch (piError) {
+            return sendPaymentIntentFailure(res, existing, resumeParams.idempotencyKey, piError);
+          }
+
+          await db.update(appointments).set({
+            stripePaymentIntentId: resumedPI.id,
+            updatedAt: new Date(),
+          }).where(eq(appointments.id, existing.id));
+          console.log(`[Booking] Resumed appointment ${existing.id} for hold ${holdId} with PaymentIntent ${resumedPI.id}`);
+
+          if (resumeParams.captureMethod === 'manual') {
+            await notifyPendingBookingRequest({
+              hold,
+              business: resumeBusiness,
+              user: resumeUser,
+              appointmentId: existing.id,
+              expiresAt: existing.pendingProviderExpiresAt!,
+              amountCents: resumeParams.amountCents,
+            });
+          }
+
+          return res.json({
+            clientSecret: resumedPI.client_secret,
+            paymentIntentId: resumedPI.id,
+            appointmentId: existing.id,
+            bookingNumber: existing.bookingNumber,
+            captureMethod: resumeParams.captureMethod,
+            ...appointmentPaymentMoneyFields(existing),
+          });
         }
         return res.status(409).json({ error: "A payment attempt for this hold already exists." });
       }
@@ -5541,89 +5765,32 @@ export async function registerRoutes(
         return res.status(404).json({ error: "User not found" });
       }
 
-      // Get or create Stripe customer — recovers stale/deleted IDs, not just null
-      const stripeCustomerId = await stripeService.getOrCreateStripeCustomer({
-        userId,
-        email: user.email!,
-        name: user.name || undefined,
-        existingStripeCustomerId: user.stripeCustomerId,
-      });
-      if (!user.stripeCustomerId || user.stripeCustomerId !== stripeCustomerId) {
-        await storage.updateUser(userId, { stripeCustomerId });
-      }
+      const stripeCustomerId = await resolveBookingStripeCustomer(userId, user);
 
-      const paymentIntent = await stripeService.createPlatformPaymentIntent({
-        amountCents: feeBreakdown.customerTotalBeforeTaxCents,
-        customerId: stripeCustomerId,
-        captureMethod,
-        metadata: {
-          type: 'appointment',
-          appointmentId: appointment.id,
-          holdId: hold.id,
-          businessId: hold.providerId,
-          staffMemberId: hold.staffMemberId || '',
-        },
-        description: `Appointment booking at ${business.name}`,
-        saveForFutureUse: true,
-      });
+      // Built from the row just written (same deposit, price and capture
+      // method as computed above), so a resumed retry sends identical params.
+      const paymentIntentParams = buildAppointmentPaymentIntentParams(appointment, business.name, stripeCustomerId);
+      let paymentIntent: Awaited<ReturnType<typeof stripeService.createPlatformPaymentIntent>>;
+      try {
+        paymentIntent = await stripeService.createPlatformPaymentIntent(paymentIntentParams);
+      } catch (piError) {
+        return sendPaymentIntentFailure(res, appointment, paymentIntentParams.idempotencyKey, piError);
+      }
 
       await db.update(appointments).set({
         stripePaymentIntentId: paymentIntent.id,
         updatedAt: new Date(),
       }).where(eq(appointments.id, appointment.id));
 
-      // When manual acceptance is required, notify the business owner and
-      // the customer immediately so neither party is left waiting silently.
       if (!isAutoAccept) {
-        const owner = await storage.getUserByBusinessOwnerId(hold.providerId).catch(() => undefined);
-        const clientUser = user; // fetched above
-
-        if (owner) {
-          sendExpoPush({
-            userId: owner.id,
-            title: 'New Booking Request',
-            body: `${clientUser?.name || 'A customer'} requested ${hold.serviceName} on ${hold.holdDate} at ${hold.startTime}`,
-            data: { type: 'booking_request', screen: 'dashboard' },
-          }).catch(() => {});
-
-          if (owner.email) {
-            sendBookingRequestToVendor({
-              toEmail: owner.email,
-              vendorName: business.name,
-              consumerName: clientUser?.name || 'Customer',
-              consumerUsername: (clientUser as any)?.username ?? undefined,
-              serviceName: hold.serviceName,
-              bookingId: appointment.id,
-              date: hold.holdDate,
-              time: hold.startTime,
-              basePrice: hold.servicePriceCents,
-              expiresAt: pendingProviderExpiresAt!,
-            }).catch(() => {});
-          }
-        }
-
-        if (user?.email) {
-          sendBookingRequestReceivedToConsumer({
-            toEmail: user.email,
-            consumerName: user.name || user.email,
-            vendorName: business.name,
-            serviceName: hold.serviceName,
-            bookingId: appointment.id,
-            date: hold.holdDate,
-            time: hold.startTime,
-            expiresAt: pendingProviderExpiresAt!,
-          }).catch(() => {});
-        }
-
-        sendAdminBookingAlert({
-          type: 'new_pending',
-          businessName: business.name,
-          customerName: user?.name || 'Unknown Customer',
-          serviceName: hold.serviceName,
-          date: hold.holdDate,
-          amount: `$${(feeBreakdown.customerTotalBeforeTaxCents / 100).toFixed(2)}`,
-          bookingId: appointment.id,
-        }).catch(() => {});
+        await notifyPendingBookingRequest({
+          hold,
+          business,
+          user,
+          appointmentId: appointment.id,
+          expiresAt: pendingProviderExpiresAt!,
+          amountCents: feeBreakdown.customerTotalBeforeTaxCents,
+        });
       }
 
       res.json({
@@ -7955,6 +8122,7 @@ export async function registerRoutes(
           );
 
       const fees = calculateBookingFees(appointment.totalPrice);
+      const charged = quoteDeposit(appointment.totalPrice, appointment.depositAmountCents);
 
       return res.json({
         cancellable: true,
@@ -7966,7 +8134,13 @@ export async function registerRoutes(
         feeWouldBeCharged: feeAmountCents > 0,
         feeNeedsManualCollection: false,
         subtotalCents: fees.subtotalCents,
+        // Full service price + 8%, kept as-is for existing callers. For deposit
+        // bookings the amount actually paid is chargedAmountCents.
         grossChargeAmountCents: fees.customerTotalBeforeTaxCents,
+        chargedAmountCents: charged.dueNowCents,
+        isDepositBooking: hasDeposit(appointment),
+        depositAmountCents: hasDeposit(appointment) ? appointment.depositAmountCents : null,
+        depositNonRefundable: hasDeposit(appointment),
       });
     } catch (error: any) {
       console.error("Appointment cancel preview error:", error);
@@ -11726,6 +11900,22 @@ export async function registerRoutes(
     }
   });
 
+  // Deposit rule for vendor services: no deposit (null), or at least $7.00 and
+  // less than the service price. 0 means no deposit and is stored as null.
+  const MIN_DEPOSIT_CENTS = 700;
+  function validateDeposit(
+    depositCents: number | null | undefined,
+    priceCents: number,
+  ): { ok: true; value: number | null | undefined } | { ok: false; message: string } {
+    if (depositCents === undefined) return { ok: true, value: undefined };
+    if (depositCents === null || depositCents === 0) return { ok: true, value: null };
+    if (depositCents < MIN_DEPOSIT_CENTS) return { ok: false, message: "Deposit must be at least $7.00." };
+    if (depositCents >= priceCents) return { ok: false, message: "Deposit must be less than the service price." };
+    return { ok: true, value: depositCents };
+  }
+  const invalidDepositBody = (message: string, extra: Record<string, unknown> = {}) =>
+    ({ error: message, message, code: "INVALID_DEPOSIT", ...extra });
+
   // Get vendor's services
   app.get("/api/vendor/services", async (req, res) => {
     const userId = getUserIdFromRequest(req);
@@ -11763,7 +11953,7 @@ export async function registerRoutes(
   app.post("/api/vendor/services", async (req, res) => {
     const xBusinessId = req.headers['x-business-id'] as string | undefined;
     const ALLOWED_ADMIN_EMAILS = ['info@goutsyde.com', 'jamesmeyers2304@gmail.com'];
-    const userId = req.session?.userId || (req as any).user?.userId;
+    const userId = req.session?.userId || getUserIdFromRequest(req);
     if (!userId) return res.status(401).json({ error: 'Not authenticated' });
 
     const userRecord = await storage.getUser(userId);
@@ -11805,6 +11995,12 @@ export async function registerRoutes(
       });
 
       const validated = serviceSchema.parse(req.body);
+      const depositCheck = validateDeposit(validated.depositAmountCents, validated.price);
+      if (!depositCheck.ok) {
+        return res.status(400).json(invalidDepositBody(depositCheck.message));
+      }
+      if (depositCheck.value !== undefined) validated.depositAmountCents = depositCheck.value;
+
       const service = await storage.createVendorService({
         businessId: business.id,
         ...validated,
@@ -11875,6 +12071,20 @@ export async function registerRoutes(
       });
 
       const validated = updateSchema.parse(req.body);
+
+      // Re-check the deposit whenever the price or the deposit changes, so a
+      // price lowered below an existing deposit is rejected too. Edits that
+      // touch neither are not blocked by a deposit saved before this rule.
+      if (validated.price !== undefined || validated.depositAmountCents !== undefined) {
+        const depositCheck = validateDeposit(
+          validated.depositAmountCents !== undefined ? validated.depositAmountCents : service.depositAmountCents,
+          validated.price ?? service.price,
+        );
+        if (!depositCheck.ok) {
+          return res.status(400).json(invalidDepositBody(depositCheck.message));
+        }
+        if (validated.depositAmountCents !== undefined) validated.depositAmountCents = depositCheck.value;
+      }
 
       // Handle Stripe catalog updates for live services.
       let stripeUpdates: any = {};
@@ -12162,7 +12372,23 @@ export async function registerRoutes(
       });
       const { depositAmountCents } = bodySchema.parse(req.body);
 
-      const updatedCount = await storage.updateAllVendorServicesDepositAmount(business.id, depositAmountCents);
+      // All or nothing: if the deposit is invalid for any service (below $7.00,
+      // or not less than that service's price), nothing is written.
+      const services = await storage.getVendorServicesByBusiness(business.id);
+      const invalid = services
+        .map(s => ({ s, check: validateDeposit(depositAmountCents, s.price) }))
+        .filter(({ check }) => !check.ok);
+      if (invalid.length > 0) {
+        const first = invalid[0].check as { ok: false; message: string };
+        return res.status(400).json(invalidDepositBody(first.message, {
+          invalidServices: invalid.map(({ s }) => ({ id: s.id, name: s.name, priceCents: s.price })),
+        }));
+      }
+
+      const updatedCount = await storage.updateAllVendorServicesDepositAmount(
+        business.id,
+        depositAmountCents === 0 ? null : depositAmountCents,
+      );
       res.json({ success: true, updatedCount });
     } catch (error) {
       if (error instanceof z.ZodError) {
