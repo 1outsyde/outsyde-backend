@@ -7899,6 +7899,16 @@ export async function registerRoutes(
     return { refundTier, refundAmountCents, feeAmountCents };
   }
 
+  // A deposit of 0 is treated as no deposit (older rows may hold 0).
+  const hasDeposit = (appointment: { depositAmountCents?: number | null }): boolean =>
+    (appointment.depositAmountCents ?? 0) > 0;
+
+  const NON_REFUNDABLE_DEPOSIT_OUTCOME = {
+    refundTier: 'none' as const,
+    refundAmountCents: 0,
+    feeAmountCents: 0,
+  };
+
   // ── Cancellation preview: pure read, no side effects ──────────────────────────
   // Returns what WOULD happen if the consumer cancels right now, without
   // touching any booking state, Stripe, or availability slots.
@@ -7933,12 +7943,16 @@ export async function registerRoutes(
         ? await storage.getVendorService(appointment.serviceId)
         : null;
 
-      const { refundTier, refundAmountCents, feeAmountCents } = computeCancellationRefund(
-        service,
-        new Date(`${appointment.appointmentDate}T${appointment.appointmentTime}`),
-        appointment.totalPrice,
-        appointment.vendorNet,
-      );
+      // Platform rule: a deposit is non-refundable when the customer cancels,
+      // and no cancellation fee is charged on top of it.
+      const { refundTier, refundAmountCents, feeAmountCents } = hasDeposit(appointment)
+        ? NON_REFUNDABLE_DEPOSIT_OUTCOME
+        : computeCancellationRefund(
+            service,
+            new Date(`${appointment.appointmentDate}T${appointment.appointmentTime}`),
+            appointment.totalPrice,
+            appointment.vendorNet,
+          );
 
       const fees = calculateBookingFees(appointment.totalPrice);
 
@@ -8049,40 +8063,123 @@ export async function registerRoutes(
         : null;
 
       // ── Compute refund tier + cancellation fee ────────────────────────────
-      const { refundTier, refundAmountCents, feeAmountCents } = computeCancellationRefund(
-        service,
-        new Date(`${appointment.appointmentDate}T${appointment.appointmentTime}`),
-        appointment.totalPrice,
-        appointment.vendorNet,
-      );
+      // Platform rule: a deposit is non-refundable when the customer cancels,
+      // and no cancellation fee is charged on top of it.
+      let { refundTier, refundAmountCents, feeAmountCents } = hasDeposit(appointment)
+        ? NON_REFUNDABLE_DEPOSIT_OUTCOME
+        : computeCancellationRefund(
+            service,
+            new Date(`${appointment.appointmentDate}T${appointment.appointmentTime}`),
+            appointment.totalPrice,
+            appointment.vendorNet,
+          );
 
-      // ── Issue refund (best-effort) ────────────────────────────────────────
-      let refundSucceeded = false;
-      if (refundAmountCents > 0 && appointment.stripePaymentIntentId) {
+      const paymentIntentId = appointment.stripePaymentIntentId;
+      const refundAlreadyIssued = !!appointment.stripeRefundId;
+      if (refundAlreadyIssued) {
+        // A retry after the refund succeeded but the status change did not.
+        refundAmountCents = appointment.refundAmount ?? refundAmountCents;
+      }
+      const refundNeeded = refundAmountCents > 0 && !refundAlreadyIssued;
+
+      // ── Read the PaymentIntent when it matters ────────────────────────────
+      // A refund needs what Stripe actually holds, and a manual-capture
+      // PaymentIntent may still be an uncaptured authorization. An
+      // auto-capture deposit cancel needs neither, so it makes no Stripe call.
+      let paymentState: Awaited<ReturnType<typeof stripeService.getPaymentIntentForRefund>> | undefined;
+      if (paymentIntentId && (refundNeeded || appointment.captureMethod === 'manual')) {
         try {
-          const refund = await stripeService.createBookingRefund({
-            paymentIntentId: appointment.stripePaymentIntentId,
-            amountCents: refundAmountCents,
-            reason: 'requested_by_customer',
-            metadata: {
-              appointmentId,
-              initiatedBy: userId,
-              refundTier,
-              reason: 'Consumer-initiated cancellation',
-            },
-          });
-          await db.update(appointments).set({
-            stripeRefundId: refund.id,
-            refundedAt: new Date(),
-            refundAmount: refundAmountCents,
-          }).where(eq(appointments.id, appointmentId));
-          refundSucceeded = true;
-        } catch (refundError: any) {
-          console.error(`[Cancel] Refund failed for appointment ${appointmentId}:`, refundError);
+          paymentState = await stripeService.getPaymentIntentForRefund(paymentIntentId);
+        } catch (stripeError: any) {
+          const code = refundNeeded ? 'REFUND_FAILED' : 'AUTH_RELEASE_FAILED';
+          console.error(`[Cancel] ${code} appointment=${appointmentId} pi=${paymentIntentId} amount=${refundAmountCents}: could not read PaymentIntent`, stripeError);
+          return res.status(502).json({ error: "Refund failed; appointment not canceled", code, appointmentId });
         }
       }
 
-      // ── Charge cancellation fee (best-effort) ────────────────────────────
+      // ── Uncaptured authorization: release it instead of refunding ────────
+      let authorizationReleased = false;
+      if (paymentIntentId && (paymentState?.status === 'requires_capture' || paymentState?.status === 'canceled')) {
+        if (paymentState.status === 'requires_capture') {
+          try {
+            await stripeService.cancelPaymentIntent(paymentIntentId, 'requested_by_customer');
+          } catch (stripeError: any) {
+            console.error(`[Cancel] Authorization release FAILED appointment=${appointmentId} pi=${paymentIntentId}:`, stripeError);
+            return res.status(502).json({ error: "Could not release payment authorization; appointment not canceled", code: "AUTH_RELEASE_FAILED", appointmentId });
+          }
+        }
+        authorizationReleased = true;
+        refundTier = 'none';
+        refundAmountCents = 0;
+        feeAmountCents = 0;
+      }
+
+      // ── Issue refund, capped at what Stripe still holds ───────────────────
+      let refundId: string | null = appointment.stripeRefundId ?? null;
+      if (!authorizationReleased && refundNeeded && paymentIntentId && paymentState) {
+        const refundableCents = Math.max(0, paymentState.amountReceived - paymentState.amountRefunded);
+        if (refundAmountCents > refundableCents) {
+          console.warn(`[Cancel] refund capped appointment=${appointmentId} pi=${paymentIntentId}: computed ${refundAmountCents}, refundable ${refundableCents}`);
+          refundAmountCents = refundableCents;
+        }
+        if (refundAmountCents > 0) {
+          try {
+            const refund = await stripeService.createBookingRefund({
+              paymentIntentId,
+              amountCents: refundAmountCents,
+              reason: 'requested_by_customer',
+              metadata: {
+                appointmentId,
+                initiatedBy: userId,
+                refundTier,
+                reason: 'Consumer-initiated cancellation',
+              },
+              idempotencyKey: `consumer_cancel_refund_${appointmentId}_${refundAmountCents}`,
+            });
+            await db.update(appointments).set({
+              stripeRefundId: refund.id,
+              refundedAt: new Date(),
+              refundAmount: refundAmountCents,
+            }).where(eq(appointments.id, appointmentId));
+            refundId = refund.id;
+          } catch (refundError: any) {
+            console.error(`[Cancel] Refund FAILED appointment=${appointmentId} pi=${paymentIntentId} amount=${refundAmountCents}:`, refundError);
+            return res.status(502).json({ error: "Refund failed; appointment not canceled", code: "REFUND_FAILED", appointmentId });
+          }
+        }
+      }
+      const refundSucceeded = !!refundId;
+
+      // ── Transition to CANCELED (checked) ──────────────────────────────────
+      const transition = await transitionAppointmentState(appointmentId, BOOKING_STATES.CANCELED, {
+        triggeredBy: userId,
+        triggerSource: 'api',
+        metadata: {
+          action: 'consumer_cancel',
+          refundTier,
+          refundAmountCents: String(refundAmountCents),
+          refundSucceeded: String(refundSucceeded),
+          feeAmountCents: String(feeAmountCents),
+          authorizationReleased: String(authorizationReleased),
+        },
+      });
+
+      if (!transition.success) {
+        const current = await storage.getAppointment(appointmentId);
+        if (current?.status === BOOKING_STATES.CANCELED) {
+          return res.status(409).json({ error: "Appointment is already canceled", code: "ALREADY_CANCELED", refundIssued: refundSucceeded, authorizationReleased });
+        }
+        console.error(`[Cancel] transition FAILED appointment=${appointmentId} refund=${refundId ?? 'none'} released=${authorizationReleased}: ${transition.code}`);
+        return res.status(409).json({ error: transition.error, code: transition.code, refundIssued: refundSucceeded, authorizationReleased });
+      }
+
+      await db.update(appointments).set({
+        canceledAt: new Date(),
+        canceledBy: userId,
+        cancellationReason: 'Consumer-initiated cancellation',
+      }).where(eq(appointments.id, appointmentId));
+
+      // ── Charge cancellation fee (best-effort, only after refund and cancel) ──
       let feeCharged = false;
       let feeNeedsManualCollection = false;
       if (feeAmountCents > 0 && appointment.stripePaymentIntentId) {
@@ -8112,27 +8209,6 @@ export async function registerRoutes(
           feeNeedsManualCollection = true;
         }
       }
-
-      // ── Always transition to CANCELED ─────────────────────────────────────
-      await transitionAppointmentState(appointmentId, BOOKING_STATES.CANCELED, {
-        triggeredBy: userId,
-        triggerSource: 'api',
-        metadata: {
-          action: 'consumer_cancel',
-          refundTier,
-          refundAmountCents: String(refundAmountCents),
-          refundSucceeded: String(refundSucceeded),
-          feeAmountCents: String(feeAmountCents),
-          feeCharged: String(feeCharged),
-          feeNeedsManualCollection: String(feeNeedsManualCollection),
-        },
-      });
-
-      await db.update(appointments).set({
-        canceledAt: new Date(),
-        canceledBy: userId,
-        cancellationReason: 'Consumer-initiated cancellation',
-      }).where(eq(appointments.id, appointmentId));
 
       // Clawback points proportional to refund (no refund = no clawback; full = full; partial = partial)
       if (refundAmountCents > 0) {
