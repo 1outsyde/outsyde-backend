@@ -95,6 +95,82 @@ async function main() {
   const { BOOKING_STATES } = schema;
   const { eq } = await import("drizzle-orm");
 
+  // Part 1 guard. Creates and deletes only its own rows. Refuses the production
+  // Braids With Love id even if a fixture insert ever returned it.
+  const BWL_BUSINESS_ID = "f94ae1a2-2ecd-40dc-8d81-4a8dfdfb0a8d";
+  async function runGuardTests(): Promise<void> {
+    const express = (await import("express")).default;
+    const { createServer } = await import("node:http");
+    const { registerRoutes } = await import("../server/routes");
+    const { generateAccessToken } = await import("../server/auth");
+    const gtag = randomUUID().slice(0, 8);
+    const [owner] = await db.insert(schema.users).values({ username: `g_${gtag}`, email: `guard-${gtag}@example.com`, name: "Guard Owner" } as any).returning();
+    const [photoUser] = await db.insert(schema.users).values({ username: `gp_${gtag}`, email: `guard-photo-${gtag}@example.com`, name: "Guard Photog" } as any).returning();
+    const [biz] = await db.insert(schema.businesses).values({ ownerId: owner.id, name: `Guard Biz ${gtag}`, category: "beauty", autoAcceptBookings: true } as any).returning();
+    const [photo] = await db.insert(schema.photographers).values({ userId: photoUser.id, displayName: `Guard Photog ${gtag}`, hourlyRate: 10000, autoAcceptBookings: true } as any).returning();
+    assert(biz.id !== BWL_BUSINESS_ID, "guard fixture business is not Braids With Love");
+    const priorAllow = process.env.MANUAL_ACCEPT_ALLOWLIST;
+    const app = express();
+    app.use(express.json());
+    const server = createServer(app);
+    await registerRoutes(server, app);
+    await new Promise<void>(r => server.listen(0, "127.0.0.1", () => r()));
+    const port = (server.address() as any).port;
+    const vendorToken = generateAccessToken({ userId: owner.id, isVendor: true, businessId: biz.id });
+    const photoToken = generateAccessToken({ userId: photoUser.id, isVendor: false, isPhotographer: true, photographerId: photo.id });
+    const call = async (method: string, path: string, token: string, body: unknown) => {
+      const res = await fetch(`http://127.0.0.1:${port}${path}`, {
+        method,
+        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      return { status: res.status, body: await res.json().catch(() => ({})) as any };
+    };
+    const bizRow = async () => (await db.select().from(schema.businesses).where(eq(schema.businesses.id, biz.id)))[0] as any;
+    const photoRow = async () => (await db.select().from(schema.photographers).where(eq(schema.photographers.id, photo.id)))[0] as any;
+    try {
+      delete process.env.MANUAL_ACCEPT_ALLOWLIST;
+      let r = await call("PATCH", "/api/business/settings", vendorToken, { autoAcceptBookings: false });
+      assert(r.status === 400 && r.body?.code === "MANUAL_ACCEPT_DISABLED", `business false → ${r.status} ${r.body?.code}`);
+      assert((await bizRow()).autoAcceptBookings === true, "business false did not write the column");
+
+      r = await call("PATCH", "/api/business/settings", vendorToken, { autoAcceptBookings: true });
+      assert(r.status === 200 && r.body?.success === true, `business true → ${r.status}`);
+      assert((await bizRow()).autoAcceptBookings === true, "business true still writes true");
+
+      r = await call("PUT", "/api/businesses/me/weekly-availability", vendorToken, { slots: [], autoAcceptBookings: false });
+      assert(r.status === 400 && r.body?.code === "MANUAL_ACCEPT_DISABLED", `weekly-availability false → ${r.status} ${r.body?.code}`);
+      assert((await bizRow()).autoAcceptBookings === true, "weekly-availability false did not write the column");
+
+      r = await call("PATCH", "/api/vendor/my-business", vendorToken, { name: `Guard Biz ${gtag} renamed`, autoAcceptBookings: false });
+      assert(r.status === 200, `my-business with false flag → ${r.status} ${JSON.stringify(r.body).slice(0, 160)}`);
+      const afterProfile = await bizRow();
+      assert(afterProfile.autoAcceptBookings === true && afterProfile.name === `Guard Biz ${gtag} renamed`, "profile save kept auto-accept and updated the name");
+
+      r = await call("PATCH", "/api/photographers/me/settings", photoToken, { autoAcceptBookings: false });
+      assert(r.status === 400 && r.body?.code === "MANUAL_ACCEPT_DISABLED", `photographer false → ${r.status} ${r.body?.code}`);
+      assert((await photoRow()).autoAcceptBookings === true, "photographer false did not write the column");
+
+      process.env.MANUAL_ACCEPT_ALLOWLIST = biz.id;
+      r = await call("PATCH", "/api/business/settings", vendorToken, { autoAcceptBookings: false });
+      assert(r.status === 200 && (await bizRow()).autoAcceptBookings === false, "allowlisted business can set false");
+    } finally {
+      if (priorAllow === undefined) delete process.env.MANUAL_ACCEPT_ALLOWLIST;
+      else process.env.MANUAL_ACCEPT_ALLOWLIST = priorAllow;
+      await db.delete(schema.photographers).where(eq(schema.photographers.id, photo.id));
+      await db.delete(schema.businesses).where(eq(schema.businesses.id, biz.id));
+      await db.delete(schema.users).where(eq(schema.users.id, owner.id));
+      await db.delete(schema.users).where(eq(schema.users.id, photoUser.id));
+      server.close();
+    }
+  }
+
+  if (process.env.ONLY === "guard") {
+    await runGuardTests();
+    origLog(`\nAll ${passed} assertions passed.`);
+    return;
+  }
+
   const tag = randomUUID().slice(0, 8);
   const consumerEmail = `consumer-${tag}@example.com`;
   const vendorEmail = `vendor-${tag}@example.com`;
@@ -1269,6 +1345,7 @@ async function main() {
     assert(!/getUncachableResendClient|REPLIT_CONNECTORS_HOSTNAME|X_REPLIT_TOKEN|api\/v2\/connection/.test(src), "emailService.ts has no Replit connector call");
   }
 
+  await runGuardTests();
   await runCancelTests();
 
   const deposits = await runDepositTests();

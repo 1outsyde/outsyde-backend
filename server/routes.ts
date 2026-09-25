@@ -34,6 +34,20 @@ import { checkVendorStripeBalances, checkActiveOrders } from "./services/account
 import { sendBookingAcceptedToConsumer, sendBookingDeclinedToConsumer, sendBookingRequestToVendor, sendBookingRequestReceivedToConsumer, sendAdminBookingAlert, sendShootBookingAcceptedToPhotographer, sendShootBookingDeclinedToPhotographer, sendShootBookingCanceledToPhotographer, sendAftercareEmail, sendPhotographerWelcomeEmail } from "./emailService";
 import { sendExpoPush } from "./expoPushService";
 
+// TEMP_MANUAL_ACCEPT_GUARD — delete this helper in its own PR after P1 #6 is proven.
+const MANUAL_ACCEPT_DISABLED_BODY = {
+  error: "Manual approval is temporarily unavailable. Bookings stay auto-accepted.",
+  code: "MANUAL_ACCEPT_DISABLED",
+} as const;
+
+function manualAcceptDisabledFor(id: string): boolean {
+  const allow = (process.env.MANUAL_ACCEPT_ALLOWLIST ?? "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+  return !allow.includes(id);
+}
+
 // Helper to sanitize user data for non-admin responses (removes sensitive fields)
 // DOB: replaced with age range for privacy
 // Ethnicity/race: never exposed at individual level, only aggregated
@@ -5938,6 +5952,11 @@ export async function registerRoutes(
 
       const { slots, staffMemberId, autoAcceptBookings } = req.body;
 
+      // TEMP_MANUAL_ACCEPT_GUARD
+      if (autoAcceptBookings === false && manualAcceptDisabledFor(business.id)) {
+        return res.status(400).json(MANUAL_ACCEPT_DISABLED_BODY);
+      }
+
       if (!Array.isArray(slots)) {
         return res.status(400).json({ error: "slots must be an array" });
       }
@@ -6006,6 +6025,11 @@ export async function registerRoutes(
       }
 
       const { slots, autoAcceptBookings } = req.body;
+
+      // TEMP_MANUAL_ACCEPT_GUARD
+      if (autoAcceptBookings === false && manualAcceptDisabledFor(photographer.id)) {
+        return res.status(400).json(MANUAL_ACCEPT_DISABLED_BODY);
+      }
 
       // DEBUG: Log incoming data
       console.log("[AVAILABILITY_DEBUG] PUT /api/photographers/me/weekly-availability");
@@ -10908,6 +10932,8 @@ export async function registerRoutes(
       }
 
       const { coverImage, coverMediaType, ctaConfig, siteConfig, ...otherFields } = req.body;
+      // TEMP_MANUAL_ACCEPT_GUARD — this route is not the toggle; never persist the flag from a profile save.
+      delete otherFields.autoAcceptBookings;
       const updates: Record<string, any> = { ...otherFields };
 
       if (siteConfig !== undefined) {
@@ -18047,6 +18073,11 @@ export async function registerRoutes(
         return res.status(400).json({ error: "autoAcceptBookings must be a boolean" });
       }
 
+      // TEMP_MANUAL_ACCEPT_GUARD
+      if (autoAcceptBookings === false && manualAcceptDisabledFor(business.id)) {
+        return res.status(400).json(MANUAL_ACCEPT_DISABLED_BODY);
+      }
+
       await storage.updateBusiness(business.id, { autoAcceptBookings });
       res.json({ success: true });
     } catch (error) {
@@ -18067,6 +18098,11 @@ export async function registerRoutes(
       const { autoAcceptBookings } = req.body;
       if (typeof autoAcceptBookings !== 'boolean') {
         return res.status(400).json({ error: "autoAcceptBookings must be a boolean" });
+      }
+
+      // TEMP_MANUAL_ACCEPT_GUARD
+      if (autoAcceptBookings === false && manualAcceptDisabledFor(photographer.id)) {
+        return res.status(400).json(MANUAL_ACCEPT_DISABLED_BODY);
       }
 
       await storage.updatePhotographer(photographer.id, { autoAcceptBookings });
