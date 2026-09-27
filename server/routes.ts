@@ -10934,7 +10934,47 @@ export async function registerRoutes(
       const { coverImage, coverMediaType, ctaConfig, siteConfig, ...otherFields } = req.body;
       // TEMP_MANUAL_ACCEPT_GUARD — this route is not the toggle; never persist the flag from a profile save.
       delete otherFields.autoAcceptBookings;
-      const updates: Record<string, any> = { ...otherFields };
+      const VENDOR_MY_BUSINESS_ALLOWED_FIELDS = new Set([
+        "name",
+        "category",
+        "description",
+        "tagline",
+        "city",
+        "state",
+        "zipCode",
+        "address",
+        "hasPhysicalLocation",
+        "hasProducts",
+        "hasServices",
+        "yearsInBusiness",
+        "contactEmail",
+        "contactPhone",
+        "websiteUrl",
+        "brandColors",
+        "logoImage",
+        "knownFor",
+        "hoursOfOperation",
+        "defaultServiceLocationType",
+        "vendorTermsAndConditions",
+        "responseTimeValue",
+        "responseTimeUnit",
+        "showResponseTime",
+        "showEmail",
+        "showPhone",
+        "showWebsite",
+        "showStoreHours",
+        "showAddress",
+      ]);
+      const droppedKeys = Object.keys(otherFields).filter((key) => !VENDOR_MY_BUSINESS_ALLOWED_FIELDS.has(key));
+      if (droppedKeys.length > 0) {
+        console.warn(`[my-business] dropped keys: ${droppedKeys.join(", ")} | businessId: ${business.id}`);
+      }
+      const updates: Record<string, any> = {};
+      for (const key of Object.keys(otherFields)) {
+        if (VENDOR_MY_BUSINESS_ALLOWED_FIELDS.has(key)) {
+          updates[key] = otherFields[key];
+        }
+      }
 
       if (siteConfig !== undefined) {
         updates.siteConfig = siteConfig;
@@ -11048,6 +11088,10 @@ export async function registerRoutes(
         if (coverImage !== null && coverMediaType === undefined) {
           return res.status(400).json({ error: "coverMediaType is required when setting coverImage" });
         }
+      }
+
+      if (Object.keys(updates).length === 0) {
+        return res.json({ business });
       }
 
       const updated = await storage.updateBusiness(business.id, updates);
