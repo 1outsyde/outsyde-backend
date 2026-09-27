@@ -139,6 +139,7 @@ import {
   transitionShootBookingState,
   getPendingProviderExpiryTime
 } from "./bookingStateMachine";
+import { settleAppointmentBooking } from "./bookingSettlement";
 import { calculateProductFee, calculateBookingFee, calculateConsumerServiceFee, calculateBookingFees, quoteDeposit } from "./fees";
 import {
   trackLinkClick,
@@ -6715,6 +6716,10 @@ export async function registerRoutes(
         });
       }
 
+      if (appointment.pendingProviderExpiresAt && new Date(appointment.pendingProviderExpiresAt) < new Date()) {
+        return res.status(400).json({ error: "This request expired before you accepted it. The customer was not charged." });
+      }
+
       // Capture the PaymentIntent if using manual capture
       let capturedPaymentIntent: Awaited<ReturnType<typeof stripeService.capturePaymentIntent>> | undefined;
       if (appointment.captureMethod === 'manual' && appointment.stripePaymentIntentId) {
@@ -6737,6 +6742,23 @@ export async function registerRoutes(
         metadata: { action: 'provider_accept' }
       });
 
+      if (!result.success && result.code === 'PENDING_PROVIDER_EXPIRED' && capturedPaymentIntent) {
+        // The request expired between the check above and the capture:
+        // give the customer their money back instead of confirming.
+        try {
+          await stripeService.createBookingRefund({
+            paymentIntentId: capturedPaymentIntent.id,
+            reason: 'requested_by_customer',
+            metadata: { appointmentId, initiatedBy: userId, reason: 'Accepted after pending_provider expiry' },
+            idempotencyKey: `accept_expired_refund_${appointmentId}`,
+          });
+        } catch (refundError: any) {
+          console.error(`[Booking] Refund after expired accept FAILED appointment=${appointmentId} pi=${capturedPaymentIntent.id}:`, refundError);
+          return res.status(502).json({ error: "This request expired before you accepted it. The refund failed; please contact support.", code: "REFUND_FAILED" });
+        }
+        return res.status(400).json({ error: "This request expired before you accepted it. The customer was refunded." });
+      }
+
       if (!result.success) {
         // The payment_intent.succeeded webhook for the capture above can
         // confirm the booking first. The money is captured and the booking
@@ -6756,6 +6778,13 @@ export async function registerRoutes(
           stripeChargeCents: capturedPaymentIntent.amount_received ?? capturedPaymentIntent.amount,
           forceFullPayment: capturedPaymentIntent.metadata?.type === 'appointment_booking',
         });
+      }
+
+      // The booking is confirmed here or by the webhook. Hold-flow charges sit
+      // on the platform balance until settled; legacy appointment_booking
+      // charges already paid the vendor via transfer_data, so never settle those.
+      if (capturedPaymentIntent?.metadata?.type === 'appointment') {
+        await settleAppointmentBooking(appointmentId);
       }
 
       // Notify customer — booking accepted

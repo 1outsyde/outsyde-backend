@@ -123,7 +123,7 @@ export async function transitionAppointmentState(
         previousState: currentState,
         updatedAt: new Date(),
       })
-      .where(eq(appointments.id, appointmentId));
+      .where(and(eq(appointments.id, appointmentId), eq(appointments.status, BOOKING_STATES.PENDING_PROVIDER)));
     
     await logAuditEntry(
       { bookingType: 'appointment', bookingId: appointmentId, triggeredBy: 'system', triggerSource: 'cron' },

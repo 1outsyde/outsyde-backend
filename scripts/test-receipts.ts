@@ -4,11 +4,13 @@
  * Runs the real Stripe webhook handlers against a LOCAL Postgres (see
  * AGENTS.md "Local Database Setup") with outbound HTTP stubbed: Resend calls
  * are recorded instead of sent, Expo push calls are no-ops. Stripe is never
- * called — fixtures have no connected accounts, so payouts are skipped.
+ * called — Stripe SDK methods the routes reach are stubbed, so the keys below
+ * only need to be present (any placeholder value).
  *
  *   DATABASE_URL=postgresql://outsyde:outsyde@localhost:5432/outsyde \
  *   NODE_OPTIONS="--import ./.dev/neon-preload.mjs" \
  *   RESEND_API_KEY=re_test ADMIN_NOTIFICATION_EMAIL=ops-test@example.com \
+ *   STRIPE_SECRET_KEY=sk_test_placeholder STRIPE_PUBLISHABLE_KEY=pk_test_placeholder \
  *   npx tsx scripts/test-receipts.ts
  *
  * Exits non-zero on the first failed assertion. Refuses to run against a
@@ -94,6 +96,27 @@ async function main() {
   const { WebhookHandlers } = await import("../server/stripe/webhookHandlers");
   const { BOOKING_STATES } = schema;
   const { eq } = await import("drizzle-orm");
+
+  // Stripe transfers never leave the process: list/create are recorded here
+  // (Stripe SDK level, so transferBookingPayout's own dedupe logic runs).
+  // Tests that need a different create temporarily override and restore it.
+  const StripeSdk: any = (await import("stripe")).default;
+  const stripeTransfers: Array<{ id: string; amount: number; destination: string; transfer_group: string; metadata: Record<string, string>; idempotencyKey?: string }> = [];
+  const transferCalls: string[] = [];
+  let transferCreateThrows: "none" | "before" | "after" = "none";
+  StripeSdk.resources.Transfers.prototype.list = async function (p: any) {
+    transferCalls.push(`transfers.list:${p?.transfer_group}`);
+    return { data: stripeTransfers.filter(t => t.transfer_group === p?.transfer_group).slice(0, p?.limit ?? 10), has_more: false };
+  };
+  StripeSdk.resources.Transfers.prototype.create = async function (p: any, o: any) {
+    transferCalls.push(`transfers.create:${p?.transfer_group}`);
+    if (transferCreateThrows === "before") throw new Error("forced transfer failure");
+    const t = { id: `tr_${randomUUID().slice(0, 8)}`, amount: p.amount, destination: p.destination, transfer_group: p.transfer_group, metadata: p.metadata ?? {}, idempotencyKey: o?.idempotencyKey };
+    stripeTransfers.push(t);
+    // Stripe created it but the response never arrived.
+    if (transferCreateThrows === "after") throw new Error("forced timeout after transfer created");
+    return t;
+  };
 
   // Part 1 guard. Creates and deletes only its own rows. Refuses the production
   // Braids With Love id even if a fixture insert ever returned it.
@@ -278,6 +301,7 @@ async function main() {
       getPaymentIntent: async (id: string) => { stripeCalls.push("getPaymentIntent"); return { id, status: "requires_capture", amount: 16200 }; },
       // Consumer cancel reads what a refund can still return (absent on main).
       getPaymentIntentForRefund: async () => { stripeCalls.push("getPaymentIntentForRefund"); return { status: "succeeded", amountReceived: 13500, amountRefunded: 0 }; },
+      transferBookingPayout: async (a: any) => { stripeCalls.push(`transferBookingPayout:${a?.recipient}`); return { id: "tr_test" }; },
     };
     const originals: Record<string, any> = {};
     for (const [k, fn] of Object.entries(stubs)) { originals[k] = (stripeService as any)[k]; (stripeService as any)[k] = fn; }
@@ -1343,6 +1367,176 @@ async function main() {
     const { readFileSync } = await import("node:fs");
     const src = readFileSync(new URL("../server/emailService.ts", import.meta.url), "utf8");
     assert(!/getUncachableResendClient|REPLIT_CONNECTORS_HOSTNAME|X_REPLIT_TOKEN|api\/v2\/connection/.test(src), "emailService.ts has no Replit connector call");
+  }
+
+  // ── Settlement: payout + pending points exactly once per appointment ─────
+  // Own vendor/business with a connected account, so transfers actually run
+  // (through the Stripe SDK stub above). Reuses the capture stub and the
+  // webhook timing switch from the request-then-accept block.
+  {
+    const [sUser] = await db.insert(schema.users).values({ username: `sv_${tag}`, email: `settle-vendor-${tag}@example.com`, name: "Settle Vendor" } as any).returning();
+    const [sBiz] = await db.insert(schema.businesses).values({ ownerId: sUser.id, name: "Settle Braids", category: "beauty", stripeAccountId: `acct_settle_${tag}` } as any).returning();
+    const sToken = generateAccessToken({ userId: sUser.id, isVendor: true, businessId: sBiz.id });
+    const { and: dAnd } = await import("drizzle-orm");
+
+    const baseCapture = (stripeService as any).capturePaymentIntent;
+    let captureCount = 0;
+    let afterCapture: ((piId: string) => Promise<void>) | null = null;
+    (stripeService as any).capturePaymentIntent = async (piId: string) => {
+      captureCount++;
+      const r = await baseCapture(piId);
+      if (afterCapture) await afterCapture(piId);
+      return r;
+    };
+    const baseRefund = (stripeService as any).createBookingRefund;
+    const refundCalls: any[] = [];
+    (stripeService as any).createBookingRefund = async (a: any) => { refundCalls.push(a); return { id: `re_${randomUUID().slice(0, 8)}`, amount: a?.amountCents }; };
+
+    async function settleAppt(status: string, capture: "automatic" | "manual", expiresInMs: number | null = null) {
+      const { date, time } = nextSlot();
+      const piId = `pi_test_${randomUUID()}`;
+      const [a] = await db.insert(schema.appointments).values({
+        businessId: sBiz.id, clientId: consumer.id, appointmentDate: date, appointmentTime: time,
+        totalPrice: 27500, depositAmountCents: 3000, serviceName: "Settlement test", status,
+        captureMethod: capture, stripePaymentIntentId: piId,
+        pendingProviderExpiresAt: expiresInMs === null ? null : new Date(Date.now() + expiresInMs),
+      } as any).returning();
+      const pi = { id: piId, amount: 3240, amount_received: 3240, metadata: { type: "appointment", appointmentId: a.id, businessId: sBiz.id, staffMemberId: "" } };
+      capturable.set(piId, pi);
+      return { id: a.id as string, piId, pi };
+    }
+    const transfersFor = (id: string) => stripeTransfers.filter(t => t.transfer_group === `appointment_${id}`);
+    const pointsFor = async (id: string) => db.select().from(schema.pendingPointTransactions)
+      .where(dAnd(eq(schema.pendingPointTransactions.referenceType, "appointment"), eq(schema.pendingPointTransactions.referenceId, id)));
+    const apptRow = async (id: string) => (await db.select().from(schema.appointments).where(eq(schema.appointments.id, id)))[0] as any;
+    async function acceptS(id: string) {
+      const res = await fetch(`http://127.0.0.1:${port}/api/bookings/appointments/${id}/accept`, { method: "POST", headers: { Authorization: `Bearer ${sToken}`, "Content-Type": "application/json" } });
+      return { status: res.status, body: await res.json().catch(() => ({})) as any };
+    }
+
+    // (a) auto-accept: webhook confirms and settles.
+    {
+      reset();
+      const { id, pi } = await settleAppt(BOOKING_STATES.PENDING_PAYMENT, "automatic");
+      await WebhookHandlers.handlePaymentIntentSucceeded(pi);
+      const tr = transfersFor(id); const row = await apptRow(id);
+      assert(row.status === BOOKING_STATES.CONFIRMED, "settlement (a) auto-accept: confirmed");
+      assert(tr.length === 1, `settlement (a) auto-accept: exactly 1 transfer (got ${tr.length})`);
+      assert(tr[0].amount === 2940 && tr[0].destination === `acct_settle_${tag}` && tr[0].metadata.recipient === "business", "settlement (a) auto-accept: 2940c to the business account");
+      assert(tr[0].idempotencyKey === `transfer_appt_${id}_business`, `settlement (a) auto-accept: deterministic idempotency key (got ${tr[0].idempotencyKey})`);
+      assert((await pointsFor(id)).length === 1, "settlement (a) auto-accept: 1 pending points row");
+      assert(!!row.settledAt && row.stripeTransferId === tr[0].id, "settlement (a) auto-accept: settled_at and stripe_transfer_id set");
+    }
+
+    // (b) manual accept, all four webhook timings.
+    for (const timing of ["none", "after", "before", "concurrent"] as const) {
+      reset();
+      webhookTiming = timing;
+      pendingWebhook = null;
+      const { id, pi } = await settleAppt(BOOKING_STATES.PENDING_PROVIDER, "manual", 86_400_000);
+      const res = await acceptS(id);
+      if (timing === "after") await WebhookHandlers.handlePaymentIntentSucceeded({ ...pi, status: "succeeded" });
+      if (pendingWebhook) await pendingWebhook;
+      const tr = transfersFor(id); const row = await apptRow(id);
+      assert(res.status === 200 && res.body?.success === true, `settlement (b) manual accept, webhook ${timing}: HTTP 200 (got ${res.status})`);
+      assert(tr.length === 1, `settlement (b) manual accept, webhook ${timing}: exactly 1 transfer (got ${tr.length})`);
+      assert((await pointsFor(id)).length === 1, `settlement (b) manual accept, webhook ${timing}: 1 pending points row`);
+      assert(!!row.settledAt && row.stripeTransferId === tr[0]?.id, `settlement (b) manual accept, webhook ${timing}: settled_at and stripe_transfer_id set`);
+    }
+    webhookTiming = "none";
+    pendingWebhook = null;
+
+    // (c) duplicate webhook deliveries, sequential and concurrent.
+    {
+      reset();
+      const { id, pi } = await settleAppt(BOOKING_STATES.PENDING_PAYMENT, "automatic");
+      await WebhookHandlers.handlePaymentIntentSucceeded(pi);
+      await WebhookHandlers.handlePaymentIntentSucceeded(pi);
+      await Promise.all([WebhookHandlers.handlePaymentIntentSucceeded(pi), WebhookHandlers.handlePaymentIntentSucceeded(pi)]);
+      assert(transfersFor(id).length === 1, `settlement (c) duplicate deliveries: still 1 transfer (got ${transfersFor(id).length})`);
+      assert((await pointsFor(id)).length === 1, "settlement (c) duplicate deliveries: still 1 pending points row");
+      assert(sent.length === 3, `settlement (c) duplicate deliveries: receipts still sent once (got ${sent.length})`);
+    }
+
+    // (d) request expired before the vendor accepted: no capture at all.
+    {
+      reset();
+      const { id } = await settleAppt(BOOKING_STATES.PENDING_PROVIDER, "manual", -60_000);
+      captureCount = 0;
+      const res = await acceptS(id);
+      const row = await apptRow(id);
+      assert(res.status === 400 && res.body?.error === "This request expired before you accepted it. The customer was not charged.", `settlement (d) expired before Accept: 400 not-charged message (got ${res.status} ${JSON.stringify(res.body)})`);
+      assert(captureCount === 0, "settlement (d) expired before Accept: no capture");
+      assert(transfersFor(id).length === 0 && !row.settledAt, "settlement (d) expired before Accept: no transfer, not settled");
+      assert(row.status === BOOKING_STATES.PENDING_PROVIDER, "settlement (d) expired before Accept: status left for the expiry job");
+      // Retire it so the next run's cleanupExpiredPendingProvider scenario does not pick it up.
+      await db.update(schema.appointments).set({ status: BOOKING_STATES.EXPIRED } as any).where(eq(schema.appointments.id, id));
+    }
+
+    // (e) capture succeeds, then the request turns out expired: refund, no payout.
+    {
+      reset();
+      const { id, piId, pi } = await settleAppt(BOOKING_STATES.PENDING_PROVIDER, "manual", 86_400_000);
+      refundCalls.length = 0;
+      afterCapture = async () => {
+        await db.update(schema.appointments).set({ pendingProviderExpiresAt: new Date(Date.now() - 1000) } as any).where(eq(schema.appointments.id, id));
+      };
+      const res = await acceptS(id);
+      afterCapture = null;
+      // The capture's payment_intent.succeeded still arrives later.
+      await WebhookHandlers.handlePaymentIntentSucceeded({ ...pi, status: "succeeded" });
+      const row = await apptRow(id);
+      assert(res.status === 400 && res.body?.error === "This request expired before you accepted it. The customer was refunded.", `settlement (e) capture then expiry: 400 refunded message (got ${res.status} ${JSON.stringify(res.body)})`);
+      assert(refundCalls.length === 1 && refundCalls[0].paymentIntentId === piId && refundCalls[0].amountCents === undefined, "settlement (e) capture then expiry: one full refund of the captured PaymentIntent");
+      assert(transfersFor(id).length === 0 && !row.settledAt, "settlement (e) capture then expiry: no transfer, not settled (even after the webhook)");
+      assert(row.status === BOOKING_STATES.EXPIRED, "settlement (e) capture then expiry: status expired");
+    }
+
+    // (f) legacy appointment_booking PaymentIntent: vendor already paid via transfer_data.
+    for (const timing of ["none", "after"] as const) {
+      reset();
+      const { id, piId } = await settleAppt(BOOKING_STATES.PENDING_PROVIDER, "manual", 86_400_000);
+      const legacy = { id: piId, amount: 29700, amount_received: 29700, metadata: { type: "appointment_booking", bookingId: id, clientId: consumer.id } };
+      capturable.set(piId, legacy);
+      const res = await acceptS(id);
+      if (timing === "after") await WebhookHandlers.handlePaymentIntentSucceeded({ ...legacy, status: "succeeded" });
+      const row = await apptRow(id);
+      assert(res.status === 200 && row.status === BOOKING_STATES.CONFIRMED, `settlement (f) legacy accept, webhook ${timing}: HTTP 200, confirmed`);
+      assert(transferCalls.filter(c => c.endsWith(`appointment_${id}`)).length === 0, `settlement (f) legacy accept, webhook ${timing}: 0 settlement transfer calls`);
+      assert(!row.settledAt && (await pointsFor(id)).length === 0, `settlement (f) legacy accept, webhook ${timing}: not settled, no pending points`);
+    }
+
+    // (g) transfer throws: settled_at kept, no transfer id, no second transfer later.
+    {
+      reset();
+      const { id, pi } = await settleAppt(BOOKING_STATES.PENDING_PAYMENT, "automatic");
+      transferCreateThrows = "before";
+      await WebhookHandlers.handlePaymentIntentSucceeded(pi);
+      transferCreateThrows = "none";
+      let row = await apptRow(id);
+      assert(!!row.settledAt && row.stripeTransferId === null, "settlement (g) transfer throws: settled_at set, stripe_transfer_id NULL");
+      assert((await pointsFor(id)).length === 1, "settlement (g) transfer throws: points still created");
+      await WebhookHandlers.handlePaymentIntentSucceeded(pi);
+      row = await apptRow(id);
+      assert(transfersFor(id).length === 0 && row.stripeTransferId === null, "settlement (g) transfer throws: later webhook creates no transfer");
+    }
+    // (g2) Stripe created the transfer but the response was lost.
+    {
+      reset();
+      const { id, pi } = await settleAppt(BOOKING_STATES.PENDING_PAYMENT, "automatic");
+      transferCreateThrows = "after";
+      await WebhookHandlers.handlePaymentIntentSucceeded(pi);
+      transferCreateThrows = "none";
+      const row = await apptRow(id);
+      assert(!!row.settledAt && row.stripeTransferId === null && transfersFor(id).length === 1, "settlement (g2) lost transfer response: settled_at set, stripe_transfer_id NULL, 1 transfer at Stripe");
+      await WebhookHandlers.handlePaymentIntentSucceeded(pi);
+      assert(transfersFor(id).length === 1, "settlement (g2) lost transfer response: later webhook creates no second transfer");
+      const retried = await stripeService.transferBookingPayout({ amountInCents: 2940, connectedAccountId: `acct_settle_${tag}`, appointmentId: id, recipient: "business" });
+      assert(retried.id === transfersFor(id)[0].id && transfersFor(id).length === 1, "settlement (g2) manual payout retry returns the existing transfer (transfers.list), no second create");
+    }
+
+    (stripeService as any).capturePaymentIntent = baseCapture;
+    (stripeService as any).createBookingRefund = baseRefund;
   }
 
   await runGuardTests();
