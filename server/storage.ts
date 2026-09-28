@@ -1423,7 +1423,8 @@ export class DatabaseStorage implements IStorage {
     return db.select().from(reviews).where(
       and(
         eq(reviews.targetType, targetType),
-        eq(reviews.targetId, targetId)
+        eq(reviews.targetId, targetId),
+        eq(reviews.isVerified, true)
       )
     );
   }

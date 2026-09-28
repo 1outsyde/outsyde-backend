@@ -10411,7 +10411,10 @@ export async function registerRoutes(
     }
 
     try {
-      const data = insertReviewSchema.parse({
+      const reviewSchema = insertReviewSchema.extend({
+        rating: z.number().int().min(5).max(50),
+      });
+      const data = reviewSchema.parse({
         ...req.body,
         reviewerId: userId,
       });
