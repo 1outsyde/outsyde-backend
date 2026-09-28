@@ -23,7 +23,7 @@ import {
   sendNewBookingAlertToVendor,
 } from "../emailService";
 import { processInfluencerCommission, reverseInfluencerCommission } from "../influencerPayoutService";
-import { calculateBookingFees } from "../fees";
+import { settleAppointmentBooking } from "../bookingSettlement";
 
 // XO Beauty & Lashes' own deposit-email sender (the legacy
 // create-deposit-intent flow's pre-existing behavior).
@@ -768,7 +768,7 @@ export class WebhookHandlers {
         // platform balance. Confirm the booking, convert the hold, then pay
         // out the vendor(s) via separate stripe.transfers.create() calls.
         const appointmentId = appointmentIdFromMetadata;
-        const { holdId, businessId, staffMemberId } = metadata;
+        const { businessId, staffMemberId } = metadata;
 
         if (!appointmentId) {
           console.error("[Stripe] Appointment PaymentIntent succeeded but missing appointmentId in metadata");
@@ -784,6 +784,11 @@ export class WebhookHandlers {
         if (appointment.status !== BOOKING_STATES.PENDING_PAYMENT &&
             appointment.status !== BOOKING_STATES.PENDING_PROVIDER) {
           logReceiptsSkipped('appointment', appointmentId);
+          // Confirmed elsewhere (e.g. vendor Accept captured first): the
+          // payout and points still have to happen exactly once.
+          if (appointment.status === BOOKING_STATES.CONFIRMED) {
+            await settleAppointmentBooking(appointmentId);
+          }
           return;
         }
 
@@ -804,6 +809,7 @@ export class WebhookHandlers {
           if (!result.success) {
             if (result.code === 'ALREADY_CONFIRMED' || result.code === 'CONCURRENT_TRANSITION') {
               logReceiptsSkipped('appointment', appointmentId);
+              await settleAppointmentBooking(appointmentId);
             } else {
               console.error(`[Stripe] Failed to confirm appointment ${appointmentId}: ${result.error}`);
             }
@@ -824,91 +830,9 @@ export class WebhookHandlers {
           // Receipts first, so later side effects can never skip them.
           await sendAppointmentReceipts(appointmentId, { txnType: 'appointment', stripeChargeCents: paymentIntent.amount });
 
-          // Convert the hold now that the appointment is confirmed. This is
-          // the first place holdId is ever set in Stripe metadata, so this
-          // is also the first time markHoldAsConverted is actually reachable.
-          if (holdId) {
-            try {
-              await markHoldAsConverted(holdId, appointmentId, 'appointment');
-            } catch (holdErr) {
-              console.error(`[Stripe] Failed to convert hold ${holdId}:`, holdErr);
-            }
-          }
-
-          // Uses calculateBookingFees() from fees.ts (8% consumer fee / 2% booking fee —
-          // universal rate as of the fee-model migration). vendorNetCents from this
-          // breakdown is transferred to the business/staff connected account below.
-          // Use the amount actually charged: depositAmountCents when a deposit was
-          // configured, otherwise the full service price (no deposit = full charge).
-          const chargedAmountCents = appointment.depositAmountCents ?? appointment.totalPrice;
-          const feeBreakdown = calculateBookingFees(chargedAmountCents);
-          const vendorNetCents = feeBreakdown.vendorNetCents;
-
-          if (!business?.stripeAccountId) {
-            console.error(`[Stripe] Cannot pay out appointment ${appointmentId}: business ${businessId} has no stripeAccountId. Funds remain on platform balance -- manual reconciliation required.`);
-          } else if (staffMemberId) {
-            // Staff-scoped booking. Model A (booth-split percentage) has no
-            // schema-backed column anywhere on `businesses` as of this build
-            // (confirmed absent from shared/schema.ts) -- until that exists,
-            // the staff member receives the full vendorNetCents, same as a
-            // solo-provider business would. The business-side booth-cut
-            // transfer is intentionally NOT fired here; wire it in once
-            // Model A's split percentage is schema-backed.
-            const staffMember = await storage.getStaffMember(staffMemberId);
-            if (!staffMember?.stripeAccountId) {
-              console.error(`[Stripe] Cannot pay out appointment ${appointmentId}: staff member ${staffMemberId} has no stripeAccountId. Funds remain on platform balance -- manual reconciliation required.`);
-            } else {
-              try {
-                const transfer = await stripeService.transferBookingPayout({
-                  amountInCents: vendorNetCents,
-                  connectedAccountId: staffMember.stripeAccountId,
-                  appointmentId,
-                  recipient: 'staff',
-                });
-                await db.update(appointments).set({
-                  staffPayout: vendorNetCents,
-                  updatedAt: new Date(),
-                }).where(eq(appointments.id, appointmentId));
-                console.log(`[Stripe] Transferred ${vendorNetCents}c to staff ${staffMemberId} (transfer ${transfer.id}) for appointment ${appointmentId}`);
-              } catch (transferErr) {
-                // The charge already succeeded and the booking is confirmed
-                // above -- a failed transfer here does NOT roll back the
-                // booking or touch payment status. This is a genuine edge
-                // case: the customer's money is real and sitting on the
-                // platform balance instead of reaching the staff member.
-                // No automatic retry is attempted; log loudly for manual
-                // reconciliation.
-                console.error(`[Stripe] FAILED to transfer ${vendorNetCents}c to staff ${staffMemberId} for appointment ${appointmentId}. Funds remain on platform balance -- manual reconciliation required.`, transferErr);
-              }
-            }
-          } else {
-            // Solo-provider business: single transfer for the full vendor net.
-            try {
-              const transfer = await stripeService.transferBookingPayout({
-                amountInCents: vendorNetCents,
-                connectedAccountId: business.stripeAccountId,
-                appointmentId,
-                recipient: 'business',
-              });
-              console.log(`[Stripe] Transferred ${vendorNetCents}c to business ${businessId} (transfer ${transfer.id}) for appointment ${appointmentId}`);
-            } catch (transferErr) {
-              console.error(`[Stripe] FAILED to transfer ${vendorNetCents}c to business ${businessId} for appointment ${appointmentId}. Funds remain on platform balance -- manual reconciliation required.`, transferErr);
-            }
-          }
-
-          // Points: create a pending transaction on totalPrice (full service value).
-          // Points are held until the appointment is marked completed — they are
-          // approved in PATCH /api/bookings/appointments/:id/complete.
-          await bestEffort(`createPendingPointTransaction for appointment ${appointmentId}`, () => storage.createPendingPointTransaction({
-            userId: appointment.clientId,
-            dollarAmountCents: appointment.totalPrice,
-            transactionType: 'business_transaction',
-            referenceType: 'appointment',
-            referenceId: appointmentId,
-            description: 'Points earned from service booking',
-            businessId,
-          }));
-          await bestEffort(`tryCompleteReferral for appointment ${appointmentId}`, () => this.tryCompleteReferral(appointment.clientId, appointmentId, 'appointment'));
+          // Hold conversion, vendor payout, pending points and referral run
+          // once per appointment, shared with the vendor Accept route.
+          await settleAppointmentBooking(appointmentId);
 
           // Notifications (best-effort: each recipient is independently try/catch'd so
           // one failure does not prevent the others from firing or block the booking)

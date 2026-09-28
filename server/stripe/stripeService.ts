@@ -475,18 +475,29 @@ export class StripeService {
     recipient: 'staff' | 'business';
   }) {
     const stripe = await getUncachableStripeClient();
+    const transferGroup = `appointment_${params.appointmentId}`;
 
+    // Stripe keeps idempotency keys for 24h only, so also look for an earlier
+    // transfer to this recipient in the appointment's transfer group.
+    const existing = await stripe.transfers.list({ transfer_group: transferGroup, limit: 10 });
+    const prior = existing.data.find(t => t.metadata?.recipient === params.recipient);
+    if (prior) {
+      return prior;
+    }
+
+    // Deterministic key: must be stable across retries, so not the
+    // idempotencyKey() helper (it appends randomUUID()).
     return stripe.transfers.create({
       amount: params.amountInCents,
       currency: "usd",
       destination: params.connectedAccountId,
-      transfer_group: `appointment_${params.appointmentId}`,
+      transfer_group: transferGroup,
       metadata: {
         appointmentId: params.appointmentId,
         recipient: params.recipient,
         type: 'appointment_booking_payout',
       },
-    }, { idempotencyKey: idempotencyKey(`transfer_appt_${params.appointmentId}_${params.recipient}`) });
+    }, { idempotencyKey: `transfer_appt_${params.appointmentId}_${params.recipient}` });
   }
 
   /**

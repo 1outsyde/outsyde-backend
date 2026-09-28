@@ -1011,6 +1011,10 @@ export const appointments = pgTable("appointments", {
   // Staff payout tracking (when staffMemberId is set)
   staffPayout: integer("staff_payout").default(0), // Amount going to staff Stripe account
 
+  // Set once when the vendor payout and pending points are claimed (migration 033).
+  settledAt: timestamp("settled_at", { withTimezone: true }),
+  stripeTransferId: text("stripe_transfer_id"),
+
   stripePaymentIntentId: text("stripe_payment_intent_id"),
   stripeCheckoutSessionId: text("stripe_checkout_session_id"),
   
