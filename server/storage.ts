@@ -2032,11 +2032,22 @@ export class DatabaseStorage implements IStorage {
   async updateTargetRating(targetType: string, targetId: string): Promise<void> {
     const targetReviews = await this.getReviewsByTarget(targetType, targetId);
     
-    if (targetReviews.length === 0) return;
+    if (targetReviews.length === 0) {
+      if (targetType === 'photographer') {
+        await db.update(photographers)
+          .set({ rating: 0, reviewCount: 0 })
+          .where(eq(photographers.id, targetId));
+      } else if (targetType === 'business') {
+        await db.update(businesses)
+          .set({ rating: 0, reviewCount: 0 })
+          .where(eq(businesses.id, targetId));
+      }
+      return;
+    }
 
     const avgRating = Math.round(
-      targetReviews.reduce((sum, r) => sum + r.rating, 0) / targetReviews.length * 10
-    ); // Store as 0-50 (multiplied by 10 for precision)
+      targetReviews.reduce((sum, r) => sum + r.rating, 0) / targetReviews.length
+    ); // reviews.rating is already stored as 5-50 (stars x 10)
     
     const reviewCount = targetReviews.length;
 
