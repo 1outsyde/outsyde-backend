@@ -703,6 +703,8 @@ export const staffServices = pgTable("staff_services", {
   cancellationFeeType: text("cancellation_fee_type"), // nullable, 'flat'|'percentage'
   cancellationFeeAmount: integer("cancellation_fee_amount"), // nullable, cents if flat / whole percent if percentage
 
+  depositAmountCents: integer('deposit_amount_cents'),
+
   createdAt: timestamp("created_at").defaultNow().notNull(),
 });
 
