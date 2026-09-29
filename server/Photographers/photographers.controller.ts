@@ -7,6 +7,7 @@ import { storage } from "../storage";
 import { verifyAccessToken, AuthenticatedRequest } from "../auth";
 import { toPublicPhotographerDTO } from "../serializers/photographer";
 import { provisionConnectedCatalogItem } from "../services/connectedCatalog";
+import { validatePhotographerDeposit, invalidDepositBody } from "../deposits";
 
 // Rate limit for displayName changes (7 days cooldown)
 const DISPLAY_NAME_CHANGE_COOLDOWN_DAYS = 7;
@@ -513,6 +514,7 @@ export class PhotographerController {
         hasCancellationFee: z.boolean().optional(),
         cancellationFeeType: z.enum(['flat', 'percentage']).nullable().optional(),
         cancellationFeeAmount: z.number().int().min(0).nullable().optional(),
+        depositAmountCents: z.number().int().min(0).nullable().optional(),
       });
 
       let validated: z.infer<typeof createSchema>;
@@ -525,6 +527,12 @@ export class PhotographerController {
         throw zodErr;
       }
 
+      const storedPriceCents = validated.isContactForPricing ? null : (validated.priceCents ?? null);
+      const depositCheck = validatePhotographerDeposit(validated.depositAmountCents, storedPriceCents);
+      if (!depositCheck.ok) {
+        return res.status(400).json(invalidDepositBody(depositCheck.message));
+      }
+
       const service = await storage.createPhotographerService({
         photographerId: photographer.id,
         name: validated.name,
@@ -532,7 +540,8 @@ export class PhotographerController {
         category: validated.category ?? null,
         pricingModel: validated.pricingModel ?? "package",
         hourlyRateCents: validated.hourlyRateCents ?? null,
-        priceCents: validated.isContactForPricing ? null : (validated.priceCents ?? null),
+        priceCents: storedPriceCents,
+        depositAmountCents: depositCheck.value ?? null,
         packageHours: validated.packageHours ?? null,
         isContactForPricing: validated.isContactForPricing ?? false,
         estimatedDurationMinutes: validated.estimatedDurationMinutes ?? null,
@@ -609,6 +618,7 @@ export class PhotographerController {
         hasCancellationFee: z.boolean().optional(),
         cancellationFeeType: z.enum(['flat', 'percentage']).nullable().optional(),
         cancellationFeeAmount: z.number().int().min(0).nullable().optional(),
+        depositAmountCents: z.number().int().min(0).nullable().optional(),
       });
 
       let validated: z.infer<typeof updateSchema>;
@@ -619,6 +629,21 @@ export class PhotographerController {
           return res.status(400).json({ error: "Invalid data", details: zodErr.errors });
         }
         throw zodErr;
+      }
+
+      // Same rule as PATCH /api/vendor/services/:id: re-check whenever the
+      // price or the deposit changes, so a price lowered to or below the
+      // stored deposit (or removed) is rejected too.
+      let depositAmountCents: number | null | undefined;
+      if (validated.priceCents !== undefined || validated.depositAmountCents !== undefined || validated.isContactForPricing === true) {
+        const depositCheck = validatePhotographerDeposit(
+          validated.depositAmountCents !== undefined ? validated.depositAmountCents : service.depositAmountCents,
+          validated.isContactForPricing ? null : (validated.priceCents !== undefined ? validated.priceCents : service.priceCents),
+        );
+        if (!depositCheck.ok) {
+          return res.status(400).json(invalidDepositBody(depositCheck.message));
+        }
+        if (validated.depositAmountCents !== undefined) depositAmountCents = depositCheck.value;
       }
 
       const {
@@ -715,6 +740,7 @@ export class PhotographerController {
         hasCancellationFee,
         cancellationFeeType,
         cancellationFeeAmount,
+        depositAmountCents,
         ...stripeUpdates,
       });
 
