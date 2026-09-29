@@ -3976,6 +3976,51 @@ export async function registerRoutes(
       const rawNotifications = await storage.getUserNotifications(userId, options);
       const unreadCount = await storage.getUnreadNotificationCount(userId);
 
+      type TriggeringUser = {
+        id: string;
+        displayName: string | null;
+        profilePhotoUrl: string | null;
+        profileImageUrl: string | null;
+      };
+
+      // Keyed by actor id so each actor is resolved once per request, even
+      // though rows are mapped concurrently below.
+      const triggeringUserCache = new Map<string, Promise<TriggeringUser | null>>();
+
+      const resolveTriggeringUser = (actorId: string): Promise<TriggeringUser | null> => {
+        const cached = triggeringUserCache.get(actorId);
+        if (cached) return cached;
+
+        const pending = (async (): Promise<TriggeringUser | null> => {
+          const triggeringUser = await storage.getUser(actorId);
+          if (!triggeringUser) return null;
+
+          // Vendor-first order matches GET /api/users/:id.
+          let resolvedAvatar: string | null = triggeringUser.profileImageUrl ?? null;
+          try {
+            if (triggeringUser.isVendor) {
+              const business = await storage.getBusinessByOwnerId(triggeringUser.id);
+              if (business?.logoImage) resolvedAvatar = business.logoImage;
+            } else if (triggeringUser.isPhotographer) {
+              const photographer = await storage.getPhotographerByUserId(triggeringUser.id);
+              if (photographer?.logoImage) resolvedAvatar = photographer.logoImage;
+            }
+          } catch {
+            resolvedAvatar = triggeringUser.profileImageUrl ?? null;
+          }
+
+          return {
+            id: triggeringUser.id,
+            displayName: triggeringUser.name ?? triggeringUser.firstName ?? null,
+            profilePhotoUrl: resolvedAvatar,
+            profileImageUrl: resolvedAvatar,
+          };
+        })().catch(() => null);
+
+        triggeringUserCache.set(actorId, pending);
+        return pending;
+      };
+
       const notifications = await Promise.all(
         rawNotifications.map(async (n) => {
           const triggeredByUserId = n.triggeredByUserId ?? null;
@@ -3984,22 +4029,7 @@ export async function registerRoutes(
             return { ...n, triggeringUser: null };
           }
 
-          try {
-            const triggeringUser = await storage.getUser(triggeredByUserId);
-            return {
-              ...n,
-              triggeringUser: triggeringUser
-                ? {
-                    id: triggeringUser.id,
-                    displayName: triggeringUser.name ?? triggeringUser.firstName ?? null,
-                    profilePhotoUrl: triggeringUser.profileImageUrl ?? null,
-                    profileImageUrl: triggeringUser.profileImageUrl ?? null,
-                  }
-                : null,
-            };
-          } catch {
-            return { ...n, triggeringUser: null };
-          }
+          return { ...n, triggeringUser: await resolveTriggeringUser(triggeredByUserId) };
         })
       );
 
