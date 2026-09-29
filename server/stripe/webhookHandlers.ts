@@ -23,7 +23,7 @@ import {
   sendNewBookingAlertToVendor,
 } from "../emailService";
 import { processInfluencerCommission, reverseInfluencerCommission } from "../influencerPayoutService";
-import { settleAppointmentBooking } from "../bookingSettlement";
+import { settleAppointmentBooking, settleShootBooking } from "../bookingSettlement";
 
 // XO Beauty & Lashes' own deposit-email sender (the legacy
 // create-deposit-intent flow's pre-existing behavior).
@@ -637,6 +637,14 @@ export class WebhookHandlers {
         if (claimed.length === 0) {
           console.log(`[Stripe] Shoot booking ${bookingId} already confirmed or not in expected state — skipping duplicate webhook`);
           logReceiptsSkipped('shoot_booking', bookingId);
+          // Confirmed elsewhere (e.g. photographer Accept captured first): the
+          // payout and points still have to happen exactly once.
+          const [current] = await db.select({ status: shootBookings.status })
+            .from(shootBookings)
+            .where(eq(shootBookings.id, bookingId));
+          if (current?.status === BOOKING_STATES.CONFIRMED) {
+            await settleShootBooking(bookingId, paymentIntent);
+          }
           return;
         }
 
@@ -668,71 +676,14 @@ export class WebhookHandlers {
         // Receipts first, so later side effects can never skip them.
         await sendShootBookingReceipts(bookingId, { txnType: 'shoot_booking', stripeChargeCents: paymentIntent.amount });
 
-        // Transfer payout to photographer's connected account. vendorPayoutCents
-        // was stored in PI metadata at creation time so the webhook uses the
-        // exact figure computed in the create-payment-intent route — no
-        // re-derivation from the booking needed.
-        const vendorPayoutCents = metadata.vendorPayoutCents
-          ? parseInt(metadata.vendorPayoutCents, 10)
-          : 0;
+        // Hold conversion, photographer payout, points and referral, once.
+        await settleShootBooking(bookingId, paymentIntent);
 
-        if (vendorPayoutCents > 0) {
-          const photographer = sb_photographer;
-
-          if (!photographer?.stripeAccountId) {
-            console.error(`[Stripe] Cannot transfer payout for shoot booking ${bookingId}: photographer has no stripeAccountId. Funds remain on platform balance — manual reconciliation required.`);
-          } else {
-            try {
-              const transfer = await stripeService.transferShootBookingPayout({
-                amountInCents: vendorPayoutCents,
-                connectedAccountId: photographer.stripeAccountId,
-                bookingId,
-              });
-              console.log(`[Stripe] Transferred ${vendorPayoutCents}¢ to photographer ${photographer.id} (transfer ${transfer.id}) for shoot booking ${bookingId}`);
-            } catch (transferErr) {
-              // The charge already succeeded and the booking is confirmed above.
-              // A failed transfer does NOT roll back the booking or payment.
-              // Log loudly for manual reconciliation.
-              console.error(`[Stripe] FAILED to transfer ${vendorPayoutCents}¢ to photographer ${photographer?.id} for shoot booking ${bookingId}. Funds remain on platform balance — manual reconciliation required.`, transferErr);
-            }
-          }
-        } else {
-          console.error(`[Stripe] Shoot booking ${bookingId} has no vendorPayoutCents in metadata — payout transfer skipped. Manual reconciliation required.`);
-        }
-
-        // If this PaymentIntent was created via the hold-based unified booking
-        // flow (POST /api/booking/:holdId/create-payment-intent with
-        // providerType='photographer'), convert the hold now that payment has
-        // succeeded. holdId is absent from PaymentIntents created by the legacy
-        // POST /api/bookings/photographer/:bookingId/create-payment-intent
-        // route, so the presence check is the safe guard for backwards compat.
-        const holdIdFromMeta = metadata.holdId;
-        if (holdIdFromMeta) {
-          try {
-            await markHoldAsConverted(holdIdFromMeta, bookingId, 'shoot_booking');
-          } catch (holdErr) {
-            console.error(`[Stripe] Failed to convert hold ${holdIdFromMeta} for shoot booking ${bookingId}:`, holdErr);
-          }
-        }
-
-        // Mark promo code used and award points on original pre-discount total
-        const { promoCodeId: sbPromoCodeId, originalConsumerTotalCents: sbOriginalTotal } = metadata;
+        const { promoCodeId: sbPromoCodeId } = metadata;
         if (sbPromoCodeId) {
           await storage.applyPromoCode(sbPromoCodeId, 'shoot_booking', bookingId).catch(err =>
             console.error(`[Stripe] Failed to apply promo code ${sbPromoCodeId} for shoot booking ${bookingId}:`, err)
           );
-        }
-        const sbPointsBase = sbOriginalTotal ? Number(sbOriginalTotal) : paymentIntent.amount;
-        if (user) {
-          await bestEffort(`earnPoints for shoot booking ${bookingId}`, () => storage.earnPoints({
-            userId: user.id,
-            dollarAmountCents: sbPointsBase,
-            transactionType: 'photographer_booking',
-            referenceType: 'shoot_booking',
-            referenceId: bookingId,
-            description: 'Points earned from photographer booking',
-          }));
-          await bestEffort(`tryCompleteReferral for shoot booking ${bookingId}`, () => this.tryCompleteReferral(user.id, bookingId, 'shoot_booking'));
         }
 
         // In-app + push notifications (best-effort)
