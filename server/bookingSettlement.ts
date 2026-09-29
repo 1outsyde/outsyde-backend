@@ -157,7 +157,11 @@ export async function settleAppointmentBooking(appointmentId: string): Promise<S
  */
 export async function settleShootBooking(
   bookingId: string,
-  paymentIntent: { amount: number; metadata?: Record<string, string> | null },
+  paymentIntent: {
+    amount: number;
+    metadata?: Record<string, string> | null;
+    transfer_data?: { destination?: string | { id: string } | null } | null;
+  },
 ): Promise<SettlementResult> {
   const [booking] = await db.update(shootBookings)
     .set({ settledAt: sql`now()` })
@@ -199,7 +203,10 @@ export async function settleShootBooking(
   const photographer = await storage.getPhotographer(booking.photographerId).catch(() => undefined);
   let transferId: string | null = null;
 
-  if (vendorNetCents <= 0) {
+  if (paymentIntent.transfer_data?.destination) {
+    // Destination charge: Stripe already moved the photographer's share.
+    console.log(`[Settlement] shoot booking ${bookingId} destination charge — no transfer`);
+  } else if (vendorNetCents <= 0) {
     console.error(`[Settlement] PAYOUT FAILED shoot booking ${bookingId}: vendor_net is ${booking.vendorNet}. Manual reconciliation required.`);
   } else if (!photographer?.stripeAccountId) {
     console.error(`[Settlement] PAYOUT FAILED shoot booking ${bookingId}: photographer ${booking.photographerId} has no stripeAccountId. Funds remain on platform balance -- manual reconciliation required.`);

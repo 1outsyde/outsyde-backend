@@ -1152,7 +1152,7 @@ async function main() {
   }
 
   // ── Case 1 + 5: each type sends exactly 3, and a duplicate adds none ─────
-  const cases: Array<{ name: string; run: () => Promise<{ first: () => Promise<void>; again: () => Promise<void> }> }> = [
+  const cases: Array<{ name: string; run: () => Promise<{ first: () => Promise<void>; again: () => Promise<void>; shootId?: string }> }> = [
     { name: "appointment (deposit)", run: async () => {
       const a = await newAppointment({ totalPrice: 27500, deposit: 3000 });
       const p = pi(3240, { type: "appointment", appointmentId: a.id, businessId: business.id, staffMemberId: "" });
@@ -1208,17 +1208,27 @@ async function main() {
       const b = await newShoot();
       const session = { id: `cs_${tag}`, payment_intent: `pi_${randomUUID()}`, amount_total: 16200, customer: null,
         metadata: { type: "shoot_booking", shootBookingId: b.id, clientId: consumer.id } };
-      return { first: () => WebhookHandlers.handleCheckoutCompleted(session), again: () => WebhookHandlers.handleCheckoutCompleted(session) };
+      // Checkout PaymentIntents get no metadata (only the session does) and are destination charges.
+      const checkoutPi = { id: session.payment_intent, amount: 16200, metadata: {}, transfer_data: { destination: "acct_photog_checkout" } };
+      return {
+        first: async () => { await WebhookHandlers.handleCheckoutCompleted(session); await WebhookHandlers.handlePaymentIntentSucceeded(checkoutPi); },
+        again: () => WebhookHandlers.handleCheckoutCompleted(session),
+        shootId: b.id,
+      };
     } },
   ];
 
   for (const c of cases) {
     reset();
-    const { first, again } = await c.run();
+    const { first, again, shootId } = await c.run();
     await first();
     const isShoot = c.name.includes("shoot");
     const expected = isShoot ? [ADMIN!, consumerEmail, photogEmail].sort() : expect3;
     assert(JSON.stringify(recipients()) === JSON.stringify(expected), `${c.name}: 3 receipts (consumer, vendor, admin)`);
+    if (shootId) {
+      const calls = transferCalls.filter(c => c.endsWith(`shoot_booking_${shootId}`));
+      assert(calls.length === 0, `${c.name}: 0 settlement transfers (got ${JSON.stringify(calls)})`);
+    }
     await again();
     assert(sent.length === 3, `${c.name}: duplicate delivery sends nothing more (3 total, not 6)`);
     assert(receiptLogs.some(l => l.includes("SKIPPED: already processed")), `${c.name}: duplicate logs SKIPPED: already processed`);
@@ -1836,6 +1846,21 @@ async function main() {
         const creates = transferCalls.filter(c => c === `transfers.create:shoot_booking_${id}`).length;
         assert(retried.id === shootTransfers(id)[0].id && shootTransfers(id).length === 1 && creates === 1,
           `shoot settlement (g) manual payout retry returns the existing transfer (transfers.list), no second create (creates ${creates})`);
+      }
+
+      // (h2) destination charge (transfer_data): Stripe already paid the photographer.
+      {
+        reset();
+        const { id, pi } = await settleShoot(BOOKING_STATES.PENDING_PAYMENT, "automatic");
+        const destPi = { ...pi, transfer_data: { destination: `acct_shoot_${tag}` } };
+        await WebhookHandlers.handlePaymentIntentSucceeded(destPi);
+        await WebhookHandlers.handlePaymentIntentSucceeded(destPi);
+        const row = await shootRow(id);
+        const calls = transferCalls.filter(c => c.endsWith(`shoot_booking_${id}`));
+        assert(row.status === BOOKING_STATES.CONFIRMED && !!row.settledAt && row.stripeTransferId === null,
+          `shoot settlement (h2) destination charge: confirmed, settled_at set, no stripe_transfer_id (got ${row.status}, ${!!row.settledAt}, ${row.stripeTransferId})`);
+        assert(shootTransfers(id).length === 0 && calls.length === 0, `shoot settlement (h2) destination charge: 0 settlement transfer calls (got ${JSON.stringify(calls)})`);
+        assert(sent.length === 3, `shoot settlement (h2) destination charge: receipts still 3 (got ${sent.length})`);
       }
       (storage as any).earnPoints = origEarnPoints;
     }
