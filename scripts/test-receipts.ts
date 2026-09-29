@@ -911,10 +911,14 @@ async function main() {
           `${label}: transfers ${JSON.stringify(tr.map(t => [t.amount, t.destination]))}, PI vendorPayoutCents ${meta.vendorPayoutCents}, vendor_net ${before.vendorNet}`);
         check("T-2p", row.status === BOOKING_STATES.CONFIRMED && !!row.settledAt && row.stripeTransferId === tr[0]?.id,
           `${label}: status ${row.status}, settled ${!!row.settledAt}, transfer id ${row.stripeTransferId}`);
-        const pts = await db.select().from(schema.pointTransactions).where(eq(schema.pointTransactions.referenceId, bookingId)) as any[];
+        const pts = earnCalls.filter(c => c.referenceType === "shoot_booking" && c.referenceId === bookingId);
         const base = meta.originalConsumerTotalCents ? Number(meta.originalConsumerTotalCents) : call.params.amount;
-        check("T-2p", pts.length === 1 && pts[0].dollarAmountCents === base, `${label}: points ${JSON.stringify(pts.map(p => p.dollarAmountCents))}, expected one on ${base}`);
+        check("T-2p", pts.length === 1 && pts[0].dollarAmountCents === base, `${label}: earnPoints calls ${JSON.stringify(pts.map(p => p.dollarAmountCents))}, expected one on ${base}`);
       };
+      // earnPoints never writes under neon-http (db.transaction); record the calls.
+      const earnCalls: any[] = [];
+      const origEarnPoints = storage.earnPoints;
+      (storage as any).earnPoints = async function (this: any, data: any) { earnCalls.push(data); return origEarnPoints.call(this, data); };
 
       // Hold flow.
       const h = await hold("photo");
@@ -940,6 +944,7 @@ async function main() {
         check("T-2p", r.status === 200, `legacy shoot PI route → ${r.status} ${JSON.stringify(r.body).slice(0, 120)}`);
         await shootViaWebhook("legacy shoot PI", call, b.id);
       }
+      (storage as any).earnPoints = origEarnPoints;
     }
 
     Object.assign(R.PaymentIntents.prototype, { create: orig.piCreate, retrieve: orig.piRetrieve, cancel: orig.piCancel });
@@ -1709,8 +1714,13 @@ async function main() {
         return { id: b.id as string, piId, pi };
       }
       const shootTransfers = (id: string) => stripeTransfers.filter(t => t.transfer_group === `shoot_booking_${id}`);
-      const shootPoints = async (id: string) => db.select().from(schema.pointTransactions)
-        .where(dAnd(eq(schema.pointTransactions.referenceType, "shoot_booking"), eq(schema.pointTransactions.referenceId, id)));
+      // earnPoints uses db.transaction, which the neon-http driver rejects, so
+      // it never writes a row here. Count the calls instead; each call still
+      // goes through to the real earnPoints.
+      const earnCalls: any[] = [];
+      const origEarnPoints = storage.earnPoints;
+      (storage as any).earnPoints = async function (this: any, data: any) { earnCalls.push(data); return origEarnPoints.call(this, data); };
+      const shootPoints = async (id: string) => earnCalls.filter(c => c.referenceType === "shoot_booking" && c.referenceId === id);
       const shootRow = async (id: string) => (await db.select().from(schema.shootBookings).where(eq(schema.shootBookings.id, id)))[0] as any;
       async function acceptShoot(id: string) {
         const res = await fetch(`http://127.0.0.1:${port}/api/bookings/photographer/${id}/accept`, { method: "POST", headers: { Authorization: `Bearer ${spToken}`, "Content-Type": "application/json" } });
@@ -1730,7 +1740,8 @@ async function main() {
         assert(tr[0].idempotencyKey === `transfer_shoot_${id}_photographer`, `shoot settlement (a) auto-accept: deterministic idempotency key (got ${tr[0].idempotencyKey})`);
         assert(!!row.settledAt && row.stripeTransferId === tr[0].id, "shoot settlement (a) auto-accept: settled_at and stripe_transfer_id set");
         const pts = await shootPoints(id);
-        assert(pts.length === 1 && pts[0].dollarAmountCents === 16200, `shoot settlement (a) auto-accept: points earned once on 16200 (got ${JSON.stringify(pts.map(p => p.dollarAmountCents))})`);
+        assert(pts.length === 1 && pts[0].dollarAmountCents === 16200 && pts[0].userId === consumer.id && pts[0].transactionType === "photographer_booking",
+          `shoot settlement (a) auto-accept: earnPoints called once, 16200 for the client (got ${JSON.stringify(pts.map(p => p.dollarAmountCents))})`);
       }
 
       // (b) manual accept, all four webhook timings.
@@ -1746,7 +1757,7 @@ async function main() {
         assert(res.status === 200 && res.body?.success === true, `shoot settlement (b) manual accept, webhook ${timing}: HTTP 200 (got ${res.status})`);
         assert(tr.length === 1 && tr[0].amount === VENDOR_NET, `shoot settlement (b) manual accept, webhook ${timing}: exactly 1 transfer of ${VENDOR_NET} (got ${JSON.stringify(tr.map(t => t.amount))})`);
         assert(!!row.settledAt && row.stripeTransferId === tr[0]?.id, `shoot settlement (b) manual accept, webhook ${timing}: settled_at and stripe_transfer_id set`);
-        assert((await shootPoints(id)).length === 1, `shoot settlement (b) manual accept, webhook ${timing}: points earned once (got ${(await shootPoints(id)).length})`);
+        assert((await shootPoints(id)).length === 1, `shoot settlement (b) manual accept, webhook ${timing}: earnPoints called once (got ${(await shootPoints(id)).length})`);
         assert(receiptSentCount() === 3, `shoot settlement (b) manual accept, webhook ${timing}: receipts still exactly 3 (got ${receiptSentCount()})`);
       }
       webhookTiming = "none";
@@ -1760,7 +1771,7 @@ async function main() {
         await WebhookHandlers.handlePaymentIntentSucceeded(pi);
         await Promise.all([WebhookHandlers.handlePaymentIntentSucceeded(pi), WebhookHandlers.handlePaymentIntentSucceeded(pi)]);
         assert(shootTransfers(id).length === 1, `shoot settlement (c) duplicate deliveries: still 1 transfer (got ${shootTransfers(id).length})`);
-        assert((await shootPoints(id)).length === 1, `shoot settlement (c) duplicate deliveries: points once (got ${(await shootPoints(id)).length})`);
+        assert((await shootPoints(id)).length === 1, `shoot settlement (c) duplicate deliveries: earnPoints called once (got ${(await shootPoints(id)).length})`);
         assert(sent.length === 3, `shoot settlement (c) duplicate deliveries: receipts still sent once (got ${sent.length})`);
       }
 
@@ -1791,7 +1802,7 @@ async function main() {
         const row = await shootRow(id);
         assert(res.status === 400 && res.body?.error === "This request expired before you accepted it. The customer was refunded.", `shoot settlement (e) capture then expiry: 400 refunded message (got ${res.status} ${JSON.stringify(res.body)})`);
         assert(refundCalls.length === 1 && refundCalls[0].paymentIntentId === piId && refundCalls[0].amountCents === undefined, `shoot settlement (e) capture then expiry: one full refund of the captured PaymentIntent (got ${JSON.stringify(refundCalls)})`);
-        assert(shootTransfers(id).length === 0 && !row.settledAt && (await shootPoints(id)).length === 0, "shoot settlement (e) capture then expiry: no transfer, not settled, no points (even after the webhook)");
+        assert(shootTransfers(id).length === 0 && !row.settledAt && (await shootPoints(id)).length === 0, "shoot settlement (e) capture then expiry: no transfer, not settled, earnPoints not called (even after the webhook)");
         assert(row.status === BOOKING_STATES.EXPIRED, `shoot settlement (e) capture then expiry: status expired (got ${row.status})`);
       }
 
@@ -1804,10 +1815,10 @@ async function main() {
         transferCreateThrows = "none";
         let row = await shootRow(id);
         assert(!!row.settledAt && row.stripeTransferId === null, "shoot settlement (f) transfer throws: settled_at set, stripe_transfer_id NULL");
-        assert((await shootPoints(id)).length === 1, "shoot settlement (f) transfer throws: points still earned once");
+        assert((await shootPoints(id)).length === 1, "shoot settlement (f) transfer throws: earnPoints still called once");
         await WebhookHandlers.handlePaymentIntentSucceeded(pi);
         row = await shootRow(id);
-        assert(shootTransfers(id).length === 0 && row.stripeTransferId === null && (await shootPoints(id)).length === 1, "shoot settlement (f) transfer throws: later webhook creates no transfer, no second points");
+        assert(shootTransfers(id).length === 0 && row.stripeTransferId === null && (await shootPoints(id)).length === 1, "shoot settlement (f) transfer throws: later webhook creates no transfer, no second earnPoints call");
       }
 
       // (g) Stripe created the transfer but the response was lost.
@@ -1826,6 +1837,7 @@ async function main() {
         assert(retried.id === shootTransfers(id)[0].id && shootTransfers(id).length === 1 && creates === 1,
           `shoot settlement (g) manual payout retry returns the existing transfer (transfers.list), no second create (creates ${creates})`);
       }
+      (storage as any).earnPoints = origEarnPoints;
     }
 
     (stripeService as any).capturePaymentIntent = baseCapture;
