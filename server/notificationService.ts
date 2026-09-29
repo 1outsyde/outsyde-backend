@@ -117,6 +117,8 @@ export const NotificationTriggers = {
     shootType: string;
     date: string;
     time: string;
+    // Applied to the photographer's copy only; the customer's own copy has no actor.
+    triggeredByUserId?: string | null;
   }): Promise<void> {
     await sendNotification({
       userId: params.customerId,
@@ -148,6 +150,7 @@ export const NotificationTriggers = {
           date: params.date,
           time: params.time,
         },
+        triggeredByUserId: params.triggeredByUserId || undefined,
       });
     }
   },
@@ -158,6 +161,7 @@ export const NotificationTriggers = {
     referenceType: string;
     referenceId: string;
     description?: string;
+    triggeredByUserId?: string | null;
   }): Promise<void> {
     const formattedAmount = (params.amount / 100).toFixed(2);
     await sendNotification({
@@ -168,6 +172,7 @@ export const NotificationTriggers = {
       referenceType: params.referenceType,
       referenceId: params.referenceId,
       metadata: { amount: params.amount },
+      triggeredByUserId: params.triggeredByUserId || undefined,
     });
   },
 
@@ -269,6 +274,7 @@ export const NotificationTriggers = {
     customerName: string;
     orderTotal: number;
     itemCount: number;
+    triggeredByUserId?: string | null;
   }): Promise<void> {
     const formattedAmount = (params.orderTotal / 100).toFixed(2);
     await sendNotification({
@@ -283,6 +289,7 @@ export const NotificationTriggers = {
         orderTotal: params.orderTotal,
         itemCount: params.itemCount,
       },
+      triggeredByUserId: params.triggeredByUserId || undefined,
     });
   },
 

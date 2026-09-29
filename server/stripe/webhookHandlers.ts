@@ -598,6 +598,7 @@ export class WebhookHandlers {
               referenceType: 'appointment',
               referenceId: bookingId,
               description: `New booking from ${user?.name || 'customer'}`,
+              triggeredByUserId: user?.id ?? null,
             });
             console.log(`[Notify:appointment_booking] Business owner ${ab_owner.id} notified`);
 
@@ -707,6 +708,7 @@ export class WebhookHandlers {
             shootType: sb_booking?.shootType || 'session',
             date: sb_booking?.date || '',
             time: sb_booking?.startTime || '',
+            triggeredByUserId: user?.id ?? null,
           });
           console.log(`[Notify:shoot_booking] Customer ${clientId} and photographer notified`);
 
@@ -824,6 +826,7 @@ export class WebhookHandlers {
                 referenceType: 'appointment',
                 referenceId: appointmentId,
                 description: `New booking from ${apptCustomer?.name || 'customer'}`,
+                triggeredByUserId: apptCustomer?.id ?? null,
               });
               console.log(`[Notify:appointment] Business owner ${apptOwner.id} notified`);
             }
@@ -845,6 +848,7 @@ export class WebhookHandlers {
                   referenceType: 'appointment',
                   referenceId: appointmentId,
                   description: `New booking on ${appointment.appointmentDate} at ${appointment.appointmentTime}`,
+                  triggeredByUserId: apptCustomer?.id ?? null,
                 });
                 console.log(`[Notify:appointment] Staff member ${apptStaffMember.userId} notified`);
               } else {
@@ -1116,6 +1120,7 @@ export class WebhookHandlers {
             customerName: customer?.name || customer?.email || 'Customer',
             orderTotal: order.totalAmount,
             itemCount,
+            triggeredByUserId: customer?.id ?? null,
           }));
 
           // Notify the customer that their order is confirmed (app push)
@@ -1225,6 +1230,7 @@ export class WebhookHandlers {
               customerName: customer?.name || customer?.email || 'Customer',
               orderTotal: order.totalAmount,
               itemCount: order.items?.length || 1,
+              triggeredByUserId: customer?.id ?? null,
             }));
           }
         }
@@ -1929,6 +1935,7 @@ export class WebhookHandlers {
         customerName: customer?.name || customer?.email || 'Customer',
         orderTotal: order.totalAmount,
         itemCount,
+        triggeredByUserId: customer?.id ?? null,
       }));
 
       // Notify the customer that their order is confirmed
@@ -2052,6 +2059,7 @@ export class WebhookHandlers {
           customerName: customer?.name || customer?.email || 'Customer',
           orderTotal: order.totalAmount,
           itemCount: order.items?.length || 1,
+          triggeredByUserId: customer?.id ?? null,
         }));
       }
     }
@@ -2714,6 +2722,7 @@ export class WebhookHandlers {
             referenceType: 'appointment',
             referenceId: appointmentId,
             description: `New booking from ${customer?.name || 'customer'}`,
+            triggeredByUserId: customer?.id ?? null,
           }).catch(err => console.error("[Stripe] Failed to send business notification:", err));
 
           // Mobile push notification (Expo) — failures never crash the booking flow
@@ -2869,6 +2878,7 @@ export class WebhookHandlers {
           shootType: booking.shootType,
           date: booking.date,
           time: booking.startTime,
+          triggeredByUserId: sbCustomer?.id ?? null,
         }).catch(err => console.error("[Stripe] Failed to send booking notification:", err));
 
         // Mobile push notification (Expo) — failures never crash the booking flow
