@@ -391,6 +391,7 @@ export interface IStorage {
     locationDetails?: string | null;
     specialRequests?: string | null;
     totalPrice: number;
+    depositAmountCents?: number | null;
     platformFee: number;
     vendorNet: number;
     status?: string;
@@ -1721,6 +1722,7 @@ export class DatabaseStorage implements IStorage {
     locationDetails?: string | null;
     specialRequests?: string | null;
     totalPrice: number;
+    depositAmountCents?: number | null;
     platformFee: number;
     vendorNet: number;
     status?: string;
@@ -1741,6 +1743,7 @@ export class DatabaseStorage implements IStorage {
         locationDetails: data.locationDetails || null,
         specialRequests: data.specialRequests || null,
         totalPrice: data.totalPrice,
+        depositAmountCents: data.depositAmountCents ?? null,
         platformFee: data.platformFee,
         vendorNet: data.vendorNet,
         status: data.status || "pending",
