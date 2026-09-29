@@ -7,7 +7,7 @@
  * businesses flag and the audit row commit together or not at all.
  *
  * ON CONFLICT (business_id) requires uq_vendor_subscriptions_business
- * (migrations/036_vendor_subscriptions_business_unique.sql, hand-run in Neon).
+ * (migrations/037_vendor_subscriptions_business_unique.sql, hand-run in Neon).
  */
 
 import { and, eq, isNull, sql } from "drizzle-orm";

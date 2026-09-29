@@ -1548,7 +1548,7 @@ export const vendorSubscriptions = pgTable("vendor_subscriptions", {
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 }, (table) => ({
   // One subscription row per business. Hand-run in Neon via
-  // migrations/036_vendor_subscriptions_business_unique.sql (never drizzle-kit push).
+  // migrations/037_vendor_subscriptions_business_unique.sql (never drizzle-kit push).
   // The complimentary-tier admin upsert relies on ON CONFLICT (business_id).
   businessUnique: uniqueIndex("uq_vendor_subscriptions_business").on(table.businessId),
 }));
