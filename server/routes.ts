@@ -180,6 +180,20 @@ import { createStory, getStoriesByUser, getStory, deleteStory, recordView, creat
 import { photographersRouter } from "./Photographers/photographers.routes";
 import { toPublicBusinessDTO } from "./serializers/business";
 import { grantToken } from "./utils/grantToken";
+import {
+  isComplimentaryTier,
+  isSubscriptionProvisioned,
+  isTerminalStripeStatus,
+  resolveGrantTierId,
+  selectTiersForCaller,
+  PERMANENT_EXPIRY_ISO,
+} from "./complimentary";
+import {
+  computeConnectReady,
+  getComplimentaryTier,
+  runGrantStatement,
+  runRevokeStatement,
+} from "./services/complimentarySubscription";
 
 // =========================
 // PAYMENTS CONFIGURATION
@@ -9191,9 +9205,52 @@ export async function registerRoutes(
   // ==================== STRIPE ROUTES ====================
 
   // Get subscription tiers
+  // Hidden tiers (sortOrder < 0: waived, grandfathered) are only returned to their own holder,
+  // to the holder of a verified ?grant= token, and to admins. Everyone else gets sortOrder >= 0.
+  // Response shape is unchanged. Never 401s and never logs tokens or the grant value.
   app.get("/api/subscription-tiers", async (req, res) => {
     try {
-      const tiers = await stripeService.getSubscriptionTiers();
+      const allTiers = await stripeService.getSubscriptionTiers();
+
+      // Soft auth: a Bearer JWT (app / web BFF) or the web session cookie. Anything that
+      // fails just means the caller is treated as anonymous.
+      let callerUserId: string | null = null;
+      let jwtSaysAdmin = true;
+      const authHeader = req.headers.authorization;
+      if (authHeader && authHeader.startsWith("Bearer ")) {
+        const tokenPayload = verifyAccessToken(authHeader.substring(7));
+        if (tokenPayload) {
+          callerUserId = tokenPayload.userId;
+          jwtSaysAdmin = tokenPayload.isAdmin === true;
+        }
+      }
+      if (!callerUserId) {
+        callerUserId = req.session?.userId ?? null;
+      }
+
+      let currentTierId: string | null = null;
+      let isAdmin = false;
+      if (callerUserId) {
+        try {
+          // Same check requireAdmin uses: user.isAdmin AND an allowed admin email
+          // (and a JWT that itself says isAdmin, when a JWT was presented).
+          const callerUser = await storage.getUser(callerUserId);
+          isAdmin = jwtSaysAdmin && !!callerUser?.isAdmin && isAllowedAdminEmail(callerUser.email);
+
+          const callerBusiness = await storage.getBusinessByOwnerId(callerUserId);
+          if (callerBusiness) {
+            const callerSub = await storage.getVendorSubscriptionByBusinessId(callerBusiness.id);
+            currentTierId = callerSub?.tierId ?? null;
+          }
+        } catch {
+          // soft: fall back to the public list
+        }
+      }
+
+      // A bad/expired token or a missing GRANT_LINK_SECRET means "no grant".
+      const grantTierId = resolveGrantTierId(req.query.grant, (t) => grantToken.verify(t));
+
+      const tiers = selectTiersForCaller(allTiers, { currentTierId, grantTierId, isAdmin });
       res.json({ tiers });
     } catch (error) {
       console.error("Get subscription tiers error:", error);
@@ -10138,6 +10195,17 @@ export async function registerRoutes(
         }
       }
 
+      // connectReady (additive): only computed for complimentary-tier rows so the app / web
+      // can prompt winners to set up Stripe Connect. null for every other row.
+      let connectReady: boolean | null = null;
+      const [rowTier] = await db
+        .select()
+        .from(subscriptionTiers)
+        .where(eq(subscriptionTiers.id, sub.tierId));
+      if (isComplimentaryTier(rowTier)) {
+        connectReady = await computeConnectReady(business);
+      }
+
       res.json({
         subscription: {
           ...sub,
@@ -10148,6 +10216,7 @@ export async function registerRoutes(
           tierDisplayName: liveTierDisplayName ?? sub.tierDisplayName,
           priceInCents: livePriceInCents ?? sub.priceInCents,
           cancelAtPeriodEnd,
+          connectReady,
         },
       });
     } catch (error) {
@@ -11443,14 +11512,19 @@ export async function registerRoutes(
       const subscription = await storage.getVendorSubscriptionByBusinessId(business.id);
       const hasPlanSelected = !!subscription;
 
+      // Tier of the current row (also feeds currentTier below)
+      let subscriptionTier: SubscriptionTier | null = null;
+      if (subscription?.tierId) {
+        const tiers = await stripeService.getSubscriptionTiers();
+        subscriptionTier = tiers.find((t: { id: string }) => t.id === subscription.tierId) ?? null;
+      }
+
       // A subscription with a stripeSubscriptionId that isn't in a terminal/failed state
-      // is treated as provisioned — even if the webhook hasn't fired yet to set 'active'
+      // is treated as provisioned — even if the webhook hasn't fired yet to set 'active'.
+      // An admin-granted complimentary row (no Stripe id) is provisioned while it is
+      // 'active' and its period has not ended.
       const rawSubStatus = (subscription?.status || '').toLowerCase();
-      const hasProvisionedSub =
-        !!subscription?.stripeSubscriptionId &&
-        rawSubStatus !== 'canceled' &&
-        rawSubStatus !== 'incomplete_expired' &&
-        rawSubStatus !== 'unpaid';
+      const hasProvisionedSub = isSubscriptionProvisioned(subscription, subscriptionTier);
 
       const canPublish = isApproved && hasProvisionedSub && stripeOnboardingComplete;
 
@@ -11464,12 +11538,13 @@ export async function registerRoutes(
 
       // Get current tier info if subscription exists
       let currentTier: { id: string; name: string; displayName: string; priceInCents: number } | null = null;
-      if (subscription?.tierId) {
-        const tiers = await stripeService.getSubscriptionTiers();
-        const tier = tiers.find((t: { id: string }) => t.id === subscription.tierId);
-        if (tier) {
-          currentTier = { id: tier.id, name: tier.name, displayName: tier.displayName, priceInCents: tier.priceInCents };
-        }
+      if (subscriptionTier) {
+        currentTier = {
+          id: subscriptionTier.id,
+          name: subscriptionTier.name,
+          displayName: subscriptionTier.displayName,
+          priceInCents: subscriptionTier.priceInCents,
+        };
       }
 
       res.json({
@@ -18712,6 +18787,141 @@ export async function registerRoutes(
       }
       console.error("Update admin business error:", error);
       res.status(500).json({ error: "Failed to update business" });
+    }
+  });
+
+  // Admin: complimentary ("waived") subscription — grant, extend, or re-grant after expiry.
+  // Body is either { expiresAt: ISO datetime WITH offset, in the future } or { permanent: true }
+  // (permanent = 2099-01-01). Nothing else is accepted: the tier is resolved server-side and the
+  // owner comes from the business row. The write is ONE statement (see runGrantStatement).
+  const complimentaryGrantSchema = z.union([
+    z.object({ expiresAt: z.string().datetime({ offset: true }) }).strict(),
+    z.object({ permanent: z.literal(true) }).strict(),
+  ]);
+
+  app.post("/api/admin/businesses/:id/complimentary-subscription", requireAdmin, async (req, res) => {
+    try {
+      const { id } = req.params;
+      const parsed = complimentaryGrantSchema.safeParse(req.body);
+      if (!parsed.success) {
+        return res.status(400).json({ error: "Invalid data", details: parsed.error.errors });
+      }
+
+      const permanent = "permanent" in parsed.data;
+      const expiresAtIso = "permanent" in parsed.data
+        ? PERMANENT_EXPIRY_ISO
+        : new Date(parsed.data.expiresAt).toISOString();
+      if (!permanent && new Date(expiresAtIso).getTime() <= Date.now()) {
+        return res.status(400).json({ error: "expiresAt must be in the future" });
+      }
+
+      const business = await storage.getBusiness(id);
+      if (!business) {
+        return res.status(404).json({ error: "Business not found" });
+      }
+
+      const complimentaryTier = await getComplimentaryTier();
+      if (!complimentaryTier) {
+        return res.status(500).json({ error: "Complimentary tier is not configured" });
+      }
+
+      const existing = await storage.getVendorSubscriptionByBusinessId(business.id);
+
+      // A past payer keeps a stripe_subscription_id on the row. Only convert it when Stripe
+      // confirms the old subscription can never bill again; any Stripe error refuses.
+      if (existing?.stripeSubscriptionId) {
+        try {
+          const stripe = await getUncachableStripeClient();
+          const oldSub = await stripe.subscriptions.retrieve(existing.stripeSubscriptionId);
+          if (!isTerminalStripeStatus(oldSub.status)) {
+            return res.status(409).json({
+              error: `This business has a Stripe subscription that is still ${oldSub.status}. Cancel it in Stripe before granting a complimentary plan.`,
+            });
+          }
+        } catch (stripeError) {
+          console.error(
+            `[Complimentary] Could not verify previous Stripe subscription for business ${business.id}:`,
+            stripeError instanceof Error ? stripeError.message : "unknown error",
+          );
+          return res.status(409).json({
+            error: "Could not verify this business's previous Stripe subscription with Stripe. Nothing was changed.",
+          });
+        }
+      }
+
+      let existingTier: SubscriptionTier | undefined;
+      if (existing) {
+        [existingTier] = await db.select().from(subscriptionTiers).where(eq(subscriptionTiers.id, existing.tierId));
+      }
+      const action = existing && isComplimentaryTier(existingTier)
+        ? "complimentary_subscription.extend"
+        : "complimentary_subscription.grant";
+
+      const subscription = await runGrantStatement({
+        businessId: business.id,
+        ownerId: business.ownerId,
+        tierId: complimentaryTier.id,
+        expiresAtIso,
+        permanent,
+        action,
+        actorId: (req as any).adminUser.id,
+        ip: req.ip ?? null,
+        userAgent: req.get("user-agent") ?? null,
+      });
+
+      if (!subscription) {
+        // 0 rows: the conflict WHERE refused because a paid row is still live
+        // (or the business disappeared between the read and the write).
+        const stillThere = await storage.getBusiness(business.id);
+        if (!stillThere) {
+          return res.status(404).json({ error: "Business not found" });
+        }
+        return res.status(409).json({
+          error: "This business has a paid subscription that is still live. Complimentary grant refused.",
+        });
+      }
+
+      const connectReady = await computeConnectReady(business);
+      res.json({ subscription, connectReady });
+    } catch (error) {
+      console.error("Complimentary grant error:", error);
+      res.status(500).json({ error: "Failed to grant complimentary subscription" });
+    }
+  });
+
+  // Admin: revoke a complimentary subscription — expires it now (status 'canceled') and clears
+  // businesses.subscription_active. ONE statement (see runRevokeStatement).
+  app.delete("/api/admin/businesses/:id/complimentary-subscription", requireAdmin, async (req, res) => {
+    try {
+      const { id } = req.params;
+
+      const subscription = await runRevokeStatement({
+        businessId: id,
+        actorId: (req as any).adminUser.id,
+        ip: req.ip ?? null,
+        userAgent: req.get("user-agent") ?? null,
+      });
+
+      if (!subscription) {
+        const business = await storage.getBusiness(id);
+        if (!business) {
+          return res.status(404).json({ error: "Business not found" });
+        }
+        const existing = await storage.getVendorSubscriptionByBusinessId(id);
+        if (!existing) {
+          return res.status(404).json({ error: "No subscription found for this business" });
+        }
+        return res.status(409).json({
+          error: existing.stripeSubscriptionId
+            ? "This business has a paid Stripe subscription; it cannot be revoked here."
+            : "This business's subscription is not a complimentary plan. Nothing was revoked.",
+        });
+      }
+
+      res.json({ subscription });
+    } catch (error) {
+      console.error("Complimentary revoke error:", error);
+      res.status(500).json({ error: "Failed to revoke complimentary subscription" });
     }
   });
 

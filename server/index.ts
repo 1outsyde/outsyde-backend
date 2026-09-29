@@ -19,6 +19,7 @@ import { startDraftCleanupJob } from "./bookingStateMachine";
 import { startReminderJob } from "./reminderService";
 import { processScheduledDeletions } from "./services/accountDeletionService";
 import { cleanupExpiredStories } from "./services/stories";
+import { expireComplimentarySubscriptions } from "./services/complimentarySubscription";
 import passport from "passport";
 
 // Global error handlers — prevent silent crashes
@@ -335,6 +336,15 @@ if (process.env.NODE_ENV === 'production') {
   processScheduledDeletions().catch(err => console.error("[accountDeletion] Initial run failed:", err));
   setInterval(() => {
     processScheduledDeletions().catch(err => console.error("[accountDeletion] Scheduled run failed:", err));
+  }, 24 * 60 * 60 * 1000);
+
+  // Daily complimentary-subscription expiry — admin-granted rows (no Stripe subscription id)
+  // whose period has ended become 'canceled' and their business loses subscription_active.
+  // Runs once at boot, then every 24h. One statement; paid rows never match; no mass-pause
+  // of products/services (the visibility + go-live gates already handle an inactive business).
+  expireComplimentarySubscriptions().catch(err => console.error("[Complimentary] Initial expiry run failed:", err));
+  setInterval(() => {
+    expireComplimentarySubscriptions().catch(err => console.error("[Complimentary] Scheduled expiry run failed:", err));
   }, 24 * 60 * 60 * 1000);
 
   await registerRoutes(httpServer, app);

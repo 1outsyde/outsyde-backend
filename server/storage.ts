@@ -177,6 +177,7 @@ import { db } from "./db";
 import { eq, ilike, or, and, sql, isNull, isNotNull, desc, asc, gte, lte, ne, inArray, notInArray } from "drizzle-orm";
 import { randomUUID, createHash } from "crypto";
 import { quoteDeposit } from "./fees";
+import { isExpiredUnbilledActiveRow } from "./complimentary";
 
 const pendingRecomputes = new Map<string, NodeJS.Timeout>();
 
@@ -4219,7 +4220,16 @@ export class DatabaseStorage implements IStorage {
 
   private checkSubscriptionActiveStatus(subscription: VendorSubscription, gracePeriodDays: number): { active: boolean; status?: string; reason?: string } {
     const status = subscription.status ?? undefined;
-    
+
+    // Backstop for admin-granted complimentary rows (no Stripe subscription id) whose
+    // period has ended. This function only receives the row, so the rule is row-only;
+    // no paid row can match because every paid row carries a stripe_subscription_id.
+    // The daily expiry job (server/index.ts) is the real enforcement: it flips the row
+    // to 'canceled' and clears businesses.subscription_active. Paid rows are unchanged.
+    if (isExpiredUnbilledActiveRow(subscription)) {
+      return { active: false, status, reason: 'Complimentary subscription has expired' };
+    }
+
     // Active subscription
     if (status === 'active') {
       return { active: true, status };
