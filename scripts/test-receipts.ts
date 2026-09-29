@@ -512,6 +512,7 @@ async function main() {
       vendor: generateAccessToken({ userId: vendorUser.id, isVendor: true, businessId: business.id }),
       vendor2: generateAccessToken({ userId: vendor2.id, isVendor: true, businessId: business2.id }),
       staff: generateAccessToken({ userId: staffUser.id, isVendor: false }),
+      photog: generateAccessToken({ userId: photogUser.id, isVendor: false, isPhotographer: true, photographerId: photographer.id }),
     };
     async function http(method: string, path: string, who: keyof typeof tok, body?: unknown) {
       const res = await fetch(`http://127.0.0.1:${port}${path}`, {
@@ -947,13 +948,240 @@ async function main() {
       (storage as any).earnPoints = origEarnPoints;
     }
 
+    // ── T-2ph: photographer service deposits ────────────────────────────────
+    // Live service routes (PhotographerController), real hold → PaymentIntent
+    // → webhook / accept → settlement, cancel and refund routes.
+    {
+      const T = "T-2ph";
+      await db.update(schema.users).set({ isPhotographer: true } as any).where(eq(schema.users.id, photogUser.id));
+      const origCapture = R.PaymentIntents.prototype.capture, origRefund = R.Refunds.prototype.create, depCancel = R.PaymentIntents.prototype.cancel;
+      R.PaymentIntents.prototype.capture = async function (id: string) {
+        const p = piById.get(id);
+        return { ...p, status: "succeeded", amount_received: p?.amount ?? 0 };
+      };
+      const refundCreates: any[] = [];
+      R.Refunds.prototype.create = async function (p: any) { refundCreates.push(p); return { id: `re_${randomUUID().slice(0, 8)}`, amount: p.amount, status: "succeeded" }; };
+      const piCancels: string[] = [];
+      R.PaymentIntents.prototype.cancel = async function (id: string) { piCancels.push(id); return { id, status: "canceled" }; };
+
+      const svcPost = (body: Record<string, unknown>) => http("POST", "/api/photographers/me/services", "photog",
+        { name: `Photo dep ${randomUUID().slice(0, 4)}`, pricingModel: "package", priceCents: 27500, estimatedDurationMinutes: 60, ...body });
+      const svcRow = async (id: string) => (await db.select().from(schema.photographerServices).where(eq(schema.photographerServices.id, id)))[0] as any;
+      const shootRowOf = async (id: string) => (await db.select().from(schema.shootBookings).where(eq(schema.shootBookings.id, id)))[0] as any;
+      const ok = (s: number) => s >= 200 && s < 300;
+
+      // (a) validation
+      let r = await svcPost({ depositAmountCents: 600 });
+      check(T, r.status === 400 && r.body?.code === "INVALID_DEPOSIT", `(a) POST D=600 → ${r.status} ${r.body?.code}`);
+      r = await svcPost({ depositAmountCents: 27500 });
+      check(T, r.status === 400 && r.body?.code === "INVALID_DEPOSIT", `(a) POST D=price → ${r.status} ${r.body?.code}`);
+      r = await svcPost({ depositAmountCents: 0 });
+      check(T, ok(r.status) && r.body?.service?.depositAmountCents === null, `(a) POST D=0 → ${r.status}, stored ${r.body?.service?.depositAmountCents}`);
+      r = await svcPost({ pricingModel: "hourly", priceCents: undefined, hourlyRateCents: 10000, depositAmountCents: 3000 });
+      check(T, r.status === 400 && r.body?.code === "INVALID_DEPOSIT" && r.body?.message === "Deposits require a fixed price.",
+        `(a) POST hourly with D → ${r.status} ${r.body?.code} ${r.body?.message}`);
+      r = await svcPost({ pricingModel: "hourly", priceCents: undefined, hourlyRateCents: 10000 });
+      check(T, ok(r.status) && r.body?.service?.depositAmountCents === null, `(a) POST hourly without D → ${r.status}`);
+      r = await svcPost({ depositAmountCents: 3000 });
+      check(T, ok(r.status) && r.body?.service?.depositAmountCents === 3000, `(a) POST D=3000 → ${r.status}, stored ${r.body?.service?.depositAmountCents}`);
+      const depSvcId: string | undefined = r.body?.service?.id;
+      if (depSvcId) {
+        const patch = (body: Record<string, unknown>) => http("PATCH", `/api/photographers/me/services/${depSvcId}`, "photog", body);
+        r = await patch({ priceCents: 3000 });
+        check(T, r.status === 400 && r.body?.code === "INVALID_DEPOSIT" && (await svcRow(depSvcId)).priceCents === 27500,
+          `(a) PATCH price to stored D → ${r.status}, price now ${(await svcRow(depSvcId)).priceCents}`);
+        r = await patch({ priceCents: 2500 });
+        check(T, r.status === 400 && r.body?.code === "INVALID_DEPOSIT", `(a) PATCH price below stored D → ${r.status}`);
+        r = await patch({ priceCents: null });
+        check(T, r.status === 400 && r.body?.code === "INVALID_DEPOSIT" && (await svcRow(depSvcId)).priceCents === 27500, `(a) PATCH price removed with stored D → ${r.status}`);
+        r = await patch({ isContactForPricing: true });
+        check(T, r.status === 400 && r.body?.code === "INVALID_DEPOSIT", `(a) PATCH contact-for-pricing with stored D → ${r.status}`);
+        r = await patch({ depositAmountCents: 600 });
+        check(T, r.status === 400 && (await svcRow(depSvcId)).depositAmountCents === 3000, `(a) PATCH D=600 → ${r.status}`);
+        r = await patch({ name: "Portrait (deposit)" });
+        check(T, r.status === 200 && (await svcRow(depSvcId)).depositAmountCents === 3000, `(a) PATCH name only → ${r.status}`);
+        r = await patch({ depositAmountCents: 0 });
+        check(T, r.status === 200 && (await svcRow(depSvcId)).depositAmountCents === null, `(a) PATCH D=0 → ${r.status}, stored ${(await svcRow(depSvcId)).depositAmountCents}`);
+        r = await patch({ depositAmountCents: 3000 });
+        check(T, r.status === 200 && (await svcRow(depSvcId)).depositAmountCents === 3000, `(a) PATCH D=3000 → ${r.status}`);
+        // Far-future slots sit inside a 1-week full-refund window, so without the
+        // deposit rule the customer cancel below would refund the full price.
+        await db.update(schema.photographerServices).set({ status: "live", fullRefundWindow: "1_week" } as any).where(eq(schema.photographerServices.id, depSvcId));
+      } else check(T, false, "(a) no deposit service created");
+
+      const r2 = await svcPost({ priceCents: 15000 });
+      const fullSvcId: string | undefined = r2.body?.service?.id;
+      if (fullSvcId) await db.update(schema.photographerServices).set({ status: "live", fullRefundWindow: "1_week" } as any).where(eq(schema.photographerServices.id, fullSvcId));
+      else check(T, false, `no-deposit service create → ${r2.status}`);
+
+      // A spare slot between holds: a canceled pending shoot's hold stays active
+      // until it expires and blocks the adjacent slot.
+      const photoHold = (serviceId: string) => { nextSlot(); const { date, time } = nextSlot(); return http("POST", "/api/booking/hold", "consumer", { providerType: "photographer", providerId: photographer.id, serviceId, date, startTime: time }); };
+      async function bookShoot(serviceId: string) {
+        const h = await photoHold(serviceId);
+        if (h.status !== 200) return { h };
+        const before = createCalls.length;
+        const p = await pay(h.body.holdId);
+        const call = createCalls.length > before ? lastCreate() : undefined;
+        const row = p.body?.shootBookingId ? await shootRowOf(p.body.shootBookingId) : undefined;
+        return { h, p, call, row };
+      }
+      const shootTransfersOf = (t0: number, id: string) => depTransfers.slice(t0).filter(t => t.transfer_group === `shoot_booking_${id}`);
+
+      // (b)–(d) auto-accept deposit booking
+      let autoId: string | undefined;
+      if (depSvcId) {
+        const { h, p, call, row } = await bookShoot(depSvcId);
+        const hb = h.body;
+        check(T, h.status === 200 && hb.serviceTotalCents === 27500 && hb.depositAmountCents === 3000 && hb.chargeAmountCents === 3000
+          && hb.dueNowCents === 3240 && hb.dueAtAppointmentCents === 24500 && hb.depositNonRefundable === true && hb.dueNowFeeBreakdown?.grossChargeAmount === 3240,
+          `(b) hold ${h.status} ${JSON.stringify({ s: hb?.serviceTotalCents, d: hb?.depositAmountCents, c: hb?.chargeAmountCents, n: hb?.dueNowCents, r: hb?.dueAtAppointmentCents, nr: hb?.depositNonRefundable })}`);
+        check(T, p?.status === 200 && call?.params.amount === 3240 && call?.params.amount === hb?.dueNowCents && call?.params.capture_method === "automatic",
+          `(c) PI amount ${call?.params.amount} vs hold dueNowCents ${hb?.dueNowCents} (http ${p?.status})`);
+        check(T, row && row.totalPrice === 27500 && row.depositAmountCents === 3000 && row.vendorNet === 2940 && row.platformFee === 60
+          && call?.params.metadata?.vendorPayoutCents === "2940" && call?.params.metadata?.type === "shoot_booking",
+          `(c) shoot row ${JSON.stringify(row && { t: row.totalPrice, d: row.depositAmountCents, v: row.vendorNet, f: row.platformFee })}, metadata vendorPayoutCents ${call?.params.metadata?.vendorPayoutCents}`);
+        if (call && row) {
+          autoId = row.id;
+          const sentBefore = sent.length;
+          const t0 = depTransfers.length;
+          const evt = { id: p!.body.paymentIntentId, amount: call.params.amount, metadata: call.params.metadata };
+          await WH.handlePaymentIntentSucceeded(evt);
+          await WH.handlePaymentIntentSucceeded(evt);
+          const tr = shootTransfersOf(t0, row.id);
+          const after = await shootRowOf(row.id);
+          check(T, after.status === BOOKING_STATES.CONFIRMED && tr.length === 1 && tr[0].amount === 2940 && tr[0].destination === `acct_ph_${dtag}`
+            && after.stripeTransferId === tr[0].id && !!after.settledAt,
+            `(d) auto-accept: status ${after.status}, transfers ${JSON.stringify(tr.map(t => [t.amount, t.destination]))}`);
+          const mail = sent.slice(sentBefore);
+          const toConsumer = mail.find(e => e.to === consumerEmail), toPhotog = mail.find(e => e.to === photogEmail), toAdmin = mail.find(e => e.to === ADMIN);
+          check(T, !!toConsumer && toConsumer.html.includes("Deposit Paid") && toConsumer.html.includes("$32.40") && toConsumer.html.includes("Due at Appointment") && toConsumer.html.includes("$245.00") && !toConsumer.html.includes("Total Paid"),
+            `(d) consumer receipt shows deposit $32.40 paid, $245.00 due`);
+          check(T, !!toPhotog && toPhotog.html.includes("Deposit Collected") && toPhotog.html.includes("$29.40") && toPhotog.html.includes("Balance to Collect in Person") && toPhotog.html.includes("$245.00"),
+            `(d) photographer receipt shows $29.40 deposit payout, $245.00 to collect`);
+          check(T, !!toAdmin && toAdmin.html.includes("Deposit") && toAdmin.html.includes("$275.00") && toAdmin.html.includes("$2.40") && toAdmin.html.includes("$0.60") && mail.length === 3,
+            `(d) admin receipt: deposit, 8% $2.40 and 2% $0.60 on D, service total $275.00 (${mail.length} emails)`);
+        }
+      }
+
+      // (e) manual accept deposit booking
+      let manualId: string | undefined;
+      if (depSvcId) {
+        await db.update(schema.photographers).set({ autoAcceptBookings: false } as any).where(eq(schema.photographers.id, photographer.id));
+        const { p, call, row } = await bookShoot(depSvcId);
+        if (call && row) {
+          manualId = row.id;
+          const evt = { id: p!.body.paymentIntentId, amount: call.params.amount, amount_capturable: call.params.amount, status: "requires_capture", metadata: call.params.metadata };
+          await WH.handlePaymentIntentCapturableUpdated(evt);
+          const pending = await shootRowOf(row.id);
+          const t0 = depTransfers.length;
+          const acc = await http("POST", `/api/bookings/photographer/${row.id}/accept`, "photog", {});
+          await WH.handlePaymentIntentSucceeded({ ...evt, status: "succeeded" });
+          const tr = shootTransfersOf(t0, row.id);
+          const after = await shootRowOf(row.id);
+          check(T, call.params.capture_method === "manual" && call.params.amount === 3240 && pending.status === BOOKING_STATES.PENDING_PROVIDER
+            && acc.status === 200 && after.status === BOOKING_STATES.CONFIRMED && tr.length === 1 && tr[0].amount === 2940,
+            `(e) manual accept: capture ${call.params.capture_method}, pending ${pending.status}, accept ${acc.status}, status ${after.status}, transfers ${JSON.stringify(tr.map(t => t.amount))}`);
+        } else check(T, false, "(e) could not create manual deposit booking");
+      }
+
+      // (f) customer cancel preview + cancel on a confirmed deposit shoot
+      if (autoId) {
+        const pv = await http("GET", `/api/bookings/shoot/${autoId}/cancel-preview`, "consumer");
+        const b = pv.body;
+        check(T, pv.status === 200 && b.refundTier === "none" && b.refundAmountCents === 0 && b.feeAmountCents === 0 && b.isDepositBooking === true
+          && b.depositAmountCents === 3000 && b.depositNonRefundable === true && b.chargedAmountCents === 3240,
+          `(f) preview ${JSON.stringify({ t: b.refundTier, r: b.refundAmountCents, f: b.feeAmountCents, i: b.isDepositBooking, d: b.depositAmountCents, c: b.chargedAmountCents })}`);
+        const rc0 = refundCreates.length;
+        const c = await http("POST", `/api/bookings/shoot/${autoId}/cancel`, "consumer", {});
+        const after = await shootRowOf(autoId);
+        check(T, c.status === 200 && c.body?.refundAmountCents === 0 && c.body?.feeAmountCents === 0 && c.body?.refundTier === "none"
+          && refundCreates.length === rc0 && after.status === BOOKING_STATES.CANCELED && after.refundAmount == null,
+          `(f) cancel ${c.status} ${JSON.stringify({ r: c.body?.refundAmountCents, f: c.body?.feeAmountCents })}, refunds ${refundCreates.length - rc0}, status ${after.status}`);
+      } else check(T, false, "(f) no confirmed deposit shoot");
+
+      // (g) customer cancel while pending_provider: release the authorization
+      for (const [label, svcId] of [["deposit", depSvcId], ["no deposit", fullSvcId]] as const) {
+        if (!svcId) { check(T, false, `(g) ${label}: no service`); continue; }
+        const { h, p, call, row } = await bookShoot(svcId);
+        if (!call || !row) { check(T, false, `(g) ${label}: could not book (hold ${h.status} ${JSON.stringify(h.body ?? null).slice(0, 160)}, PI ${p?.status} ${JSON.stringify(p?.body ?? null).slice(0, 160)})`); continue; }
+        await WH.handlePaymentIntentCapturableUpdated({ id: p!.body.paymentIntentId, amount: call.params.amount, amount_capturable: call.params.amount, status: "requires_capture", metadata: call.params.metadata });
+        const pending = await shootRowOf(row.id);
+        retrieveStatus = "requires_capture";
+        const rc0 = refundCreates.length, pc0 = piCancels.length;
+        const c = await http("POST", `/api/bookings/shoot/${row.id}/cancel`, "consumer", {});
+        retrieveStatus = "requires_payment_method";
+        const after = await shootRowOf(row.id);
+        check(T, pending.status === BOOKING_STATES.PENDING_PROVIDER && c.status === 200 && c.body?.authorizationReleased === true && c.body?.refundAmountCents === 0
+          && piCancels.slice(pc0).length === 1 && piCancels[pc0] === p!.body.paymentIntentId && refundCreates.length === rc0 && after.status === BOOKING_STATES.CANCELED,
+          `(g) ${label} pending_provider cancel: ${c.status} released ${c.body?.authorizationReleased}, PI cancels ${JSON.stringify(piCancels.slice(pc0))}, refunds ${refundCreates.length - rc0}, status ${pending.status} → ${after.status}`);
+      }
+      await db.update(schema.photographers).set({ autoAcceptBookings: true } as any).where(eq(schema.photographers.id, photographer.id));
+
+      // (h) photographer refund with no amount on a deposit shoot
+      if (manualId) {
+        const rc0 = refundCreates.length;
+        const rf = await http("POST", `/api/bookings/photographer/${manualId}/refund`, "photog", {});
+        const made = refundCreates.slice(rc0);
+        check(T, rf.status === 200 && rf.body?.amount === 3000 && made.length === 1 && made[0].amount === 3000 && (await shootRowOf(manualId)).refundAmount === 3000,
+          `(h) refund ${rf.status}, amount ${rf.body?.amount}, Stripe refunds ${JSON.stringify(made.map(m => m.amount))}`);
+      } else check(T, false, "(h) no confirmed manual deposit shoot");
+
+      // (i) legacy photographer PI route on a deposit booking
+      {
+        const { date, time } = nextSlot();
+        const [b] = await db.insert(schema.shootBookings).values({
+          photographerId: photographer.id, clientId: consumer.id, shootType: "Portrait", date, startTime: time, endTime: time,
+          durationHours: 1, totalPrice: 27500, depositAmountCents: 3000, status: BOOKING_STATES.PENDING_PAYMENT,
+        } as any).returning();
+        const before = createCalls.length;
+        const lr = await http("POST", `/api/bookings/photographer/${b.id}/create-payment-intent`, "consumer", {});
+        check(T, lr.status === 409 && createCalls.length === before, `(i) legacy PI route on deposit booking → ${lr.status}, PaymentIntents created ${createCalls.length - before}`);
+      }
+
+      // (j) no-deposit photographer service: unchanged
+      if (fullSvcId) {
+        const { h, p, call, row } = await bookShoot(fullSvcId);
+        const hb = h.body;
+        check(T, h.status === 200 && hb.depositAmountCents === null && hb.dueNowCents === 16200 && hb.dueAtAppointmentCents === 0 && hb.depositNonRefundable === false,
+          `(j) hold ${h.status} ${JSON.stringify({ d: hb?.depositAmountCents, n: hb?.dueNowCents, r: hb?.dueAtAppointmentCents })}`);
+        check(T, p?.status === 200 && call?.params.amount === 16200 && row?.depositAmountCents === null && row?.totalPrice === 15000 && row?.vendorNet === 14700
+          && call?.params.metadata?.vendorPayoutCents === "14700",
+          `(j) PI ${call?.params.amount}, row ${JSON.stringify(row && { d: row.depositAmountCents, t: row.totalPrice, v: row.vendorNet })}`);
+        if (call && row) {
+          const t0 = depTransfers.length;
+          await WH.handlePaymentIntentSucceeded({ id: p!.body.paymentIntentId, amount: call.params.amount, metadata: call.params.metadata });
+          const tr = shootTransfersOf(t0, row.id);
+          check(T, tr.length === 1 && tr[0].amount === 14700 && tr[0].destination === `acct_ph_${dtag}`, `(j) transfers ${JSON.stringify(tr.map(t => [t.amount, t.destination]))}`);
+          const pv = await http("GET", `/api/bookings/shoot/${row.id}/cancel-preview`, "consumer");
+          check(T, pv.status === 200 && pv.body.isDepositBooking === false && pv.body.depositAmountCents === null && pv.body.chargedAmountCents === 16200
+            && pv.body.refundTier === "full" && pv.body.refundAmountCents === 15000,
+            `(j) no-deposit preview ${JSON.stringify({ i: pv.body.isDepositBooking, c: pv.body.chargedAmountCents, t: pv.body.refundTier, r: pv.body.refundAmountCents })}`);
+        }
+      }
+
+      // GET /api/my-shoot-bookings
+      {
+        const mine = await http("GET", "/api/my-shoot-bookings", "consumer");
+        const list: any[] = mine.body?.sessions ?? [];
+        const md = list.find(s => s.id === manualId);
+        const mf = list.find(s => s.depositAmountCents === null && s.price === 150);
+        check(T, mine.status === 200 && md && md.depositAmountCents === 3000 && md.chargedAmountCents === 3240 && md.price === 275
+          && mf && mf.chargedAmountCents === 16200,
+          `my-shoot-bookings ${JSON.stringify({ d: md && [md.depositAmountCents, md.chargedAmountCents, md.price], f: mf && [mf.depositAmountCents, mf.chargedAmountCents] })}`);
+      }
+
+      Object.assign(R.PaymentIntents.prototype, { capture: origCapture, cancel: depCancel });
+      R.Refunds.prototype.create = origRefund;
+    }
+
     Object.assign(R.PaymentIntents.prototype, { create: orig.piCreate, retrieve: orig.piRetrieve, cancel: orig.piCancel });
     Object.assign(R.Customers.prototype, { retrieve: orig.custRetrieve, create: orig.custCreate });
     R.Transfers.prototype.create = orig.trCreate;
     server.close();
 
     const failed: string[] = [];
-    for (const id of ["T-2a", "T-2b", "T-2c", "T-2d", "T-2f", "T-2g", "T-2h", "T-2s", "T-2p"]) {
+    for (const id of ["T-2a", "T-2b", "T-2c", "T-2d", "T-2f", "T-2g", "T-2h", "T-2s", "T-2p", "T-2ph"]) {
       const errs = results.get(id) ?? ["no checks ran"];
       if (errs.length) failed.push(id);
       origLog(`${errs.length ? "FAIL" : "PASS"}  ${id}${errs.length ? "\n        - " + errs.join("\n        - ") : ""}`);
