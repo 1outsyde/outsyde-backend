@@ -895,13 +895,60 @@ async function main() {
       }
     }
 
+    // ── T-2p: shoot settlement (h): transfer == PI metadata vendorPayoutCents ─
+    // Both photographer create-payment-intent routes, real handlers, Stripe
+    // mocked at the SDK.
+    {
+      const shootViaWebhook = async (label: string, call: { params: any } | undefined, bookingId: string | undefined) => {
+        if (!call || !bookingId) { check("T-2p", false, `${label}: no PaymentIntent created`); return; }
+        const meta = call.params.metadata;
+        const [before] = await db.select().from(schema.shootBookings).where(eq(schema.shootBookings.id, bookingId)) as any[];
+        const t0 = depTransfers.length;
+        await WH.handlePaymentIntentSucceeded({ id: `pi_h_${randomUUID().slice(0, 8)}`, amount: call.params.amount, metadata: meta });
+        const tr = depTransfers.slice(t0).filter(t => t.transfer_group === `shoot_booking_${bookingId}`);
+        const [row] = await db.select().from(schema.shootBookings).where(eq(schema.shootBookings.id, bookingId)) as any[];
+        check("T-2p", tr.length === 1 && tr[0].amount === Number(meta.vendorPayoutCents) && tr[0].amount === before.vendorNet && tr[0].destination === `acct_ph_${dtag}`,
+          `${label}: transfers ${JSON.stringify(tr.map(t => [t.amount, t.destination]))}, PI vendorPayoutCents ${meta.vendorPayoutCents}, vendor_net ${before.vendorNet}`);
+        check("T-2p", row.status === BOOKING_STATES.CONFIRMED && !!row.settledAt && row.stripeTransferId === tr[0]?.id,
+          `${label}: status ${row.status}, settled ${!!row.settledAt}, transfer id ${row.stripeTransferId}`);
+        const pts = await db.select().from(schema.pointTransactions).where(eq(schema.pointTransactions.referenceId, bookingId)) as any[];
+        const base = meta.originalConsumerTotalCents ? Number(meta.originalConsumerTotalCents) : call.params.amount;
+        check("T-2p", pts.length === 1 && pts[0].dollarAmountCents === base, `${label}: points ${JSON.stringify(pts.map(p => p.dollarAmountCents))}, expected one on ${base}`);
+      };
+
+      // Hold flow.
+      const h = await hold("photo");
+      if (h.status === 200) {
+        const before = createCalls.length;
+        const p = await pay(h.body.holdId);
+        const call = createCalls.length > before ? lastCreate() : undefined;
+        await shootViaWebhook("hold-flow shoot PI", call, p.body?.shootBookingId);
+        const [hr] = await db.select().from(schema.bookingHolds).where(eq(schema.bookingHolds.id, h.body.holdId)) as any[];
+        check("T-2p", hr?.status === "converted" && hr?.convertedToBookingId === p.body?.shootBookingId, `hold-flow shoot hold ${hr?.status} → ${hr?.convertedToBookingId}`);
+      } else check("T-2p", false, `photo hold → ${h.status}`);
+
+      // Legacy POST /api/bookings/photographer/:bookingId/create-payment-intent.
+      {
+        const { date, time } = nextSlot();
+        const [b] = await db.insert(schema.shootBookings).values({
+          photographerId: photographer.id, clientId: consumer.id, shootType: "Portrait", date, startTime: time, endTime: time,
+          durationHours: 1, totalPrice: 15000, status: BOOKING_STATES.PENDING_PAYMENT,
+        } as any).returning();
+        const before = createCalls.length;
+        const r = await http("POST", `/api/bookings/photographer/${b.id}/create-payment-intent`, "consumer", {});
+        const call = createCalls.length > before ? lastCreate() : undefined;
+        check("T-2p", r.status === 200, `legacy shoot PI route → ${r.status} ${JSON.stringify(r.body).slice(0, 120)}`);
+        await shootViaWebhook("legacy shoot PI", call, b.id);
+      }
+    }
+
     Object.assign(R.PaymentIntents.prototype, { create: orig.piCreate, retrieve: orig.piRetrieve, cancel: orig.piCancel });
     Object.assign(R.Customers.prototype, { retrieve: orig.custRetrieve, create: orig.custCreate });
     R.Transfers.prototype.create = orig.trCreate;
     server.close();
 
     const failed: string[] = [];
-    for (const id of ["T-2a", "T-2b", "T-2c", "T-2d", "T-2f", "T-2g", "T-2h", "T-2s"]) {
+    for (const id of ["T-2a", "T-2b", "T-2c", "T-2d", "T-2f", "T-2g", "T-2h", "T-2s", "T-2p"]) {
       const errs = results.get(id) ?? ["no checks ran"];
       if (errs.length) failed.push(id);
       origLog(`${errs.length ? "FAIL" : "PASS"}  ${id}${errs.length ? "\n        - " + errs.join("\n        - ") : ""}`);
@@ -1641,6 +1688,144 @@ async function main() {
       assert(transfersFor(id).length === 1, "settlement (g2) lost transfer response: later webhook creates no second transfer");
       const retried = await stripeService.transferBookingPayout({ amountInCents: 2940, connectedAccountId: `acct_settle_${tag}`, appointmentId: id, recipient: "business" });
       assert(retried.id === transfersFor(id)[0].id && transfersFor(id).length === 1, "settlement (g2) manual payout retry returns the existing transfer (transfers.list), no second create");
+    }
+
+    // ── Shoot settlement: photographer payout + points exactly once ──────────
+    {
+      const [spUser] = await db.insert(schema.users).values({ username: `sp_${tag}`, email: `settle-photog-${tag}@example.com`, name: "Settle Photog" } as any).returning();
+      const [sPhoto] = await db.insert(schema.photographers).values({ userId: spUser.id, displayName: "Settle Photog", hourlyRate: 10000, stripeAccountId: `acct_shoot_${tag}`, stripeOnboardingComplete: true } as any).returning();
+      const spToken = generateAccessToken({ userId: spUser.id, isVendor: false, isPhotographer: true, photographerId: sPhoto.id });
+      const VENDOR_NET = 14700;
+      async function settleShoot(status: string, capture: "automatic" | "manual", expiresInMs: number | null = null) {
+        const { date, time } = nextSlot();
+        const piId = `pi_test_${randomUUID()}`;
+        const [b] = await db.insert(schema.shootBookings).values({
+          photographerId: sPhoto.id, clientId: consumer.id, shootType: "Portrait", date, startTime: time, endTime: time, durationHours: 1,
+          totalPrice: 15000, platformFee: 1500, vendorNet: VENDOR_NET, status, captureMethod: capture, stripePaymentIntentId: piId,
+          pendingProviderExpiresAt: expiresInMs === null ? null : new Date(Date.now() + expiresInMs),
+        } as any).returning();
+        const pi = { id: piId, amount: 16200, amount_received: 16200, metadata: { type: "shoot_booking", bookingId: b.id, clientId: consumer.id, vendorPayoutCents: String(VENDOR_NET) } };
+        capturable.set(piId, pi);
+        return { id: b.id as string, piId, pi };
+      }
+      const shootTransfers = (id: string) => stripeTransfers.filter(t => t.transfer_group === `shoot_booking_${id}`);
+      const shootPoints = async (id: string) => db.select().from(schema.pointTransactions)
+        .where(dAnd(eq(schema.pointTransactions.referenceType, "shoot_booking"), eq(schema.pointTransactions.referenceId, id)));
+      const shootRow = async (id: string) => (await db.select().from(schema.shootBookings).where(eq(schema.shootBookings.id, id)))[0] as any;
+      async function acceptShoot(id: string) {
+        const res = await fetch(`http://127.0.0.1:${port}/api/bookings/photographer/${id}/accept`, { method: "POST", headers: { Authorization: `Bearer ${spToken}`, "Content-Type": "application/json" } });
+        return { status: res.status, body: await res.json().catch(() => ({})) as any };
+      }
+
+      // (a) auto-accept: webhook confirms and settles.
+      {
+        reset();
+        const { id, pi } = await settleShoot(BOOKING_STATES.PENDING_PAYMENT, "automatic");
+        await WebhookHandlers.handlePaymentIntentSucceeded(pi);
+        const tr = shootTransfers(id); const row = await shootRow(id);
+        assert(row.status === BOOKING_STATES.CONFIRMED, "shoot settlement (a) auto-accept: confirmed");
+        assert(tr.length === 1, `shoot settlement (a) auto-accept: exactly 1 transfer (got ${tr.length})`);
+        assert(tr[0].amount === VENDOR_NET && tr[0].amount === row.vendorNet && tr[0].destination === `acct_shoot_${tag}` && tr[0].metadata.recipient === "photographer",
+          `shoot settlement (a) auto-accept: vendorNet ${row.vendorNet}c to the photographer account (got ${tr[0]?.amount} → ${tr[0]?.destination})`);
+        assert(tr[0].idempotencyKey === `transfer_shoot_${id}_photographer`, `shoot settlement (a) auto-accept: deterministic idempotency key (got ${tr[0].idempotencyKey})`);
+        assert(!!row.settledAt && row.stripeTransferId === tr[0].id, "shoot settlement (a) auto-accept: settled_at and stripe_transfer_id set");
+        const pts = await shootPoints(id);
+        assert(pts.length === 1 && pts[0].dollarAmountCents === 16200, `shoot settlement (a) auto-accept: points earned once on 16200 (got ${JSON.stringify(pts.map(p => p.dollarAmountCents))})`);
+      }
+
+      // (b) manual accept, all four webhook timings.
+      for (const timing of ["none", "after", "before", "concurrent"] as const) {
+        reset();
+        webhookTiming = timing;
+        pendingWebhook = null;
+        const { id, pi } = await settleShoot(BOOKING_STATES.PENDING_PROVIDER, "manual", 86_400_000);
+        const res = await acceptShoot(id);
+        if (timing === "after") await WebhookHandlers.handlePaymentIntentSucceeded({ ...pi, status: "succeeded" });
+        if (pendingWebhook) await pendingWebhook;
+        const tr = shootTransfers(id); const row = await shootRow(id);
+        assert(res.status === 200 && res.body?.success === true, `shoot settlement (b) manual accept, webhook ${timing}: HTTP 200 (got ${res.status})`);
+        assert(tr.length === 1 && tr[0].amount === VENDOR_NET, `shoot settlement (b) manual accept, webhook ${timing}: exactly 1 transfer of ${VENDOR_NET} (got ${JSON.stringify(tr.map(t => t.amount))})`);
+        assert(!!row.settledAt && row.stripeTransferId === tr[0]?.id, `shoot settlement (b) manual accept, webhook ${timing}: settled_at and stripe_transfer_id set`);
+        assert((await shootPoints(id)).length === 1, `shoot settlement (b) manual accept, webhook ${timing}: points earned once (got ${(await shootPoints(id)).length})`);
+        assert(receiptSentCount() === 3, `shoot settlement (b) manual accept, webhook ${timing}: receipts still exactly 3 (got ${receiptSentCount()})`);
+      }
+      webhookTiming = "none";
+      pendingWebhook = null;
+
+      // (c) duplicate webhook deliveries, sequential and concurrent.
+      {
+        reset();
+        const { id, pi } = await settleShoot(BOOKING_STATES.PENDING_PAYMENT, "automatic");
+        await WebhookHandlers.handlePaymentIntentSucceeded(pi);
+        await WebhookHandlers.handlePaymentIntentSucceeded(pi);
+        await Promise.all([WebhookHandlers.handlePaymentIntentSucceeded(pi), WebhookHandlers.handlePaymentIntentSucceeded(pi)]);
+        assert(shootTransfers(id).length === 1, `shoot settlement (c) duplicate deliveries: still 1 transfer (got ${shootTransfers(id).length})`);
+        assert((await shootPoints(id)).length === 1, `shoot settlement (c) duplicate deliveries: points once (got ${(await shootPoints(id)).length})`);
+        assert(sent.length === 3, `shoot settlement (c) duplicate deliveries: receipts still sent once (got ${sent.length})`);
+      }
+
+      // (d) request expired before the photographer accepted: no capture at all.
+      {
+        reset();
+        const { id } = await settleShoot(BOOKING_STATES.PENDING_PROVIDER, "manual", -60_000);
+        captureCount = 0;
+        const res = await acceptShoot(id);
+        const row = await shootRow(id);
+        assert(res.status === 400 && res.body?.error === "This request expired before you accepted it. The customer was not charged.", `shoot settlement (d) expired before Accept: 400 not-charged message (got ${res.status} ${JSON.stringify(res.body)})`);
+        assert(captureCount === 0, `shoot settlement (d) expired before Accept: no capture (got ${captureCount})`);
+        assert(shootTransfers(id).length === 0 && !row.settledAt, "shoot settlement (d) expired before Accept: no transfer, not settled");
+        await db.update(schema.shootBookings).set({ status: BOOKING_STATES.EXPIRED } as any).where(eq(schema.shootBookings.id, id));
+      }
+
+      // (e) capture succeeds, then the request turns out expired: refund, no payout.
+      {
+        reset();
+        const { id, piId, pi } = await settleShoot(BOOKING_STATES.PENDING_PROVIDER, "manual", 86_400_000);
+        refundCalls.length = 0;
+        afterCapture = async () => {
+          await db.update(schema.shootBookings).set({ pendingProviderExpiresAt: new Date(Date.now() - 1000) } as any).where(eq(schema.shootBookings.id, id));
+        };
+        const res = await acceptShoot(id);
+        afterCapture = null;
+        await WebhookHandlers.handlePaymentIntentSucceeded({ ...pi, status: "succeeded" });
+        const row = await shootRow(id);
+        assert(res.status === 400 && res.body?.error === "This request expired before you accepted it. The customer was refunded.", `shoot settlement (e) capture then expiry: 400 refunded message (got ${res.status} ${JSON.stringify(res.body)})`);
+        assert(refundCalls.length === 1 && refundCalls[0].paymentIntentId === piId && refundCalls[0].amountCents === undefined, `shoot settlement (e) capture then expiry: one full refund of the captured PaymentIntent (got ${JSON.stringify(refundCalls)})`);
+        assert(shootTransfers(id).length === 0 && !row.settledAt && (await shootPoints(id)).length === 0, "shoot settlement (e) capture then expiry: no transfer, not settled, no points (even after the webhook)");
+        assert(row.status === BOOKING_STATES.EXPIRED, `shoot settlement (e) capture then expiry: status expired (got ${row.status})`);
+      }
+
+      // (f) transfer throws: settled_at kept, no transfer id, no transfer later.
+      {
+        reset();
+        const { id, pi } = await settleShoot(BOOKING_STATES.PENDING_PAYMENT, "automatic");
+        transferCreateThrows = "before";
+        await WebhookHandlers.handlePaymentIntentSucceeded(pi);
+        transferCreateThrows = "none";
+        let row = await shootRow(id);
+        assert(!!row.settledAt && row.stripeTransferId === null, "shoot settlement (f) transfer throws: settled_at set, stripe_transfer_id NULL");
+        assert((await shootPoints(id)).length === 1, "shoot settlement (f) transfer throws: points still earned once");
+        await WebhookHandlers.handlePaymentIntentSucceeded(pi);
+        row = await shootRow(id);
+        assert(shootTransfers(id).length === 0 && row.stripeTransferId === null && (await shootPoints(id)).length === 1, "shoot settlement (f) transfer throws: later webhook creates no transfer, no second points");
+      }
+
+      // (g) Stripe created the transfer but the response was lost.
+      {
+        reset();
+        const { id, pi } = await settleShoot(BOOKING_STATES.PENDING_PAYMENT, "automatic");
+        transferCreateThrows = "after";
+        await WebhookHandlers.handlePaymentIntentSucceeded(pi);
+        transferCreateThrows = "none";
+        const row = await shootRow(id);
+        assert(!!row.settledAt && row.stripeTransferId === null && shootTransfers(id).length === 1, "shoot settlement (g) lost transfer response: settled_at set, stripe_transfer_id NULL, 1 transfer at Stripe");
+        await WebhookHandlers.handlePaymentIntentSucceeded(pi);
+        assert(shootTransfers(id).length === 1, "shoot settlement (g) lost transfer response: later webhook creates no second transfer");
+        const retried = await stripeService.transferShootBookingPayout({ amountInCents: VENDOR_NET, connectedAccountId: `acct_shoot_${tag}`, bookingId: id });
+        const creates = transferCalls.filter(c => c === `transfers.create:shoot_booking_${id}`).length;
+        assert(retried.id === shootTransfers(id)[0].id && shootTransfers(id).length === 1 && creates === 1,
+          `shoot settlement (g) manual payout retry returns the existing transfer (transfers.list), no second create (creates ${creates})`);
+      }
     }
 
     (stripeService as any).capturePaymentIntent = baseCapture;

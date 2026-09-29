@@ -512,18 +512,29 @@ export class StripeService {
     bookingId: string;
   }) {
     const stripe = await getUncachableStripeClient();
+    const transferGroup = `shoot_booking_${params.bookingId}`;
 
+    // Stripe keeps idempotency keys for 24h only, so also look for an earlier
+    // photographer transfer in the booking's transfer group.
+    const existing = await stripe.transfers.list({ transfer_group: transferGroup, limit: 10 });
+    const prior = existing.data.find(t => t.metadata?.recipient === 'photographer');
+    if (prior) {
+      return prior;
+    }
+
+    // Deterministic key: must be stable across retries, so not the
+    // idempotencyKey() helper (it appends randomUUID()).
     return stripe.transfers.create({
       amount: params.amountInCents,
       currency: 'usd',
       destination: params.connectedAccountId,
-      transfer_group: `shoot_booking_${params.bookingId}`,
+      transfer_group: transferGroup,
       metadata: {
         bookingId: params.bookingId,
         recipient: 'photographer',
         type: 'shoot_booking_payout',
       },
-    }, { idempotencyKey: idempotencyKey(`transfer_shoot_${params.bookingId}`) });
+    }, { idempotencyKey: `transfer_shoot_${params.bookingId}_photographer` });
   }
 
   /**

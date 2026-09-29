@@ -961,6 +961,10 @@ export const shootBookings = pgTable("shoot_bookings", {
   discountAmountCents: integer("discount_amount_cents").default(0),
   pointsRedeemed: integer("points_redeemed").default(0),
 
+  // Set once when the photographer payout and points run (see settleShootBooking).
+  settledAt: timestamp("settled_at", { withTimezone: true }),
+  stripeTransferId: text("stripe_transfer_id"),
+
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 }, (table) => ({
