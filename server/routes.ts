@@ -10524,6 +10524,14 @@ export async function registerRoutes(
 
       storage.scheduleAggregateRecompute(targetType, targetId);
 
+      // Recompute the parent business rating
+      if (targetType === 'product' || targetType === 'service') {
+        const businessId = await storage.getBusinessIdForTarget(targetType, targetId);
+        if (businessId) {
+          await storage.recomputeBusinessRating(businessId);
+        }
+      }
+
       return res.status(201).json(result);
     } catch (error) {
       console.error("POST /api/ratings error:", error);

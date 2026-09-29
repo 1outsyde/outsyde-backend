@@ -854,6 +854,8 @@ export interface IStorage {
   upsertRating(data: InsertRating): Promise<Rating>;
   getRatingsForTarget(targetType: string, targetId: string): Promise<Rating[]>;
   getRatingsForBusiness(businessId: string): Promise<Rating[]>;
+  recomputeBusinessRating(businessId: string): Promise<void>;
+  getBusinessIdForTarget(targetType: 'product' | 'service', targetId: string): Promise<string | null>;
   verifyPurchaseForRating(userId: string, targetType: string, targetId: string, purchaseType?: string, purchaseId?: string): Promise<{
     verified: boolean;
     reason?: string;
@@ -2039,9 +2041,7 @@ export class DatabaseStorage implements IStorage {
           .set({ rating: 0, reviewCount: 0 })
           .where(eq(photographers.id, targetId));
       } else if (targetType === 'business') {
-        await db.update(businesses)
-          .set({ rating: 0, reviewCount: 0 })
-          .where(eq(businesses.id, targetId));
+        await this.recomputeBusinessRating(targetId);
       }
       return;
     }
@@ -2057,9 +2057,7 @@ export class DatabaseStorage implements IStorage {
         .set({ rating: avgRating, reviewCount })
         .where(eq(photographers.id, targetId));
     } else if (targetType === 'business') {
-      await db.update(businesses)
-        .set({ rating: avgRating, reviewCount })
-        .where(eq(businesses.id, targetId));
+      await this.recomputeBusinessRating(targetId);
     }
     // service_businesses would need a rating column added if needed
   }
@@ -7721,6 +7719,66 @@ export class DatabaseStorage implements IStorage {
     }
 
     return db.select().from(ratings).where(or(...conditions));
+  }
+
+  async recomputeBusinessRating(businessId: string): Promise<void> {
+    const ratingsRows = await this.getRatingsForBusiness(businessId);
+
+    const reviewsRows = await db.select()
+      .from(reviews)
+      .where(and(
+        eq(reviews.targetType, 'business'),
+        eq(reviews.targetId, businessId),
+        eq(reviews.isVerified, true)
+      ));
+
+    // A purchase can have both a product/service rating and a business review; count it once (rating wins).
+    const ratedPurchaseIds = new Set(
+      ratingsRows.map(r => r.purchaseId).filter((id): id is string => Boolean(id))
+    );
+    const uniqueReviews = reviewsRows.filter(r => !ratedPurchaseIds.has(r.bookingId));
+
+    const allRatings = [
+      ...ratingsRows.map(r => r.rating),
+      ...uniqueReviews.map(r => r.rating),
+    ];
+
+    if (allRatings.length === 0) {
+      await db.update(businesses)
+        .set({ rating: 0, reviewCount: 0 })
+        .where(eq(businesses.id, businessId));
+      return;
+    }
+
+    const average = Math.round(
+      allRatings.reduce((sum, r) => sum + r, 0) / allRatings.length
+    );
+    const count = allRatings.length;
+
+    await db.update(businesses)
+      .set({ rating: average, reviewCount: count })
+      .where(eq(businesses.id, businessId));
+  }
+
+  async getBusinessIdForTarget(
+    targetType: 'product' | 'service',
+    targetId: string
+  ): Promise<string | null> {
+    if (targetType === 'product') {
+      const [row] = await db.select({ businessId: vendorProducts.businessId })
+        .from(vendorProducts)
+        .where(eq(vendorProducts.id, targetId))
+        .limit(1);
+      return row?.businessId ?? null;
+    }
+    if (targetType === 'service') {
+      const [row] = await db.select({ businessId: vendorServices.businessId })
+        .from(vendorServices)
+        .where(eq(vendorServices.id, targetId))
+        .limit(1);
+      return row?.businessId ?? null;
+    }
+    return null;
   }
 
   async verifyPurchaseForRating(
