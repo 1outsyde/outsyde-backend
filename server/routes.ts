@@ -141,6 +141,7 @@ import {
 } from "./bookingStateMachine";
 import { settleAppointmentBooking, settleShootBooking } from "./bookingSettlement";
 import { calculateProductFee, calculateBookingFee, calculateConsumerServiceFee, calculateBookingFees, quoteDeposit } from "./fees";
+import { validateDeposit, invalidDepositBody, validatePhotographerDeposit, photographerBookingDepositCents } from "./deposits";
 import {
   trackLinkClick,
   recordAttribution,
@@ -5044,10 +5045,13 @@ export async function registerRoutes(
 
       // What create-payment-intent will charge for this hold. The deposit is
       // read from the same record that route reads it from: the staff service
-      // for staff bookings, otherwise the vendor service. Photographers have
-      // no deposit.
+      // for staff bookings, the photographer service for photographers,
+      // otherwise the vendor service.
       let holdDepositAmountCents: number | null = null;
-      if (providerType === 'business' && staffMemberId) {
+      if (providerType === 'photographer') {
+        const photographerService = await storage.getPhotographerService(serviceId as string);
+        holdDepositAmountCents = photographerBookingDepositCents(photographerService, result.servicePriceCents);
+      } else if (providerType === 'business' && staffMemberId) {
         const staffService = await storage.getStaffService(serviceId as string);
         holdDepositAmountCents = typeof staffService?.depositAmountCents === 'number' ? staffService.depositAmountCents : null;
       } else if (providerType === 'business') {
@@ -5474,9 +5478,16 @@ export async function registerRoutes(
           return res.status(400).json({ error: "Photographer has not completed Stripe onboarding" });
         }
 
+        // Same deposit rule as the hold response, from the same service
+        // record. Deposit bookings charge D + 8% now; fees and the
+        // photographer's net are on the charged amount.
+        const photographerService = hold.serviceId ? await storage.getPhotographerService(hold.serviceId) : undefined;
+        const shootDepositCents = photographerBookingDepositCents(photographerService, hold.servicePriceCents);
+        const shootQuote = quoteDeposit(hold.servicePriceCents, shootDepositCents);
+
         // Same calculateBookingFees() as the business branch — one fee model,
         // one place to update when rates change.
-        const photographerFees = calculateBookingFees(hold.servicePriceCents);
+        const photographerFees = calculateBookingFees(shootQuote.chargeAmountCents);
 
         // Respect autoAcceptBookings: shoot_booking is already handled by the
         // payment_intent.amount_capturable_updated webhook branch, so manual
@@ -5500,6 +5511,7 @@ export async function registerRoutes(
           endTime: hold.endTime,
           durationHours,
           totalPrice: hold.servicePriceCents,
+          depositAmountCents: shootDepositCents,
           platformFee: photographerFees.platformFeeCents,
           vendorNet: photographerFees.vendorNetCents,
           status: BOOKING_STATES.PENDING_PAYMENT,
@@ -5551,7 +5563,7 @@ export async function registerRoutes(
         // call markHoldAsConverted once payment succeeds (mirrors how the
         // 'appointment' branch handles hold conversion).
         const photographerPI = await stripeService.createPlatformPaymentIntent({
-          amountCents: photographerFees.customerTotalBeforeTaxCents,
+          amountCents: shootQuote.dueNowCents,
           customerId: photographerStripeCustomerId,
           captureMethod,
           metadata: {
@@ -6405,9 +6417,15 @@ export async function registerRoutes(
         isContactForPricing: z.boolean().optional(),
         estimatedDurationMinutes: z.number().min(1).nullable().optional(),
         isActive: z.boolean().optional(),
+        depositAmountCents: z.number().int().min(0).nullable().optional(),
       });
 
       const validated = serviceSchema.parse(req.body);
+
+      const depositCheck = validatePhotographerDeposit(validated.depositAmountCents, validated.priceCents || null);
+      if (!depositCheck.ok) {
+        return res.status(400).json(invalidDepositBody(depositCheck.message));
+      }
       
       // Create service in draft status
       const service = await storage.createPhotographerService({
@@ -6422,6 +6440,7 @@ export async function registerRoutes(
         isContactForPricing: validated.isContactForPricing || false,
         estimatedDurationMinutes: validated.estimatedDurationMinutes || null,
         isActive: validated.isActive !== false,
+        depositAmountCents: depositCheck.value ?? null,
         status: 'draft',
       });
 
@@ -6464,9 +6483,23 @@ export async function registerRoutes(
         isContactForPricing: z.boolean().optional(),
         estimatedDurationMinutes: z.number().min(1).nullable().optional(),
         isActive: z.boolean().optional(),
+        depositAmountCents: z.number().int().min(0).nullable().optional(),
       });
 
       const validated = updateSchema.parse(req.body);
+
+      // Same rule as PATCH /api/vendor/services/:id: re-check whenever the
+      // price or the deposit changes.
+      if (validated.priceCents !== undefined || validated.depositAmountCents !== undefined) {
+        const depositCheck = validatePhotographerDeposit(
+          validated.depositAmountCents !== undefined ? validated.depositAmountCents : service.depositAmountCents,
+          validated.priceCents !== undefined ? validated.priceCents : service.priceCents,
+        );
+        if (!depositCheck.ok) {
+          return res.status(400).json(invalidDepositBody(depositCheck.message));
+        }
+        if (validated.depositAmountCents !== undefined) validated.depositAmountCents = depositCheck.value;
+      }
       
       // Handle price changes for live services with Stripe Connected account
       if (service.status === 'live' && service.stripeConnectedProductId && photographer.stripeAccountId) {
@@ -7413,6 +7446,15 @@ export async function registerRoutes(
         return res.status(403).json({ error: "Not authorized to pay for this booking" });
       }
 
+      // This route charges the full price; deposit bookings are paid only
+      // through the hold flow (POST /api/booking/:holdId/create-payment-intent).
+      if ((booking.depositAmountCents ?? 0) > 0) {
+        return res.status(409).json({
+          error: "This booking takes a deposit and cannot be paid here.",
+          code: "DEPOSIT_BOOKING",
+        });
+      }
+
       // Must be in draft or pending_payment state
       if (booking.status !== BOOKING_STATES.DRAFT && booking.status !== BOOKING_STATES.PENDING_PAYMENT) {
         return res.status(400).json({ 
@@ -8264,14 +8306,19 @@ export async function registerRoutes(
         ? await storage.getPhotographerService(booking.serviceId)
         : null;
 
-      const { refundTier, refundAmountCents, feeAmountCents } = computeCancellationRefund(
-        service,
-        new Date(`${booking.date}T${booking.startTime}`),
-        booking.totalPrice,
-        booking.vendorNet,
-      );
+      // Platform rule: a deposit is non-refundable when the customer cancels,
+      // and no cancellation fee is charged on top of it.
+      const { refundTier, refundAmountCents, feeAmountCents } = hasDeposit(booking)
+        ? NON_REFUNDABLE_DEPOSIT_OUTCOME
+        : computeCancellationRefund(
+            service,
+            new Date(`${booking.date}T${booking.startTime}`),
+            booking.totalPrice,
+            booking.vendorNet,
+          );
 
       const fees = calculateBookingFees(booking.totalPrice);
+      const charged = quoteDeposit(booking.totalPrice, hasDeposit(booking) ? booking.depositAmountCents : null);
 
       return res.json({
         cancellable: true,
@@ -8281,7 +8328,13 @@ export async function registerRoutes(
         feeWouldBeCharged: feeAmountCents > 0,
         feeNeedsManualCollection: false,
         subtotalCents: fees.subtotalCents,
+        // Full price + 8%, kept as-is for existing callers. For deposit
+        // bookings the amount actually paid is chargedAmountCents.
         grossChargeAmountCents: fees.customerTotalBeforeTaxCents,
+        chargedAmountCents: charged.dueNowCents,
+        isDepositBooking: hasDeposit(booking),
+        depositAmountCents: hasDeposit(booking) ? booking.depositAmountCents : null,
+        depositNonRefundable: hasDeposit(booking),
       });
     } catch (error: any) {
       console.error("Shoot booking cancel preview error:", error);
@@ -8696,16 +8749,48 @@ export async function registerRoutes(
         : null;
 
       // ── Compute refund tier + cancellation fee ────────────────────────────
-      const { refundTier, refundAmountCents, feeAmountCents } = computeCancellationRefund(
-        service,
-        new Date(`${booking.date}T${booking.startTime}`),
-        booking.totalPrice,
-        booking.vendorNet,
-      );
+      // Platform rule: a deposit is non-refundable when the customer cancels,
+      // and no cancellation fee is charged on top of it.
+      let { refundTier, refundAmountCents, feeAmountCents } = hasDeposit(booking)
+        ? NON_REFUNDABLE_DEPOSIT_OUTCOME
+        : computeCancellationRefund(
+            service,
+            new Date(`${booking.date}T${booking.startTime}`),
+            booking.totalPrice,
+            booking.vendorNet,
+          );
+
+      // ── Uncaptured authorization: release it instead of refunding ────────
+      // A manual-capture PaymentIntent is still requires_capture while the
+      // photographer has not accepted; nothing was charged, so cancel it.
+      let authorizationReleased = false;
+      if (booking.stripePaymentIntentId && booking.status === BOOKING_STATES.PENDING_PROVIDER) {
+        let paymentStatus: string;
+        try {
+          paymentStatus = (await stripeService.getPaymentIntentForRefund(booking.stripePaymentIntentId)).status;
+        } catch (stripeError: any) {
+          console.error(`[Cancel] AUTH_RELEASE_FAILED shoot booking=${bookingId} pi=${booking.stripePaymentIntentId}: could not read PaymentIntent`, stripeError);
+          return res.status(502).json({ error: "Could not read payment; booking not canceled", code: "AUTH_RELEASE_FAILED", bookingId });
+        }
+        if (paymentStatus === 'requires_capture' || paymentStatus === 'canceled') {
+          if (paymentStatus === 'requires_capture') {
+            try {
+              await stripeService.cancelPaymentIntent(booking.stripePaymentIntentId, 'requested_by_customer');
+            } catch (stripeError: any) {
+              console.error(`[Cancel] Authorization release FAILED shoot booking=${bookingId} pi=${booking.stripePaymentIntentId}:`, stripeError);
+              return res.status(502).json({ error: "Could not release payment authorization; booking not canceled", code: "AUTH_RELEASE_FAILED", bookingId });
+            }
+          }
+          authorizationReleased = true;
+          refundTier = 'none';
+          refundAmountCents = 0;
+          feeAmountCents = 0;
+        }
+      }
 
       // ── Issue refund (best-effort) ────────────────────────────────────────
       let refundSucceeded = false;
-      if (refundAmountCents > 0 && booking.stripePaymentIntentId) {
+      if (!authorizationReleased && refundAmountCents > 0 && booking.stripePaymentIntentId) {
         try {
           const refund = await stripeService.createBookingRefund({
             paymentIntentId: booking.stripePaymentIntentId,
@@ -8772,6 +8857,7 @@ export async function registerRoutes(
           feeAmountCents: String(feeAmountCents),
           feeCharged: String(feeCharged),
           feeNeedsManualCollection: String(feeNeedsManualCollection),
+          authorizationReleased: String(authorizationReleased),
         },
       });
 
@@ -8856,6 +8942,7 @@ export async function registerRoutes(
         feeAmountCents,
         feeCharged,
         feeNeedsManualCollection,
+        authorizationReleased,
       });
     } catch (error: any) {
       console.error("Consumer cancel shoot booking error:", error);
@@ -8933,8 +9020,9 @@ export async function registerRoutes(
         return res.status(400).json({ error: "No payment found for this booking" });
       }
 
-      // Create refund
-      const refundAmount = amount || booking.totalPrice;
+      // Create refund. Default: what was charged before the consumer fee (the
+      // deposit on deposit bookings, otherwise the service price).
+      const refundAmount = amount || (hasDeposit(booking) ? booking.depositAmountCents! : booking.totalPrice);
       const refund = await stripeService.createBookingRefund({
         paymentIntentId: booking.stripePaymentIntentId,
         amountCents: refundAmount,
@@ -9097,6 +9185,9 @@ export async function registerRoutes(
           sessionType: booking.shootType,
           status: statusMap[booking.status] ?? "upcoming",
           price: (booking.totalPrice ?? 0) / 100,
+          // Deposit bookings charge D + 8% now; the rest of price is paid in person.
+          depositAmountCents: hasDeposit(booking) ? booking.depositAmountCents : null,
+          chargedAmountCents: quoteDeposit(booking.totalPrice ?? 0, hasDeposit(booking) ? booking.depositAmountCents : null).dueNowCents,
           // Service details
           serviceName: service?.name ?? null,
           serviceDurationMinutes: service?.estimatedDurationMinutes ?? null,
@@ -12030,22 +12121,6 @@ export async function registerRoutes(
       res.status(500).json({ error: "Failed to delete variant" });
     }
   });
-
-  // Deposit rule for vendor services: no deposit (null), or at least $7.00 and
-  // less than the service price. 0 means no deposit and is stored as null.
-  const MIN_DEPOSIT_CENTS = 700;
-  function validateDeposit(
-    depositCents: number | null | undefined,
-    priceCents: number,
-  ): { ok: true; value: number | null | undefined } | { ok: false; message: string } {
-    if (depositCents === undefined) return { ok: true, value: undefined };
-    if (depositCents === null || depositCents === 0) return { ok: true, value: null };
-    if (depositCents < MIN_DEPOSIT_CENTS) return { ok: false, message: "Deposit must be at least $7.00." };
-    if (depositCents >= priceCents) return { ok: false, message: "Deposit must be less than the service price." };
-    return { ok: true, value: depositCents };
-  }
-  const invalidDepositBody = (message: string, extra: Record<string, unknown> = {}) =>
-    ({ error: message, message, code: "INVALID_DEPOSIT", ...extra });
 
   // Get vendor's services
   app.get("/api/vendor/services", async (req, res) => {

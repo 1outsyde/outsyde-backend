@@ -239,6 +239,11 @@ export async function sendShootBookingReceipts(
   const photographerUser = photographer ? await storage.getUser(photographer.userId).catch(() => undefined) : undefined;
   const customer = await storage.getUser(booking.clientId).catch(() => undefined);
 
+  // Deposit bookings charge D (+8%) now; the remainder is paid in person and
+  // is display only.
+  const depositCents = (booking.depositAmountCents ?? 0) > 0 ? booking.depositAmountCents! : undefined;
+  const remainderCents = depositCents != null ? Math.max(0, (booking.totalPrice || 0) - depositCents) : undefined;
+
   await sendTransactionReceipts(opts.txnType, bookingId, {
     consumer: {
       email: customer?.email,
@@ -253,6 +258,8 @@ export async function sendShootBookingReceipts(
         date: booking.date || '',
         time: booking.startTime || '',
         basePrice: booking.totalPrice || 0,
+        depositAmountCents: depositCents,
+        remainderDueCents: remainderCents,
       }),
     },
     vendor: {
@@ -268,6 +275,8 @@ export async function sendShootBookingReceipts(
         date: booking.date || '',
         time: booking.startTime || '',
         basePrice: booking.totalPrice || 0,
+        depositAmountCents: depositCents,
+        remainderDueCents: remainderCents,
       }),
     },
     admin: () => sendInternalEventAlert({
@@ -278,8 +287,9 @@ export async function sendShootBookingReceipts(
       vendorName: photographer?.displayName || 'Photographer',
       vendorEmail: photographerUser?.email || '',
       basePrice: booking.totalPrice || 0,
-      paymentType: 'full',
-      amountChargedCents: booking.totalPrice || 0,
+      paymentType: depositCents != null ? 'deposit' : 'full',
+      amountChargedCents: depositCents ?? (booking.totalPrice || 0),
+      serviceTotalCents: booking.totalPrice || 0,
       stripeChargeCents: opts.stripeChargeCents,
       date: booking.date || '',
       time: booking.startTime || '',

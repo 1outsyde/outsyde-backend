@@ -855,6 +855,9 @@ export const photographerServices = pgTable("photographer_services", {
   // For package pricing - total price for included hours in cents
   priceCents: integer("price_cents"),
   packageHours: integer("package_hours"), // How many hours included in package (e.g., "3hr car photography")
+
+  // Optional deposit (cents). NULL = no deposit. Only valid with a fixed priceCents.
+  depositAmountCents: integer("deposit_amount_cents"),
   
   isContactForPricing: boolean("is_contact_for_pricing").default(false),
   estimatedDurationMinutes: integer("estimated_duration_minutes"),
@@ -915,6 +918,9 @@ export const shootBookings = pgTable("shoot_bookings", {
   specialRequests: text("special_requests"),
 
   totalPrice: integer("total_price").notNull(),
+  // Deposit charged at booking (cents). NULL = full price charged. The rest of
+  // totalPrice is paid in person; platformFee and vendorNet are on the deposit.
+  depositAmountCents: integer("deposit_amount_cents"),
   platformFee: integer("platform_fee").default(0),
   vendorNet: integer("vendor_net").default(0),
 

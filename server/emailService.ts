@@ -680,11 +680,16 @@ export async function sendShootBookingConfirmationToConsumer(params: {
   time: string;
   location?: string;
   basePrice: number;
+  // Set only when a deposit was charged instead of the full service price.
+  depositAmountCents?: number;
+  remainderDueCents?: number;
 }): Promise<void> {
   try {
-    const consumerUpcharge = params.basePrice * 0.08;
-    const consumerTotal = params.basePrice + consumerUpcharge;
+    const chargedBase = params.depositAmountCents ?? params.basePrice;
+    const consumerUpcharge = chargedBase * 0.08;
+    const consumerTotal = chargedBase + consumerUpcharge;
     const bookingRef = `#S${String(params.bookingNumber).padStart(4, '0')}`;
+    const isDeposit = params.depositAmountCents != null;
 
     const rows = [
       { label: 'Booking', value: bookingRef },
@@ -693,7 +698,13 @@ export async function sendShootBookingConfirmationToConsumer(params: {
       { label: 'Date', value: params.date },
       { label: 'Time', value: params.time },
       ...(params.location ? [{ label: 'Location', value: params.location }] : []),
-      { label: 'Total Paid', value: cents(consumerTotal) },
+      ...(isDeposit ? [
+        { label: 'Service Total', value: cents(params.basePrice) },
+        { label: 'Deposit Paid', value: cents(consumerTotal) },
+        { label: 'Due at Appointment', value: cents(params.remainderDueCents ?? 0) },
+      ] : [
+        { label: 'Total Paid', value: cents(consumerTotal) },
+      ]),
     ].map((r, i) => detailRow(r.label, r.value, i % 2 === 0)).join('');
 
     const contactLines = [
@@ -735,11 +746,16 @@ export async function sendShootBookingNotificationToPhotographer(params: {
   time: string;
   location?: string;
   basePrice: number;
+  // Set only when a deposit was charged instead of the full service price.
+  depositAmountCents?: number;
+  remainderDueCents?: number;
 }): Promise<void> {
   try {
-    const vendorFee = params.basePrice * 0.02;
-    const vendorPayout = params.basePrice - vendorFee;
+    const chargedBase = params.depositAmountCents ?? params.basePrice;
+    const vendorFee = chargedBase * 0.02;
+    const vendorPayout = chargedBase - vendorFee;
     const bookingRef = `#S${String(params.bookingNumber).padStart(4, '0')}`;
+    const isDeposit = params.depositAmountCents != null;
 
     const clientDisplay = params.consumerDisplayName || params.consumerName;
     const usernameDisplay = params.consumerUsername ? `@${params.consumerUsername}` : '';
@@ -752,7 +768,14 @@ export async function sendShootBookingNotificationToPhotographer(params: {
       { label: 'Date', value: params.date },
       { label: 'Time', value: params.time },
       ...(params.location ? [{ label: 'Location', value: params.location }] : []),
-      { label: 'Your Payout', value: cents(vendorPayout) },
+      ...(isDeposit ? [
+        { label: 'Service Total', value: cents(params.basePrice) },
+        { label: 'Deposit Collected', value: cents(chargedBase) },
+        { label: 'Your Deposit Payout', value: cents(vendorPayout) },
+        { label: 'Balance to Collect in Person', value: cents(params.remainderDueCents ?? 0) },
+      ] : [
+        { label: 'Your Payout', value: cents(vendorPayout) },
+      ]),
     ].map((r, i) => detailRow(r.label, r.value, i % 2 === 0)).join('');
 
     const html = wrapEmail(`
