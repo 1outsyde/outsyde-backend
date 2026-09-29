@@ -494,7 +494,8 @@ async function main() {
     await db.update(schema.businesses).set({ stripeAccountId: `acct_biz_${dtag}`, autoAcceptBookings: true } as any).where(eq(schema.businesses.id, business.id));
     await db.update(schema.photographers).set({ stripeAccountId: `acct_ph_${dtag}`, stripeOnboardingComplete: true, autoAcceptBookings: true } as any).where(eq(schema.photographers.id, photographer.id));
     await db.update(schema.users).set({ stripeCustomerId: `cus_dep_${dtag}` } as any).where(eq(schema.users.id, consumer.id));
-    const [staff] = await db.insert(schema.staffMembers).values({ businessId: business.id, displayName: "Test Staff", status: "active", stripeOnboardingComplete: true, stripeAccountId: `acct_staff_${dtag}` } as any).returning();
+    const [staffUser] = await db.insert(schema.users).values({ username: `s_${dtag}`, email: `staff-${dtag}@example.com`, name: "Test Staff" } as any).returning();
+    const [staff] = await db.insert(schema.staffMembers).values({ businessId: business.id, userId: staffUser.id, displayName: "Test Staff", status: "active", stripeOnboardingComplete: true, stripeAccountId: `acct_staff_${dtag}` } as any).returning();
     const [staffSvc] = await db.insert(schema.staffServices).values({ staffMemberId: staff.id, businessId: business.id, name: "Staff braids", priceCents: 12500, durationMinutes: 60, status: "live" } as any).returning();
     const [photoSvc] = await db.insert(schema.photographerServices).values({ photographerId: photographer.id, name: "Portrait", priceCents: 15000, estimatedDurationMinutes: 60, status: "live" } as any).returning();
     const [bizDep] = await db.insert(schema.vendorServices).values({ businessId: business.id, name: "Knotless (deposit)", price: 27500, durationMinutes: 60, depositAmountCents: 3000 } as any).returning();
@@ -510,6 +511,7 @@ async function main() {
       consumer: generateAccessToken({ userId: consumer.id, isVendor: false }),
       vendor: generateAccessToken({ userId: vendorUser.id, isVendor: true, businessId: business.id }),
       vendor2: generateAccessToken({ userId: vendor2.id, isVendor: true, businessId: business2.id }),
+      staff: generateAccessToken({ userId: staffUser.id, isVendor: false }),
     };
     async function http(method: string, path: string, who: keyof typeof tok, body?: unknown) {
       const res = await fetch(`http://127.0.0.1:${port}${path}`, {
@@ -562,7 +564,12 @@ async function main() {
     R.PaymentIntents.prototype.cancel = async function (id: string) { return { id, status: "canceled" }; };
     R.Customers.prototype.retrieve = async function (id: string) { return { id, deleted: false }; };
     R.Customers.prototype.create = async function () { return { id: `cus_new_${randomUUID().slice(0, 8)}` }; };
-    R.Transfers.prototype.create = async function (p: any) { return { id: `tr_${randomUUID().slice(0, 8)}`, amount: p.amount }; };
+    const depTransfers: Array<{ id: string; amount: number; destination: string; transfer_group: string; metadata: Record<string, string> }> = [];
+    R.Transfers.prototype.create = async function (p: any) {
+      const t = { id: `tr_${randomUUID().slice(0, 8)}`, amount: p.amount, destination: p.destination, transfer_group: p.transfer_group, metadata: p.metadata ?? {} };
+      depTransfers.push(t);
+      return t;
+    };
 
     async function hold(kind: "dep" | "full" | "staff" | "photo") {
       const { date, time } = nextSlot();
@@ -787,13 +794,114 @@ async function main() {
         `business/bookings full ${JSON.stringify(bf && { c: bf.chargedAmountCents, a: bf.amount, v: bf.vendorNetAmount })}`);
     } else check("T-2h", false, "could not create confirmed bookings");
 
+    // ── T-2s: staff service deposits ────────────────────────────────────────
+    {
+      const staffPost = (body: Record<string, unknown>) => http("POST", "/api/staff/services", "staff",
+        { name: `Staff dep ${randomUUID().slice(0, 4)}`, priceCents: 27500, durationMinutes: 60, ...body });
+      let r = await staffPost({ depositAmountCents: 600 });
+      check("T-2s", r.status === 400 && r.body?.code === "INVALID_DEPOSIT" && !!r.body?.message && !!r.body?.error, `staff POST D=600 → ${r.status} ${r.body?.code}`);
+      r = await staffPost({ depositAmountCents: 27500 });
+      check("T-2s", r.status === 400 && r.body?.code === "INVALID_DEPOSIT", `staff POST D=B → ${r.status} ${r.body?.code}`);
+      r = await staffPost({ depositAmountCents: 0 });
+      check("T-2s", r.status === 200 && r.body?.service?.depositAmountCents === null, `staff POST D=0 → ${r.status}, stored ${r.body?.service?.depositAmountCents}`);
+      r = await staffPost({ depositAmountCents: null });
+      check("T-2s", r.status === 200 && r.body?.service?.depositAmountCents === null, `staff POST D=null → ${r.status}, stored ${r.body?.service?.depositAmountCents}`);
+      r = await staffPost({});
+      check("T-2s", r.status === 200 && r.body?.service?.depositAmountCents === null, `staff POST no D → ${r.status}, stored ${r.body?.service?.depositAmountCents}`);
+      r = await staffPost({ depositAmountCents: 3000 });
+      check("T-2s", r.status === 200 && r.body?.service?.depositAmountCents === 3000, `staff POST D=3000 → ${r.status}, stored ${r.body?.service?.depositAmountCents}`);
+      const staffDepId: string | undefined = r.body?.service?.id;
+
+      if (staffDepId) {
+        const patch = (body: Record<string, unknown>) => http("PATCH", `/api/staff/services/${staffDepId}`, "staff", body);
+        const stored = async () => (await db.select().from(schema.staffServices).where(eq(schema.staffServices.id, staffDepId)))[0] as any;
+        r = await patch({ priceCents: 3000 });
+        check("T-2s", r.status === 400 && r.body?.code === "INVALID_DEPOSIT" && (await stored()).priceCents === 27500, `staff PATCH price to stored D → ${r.status}, price now ${(await stored()).priceCents}`);
+        r = await patch({ depositAmountCents: 600 });
+        check("T-2s", r.status === 400 && r.body?.code === "INVALID_DEPOSIT" && (await stored()).depositAmountCents === 3000, `staff PATCH D=600 → ${r.status}`);
+        r = await patch({ priceCents: 20000, depositAmountCents: 20000 });
+        check("T-2s", r.status === 400 && r.body?.code === "INVALID_DEPOSIT", `staff PATCH D = new price → ${r.status}`);
+        r = await patch({ depositAmountCents: 0 });
+        check("T-2s", r.status === 200 && (await stored()).depositAmountCents === null, `staff PATCH D=0 → ${r.status}, stored ${(await stored()).depositAmountCents}`);
+        r = await patch({ depositAmountCents: 3000 });
+        check("T-2s", r.status === 200 && (await stored()).depositAmountCents === 3000, `staff PATCH D=3000 → ${r.status}, stored ${(await stored()).depositAmountCents}`);
+        r = await patch({ name: "Staff knotless (deposit)" });
+        check("T-2s", r.status === 200 && (await stored()).depositAmountCents === 3000, `staff PATCH name only → ${r.status}`);
+        await db.update(schema.staffServices).set({ status: "live" } as any).where(eq(schema.staffServices.id, staffDepId));
+
+        const pub = await http("GET", `/api/businesses/${business.id}/staff/${staff.id}/services`, "consumer");
+        const listed = (pub.body?.services ?? []) as any[];
+        check("T-2s", pub.status === 200 && listed.find(s => s.id === staffDepId)?.depositAmountCents === 3000
+          && listed.find(s => s.id === staffSvc.id)?.depositAmountCents === null, `public staff services depositAmountCents ${JSON.stringify(listed.map(s => [s.name, s.depositAmountCents]))}`);
+
+        // Hold → PaymentIntent → webhook settlement → cancel preview.
+        const { date, time } = nextSlot();
+        const h = await http("POST", "/api/booking/hold", "consumer", { providerType: "business", providerId: business.id, staffMemberId: staff.id, serviceId: staffDepId, date, startTime: time });
+        const hb = h.body;
+        check("T-2s", h.status === 200 && hb.serviceTotalCents === 27500 && hb.depositAmountCents === 3000 && hb.chargeAmountCents === 3000
+          && hb.dueNowCents === 3240 && hb.dueAtAppointmentCents === 24500 && hb.depositNonRefundable === true
+          && hb.dueNowFeeBreakdown?.grossChargeAmount === 3240 && hb.feeBreakdown?.grossChargeAmount === 29700,
+          `staff deposit hold fields: ${h.status} ${JSON.stringify({ s: hb?.serviceTotalCents, d: hb?.depositAmountCents, c: hb?.chargeAmountCents, n: hb?.dueNowCents, r: hb?.dueAtAppointmentCents, nr: hb?.depositNonRefundable })}`);
+        if (h.status === 200) {
+          const before = createCalls.length;
+          const p = await pay(hb.holdId);
+          const call = createCalls.length > before ? lastCreate() : undefined;
+          const [row] = await apptsForHold(hb.holdId) as any[];
+          check("T-2s", p.status === 200 && call?.params.amount === 3240 && call?.params.amount === hb.dueNowCents && call?.params.metadata?.staffMemberId === staff.id,
+            `staff deposit PI amount ${call?.params.amount} vs hold dueNowCents ${hb.dueNowCents} (PI http ${p.status})`);
+          check("T-2s", row && row.depositAmountCents === 3000 && row.totalPrice === 27500 && row.staffServiceId === staffDepId && row.serviceId === null && row.staffMemberId === staff.id,
+            `staff deposit appointment row ${JSON.stringify(row && { d: row.depositAmountCents, t: row.totalPrice, ss: row.staffServiceId, s: row.serviceId })}`);
+
+          if (call && row) {
+            const t0 = depTransfers.length;
+            await WH.handlePaymentIntentSucceeded({ id: p.body.paymentIntentId, amount: call.params.amount, metadata: call.params.metadata });
+            const tr = depTransfers.slice(t0).filter(t => t.transfer_group?.endsWith(row.id));
+            const [after] = await db.select().from(schema.appointments).where(eq(schema.appointments.id, row.id)) as any[];
+            check("T-2s", after.status === BOOKING_STATES.CONFIRMED && tr.length === 1 && tr[0].amount === 2940
+              && tr[0].destination === `acct_staff_${dtag}` && tr[0].metadata.recipient === "staff" && after.staffPayout === 2940 && !!after.settledAt,
+              `staff deposit settlement: status ${after.status}, transfers ${JSON.stringify(tr.map(t => [t.amount, t.destination, t.metadata.recipient]))}, staffPayout ${after.staffPayout}`);
+
+            const pv = await http("GET", `/api/bookings/appointments/${row.id}/cancel-preview`, "consumer");
+            const b = pv.body;
+            check("T-2s", pv.status === 200 && b.isDepositBooking === true && b.refundAmountCents === 0 && b.refundTier === "none" && b.feeAmountCents === 0
+              && b.depositAmountCents === 3000 && b.chargedAmountCents === 3240 && b.depositNonRefundable === true,
+              `staff deposit cancel preview ${JSON.stringify({ i: b.isDepositBooking, r: b.refundAmountCents, t: b.refundTier, d: b.depositAmountCents, c: b.chargedAmountCents })}`);
+          }
+        }
+      }
+
+      // Staff service without a deposit: full price + 8% now, full vendor net to the staff member.
+      {
+        const { date, time } = nextSlot();
+        const h = await http("POST", "/api/booking/hold", "consumer", { providerType: "business", providerId: business.id, staffMemberId: staff.id, serviceId: staffSvc.id, date, startTime: time });
+        const hb = h.body;
+        check("T-2s", h.status === 200 && hb.depositAmountCents === null && hb.dueNowCents === 13500 && hb.dueAtAppointmentCents === 0 && hb.depositNonRefundable === false,
+          `staff no-deposit hold: ${h.status} ${JSON.stringify({ d: hb?.depositAmountCents, n: hb?.dueNowCents, r: hb?.dueAtAppointmentCents })}`);
+        if (h.status === 200) {
+          const before = createCalls.length;
+          const p = await pay(hb.holdId);
+          const call = createCalls.length > before ? lastCreate() : undefined;
+          const [row] = await apptsForHold(hb.holdId) as any[];
+          check("T-2s", p.status === 200 && call?.params.amount === 13500 && row?.depositAmountCents === null,
+            `staff no-deposit PI amount ${call?.params.amount}, stored deposit ${row?.depositAmountCents}`);
+          if (call && row) {
+            const t0 = depTransfers.length;
+            await WH.handlePaymentIntentSucceeded({ id: p.body.paymentIntentId, amount: call.params.amount, metadata: call.params.metadata });
+            const tr = depTransfers.slice(t0).filter(t => t.transfer_group?.endsWith(row.id));
+            check("T-2s", tr.length === 1 && tr[0].amount === 12250 && tr[0].destination === `acct_staff_${dtag}`,
+              `staff no-deposit settlement transfers ${JSON.stringify(tr.map(t => [t.amount, t.destination]))}`);
+          }
+        }
+      }
+    }
+
     Object.assign(R.PaymentIntents.prototype, { create: orig.piCreate, retrieve: orig.piRetrieve, cancel: orig.piCancel });
     Object.assign(R.Customers.prototype, { retrieve: orig.custRetrieve, create: orig.custCreate });
     R.Transfers.prototype.create = orig.trCreate;
     server.close();
 
     const failed: string[] = [];
-    for (const id of ["T-2a", "T-2b", "T-2c", "T-2d", "T-2f", "T-2g", "T-2h"]) {
+    for (const id of ["T-2a", "T-2b", "T-2c", "T-2d", "T-2f", "T-2g", "T-2h", "T-2s"]) {
       const errs = results.get(id) ?? ["no checks ran"];
       if (errs.length) failed.push(id);
       origLog(`${errs.length ? "FAIL" : "PASS"}  ${id}${errs.length ? "\n        - " + errs.join("\n        - ") : ""}`);

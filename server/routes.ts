@@ -5043,10 +5043,14 @@ export async function registerRoutes(
       const feePreview = calculateBookingFees(result.servicePriceCents);
 
       // What create-payment-intent will charge for this hold. The deposit is
-      // read from the same place that route reads it: vendor services only
-      // (staff services and photographers have no deposit).
+      // read from the same record that route reads it from: the staff service
+      // for staff bookings, otherwise the vendor service. Photographers have
+      // no deposit.
       let holdDepositAmountCents: number | null = null;
-      if (providerType === 'business' && !staffMemberId) {
+      if (providerType === 'business' && staffMemberId) {
+        const staffService = await storage.getStaffService(serviceId as string);
+        holdDepositAmountCents = typeof staffService?.depositAmountCents === 'number' ? staffService.depositAmountCents : null;
+      } else if (providerType === 'business') {
         const vendorService = await storage.getVendorService(serviceId as string);
         holdDepositAmountCents = typeof vendorService?.depositAmountCents === 'number' ? vendorService.depositAmountCents : null;
       }
@@ -13329,6 +13333,7 @@ export async function registerRoutes(
         hasCancellationFee: s.hasCancellationFee,
         cancellationFeeType: s.cancellationFeeType,
         cancellationFeeAmount: s.cancellationFeeAmount,
+        depositAmountCents: s.depositAmountCents,
         createdAt: s.createdAt,
       }));
 
@@ -13471,6 +13476,7 @@ export async function registerRoutes(
     hasCancellationFee: z.boolean().optional(),
     cancellationFeeType: z.enum(['flat', 'percentage']).nullable().optional(),
     cancellationFeeAmount: z.number().int().min(0).nullable().optional(),
+    depositAmountCents: z.number().int().min(0).nullable().optional(),
   });
 
   const staffServiceUpdateSchema = staffServiceCreateSchema.partial();
@@ -13490,6 +13496,12 @@ export async function registerRoutes(
       const staff = resolved.staff;
 
       const validated = staffServiceCreateSchema.parse(req.body);
+      const depositCheck = validateDeposit(validated.depositAmountCents, validated.priceCents);
+      if (!depositCheck.ok) {
+        return res.status(400).json(invalidDepositBody(depositCheck.message));
+      }
+      if (depositCheck.value !== undefined) validated.depositAmountCents = depositCheck.value;
+
       const service = await storage.createStaffService({
         ...validated,
         staffMemberId: staff.id,
@@ -13557,6 +13569,21 @@ export async function registerRoutes(
       }
 
       const validated = staffServiceUpdateSchema.parse(req.body);
+
+      // Same rule as PATCH /api/vendor/services/:id: re-check whenever the
+      // price or the deposit changes, so a price lowered to or below the
+      // stored deposit is rejected too.
+      if (validated.priceCents !== undefined || validated.depositAmountCents !== undefined) {
+        const depositCheck = validateDeposit(
+          validated.depositAmountCents !== undefined ? validated.depositAmountCents : service.depositAmountCents,
+          validated.priceCents ?? service.priceCents,
+        );
+        if (!depositCheck.ok) {
+          return res.status(400).json(invalidDepositBody(depositCheck.message));
+        }
+        if (validated.depositAmountCents !== undefined) validated.depositAmountCents = depositCheck.value;
+      }
+
       const updated = await storage.updateStaffService(req.params.id, validated);
       res.json({ service: updated });
     } catch (error) {
