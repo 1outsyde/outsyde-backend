@@ -7,7 +7,32 @@ import { db } from "./db";
 import { subscriptionTiers, vendorSubscriptions } from "@shared/schema";
 import { eq } from "drizzle-orm";
 
+// Growth feature list — the complimentary ("waived") tier mirrors it.
+const GROWTH_FEATURES = [
+  'Everything in Starter',
+  'Advanced analytics',
+  '1 complimentary Unranked influencer per month',
+  'Shoot credits (1 credit/month)',
+];
+
 const TIERS = [
+  {
+    // Complimentary plan for handpicked clients / giveaway winners. Admin-granted only:
+    // price 0 and no Stripe price id, so there is nothing to check out
+    // (see isComplimentaryTier in ./complimentary). Hidden from public pickers by
+    // sortOrder < 0. displayName/description match the existing DB row verbatim.
+    name: 'waived',
+    displayName: 'Waived',
+    description: 'Complimentary plan — handpicked clients, no charge',
+    priceInCents: 0,
+    platformFeeBps: 800,
+    stripePriceId: null as string | null,
+    features: [...GROWTH_FEATURES],
+    alaCarteDiscountPercent: 10,
+    sortOrder: -2,
+    isActive: true,
+    maxStaff: 8,
+  },
   {
     name: 'grandfathered',
     displayName: 'Grandfathered',
@@ -49,12 +74,7 @@ const TIERS = [
     priceInCents: 5900, // $59/mo
     platformFeeBps: 800,
     stripePriceId: 'price_1U73DQRxWOny76kZhoEcEEUC',
-    features: [
-      'Everything in Starter',
-      'Advanced analytics',
-      '1 complimentary Unranked influencer per month',
-      'Shoot credits (1 credit/month)',
-    ],
+    features: [...GROWTH_FEATURES],
     alaCarteDiscountPercent: 10,
     sortOrder: 1,
     maxStaff: 8,
@@ -122,5 +142,5 @@ export async function seedSubscriptionTiers(): Promise<void> {
     }
   }
 
-  console.log("[Subscriptions] Tiers synced: Grandfathered ($40.99), Starter ($29), Growth ($59), Pro ($99)");
+  console.log("[Subscriptions] Tiers synced: Waived ($0, admin-granted), Grandfathered ($40.99), Starter ($29), Growth ($59), Pro ($99)");
 }

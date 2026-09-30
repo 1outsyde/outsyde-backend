@@ -24,6 +24,7 @@ import {
 } from "../emailService";
 import { processInfluencerCommission, reverseInfluencerCommission } from "../influencerPayoutService";
 import { settleAppointmentBooking, settleShootBooking } from "../bookingSettlement";
+import { isComplimentaryTier, isTerminalStripeStatus } from "../complimentary";
 
 // XO Beauty & Lashes' own deposit-email sender (the legacy
 // create-deposit-intent flow's pre-existing behavior).
@@ -1712,7 +1713,38 @@ export class WebhookHandlers {
     }
 
     try {
-      const existing = await storage.getVendorSubscription(vendorId);
+      // One row per business (unique index uq_vendor_subscriptions_business): look the row up by
+      // business first, then fall back to vendor. Insert only when neither exists — a blind insert
+      // would throw against the unique index and lose the activation.
+      const existing =
+        (await storage.getVendorSubscriptionByBusinessId(businessId)) ??
+        (await storage.getVendorSubscription(vendorId));
+
+      // Stale-event guard: a retried checkout.session.completed for an OLD Stripe subscription must
+      // not overwrite an admin-granted complimentary row (no Stripe subscription id). If the
+      // session's subscription is dead in Stripe (canceled / incomplete_expired) skip it; otherwise
+      // proceed normally so a real checkout that finishes after a grant still lands. A failed
+      // Stripe lookup proceeds normally (fail open) and is logged without secrets.
+      if (existing && !existing.stripeSubscriptionId && session.subscription) {
+        const [existingTier] = await db.select().from(subscriptionTiers).where(eq(subscriptionTiers.id, existing.tierId));
+        if (isComplimentaryTier(existingTier)) {
+          let checkoutSubStatus: string | null = null;
+          try {
+            const stripe = await getUncachableStripeClient();
+            const checkoutSub = await stripe.subscriptions.retrieve(session.subscription);
+            checkoutSubStatus = checkoutSub.status;
+          } catch (retrieveErr) {
+            console.error(
+              `[Webhook] Could not retrieve subscription ${session.subscription} to check a stale checkout:`,
+              retrieveErr instanceof Error ? retrieveErr.message : 'unknown error',
+            );
+          }
+          if (isTerminalStripeStatus(checkoutSubStatus)) {
+            console.log(`[Webhook] Skipping stale checkout.session.completed for complimentary business ${businessId}: subscription ${session.subscription} is ${checkoutSubStatus}`);
+            return;
+          }
+        }
+      }
 
       let subscriptionId: string;
       if (existing) {
