@@ -10,6 +10,7 @@
  */
 
 import { z } from "zod";
+import { grantToken } from "./utils/grantToken";
 
 export interface TierPriceFields {
   priceInCents?: number | null;
@@ -224,4 +225,71 @@ export function buildAdminSubscriptionSummary(row: AdminSubscriptionSource): Adm
     currentPeriodEnd: isoOrNull(row.currentPeriodEnd),
     hasStripeSubscription: !!row.stripeSubscriptionId,
   };
+}
+
+/* =====================================================================================
+   Hidden plans (sortOrder < 0, e.g. Grandfathered) at checkout / plan change / preview
+   ===================================================================================== */
+
+export const TIER_NOT_AVAILABLE = "TIER_NOT_AVAILABLE";
+/** One static message for EVERY refusal reason: it says nothing about the plan or why. */
+export const TIER_NOT_AVAILABLE_MESSAGE = "This plan isn't available for your account.";
+
+export interface TierPurchaseTier {
+  id: string;
+  sortOrder?: number | null;
+  isActive?: boolean | null;
+}
+
+export interface GrantPayloadLike {
+  businessId: string;
+  tierId: string;
+}
+
+/**
+ * May this business start / switch to `tier`? Allowed when ANY of:
+ *  (a) the tier is visible: (sortOrder ?? 0) >= 0 and not deactivated;
+ *  (b) it is the business's own current tier, in ANY subscription status (a lapsed Grandfathered
+ *      holder may come back; someone who moved to another plan has a different row tier);
+ *  (c) a VERIFIED grant token names exactly this business AND this tier.
+ * Callers run it after the existing tier-exists / has-a-Stripe-price guards, so complimentary
+ * (price-less) tiers keep their current refusal.
+ */
+export function tierPurchaseDecision(input: {
+  tier: TierPurchaseTier;
+  currentRowTierId?: string | null;
+  businessId: string;
+  grantPayload?: GrantPayloadLike | null;
+}): "allow" | typeof TIER_NOT_AVAILABLE {
+  const { tier, currentRowTierId, businessId, grantPayload } = input;
+  if ((tier.sortOrder ?? 0) >= 0 && tier.isActive !== false) return "allow";
+  if (!!currentRowTierId && currentRowTierId === tier.id) return "allow";
+  if (
+    grantPayload &&
+    !!businessId &&
+    grantPayload.businessId === businessId &&
+    grantPayload.tierId === tier.id
+  ) {
+    return "allow";
+  }
+  return TIER_NOT_AVAILABLE;
+}
+
+/**
+ * Verify a `grant` request field. Anything that is not a non-empty string that the signed-token
+ * check accepts (bad signature, tampered, expired, missing GRANT_LINK_SECRET, malformed JSON)
+ * yields null. Never throws and never logs the value.
+ */
+export function verifyGrantSafely(
+  grant: unknown,
+  verify: (token: string) => GrantPayloadLike = grantToken.verify,
+): GrantPayloadLike | null {
+  if (typeof grant !== "string" || grant.length === 0) return null;
+  try {
+    const payload = verify(grant);
+    if (!payload || typeof payload.businessId !== "string" || typeof payload.tierId !== "string") return null;
+    return { businessId: payload.businessId, tierId: payload.tierId };
+  } catch {
+    return null;
+  }
 }
