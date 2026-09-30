@@ -182,19 +182,29 @@ import { photographersRouter } from "./Photographers/photographers.routes";
 import { toPublicBusinessDTO } from "./serializers/business";
 import { grantToken } from "./utils/grantToken";
 import {
+  clampAdminListLimit,
+  complimentaryGrantSchema,
   isComplimentaryTier,
   isSubscriptionProvisioned,
-  isTerminalStripeStatus,
   resolveGrantTierId,
   selectTiersForCaller,
   PERMANENT_EXPIRY_ISO,
 } from "./complimentary";
 import {
+  PAID_ROW_LIVE_MESSAGE,
+  checkPreviousStripeSubscription,
   computeConnectReady,
+  getAdminSubscriptionSummaries,
   getComplimentaryTier,
   runGrantStatement,
   runRevokeStatement,
 } from "./services/complimentarySubscription";
+import {
+  createComplimentaryLink,
+  listComplimentaryLinks,
+  redeemComplimentaryLink,
+  revokeComplimentaryLink,
+} from "./services/complimentaryLinks";
 
 // =========================
 // PAYMENTS CONFIGURATION
@@ -692,6 +702,21 @@ export async function registerRoutes(
     standardHeaders: true,
     legacyHeaders: false,
     message: { success: false, message: "Too many attempts, please try again later" },
+  });
+
+  // Free-plan link claims get their OWN bucket (not the shared authRateLimiter, which signups use):
+  // 10 attempts per 15 minutes per IP. `error` is a plain string so the web BFF can show it.
+  const complimentaryRedeemRateLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000,
+    max: 10,
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: {
+      success: false,
+      error: "Too many attempts, please try again later",
+      message: "Too many attempts, please try again later",
+      code: "RATE_LIMITED",
+    },
   });
 
   // Username availability check (public, rate-limited)
@@ -18776,7 +18801,10 @@ export async function registerRoutes(
   // Admin: Get all businesses
   app.get("/api/admin/businesses", requireAdmin, async (req, res) => {
     try {
-      const { search, category, limit = "50", offset = "0" } = req.query;
+      const { search, category, offset = "0" } = req.query;
+      // limit: parseInt, NaN → 50, clamped to 1..200 (the batched subscription query below is
+      // bounded by this page).
+      const limit = clampAdminListLimit(req.query.limit);
       let businesses = await storage.getAllBusinesses();
 
       // Filter out demo/test data - admin should only see real businesses
@@ -18802,8 +18830,11 @@ export async function registerRoutes(
 
       // Pagination
       const start = parseInt(offset as string);
-      const end = start + parseInt(limit as string);
+      const end = start + limit;
       const paginatedBusinesses = businesses.slice(start, end);
+
+      // ONE batched query for this page's subscriptions (additive `subscription` field).
+      const subscriptionSummaries = await getAdminSubscriptionSummaries(paginatedBusinesses.map((b) => b.id));
 
       // Get owner info for each business
       const enrichedBusinesses = await Promise.all(paginatedBusinesses.map(async (b) => {
@@ -18812,6 +18843,8 @@ export async function registerRoutes(
           ...b,
           ownerEmail: owner?.email,
           ownerName: owner?.name || `${owner?.firstName || ''} ${owner?.lastName || ''}`.trim(),
+          subscription: subscriptionSummaries.get(b.id) ?? null,
+          hasConnectAccount: !!b.stripeAccountId,
         };
       }));
 
@@ -18899,10 +18932,7 @@ export async function registerRoutes(
   // Body is either { expiresAt: ISO datetime WITH offset, in the future } or { permanent: true }
   // (permanent = 2099-01-01). Nothing else is accepted: the tier is resolved server-side and the
   // owner comes from the business row. The write is ONE statement (see runGrantStatement).
-  const complimentaryGrantSchema = z.union([
-    z.object({ expiresAt: z.string().datetime({ offset: true }) }).strict(),
-    z.object({ permanent: z.literal(true) }).strict(),
-  ]);
+  // (complimentaryGrantSchema lives in ./complimentary so the claim-link route shares it.)
 
   app.post("/api/admin/businesses/:id/complimentary-subscription", requireAdmin, async (req, res) => {
     try {
@@ -18934,24 +18964,9 @@ export async function registerRoutes(
 
       // A past payer keeps a stripe_subscription_id on the row. Only convert it when Stripe
       // confirms the old subscription can never bill again; any Stripe error refuses.
-      if (existing?.stripeSubscriptionId) {
-        try {
-          const stripe = await getUncachableStripeClient();
-          const oldSub = await stripe.subscriptions.retrieve(existing.stripeSubscriptionId);
-          if (!isTerminalStripeStatus(oldSub.status)) {
-            return res.status(409).json({
-              error: `This business has a Stripe subscription that is still ${oldSub.status}. Cancel it in Stripe before granting a complimentary plan.`,
-            });
-          }
-        } catch (stripeError) {
-          console.error(
-            `[Complimentary] Could not verify previous Stripe subscription for business ${business.id}:`,
-            stripeError instanceof Error ? stripeError.message : "unknown error",
-          );
-          return res.status(409).json({
-            error: "Could not verify this business's previous Stripe subscription with Stripe. Nothing was changed.",
-          });
-        }
+      const stripeRefusal = await checkPreviousStripeSubscription(business.id, existing?.stripeSubscriptionId);
+      if (stripeRefusal) {
+        return res.status(409).json({ error: stripeRefusal });
       }
 
       let existingTier: SubscriptionTier | undefined;
@@ -18982,7 +18997,7 @@ export async function registerRoutes(
           return res.status(404).json({ error: "Business not found" });
         }
         return res.status(409).json({
-          error: "This business has a paid subscription that is still live. Complimentary grant refused.",
+          error: PAID_ROW_LIVE_MESSAGE,
         });
       }
 
@@ -22242,6 +22257,29 @@ export async function registerRoutes(
     }
   });
 
+  // ==================== FREE-PLAN CLAIM LINKS (complimentary tier) ====================
+  // Admin creates a single-use, 7-day link; the business OWNER signs in and claims it. Only a
+  // sha256 of the token is stored. See services/complimentaryLinks.ts. Separate from (and never
+  // accepted by) the grandfathered grant links below.
+
+  // POST /api/admin/subscription/complimentary-link  { businessId, expiresAt | permanent:true }
+  app.post("/api/admin/subscription/complimentary-link", requireAdmin, async (req, res) => {
+    const out = await createComplimentaryLink({ body: req.body, adminId: (req as any).adminUser.id });
+    res.status(out.status).json(out.body);
+  });
+
+  // GET /api/admin/subscription/complimentary-links?businessId=  (never returns token_hash)
+  app.get("/api/admin/subscription/complimentary-links", requireAdmin, async (req, res) => {
+    const out = await listComplimentaryLinks(req.query.businessId);
+    res.status(out.status).json(out.body);
+  });
+
+  // DELETE /api/admin/subscription/complimentary-link/:id  (only while unused)
+  app.delete("/api/admin/subscription/complimentary-link/:id", requireAdmin, async (req, res) => {
+    const out = await revokeComplimentaryLink(req.params.id);
+    res.status(out.status).json(out.body);
+  });
+
   // POST /api/admin/subscription/grant-link
   // Generates a signed 48h grant URL for a specific vendor + grandfathered tier.
   // Admin-only.
@@ -22339,6 +22377,24 @@ export async function registerRoutes(
       return res.status(500).json({ error: "Redemption failed" });
     }
   });
+
+  // POST /api/subscription/complimentary-link/redeem  { token }
+  // The caller is the verified JWT user; the business comes from the link, never from the body.
+  app.post(
+    "/api/subscription/complimentary-link/redeem",
+    authMiddleware,
+    complimentaryRedeemRateLimiter,
+    async (req, res) => {
+      const authReq = req as AuthenticatedRequest;
+      const out = await redeemComplimentaryLink({
+        token: req.body?.token,
+        userId: authReq.user!.userId,
+        ip: req.ip ?? null,
+        userAgent: req.get("user-agent") ?? null,
+      });
+      res.status(out.status).json(out.body);
+    },
+  );
 
   return httpServer;
 }

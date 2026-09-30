@@ -20,6 +20,7 @@ import { startReminderJob } from "./reminderService";
 import { processScheduledDeletions } from "./services/accountDeletionService";
 import { cleanupExpiredStories } from "./services/stories";
 import { expireComplimentarySubscriptions } from "./services/complimentarySubscription";
+import { errorLogArgs, loggedResponseBody } from "./utils/requestLogging";
 import passport from "passport";
 
 // Global error handlers — prevent silent crashes
@@ -189,7 +190,7 @@ app.use((req, res, next) => {
     if (path.startsWith("/api")) {
       let logLine = `${req.method} ${path} ${res.statusCode} in ${duration}ms`;
       if (capturedJsonResponse) {
-        logLine += ` :: ${JSON.stringify(capturedJsonResponse)}`;
+        logLine += ` :: ${JSON.stringify(loggedResponseBody(req.method, path, capturedJsonResponse))}`;
       }
       if (logLine.length > 80) logLine = logLine.slice(0, 79) + "…";
       log(logLine);
@@ -354,7 +355,7 @@ if (process.env.NODE_ENV === 'production') {
 
   app.use((err: any, _req: Request, res: Response, _next: NextFunction) => {
     const status = err.status || err.statusCode || 500;
-    console.error(`[ERROR] ${err.message || 'Unknown error'}`, err.stack || '');
+    console.error(...errorLogArgs(err));
     res.status(status).json({
       success: false,
       error: {

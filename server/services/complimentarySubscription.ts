@@ -10,11 +10,24 @@
  * (migrations/037_vendor_subscriptions_business_unique.sql, hand-run in Neon).
  */
 
-import { and, eq, isNull, sql } from "drizzle-orm";
+import { and, desc, eq, inArray, isNull, sql } from "drizzle-orm";
 import { db } from "../db";
-import { subscriptionTiers, type Business, type SubscriptionTier } from "@shared/schema";
+import {
+  subscriptionTiers,
+  vendorSubscriptions,
+  type Business,
+  type SubscriptionTier,
+} from "@shared/schema";
 import { stripeService } from "../stripe/stripeService";
-import { isComplimentaryTier } from "../complimentary";
+import { getUncachableStripeClient } from "../stripe/stripeClient";
+import {
+  PERMANENT_EXPIRY_ISO,
+  buildAdminSubscriptionSummary,
+  isComplimentaryTier,
+  isTerminalStripeStatus,
+  isoOrNull,
+  type AdminSubscriptionSummary,
+} from "../complimentary";
 
 export interface ComplimentarySubscriptionRow {
   id: string;
@@ -28,19 +41,6 @@ export interface ComplimentarySubscriptionRow {
   currentPeriodEnd: string | null;
   createdAt: string | null;
   updatedAt: string | null;
-}
-
-// Raw db.execute rows can carry a Date or Postgres text ("2099-01-01 00:00:00" — `timestamp`
-// columns are UTC with no zone). Normalise both to an ISO-8601 string with a trailing Z.
-function isoOrNull(value: unknown): string | null {
-  if (value == null) return null;
-  if (value instanceof Date) return value.toISOString();
-  const text = String(value);
-  if (/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}/.test(text)) {
-    const parsed = new Date(text.replace(" ", "T") + "Z");
-    return Number.isNaN(parsed.getTime()) ? text : parsed.toISOString();
-  }
-  return text;
 }
 
 function mapRow(row: Record<string, unknown>): ComplimentarySubscriptionRow {
@@ -108,25 +108,12 @@ export interface GrantStatementParams {
 }
 
 /**
- * Grant / extend / re-grant after expiry: ONE statement.
- * Returns the resulting row, or null when the conflict WHERE refused (a live paid
- * row exists) — in that case no row is written and no audit row is inserted.
+ * The upsert tail shared by the admin grant/extend statement and the claim-link redeem
+ * statement: a live paid row (Stripe subscription id that is not canceled/incomplete_expired
+ * with an ended period) is never overwritten. Keep both statements on this ONE fragment so they
+ * cannot drift.
  */
-export async function runGrantStatement(p: GrantStatementParams): Promise<ComplimentarySubscriptionRow | null> {
-  const result = await db.execute<Record<string, unknown>>(sql`
-    WITH prev AS (
-      SELECT * FROM vendor_subscriptions WHERE business_id = ${p.businessId}::varchar
-    ),
-    up AS (
-      INSERT INTO vendor_subscriptions
-        (vendor_id, business_id, tier_id, status, current_period_start, current_period_end,
-         current_quarter_start, current_quarter_end, stripe_subscription_id, stripe_customer_id,
-         created_at, updated_at)
-      VALUES
-        (${p.ownerId}::varchar, ${p.businessId}::varchar, ${p.tierId}::varchar, 'active',
-         now() AT TIME ZONE 'UTC', (${p.expiresAtIso}::timestamptz AT TIME ZONE 'UTC'),
-         NULL, NULL, NULL, NULL, now() AT TIME ZONE 'UTC', now() AT TIME ZONE 'UTC')
-      ON CONFLICT (business_id) DO UPDATE SET
+const UPSERT_ON_CONFLICT = sql`ON CONFLICT (business_id) DO UPDATE SET
         vendor_id = EXCLUDED.vendor_id,
         tier_id = EXCLUDED.tier_id,
         status = 'active',
@@ -140,7 +127,28 @@ export async function runGrantStatement(p: GrantStatementParams): Promise<Compli
       WHERE vendor_subscriptions.stripe_subscription_id IS NULL
          OR (vendor_subscriptions.status IN ('canceled','incomplete_expired')
              AND (vendor_subscriptions.current_period_end IS NULL
-                  OR vendor_subscriptions.current_period_end < (now() AT TIME ZONE 'UTC')))
+                  OR vendor_subscriptions.current_period_end < (now() AT TIME ZONE 'UTC')))`;
+
+/**
+ * Grant / extend / re-grant after expiry: ONE statement.
+ * Returns the resulting row, or null when the conflict WHERE refused (a live paid
+ * row exists) — in that case no row is written and no audit row is inserted.
+ */
+export function buildGrantStatement(p: GrantStatementParams) {
+  return sql`
+    WITH prev AS (
+      SELECT * FROM vendor_subscriptions WHERE business_id = ${p.businessId}::varchar
+    ),
+    up AS (
+      INSERT INTO vendor_subscriptions
+        (vendor_id, business_id, tier_id, status, current_period_start, current_period_end,
+         current_quarter_start, current_quarter_end, stripe_subscription_id, stripe_customer_id,
+         created_at, updated_at)
+      VALUES
+        (${p.ownerId}::varchar, ${p.businessId}::varchar, ${p.tierId}::varchar, 'active',
+         now() AT TIME ZONE 'UTC', (${p.expiresAtIso}::timestamptz AT TIME ZONE 'UTC'),
+         NULL, NULL, NULL, NULL, now() AT TIME ZONE 'UTC', now() AT TIME ZONE 'UTC')
+      ${UPSERT_ON_CONFLICT}
       RETURNING *
     ),
     biz AS (
@@ -161,9 +169,159 @@ export async function runGrantStatement(p: GrantStatementParams): Promise<Compli
       FROM up RETURNING id
     )
     SELECT up.*, (SELECT count(*) FROM biz) AS biz_updated, (SELECT count(*) FROM aud) AS aud_written FROM up
-  `);
+  `;
+}
+
+export async function runGrantStatement(p: GrantStatementParams): Promise<ComplimentarySubscriptionRow | null> {
+  const result = await db.execute<Record<string, unknown>>(buildGrantStatement(p));
   const row = result.rows[0];
   return row ? mapRow(row) : null;
+}
+
+/** 409 text shared by the grant route, link creation and the redeem re-read. */
+export const PAID_ROW_LIVE_MESSAGE =
+  "This business has a paid subscription that is still live. Complimentary grant refused.";
+
+/**
+ * A past payer keeps a stripe_subscription_id on the row. Only convert it when Stripe confirms
+ * the old subscription can never bill again; any Stripe error refuses.
+ * Returns the 409 message to send, or null when it is safe to continue.
+ */
+export async function checkPreviousStripeSubscription(
+  businessId: string,
+  stripeSubscriptionId: string | null | undefined,
+): Promise<string | null> {
+  if (!stripeSubscriptionId) return null;
+  try {
+    const stripe = await getUncachableStripeClient();
+    const oldSub = await stripe.subscriptions.retrieve(stripeSubscriptionId);
+    if (!isTerminalStripeStatus(oldSub.status)) {
+      return `This business has a Stripe subscription that is still ${oldSub.status}. Cancel it in Stripe before granting a complimentary plan.`;
+    }
+    return null;
+  } catch (stripeError) {
+    console.error(
+      `[Complimentary] Could not verify previous Stripe subscription for business ${businessId}:`,
+      stripeError instanceof Error ? stripeError.message : "unknown error",
+    );
+    return "Could not verify this business's previous Stripe subscription with Stripe. Nothing was changed.";
+  }
+}
+
+export interface RedeemStatementParams {
+  /** sha256 hex of the claim token — the raw token never reaches SQL, audit rows or logs. */
+  tokenHash: string;
+  /** The authenticated caller; must own the link's business. */
+  userId: string;
+  tierId: string;
+  ip: string | null;
+  userAgent: string | null;
+}
+
+/**
+ * Claim a free-plan link: ONE statement.
+ *
+ * The `link` CTE marks the link redeemed only when EVERY guard holds (link unused, unrevoked,
+ * unexpired; plan not already expired; caller owns the business; no live paid row). The upsert,
+ * businesses.subscription_active and audit row all hang off that CTE, so a refused claim writes
+ * nothing and leaves the link unused. Two concurrent claims: the second blocks on the link row
+ * lock, re-evaluates `redeemed_at IS NULL` and gets 0 rows — exactly one grant.
+ *
+ * The paid-row guard repeats the upsert's conflict WHERE (NULL status counts as live, like the
+ * conflict WHERE does) so the link is never burned by an upsert that would then refuse.
+ * Returns the subscription row, or null when any guard refused.
+ */
+export function buildRedeemStatement(p: RedeemStatementParams) {
+  return sql`
+    WITH link AS (
+      UPDATE complimentary_grant_links l
+         SET redeemed_at = now() AT TIME ZONE 'UTC', redeemed_by = ${p.userId}::varchar
+       WHERE l.token_hash = ${p.tokenHash}::text
+         AND l.redeemed_at IS NULL AND l.revoked_at IS NULL
+         AND l.link_expires_at > (now() AT TIME ZONE 'UTC')
+         AND (l.plan_expires_at IS NULL OR l.plan_expires_at > (now() AT TIME ZONE 'UTC'))
+         AND EXISTS (SELECT 1 FROM businesses b WHERE b.id = l.business_id AND b.owner_id = ${p.userId}::varchar)
+         AND NOT EXISTS (
+           SELECT 1 FROM vendor_subscriptions vs
+            WHERE vs.business_id = l.business_id AND vs.stripe_subscription_id IS NOT NULL
+              AND NOT (COALESCE(vs.status, '') IN ('canceled','incomplete_expired')
+                       AND (vs.current_period_end IS NULL
+                            OR vs.current_period_end < (now() AT TIME ZONE 'UTC'))))
+      RETURNING l.id, l.business_id, l.plan_expires_at, l.created_by
+    ),
+    prev AS (
+      SELECT vs.* FROM vendor_subscriptions vs JOIN link ON vs.business_id = link.business_id
+    ),
+    up AS (
+      INSERT INTO vendor_subscriptions
+        (vendor_id, business_id, tier_id, status, current_period_start, current_period_end,
+         current_quarter_start, current_quarter_end, stripe_subscription_id, stripe_customer_id,
+         created_at, updated_at)
+      SELECT ${p.userId}::varchar, link.business_id, ${p.tierId}::varchar, 'active',
+             now() AT TIME ZONE 'UTC',
+             COALESCE(link.plan_expires_at, (${PERMANENT_EXPIRY_ISO}::timestamptz AT TIME ZONE 'UTC')),
+             NULL, NULL, NULL, NULL, now() AT TIME ZONE 'UTC', now() AT TIME ZONE 'UTC'
+        FROM link
+      ${UPSERT_ON_CONFLICT}
+      RETURNING *
+    ),
+    biz AS (
+      UPDATE businesses SET subscription_active = true
+      WHERE id IN (SELECT business_id FROM up) RETURNING id
+    ),
+    aud AS (
+      INSERT INTO audit_logs
+        (actor_id, actor_type, action, target_type, target_id, before_state, after_state,
+         metadata, ip_address, user_agent)
+      SELECT ${p.userId}::text, 'vendor', 'complimentary_subscription.redeem', 'vendor_subscription', up.id,
+             (SELECT to_jsonb(prev) FROM prev LIMIT 1), to_jsonb(up),
+             jsonb_build_object('businessId', up.business_id, 'linkId', link.id, 'createdBy', link.created_by,
+                                'expiresAt', up.current_period_end,
+                                'permanent', (link.plan_expires_at IS NULL),
+                                'replacedStripeSubscriptionId', (SELECT stripe_subscription_id FROM prev LIMIT 1),
+                                'replacedStripeCustomerId', (SELECT stripe_customer_id FROM prev LIMIT 1)),
+             ${p.ip}::text, ${p.userAgent}::text
+      FROM up CROSS JOIN link RETURNING id
+    )
+    SELECT up.*, (SELECT count(*) FROM biz) AS biz_updated, (SELECT count(*) FROM aud) AS aud_written FROM up
+  `;
+}
+
+export async function runRedeemStatement(p: RedeemStatementParams): Promise<ComplimentarySubscriptionRow | null> {
+  const result = await db.execute<Record<string, unknown>>(buildRedeemStatement(p));
+  const row = result.rows[0];
+  return row ? mapRow(row) : null;
+}
+
+/**
+ * GET /api/admin/businesses: the additive per-row `subscription` summary for one page of
+ * businesses. ONE query (vendor_subscriptions ⨝ subscription_tiers) bounded by the page's ids,
+ * no Stripe calls. Businesses without a row are absent from the map.
+ */
+export async function getAdminSubscriptionSummaries(
+  businessIds: string[],
+): Promise<Map<string, AdminSubscriptionSummary>> {
+  const summaries = new Map<string, AdminSubscriptionSummary>();
+  if (businessIds.length === 0) return summaries;
+  const rows = await db
+    .select({
+      businessId: vendorSubscriptions.businessId,
+      tierName: subscriptionTiers.name,
+      tierDisplayName: subscriptionTiers.displayName,
+      priceInCents: subscriptionTiers.priceInCents,
+      stripePriceId: subscriptionTiers.stripePriceId,
+      status: vendorSubscriptions.status,
+      currentPeriodEnd: vendorSubscriptions.currentPeriodEnd,
+      stripeSubscriptionId: vendorSubscriptions.stripeSubscriptionId,
+    })
+    .from(vendorSubscriptions)
+    .innerJoin(subscriptionTiers, eq(vendorSubscriptions.tierId, subscriptionTiers.id))
+    .where(inArray(vendorSubscriptions.businessId, businessIds))
+    .orderBy(desc(vendorSubscriptions.createdAt));
+  for (const row of rows) {
+    if (!summaries.has(row.businessId)) summaries.set(row.businessId, buildAdminSubscriptionSummary(row));
+  }
+  return summaries;
 }
 
 export interface RevokeStatementParams {

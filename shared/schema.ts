@@ -1554,6 +1554,34 @@ export const vendorSubscriptions = pgTable("vendor_subscriptions", {
 }));
 
 /* =====================================================
+   COMPLIMENTARY (FREE-PLAN) CLAIM LINKS
+   Hand-run in Neon via migrations/038_complimentary_grant_links.sql (never drizzle-kit push).
+   Only the sha256 of the link token is stored, never the token itself.
+===================================================== */
+export const complimentaryGrantLinks = pgTable("complimentary_grant_links", {
+  id: varchar("id", { length: 36 }).primaryKey().default(sql`gen_random_uuid()`),
+
+  tokenHash: text("token_hash").notNull(),
+  businessId: varchar("business_id", { length: 36 }).notNull().references(() => businesses.id, { onDelete: "cascade" }),
+
+  // null = permanent (the grant is written as 2099-01-01)
+  planExpiresAt: timestamp("plan_expires_at"),
+  linkExpiresAt: timestamp("link_expires_at").notNull(),
+
+  createdBy: varchar("created_by", { length: 36 }).references(() => users.id, { onDelete: "set null" }),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+
+  redeemedAt: timestamp("redeemed_at"),
+  redeemedBy: varchar("redeemed_by", { length: 36 }).references(() => users.id, { onDelete: "set null" }),
+  revokedAt: timestamp("revoked_at"),
+}, (table) => ({
+  tokenHashUnique: uniqueIndex("uq_complimentary_grant_links_token_hash").on(table.tokenHash),
+  businessIdx: index("idx_complimentary_grant_links_business").on(table.businessId, table.createdAt.desc()),
+}));
+
+export type ComplimentaryGrantLink = typeof complimentaryGrantLinks.$inferSelect;
+
+/* =====================================================
    BENEFIT ALLOWANCES
 ===================================================== */
 export const benefitAllowances = pgTable("benefit_allowances", {
