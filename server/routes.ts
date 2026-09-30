@@ -189,6 +189,10 @@ import {
   resolveGrantTierId,
   selectTiersForCaller,
   PERMANENT_EXPIRY_ISO,
+  TIER_NOT_AVAILABLE,
+  TIER_NOT_AVAILABLE_MESSAGE,
+  tierPurchaseDecision,
+  verifyGrantSafely,
 } from "./complimentary";
 import {
   PAID_ROW_LIVE_MESSAGE,
@@ -9430,7 +9434,9 @@ export async function registerRoutes(
     }
 
     try {
-      const { tierId } = z.object({ tierId: z.string().min(1) }).parse(req.body);
+      // `grant` (optional): the signed token of a grandfathered grant link, forwarded by the web
+      // checkout. It is only used by tierPurchaseDecision below and is never logged.
+      const { tierId, grant } = z.object({ tierId: z.string().min(1), grant: z.string().optional() }).parse(req.body);
 
       const user = await storage.getUser(userId);
       if (!user) {
@@ -9442,6 +9448,30 @@ export async function registerRoutes(
         return res.status(404).json({ success: false, error: { code: 'NOT_FOUND', message: 'No business found for this account' } });
       }
 
+      // The business's subscription row (one row per business). Used by the hidden-plan guard below
+      // and by the active-subscription update branch.
+      const existingSub = await storage.getVendorSubscriptionByBusinessId(business.id);
+
+      // Hidden plans (sortOrder < 0, e.g. Grandfathered) may only be started by the business that is
+      // already on them, or with a grant token for THIS business and THAT plan. A missing tier or a
+      // price-less (complimentary) tier falls through unchanged: update branch 404, create path
+      // throws → 500. Runs before any Stripe customer is created for a refused request.
+      const [requestedTier] = await db.select().from(subscriptionTiers).where(eq(subscriptionTiers.id, tierId));
+      if (requestedTier?.stripePriceId) {
+        const decision = tierPurchaseDecision({
+          tier: requestedTier,
+          currentRowTierId: existingSub?.tierId ?? null,
+          businessId: business.id,
+          grantPayload: verifyGrantSafely(grant),
+        });
+        if (decision !== "allow") {
+          return res.status(403).json({
+            success: false,
+            error: { code: TIER_NOT_AVAILABLE, message: TIER_NOT_AVAILABLE_MESSAGE },
+          });
+        }
+      }
+
       // Get or create Stripe customer (platform customer, NOT Connect)
       let stripeCustomerId = user.stripeCustomerId;
       if (!stripeCustomerId) {
@@ -9451,7 +9481,6 @@ export async function registerRoutes(
       }
 
       // Check if business already has an active subscription — use update instead of create
-      const existingSub = await storage.getVendorSubscription(userId);
       if (existingSub?.stripeSubscriptionId && (existingSub.status === 'active' || existingSub.status === 'trialing')) {
         const stripe = await getUncachableStripeClient();
         const stripeSub = await stripe.subscriptions.retrieve(existingSub.stripeSubscriptionId);
@@ -9516,6 +9545,8 @@ export async function registerRoutes(
           stripeCustomerId,
           tierId,
           `${baseUrl}/subscription/success`,
+          // NOTE: this cancel URL does not carry the `grant` token. A grant-link user who backs out of
+          // Stripe lands on the dashboard and must reopen the original link (valid 48h) to retry.
           `${baseUrl}/vendor-dashboard?subscription=cancelled`,
           userId,
           business.id
@@ -9549,12 +9580,14 @@ export async function registerRoutes(
       const changeSchema = z.object({
         newTierId: z.string().min(1, "New tier ID is required"),
         prorationBehavior: z.enum(['create_prorations', 'none', 'always_invoice']).default('create_prorations'),
+        grant: z.string().optional(), // grandfathered grant-link token; never logged
       });
-      const { newTierId, prorationBehavior } = changeSchema.parse(req.body);
+      const { newTierId, prorationBehavior, grant } = changeSchema.parse(req.body);
 
-      // Get current subscription
-      const subscription = await storage.getVendorSubscription(userId);
-      if (!subscription) {
+      // Get current subscription (by business: one row per business)
+      const business = await storage.getBusinessByOwnerId(userId);
+      const subscription = business ? await storage.getVendorSubscriptionByBusinessId(business.id) : undefined;
+      if (!business || !subscription) {
         return res.status(404).json({ error: "No active subscription found" });
       }
 
@@ -9574,6 +9607,15 @@ export async function registerRoutes(
       const [newTier] = await db.select().from(subscriptionTiers).where(eq(subscriptionTiers.id, newTierId));
       if (!newTier || !newTier.stripePriceId) {
         return res.status(404).json({ error: "Tier not found or not configured for Stripe" });
+      }
+
+      if (tierPurchaseDecision({
+        tier: newTier,
+        currentRowTierId: subscription.tierId,
+        businessId: business.id,
+        grantPayload: verifyGrantSafely(grant),
+      }) !== "allow") {
+        return res.status(403).json({ error: TIER_NOT_AVAILABLE_MESSAGE, code: TIER_NOT_AVAILABLE });
       }
 
       // Get current tier for comparison
@@ -9634,12 +9676,14 @@ export async function registerRoutes(
     try {
       const previewSchema = z.object({
         newTierId: z.string().min(1, "New tier ID is required"),
+        grant: z.string().optional(), // grandfathered grant-link token; never logged
       });
-      const { newTierId } = previewSchema.parse(req.body);
+      const { newTierId, grant } = previewSchema.parse(req.body);
 
-      // Get current subscription
-      const subscription = await storage.getVendorSubscription(userId);
-      if (!subscription || !subscription.stripeSubscriptionId) {
+      // Get current subscription (by business: one row per business)
+      const business = await storage.getBusinessByOwnerId(userId);
+      const subscription = business ? await storage.getVendorSubscriptionByBusinessId(business.id) : undefined;
+      if (!business || !subscription || !subscription.stripeSubscriptionId) {
         return res.status(404).json({ error: "No active subscription found" });
       }
 
@@ -9653,6 +9697,15 @@ export async function registerRoutes(
       
       if (!newTier || !newTier.stripePriceId) {
         return res.status(404).json({ error: "Tier not found" });
+      }
+
+      if (tierPurchaseDecision({
+        tier: newTier,
+        currentRowTierId: subscription.tierId,
+        businessId: business.id,
+        grantPayload: verifyGrantSafely(grant),
+      }) !== "allow") {
+        return res.status(403).json({ error: TIER_NOT_AVAILABLE_MESSAGE, code: TIER_NOT_AVAILABLE });
       }
 
       const isUpgrade = (newTier.priceInCents || 0) > (currentTier?.priceInCents || 0);
@@ -10221,6 +10274,10 @@ export async function registerRoutes(
       const baseUrl = process.env.API_BASE_URL || 'https://outsyde-backend.onrender.com';
       const returnUrl = `${baseUrl}/api/stripe/portal-return`;
 
+      // NOTE: no `configuration` id is passed, so Stripe's default portal configuration applies. If it
+      // allows plan switching, a customer can move onto a hidden plan there and the webhook
+      // (handleSubscriptionChange) will record it: the hidden-plan guard only covers our own routes.
+      // Whether the portal allows plan changes is a Stripe dashboard setting.
       const session = await stripe.billingPortal.sessions.create({
         customer: user.stripeCustomerId,
         return_url: returnUrl,
