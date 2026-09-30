@@ -3836,18 +3836,21 @@ export async function registerRoutes(
         let authorRole: 'consumer' | 'photographer' | 'vendor' = 'consumer';
         let authorBusinessId: string | null = null;
         let authorPhotographerId: string | null = null;
+        let authorProName: string | null = null;
 
         if (post.authorType === 'vendor') {
           const business = await storage.getBusinessByOwnerId(post.authorId);
           if (business) {
             authorBusinessId = business.id;
             authorRole = 'vendor';
+            authorProName = business.name?.trim() || null;
           }
         } else if (post.authorType === 'photographer') {
           const photographer = await storage.getPhotographerByUserId(post.authorId);
           if (photographer) {
             authorPhotographerId = photographer.id;
             authorRole = 'photographer';
+            authorProName = photographer.displayName?.trim() || null;
           }
         }
 
@@ -3871,7 +3874,7 @@ export async function registerRoutes(
           author: {
             userId: author.id,
             username: author.username || null,
-            displayName: author.name || author.firstName || 'Anonymous',
+            displayName: authorProName || author.name || author.firstName || 'Anonymous',
             profilePhotoUrl: author.profileImageUrl || null,
             role: authorRole,
           },
@@ -19737,6 +19740,7 @@ export async function registerRoutes(
         // Also determines the role for the canonical author object
         let authorRole: 'consumer' | 'photographer' | 'vendor' = 'consumer';
         let authorLogoImage: string | null = null;
+        let authorProName: string | null = null;
         
         if (post.authorType === 'vendor' && post.authorId) {
           const business = await storage.getBusinessByOwnerId(post.authorId);
@@ -19744,6 +19748,7 @@ export async function registerRoutes(
             authorBusinessId = business.id;
             authorRole = 'vendor';
             authorLogoImage = business.logoImage ?? null;
+            authorProName = business.name?.trim() || null;
           }
         } else if (post.authorType === 'photographer' && post.authorId) {
           const photographer = await storage.getPhotographerByUserId(post.authorId);
@@ -19751,6 +19756,7 @@ export async function registerRoutes(
             authorPhotographerId = photographer.id;
             authorRole = 'photographer';
             authorLogoImage = photographer.logoImage ?? null;
+            authorProName = photographer.displayName?.trim() || null;
           }
         }
         
@@ -19785,7 +19791,7 @@ export async function registerRoutes(
           author: {
             userId: author.id,
             username: author.username || null,
-            displayName: author.name || author.firstName || 'Anonymous',
+            displayName: authorProName || author.name || author.firstName || 'Anonymous',
             profilePhotoUrl: authorLogoImage ?? author.profileImageUrl ?? null,
             role: authorRole,
           },
@@ -19796,7 +19802,7 @@ export async function registerRoutes(
           // Legacy identity fields for backwards compatibility
           userId: post.authorId,
           username: author.username || null,
-          displayName: author.name || author.firstName || null,
+          displayName: authorProName || author.name || author.firstName || null,
           providerId: authorPhotographerId || authorBusinessId || null,
           taggedBusiness: taggedBusiness ? { id: taggedBusiness.id, name: taggedBusiness.name, logoImage: taggedBusiness.logoImage } : null,
           taggedPhotographer: taggedPhotographer ? { id: taggedPhotographer.id, displayName: taggedPhotographer.displayName } : null,
@@ -20060,18 +20066,21 @@ export async function registerRoutes(
       let authorBusinessId: string | null = null;
       let authorPhotographerId: string | null = null;
       let authorRoleResponse: 'consumer' | 'photographer' | 'vendor' = 'consumer';
+      let authorProName: string | null = null;
       
       if (authorType === 'vendor') {
         const business = await storage.getBusinessByOwnerId(userId);
         if (business) {
           authorBusinessId = business.id;
           authorRoleResponse = 'vendor';
+          authorProName = business.name?.trim() || null;
         }
       } else if (authorType === 'photographer') {
         const photographer = await storage.getPhotographerByUserId(userId);
         if (photographer) {
           authorPhotographerId = photographer.id;
           authorRoleResponse = 'photographer';
+          authorProName = photographer.displayName?.trim() || null;
         }
       }
 
@@ -20092,7 +20101,7 @@ export async function registerRoutes(
           author: {
             userId: user.id,
             username: user.username || null,
-            displayName: user.name || user.firstName || 'Anonymous',
+            displayName: authorProName || user.name || user.firstName || 'Anonymous',
             profilePhotoUrl: user.profileImageUrl || null,
             role: authorRoleResponse,
           },
