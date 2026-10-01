@@ -4,6 +4,7 @@ import { PhotographerController } from "./photographers.controller";
 import { getUncachableStripeClient } from "../stripe/stripeClient";
 import { verifyAccessToken } from "../auth";
 import { storage } from "../storage";
+import { requirePlatformAdmin } from "../middleware/requirePlatformAdmin";
 
 const photographersRouter = Router();
 
@@ -63,7 +64,7 @@ photographersRouter.patch("/me/availability/:slotId", PhotographerController.upd
 photographersRouter.delete("/me/availability/:slotId", PhotographerController.deleteAvailabilitySlot);
 
 // Create photographer
-photographersRouter.post("/",      PhotographerController.create);
+photographersRouter.post("/", requirePlatformAdmin, PhotographerController.create);
 // List photographers
 photographersRouter.get("/",       PhotographerController.list);
 // Get one photographer
@@ -71,8 +72,8 @@ photographersRouter.get("/:id",    PhotographerController.get);
 // Get photographer's public services
 photographersRouter.get("/:id/services", PhotographerController.getPublicServices);
 // Update photographer
-photographersRouter.patch("/:id",  PhotographerController.update);
+photographersRouter.patch("/:id", requirePlatformAdmin, PhotographerController.update);
 // Delete photographer
-photographersRouter.delete("/:id", PhotographerController.delete);
+photographersRouter.delete("/:id", requirePlatformAdmin, PhotographerController.delete);
 
 export { photographersRouter };
