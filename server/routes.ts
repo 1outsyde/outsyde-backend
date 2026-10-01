@@ -13619,6 +13619,7 @@ export async function registerRoutes(
         businessId: s.businessId,
         name: s.name,
         description: s.description,
+        imageUrl: s.imageUrl ?? null,
         category: s.category,
         price: s.priceCents,
         durationMinutes: s.durationMinutes,
@@ -13764,6 +13765,7 @@ export async function registerRoutes(
   const staffServiceCreateSchema = z.object({
     name: z.string().min(1),
     description: z.string().nullable().optional(),
+    imageUrl: z.string().url().nullable().optional(),
     category: z.string().nullable().optional(),
     priceCents: z.number().int().min(700, "Price must be at least $7.00"),
     durationMinutes: z.number().int().min(5),
