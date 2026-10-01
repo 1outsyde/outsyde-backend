@@ -10718,7 +10718,10 @@ export async function registerRoutes(
     }
 
     try {
-      const data = insertReviewSchema.parse({
+      const reviewSchema = insertReviewSchema.extend({
+        rating: z.number().int().min(5).max(50),
+      });
+      const data = reviewSchema.parse({
         ...req.body,
         reviewerId: userId,
       });
@@ -10827,6 +10830,14 @@ export async function registerRoutes(
       });
 
       storage.scheduleAggregateRecompute(targetType, targetId);
+
+      // Recompute the parent business rating
+      if (targetType === 'product' || targetType === 'service') {
+        const businessId = await storage.getBusinessIdForTarget(targetType, targetId);
+        if (businessId) {
+          await storage.recomputeBusinessRating(businessId);
+        }
+      }
 
       return res.status(201).json(result);
     } catch (error) {
