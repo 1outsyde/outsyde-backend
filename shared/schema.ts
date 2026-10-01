@@ -671,6 +671,7 @@ export const staffServices = pgTable("staff_services", {
 
   name: text("name").notNull(),
   description: text("description"),
+  imageUrl: text("image_url"),
   category: text("category"),
 
   // Flat-rate fixed-duration pricing (no hourly/package model — staff services are appointments)
@@ -844,6 +845,7 @@ export const photographerServices = pgTable("photographer_services", {
 
   name: text("name").notNull(),
   description: text("description"),
+  imageUrl: text("image_url"),
   category: text("category"),
 
   // Pricing model: 'hourly' = charge by hour, 'package' = flat rate for set hours

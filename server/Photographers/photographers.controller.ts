@@ -493,6 +493,7 @@ export class PhotographerController {
       const createSchema = z.object({
         name: z.string().min(1),
         description: z.string().nullable().optional(),
+        imageUrl: z.string().url().nullable().optional(),
         category: z.string().nullable().optional(),
         pricingModel: z.enum(['hourly', 'package']).optional(),
         hourlyRateCents: z.number().min(700, "Price must be at least $7.00").nullable().optional(),
@@ -537,6 +538,7 @@ export class PhotographerController {
         photographerId: photographer.id,
         name: validated.name,
         description: validated.description ?? null,
+        imageUrl: validated.imageUrl ?? null,
         category: validated.category ?? null,
         pricingModel: validated.pricingModel ?? "package",
         hourlyRateCents: validated.hourlyRateCents ?? null,
@@ -597,6 +599,7 @@ export class PhotographerController {
       const updateSchema = z.object({
         name: z.string().min(1).optional(),
         description: z.string().nullable().optional(),
+        imageUrl: z.string().url().nullable().optional(),
         category: z.string().nullable().optional(),
         pricingModel: z.enum(['hourly', 'package']).optional(),
         hourlyRateCents: z.number().min(700, "Price must be at least $7.00").nullable().optional(),
@@ -649,6 +652,7 @@ export class PhotographerController {
       const {
         name,
         description,
+        imageUrl,
         category,
         priceCents,
         isContactForPricing,
@@ -719,6 +723,7 @@ export class PhotographerController {
       const updated = await storage.updatePhotographerService(serviceId, {
         name,
         description,
+        imageUrl,
         category,
         priceCents: isContactForPricing ? null : priceCents,
         isContactForPricing,
