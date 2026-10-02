@@ -1160,6 +1160,97 @@ async function main() {
         }
       }
 
+      // (k) hourly services: price = rate x min hours, duration = min hours, deposits allowed.
+      // Computed in PhotographerController create/update; the payload's own
+      // priceCents / estimatedDurationMinutes are ignored when it applies.
+      {
+        const hourlyBody = (extra: Record<string, unknown> = {}) => ({ pricingModel: "hourly", hourlyRateCents: 10000, packageHours: 3, priceCents: 99999, estimatedDurationMinutes: 45, ...extra });
+        let k = await svcPost(hourlyBody());
+        const hk0 = k.body?.service;
+        check(T, ok(k.status) && hk0?.priceCents === 30000 && hk0?.estimatedDurationMinutes === 180 && hk0?.hourlyRateCents === 10000 && hk0?.packageHours === 3 && hk0?.depositAmountCents === null,
+          `(k) POST hourly 10000 x 3 (payload priceCents 99999, duration 45 ignored) → ${k.status} ${JSON.stringify(hk0 && { p: hk0.priceCents, d: hk0.estimatedDurationMinutes, r: hk0.hourlyRateCents, h: hk0.packageHours })}`);
+        k = await svcPost(hourlyBody({ depositAmountCents: 600 }));
+        check(T, k.status === 400 && k.body?.code === "INVALID_DEPOSIT", `(k) POST hourly D=600 → ${k.status} ${k.body?.code}`);
+        k = await svcPost(hourlyBody({ depositAmountCents: 30000 }));
+        check(T, k.status === 400 && k.body?.code === "INVALID_DEPOSIT" && k.body?.message === "Deposit must be less than the service price.", `(k) POST hourly D=computed price → ${k.status} ${k.body?.code} ${k.body?.message}`);
+        k = await svcPost(hourlyBody({ packageHours: 2.5 }));
+        check(T, k.status === 400 && k.body?.error === "Invalid data", `(k) POST hourly packageHours 2.5 → ${k.status} ${k.body?.error}`);
+        k = await svcPost(hourlyBody({ depositAmountCents: 5000 }));
+        const hSvcId: string | undefined = k.body?.service?.id;
+        check(T, ok(k.status) && k.body?.service?.depositAmountCents === 5000 && k.body?.service?.priceCents === 30000, `(k) POST hourly D=5000 → ${k.status}, stored D ${k.body?.service?.depositAmountCents}, price ${k.body?.service?.priceCents}`);
+
+        // Not applicable: package model, contact-for-pricing, or old-app shapes without a rate.
+        k = await svcPost({ pricingModel: "package", hourlyRateCents: 10000, packageHours: 3, priceCents: 27500, estimatedDurationMinutes: 60 });
+        check(T, ok(k.status) && k.body?.service?.priceCents === 27500 && k.body?.service?.estimatedDurationMinutes === 60, `(k) POST package with rate+hours stores payload as sent → ${k.status} ${k.body?.service?.priceCents}/${k.body?.service?.estimatedDurationMinutes}`);
+        k = await svcPost(hourlyBody({ isContactForPricing: true }));
+        check(T, ok(k.status) && k.body?.service?.priceCents === null && k.body?.service?.estimatedDurationMinutes === 45, `(k) POST hourly contact-for-pricing stores payload as sent → ${k.status} ${k.body?.service?.priceCents}/${k.body?.service?.estimatedDurationMinutes}`);
+        k = await svcPost({ pricingModel: "hourly", priceCents: 10000, estimatedDurationMinutes: 60 });
+        check(T, ok(k.status) && k.body?.service?.priceCents === 10000 && k.body?.service?.hourlyRateCents === null && k.body?.service?.estimatedDurationMinutes === 60 && k.body?.service?.packageHours === null,
+          `(k) old-app CREATE shape (hourly, priceCents 10000, no rate) stored as today → ${k.status} ${JSON.stringify(k.body?.service && { p: k.body.service.priceCents, r: k.body.service.hourlyRateCents, d: k.body.service.estimatedDurationMinutes })}`);
+        k = await svcPost({ pricingModel: "hourly", priceCents: 10000, packageHours: 3, estimatedDurationMinutes: 60 });
+        check(T, ok(k.status) && k.body?.service?.priceCents === 10000 && k.body?.service?.hourlyRateCents === null && k.body?.service?.estimatedDurationMinutes === 60 && k.body?.service?.packageHours === 3,
+          `(k) old-app CREATE shape with min hours (no rate) stored as today → ${k.status} ${JSON.stringify(k.body?.service && { p: k.body.service.priceCents, r: k.body.service.hourlyRateCents, d: k.body.service.estimatedDurationMinutes, h: k.body.service.packageHours })}`);
+
+        if (hSvcId) {
+          const hpatch = (body: Record<string, unknown>) => http("PATCH", `/api/photographers/me/services/${hSvcId}`, "photog", body);
+          const snap = async () => { const s = await svcRow(hSvcId); return { p: s.priceCents, d: s.estimatedDurationMinutes, r: s.hourlyRateCents, h: s.packageHours, dep: s.depositAmountCents }; };
+          const same = (a: any, b: any) => JSON.stringify(a) === JSON.stringify(b);
+          const base = { p: 30000, d: 180, r: 10000, h: 3, dep: 5000 };
+
+          k = await hpatch({ hourlyRateCents: 12000 });
+          check(T, k.status === 200 && same(await snap(), { p: 36000, d: 180, r: 12000, h: 3, dep: 5000 }), `(k) PATCH rate only → ${k.status} ${JSON.stringify(await snap())}`);
+          k = await hpatch({ hourlyRateCents: 10000 });
+          check(T, k.status === 200 && same(await snap(), base), `(k) PATCH rate back → ${k.status} ${JSON.stringify(await snap())}`);
+          k = await hpatch({ packageHours: 4 });
+          check(T, k.status === 200 && same(await snap(), { p: 40000, d: 240, r: 10000, h: 4, dep: 5000 }), `(k) PATCH hours only → ${k.status} ${JSON.stringify(await snap())}`);
+          k = await hpatch({ hourlyRateCents: 20000, packageHours: 2 });
+          check(T, k.status === 200 && same(await snap(), { p: 40000, d: 120, r: 20000, h: 2, dep: 5000 }), `(k) PATCH rate and hours → ${k.status} ${JSON.stringify(await snap())}`);
+          k = await hpatch({ hourlyRateCents: 10000, packageHours: 3 });
+          check(T, k.status === 200 && same(await snap(), base), `(k) PATCH rate and hours back → ${k.status} ${JSON.stringify(await snap())}`);
+
+          // Lowering hours below the stored deposit is rejected before any write.
+          k = await hpatch({ depositAmountCents: 25000 });
+          check(T, k.status === 200 && (await snap()).dep === 25000, `(k) PATCH D=25000 (< 30000) → ${k.status}`);
+          k = await hpatch({ packageHours: 2 });
+          check(T, k.status === 400 && k.body?.code === "INVALID_DEPOSIT" && same(await snap(), { ...base, dep: 25000 }), `(k) PATCH hours 3→2 with stored D 25000 → ${k.status} ${k.body?.code}, row ${JSON.stringify(await snap())}`);
+          k = await hpatch({ depositAmountCents: 5000 });
+          check(T, k.status === 200 && same(await snap(), base), `(k) PATCH D back to 5000 → ${k.status}`);
+
+          k = await hpatch({ name: "Hourly portrait" });
+          check(T, k.status === 200 && same(await snap(), base), `(k) PATCH name only leaves price, rate, hours and deposit → ${k.status} ${JSON.stringify(await snap())}`);
+
+          // An old app edits the same row: its own priceCents / duration are replaced.
+          k = await hpatch({ pricingModel: "hourly", priceCents: 99999, estimatedDurationMinutes: 60 });
+          check(T, k.status === 200 && same(await snap(), base), `(k) PATCH old-app shape (priceCents 99999, duration 60, no rate) → ${k.status} ${JSON.stringify(await snap())}`);
+
+          // Booking: hold, PaymentIntent, shoot row, settlement, cancel preview, refund.
+          await db.update(schema.photographerServices).set({ status: "live", fullRefundWindow: "1_week" } as any).where(eq(schema.photographerServices.id, hSvcId));
+          const { h, p, call, row } = await bookShoot(hSvcId);
+          const hb = h.body;
+          check(T, h.status === 200 && hb.servicePriceCents === 30000 && hb.durationMinutes === 180 && hb.serviceTotalCents === 30000 && hb.depositAmountCents === 5000
+            && hb.dueNowCents === 5400 && hb.dueAtAppointmentCents === 25000 && hb.depositNonRefundable === true,
+            `(k) hourly hold ${h.status} ${JSON.stringify({ s: hb?.servicePriceCents, dur: hb?.durationMinutes, d: hb?.depositAmountCents, n: hb?.dueNowCents, r: hb?.dueAtAppointmentCents })}`);
+          check(T, p?.status === 200 && call?.params.amount === 5400 && call?.params.amount === hb?.dueNowCents && row && row.depositAmountCents === 5000 && row.totalPrice === 30000
+            && row.vendorNet === 4900 && row.platformFee === 100 && call?.params.metadata?.vendorPayoutCents === "4900",
+            `(k) hourly PI ${call?.params.amount}, row ${JSON.stringify(row && { d: row.depositAmountCents, t: row.totalPrice, v: row.vendorNet, f: row.platformFee })}`);
+          if (call && row) {
+            const t0 = depTransfers.length;
+            await WH.handlePaymentIntentSucceeded({ id: p!.body.paymentIntentId, amount: call.params.amount, metadata: call.params.metadata });
+            const tr = shootTransfersOf(t0, row.id);
+            check(T, tr.length === 1 && tr[0].amount === 4900 && tr[0].destination === `acct_ph_${dtag}` && (await shootRowOf(row.id)).status === BOOKING_STATES.CONFIRMED,
+              `(k) hourly settlement transfers ${JSON.stringify(tr.map(t => [t.amount, t.destination]))}`);
+            const pv = await http("GET", `/api/bookings/shoot/${row.id}/cancel-preview`, "consumer");
+            check(T, pv.status === 200 && pv.body.isDepositBooking === true && pv.body.chargedAmountCents === 5400 && pv.body.refundAmountCents === 0 && pv.body.refundTier === "none",
+              `(k) hourly cancel preview ${JSON.stringify({ i: pv.body.isDepositBooking, c: pv.body.chargedAmountCents, r: pv.body.refundAmountCents, t: pv.body.refundTier })}`);
+            const rc0 = refundCreates.length;
+            const rf = await http("POST", `/api/bookings/photographer/${row.id}/refund`, "photog", {});
+            const made = refundCreates.slice(rc0);
+            check(T, rf.status === 200 && rf.body?.amount === 5000 && made.length === 1 && made[0].amount === 5000,
+              `(k) hourly photographer refund default ${rf.status}, amount ${rf.body?.amount}, Stripe refunds ${JSON.stringify(made.map(m => m.amount))}`);
+          }
+        } else check(T, false, "(k) no hourly deposit service created");
+      }
+
       // GET /api/my-shoot-bookings
       {
         const mine = await http("GET", "/api/my-shoot-bookings", "consumer");
