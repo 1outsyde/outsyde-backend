@@ -24,6 +24,21 @@ const canChangeDisplayName = (lastChangedAt: Date | null): { allowed: boolean; d
   return { allowed, daysRemaining };
 };
 
+// Hourly services: the booking price is the hourly rate times the minimum
+// hours, and the duration is the minimum hours. Returns null (leaving the
+// payload to be stored as sent) unless the service is hourly, priced, and has
+// both a rate and minimum hours.
+function computeHourlyTotals(
+  model: string | null | undefined,
+  rateCents: number | null | undefined,
+  minHours: number | null | undefined,
+  isContactForPricing: boolean | null | undefined,
+): { priceCents: number; estimatedDurationMinutes: number } | null {
+  if (model !== "hourly" || isContactForPricing) return null;
+  if (typeof rateCents !== "number" || typeof minHours !== "number") return null;
+  return { priceCents: rateCents * minHours, estimatedDurationMinutes: minHours * 60 };
+}
+
 // Helper to resolve photographer for authenticated user
 // Supports both JWT (Authorization header) and session-based auth
 // Returns: { user, photographer, error? }
@@ -498,7 +513,7 @@ export class PhotographerController {
         pricingModel: z.enum(['hourly', 'package']).optional(),
         hourlyRateCents: z.number().min(700, "Price must be at least $7.00").nullable().optional(),
         priceCents: z.number().min(700, "Price must be at least $7.00").nullable().optional(),
-        packageHours: z.number().min(1).nullable().optional(),
+        packageHours: z.number().int().min(1).nullable().optional(),
         isContactForPricing: z.boolean().optional(),
         estimatedDurationMinutes: z.number().min(1).nullable().optional(),
         isActive: z.boolean().optional(),
@@ -528,7 +543,18 @@ export class PhotographerController {
         throw zodErr;
       }
 
-      const storedPriceCents = validated.isContactForPricing ? null : (validated.priceCents ?? null);
+      // Hourly: price = rate x min hours and duration = min hours, ignoring any
+      // priceCents / estimatedDurationMinutes in the payload. Computed before the
+      // deposit check so the deposit is validated against the stored price.
+      const hourly = computeHourlyTotals(
+        validated.pricingModel ?? "package",
+        validated.hourlyRateCents,
+        validated.packageHours,
+        validated.isContactForPricing,
+      );
+      const storedPriceCents = hourly
+        ? hourly.priceCents
+        : (validated.isContactForPricing ? null : (validated.priceCents ?? null));
       const depositCheck = validatePhotographerDeposit(validated.depositAmountCents, storedPriceCents);
       if (!depositCheck.ok) {
         return res.status(400).json(invalidDepositBody(depositCheck.message));
@@ -546,7 +572,7 @@ export class PhotographerController {
         depositAmountCents: depositCheck.value ?? null,
         packageHours: validated.packageHours ?? null,
         isContactForPricing: validated.isContactForPricing ?? false,
-        estimatedDurationMinutes: validated.estimatedDurationMinutes ?? null,
+        estimatedDurationMinutes: hourly ? hourly.estimatedDurationMinutes : (validated.estimatedDurationMinutes ?? null),
         serviceLocationType: validated.serviceLocationType,
         alternateAddress: validated.alternateAddress,
         alternateCity: validated.alternateCity,
@@ -604,7 +630,7 @@ export class PhotographerController {
         pricingModel: z.enum(['hourly', 'package']).optional(),
         hourlyRateCents: z.number().min(700, "Price must be at least $7.00").nullable().optional(),
         priceCents: z.number().min(700, "Price must be at least $7.00").nullable().optional(),
-        packageHours: z.number().min(1).nullable().optional(),
+        packageHours: z.number().int().min(1).nullable().optional(),
         isContactForPricing: z.boolean().optional(),
         estimatedDurationMinutes: z.number().min(1).nullable().optional(),
         isActive: z.boolean().optional(),
@@ -634,14 +660,37 @@ export class PhotographerController {
         throw zodErr;
       }
 
+      // Hourly: price = rate x min hours and duration = min hours, from the
+      // payload value where sent and the stored value otherwise. The payload's
+      // priceCents / estimatedDurationMinutes are ignored when this applies.
+      // Computed before the deposit check and the Stripe price rotation below, so
+      // a rejected deposit returns before any Stripe call or write.
+      const hourly = computeHourlyTotals(
+        validated.pricingModel ?? service.pricingModel,
+        validated.hourlyRateCents !== undefined ? validated.hourlyRateCents : service.hourlyRateCents,
+        validated.packageHours !== undefined ? validated.packageHours : service.packageHours,
+        validated.isContactForPricing !== undefined ? validated.isContactForPricing : service.isContactForPricing,
+      );
+
       // Same rule as PATCH /api/vendor/services/:id: re-check whenever the
       // price or the deposit changes, so a price lowered to or below the
-      // stored deposit (or removed) is rejected too.
+      // stored deposit (or removed) is rejected too. The price also changes
+      // through the hourly rate, minimum hours, pricing model or contact flag.
       let depositAmountCents: number | null | undefined;
-      if (validated.priceCents !== undefined || validated.depositAmountCents !== undefined || validated.isContactForPricing === true) {
+      if (
+        validated.priceCents !== undefined ||
+        validated.depositAmountCents !== undefined ||
+        validated.hourlyRateCents !== undefined ||
+        validated.packageHours !== undefined ||
+        validated.pricingModel !== undefined ||
+        validated.isContactForPricing !== undefined ||
+        (hourly !== null && hourly.priceCents !== service.priceCents)
+      ) {
         const depositCheck = validatePhotographerDeposit(
           validated.depositAmountCents !== undefined ? validated.depositAmountCents : service.depositAmountCents,
-          validated.isContactForPricing ? null : (validated.priceCents !== undefined ? validated.priceCents : service.priceCents),
+          hourly
+            ? hourly.priceCents
+            : (validated.isContactForPricing ? null : (validated.priceCents !== undefined ? validated.priceCents : service.priceCents)),
         );
         if (!depositCheck.ok) {
           return res.status(400).json(invalidDepositBody(depositCheck.message));
@@ -725,9 +774,9 @@ export class PhotographerController {
         description,
         imageUrl,
         category,
-        priceCents: isContactForPricing ? null : priceCents,
+        priceCents: hourly ? hourly.priceCents : (isContactForPricing ? null : priceCents),
         isContactForPricing,
-        estimatedDurationMinutes,
+        estimatedDurationMinutes: hourly ? hourly.estimatedDurationMinutes : estimatedDurationMinutes,
         isActive,
         pricingModel,
         hourlyRateCents,
