@@ -258,6 +258,434 @@ async function main() {
   const pi = (amount: number, metadata: Record<string, string>) => ({ id: `pi_test_${randomUUID()}`, amount, metadata });
   const receiptSentCount = () => receiptLogs.filter(l => / → (consumer|vendor|admin) sent$/.test(l)).length;
 
+  // ── Free consultations ────────────────────────────────────────────────────
+  // Real routes, real holds, local Postgres. Stripe is mocked at the SDK
+  // resource prototypes and every call is recorded: free flows must make none.
+  async function runFreeConsultationTests(): Promise<void> {
+    const express = (await import("express")).default;
+    const { createServer } = await import("node:http");
+    const { registerRoutes } = await import("../server/routes");
+    const { generateAccessToken } = await import("../server/auth");
+    const Stripe: any = (await import("stripe")).default;
+    const R = Stripe.resources;
+    const { and: dAnd, sql: dSql } = await import("drizzle-orm");
+
+    const app = express();
+    app.use(express.json());
+    // POST /api/feed reads req.session.userId only.
+    app.use((req: any, _res, next) => { const u = req.headers["x-test-session-user"]; if (u) req.session = { userId: u }; next(); });
+    const server = createServer(app);
+    await registerRoutes(server, app);
+    await new Promise<void>(r => server.listen(0, "127.0.0.1", () => r()));
+    const port = (server.address() as any).port;
+
+    // ── Stripe SDK recorder ─────────────────────────────────────────────────
+    const stripeCalls: string[] = [];
+    const orig = {
+      piCreate: R.PaymentIntents.prototype.create, piCapture: R.PaymentIntents.prototype.capture,
+      piCancel: R.PaymentIntents.prototype.cancel, piRetrieve: R.PaymentIntents.prototype.retrieve,
+      refund: R.Refunds.prototype.create, prodCreate: R.Products.prototype.create, priceCreate: R.Prices.prototype.create,
+      custCreate: R.Customers.prototype.create, custRetrieve: R.Customers.prototype.retrieve,
+    };
+    R.PaymentIntents.prototype.create = async function (p: any) {
+      stripeCalls.push("paymentIntents.create");
+      const id = `pi_free_${randomUUID().slice(0, 8)}`;
+      return { id, client_secret: `${id}_secret`, amount: p.amount, capture_method: p.capture_method, status: "requires_payment_method", metadata: p.metadata };
+    };
+    R.PaymentIntents.prototype.capture = async function (id: string) { stripeCalls.push("paymentIntents.capture"); return { id, amount: 0, metadata: {} }; };
+    R.PaymentIntents.prototype.cancel = async function (id: string) { stripeCalls.push("paymentIntents.cancel"); return { id, status: "canceled" }; };
+    R.PaymentIntents.prototype.retrieve = async function (id: string) { stripeCalls.push("paymentIntents.retrieve"); return { id, status: "succeeded", amount: 0, amount_received: 0, amount_refunded: 0 }; };
+    R.Refunds.prototype.create = async function () { stripeCalls.push("refunds.create"); return { id: "re_x", status: "succeeded" }; };
+    R.Products.prototype.create = async function (p: any) { stripeCalls.push("products.create"); return { id: `prod_${randomUUID().slice(0, 8)}`, ...p }; };
+    R.Prices.prototype.create = async function (p: any) { stripeCalls.push("prices.create"); return { id: `price_${randomUUID().slice(0, 8)}`, ...p }; };
+    R.Customers.prototype.create = async function () { stripeCalls.push("customers.create"); return { id: `cus_${randomUUID().slice(0, 8)}` }; };
+    R.Customers.prototype.retrieve = async function (id: string) { stripeCalls.push("customers.retrieve"); return { id, deleted: false }; };
+    const transferCountBefore = stripeTransfers.length;
+
+    const referralCalls: string[] = [];
+    const origReferral = (WebhookHandlers as any).tryCompleteReferral;
+    (WebhookHandlers as any).tryCompleteReferral = async (...a: any[]) => { referralCalls.push(String(a[1])); };
+    const earnCalls: any[] = [];
+    const origEarn = (storage as any).earnPoints;
+    (storage as any).earnPoints = async function (this: any, data: any) { earnCalls.push(data); return origEarn.call(this, data); };
+    const origSubActive = (storage as any).isBusinessSubscriptionActive;
+    let subActive = true;
+    (storage as any).isBusinessSubscriptionActive = async () => (subActive ? { active: true } : { active: false, reason: "test_inactive" });
+    const priorInternalKey = process.env.INTERNAL_API_KEY;
+    process.env.INTERNAL_API_KEY = `ik_${randomUUID()}`;
+
+    // ── Fixtures ────────────────────────────────────────────────────────────
+    const ft = randomUUID().slice(0, 8);
+    async function newUser(label: string, extra: Record<string, unknown> = {}) {
+      const [u] = await db.insert(schema.users).values({ username: `${label}_${ft}_${randomUUID().slice(0, 4)}`, email: `${label}-${ft}-${randomUUID().slice(0, 4)}@example.com`, name: `Free ${label}`, ...extra } as any).returning();
+      return u as any;
+    }
+    async function newBusiness(autoAccept: boolean) {
+      const owner = await newUser("fowner", { isVendor: true });
+      const [b] = await db.insert(schema.businesses).values({
+        ownerId: owner.id, name: `Free Biz ${autoAccept ? "auto" : "manual"} ${ft}`, category: "beauty",
+        autoAcceptBookings: autoAccept, stripeAccountId: `acct_free_${randomUUID().slice(0, 8)}`, stripeOnboardingComplete: true,
+        approvalStatus: "approved",
+      } as any).returning();
+      for (let day = 0; day < 7; day++) {
+        await db.insert(schema.weeklyAvailability).values({ providerType: "business", providerId: b.id, dayOfWeek: day, startTime: "00:00", endTime: "23:59", isActive: true } as any);
+      }
+      return { biz: b as any, owner, token: generateAccessToken({ userId: owner.id, isVendor: true, businessId: b.id }) };
+    }
+    const tokenFor = (u: any) => generateAccessToken({ userId: u.id, isVendor: false });
+
+    async function http(method: string, path: string, token: string | null, body?: unknown, headers: Record<string, string> = {}) {
+      const res = await fetch(`http://127.0.0.1:${port}${path}`, {
+        method, headers: { ...(token ? { Authorization: `Bearer ${token}` } : {}), "Content-Type": "application/json", ...headers },
+        ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
+      });
+      return { status: res.status, body: (await res.json().catch(() => ({}))) as any };
+    }
+    const apptRow = async (id: string) => (await db.select().from(schema.appointments).where(eq(schema.appointments.id, id)))[0] as any;
+    const apptsForHold = async (holdId: string) => db.select().from(schema.appointments).where(eq(schema.appointments.holdId, holdId));
+    const holdRow = async (id: string) => (await db.select().from(schema.bookingHolds).where(eq(schema.bookingHolds.id, id)))[0] as any;
+    async function hold(token: string, providerId: string, serviceId: string, staffMemberId?: string) {
+      const { date, time } = nextSlot();
+      const r = await http("POST", "/api/booking/hold", token, { providerType: "business", providerId, serviceId, date, startTime: time, ...(staffMemberId ? { staffMemberId } : {}) });
+      assert(r.status === 200 && r.body?.holdId, `free: hold created (got ${r.status} ${JSON.stringify(r.body).slice(0, 200)})`);
+      return r.body.holdId as string;
+    }
+
+    const auto = await newBusiness(true);
+    const manual = await newBusiness(false);
+
+    // ── Service create / patch ──────────────────────────────────────────────
+    const questionsInput = [
+      { label: "What's your goal?", type: "text", required: true },
+      { label: "Hair length", type: "select", options: ["Short", "Long"], required: true },
+      { label: "Event date", type: "date" },
+    ];
+    let freeSvc: any;
+    {
+      const r = await http("POST", "/api/vendor/services", auto.token, { name: `Free consult ${ft}`, price: 9000, depositAmountCents: 3000, durationMinutes: 30, isFreeConsultation: true, bookingQuestions: questionsInput });
+      freeSvc = r.body?.service;
+      assert(r.status === 200 && freeSvc?.isFreeConsultation === true && freeSvc.price === 0 && freeSvc.depositAmountCents === null,
+        `free create: price forced 0, deposit null (got ${r.status} price=${freeSvc?.price} dep=${freeSvc?.depositAmountCents})`);
+      assert(Array.isArray(freeSvc.bookingQuestions) && freeSvc.bookingQuestions.length === 3 && freeSvc.bookingQuestions.every((q: any) => /^[0-9a-f-]{36}$/.test(q.id)),
+        "free create: 3 questions with server-generated ids");
+      const bad = await http("POST", "/api/vendor/services", auto.token, { name: "bad q", durationMinutes: 30, isFreeConsultation: true, bookingQuestions: [{ label: "x", type: "select", options: ["one"] }] });
+      assert(bad.status === 400 && bad.body?.code === "INVALID_BOOKING_QUESTIONS", `free create: invalid questions → 400 INVALID_BOOKING_QUESTIONS (got ${bad.status} ${bad.body?.code})`);
+      const paidQ = await http("POST", "/api/vendor/services", auto.token, { name: "paid q", price: 9000, durationMinutes: 30, bookingQuestions: questionsInput });
+      assert(paidQ.status === 400 && paidQ.body?.code === "INVALID_BOOKING_QUESTIONS", `paid create with questions → 400 (got ${paidQ.status})`);
+      const paidLow = await http("POST", "/api/vendor/services", auto.token, { name: "paid low", price: 500, durationMinutes: 30 });
+      assert(paidLow.status === 400, `paid create below $7 still → 400 (got ${paidLow.status})`);
+      const badFlag = await http("POST", "/api/vendor/services", auto.token, { name: "flag", price: 9000, durationMinutes: 30, isFreeConsultation: "yes" });
+      assert(badFlag.status === 400, `non-boolean isFreeConsultation → 400 (got ${badFlag.status})`);
+    }
+    // Patch: editing, turning off, turning on.
+    {
+      const [tmp] = await db.insert(schema.vendorServices).values({ businessId: auto.biz.id, name: `Toggle ${ft}`, price: 9000, durationMinutes: 30, depositAmountCents: 3000 } as any).returning();
+      let r = await http("PATCH", `/api/vendor/services/${tmp.id}`, auto.token, { isFreeConsultation: true, bookingQuestions: [{ label: "Q", type: "long_text" }] });
+      assert(r.status === 200 && r.body.service.isFreeConsultation === true && r.body.service.price === 0 && r.body.service.depositAmountCents === null && r.body.service.bookingQuestions.length === 1,
+        `patch: turning free on forces price 0 / deposit null (got ${r.status} ${JSON.stringify(r.body).slice(0, 160)})`);
+      const qid = r.body.service.bookingQuestions[0].id;
+      r = await http("PATCH", `/api/vendor/services/${tmp.id}`, auto.token, { price: 5000, name: `Toggle2 ${ft}`, bookingQuestions: [{ id: qid, label: "Q renamed", type: "long_text" }] });
+      assert(r.status === 200 && r.body.service.price === 0 && r.body.service.name === `Toggle2 ${ft}` && r.body.service.bookingQuestions[0].id === qid,
+        `patch: editing a free service keeps price 0 and existing question id (got price=${r.body?.service?.price})`);
+      r = await http("PATCH", `/api/vendor/services/${tmp.id}`, auto.token, { isFreeConsultation: false });
+      assert(r.status === 400 && r.body?.code === "FREE_CONSULTATION_PRICE_REQUIRED", `patch: turning free off without price → 400 FREE_CONSULTATION_PRICE_REQUIRED (got ${r.status} ${r.body?.code})`);
+      r = await http("PATCH", `/api/vendor/services/${tmp.id}`, auto.token, { isFreeConsultation: false, price: 600 });
+      assert(r.status === 400 && (await db.select().from(schema.vendorServices).where(eq(schema.vendorServices.id, tmp.id)))[0].isFreeConsultation === true,
+        `patch: turning free off with price < $7 → 400, still free (got ${r.status})`);
+      r = await http("PATCH", `/api/vendor/services/${tmp.id}`, auto.token, { isFreeConsultation: false, price: 8000 });
+      assert(r.status === 200 && r.body.service.isFreeConsultation === false && r.body.service.price === 8000 && r.body.service.bookingQuestions === null,
+        `patch: turning free off with price ≥ $7 → paid, questions cleared (got ${r.status} ${JSON.stringify(r.body).slice(0, 160)})`);
+      r = await http("PATCH", `/api/vendor/services/${tmp.id}`, auto.token, { bookingQuestions: [{ label: "x", type: "text" }] });
+      assert(r.status === 400 && r.body?.code === "INVALID_BOOKING_QUESTIONS", `patch: questions on a paid service → 400 (got ${r.status})`);
+      r = await http("PATCH", `/api/vendor/services/${tmp.id}`, auto.token, { price: 600 });
+      assert(r.status === 400, `patch: paid min price rule unchanged (got ${r.status})`);
+      await db.delete(schema.vendorServices).where(eq(schema.vendorServices.id, tmp.id));
+    }
+    const [paidSvc] = await db.insert(schema.vendorServices).values({ businessId: auto.biz.id, name: `Paid consult ${ft}`, price: 27500, durationMinutes: 60, status: "live", isActive: true } as any).returning();
+    await db.update(schema.vendorServices).set({ status: "live", isActive: true } as any).where(eq(schema.vendorServices.id, freeSvc.id));
+    const r2 = await http("POST", "/api/vendor/services", manual.token, { name: `Free manual ${ft}`, durationMinutes: 30, isFreeConsultation: true, bookingQuestions: questionsInput });
+    const manualSvc = r2.body.service;
+    await db.update(schema.vendorServices).set({ status: "live", isActive: true } as any).where(eq(schema.vendorServices.id, manualSvc.id));
+
+    const answersFor = (svc: any, goal = "Volume <b>boost</b> & shine") => {
+      const qs = svc.bookingQuestions;
+      return [{ questionId: qs[0].id, answer: goal }, { questionId: qs[1].id, answer: "Long" }];
+    };
+
+    // ── Go-live: gate unchanged, no Stripe catalog for free ─────────────────
+    {
+      await db.update(schema.vendorServices).set({ status: "draft" } as any).where(eq(schema.vendorServices.id, freeSvc.id));
+      stripeCalls.length = 0;
+      subActive = false;
+      let r = await http("POST", `/api/vendor/services/${freeSvc.id}/go-live`, auto.token);
+      assert(r.status === 409 && r.body?.code === "subscription_inactive", `go-live free: subscription gate still applies (got ${r.status} ${r.body?.code})`);
+      subActive = true;
+      r = await http("POST", `/api/vendor/services/${freeSvc.id}/go-live`, auto.token);
+      assert(r.status === 200 && r.body.service.status === "live" && r.body.service.stripeProductId === null && r.body.service.stripePriceId === null,
+        `go-live free: live with no Stripe Product/Price (got ${r.status} ${JSON.stringify(r.body).slice(0, 160)})`);
+      assert(!stripeCalls.includes("products.create") && !stripeCalls.includes("prices.create"), `go-live free: no Stripe catalog calls (got ${JSON.stringify(stripeCalls)})`);
+    }
+
+    // ── Free auto-accept: hold → confirm-free → confirmed ───────────────────
+    const c1 = await newUser("fc1");
+    const t1 = tokenFor(c1);
+    let autoApptId = "";
+    let autoHoldId = "";
+    {
+      reset(); stripeCalls.length = 0; earnCalls.length = 0; referralCalls.length = 0;
+      autoHoldId = await hold(t1, auto.biz.id, freeSvc.id);
+      const r = await http("POST", `/api/booking/${autoHoldId}/confirm-free`, t1, { answers: answersFor(freeSvc) });
+      assert(r.status === 200 && r.body.free === true && r.body.status === "confirmed" && !!r.body.appointmentId && typeof r.body.bookingNumber === "number",
+        `free auto: confirm-free → 200 { free, appointmentId, bookingNumber, status: confirmed } (got ${r.status} ${JSON.stringify(r.body)})`);
+      autoApptId = r.body.appointmentId;
+      const row = await apptRow(autoApptId);
+      assert(row.status === "confirmed" && row.paymentMethod === "free" && row.totalPrice === 0 && row.platformFee === 0 && row.vendorNet === 0
+        && row.depositAmountCents === null && row.captureMethod === null && row.stripePaymentIntentId === null && row.servicePriceCents === 0,
+        `free auto: row is free/0/no deposit/no capture/no PI (got ${JSON.stringify({ s: row.status, pm: row.paymentMethod, tp: row.totalPrice, d: row.depositAmountCents, c: row.captureMethod, pi: row.stripePaymentIntentId })})`);
+      assert(!!row.settledAt && row.stripeTransferId === null, "free auto: settled_at claimed, no transfer id");
+      assert(Array.isArray(row.bookingAnswers) && row.bookingAnswers.length === 3 && row.bookingAnswers[0].answer === "Volume <b>boost</b> & shine"
+        && row.bookingAnswers[0].label === "What's your goal?" && row.bookingAnswers[2].answer === null,
+        "free auto: answers snapshot saved (label + type + answer, unanswered optional = null)");
+      assert((await holdRow(autoHoldId)).status === "converted", "free auto: hold converted");
+      assert(stripeCalls.length === 0, `free auto: zero Stripe calls (got ${JSON.stringify(stripeCalls)})`);
+      assert(stripeTransfers.length === transferCountBefore, "free auto: no transfer");
+      const pend = await db.select().from(schema.pendingPointTransactions).where(eq(schema.pendingPointTransactions.referenceId, autoApptId));
+      assert(pend.length === 0 && earnCalls.length === 0, "free auto: no points (pending or earned)");
+      assert(referralCalls.length === 0, "free auto: no referral completion");
+      const subjects = sent.map(s => `${s.to} | ${s.subject}`);
+      assert(sent.length === 3 && sent.some(s => s.to === c1.email && s.subject.startsWith("🎉 Your free consultation is confirmed"))
+        && sent.some(s => s.to === auto.owner.email && s.subject.startsWith("📋 New free consultation"))
+        && sent.some(s => s.to === ADMIN && s.subject.startsWith("[Outsyde] Free Consultation CONFIRMED")),
+        `free auto: consumer/vendor/admin free receipts (got ${JSON.stringify(subjects)})`);
+      assert(sent.every(s => !s.html.includes("<b>boost</b>") && s.html.includes("Volume &lt;b&gt;boost&lt;/b&gt; &amp; shine")), "free auto: answers HTML-escaped in every email");
+      assert(sent.every(s => !/Total Paid|Your Payout|platform fee/i.test(s.html)), "free auto: no money lines in free emails");
+      const notes = await db.select().from(schema.notifications).where(eq(schema.notifications.referenceId, autoApptId));
+      assert(notes.length === 2 && notes.every((n: any) => n.title === "Booking confirmed"), `free auto: in-app "Booking confirmed" for customer + owner (got ${JSON.stringify(notes.map((n: any) => n.title))})`);
+    }
+
+    // ── Idempotent retry ────────────────────────────────────────────────────
+    {
+      reset();
+      const r = await http("POST", `/api/booking/${autoHoldId}/confirm-free`, t1, { answers: answersFor(freeSvc) });
+      assert(r.status === 200 && r.body.appointmentId === autoApptId && r.body.status === "confirmed", `free retry: same appointment returned (got ${r.status} ${JSON.stringify(r.body)})`);
+      assert((await apptsForHold(autoHoldId)).length === 1 && sent.length === 0, "free retry: no second row, no second receipts");
+    }
+
+    // ── Limit 409, then frees up after cancel ───────────────────────────────
+    let secondHold = "";
+    {
+      reset(); stripeCalls.length = 0;
+      secondHold = await hold(t1, auto.biz.id, freeSvc.id);
+      const r = await http("POST", `/api/booking/${secondHold}/confirm-free`, t1, { answers: answersFor(freeSvc) });
+      assert(r.status === 409 && r.body?.code === "FREE_CONSULTATION_LIMIT" && !!r.body?.message, `free limit: second open consultation → 409 FREE_CONSULTATION_LIMIT (got ${r.status} ${r.body?.code})`);
+      assert((await apptsForHold(secondHold)).length === 0 && sent.length === 0, "free limit: no row, no email");
+      // Another business is a separate limit.
+      const otherHold = await hold(t1, manual.biz.id, manualSvc.id);
+      const other = await http("POST", `/api/booking/${otherHold}/confirm-free`, t1, { answers: answersFor(manualSvc) });
+      assert(other.status === 200 && other.body.status === "pending_provider", `free limit: is per business (other business → ${other.status} ${other.body?.status})`);
+
+      const preview = await http("GET", `/api/bookings/appointments/${autoApptId}/cancel-preview`, t1);
+      assert(preview.status === 200 && preview.body.cancellable === true && preview.body.isFreeConsultation === true && preview.body.refundAmountCents === 0
+        && preview.body.feeAmountCents === 0 && preview.body.chargedAmountCents === 0, `free cancel-preview: free, no refund, no fee (got ${JSON.stringify(preview.body)})`);
+      const cancel = await http("POST", `/api/bookings/appointments/${autoApptId}/cancel`, t1);
+      assert(cancel.status === 200 && cancel.body.refundAmountCents === 0 && cancel.body.feeAmountCents === 0 && cancel.body.feeCharged === false,
+        `free cancel: 200, no refund, no fee (got ${cancel.status} ${JSON.stringify(cancel.body)})`);
+      assert((await apptRow(autoApptId)).status === "canceled" && stripeCalls.length === 0, `free cancel: canceled, zero Stripe calls (got ${JSON.stringify(stripeCalls)})`);
+      const again = await http("POST", `/api/booking/${secondHold}/confirm-free`, t1, { answers: answersFor(freeSvc) });
+      assert(again.status === 200 && again.body.status === "confirmed", `free limit: after cancel the same customer can book again (got ${again.status} ${JSON.stringify(again.body)})`);
+    }
+
+    // ── Free manual: pending_provider → accept → confirmed + free receipts ──
+    {
+      reset(); stripeCalls.length = 0;
+      const c2 = await newUser("fc2");
+      const t2 = tokenFor(c2);
+      const h = await hold(t2, manual.biz.id, manualSvc.id);
+      const r = await http("POST", `/api/booking/${h}/confirm-free`, t2, { answers: answersFor(manualSvc, "Trim") });
+      assert(r.status === 200 && r.body.free === true && r.body.status === "pending_provider", `free manual: confirm-free → pending_provider (got ${r.status} ${JSON.stringify(r.body)})`);
+      const id = r.body.appointmentId;
+      let row = await apptRow(id);
+      assert(row.status === "pending_provider" && row.paymentMethod === "free" && !!row.pendingProviderExpiresAt && !row.settledAt && row.captureMethod === null,
+        "free manual: pending_provider row, expiry set, not settled");
+      assert((await holdRow(h)).status === "active", "free manual: hold not converted before accept");
+      const subjects = sent.map(s => `${s.to} | ${s.subject}`);
+      assert(sent.length === 3 && sent.some(s => s.to === c2.email && s.subject.startsWith("Consultation request received"))
+        && sent.some(s => s.to === manual.owner.email && s.subject.startsWith("New consultation request"))
+        && sent.some(s => s.to === ADMIN && s.subject.includes("Free Consultation REQUESTED"))
+        && !sent.some(s => /Booking request received|New booking request/.test(s.subject)),
+        `free manual: free request notifier, not notifyPendingBookingRequest (got ${JSON.stringify(subjects)})`);
+      assert(sent.every(s => !/authorized|charged/i.test(s.html)), "free manual: no card-authorization wording");
+
+      reset();
+      const acc = await http("POST", `/api/bookings/appointments/${id}/accept`, manual.token);
+      row = await apptRow(id);
+      assert(acc.status === 200 && row.status === "confirmed" && !!row.settledAt && row.stripeTransferId === null, `free manual accept: confirmed + settled (got ${acc.status} ${row.status})`);
+      assert((await holdRow(h)).status === "converted", "free manual accept: hold converted");
+      const accSubjects = sent.map(s => `${s.to} | ${s.subject}`);
+      assert(sent.length === 3 && sent.some(s => s.to === c2.email && s.subject.startsWith("Consultation accepted"))
+        && sent.some(s => s.to === manual.owner.email && s.subject.startsWith("📋 New free consultation"))
+        && sent.some(s => s.to === ADMIN && s.subject.includes("Free Consultation ACCEPTED")),
+        `free manual accept: free receipts (got ${JSON.stringify(accSubjects)})`);
+      assert(stripeCalls.length === 0 && stripeTransfers.length === transferCountBefore, `free manual: zero Stripe calls, no transfer (got ${JSON.stringify(stripeCalls)})`);
+
+      // Vendor /refund on a free booking: plain state-machine cancel.
+      const ref = await http("POST", `/api/bookings/appointments/${id}/refund`, manual.token, { reason: "Vendor sick" });
+      assert(ref.status === 200 && (await apptRow(id)).status === "canceled" && stripeCalls.length === 0, `free /refund: plain cancel, no Stripe (got ${ref.status} ${JSON.stringify(ref.body)})`);
+    }
+
+    // ── Complete: no COMPLETION_POINTS ──────────────────────────────────────
+    {
+      reset(); earnCalls.length = 0;
+      const c3 = await newUser("fc3");
+      const t3 = tokenFor(c3);
+      const h = await hold(t3, auto.biz.id, freeSvc.id);
+      const r = await http("POST", `/api/booking/${h}/confirm-free`, t3, { answers: answersFor(freeSvc) });
+      const done = await http("PATCH", `/api/bookings/appointments/${r.body.appointmentId}/complete`, auto.token);
+      assert(done.status === 200 && done.body.pointsAwarded === 0 && earnCalls.length === 0 && (await apptRow(r.body.appointmentId)).status === "completed",
+        `free complete: completed, 0 points (got ${done.status} ${JSON.stringify(done.body)}, earnPoints calls ${earnCalls.length})`);
+      // The completed one no longer blocks.
+      const h2 = await hold(t3, auto.biz.id, freeSvc.id);
+      const r2b = await http("POST", `/api/booking/${h2}/confirm-free`, t3, { answers: answersFor(freeSvc) });
+      assert(r2b.status === 200, `free limit: completed consultation does not block (got ${r2b.status})`);
+    }
+
+    // ── Invalid answers / not free ──────────────────────────────────────────
+    {
+      const c4 = await newUser("fc4");
+      const t4 = tokenFor(c4);
+      const h = await hold(t4, auto.biz.id, freeSvc.id);
+      let r = await http("POST", `/api/booking/${h}/confirm-free`, t4, { answers: [{ questionId: freeSvc.bookingQuestions[1].id, answer: "Medium" }] });
+      assert(r.status === 400 && r.body?.code === "INVALID_BOOKING_ANSWERS" && Array.isArray(r.body.errors) && r.body.errors.length === 2,
+        `confirm-free: missing required + bad select → 400 INVALID_BOOKING_ANSWERS (got ${r.status} ${JSON.stringify(r.body)})`);
+      r = await http("POST", `/api/booking/${h}/confirm-free`, t4, { answers: [...answersFor(freeSvc), { questionId: "unknown", answer: "x" }] });
+      assert(r.status === 400 && r.body?.code === "INVALID_BOOKING_ANSWERS", "confirm-free: unknown question id → 400");
+      assert((await apptsForHold(h)).length === 0, "confirm-free: invalid answers create no row");
+      const paidHold = await hold(t4, auto.biz.id, paidSvc.id);
+      r = await http("POST", `/api/booking/${paidHold}/confirm-free`, t4, {});
+      assert(r.status === 400 && r.body?.code === "NOT_FREE_CONSULTATION" && (await apptsForHold(paidHold)).length === 0, `confirm-free on a paid service → 400 NOT_FREE_CONSULTATION (got ${r.status} ${r.body?.code})`);
+      const other = await newUser("fc4b");
+      r = await http("POST", `/api/booking/${h}/confirm-free`, tokenFor(other), { answers: answersFor(freeSvc) });
+      assert(r.status === 400 && (await apptsForHold(h)).length === 0, `confirm-free: another user's hold → 400 (got ${r.status})`);
+      r = await http("POST", `/api/booking/${h}/confirm-free`, null, {});
+      assert(r.status === 401, `confirm-free: unauthenticated → 401 (got ${r.status})`);
+    }
+
+    // ── Payment routes refuse free holds; staff holds rejected ──────────────
+    {
+      const c5 = await newUser("fc5");
+      const t5 = tokenFor(c5);
+      stripeCalls.length = 0;
+      const before = (await db.select({ n: dSql<number>`count(*)::int` }).from(schema.appointments))[0].n;
+      const h = await hold(t5, auto.biz.id, freeSvc.id);
+      let r = await http("POST", `/api/booking/${h}/create-payment-intent`, t5, {});
+      assert(r.status === 400 && r.body?.code === "FREE_CONSULTATION" && !!r.body?.message && !!r.body?.error, `create-payment-intent on a free hold → 400 FREE_CONSULTATION (got ${r.status} ${JSON.stringify(r.body)})`);
+      r = await http("POST", `/api/booking/${h}/create-deposit-intent`, t5, {});
+      assert(r.status === 400 && r.body?.code === "FREE_CONSULTATION", `create-deposit-intent on a free hold → 400 FREE_CONSULTATION (got ${r.status} ${JSON.stringify(r.body)})`);
+
+      const staffUser = await newUser("fstaff");
+      const [staff] = await db.insert(schema.staffMembers).values({ businessId: auto.biz.id, userId: staffUser.id, displayName: "Free Staff", status: "active", stripeOnboardingComplete: true, stripeAccountId: `acct_fs_${ft}` } as any).returning();
+      await db.insert(schema.staffServices).values({ staffMemberId: staff.id, businessId: auto.biz.id, name: "Staff svc", priceCents: 9000, durationMinutes: 30, status: "live" } as any);
+      for (let day = 0; day < 7; day++) {
+        await db.insert(schema.weeklyAvailability).values({ providerType: "business", providerId: auto.biz.id, staffMemberId: staff.id, dayOfWeek: day, startTime: "00:00", endTime: "23:59", isActive: true } as any);
+      }
+      const sh = await hold(t5, auto.biz.id, freeSvc.id, staff.id);
+      r = await http("POST", `/api/booking/${sh}/confirm-free`, t5, { answers: answersFor(freeSvc) });
+      assert(r.status === 400 && r.body?.code === "FREE_CONSULTATION_STAFF_UNSUPPORTED", `confirm-free with a staff-selected hold → 400 FREE_CONSULTATION_STAFF_UNSUPPORTED (got ${r.status} ${r.body?.code})`);
+      r = await http("POST", `/api/booking/${sh}/create-payment-intent`, t5, {});
+      assert(r.status === 400 && r.body?.code === "FREE_CONSULTATION", `create-payment-intent on a staff-selected free hold → 400 FREE_CONSULTATION (got ${r.status} ${r.body?.code})`);
+      r = await http("POST", `/api/booking/${sh}/create-deposit-intent`, t5, {});
+      assert(r.status === 400 && r.body?.code === "FREE_CONSULTATION", `create-deposit-intent on a staff-selected free hold → 400 FREE_CONSULTATION (got ${r.status} ${r.body?.code})`);
+      const after = (await db.select({ n: dSql<number>`count(*)::int` }).from(schema.appointments))[0].n;
+      assert(after === before && stripeCalls.length === 0, `payment routes on free holds: zero new rows, zero Stripe calls (rows ${before}→${after}, stripe ${JSON.stringify(stripeCalls)})`);
+
+      // A paid hold still reaches Stripe (guard does not over-match).
+      const ph = await hold(t5, auto.biz.id, paidSvc.id);
+      r = await http("POST", `/api/booking/${ph}/create-payment-intent`, t5, {});
+      assert(r.status === 200 && !!r.body.clientSecret && r.body.chargeAmountCents === 27500 && stripeCalls.includes("paymentIntents.create"), `paid hold still creates its PaymentIntent (got ${r.status} ${JSON.stringify(r.body).slice(0, 160)})`);
+    }
+
+    // ── apply-deposit-to-all with a free service present ────────────────────
+    {
+      const r = await http("POST", "/api/vendor/services/apply-deposit-to-all", auto.token, { depositAmountCents: 3000 });
+      const rows = await db.select().from(schema.vendorServices).where(eq(schema.vendorServices.businessId, auto.biz.id));
+      const free = rows.find((s: any) => s.id === freeSvc.id) as any;
+      const paid = rows.find((s: any) => s.id === paidSvc.id) as any;
+      assert(r.status === 200 && r.body.updatedCount === rows.filter((s: any) => !s.isFreeConsultation).length,
+        `apply-deposit-to-all: 200, free skipped in update count (got ${r.status} ${JSON.stringify(r.body)})`);
+      assert(free.depositAmountCents === null && free.price === 0 && paid.depositAmountCents === 3000, "apply-deposit-to-all: free untouched (no deposit), paid updated");
+    }
+
+    // ── Capability filter: public lists only ────────────────────────────────
+    {
+      const ik = { "x-internal-api-key": process.env.INTERNAL_API_KEY! };
+      const ids = (r: any) => (r.body.services ?? []).map((s: any) => s.id);
+      let r = await http("GET", `/api/businesses/${auto.biz.id}/services`, null, undefined, ik);
+      assert(r.status === 200 && ids(r).includes(paidSvc.id) && !ids(r).includes(freeSvc.id), `public services without capability: free hidden (got ${r.status} ${JSON.stringify(ids(r))})`);
+      r = await http("GET", `/api/businesses/${auto.biz.id}/services`, null, undefined, { ...ik, "X-Outsyde-Capabilities": "something-else, free-consultation" });
+      const freeDto = (r.body.services ?? []).find((s: any) => s.id === freeSvc.id);
+      assert(r.status === 200 && ids(r).includes(paidSvc.id) && !!freeDto && freeDto.isFreeConsultation === true && Array.isArray(freeDto.bookingQuestions),
+        "public services with capability: free shown with isFreeConsultation + bookingQuestions");
+      const paidDto = (r.body.services ?? []).find((s: any) => s.id === paidSvc.id);
+      assert(paidDto.isFreeConsultation === false && paidDto.bookingQuestions === null, "public services: paid DTO carries isFreeConsultation false");
+
+      r = await http("GET", "/api/vendor/services", auto.token);
+      assert(r.status === 200 && ids(r).includes(freeSvc.id), "owner list /api/vendor/services: not filtered");
+      r = await http("GET", "/api/business/services", auto.token);
+      assert(r.status === 200 && ids(r).includes(freeSvc.id), `owner list /api/business/services: not filtered (got ${r.status})`);
+
+      const q = encodeURIComponent(ft);
+      const searchIds = (x: any) => (x.body.results ?? []).map((s: any) => s.id);
+      r = await http("GET", `/api/search?q=${q}&scope=services`, null);
+      assert(r.status === 200 && searchIds(r).includes(paidSvc.id) && !searchIds(r).includes(freeSvc.id), `/api/search without capability: free hidden (got ${r.status} ${JSON.stringify(searchIds(r))} ${JSON.stringify(r.body).slice(0, 200)})`);
+      r = await http("GET", `/api/search?q=${q}&scope=services`, null, undefined, { "X-Outsyde-Capabilities": "free-consultation" });
+      assert(r.status === 200 && searchIds(r).includes(freeSvc.id), "/api/search with capability: free shown");
+
+      await storage.rebuildSearchIndex();
+      const idx = await db.select().from(schema.searchIndex).where(dAnd(eq(schema.searchIndex.entityType, "service"), eq(schema.searchIndex.parentId, auto.biz.id)));
+      const idxIds = idx.map((e: any) => e.entityId);
+      assert(idxIds.includes(paidSvc.id) && !idxIds.includes(freeSvc.id), `unified-search index: paid indexed, free excluded (got ${JSON.stringify(idxIds)})`);
+    }
+
+    // ── Feed post attach rejects free services ──────────────────────────────
+    {
+      await db.update(schema.users).set({ isVendor: true } as any).where(eq(schema.users.id, auto.owner.id));
+      let r = await http("POST", "/api/feed", null, { content: "come see us", postType: "service", serviceId: freeSvc.id }, { "x-test-session-user": auto.owner.id });
+      assert(r.status === 400 && r.body?.code === "FREE_CONSULTATION_NOT_ATTACHABLE", `feed attach free service → 400 (got ${r.status} ${JSON.stringify(r.body).slice(0, 160)})`);
+      r = await http("POST", "/api/feed", null, { content: "come see us", postType: "service", serviceId: paidSvc.id }, { "x-test-session-user": auto.owner.id });
+      assert(r.body?.code !== "FREE_CONSULTATION_NOT_ATTACHABLE", `feed attach paid service not blocked by the free check (got ${r.status})`);
+    }
+
+    // ── Appointment DTOs (storage) ──────────────────────────────────────────
+    {
+      const bizList = await storage.getAppointmentsByBusinessWithDetails(auto.biz.id);
+      const freeRow = bizList.find((a: any) => a.isFreeConsultation === true) as any;
+      assert(!!freeRow && Array.isArray(freeRow.bookingAnswers) && freeRow.chargedAmountCents === 0, "getAppointmentsByBusinessWithDetails: isFreeConsultation + bookingAnswers");
+      const paidRow = bizList.find((a: any) => a.isFreeConsultation === false) as any;
+      assert(!!paidRow && paidRow.bookingAnswers === null, "getAppointmentsByBusinessWithDetails: paid rows isFreeConsultation false, answers null");
+      const clientList = await storage.getAppointmentsByClientWithDetails(c1.id);
+      assert(clientList.length > 0 && clientList.every((a: any) => a.isFreeConsultation === true && Array.isArray(a.bookingAnswers) && !("paymentMethod" in a)),
+        "getAppointmentsByClientWithDetails: isFreeConsultation + bookingAnswers, no extra paymentMethod key");
+    }
+
+    // ── Restore ──────────────────────────────────────────────────────────────
+    Object.assign(R.PaymentIntents.prototype, { create: orig.piCreate, capture: orig.piCapture, cancel: orig.piCancel, retrieve: orig.piRetrieve });
+    R.Refunds.prototype.create = orig.refund;
+    R.Products.prototype.create = orig.prodCreate;
+    R.Prices.prototype.create = orig.priceCreate;
+    Object.assign(R.Customers.prototype, { create: orig.custCreate, retrieve: orig.custRetrieve });
+    (WebhookHandlers as any).tryCompleteReferral = origReferral;
+    (storage as any).earnPoints = origEarn;
+    (storage as any).isBusinessSubscriptionActive = origSubActive;
+    if (priorInternalKey === undefined) delete process.env.INTERNAL_API_KEY; else process.env.INTERNAL_API_KEY = priorInternalKey;
+    server.close();
+  }
+
+  if (process.env.ONLY === "free") {
+    await runFreeConsultationTests();
+    origLog(`\nAll ${passed} assertions passed.`);
+    return;
+  }
+
   // ── Non-payment transitions: parity harness ──────────────────────────────
   // Uses only APIs present on both main (8500932) and this branch, so the same
   // file can run against a main worktree with ONLY=transitions. Each scenario
@@ -2190,6 +2618,7 @@ async function main() {
 
   await runGuardTests();
   await runCancelTests();
+  await runFreeConsultationTests();
 
   const deposits = await runDepositTests();
   assert(deposits.failed.length === 0, `deposit tests pass (failing: ${deposits.failed.join(", ") || "none"})`);

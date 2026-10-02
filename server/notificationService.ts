@@ -155,6 +155,42 @@ export const NotificationTriggers = {
     }
   },
 
+  // Free consultation confirmed (no payment): in-app for the customer and the
+  // business owner. Paid bookings use paymentSucceeded instead.
+  async freeConsultationConfirmed(params: {
+    customerId: string;
+    ownerUserId?: string | null;
+    appointmentId: string;
+    businessName: string;
+    serviceName: string;
+    date: string;
+    time: string;
+    customerName?: string | null;
+  }): Promise<void> {
+    await sendNotification({
+      userId: params.customerId,
+      type: 'booking_confirmed',
+      title: 'Booking confirmed',
+      message: `Your free consultation (${params.serviceName}) with ${params.businessName} on ${params.date} at ${params.time} is confirmed.`,
+      referenceType: 'appointment',
+      referenceId: params.appointmentId,
+      metadata: { freeConsultation: true, date: params.date, time: params.time },
+    });
+
+    if (params.ownerUserId) {
+      await sendNotification({
+        userId: params.ownerUserId,
+        type: 'booking_confirmed',
+        title: 'Booking confirmed',
+        message: `Free consultation with ${params.customerName || 'a customer'} (${params.serviceName}) on ${params.date} at ${params.time}.`,
+        referenceType: 'appointment',
+        referenceId: params.appointmentId,
+        metadata: { freeConsultation: true, date: params.date, time: params.time },
+        triggeredByUserId: params.customerId,
+      });
+    }
+  },
+
   async paymentSucceeded(params: {
     userId: string;
     amount: number;

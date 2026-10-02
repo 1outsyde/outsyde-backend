@@ -1,5 +1,6 @@
 import { 
   type User, 
+  type BookingAnswer,
   type InsertUser, 
   type UpsertUser,
   type Business, 
@@ -888,6 +889,9 @@ export interface UnifiedSearchParams {
   limit: number;
   offset: number;
   isAdmin: boolean;
+  // Free consultation services are returned only when the client sent the
+  // free-consultation capability (X-Outsyde-Capabilities). Default: hidden.
+  includeFreeConsultations?: boolean;
 }
 
 export interface UnifiedSearchResult {
@@ -1842,6 +1846,8 @@ export class DatabaseStorage implements IStorage {
     depositAmountCents: number | null;
     chargedAmountCents: number;
     dueAtAppointmentCents: number;
+    isFreeConsultation: boolean;
+    bookingAnswers: BookingAnswer[] | null;
   }[]> {
     const rows = await db.select({
       id: appointments.id,
@@ -1858,6 +1864,8 @@ export class DatabaseStorage implements IStorage {
       customerAvatar: users.profileImageUrl,
       serviceName: vendorServices.name,
       staffMemberId: appointments.staffMemberId,
+      paymentMethod: appointments.paymentMethod,
+      bookingAnswers: appointments.bookingAnswers,
     })
       .from(appointments)
       .leftJoin(users, eq(appointments.clientId, users.id))
@@ -1884,6 +1892,8 @@ export class DatabaseStorage implements IStorage {
         // charged (deposit or full price, plus the consumer fee); the rest is
         // due in person at the appointment.
         ...appointmentChargeFields(row.totalPrice ?? 0, row.depositAmountCents),
+        isFreeConsultation: row.paymentMethod === 'free',
+        bookingAnswers: row.bookingAnswers ?? null,
       };
     });
   }
@@ -1918,6 +1928,8 @@ export class DatabaseStorage implements IStorage {
     depositAmountCents: number | null;
     chargedAmountCents: number;
     dueAtAppointmentCents: number;
+    isFreeConsultation: boolean;
+    bookingAnswers: BookingAnswer[] | null;
   }[]> {
     const rows = await db.select({
       id: appointments.id,
@@ -1956,6 +1968,8 @@ export class DatabaseStorage implements IStorage {
       customerServiceCity: appointments.customerServiceCity,
       customerServiceState: appointments.customerServiceState,
       customerServiceZipCode: appointments.customerServiceZipCode,
+      paymentMethod: appointments.paymentMethod,
+      bookingAnswers: appointments.bookingAnswers,
     })
       .from(appointments)
       .leftJoin(businesses, eq(appointments.businessId, businesses.id))
@@ -1964,9 +1978,11 @@ export class DatabaseStorage implements IStorage {
       .where(eq(appointments.clientId, clientId))
       .orderBy(desc(appointments.createdAt));
 
-    return rows.map((row) => ({
+    return rows.map(({ paymentMethod, ...row }) => ({
       ...row,
       ...appointmentChargeFields(row.totalPrice, row.depositAmountCents),
+      isFreeConsultation: paymentMethod === 'free',
+      bookingAnswers: row.bookingAnswers ?? null,
     }));
   }
 
@@ -3341,11 +3357,14 @@ export class DatabaseStorage implements IStorage {
         });
       }
       
+      // Free consultations are never indexed: /api/unified-search has no
+      // capability check, so older clients would see services they can't book.
       const services = await db.select().from(vendorServices)
         .where(and(
           eq(vendorServices.businessId, business.id),
           eq(vendorServices.isActive, true),
-          eq(vendorServices.status, 'live')
+          eq(vendorServices.status, 'live'),
+          eq(vendorServices.isFreeConsultation, false)
         ));
       for (const service of services) {
         await this.upsertSearchIndexEntry({
@@ -4914,9 +4933,13 @@ export class DatabaseStorage implements IStorage {
     businessId: string,
     depositAmountCents: number | null,
   ): Promise<number> {
+    // Free consultations take no deposit and are never touched here.
     const result = await db.update(vendorServices)
       .set({ depositAmountCents })
-      .where(eq(vendorServices.businessId, businessId))
+      .where(and(
+        eq(vendorServices.businessId, businessId),
+        eq(vendorServices.isFreeConsultation, false),
+      ))
       .returning({ id: vendorServices.id });
     return result.length;
   }
@@ -6264,6 +6287,7 @@ export class DatabaseStorage implements IStorage {
 
   async unifiedSearchWithScope(params: UnifiedSearchParams): Promise<UnifiedSearchResponse> {
     const { q, scope, viewerUserId, city, personalized, limit, offset, isAdmin } = params;
+    const includeFreeConsultations = params.includeFreeConsultations === true;
     const searchTerm = q?.trim() || '';
     const likePattern = searchTerm ? `%${searchTerm}%` : '%';
 
@@ -6660,7 +6684,8 @@ export class DatabaseStorage implements IStorage {
             ),
             city ? ilike(businesses.city, `%${city}%`) : undefined,
             isAdmin ? undefined : eq(businesses.approvalStatus, 'approved'),
-            isAdmin ? undefined : eq(businesses.stripeOnboardingComplete, true)
+            isAdmin ? undefined : eq(businesses.stripeOnboardingComplete, true),
+            includeFreeConsultations ? undefined : eq(vendorServices.isFreeConsultation, false)
           )
         )
         .limit(scope === 'all' ? 10 : limit)

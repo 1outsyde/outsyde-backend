@@ -1,4 +1,6 @@
 import { Resend } from 'resend';
+import type { BookingAnswer } from '@shared/schema';
+import { formatBookingAnswer } from './bookingQuestions';
 
 const FROM_ORDERS = 'orders@info.goutsyde.com';
 
@@ -1803,5 +1805,243 @@ export async function sendOrderDeliveredVendorEmail(params: {
     console.log(`[Email] Order delivered vendor email sent to ${params.toEmail} for order ${params.orderId}`);
   } catch (err) {
     console.error('[Email] sendOrderDeliveredVendorEmail failed:', err);
+  }
+}
+
+// ============================================================
+// FREE CONSULTATION EMAILS
+// No money lines: a free consultation charges nothing. Every value that
+// comes from a vendor or customer is HTML-escaped.
+// ============================================================
+
+function escapeHtml(value: string): string {
+  return value
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function freeBookingAnswersBlock(answers: BookingAnswer[] | null | undefined): string {
+  if (!answers || answers.length === 0) return '';
+  const rows = answers
+    .map((a, i) => detailRow(escapeHtml(a.label), escapeHtml(formatBookingAnswer(a.answer)), i % 2 === 0))
+    .join('');
+  return `<tr><td style="background:#1A1A1A;padding:16px 32px 0;">
+        <p style="color:#E8B930;font-size:13px;font-weight:700;margin:0 0 8px 0;">Booking answers</p>
+        <table width="100%" cellpadding="0" cellspacing="0" style="border-radius:6px;overflow:hidden;">${rows}</table>
+      </td></tr>`;
+}
+
+function freeConsultationDetails(rows: { label: string; value: string }[]): string {
+  const html = rows.map((r, i) => detailRow(r.label, escapeHtml(r.value), i % 2 === 0)).join('');
+  return `<tr><td style="background:#1A1A1A;padding:0 32px;">
+        <table width="100%" cellpadding="0" cellspacing="0" style="border-radius:6px;overflow:hidden;">${html}</table>
+      </td></tr>`;
+}
+
+function freeConsultationRef(bookingNumber: number): string {
+  return `#A${String(bookingNumber).padStart(4, '0')}`;
+}
+
+export interface FreeConsultationEmailBase {
+  toEmail: string;
+  vendorName: string;
+  consumerName: string;
+  serviceName: string;
+  bookingId: string;
+  bookingNumber: number;
+  date: string;
+  time: string;
+  answers?: BookingAnswer[] | null;
+}
+
+/** Consumer: free consultation booked and confirmed (auto-accept). */
+export async function sendFreeConsultationConfirmationToConsumer(params: FreeConsultationEmailBase & {
+  vendorContactEmail?: string;
+}): Promise<void> {
+  try {
+    const contact = params.vendorContactEmail
+      ? `<tr><td style="background:#1A1A1A;padding:16px 32px 0;"><p style="color:#888888;font-size:13px;margin:0;">Questions? Contact ${escapeHtml(params.vendorName)} at <a href="mailto:${escapeHtml(params.vendorContactEmail)}" style="color:#E8B930;">${escapeHtml(params.vendorContactEmail)}</a></p></td></tr>`
+      : '';
+    const html = wrapEmail(`
+      ${emailHeader('Consultation Booked! 🎉', `Your free consultation with ${escapeHtml(params.vendorName)} is confirmed.`)}
+      ${freeConsultationDetails([
+        { label: 'Booking', value: freeConsultationRef(params.bookingNumber) },
+        { label: 'Service', value: params.serviceName },
+        { label: 'Date', value: params.date },
+        { label: 'Time', value: params.time },
+        { label: 'Price', value: 'Free' },
+      ])}
+      ${freeBookingAnswersBlock(params.answers)}
+      ${contact}
+      ${emailCta('View My Bookings', 'https://goutsyde.com/account/bookings')}
+      ${emailFooter()}
+    `);
+    await sendBrandedEmail(params.toEmail, `🎉 Your free consultation is confirmed — ${params.serviceName}`, html);
+    console.log(`[Email] Free consultation confirmation sent to ${params.toEmail}`);
+  } catch (err) {
+    console.error('[Email] sendFreeConsultationConfirmationToConsumer failed:', err);
+    throw err;
+  }
+}
+
+/** Vendor: a confirmed free consultation (auto-accept, or after Accept). */
+export async function sendFreeConsultationNotificationToVendor(params: FreeConsultationEmailBase & {
+  consumerUsername?: string;
+}): Promise<void> {
+  try {
+    const html = wrapEmail(`
+      ${emailHeader('New Free Consultation 📋', `${escapeHtml(params.consumerName)} booked a free consultation.`)}
+      ${freeConsultationDetails([
+        { label: 'Booking', value: freeConsultationRef(params.bookingNumber) },
+        { label: 'Customer Name', value: params.consumerName },
+        ...(params.consumerUsername ? [{ label: 'Customer Username', value: `@${params.consumerUsername}` }] : []),
+        { label: 'Service', value: params.serviceName },
+        { label: 'Date', value: params.date },
+        { label: 'Time', value: params.time },
+        { label: 'Price', value: 'Free' },
+      ])}
+      ${freeBookingAnswersBlock(params.answers)}
+      ${emailCta('View in Dashboard', 'https://goutsyde.com/vendor/bookings')}
+      ${emailFooter()}
+    `);
+    await sendBrandedEmail(params.toEmail, `📋 New free consultation — ${params.serviceName} on ${params.date}`, html);
+    console.log(`[Email] Free consultation vendor notification sent to ${params.toEmail}`);
+  } catch (err) {
+    console.error('[Email] sendFreeConsultationNotificationToVendor failed:', err);
+    throw err;
+  }
+}
+
+/** Consumer: free consultation request awaiting the vendor (manual accept). */
+export async function sendFreeConsultationRequestReceivedToConsumer(params: FreeConsultationEmailBase & {
+  expiresAt: Date;
+}): Promise<void> {
+  try {
+    const expiryStr = params.expiresAt.toLocaleString('en-US', { dateStyle: 'medium', timeStyle: 'short' });
+    const html = wrapEmail(`
+      ${emailHeader('Consultation Request Received', `Your request for ${escapeHtml(params.vendorName)} is awaiting approval.`)}
+      ${freeConsultationDetails([
+        { label: 'Service', value: params.serviceName },
+        { label: 'Date', value: params.date },
+        { label: 'Time', value: params.time },
+        { label: 'Price', value: 'Free' },
+        { label: 'Expires', value: expiryStr },
+      ])}
+      ${freeBookingAnswersBlock(params.answers)}
+      <tr><td style="background:#1A1A1A;padding:16px 32px;">
+        <p style="color:#888888;font-size:13px;margin:0;">This consultation is free. No payment details were taken. You will hear back once ${escapeHtml(params.vendorName)} responds.</p>
+      </td></tr>
+      ${emailCta('View My Bookings', 'https://goutsyde.com/account/bookings')}
+      ${emailFooter()}
+    `);
+    await sendBrandedEmail(params.toEmail, `Consultation request received — ${params.serviceName}`, html);
+    console.log(`[Email] Free consultation request-received sent to ${params.toEmail}`);
+  } catch (err) {
+    console.error('[Email] sendFreeConsultationRequestReceivedToConsumer failed:', err);
+    throw err;
+  }
+}
+
+/** Vendor: free consultation request to accept or decline (manual accept). */
+export async function sendFreeConsultationRequestToVendor(params: FreeConsultationEmailBase & {
+  consumerUsername?: string;
+  expiresAt: Date;
+}): Promise<void> {
+  try {
+    const expiryStr = params.expiresAt.toLocaleString('en-US', { dateStyle: 'medium', timeStyle: 'short' });
+    const usernameDisplay = params.consumerUsername ? ` (@${params.consumerUsername})` : '';
+    const html = wrapEmail(`
+      ${emailHeader('New Consultation Request! 📋', `${escapeHtml(params.consumerName + usernameDisplay)} wants a free consultation.`)}
+      ${freeConsultationDetails([
+        { label: 'Customer', value: params.consumerName + usernameDisplay },
+        { label: 'Service', value: params.serviceName },
+        { label: 'Date', value: params.date },
+        { label: 'Time', value: params.time },
+        { label: 'Price', value: 'Free' },
+        { label: 'Respond By', value: expiryStr },
+      ])}
+      ${freeBookingAnswersBlock(params.answers)}
+      <tr><td style="background:#1A1A1A;padding:12px 32px 4px;">
+        <p style="color:#888888;font-size:13px;margin:0;">Accept or decline in your dashboard. If you don't respond by <strong style="color:#F5F0E8;">${escapeHtml(expiryStr)}</strong>, the request expires automatically.</p>
+      </td></tr>
+      ${emailCta('Review in Dashboard', 'https://goutsyde.com/vendor/bookings')}
+      ${emailFooter()}
+    `);
+    await sendBrandedEmail(params.toEmail, `New consultation request — ${params.serviceName} on ${params.date}`, html);
+    console.log(`[Email] Free consultation request sent to vendor ${params.toEmail}`);
+  } catch (err) {
+    console.error('[Email] sendFreeConsultationRequestToVendor failed:', err);
+    throw err;
+  }
+}
+
+/** Consumer: the vendor accepted the free consultation request. */
+export async function sendFreeConsultationAcceptedToConsumer(params: FreeConsultationEmailBase): Promise<void> {
+  try {
+    const html = wrapEmail(`
+      ${emailHeader('Consultation Accepted! 🎉', `${escapeHtml(params.vendorName)} accepted your consultation request.`)}
+      ${freeConsultationDetails([
+        { label: 'Booking', value: freeConsultationRef(params.bookingNumber) },
+        { label: 'Service', value: params.serviceName },
+        { label: 'Date', value: params.date },
+        { label: 'Time', value: params.time },
+        { label: 'Price', value: 'Free' },
+      ])}
+      ${freeBookingAnswersBlock(params.answers)}
+      ${emailCta('View My Bookings', 'https://goutsyde.com/account/bookings')}
+      ${emailFooter()}
+    `);
+    await sendBrandedEmail(params.toEmail, `Consultation accepted — ${params.serviceName} on ${params.date}`, html);
+    console.log(`[Email] Free consultation accepted sent to ${params.toEmail}`);
+  } catch (err) {
+    console.error('[Email] sendFreeConsultationAcceptedToConsumer failed:', err);
+    throw err;
+  }
+}
+
+/** Admin: free consultation booked, requested or accepted. */
+export async function sendFreeConsultationAdminAlert(params: {
+  type: 'confirmed' | 'requested' | 'accepted';
+  bookingId: string;
+  businessName: string;
+  customerName: string;
+  customerEmail: string;
+  vendorEmail: string;
+  serviceName: string;
+  date: string;
+  time: string;
+  answers?: BookingAnswer[] | null;
+}): Promise<void> {
+  const label = { confirmed: 'CONFIRMED', requested: 'REQUESTED', accepted: 'ACCEPTED' }[params.type];
+  try {
+    const html = wrapEmail(`
+      <tr>
+        <td style="background:#1A1A1A;border-radius:10px 10px 0 0;padding:20px 32px;border-bottom:3px solid #E8B930;">
+          <div style="color:#E8B930;font-size:20px;font-weight:900;letter-spacing:2px;">OUTSYDE</div>
+          <h1 style="color:#F5F0E8;font-size:18px;font-weight:700;margin:8px 0 4px 0;">Free Consultation ${label}</h1>
+          <p style="color:#888888;font-size:12px;margin:0;">${escapeHtml(params.bookingId)}</p>
+        </td>
+      </tr>
+      ${freeConsultationDetails([
+        { label: 'Business', value: params.businessName },
+        { label: 'Vendor Email', value: params.vendorEmail || '—' },
+        { label: 'Customer', value: params.customerName },
+        { label: 'Customer Email', value: params.customerEmail || '—' },
+        { label: 'Service', value: params.serviceName },
+        { label: 'Date', value: params.date },
+        { label: 'Time', value: params.time },
+        { label: 'Amount', value: '$0.00 (free consultation)' },
+      ])}
+      ${freeBookingAnswersBlock(params.answers)}
+      ${emailFooter()}
+    `);
+    const ok = await sendAdminEmail({ to: ADMIN_NOTIFICATION_EMAIL, subject: `[Outsyde] Free Consultation ${label} — ${params.businessName}`, html });
+    if (!ok) throw new Error('admin email not sent');
+  } catch (err) {
+    console.error('[Email] sendFreeConsultationAdminAlert failed:', err);
+    throw err;
   }
 }

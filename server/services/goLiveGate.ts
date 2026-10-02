@@ -88,6 +88,28 @@ export async function authorizeAndProvisionGoLive(
   business: Business,
   kind: 'service' | 'product',
 ): Promise<GoLiveResult> {
+  const stripeAccountId = await authorizeGoLive(business);
+
+  // ── Provision ─────────────────────────────────────────────────────────────
+  // Delegate to the shared connected-account catalog service.
+  // Cases A/B/C (create / reprice / idempotent) are handled there.
+  return provisionConnectedCatalogItem({
+    connectedAccountId: stripeAccountId,
+    name: item.name,
+    description: item.description,
+    unitAmountCents: item.price,
+    existingProductId: item.stripeProductId,
+    existingPriceId: item.stripePriceId,
+  });
+}
+
+/**
+ * The go-live gates alone (Connect onboarding + active subscription), without
+ * Stripe catalog provisioning. authorizeAndProvisionGoLive runs these first;
+ * free consultation services (price 0, no Stripe Price) go live through this
+ * directly. Returns the business's Connect account id. Throws GoLiveError.
+ */
+export async function authorizeGoLive(business: Business): Promise<string> {
 
   // ── Gate 1: Connect onboarding ────────────────────────────────────────────
   // Authoritative: businesses.stripeAccountId (non-null) AND
@@ -123,15 +145,5 @@ export async function authorizeAndProvisionGoLive(
     );
   }
 
-  // ── Provision ─────────────────────────────────────────────────────────────
-  // Delegate to the shared connected-account catalog service.
-  // Cases A/B/C (create / reprice / idempotent) are handled there.
-  return provisionConnectedCatalogItem({
-    connectedAccountId: business.stripeAccountId,
-    name: item.name,
-    description: item.description,
-    unitAmountCents: item.price,
-    existingProductId: item.stripeProductId,
-    existingPriceId: item.stripePriceId,
-  });
+  return business.stripeAccountId;
 }

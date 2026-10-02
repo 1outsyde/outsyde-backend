@@ -111,7 +111,7 @@ import rateLimit from "express-rate-limit";
 import { stripeService } from "./stripe/stripeService";
 import { sendAppointmentReceipts, sendShootBookingReceipts } from "./stripe/webhookHandlers";
 import { getStripePublishableKey, getUncachableStripeClient } from "./stripe/stripeClient";
-import { authorizeAndProvisionGoLive, GoLiveError } from "./services/goLiveGate";
+import { authorizeAndProvisionGoLive, authorizeGoLive, GoLiveError } from "./services/goLiveGate";
 import { ObjectStorageService, ObjectNotFoundError } from "./objectStorage";
 import { ObjectPermission } from "./objectAcl";
 import { NotificationTriggers } from "./notificationService";
@@ -139,7 +139,18 @@ import {
   transitionShootBookingState,
   getPendingProviderExpiryTime
 } from "./bookingStateMachine";
-import { settleAppointmentBooking, settleShootBooking } from "./bookingSettlement";
+import { settleAppointmentBooking, settleShootBooking, settleFreeAppointmentBooking } from "./bookingSettlement";
+import {
+  isFreeAppointment,
+  clientSupportsFreeConsultation,
+  insertFreeAppointmentIfAllowed,
+  sendFreeConsultationReceipts,
+  notifyFreeConsultationConfirmed,
+  notifyFreeConsultationRequest,
+  holdIsFreeConsultation,
+  FREE_CONSULTATION_PAYMENT_ERROR,
+} from "./freeConsultation";
+import { parseBookingQuestions, validateAnswers, invalidQuestionsBody, hasBookingQuestions } from "./bookingQuestions";
 import { calculateProductFee, calculateBookingFee, calculateConsumerServiceFee, calculateBookingFees, quoteDeposit } from "./fees";
 import { validateDeposit, invalidDepositBody, validatePhotographerDeposit, photographerBookingDepositCents } from "./deposits";
 import {
@@ -658,6 +669,7 @@ export async function registerRoutes(
         limit: Math.min(100, parseInt(limit as string) || 50),
         offset: parseInt(offset as string) || 0,
         isAdmin,
+        includeFreeConsultations: clientSupportsFreeConsultation(req),
       });
 
       res.json(results);
@@ -5253,6 +5265,10 @@ export async function registerRoutes(
       const { holdId } = req.params;
       const { hold } = await confirmBookingHold(holdId, userId);
 
+      if (await holdIsFreeConsultation(hold)) {
+        return res.status(400).json(FREE_CONSULTATION_PAYMENT_ERROR);
+      }
+
       if (hold.providerType !== 'business') {
         return res.status(400).json({ error: "Deposit payments are only supported for business bookings" });
       }
@@ -5686,6 +5702,11 @@ export async function registerRoutes(
       // BUSINESS / STAFF BRANCH (unchanged)
       // ==========================================
 
+      // Free consultations are booked via confirm-free, never paid.
+      if (await holdIsFreeConsultation(hold)) {
+        return res.status(400).json(FREE_CONSULTATION_PAYMENT_ERROR);
+      }
+
       // Idempotency: if an appointment was already created for this hold
       // (e.g. a retried request), reuse it instead of creating a duplicate
       // appointment + PaymentIntent. Mirrors the existing reuse pattern in
@@ -5927,6 +5948,148 @@ export async function registerRoutes(
       }
       console.error("Create appointment PaymentIntent from hold error:", error);
       res.status(500).json({ error: "Failed to create payment intent" });
+    }
+  });
+
+  // POST /api/booking/:holdId/confirm-free - Book a free consultation from a
+  // confirmed hold. No payment: the appointment is created with
+  // payment_method 'free', total 0, no deposit and no PaymentIntent.
+  // Auto-accept businesses: confirmed immediately. Manual: pending_provider
+  // until the vendor accepts. One open free consultation per customer per
+  // business (FREE_CONSULTATION_LIMIT). Idempotent on holdId.
+  app.post("/api/booking/:holdId/confirm-free", async (req, res) => {
+    const userId = req.session?.userId || getUserIdFromRequest(req);
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    try {
+      const { holdId } = req.params;
+
+      // Idempotency: a retry after success returns the same booking (the hold
+      // is converted by then, so this runs before confirmBookingHold).
+      const [existing] = await db.select().from(appointments).where(eq(appointments.holdId, holdId));
+      if (existing) {
+        if (existing.clientId !== userId) {
+          return res.status(400).json({ errorCode: AVAILABILITY_ERRORS.HOLD_NOT_FOUND, error: "Booking hold not found" });
+        }
+        if (!isFreeAppointment(existing)) {
+          return res.status(409).json({ error: "A payment attempt for this hold already exists." });
+        }
+        return res.json({ free: true, appointmentId: existing.id, bookingNumber: existing.bookingNumber, status: existing.status });
+      }
+
+      const { hold } = await confirmBookingHold(holdId, userId);
+
+      // Re-read the service: the hold only snapshots name/price/duration.
+      const service = hold.providerType === 'business' && hold.serviceId
+        ? await storage.getVendorService(hold.serviceId)
+        : undefined;
+      if (!service || !service.isFreeConsultation || service.businessId !== hold.providerId) {
+        return res.status(400).json({
+          error: "This service is not a free consultation.",
+          message: "This service is not a free consultation. Use create-payment-intent.",
+          code: "NOT_FREE_CONSULTATION",
+        });
+      }
+      if (hold.staffMemberId) {
+        return res.status(400).json({
+          error: "Free consultations cannot be booked with a staff member.",
+          message: "Free consultations cannot be booked with a staff member selected.",
+          code: "FREE_CONSULTATION_STAFF_UNSUPPORTED",
+        });
+      }
+
+      const answersCheck = validateAnswers(service.bookingQuestions, req.body?.answers);
+      if (!answersCheck.ok) {
+        return res.status(400).json({
+          error: "Invalid booking answers",
+          message: answersCheck.errors[0]?.message ?? "Invalid booking answers",
+          code: "INVALID_BOOKING_ANSWERS",
+          errors: answersCheck.errors,
+        });
+      }
+
+      const business = await storage.getBusiness(hold.providerId);
+      if (!business) {
+        return res.status(404).json({ error: "Business not found" });
+      }
+
+      const isAutoAccept = business.autoAcceptBookings !== false;
+      const isCustomerLocation = service.serviceLocationType === 'customer';
+
+      const appointment = await insertFreeAppointmentIfAllowed({
+        businessId: hold.providerId,
+        clientId: hold.userId,
+        serviceId: service.id,
+        holdId: hold.id,
+        appointmentDate: hold.holdDate,
+        appointmentTime: hold.startTime,
+        appointmentEndTime: hold.endTime,
+        durationMinutes: hold.durationMinutes,
+        status: isAutoAccept ? BOOKING_STATES.PENDING_PAYMENT : BOOKING_STATES.PENDING_PROVIDER,
+        pendingProviderExpiresAt: isAutoAccept ? null : getPendingProviderExpiryTime(),
+        customerServiceAddress: isCustomerLocation ? (req.body?.customerServiceAddress ?? null) : null,
+        customerServiceCity: isCustomerLocation ? (req.body?.customerServiceCity ?? null) : null,
+        customerServiceState: isCustomerLocation ? (req.body?.customerServiceState ?? null) : null,
+        customerServiceZipCode: isCustomerLocation ? (req.body?.customerServiceZipCode ?? null) : null,
+        serviceName: hold.serviceName,
+        serviceDurationMinutes: hold.durationMinutes,
+        serviceFullRefundWindow: service.fullRefundWindow ?? null,
+        serviceHasPartialRefund: service.hasPartialRefund ?? null,
+        servicePartialRefundWindow: service.partialRefundWindow ?? null,
+        servicePartialRefundPercentage: service.partialRefundPercentage ?? null,
+        serviceHasCancellationFee: service.hasCancellationFee ?? null,
+        serviceCancellationFeeType: service.cancellationFeeType ?? null,
+        serviceCancellationFeeAmount: service.cancellationFeeAmount ?? null,
+        bookingAnswers: answersCheck.snapshot,
+      });
+
+      if (!appointment) {
+        return res.status(409).json({
+          error: "You already have an open free consultation with this business.",
+          message: "You already have an open free consultation with this business. Cancel it or wait until it has passed to book another.",
+          code: "FREE_CONSULTATION_LIMIT",
+        });
+      }
+
+      if (!isAutoAccept) {
+        await notifyFreeConsultationRequest(appointment.id);
+        console.log(`[Booking] Free consultation ${appointment.id} from hold ${holdId} awaiting provider`);
+        return res.json({ free: true, appointmentId: appointment.id, bookingNumber: appointment.bookingNumber, status: BOOKING_STATES.PENDING_PROVIDER });
+      }
+
+      const transition = await transitionAppointmentState(appointment.id, BOOKING_STATES.CONFIRMED, {
+        triggeredBy: userId,
+        triggerSource: 'api',
+        metadata: { action: 'free_consultation_confirm', holdId },
+      });
+      if (!transition.success) {
+        // Leave nothing in pending_payment: nothing would ever confirm it.
+        console.error(`[Booking] Free consultation confirm FAILED appointment=${appointment.id} hold=${holdId}: ${transition.code}`);
+        const cancel = await transitionAppointmentState(appointment.id, BOOKING_STATES.CANCELED, {
+          triggeredBy: 'system',
+          triggerSource: 'api',
+          metadata: { action: 'free_consultation_confirm_failed', reason: 'Free consultation could not be confirmed', code: transition.code },
+        });
+        if (!cancel.success) {
+          console.error(`[Booking] Free consultation cleanup FAILED appointment=${appointment.id}: ${cancel.code}`);
+        }
+        return res.status(500).json({ error: "Failed to confirm free consultation" });
+      }
+
+      await settleFreeAppointmentBooking(appointment.id);
+      await sendFreeConsultationReceipts(appointment.id, { txnType: 'free_consultation' });
+      await notifyFreeConsultationConfirmed(appointment.id);
+
+      console.log(`[Booking] Free consultation ${appointment.id} confirmed from hold ${holdId}`);
+      return res.json({ free: true, appointmentId: appointment.id, bookingNumber: appointment.bookingNumber, status: BOOKING_STATES.CONFIRMED });
+    } catch (error) {
+      if (error instanceof AvailabilityError) {
+        return res.status(400).json({ errorCode: error.code, error: error.message });
+      }
+      console.error("[Booking] Confirm free consultation error:", error);
+      return res.status(500).json({ error: "Failed to book free consultation" });
     }
   });
 
@@ -6831,6 +6994,33 @@ export async function registerRoutes(
 
       if (appointment.pendingProviderExpiresAt && new Date(appointment.pendingProviderExpiresAt) < new Date()) {
         return res.status(400).json({ error: "This request expired before you accepted it. The customer was not charged." });
+      }
+
+      // Free consultation: no capture, no payout. Confirm, settle (hold
+      // conversion only) and send the free receipts.
+      if (isFreeAppointment(appointment)) {
+        const freeResult = await transitionAppointmentState(appointmentId, BOOKING_STATES.CONFIRMED, {
+          triggeredBy: userId,
+          triggerSource: 'api',
+          metadata: { action: 'provider_accept', freeConsultation: true },
+        });
+        if (!freeResult.success) {
+          return res.status(400).json({ error: freeResult.error });
+        }
+        await settleFreeAppointmentBooking(appointmentId);
+        await sendFreeConsultationReceipts(appointmentId, { txnType: 'free_provider_accept', accepted: true });
+        const freeClient = await storage.getUser(appointment.clientId).catch(() => undefined);
+        if (freeClient) {
+          sendExpoPush({
+            userId: freeClient.id,
+            title: 'Booking Accepted!',
+            body: `${business.name} accepted your free consultation for ${appointment.serviceName || 'your appointment'} on ${appointment.appointmentDate}`,
+            data: { type: 'booking_accepted', screen: 'bookings' },
+          }).catch(() => {});
+        }
+        await notifyFreeConsultationConfirmed(appointmentId);
+        const acceptedFree = await storage.getAppointment(appointmentId);
+        return res.json({ success: true, appointment: acceptedFree });
       }
 
       // Capture the PaymentIntent if using manual capture
@@ -8021,6 +8211,19 @@ export async function registerRoutes(
         return res.status(403).json({ error: "Not authorized to refund this booking" });
       }
 
+      // Free consultation: nothing was paid, so this is a plain cancel.
+      if (isFreeAppointment(appointment)) {
+        const freeCancel = await transitionAppointmentState(appointmentId, BOOKING_STATES.CANCELED, {
+          triggeredBy: userId,
+          triggerSource: 'api',
+          metadata: { action: 'provider_cancel', reason: reason || 'Canceled by provider', freeConsultation: true },
+        });
+        if (!freeCancel.success) {
+          return res.status(400).json({ error: freeCancel.error, code: freeCancel.code, currentStatus: appointment.status });
+        }
+        return res.json({ success: true, message: "Free consultation canceled", amount: 0 });
+      }
+
       // Handle non-refundable states by canceling PaymentIntent if applicable
       if (appointment.status !== BOOKING_STATES.CONFIRMED && appointment.status !== BOOKING_STATES.COMPLETED) {
         // For pending_payment or pending_provider with PaymentIntent, cancel the authorization
@@ -8309,6 +8512,25 @@ export async function registerRoutes(
         });
       }
 
+      // Free consultation: nothing paid, nothing refunded, no fee.
+      if (isFreeAppointment(appointment)) {
+        return res.json({
+          cancellable: true,
+          refundTier: 'none',
+          refundAmountCents: 0,
+          feeAmountCents: 0,
+          feeWouldBeCharged: false,
+          feeNeedsManualCollection: false,
+          subtotalCents: 0,
+          grossChargeAmountCents: 0,
+          chargedAmountCents: 0,
+          isDepositBooking: false,
+          depositAmountCents: null,
+          depositNonRefundable: false,
+          isFreeConsultation: true,
+        });
+      }
+
       const service = appointment.serviceId
         ? await storage.getVendorService(appointment.serviceId)
         : null;
@@ -8442,6 +8664,46 @@ export async function registerRoutes(
         return res.status(400).json({
           error: "Booking must be confirmed to cancel",
           currentStatus: appointment.status,
+        });
+      }
+
+      // ── Free consultation: no refund, no fee, no Stripe ──────────────────
+      if (isFreeAppointment(appointment)) {
+        const freeTransition = await transitionAppointmentState(appointmentId, BOOKING_STATES.CANCELED, {
+          triggeredBy: userId,
+          triggerSource: 'api',
+          metadata: { action: 'consumer_cancel', reason: 'Consumer-initiated cancellation', freeConsultation: true },
+        });
+        if (!freeTransition.success) {
+          const current = await storage.getAppointment(appointmentId);
+          if (current?.status === BOOKING_STATES.CANCELED) {
+            return res.status(409).json({ error: "Appointment is already canceled", code: "ALREADY_CANCELED", refundIssued: false, authorizationReleased: false });
+          }
+          return res.status(409).json({ error: freeTransition.error, code: freeTransition.code, refundIssued: false, authorizationReleased: false });
+        }
+        try {
+          const freeBusiness = await storage.getBusiness(appointment.businessId);
+          const freeUser = await storage.getUser(userId);
+          await NotificationTriggers.bookingCanceledOrRefunded({
+            consumerUserId: userId,
+            consumerName: freeUser?.name || freeUser?.email || 'Customer',
+            providerName: freeBusiness?.name || 'Business',
+            eventType: 'appointment_canceled',
+            amountCents: 0,
+            referenceType: 'appointment',
+            referenceId: appointmentId,
+            reason: 'Consumer-initiated cancellation',
+          });
+        } catch (notifyErr) {
+          console.error(`[Cancel] Quad-notification failed for free appointment ${appointmentId}:`, notifyErr);
+        }
+        return res.json({
+          success: true,
+          refundTier: 'none',
+          refundAmountCents: 0,
+          feeAmountCents: 0,
+          feeCharged: false,
+          feeNeedsManualCollection: false,
         });
       }
 
@@ -8678,6 +8940,24 @@ export async function registerRoutes(
         triggerSource: 'api',
         metadata: { action: 'business_complete' },
       });
+
+      // Free consultation: no loyalty points (nothing was paid).
+      if (isFreeAppointment(appointment)) {
+        try {
+          const freeClient = await storage.getUser(appointment.clientId);
+          if (freeClient?.email) {
+            await sendAftercareEmail({
+              toEmail: freeClient.email,
+              customerName: freeClient.name ?? freeClient.email,
+              serviceName: appointment.serviceName ?? 'your service',
+              businessName: business.name,
+            });
+          }
+        } catch (emailErr) {
+          console.error('[complete] Failed to send aftercare email:', emailErr);
+        }
+        return res.json({ success: true, appointmentId, status: BOOKING_STATES.COMPLETED, pointsAwarded: 0 });
+      }
 
       // Approve the pending loyalty points transaction created at booking payment time.
       // The pending transaction holds points on totalPrice until the appointment completes.
@@ -11219,7 +11499,11 @@ export async function registerRoutes(
       const services = await storage.getVendorServicesByBusiness(req.params.id);
       // Only return active AND live services for public view
       const liveServices = services.filter(s => s.isActive && s.status === 'live');
-      res.json({ services: liveServices });
+      // Free consultations only for clients that can book them.
+      const visibleServices = clientSupportsFreeConsultation(req)
+        ? liveServices
+        : liveServices.filter(s => !s.isFreeConsultation);
+      res.json({ services: visibleServices });
     } catch (error) {
       console.error("Get business services error:", error);
       res.status(500).json({ error: "Failed to get services" });
@@ -12401,6 +12685,37 @@ export async function registerRoutes(
         depositAmountCents: z.number().int().min(0).nullable().optional(),
       });
 
+      // Free consultation: price forced to 0, no deposit, questions validated.
+      const isFreeConsultation = req.body?.isFreeConsultation;
+      if (isFreeConsultation !== undefined && typeof isFreeConsultation !== 'boolean') {
+        return res.status(400).json({ error: "isFreeConsultation must be a boolean" });
+      }
+      if (isFreeConsultation === true) {
+        const freeValidated = serviceSchema.extend({
+          price: z.number().optional(),
+          depositAmountCents: z.number().int().min(0).nullable().optional(),
+        }).parse(req.body);
+        const questionsCheck = parseBookingQuestions(req.body.bookingQuestions);
+        if (!questionsCheck.ok) {
+          return res.status(400).json(invalidQuestionsBody(questionsCheck.message, questionsCheck.details));
+        }
+        const freeService = await storage.createVendorService({
+          businessId: business.id,
+          ...freeValidated,
+          price: 0,
+          depositAmountCents: null,
+          isFreeConsultation: true,
+          bookingQuestions: questionsCheck.questions,
+        });
+        if (!business.hasServices) {
+          await storage.updateBusiness(business.id, { hasServices: true });
+        }
+        return res.json({ service: freeService });
+      }
+      if (hasBookingQuestions(req.body?.bookingQuestions)) {
+        return res.status(400).json(invalidQuestionsBody("Booking questions are currently only allowed on free consultation services."));
+      }
+
       const validated = serviceSchema.parse(req.body);
       const depositCheck = validateDeposit(validated.depositAmountCents, validated.price);
       if (!depositCheck.ok) {
@@ -12476,6 +12791,85 @@ export async function registerRoutes(
         virtualLink: z.string().nullable().optional(),
         depositAmountCents: z.number().int().min(0).nullable().optional(),
       });
+
+      // ── Free consultation: editing one, turning it on, or turning it off ──
+      const isFreeConsultation = req.body?.isFreeConsultation;
+      if (isFreeConsultation !== undefined && typeof isFreeConsultation !== 'boolean') {
+        return res.status(400).json({ error: "isFreeConsultation must be a boolean" });
+      }
+      if (isFreeConsultation ?? service.isFreeConsultation) {
+        // Free: price forced to 0, no deposit, no Stripe catalog calls.
+        const { price: _ignoredPrice, depositAmountCents: _ignoredDeposit, ...freeFields } = updateSchema.extend({
+          price: z.number().optional(),
+          depositAmountCents: z.number().int().min(0).nullable().optional(),
+        }).parse(req.body);
+        let questions = service.bookingQuestions ?? [];
+        if (req.body.bookingQuestions !== undefined) {
+          const questionsCheck = parseBookingQuestions(req.body.bookingQuestions, service.bookingQuestions);
+          if (!questionsCheck.ok) {
+            return res.status(400).json(invalidQuestionsBody(questionsCheck.message, questionsCheck.details));
+          }
+          questions = questionsCheck.questions;
+        }
+        const updatedFree = await storage.updateVendorService(req.params.id, {
+          ...freeFields,
+          price: 0,
+          depositAmountCents: null,
+          isFreeConsultation: true,
+          bookingQuestions: questions,
+        });
+        return res.json({ service: updatedFree });
+      }
+      if (service.isFreeConsultation) {
+        // Turning free off: a real price (at least $7.00) must come in the
+        // same request. Questions are cleared.
+        if (typeof req.body?.price !== 'number') {
+          return res.status(400).json({
+            error: "A price of at least $7.00 is required to turn off free consultation.",
+            message: "A price of at least $7.00 is required to turn off free consultation.",
+            code: "FREE_CONSULTATION_PRICE_REQUIRED",
+          });
+        }
+        const paidFields = updateSchema.parse(req.body);
+        const paidPrice = paidFields.price!;
+        const paidDeposit = validateDeposit(paidFields.depositAmountCents ?? null, paidPrice);
+        if (!paidDeposit.ok) {
+          return res.status(400).json(invalidDepositBody(paidDeposit.message));
+        }
+        // A live service gets its Stripe Product+Price now (free services
+        // went live without one). Same chokepoint and gates as go-live.
+        let paidStripe: { stripeProductId?: string; stripePriceId?: string } = {};
+        if (service.status === 'live') {
+          try {
+            paidStripe = await authorizeAndProvisionGoLive(
+              {
+                ...service,
+                name: paidFields.name ?? service.name,
+                description: paidFields.description !== undefined ? paidFields.description : service.description,
+                price: paidPrice,
+              },
+              business,
+              'service',
+            );
+          } catch (err) {
+            if (err instanceof GoLiveError) {
+              return res.status(409).json({ code: err.code, message: err.message });
+            }
+            throw err;
+          }
+        }
+        const updatedPaid = await storage.updateVendorService(req.params.id, {
+          ...paidFields,
+          depositAmountCents: paidDeposit.value ?? null,
+          isFreeConsultation: false,
+          bookingQuestions: null,
+          ...paidStripe,
+        });
+        return res.json({ service: updatedPaid });
+      }
+      if (hasBookingQuestions(req.body?.bookingQuestions)) {
+        return res.status(400).json(invalidQuestionsBody("Booking questions are currently only allowed on free consultation services."));
+      }
 
       const validated = updateSchema.parse(req.body);
 
@@ -12615,6 +13009,20 @@ export async function registerRoutes(
       const service = await storage.getVendorService(req.params.id);
       if (!service || service.businessId !== business.id) {
         return res.status(404).json({ error: "Service not found" });
+      }
+
+      // Free consultation: same gates, but no Stripe Product/Price (price 0).
+      if (service.isFreeConsultation) {
+        try {
+          await authorizeGoLive(business);
+        } catch (err) {
+          if (err instanceof GoLiveError) {
+            return res.status(409).json({ code: err.code, message: err.message });
+          }
+          throw err;
+        }
+        const updatedFree = await storage.updateVendorService(service.id, { status: 'live' });
+        return res.json({ service: updatedFree, message: "Service is now live" });
       }
 
       // Single chokepoint: enforces Connect onboarding + active subscription, then
@@ -12781,7 +13189,9 @@ export async function registerRoutes(
 
       // All or nothing: if the deposit is invalid for any service (below $7.00,
       // or not less than that service's price), nothing is written.
-      const services = await storage.getVendorServicesByBusiness(business.id);
+      // Free consultations take no deposit: skipped here and in the update.
+      const allServices = await storage.getVendorServicesByBusiness(business.id);
+      const services = allServices.filter(s => !s.isFreeConsultation);
       const invalid = services
         .map(s => ({ s, check: validateDeposit(depositAmountCents, s.price) }))
         .filter(({ check }) => !check.ok);
@@ -20084,6 +20494,9 @@ export async function registerRoutes(
         const business = await storage.getBusinessByOwnerId(userId);
         if (!business || service.businessId !== business.id) {
           return res.status(403).json({ error: "You can only attach your own services" });
+        }
+        if (service.isFreeConsultation) {
+          return res.status(400).json({ error: "Free consultation services cannot be attached to posts", code: "FREE_CONSULTATION_NOT_ATTACHABLE" });
         }
       }
 

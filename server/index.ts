@@ -111,7 +111,7 @@ app.use(cors({
   },
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'X-Internal-Key'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'X-Internal-Key', 'X-Outsyde-Capabilities'],
 }));
 
 // Cookie parsing — must come before routes so req.cookies is populated

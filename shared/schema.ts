@@ -521,8 +521,44 @@ export const vendorServices = pgTable("vendor_services", {
   imageUrl: text("image_url"),
   depositAmountCents: integer('deposit_amount_cents'),
 
+  // Free consultation (migration 040): price 0, no deposit, booked without
+  // payment via POST /api/booking/:holdId/confirm-free.
+  isFreeConsultation: boolean("is_free_consultation").default(false).notNull(),
+  // Intake questions shown at booking (migration 040). Generic column; for now
+  // the API accepts questions only when isFreeConsultation is true.
+  bookingQuestions: jsonb("booking_questions").$type<BookingQuestion[]>(),
+
   createdAt: timestamp("created_at").defaultNow().notNull(),
 });
+
+/* =====================================================
+   BOOKING QUESTIONS / ANSWERS (migration 040)
+   Validated in server/bookingQuestions.ts.
+===================================================== */
+export type BookingQuestionType = 'text' | 'long_text' | 'select' | 'date' | 'address';
+
+export interface BookingQuestion {
+  id: string;
+  label: string;
+  type: BookingQuestionType;
+  required: boolean;
+  options?: string[];
+}
+
+export interface BookingAddressAnswer {
+  line1: string;
+  line2?: string;
+  city: string;
+  state: string;
+  zipCode: string;
+}
+
+export interface BookingAnswer {
+  questionId: string;
+  label: string;
+  type: BookingQuestionType;
+  answer: string | BookingAddressAnswer | null;
+}
 
 /* =====================================================
    BUSINESS AVAILABILITY (Date-specific time slots)
@@ -1088,6 +1124,9 @@ export const appointments = pgTable("appointments", {
   serviceCancellationFeeType: text("service_cancellation_fee_type"),
   serviceCancellationFeeAmount: integer("service_cancellation_fee_amount"),
   depositAmountCents: integer("deposit_amount_cents"),
+  // Answers to the service's booking questions, snapshotted at booking time
+  // (migration 040). Null when the service had no questions.
+  bookingAnswers: jsonb("booking_answers").$type<BookingAnswer[]>(),
 
   // Reminder email tracking — set to true once the reminder has been sent
   reminder24hSent: boolean("reminder_24h_sent").default(false),
@@ -2134,7 +2173,16 @@ export const insertVendorProductSchema = createInsertSchema(vendorProducts).omit
   createdAt: true,
 });
 
-export const insertVendorServiceSchema = createInsertSchema(vendorServices).omit({
+export const insertVendorServiceSchema = createInsertSchema(vendorServices, {
+  // Typed shape for the jsonb column; validated in server/bookingQuestions.ts.
+  bookingQuestions: z.array(z.object({
+    id: z.string(),
+    label: z.string(),
+    type: z.enum(['text', 'long_text', 'select', 'date', 'address']),
+    required: z.boolean(),
+    options: z.array(z.string()).optional(),
+  })).nullable().optional(),
+}).omit({
   id: true,
   createdAt: true,
 });

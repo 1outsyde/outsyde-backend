@@ -254,3 +254,46 @@ export async function settleShootBooking(
 
   return { settled: true, transferId };
 }
+
+/**
+ * Settlement for a confirmed free consultation (payment_method 'free'): claims
+ * settled_at with the same once-only conditional UPDATE as
+ * settleAppointmentBooking, then converts the hold. Nothing else: no payout,
+ * no points, no referral (nothing was paid).
+ */
+export async function settleFreeAppointmentBooking(appointmentId: string): Promise<SettlementResult> {
+  const [appointment] = await db.update(appointments)
+    .set({ settledAt: sql`now()` })
+    .where(and(
+      eq(appointments.id, appointmentId),
+      eq(appointments.status, BOOKING_STATES.CONFIRMED),
+      eq(appointments.paymentMethod, 'free'),
+      isNull(appointments.settledAt),
+    ))
+    .returning();
+
+  if (!appointment) {
+    const [current] = await db.select({ status: appointments.status, settledAt: appointments.settledAt, paymentMethod: appointments.paymentMethod })
+      .from(appointments)
+      .where(eq(appointments.id, appointmentId));
+    const reason = !current
+      ? 'not_found'
+      : current.paymentMethod !== 'free'
+        ? 'not_free'
+        : current.settledAt
+          ? 'already_settled'
+          : `status_${current.status}`;
+    console.log(`[Settlement] free appointment ${appointmentId} not settled: ${reason}`);
+    return { settled: false, reason };
+  }
+
+  if (appointment.holdId) {
+    try {
+      await markHoldAsConverted(appointment.holdId, appointmentId, 'appointment');
+    } catch (holdErr) {
+      console.error(`[Settlement] Failed to convert hold ${appointment.holdId} for free appointment ${appointmentId}:`, holdErr);
+    }
+  }
+
+  return { settled: true, transferId: null };
+}
