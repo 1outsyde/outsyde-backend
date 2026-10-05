@@ -2556,6 +2556,15 @@ export async function registerRoutes(
               req.session.photographerId = photographer.id;
             }
           }
+
+          // stripeConnectComplete: true only when account exists and onboarding is done
+          if (business) {
+            (safeUser as any).stripeConnectComplete = !!(business.stripeAccountId && business.stripeOnboardingComplete);
+          } else if (photographer) {
+            (safeUser as any).stripeConnectComplete = !!(photographer.stripeAccountId && photographer.stripeOnboardingComplete);
+          } else {
+            (safeUser as any).stripeConnectComplete = false;
+          }
           
           return res.json(safeUser);
         }
@@ -2594,6 +2603,15 @@ export async function registerRoutes(
           req.session.isPhotographer = true;
           req.session.photographerId = photographer.id;
         }
+      }
+
+      // stripeConnectComplete: true only when account exists and onboarding is done
+      if (business) {
+        (safeUser as any).stripeConnectComplete = !!(business.stripeAccountId && business.stripeOnboardingComplete);
+      } else if (photographer) {
+        (safeUser as any).stripeConnectComplete = !!(photographer.stripeAccountId && photographer.stripeOnboardingComplete);
+      } else {
+        (safeUser as any).stripeConnectComplete = false;
       }
       
       res.json(safeUser);
@@ -2715,6 +2733,16 @@ export async function registerRoutes(
         'influencerStatus:', sessionState.influencerStatus,
         'businessId:', sessionState.businessId
       );
+      // Compute stripeConnectComplete from the already-fetched business/photographer records.
+      // True only when the entity has a stripe_account_id AND stripe_onboarding_complete is true.
+      // This uses the DB-cached value kept fresh by the account.updated webhook + self-healing.
+      let stripeConnectComplete = false;
+      if (business) {
+        stripeConnectComplete = !!(business.stripeAccountId && business.stripeOnboardingComplete);
+      } else if (photographer) {
+        stripeConnectComplete = !!(photographer.stripeAccountId && photographer.stripeOnboardingComplete);
+      }
+
       res.json({
         user: {
           id: sessionState.userId,
@@ -2724,10 +2752,12 @@ export async function registerRoutes(
           role: sessionState.isAdmin ? 'admin' : sessionState.isVendor ? 'vendor' : sessionState.isPhotographer ? 'photographer' : 'consumer',
           isAdmin: sessionState.isAdmin || false,
           isVendor: sessionState.isVendor || false,
+          isPhotographer: sessionState.isPhotographer || false,
           businessId: sessionState.businessId,
           photographerId: sessionState.photographerId,
           loyaltyPoints: sessionState.loyaltyPoints ?? 0,
           profileImageUrl: sessionState.profilePhotoUrl ?? null,
+          stripeConnectComplete,
         },
       });
     } catch (error) {
