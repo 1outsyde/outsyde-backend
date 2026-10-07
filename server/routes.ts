@@ -111,6 +111,7 @@ import rateLimit from "express-rate-limit";
 import { stripeService } from "./stripe/stripeService";
 import { sendAppointmentReceipts, sendShootBookingReceipts } from "./stripe/webhookHandlers";
 import { getStripePublishableKey, getUncachableStripeClient } from "./stripe/stripeClient";
+import { isAllowedClientOrigin, normalizeClientOrigin } from "./clientOrigins";
 import { authorizeAndProvisionGoLive, GoLiveError } from "./services/goLiveGate";
 import { ObjectStorageService, ObjectNotFoundError } from "./objectStorage";
 import { ObjectPermission } from "./objectAcl";
@@ -10047,6 +10048,28 @@ export async function registerRoutes(
           });
         }
 
+        // vendor-site: a vendor's own website (allowlisted origin only) asks Stripe to return there.
+        // Separate from the vendor / vendor-web code below, which is unchanged. Any other value
+        // (missing, non-string, not allowlisted — e.g. the app's returnUrl/refreshUrl) falls through.
+        const returnOrigin = req.body?.returnOrigin;
+        if (typeof returnOrigin === 'string' && isAllowedClientOrigin(returnOrigin)) {
+          const siteOrigin = encodeURIComponent(normalizeClientOrigin(returnOrigin));
+          const siteOnboardingLink = await stripeService.createConnectOnboardingLink(
+            stripeAccountId,
+            `${baseUrl}/api/stripe/connect-refresh?account=${stripeAccountId}&type=vendor-site&origin=${siteOrigin}`,
+            `${baseUrl}/api/stripe/connect-return?account=${stripeAccountId}&type=vendor-site&origin=${siteOrigin}`
+          );
+
+          await storage.updateBusiness(business.id, {
+            stripeOnboardingUrl: siteOnboardingLink.url,
+          });
+
+          return res.json({
+            url: siteOnboardingLink.url,
+            stripeAccountId,
+          });
+        }
+
         // Generate onboarding link with HTTPS redirect URLs (Stripe rejects deep links)
         const webRedirect = req.body?.webRedirect === true;
         const onboardingLink = await stripeService.createConnectOnboardingLink(
@@ -10187,6 +10210,33 @@ export async function registerRoutes(
 
   // Stripe Connect return — called when user completes or exits onboarding
   app.get("/api/stripe/connect-return", async (req, res) => {
+    // vendor-site: return to the vendor's own website. Separate from the existing types below
+    // (unchanged). Marks the business complete only when Stripe reports details_submitted AND
+    // charges_enabled (same rule as the account.updated webhook); never writes false.
+    if (req.query.type === 'vendor-site') {
+      const siteAccount = req.query.account;
+      const siteOrigin = req.query.origin;
+      if (typeof siteAccount === 'string' && siteAccount) {
+        try {
+          const stripe = await getUncachableStripeClient();
+          const stripeAccount = await stripe.accounts.retrieve(siteAccount);
+          if (stripeAccount.details_submitted === true && stripeAccount.charges_enabled === true) {
+            const business = await storage.getBusinessByStripeAccountId(siteAccount);
+            if (business) {
+              await storage.updateBusiness(business.id, { stripeOnboardingComplete: true });
+            }
+          }
+        } catch (e) {
+          console.error("[Stripe Connect] Failed to retrieve account on vendor-site return:", e);
+        }
+      }
+      if (isAllowedClientOrigin(siteOrigin)) {
+        return res.redirect(`${normalizeClientOrigin(siteOrigin)}/dashboard/stripe/return?status=complete`);
+      }
+      console.warn(`[Stripe Connect] vendor-site return with a non-allowlisted origin (${JSON.stringify(siteOrigin)?.slice(0, 200)}); using the vendor-web return page`);
+      return res.redirect(`${process.env.FRONTEND_URL}/vendor-dashboard/stripe/return?status=complete`);
+    }
+
     const { account, type, staffId } = req.query;
     if (account) {
       try {
@@ -10231,6 +10281,17 @@ export async function registerRoutes(
 
   // Stripe Connect refresh — called when onboarding link expires
   app.get("/api/stripe/connect-refresh", async (req, res) => {
+    // vendor-site: back to the vendor's own website to start a fresh link. Separate from the
+    // existing types below (unchanged).
+    if (req.query.type === 'vendor-site') {
+      const siteOrigin = req.query.origin;
+      if (isAllowedClientOrigin(siteOrigin)) {
+        return res.redirect(`${normalizeClientOrigin(siteOrigin)}/dashboard/stripe/refresh`);
+      }
+      console.warn(`[Stripe Connect] vendor-site refresh with a non-allowlisted origin (${JSON.stringify(siteOrigin)?.slice(0, 200)}); using the vendor-web refresh page`);
+      return res.redirect(`${process.env.FRONTEND_URL}/vendor-dashboard/stripe/refresh`);
+    }
+
     const { type, staffId } = req.query;
     if (type === 'vendor-web') {
       return res.redirect(`${process.env.FRONTEND_URL}/vendor-dashboard/stripe/refresh`);

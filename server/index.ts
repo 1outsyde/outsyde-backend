@@ -21,6 +21,7 @@ import { processScheduledDeletions } from "./services/accountDeletionService";
 import { cleanupExpiredStories } from "./services/stories";
 import { expireComplimentarySubscriptions } from "./services/complimentarySubscription";
 import { errorLogArgs, loggedResponseBody } from "./utils/requestLogging";
+import { clientSiteOrigins } from "./clientOrigins";
 import passport from "passport";
 
 // Global error handlers — prevent silent crashes
@@ -62,18 +63,7 @@ app.get("/api/health", async (_req, res) => {
 // CORS configuration — locked down in production, permissive in development
 const allowedOrigins: (string | RegExp)[] = [];
 
-// Client-site origins always allowed (both dev and prod)
-const clientSiteOrigins = [
-  'http://localhost:3001',           // xo-lashes-web local dev
-  'https://xobeautyandlashes.com',   // xo-lashes-web production
-  'https://lotushouseblends.com',    // LHB custom domain
-  'https://www.lotushouseblends.com',
-  'https://braids-with-love-site.vercel.app',
-  'https://www.braids-with-love-site.vercel.app',
-  'https://braidsbylana.com',
-  'https://www.braidsbylana.com',
-  'https://braids-with-lana-site.vercel.app',
-];
+// Client-site origins always allowed (both dev and prod) — list lives in ./clientOrigins
 clientSiteOrigins.forEach(o => allowedOrigins.push(o));
 
 if (process.env.NODE_ENV === 'production') {
