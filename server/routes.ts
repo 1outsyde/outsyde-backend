@@ -5017,6 +5017,11 @@ export async function registerRoutes(
 
       let resolvedDurationMinutes = parseInt(serviceDurationMinutes as string, 10);
 
+      // When addonIds provided, serviceId is required
+      if (addonIds && typeof addonIds === 'string' && addonIds.trim() !== '' && !serviceId) {
+        return res.status(400).json({ error: 'serviceId is required when addonIds are provided' });
+      }
+
       // When addonIds provided, validate them against the DB and add their duration
       if (addonIds && typeof addonIds === 'string' && addonIds.trim() !== '' && serviceId) {
         const ids = addonIds.split(',').map(s => s.trim()).filter(Boolean);
@@ -5131,8 +5136,15 @@ export async function registerRoutes(
       if (addonIds !== undefined && !Array.isArray(addonIds)) {
         return res.status(400).json({ error: 'addonIds must be an array' });
       }
-      if (customerDetails !== undefined && (typeof customerDetails !== 'string' || customerDetails.length > 1000)) {
-        return res.status(400).json({ error: 'customerDetails must be a string of at most 1,000 characters' });
+      if (Array.isArray(addonIds) && addonIds.length > 10) {
+        return res.status(400).json({ code: 'TOO_MANY_ADDONS', error: 'At most 10 add-ons may be selected per booking' });
+      }
+      if (customerDetails !== undefined && customerDetails !== null && typeof customerDetails !== 'string') {
+        return res.status(400).json({ error: 'customerDetails must be a string' });
+      }
+      const trimmedDetails = typeof customerDetails === 'string' ? customerDetails.trim() : undefined;
+      if (trimmedDetails !== undefined && trimmedDetails.length > 1000) {
+        return res.status(400).json({ error: 'customerDetails must be at most 1,000 characters' });
       }
       // Add-ons only allowed for business (vendor service) bookings
       const validatedAddonIds: string[] = [];
@@ -5169,7 +5181,7 @@ export async function registerRoutes(
         startTime: startTime as string,
         holdDurationMinutes: holdDurationMinutes ? parseInt(holdDurationMinutes, 10) : undefined,
         addonIds: validatedAddonIds,
-        customerDetails: typeof customerDetails === 'string' ? customerDetails.trim() : undefined,
+        customerDetails: trimmedDetails !== undefined && trimmedDetails.length > 0 ? trimmedDetails : undefined,
       });
 
       // Calculate fee preview for frontend display — base on total (B+A)
@@ -5322,6 +5334,11 @@ export async function registerRoutes(
         return res.status(400).json({ error: "Deposit payments are only supported for business bookings" });
       }
 
+      // Add-ons are not supported on this legacy route; use create-payment-intent instead
+      if ((hold.addonsTotalCents ?? 0) > 0 || (hold.addons as unknown[])?.length > 0) {
+        return res.status(400).json({ code: 'ADDONS_NOT_SUPPORTED_ON_LEGACY_ROUTE', error: 'This hold has add-ons. Use POST /api/booking/:holdId/create-payment-intent instead.' });
+      }
+
       // Idempotency: if an appointment was already created for this hold, reuse it
       const [existing] = await db.select().from(appointments).where(eq(appointments.holdId, holdId));
       if (existing) {
@@ -5456,9 +5473,11 @@ export async function registerRoutes(
     }
 
     const baseDescription = `Appointment booking at ${businessName}`;
-    const description = hasAddons
-      ? `${baseDescription} + ${addons.map(a => a.name).join(', ')}`
-      : baseDescription;
+    let description = baseDescription;
+    if (hasAddons) {
+      const suffix = ` + ${addons.map(a => a.name).join(', ')}`;
+      description = (baseDescription + suffix).slice(0, 450);
+    }
 
     return {
       amountCents: quoteDeposit(appt.totalPrice, appt.depositAmountCents).dueNowCents,
@@ -5901,7 +5920,7 @@ export async function registerRoutes(
       // now; the remainder is collected in person. chargeAmountCents is what
       // actually flows to Stripe; servicePriceCents is the full-service value
       // stored on the appointment for display and reconciliation.
-      const holdAddonsTotalCents = (hold as any).addonsTotalCents ?? 0;
+      const holdAddonsTotalCents = hold.addonsTotalCents ?? 0;
       const totalServicePriceCents = hold.servicePriceCents + holdAddonsTotalCents;
       const serviceDepositAmountCents = typeof serviceForSnapshot?.depositAmountCents === 'number'
         ? serviceForSnapshot.depositAmountCents
@@ -5954,10 +5973,10 @@ export async function registerRoutes(
         serviceCancellationFeeAmount: serviceForSnapshot?.cancellationFeeAmount ?? null,
         depositAmountCents: serviceDepositAmountCents,
         // Add-ons snapshot (copied from hold)
-        addons: (hold as any).addons ?? [],
+        addons: hold.addons ?? [],
         addonsTotalCents: holdAddonsTotalCents,
-        addonsDurationMinutes: (hold as any).addonsDurationMinutes ?? 0,
-        customerDetails: (hold as any).customerDetails ?? null,
+        addonsDurationMinutes: hold.addonsDurationMinutes ?? 0,
+        customerDetails: hold.customerDetails ?? null,
       });
 
       const user = await storage.getUser(userId);
@@ -11391,7 +11410,14 @@ export async function registerRoutes(
 
       const servicesWithAddons = liveServices.map(s => ({
         ...s,
-        addons: addonsMap.get(s.id) ?? [],
+        addons: (addonsMap.get(s.id) ?? []).map(a => ({
+          id: a.id,
+          name: a.name,
+          description: a.description ?? null,
+          priceCents: a.priceCents,
+          durationMinutes: a.durationMinutes,
+          sortOrder: a.sortOrder,
+        })),
       }));
 
       res.json({ services: servicesWithAddons });
@@ -12825,9 +12851,10 @@ export async function registerRoutes(
       }
 
       const bodySchema = z.object({
-        name: z.string().min(1).max(200),
-        priceCents: z.number().int().min(0),
-        durationMinutes: z.number().int().min(0),
+        name: z.string().trim().min(1).max(80),
+        description: z.string().max(300).nullable().optional(),
+        priceCents: z.number().int().min(0).max(100000),
+        durationMinutes: z.number().int().min(0).max(480),
         sortOrder: z.number().int().min(0).default(0),
         isActive: z.boolean().default(true),
       });
@@ -12835,7 +12862,7 @@ export async function registerRoutes(
 
       const [addon] = await db
         .insert(serviceAddons)
-        .values({ serviceId: req.params.id, ...validated })
+        .values({ serviceId: req.params.id, ...validated, description: validated.description ?? null })
         .returning();
 
       res.status(201).json({ addon });
@@ -12867,9 +12894,10 @@ export async function registerRoutes(
       if (!existing) return res.status(404).json({ error: 'Add-on not found' });
 
       const patchSchema = z.object({
-        name: z.string().min(1).max(200).optional(),
-        priceCents: z.number().int().min(0).optional(),
-        durationMinutes: z.number().int().min(0).optional(),
+        name: z.string().trim().min(1).max(80).optional(),
+        description: z.string().max(300).nullable().optional(),
+        priceCents: z.number().int().min(0).max(100000).optional(),
+        durationMinutes: z.number().int().min(0).max(480).optional(),
         sortOrder: z.number().int().min(0).optional(),
         isActive: z.boolean().optional(),
       });

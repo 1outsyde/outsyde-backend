@@ -531,6 +531,7 @@ export const serviceAddons = pgTable("service_addons", {
   id: varchar("id", { length: 36 }).primaryKey().default(sql`gen_random_uuid()`),
   serviceId: varchar("service_id", { length: 36 }).notNull().references(() => vendorServices.id, { onDelete: "cascade" }),
   name: text("name").notNull(),
+  description: text("description"),
   priceCents: integer("price_cents").notNull().default(0),
   durationMinutes: integer("duration_minutes").notNull().default(0),
   isActive: boolean("is_active").notNull().default(true),

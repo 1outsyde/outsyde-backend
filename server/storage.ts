@@ -354,6 +354,7 @@ export interface IStorage {
     addons: Array<{ id: string; name: string; priceCents: number; durationMinutes: number }>;
     addonsTotalCents: number;
     addonsDurationMinutes: number;
+    customerDetails: string | null;
   }[]>;
   getAppointmentsByStaffMember(staffMemberId: string): Promise<Appointment[]>;
   updateAppointment(id: string, updates: Partial<Appointment>): Promise<Appointment | undefined>;
@@ -1954,7 +1955,7 @@ export class DatabaseStorage implements IStorage {
     addons: Array<{ id: string; name: string; priceCents: number; durationMinutes: number }>;
     addonsTotalCents: number;
     addonsDurationMinutes: number;
-    // customerDetails intentionally omitted from customer-facing list (visible in detail/receipt only)
+    customerDetails: string | null;
   }[]> {
     const rows = await db.select({
       id: appointments.id,
@@ -1996,6 +1997,7 @@ export class DatabaseStorage implements IStorage {
       addons: appointments.addons,
       addonsTotalCents: appointments.addonsTotalCents,
       addonsDurationMinutes: appointments.addonsDurationMinutes,
+      customerDetails: appointments.customerDetails,
     })
       .from(appointments)
       .leftJoin(businesses, eq(appointments.businessId, businesses.id))
@@ -2013,6 +2015,7 @@ export class DatabaseStorage implements IStorage {
         addons: (row.addons as Array<{ id: string; name: string; priceCents: number; durationMinutes: number }>) ?? [],
         addonsTotalCents: row.addonsTotalCents ?? 0,
         addonsDurationMinutes: row.addonsDurationMinutes ?? 0,
+        customerDetails: row.customerDetails ?? null,
       };
     });
   }

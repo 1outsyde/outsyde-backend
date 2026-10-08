@@ -186,7 +186,7 @@ export async function sendAppointmentReceipts(
         basePrice: appointment.totalPrice,
         depositAmountCents: depositCents,
         remainderDueCents: remainderCents,
-        addons: ((appointment as any).addons ?? []) as Array<{ name: string; priceCents: number }>,
+        addons: (appointment.addons as Array<{ name: string; priceCents: number }> | null) ?? [],
       }),
     },
     vendor: {
@@ -204,8 +204,8 @@ export async function sendAppointmentReceipts(
         basePrice: appointment.totalPrice,
         depositAmountCents: depositCents,
         remainderDueCents: remainderCents,
-        addons: ((appointment as any).addons ?? []) as Array<{ name: string; priceCents: number }>,
-        customerDetails: (appointment as any).customerDetails ?? null,
+        addons: (appointment.addons as Array<{ name: string; priceCents: number }> | null) ?? [],
+        customerDetails: appointment.customerDetails ?? null,
       }),
     },
     admin: () => sendInternalEventAlert({
