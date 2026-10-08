@@ -299,6 +299,15 @@ export interface IStorage {
     bookingFeeAmount: number;
     vendorNetAmount: number;
     staffMemberId: string | null;
+    serviceTotalCents: number;
+    depositAmountCents: number | null;
+    chargedAmountCents: number;
+    dueAtAppointmentCents: number;
+    inPersonDueCents: number;
+    addons: Array<{ id: string; name: string; priceCents: number; durationMinutes: number }>;
+    addonsTotalCents: number;
+    addonsDurationMinutes: number;
+    customerDetails: string | null;
   }[]>;
   getAppointmentsByClient(clientId: string): Promise<Appointment[]>;
   getAppointmentsByClientWithDetails(clientId: string): Promise<{
@@ -337,6 +346,14 @@ export interface IStorage {
     customerServiceCity: string | null;
     customerServiceState: string | null;
     customerServiceZipCode: string | null;
+    serviceTotalCents: number;
+    depositAmountCents: number | null;
+    chargedAmountCents: number;
+    dueAtAppointmentCents: number;
+    inPersonDueCents: number;
+    addons: Array<{ id: string; name: string; priceCents: number; durationMinutes: number }>;
+    addonsTotalCents: number;
+    addonsDurationMinutes: number;
   }[]>;
   getAppointmentsByStaffMember(staffMemberId: string): Promise<Appointment[]>;
   updateAppointment(id: string, updates: Partial<Appointment>): Promise<Appointment | undefined>;
@@ -1842,6 +1859,11 @@ export class DatabaseStorage implements IStorage {
     depositAmountCents: number | null;
     chargedAmountCents: number;
     dueAtAppointmentCents: number;
+    inPersonDueCents: number;
+    addons: Array<{ id: string; name: string; priceCents: number; durationMinutes: number }>;
+    addonsTotalCents: number;
+    addonsDurationMinutes: number;
+    customerDetails: string | null;
   }[]> {
     const rows = await db.select({
       id: appointments.id,
@@ -1858,6 +1880,10 @@ export class DatabaseStorage implements IStorage {
       customerAvatar: users.profileImageUrl,
       serviceName: vendorServices.name,
       staffMemberId: appointments.staffMemberId,
+      addons: appointments.addons,
+      addonsTotalCents: appointments.addonsTotalCents,
+      addonsDurationMinutes: appointments.addonsDurationMinutes,
+      customerDetails: appointments.customerDetails,
     })
       .from(appointments)
       .leftJoin(users, eq(appointments.clientId, users.id))
@@ -1867,6 +1893,7 @@ export class DatabaseStorage implements IStorage {
 
     return rows.map((row) => {
       const fullName = row.name || `${row.firstName ?? ""} ${row.lastName ?? ""}`.trim();
+      const chargeFields = appointmentChargeFields(row.totalPrice ?? 0, row.depositAmountCents);
       return {
         id: row.id,
         customerName: fullName || "Unknown Customer",
@@ -1883,7 +1910,12 @@ export class DatabaseStorage implements IStorage {
         // Integer cents. chargedAmountCents is what the booking PaymentIntent
         // charged (deposit or full price, plus the consumer fee); the rest is
         // due in person at the appointment.
-        ...appointmentChargeFields(row.totalPrice ?? 0, row.depositAmountCents),
+        ...chargeFields,
+        inPersonDueCents: chargeFields.dueAtAppointmentCents,
+        addons: (row.addons as Array<{ id: string; name: string; priceCents: number; durationMinutes: number }>) ?? [],
+        addonsTotalCents: row.addonsTotalCents ?? 0,
+        addonsDurationMinutes: row.addonsDurationMinutes ?? 0,
+        customerDetails: row.customerDetails ?? null,
       };
     });
   }
@@ -1918,6 +1950,11 @@ export class DatabaseStorage implements IStorage {
     depositAmountCents: number | null;
     chargedAmountCents: number;
     dueAtAppointmentCents: number;
+    inPersonDueCents: number;
+    addons: Array<{ id: string; name: string; priceCents: number; durationMinutes: number }>;
+    addonsTotalCents: number;
+    addonsDurationMinutes: number;
+    // customerDetails intentionally omitted from customer-facing list (visible in detail/receipt only)
   }[]> {
     const rows = await db.select({
       id: appointments.id,
@@ -1956,6 +1993,9 @@ export class DatabaseStorage implements IStorage {
       customerServiceCity: appointments.customerServiceCity,
       customerServiceState: appointments.customerServiceState,
       customerServiceZipCode: appointments.customerServiceZipCode,
+      addons: appointments.addons,
+      addonsTotalCents: appointments.addonsTotalCents,
+      addonsDurationMinutes: appointments.addonsDurationMinutes,
     })
       .from(appointments)
       .leftJoin(businesses, eq(appointments.businessId, businesses.id))
@@ -1964,10 +2004,17 @@ export class DatabaseStorage implements IStorage {
       .where(eq(appointments.clientId, clientId))
       .orderBy(desc(appointments.createdAt));
 
-    return rows.map((row) => ({
-      ...row,
-      ...appointmentChargeFields(row.totalPrice, row.depositAmountCents),
-    }));
+    return rows.map((row) => {
+      const chargeFields = appointmentChargeFields(row.totalPrice, row.depositAmountCents);
+      return {
+        ...row,
+        ...chargeFields,
+        inPersonDueCents: chargeFields.dueAtAppointmentCents,
+        addons: (row.addons as Array<{ id: string; name: string; priceCents: number; durationMinutes: number }>) ?? [],
+        addonsTotalCents: row.addonsTotalCents ?? 0,
+        addonsDurationMinutes: row.addonsDurationMinutes ?? 0,
+      };
+    });
   }
 
   async getAppointmentsByStaffMember(staffMemberId: string): Promise<Appointment[]> {

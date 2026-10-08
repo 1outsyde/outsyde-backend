@@ -525,6 +525,23 @@ export const vendorServices = pgTable("vendor_services", {
 });
 
 /* =====================================================
+   SERVICE ADD-ONS (Optional extras for vendor services)
+===================================================== */
+export const serviceAddons = pgTable("service_addons", {
+  id: varchar("id", { length: 36 }).primaryKey().default(sql`gen_random_uuid()`),
+  serviceId: varchar("service_id", { length: 36 }).notNull().references(() => vendorServices.id, { onDelete: "cascade" }),
+  name: text("name").notNull(),
+  priceCents: integer("price_cents").notNull().default(0),
+  durationMinutes: integer("duration_minutes").notNull().default(0),
+  isActive: boolean("is_active").notNull().default(true),
+  sortOrder: integer("sort_order").notNull().default(0),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+}, (table) => ({
+  serviceActiveIdx: index("idx_service_addons_service").on(table.serviceId, table.isActive, table.sortOrder, table.name),
+}));
+
+/* =====================================================
    BUSINESS AVAILABILITY (Date-specific time slots)
 ===================================================== */
 export const businessAvailability = pgTable("business_availability", {
@@ -1088,6 +1105,12 @@ export const appointments = pgTable("appointments", {
   serviceCancellationFeeType: text("service_cancellation_fee_type"),
   serviceCancellationFeeAmount: integer("service_cancellation_fee_amount"),
   depositAmountCents: integer("deposit_amount_cents"),
+
+  // Add-ons snapshot — copied from booking_holds at appointment creation time
+  addons: jsonb("addons").$type<Array<{ id: string; name: string; priceCents: number; durationMinutes: number }>>().default([]),
+  addonsTotalCents: integer("addons_total_cents").notNull().default(0),
+  addonsDurationMinutes: integer("addons_duration_minutes").notNull().default(0),
+  customerDetails: text("customer_details"),
 
   // Reminder email tracking — set to true once the reminder has been sent
   reminder24hSent: boolean("reminder_24h_sent").default(false),
@@ -1811,6 +1834,12 @@ export const bookingHolds = pgTable("booking_holds", {
   serviceName: text("service_name").notNull(),
   servicePriceCents: integer("service_price_cents").notNull(),
   durationMinutes: integer("duration_minutes").notNull(),
+
+  // Add-ons snapshot — resolved at hold creation time
+  addons: jsonb("addons").$type<Array<{ id: string; name: string; priceCents: number; durationMinutes: number }>>().default([]),
+  addonsTotalCents: integer("addons_total_cents").notNull().default(0),
+  addonsDurationMinutes: integer("addons_duration_minutes").notNull().default(0),
+  customerDetails: text("customer_details"),
 
   // Time slot being held (full timestamps for precision)
   holdDate: text("hold_date").notNull(), // YYYY-MM-DD

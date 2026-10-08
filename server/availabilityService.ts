@@ -14,6 +14,7 @@ import {
   weeklyAvailability,
   providerBlocks,
   bookingHolds,
+  serviceAddons,
   BOOKING_STATES,
   type BookingHold
 } from "@shared/schema";
@@ -1328,6 +1329,8 @@ export interface CreateHoldParams {
   date: string;
   startTime: string;
   holdDurationMinutes?: number;
+  addonIds?: string[];
+  customerDetails?: string;
 }
 
 export interface HoldResult {
@@ -1335,9 +1338,13 @@ export interface HoldResult {
   expiresAt: Date;
   serviceName: string;
   servicePriceCents: number;
+  addonsTotalCents: number;
+  addonsDurationMinutes: number;
+  addons: Array<{ id: string; name: string; priceCents: number; durationMinutes: number }>;
   durationMinutes: number;
   startTime: string;
   endTime: string;
+  customerDetails?: string;
 }
 
 type ServiceSnapshot = {
@@ -1499,7 +1506,25 @@ export async function createBookingHold(params: CreateHoldParams): Promise<HoldR
     throw new AvailabilityError(AVAILABILITY_ERRORS.SERVICE_NOT_FOUND, 'Service not found');
   }
 
-  const endTime = calculateEndTime(params.startTime, service.serviceDurationMinutes);
+  // Resolve add-ons (business-owned vendor services only; already validated by caller)
+  type AddonSnapshot = { id: string; name: string; priceCents: number; durationMinutes: number };
+  let resolvedAddons: AddonSnapshot[] = [];
+  if (params.addonIds && params.addonIds.length > 0 && params.providerType === 'business' && !params.staffMemberId) {
+    const rows = await db
+      .select({ id: serviceAddons.id, name: serviceAddons.name, priceCents: serviceAddons.priceCents, durationMinutes: serviceAddons.durationMinutes })
+      .from(serviceAddons)
+      .where(and(
+        inArray(serviceAddons.id, params.addonIds),
+        eq(serviceAddons.serviceId, params.serviceId),
+        eq(serviceAddons.isActive, true),
+      ));
+    resolvedAddons = rows;
+  }
+  const addonsTotalCents = resolvedAddons.reduce((s, a) => s + a.priceCents, 0);
+  const addonsDurationMinutes = resolvedAddons.reduce((s, a) => s + a.durationMinutes, 0);
+
+  const totalDurationMinutes = service.serviceDurationMinutes + addonsDurationMinutes;
+  const endTime = calculateEndTime(params.startTime, totalDurationMinutes);
 
   // checkProviderAvailability only ever stores provider_type = 'business' |
   // 'photographer' in weeklyAvailability/providerBlocks/bookingHolds -- staff
@@ -1564,7 +1589,11 @@ export async function createBookingHold(params: CreateHoldParams): Promise<HoldR
       serviceId: params.serviceId,
       serviceName: service.serviceName,
       servicePriceCents: service.servicePriceCents,
-      durationMinutes: service.serviceDurationMinutes,
+      durationMinutes: totalDurationMinutes,
+      addons: resolvedAddons,
+      addonsTotalCents,
+      addonsDurationMinutes,
+      customerDetails: params.customerDetails ?? null,
       holdDate: params.date,
       startTime: params.startTime,
       endTime,
@@ -1604,9 +1633,13 @@ export async function createBookingHold(params: CreateHoldParams): Promise<HoldR
     expiresAt,
     serviceName: service.serviceName,
     servicePriceCents: service.servicePriceCents,
-    durationMinutes: service.serviceDurationMinutes,
+    addonsTotalCents,
+    addonsDurationMinutes,
+    addons: resolvedAddons,
+    durationMinutes: totalDurationMinutes,
     startTime: params.startTime,
     endTime,
+    customerDetails: params.customerDetails,
   };
 }
 

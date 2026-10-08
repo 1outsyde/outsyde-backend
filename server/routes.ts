@@ -174,6 +174,7 @@ import {
   follows,
   staffMembers,
   pointTransactions,
+  serviceAddons,
 } from "@shared/schema";
 import { and, ilike, ne, asc } from "drizzle-orm";
 
@@ -5002,11 +5003,11 @@ export async function registerRoutes(
   // GET /api/availability/slots - Generated time slots for a specific date
   app.get("/api/availability/slots", async (req, res) => {
     try {
-      const { providerType, providerId, date, serviceDurationMinutes, staffMemberId } = req.query;
+      const { providerType, providerId, date, serviceDurationMinutes, staffMemberId, serviceId, addonIds } = req.query;
 
       if (!providerType || !providerId || !date || !serviceDurationMinutes) {
-        return res.status(400).json({ 
-          error: "providerType, providerId, date, and serviceDurationMinutes are required" 
+        return res.status(400).json({
+          error: "providerType, providerId, date, and serviceDurationMinutes are required"
         });
       }
 
@@ -5014,18 +5015,39 @@ export async function registerRoutes(
         return res.status(400).json({ error: "providerType must be 'business' or 'photographer'" });
       }
 
+      let resolvedDurationMinutes = parseInt(serviceDurationMinutes as string, 10);
+
+      // When addonIds provided, validate them against the DB and add their duration
+      if (addonIds && typeof addonIds === 'string' && addonIds.trim() !== '' && serviceId) {
+        const ids = addonIds.split(',').map(s => s.trim()).filter(Boolean);
+        if (ids.length > 0) {
+          const resolvedAddons = await db
+            .select({ durationMinutes: serviceAddons.durationMinutes })
+            .from(serviceAddons)
+            .where(and(
+              inArray(serviceAddons.id, ids),
+              eq(serviceAddons.serviceId, serviceId as string),
+              eq(serviceAddons.isActive, true),
+            ));
+          if (resolvedAddons.length !== ids.length) {
+            return res.status(400).json({ error: 'One or more add-on IDs are invalid or inactive' });
+          }
+          resolvedDurationMinutes += resolvedAddons.reduce((s, a) => s + a.durationMinutes, 0);
+        }
+      }
+
       const slots = await generateAvailabilitySlots(
         providerType as 'business' | 'photographer',
         providerId as string,
         date as string,
-        parseInt(serviceDurationMinutes as string, 10),
+        resolvedDurationMinutes,
         staffMemberId as string | undefined
       );
 
-      res.json({ 
+      res.json({
         date,
         slots,
-        totalAvailable: slots.filter(s => s.available).length 
+        totalAvailable: slots.filter(s => s.available).length
       });
     } catch (error) {
       console.error("Generate availability slots error:", error);
@@ -5093,16 +5115,48 @@ export async function registerRoutes(
     }
 
     try {
-      const { providerType, providerId, serviceId, date, startTime, staffMemberId, holdDurationMinutes } = req.body;
+      const { providerType, providerId, serviceId, date, startTime, staffMemberId, holdDurationMinutes, addonIds, customerDetails } = req.body;
 
       if (!providerType || !providerId || !serviceId || !date || !startTime) {
-        return res.status(400).json({ 
-          error: "providerType, providerId, serviceId, date, and startTime are required" 
+        return res.status(400).json({
+          error: "providerType, providerId, serviceId, date, and startTime are required"
         });
       }
 
       if (providerType !== 'business' && providerType !== 'photographer') {
         return res.status(400).json({ error: "providerType must be 'business' or 'photographer'" });
+      }
+
+      // Validate addonIds and customerDetails
+      if (addonIds !== undefined && !Array.isArray(addonIds)) {
+        return res.status(400).json({ error: 'addonIds must be an array' });
+      }
+      if (customerDetails !== undefined && (typeof customerDetails !== 'string' || customerDetails.length > 1000)) {
+        return res.status(400).json({ error: 'customerDetails must be a string of at most 1,000 characters' });
+      }
+      // Add-ons only allowed for business (vendor service) bookings
+      const validatedAddonIds: string[] = [];
+      if (Array.isArray(addonIds) && addonIds.length > 0) {
+        if (providerType !== 'business') {
+          return res.status(400).json({ error: 'Add-ons are only available for business bookings' });
+        }
+        // Must not have a staffMemberId (business-owned services only)
+        if (staffMemberId) {
+          return res.status(400).json({ error: 'Add-ons are only available for business-owned services, not staff services' });
+        }
+        const ids = (addonIds as string[]).filter(Boolean);
+        const resolvedAddons = await db
+          .select()
+          .from(serviceAddons)
+          .where(and(
+            inArray(serviceAddons.id, ids),
+            eq(serviceAddons.serviceId, serviceId as string),
+            eq(serviceAddons.isActive, true),
+          ));
+        if (resolvedAddons.length !== ids.length) {
+          return res.status(400).json({ error: 'One or more add-on IDs are invalid or do not belong to this service' });
+        }
+        validatedAddonIds.push(...ids);
       }
 
       const result = await createBookingHold({
@@ -5113,12 +5167,15 @@ export async function registerRoutes(
         serviceId: serviceId as string,
         date: date as string,
         startTime: startTime as string,
-        holdDurationMinutes: holdDurationMinutes ? parseInt(holdDurationMinutes, 10) : undefined
+        holdDurationMinutes: holdDurationMinutes ? parseInt(holdDurationMinutes, 10) : undefined,
+        addonIds: validatedAddonIds,
+        customerDetails: typeof customerDetails === 'string' ? customerDetails.trim() : undefined,
       });
 
-      // Calculate fee preview for frontend display
+      // Calculate fee preview for frontend display — base on total (B+A)
       const { calculateBookingFees } = await import('./fees');
-      const feePreview = calculateBookingFees(result.servicePriceCents);
+      const totalPriceCents = result.servicePriceCents + result.addonsTotalCents;
+      const feePreview = calculateBookingFees(totalPriceCents);
 
       // What create-payment-intent will charge for this hold. The deposit is
       // read from the same record that route reads it from: the staff service
@@ -5127,7 +5184,7 @@ export async function registerRoutes(
       let holdDepositAmountCents: number | null = null;
       if (providerType === 'photographer') {
         const photographerService = await storage.getPhotographerService(serviceId as string);
-        holdDepositAmountCents = photographerBookingDepositCents(photographerService, result.servicePriceCents);
+        holdDepositAmountCents = photographerBookingDepositCents(photographerService, totalPriceCents);
       } else if (providerType === 'business' && staffMemberId) {
         const staffService = await storage.getStaffService(serviceId as string);
         holdDepositAmountCents = typeof staffService?.depositAmountCents === 'number' ? staffService.depositAmountCents : null;
@@ -5135,7 +5192,7 @@ export async function registerRoutes(
         const vendorService = await storage.getVendorService(serviceId as string);
         holdDepositAmountCents = typeof vendorService?.depositAmountCents === 'number' ? vendorService.depositAmountCents : null;
       }
-      const dueNow = quoteDeposit(result.servicePriceCents, holdDepositAmountCents);
+      const dueNow = quoteDeposit(totalPriceCents, holdDepositAmountCents);
 
       res.json({
         success: true,
@@ -5143,9 +5200,14 @@ export async function registerRoutes(
         expiresAt: result.expiresAt.toISOString(),
         serviceName: result.serviceName,
         servicePriceCents: result.servicePriceCents,
+        addonsTotalCents: result.addonsTotalCents,
+        addonsDurationMinutes: result.addonsDurationMinutes,
+        addons: result.addons,
+        totalPriceCents,
         durationMinutes: result.durationMinutes,
         startTime: result.startTime,
         endTime: result.endTime,
+        customerDetails: result.customerDetails ?? null,
         // Fee breakdown for frontend rendering (all in cents)
         feeBreakdown: {
           subtotalAmount: feePreview.subtotalCents,
@@ -5175,6 +5237,8 @@ export async function registerRoutes(
           outsydeGrossRevenueAmount: dueNow.feeBreakdown.outsydeGrossRevenueCents,
           feeModelVersion: dueNow.feeBreakdown.feeModelVersion,
         },
+        // Convenience: what customer pays in person (remainder after online charge)
+        inPersonDueCents: dueNow.dueAtAppointmentCents,
       });
     } catch (error) {
       if (error instanceof AvailabilityError) {
@@ -5354,6 +5418,8 @@ export async function registerRoutes(
     captureMethod: string | null;
     status: string;
     bookingNumber: number;
+    addons?: Array<{ id: string; name: string; priceCents: number; durationMinutes: number }> | null;
+    addonsTotalCents?: number | null;
   };
 
   // Get or create the Stripe customer — recovers stale/deleted IDs, not just null.
@@ -5371,18 +5437,35 @@ export async function registerRoutes(
   }
 
   function buildAppointmentPaymentIntentParams(appt: HoldAppointmentRow, businessName: string, stripeCustomerId: string) {
+    const addonsTotalCents = appt.addonsTotalCents ?? 0;
+    const addons = appt.addons ?? [];
+    const hasAddons = addonsTotalCents > 0 || addons.length > 0;
+
+    const baseMetadata: Record<string, string> = {
+      type: 'appointment',
+      appointmentId: appt.id,
+      holdId: appt.holdId ?? '',
+      businessId: appt.businessId,
+      staffMemberId: appt.staffMemberId || '',
+    };
+
+    if (hasAddons) {
+      const addonNames = addons.map(a => a.name).join(', ').slice(0, 450);
+      baseMetadata.addonsTotalCents = String(addonsTotalCents);
+      baseMetadata.addonNames = addonNames;
+    }
+
+    const baseDescription = `Appointment booking at ${businessName}`;
+    const description = hasAddons
+      ? `${baseDescription} + ${addons.map(a => a.name).join(', ')}`
+      : baseDescription;
+
     return {
       amountCents: quoteDeposit(appt.totalPrice, appt.depositAmountCents).dueNowCents,
       customerId: stripeCustomerId,
       captureMethod: (appt.captureMethod === 'manual' ? 'manual' : 'automatic') as 'automatic' | 'manual',
-      metadata: {
-        type: 'appointment',
-        appointmentId: appt.id,
-        holdId: appt.holdId ?? '',
-        businessId: appt.businessId,
-        staffMemberId: appt.staffMemberId || '',
-      },
-      description: `Appointment booking at ${businessName}`,
+      metadata: baseMetadata,
+      description,
       saveForFutureUse: true,
       idempotencyKey: `hold_pi_${appt.id}`,
     };
@@ -5818,12 +5901,16 @@ export async function registerRoutes(
       // now; the remainder is collected in person. chargeAmountCents is what
       // actually flows to Stripe; servicePriceCents is the full-service value
       // stored on the appointment for display and reconciliation.
+      const holdAddonsTotalCents = (hold as any).addonsTotalCents ?? 0;
+      const totalServicePriceCents = hold.servicePriceCents + holdAddonsTotalCents;
       const serviceDepositAmountCents = typeof serviceForSnapshot?.depositAmountCents === 'number'
         ? serviceForSnapshot.depositAmountCents
         : null;
+      // For deposit bookings the online charge is still D (deposit only); add-ons are paid in person.
+      // For non-deposit bookings the online charge is B+A.
       const chargeAmountCents = serviceDepositAmountCents !== null
         ? serviceDepositAmountCents
-        : hold.servicePriceCents;
+        : totalServicePriceCents;
       const feeBreakdown = calculateBookingFees(chargeAmountCents);
 
       const isCustomerLocation = serviceForSnapshot?.serviceLocationType === 'customer';
@@ -5846,7 +5933,7 @@ export async function registerRoutes(
         appointmentTime: hold.startTime,
         appointmentEndTime: hold.endTime,
         durationMinutes: hold.durationMinutes,
-        totalPrice: hold.servicePriceCents,
+        totalPrice: totalServicePriceCents,
         platformFee: feeBreakdown.platformFeeCents,
         vendorNet: feeBreakdown.vendorNetCents,
         status: isAutoAccept ? BOOKING_STATES.PENDING_PAYMENT : BOOKING_STATES.PENDING_PROVIDER,
@@ -5866,6 +5953,11 @@ export async function registerRoutes(
         serviceCancellationFeeType: serviceForSnapshot?.cancellationFeeType ?? null,
         serviceCancellationFeeAmount: serviceForSnapshot?.cancellationFeeAmount ?? null,
         depositAmountCents: serviceDepositAmountCents,
+        // Add-ons snapshot (copied from hold)
+        addons: (hold as any).addons ?? [],
+        addonsTotalCents: holdAddonsTotalCents,
+        addonsDurationMinutes: (hold as any).addonsDurationMinutes ?? 0,
+        customerDetails: (hold as any).customerDetails ?? null,
       });
 
       const user = await storage.getUser(userId);
@@ -11280,7 +11372,29 @@ export async function registerRoutes(
       const services = await storage.getVendorServicesByBusiness(req.params.id);
       // Only return active AND live services for public view
       const liveServices = services.filter(s => s.isActive && s.status === 'live');
-      res.json({ services: liveServices });
+
+      // Attach active add-ons to each service
+      const serviceIds = liveServices.map(s => s.id);
+      const allAddons = serviceIds.length > 0
+        ? await db
+            .select()
+            .from(serviceAddons)
+            .where(and(inArray(serviceAddons.serviceId, serviceIds), eq(serviceAddons.isActive, true)))
+            .orderBy(serviceAddons.sortOrder, serviceAddons.name)
+        : [];
+
+      const addonsMap = new Map<string, typeof allAddons>();
+      for (const a of allAddons) {
+        if (!addonsMap.has(a.serviceId)) addonsMap.set(a.serviceId, []);
+        addonsMap.get(a.serviceId)!.push(a);
+      }
+
+      const servicesWithAddons = liveServices.map(s => ({
+        ...s,
+        addons: addonsMap.get(s.id) ?? [],
+      }));
+
+      res.json({ services: servicesWithAddons });
     } catch (error) {
       console.error("Get business services error:", error);
       res.status(500).json({ error: "Failed to get services" });
@@ -12642,6 +12756,164 @@ export async function registerRoutes(
     } catch (error) {
       console.error("Delete vendor service error:", error);
       res.status(500).json({ error: "Failed to delete service" });
+    }
+  });
+
+  // ── Service Add-on CRUD ──────────────────────────────────────────────────
+
+  const ADDON_ALLOWED_ADMIN_EMAILS = ['info@goutsyde.com', 'jamesmeyers2304@gmail.com'];
+
+  async function resolveBusinessForAddonRoute(
+    userId: string,
+    xBusinessId: string | undefined,
+  ) {
+    const userRecord = await storage.getUser(userId);
+    const isAdmin = ADDON_ALLOWED_ADMIN_EMAILS.includes((userRecord?.email ?? '').toLowerCase());
+    if (xBusinessId && isAdmin) {
+      return storage.getBusiness(xBusinessId);
+    }
+    return storage.getBusinessByOwnerId(userId);
+  }
+
+  // GET /api/vendor/services/:id/addons
+  app.get("/api/vendor/services/:id/addons", async (req, res) => {
+    const userId = req.session?.userId || getUserIdFromRequest(req);
+    if (!userId) return res.status(401).json({ error: 'Not authenticated' });
+    try {
+      const xBusinessId = req.headers['x-business-id'] as string | undefined;
+      const business = await resolveBusinessForAddonRoute(userId, xBusinessId);
+      if (!business) return res.status(404).json({ error: 'No business found' });
+
+      const service = await storage.getVendorService(req.params.id);
+      if (!service || service.businessId !== business.id) {
+        return res.status(404).json({ error: 'Service not found' });
+      }
+
+      const addons = await db
+        .select()
+        .from(serviceAddons)
+        .where(eq(serviceAddons.serviceId, req.params.id))
+        .orderBy(serviceAddons.sortOrder, serviceAddons.name);
+
+      res.json({ addons });
+    } catch (err) {
+      console.error('GET service addons error:', err);
+      res.status(500).json({ error: 'Failed to fetch add-ons' });
+    }
+  });
+
+  // POST /api/vendor/services/:id/addons
+  app.post("/api/vendor/services/:id/addons", async (req, res) => {
+    const userId = req.session?.userId || getUserIdFromRequest(req);
+    if (!userId) return res.status(401).json({ error: 'Not authenticated' });
+    try {
+      const xBusinessId = req.headers['x-business-id'] as string | undefined;
+      const business = await resolveBusinessForAddonRoute(userId, xBusinessId);
+      if (!business) return res.status(404).json({ error: 'No business found' });
+
+      const service = await storage.getVendorService(req.params.id);
+      if (!service || service.businessId !== business.id) {
+        return res.status(404).json({ error: 'Service not found' });
+      }
+
+      const existing = await db
+        .select({ id: serviceAddons.id })
+        .from(serviceAddons)
+        .where(eq(serviceAddons.serviceId, req.params.id));
+      if (existing.length >= 20) {
+        return res.status(400).json({ code: 'TOO_MANY_ADDONS', error: 'A service may have at most 20 add-ons' });
+      }
+
+      const bodySchema = z.object({
+        name: z.string().min(1).max(200),
+        priceCents: z.number().int().min(0),
+        durationMinutes: z.number().int().min(0),
+        sortOrder: z.number().int().min(0).default(0),
+        isActive: z.boolean().default(true),
+      });
+      const validated = bodySchema.parse(req.body);
+
+      const [addon] = await db
+        .insert(serviceAddons)
+        .values({ serviceId: req.params.id, ...validated })
+        .returning();
+
+      res.status(201).json({ addon });
+    } catch (err) {
+      if (err instanceof z.ZodError) return res.status(400).json({ error: 'Invalid data', details: err.errors });
+      console.error('POST service addon error:', err);
+      res.status(500).json({ error: 'Failed to create add-on' });
+    }
+  });
+
+  // PATCH /api/vendor/services/:serviceId/addons/:addonId
+  app.patch("/api/vendor/services/:serviceId/addons/:addonId", async (req, res) => {
+    const userId = req.session?.userId || getUserIdFromRequest(req);
+    if (!userId) return res.status(401).json({ error: 'Not authenticated' });
+    try {
+      const xBusinessId = req.headers['x-business-id'] as string | undefined;
+      const business = await resolveBusinessForAddonRoute(userId, xBusinessId);
+      if (!business) return res.status(404).json({ error: 'No business found' });
+
+      const service = await storage.getVendorService(req.params.serviceId);
+      if (!service || service.businessId !== business.id) {
+        return res.status(404).json({ error: 'Service not found' });
+      }
+
+      const [existing] = await db
+        .select()
+        .from(serviceAddons)
+        .where(and(eq(serviceAddons.id, req.params.addonId), eq(serviceAddons.serviceId, req.params.serviceId)));
+      if (!existing) return res.status(404).json({ error: 'Add-on not found' });
+
+      const patchSchema = z.object({
+        name: z.string().min(1).max(200).optional(),
+        priceCents: z.number().int().min(0).optional(),
+        durationMinutes: z.number().int().min(0).optional(),
+        sortOrder: z.number().int().min(0).optional(),
+        isActive: z.boolean().optional(),
+      });
+      const validated = patchSchema.parse(req.body);
+
+      const [addon] = await db
+        .update(serviceAddons)
+        .set({ ...validated, updatedAt: new Date() })
+        .where(eq(serviceAddons.id, req.params.addonId))
+        .returning();
+
+      res.json({ addon });
+    } catch (err) {
+      if (err instanceof z.ZodError) return res.status(400).json({ error: 'Invalid data', details: err.errors });
+      console.error('PATCH service addon error:', err);
+      res.status(500).json({ error: 'Failed to update add-on' });
+    }
+  });
+
+  // DELETE /api/vendor/services/:serviceId/addons/:addonId
+  app.delete("/api/vendor/services/:serviceId/addons/:addonId", async (req, res) => {
+    const userId = req.session?.userId || getUserIdFromRequest(req);
+    if (!userId) return res.status(401).json({ error: 'Not authenticated' });
+    try {
+      const xBusinessId = req.headers['x-business-id'] as string | undefined;
+      const business = await resolveBusinessForAddonRoute(userId, xBusinessId);
+      if (!business) return res.status(404).json({ error: 'No business found' });
+
+      const service = await storage.getVendorService(req.params.serviceId);
+      if (!service || service.businessId !== business.id) {
+        return res.status(404).json({ error: 'Service not found' });
+      }
+
+      const deleted = await db
+        .delete(serviceAddons)
+        .where(and(eq(serviceAddons.id, req.params.addonId), eq(serviceAddons.serviceId, req.params.serviceId)))
+        .returning({ id: serviceAddons.id });
+
+      if (deleted.length === 0) return res.status(404).json({ error: 'Add-on not found' });
+
+      res.json({ success: true });
+    } catch (err) {
+      console.error('DELETE service addon error:', err);
+      res.status(500).json({ error: 'Failed to delete add-on' });
     }
   });
 

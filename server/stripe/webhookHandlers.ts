@@ -186,6 +186,7 @@ export async function sendAppointmentReceipts(
         basePrice: appointment.totalPrice,
         depositAmountCents: depositCents,
         remainderDueCents: remainderCents,
+        addons: ((appointment as any).addons ?? []) as Array<{ name: string; priceCents: number }>,
       }),
     },
     vendor: {
@@ -203,6 +204,8 @@ export async function sendAppointmentReceipts(
         basePrice: appointment.totalPrice,
         depositAmountCents: depositCents,
         remainderDueCents: remainderCents,
+        addons: ((appointment as any).addons ?? []) as Array<{ name: string; priceCents: number }>,
+        customerDetails: (appointment as any).customerDetails ?? null,
       }),
     },
     admin: () => sendInternalEventAlert({
@@ -521,6 +524,7 @@ export class WebhookHandlers {
               date: appointment.appointmentDate,
               time: appointment.appointmentTime,
               basePrice: appointment.totalPrice,
+              addons: (appointment.addons as Array<{ name: string; priceCents: number }> | null) ?? [],
             }),
           },
           vendor: {
@@ -536,6 +540,8 @@ export class WebhookHandlers {
               date: appointment.appointmentDate,
               time: appointment.appointmentTime,
               basePrice: appointment.totalPrice,
+              addons: (appointment.addons as Array<{ name: string; priceCents: number }> | null) ?? [],
+              customerDetails: appointment.customerDetails ?? undefined,
             }),
           },
           admin: () => sendInternalEventAlert({
@@ -2693,6 +2699,7 @@ export class WebhookHandlers {
             date: appointment.appointmentDate,
             time: appointment.appointmentTime,
             basePrice: appointment.totalPrice,
+            addons: (appointment.addons as Array<{ name: string; priceCents: number }> | null) ?? [],
           }),
         },
         vendor: {
@@ -2708,6 +2715,8 @@ export class WebhookHandlers {
             date: appointment.appointmentDate,
             time: appointment.appointmentTime,
             basePrice: appointment.totalPrice,
+            addons: (appointment.addons as Array<{ name: string; priceCents: number }> | null) ?? [],
+            customerDetails: appointment.customerDetails ?? undefined,
           }),
         },
         admin: () => sendInternalEventAlert({
