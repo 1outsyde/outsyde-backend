@@ -940,7 +940,7 @@ export interface UnifiedSearchResponse {
 // Deposit/charge amounts for an appointment list row, in integer cents. The
 // charged amount is recomputed with the same calculateBookingFees() rounding
 // the hold-based booking PaymentIntent used (no stored column exists).
-function appointmentChargeFields(totalPrice: number, depositAmountCents: number | null) {
+export function appointmentChargeFields(totalPrice: number, depositAmountCents: number | null) {
   const quote = quoteDeposit(totalPrice, depositAmountCents);
   return {
     serviceTotalCents: quote.serviceTotalCents,

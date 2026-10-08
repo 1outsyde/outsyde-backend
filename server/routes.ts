@@ -2,7 +2,7 @@ import type { Express, RequestHandler } from "express";
 import type { Server } from "http";
 import { randomUUID } from "crypto";
 import multer from "multer";
-import { storage } from "./storage";
+import { storage, appointmentChargeFields } from "./storage";
 import { db } from "./db";
 import {
   customerSignupSchema,
@@ -19787,11 +19787,14 @@ export async function registerRoutes(
 
       const enriched = await Promise.all(paged.map(async (appt) => {
         const client = await storage.getUser(appt.clientId);
+        const chargeFields = appointmentChargeFields(appt.totalPrice, appt.depositAmountCents);
         return {
           ...appt,
           clientEmail: client?.email,
           clientName: client?.name ?? `${client?.firstName ?? ''} ${client?.lastName ?? ''}`.trim(),
           clientPhone: client?.phone,
+          ...chargeFields,
+          inPersonDueCents: chargeFields.dueAtAppointmentCents,
         };
       }));
 

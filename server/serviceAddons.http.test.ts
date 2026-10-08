@@ -542,6 +542,54 @@ async function call(method: string, path: string, o: { token?: string; body?: un
       }
     }
 
+    // ────────────────────────────────────────────────────────────────────────────────
+    // h. Charge fields on GET /api/business/appointments
+    // ────────────────────────────────────────────────────────────────────────────────
+    console.log('\n── h. Charge fields on GET /api/business/appointments ──');
+    {
+      r = await call('GET', '/api/business/appointments', { token: vendorToken });
+      assert(r.status === 200, 'GET /api/business/appointments → 200', r.status);
+      const appts: any[] = r.body?.appointments ?? [];
+
+      // deposit appointment: B+A=8500, D=2000 → charged=2000, inPersonDue=6500
+      const depAppt = appts.find((a: any) =>
+        a.depositAmountCents === 2000 && a.totalPrice === 8500 && a.businessId === bizId
+      );
+      if (depAppt) {
+        assert(depAppt.chargedAmountCents === 2000, 'deposit appt: chargedAmountCents = 2000', depAppt);
+        assert(depAppt.inPersonDueCents === 6500, 'deposit appt: inPersonDueCents = 6500 (8500-2000)', depAppt);
+        assert(depAppt.serviceTotalCents === 8500, 'deposit appt: serviceTotalCents = 8500', depAppt);
+        assert(depAppt.dueAtAppointmentCents === 6500, 'deposit appt: dueAtAppointmentCents = 6500', depAppt);
+      } else {
+        assert(false, 'deposit appt found in GET /api/business/appointments', appts.map((a: any) => ({ dp: a.depositAmountCents, tp: a.totalPrice })));
+      }
+
+      // no-deposit appointment: B+A=8500, D=null → charged=8500, inPersonDue=0
+      const ndAppt = appts.find((a: any) =>
+        (a.depositAmountCents == null || a.depositAmountCents === 0) && a.totalPrice === 8500 && a.businessId === bizId
+      );
+      if (ndAppt) {
+        assert(ndAppt.chargedAmountCents === 8500, 'no-deposit appt: chargedAmountCents = 8500', ndAppt);
+        assert(ndAppt.inPersonDueCents === 0, 'no-deposit appt: inPersonDueCents = 0', ndAppt);
+        assert(ndAppt.serviceTotalCents === 8500, 'no-deposit appt: serviceTotalCents = 8500', ndAppt);
+        assert(ndAppt.dueAtAppointmentCents === 0, 'no-deposit appt: dueAtAppointmentCents = 0', ndAppt);
+      } else {
+        assert(false, 'no-deposit appt found in GET /api/business/appointments', appts.map((a: any) => ({ dp: a.depositAmountCents, tp: a.totalPrice })));
+      }
+
+      // no-addons appointment (holdId_a0): verify charge fields present and correct
+      const noAddonsApptId = (await q(`SELECT id FROM appointments WHERE hold_id = $1`, [holdId_a0]))[0]?.id as string | undefined;
+      if (noAddonsApptId) {
+        const naAppt = appts.find((a: any) => a.id === noAddonsApptId);
+        if (naAppt) {
+          assert('chargedAmountCents' in naAppt, 'no-addons appt: chargedAmountCents field present', naAppt);
+          assert('inPersonDueCents' in naAppt, 'no-addons appt: inPersonDueCents field present', naAppt);
+          assert('serviceTotalCents' in naAppt, 'no-addons appt: serviceTotalCents field present', naAppt);
+          assert('dueAtAppointmentCents' in naAppt, 'no-addons appt: dueAtAppointmentCents field present', naAppt);
+        }
+      }
+    }
+
     // Availability slots: customerDetails NOT in slot response
     r = await call('GET', `/api/availability/slots?providerType=business&providerId=${bizId}&date=${tDate}&serviceDurationMinutes=60`);
     assert(!JSON.stringify(r.body).includes('customerDetails'), 'Slots: no customerDetails in response', null);
