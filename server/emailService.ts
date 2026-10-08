@@ -554,6 +554,7 @@ export async function sendAppointmentConfirmationToConsumer(params: {
   // Set only when a deposit was charged instead of the full service price.
   depositAmountCents?: number;
   remainderDueCents?: number;
+  addons?: Array<{ name: string; priceCents: number }>;
 }): Promise<void> {
   try {
     const chargedBase = params.depositAmountCents ?? params.basePrice;
@@ -561,10 +562,14 @@ export async function sendAppointmentConfirmationToConsumer(params: {
     const consumerTotal = chargedBase + consumerUpcharge;
     const bookingRef = `#A${String(params.bookingNumber).padStart(4, '0')}`;
     const isDeposit = params.depositAmountCents != null;
+    const addonRows = (params.addons ?? []).map((a) =>
+      ({ label: `Add-on: ${a.name.replace(/[<>&"]/g, c => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;', '"': '&quot;' }[c] ?? c))}`, value: isDeposit ? `${cents(a.priceCents)} (paid in person)` : cents(a.priceCents) })
+    );
 
     const rows = [
       { label: 'Booking', value: bookingRef },
       { label: 'Service', value: params.serviceName },
+      ...addonRows,
       { label: 'Date', value: params.date },
       { label: 'Time', value: params.time },
       ...(params.location ? [{ label: 'Location', value: params.location }] : []),
@@ -619,6 +624,8 @@ export async function sendAppointmentNotificationToVendor(params: {
   // Set only when a deposit was charged instead of the full service price.
   depositAmountCents?: number;
   remainderDueCents?: number;
+  addons?: Array<{ name: string; priceCents: number }>;
+  customerDetails?: string | null;
 }): Promise<void> {
   try {
     const chargedBase = params.depositAmountCents ?? params.basePrice;
@@ -630,11 +637,17 @@ export async function sendAppointmentNotificationToVendor(params: {
     const customerDisplay = params.consumerDisplayName || params.consumerName;
     const usernameDisplay = params.consumerUsername ? `@${params.consumerUsername}` : '';
 
+    const esc = (s: string) => s.replace(/[<>&"]/g, c => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;', '"': '&quot;' }[c] ?? c));
+    const addonRows = (params.addons ?? []).map((a) =>
+      ({ label: `Add-on: ${esc(a.name)}`, value: isDeposit ? `${cents(a.priceCents)} (paid in person)` : cents(a.priceCents) })
+    );
+
     const rows = [
       { label: 'Booking', value: bookingRef },
       { label: 'Customer Name', value: customerDisplay },
       ...(usernameDisplay ? [{ label: 'Customer Username', value: usernameDisplay }] : []),
       { label: 'Service', value: params.serviceName },
+      ...addonRows,
       { label: 'Date', value: params.date },
       { label: 'Time', value: params.time },
       ...(params.location ? [{ label: 'Location', value: params.location }] : []),
@@ -648,11 +661,19 @@ export async function sendAppointmentNotificationToVendor(params: {
       ]),
     ].map((r, i) => detailRow(r.label, r.value, i % 2 === 0)).join('');
 
+    const customerDetailsBlock = params.customerDetails
+      ? `<tr><td style="background:#1A1A1A;padding:12px 32px 4px;">
+          <p style="color:#E8B930;font-size:12px;margin:0 0 4px 0;font-weight:600;">Customer Details:</p>
+          <p style="color:#CCCCCC;font-size:13px;margin:0;white-space:pre-wrap;">${esc(params.customerDetails)}</p>
+        </td></tr>`
+      : '';
+
     const html = wrapEmail(`
       ${emailHeader('New Booking Received! 🎉', 'Congratulations! You have a new appointment booking.')}
       <tr><td style="background:#1A1A1A;padding:0 32px;">
         <table width="100%" cellpadding="0" cellspacing="0" style="border-radius:6px;overflow:hidden;">${rows}</table>
       </td></tr>
+      ${customerDetailsBlock}
       <tr><td style="background:#1A1A1A;padding:12px 32px 4px;">
         <p style="color:#555555;font-size:12px;margin:0;">Outsyde platform fee: 2% (${cents(vendorFee)})</p>
       </td></tr>

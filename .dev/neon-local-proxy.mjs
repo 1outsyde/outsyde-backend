@@ -52,6 +52,7 @@ const server = http.createServer(async (req, res) => {
       detail: err.detail,
       hint: err.hint,
       position: err.position,
+      constraint: err.constraint,
     };
     res.writeHead(400, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify(response));
