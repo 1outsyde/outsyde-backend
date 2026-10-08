@@ -556,7 +556,7 @@ async function call(method: string, path: string, o: { token?: string; body?: un
         a.depositAmountCents === 2000 && a.totalPrice === 8500 && a.businessId === bizId
       );
       if (depAppt) {
-        assert(depAppt.chargedAmountCents === 2000, 'deposit appt: chargedAmountCents = 2000', depAppt);
+        assert(depAppt.chargedAmountCents === 2160, 'deposit appt: chargedAmountCents = 2160 (D=2000 + 8% fee incl.)', depAppt);
         assert(depAppt.inPersonDueCents === 6500, 'deposit appt: inPersonDueCents = 6500 (8500-2000)', depAppt);
         assert(depAppt.serviceTotalCents === 8500, 'deposit appt: serviceTotalCents = 8500', depAppt);
         assert(depAppt.dueAtAppointmentCents === 6500, 'deposit appt: dueAtAppointmentCents = 6500', depAppt);
@@ -569,7 +569,7 @@ async function call(method: string, path: string, o: { token?: string; body?: un
         (a.depositAmountCents == null || a.depositAmountCents === 0) && a.totalPrice === 8500 && a.businessId === bizId
       );
       if (ndAppt) {
-        assert(ndAppt.chargedAmountCents === 8500, 'no-deposit appt: chargedAmountCents = 8500', ndAppt);
+        assert(ndAppt.chargedAmountCents === 9180, 'no-deposit appt: chargedAmountCents = 9180 (8500 + 8% fee incl.)', ndAppt);
         assert(ndAppt.inPersonDueCents === 0, 'no-deposit appt: inPersonDueCents = 0', ndAppt);
         assert(ndAppt.serviceTotalCents === 8500, 'no-deposit appt: serviceTotalCents = 8500', ndAppt);
         assert(ndAppt.dueAtAppointmentCents === 0, 'no-deposit appt: dueAtAppointmentCents = 0', ndAppt);
