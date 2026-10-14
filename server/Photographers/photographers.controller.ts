@@ -1165,7 +1165,16 @@ export class PhotographerController {
 
       const servicesWithAddons = services.map((s) => ({
         ...s,
-        addons: addonsByService.get(s.id) ?? [],
+        addons: s.isContactForPricing
+          ? []
+          : (addonsByService.get(s.id) ?? []).map((a) => ({
+              id: a.id,
+              name: a.name,
+              description: a.description ?? null,
+              priceCents: a.priceCents,
+              durationMinutes: a.durationMinutes,
+              sortOrder: a.sortOrder,
+            })),
       }));
 
       res.json({ services: servicesWithAddons });

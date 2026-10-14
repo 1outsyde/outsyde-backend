@@ -1730,7 +1730,7 @@ export class DatabaseStorage implements IStorage {
       .orderBy(sql`${shootBookings.createdAt} DESC`);
 
     return bookingRecords.map(b => {
-      const quote = quoteDeposit(b.totalPaid ?? 0, b.depositAmountCents);
+      const fields = appointmentChargeFields(b.totalPaid ?? 0, b.depositAmountCents);
       return {
         recordId: b.recordId,
         clientId: b.clientId,
@@ -1753,8 +1753,8 @@ export class DatabaseStorage implements IStorage {
         addonsTotalCents: b.addonsTotalCents ?? 0,
         customerDetails: b.customerDetails ?? null,
         depositAmountCents: b.depositAmountCents ?? null,
-        chargedAmountCents: quote.chargeAmountCents,
-        inPersonDueCents: quote.dueAtAppointmentCents,
+        chargedAmountCents: fields.chargedAmountCents,
+        inPersonDueCents: fields.dueAtAppointmentCents,
       };
     });
   }

@@ -117,6 +117,11 @@ async function call(method: string, path: string, o: { token?: string; body?: un
         const pi = piStore[piM[1]];
         return pi ? send(200, pi) : send(404, { error: { message: 'No such payment_intent' } });
       }
+      // POST /v1/transfers
+      if (req.method === 'POST' && req.url === '/v1/transfers') {
+        const trId = `tr_stub_${Date.now()}`;
+        return send(200, { id: trId, object: 'transfer', amount: Number(form.get('amount') || 0), currency: 'usd', destination: form.get('destination') || '' });
+      }
       send(404, { error: { type: 'invalid_request_error', message: `stub: no route ${req.method} ${req.url}` } });
     });
   });
@@ -159,6 +164,12 @@ async function call(method: string, path: string, o: { token?: string; body?: un
        VALUES ($1, $2, $3, 10000, 'Austin', 'TX', $4::jsonb, $5, $6, false, true, 'public', now(), now())`,
       [pid, userId, `Photographer ${key}`, allDaysOpen, stripeReady ? `acct_${pid.replace(/-/g, '')}` : null, stripeReady]
     );
+    for (let day = 0; day <= 6; day++) {
+      await q(
+        `INSERT INTO weekly_availability (provider_id, provider_type, day_of_week, start_time, end_time, is_active) VALUES ($1, 'photographer', $2, '08:00', '20:00', true)`,
+        [pid, day]
+      );
+    }
     seededPhotographers.push(pid);
     return pid;
   };
@@ -296,6 +307,9 @@ async function call(method: string, path: string, o: { token?: string; body?: un
     // DELETE
     r = await call('DELETE', `/api/photographers/me/services/${svcNoDeposit}/addons/${addonId2}`, { token: otherToken });
     assert(r.status === 403, 'DELETE: non-owner → 403', r.body);
+
+    r = await call('DELETE', `/api/photographers/me/services/${svcNoDeposit}/addons/${addonId2}`, { token: photogToken });
+    assert(r.status === 200, 'DELETE: owner → 200', r.body);
 
     // ──────────────────────────────────────────────────────────────────────────────
     // d. GET /api/photographers/:id/services — addons attached (A=0 parity + active shape)
@@ -454,6 +468,10 @@ async function call(method: string, path: string, o: { token?: string; body?: un
       assert(r.body?.addonsTotalCents === 1500, 'no-deposit PI response: addonsTotalCents = 1500', r.body);
       assert(r.body?.depositAmountCents === null || r.body?.depositAmountCents === 0, 'no-deposit PI response: depositAmountCents = null/0', r.body);
       assert(r.body?.inPersonDueCents === 0, 'no-deposit PI response: inPersonDueCents = 0', r.body);
+      assert(r.body?.serviceTotalCents === 8500, 'no-deposit PI response: serviceTotalCents = 8500', r.body);
+      assert(r.body?.chargeAmountCents === 8500, 'no-deposit PI response: chargeAmountCents = 8500', r.body);
+      assert(r.body?.dueNowCents === 9180, 'no-deposit PI response: dueNowCents = 9180', r.body);
+      assert(Array.isArray(r.body?.addons) && r.body.addons.some((a: any) => a.id === addonId1), 'no-deposit PI response: addons contains addon1', r.body?.addons);
 
       if (shootBookingIdND) {
         const [sbND] = await q(
@@ -490,6 +508,10 @@ async function call(method: string, path: string, o: { token?: string; body?: un
       assert(r.body?.addonsTotalCents === 1500, 'deposit PI response: addonsTotalCents = 1500', r.body);
       assert(r.body?.depositAmountCents === 2000, 'deposit PI response: depositAmountCents = 2000', r.body);
       assert(r.body?.inPersonDueCents === 6500, 'deposit PI response: inPersonDueCents = 6500', r.body);
+      assert(r.body?.serviceTotalCents === 8500, 'deposit PI response: serviceTotalCents = 8500', r.body);
+      assert(r.body?.chargeAmountCents === 2000, 'deposit PI response: chargeAmountCents = 2000 (D)', r.body);
+      assert(r.body?.dueNowCents === 2160, 'deposit PI response: dueNowCents = 2160 (D × 1.08)', r.body);
+      assert(Array.isArray(r.body?.addons) && r.body.addons.some((a: any) => a.id === depositAddonId), 'deposit PI response: addons contains depositAddon', r.body?.addons);
 
       if (shootBookingIdDep) {
         const [sbDep] = await q(
@@ -557,7 +579,64 @@ async function call(method: string, path: string, o: { token?: string; body?: un
         assert('chargedAmountCents' in ndBooking, 'me/bookings: chargedAmountCents field present', ndBooking);
         assert(ndBooking.chargedAmountCents === 9180, 'me/bookings: no-deposit chargedAmountCents = 9180', ndBooking);
       }
+      const depBooking = bookings.find((b: any) => b.addonsTotalCents === 1500 && b.inPersonDueCents === 6500);
+      if (depBooking) {
+        assert(depBooking.chargedAmountCents === 2160, 'me/bookings: deposit chargedAmountCents = 2160', depBooking);
+      }
     }
+
+    // ──────────────────────────────────────────────────────────────────────────────
+    // l. A=0 PI: metadata has no addonsTotalCents/addonNames keys
+    // ──────────────────────────────────────────────────────────────────────────────
+    console.log('\n── l. A=0 PI: metadata ──');
+
+    r = await call('POST', `/api/booking/${holdId_a0}/create-payment-intent`, { token: customerToken });
+    assert([200, 402].includes(r.status), 'A=0 PI: 200 or 402', r.body);
+    if (r.status === 200) {
+      const shootBookingIdA0 = r.body?.shootBookingId as string | undefined;
+      if (shootBookingIdA0) seededShootBookings.push(shootBookingIdA0);
+      const stubPIA0 = Object.values(piStore).find((pi: any) => pi.metadata?.bookingId === shootBookingIdA0);
+      if (stubPIA0) {
+        assert(!('addonsTotalCents' in (stubPIA0 as any).metadata), 'A=0 PI: metadata has no addonsTotalCents key', (stubPIA0 as any).metadata);
+        assert(!('addonNames' in (stubPIA0 as any).metadata), 'A=0 PI: metadata has no addonNames key', (stubPIA0 as any).metadata);
+        assert((stubPIA0 as any).description === `Photography booking with Photographer ph`, 'A=0 PI: description = base only (no addon suffix)', (stubPIA0 as any).description);
+      }
+    }
+
+    // ──────────────────────────────────────────────────────────────────────────────
+    // m. Public services shape: exactly 6 keys on addons; cfp service → addons = []
+    // ──────────────────────────────────────────────────────────────────────────────
+    console.log('\n── m. Public services shape ──');
+
+    r = await call('GET', `/api/photographers/${photogId}/services`);
+    if (r.status === 200) {
+      const mSvcND = r.body?.services?.find((s: any) => s.id === svcNoDeposit);
+      if (mSvcND && Array.isArray(mSvcND.addons) && mSvcND.addons.length > 0) {
+        const a = mSvcND.addons[0];
+        const addonKeys = Object.keys(a).sort();
+        assert(
+          JSON.stringify(addonKeys) === JSON.stringify(['description', 'durationMinutes', 'id', 'name', 'priceCents', 'sortOrder']),
+          'm: addon shape has exactly 6 keys',
+          addonKeys
+        );
+      }
+      const mSvcCfp = r.body?.services?.find((s: any) => s.id === svcCfp);
+      if (mSvcCfp) {
+        assert(Array.isArray(mSvcCfp.addons) && mSvcCfp.addons.length === 0, 'm: cfp service addons = []', mSvcCfp.addons);
+      }
+    }
+
+    // ──────────────────────────────────────────────────────────────────────────────
+    // n. Email HTML: escaping logic
+    // ──────────────────────────────────────────────────────────────────────────────
+    console.log('\n── n. Email HTML: escaping ──');
+
+    const escFn = (s: string) => s.replace(/[<>&"]/g, (c: string) => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;', '"': '&quot;' } as Record<string, string>)[c] ?? c);
+    assert(escFn('<b>x</b>') === '&lt;b&gt;x&lt;/b&gt;', 'esc: <b>x</b> escaped correctly', escFn('<b>x</b>'));
+    assert(escFn('<script>') === '&lt;script&gt;', 'esc: <script> escaped correctly', escFn('<script>'));
+    assert(escFn('A & B') === 'A &amp; B', 'esc: & escaped correctly', escFn('A & B'));
+    assert(escFn('"quoted"') === '&quot;quoted&quot;', 'esc: " escaped correctly', escFn('"quoted"'));
+    assert(escFn('plain text') === 'plain text', 'esc: plain text unchanged', escFn('plain text'));
 
   } finally {
     // Cleanup: shoot_bookings + photographer_availability created by reservePhotographerSlot
@@ -571,9 +650,13 @@ async function call(method: string, path: string, o: { token?: string; body?: un
     }
     // photographer_service_addons cascade-deleted via photographer_services
     if (seededPhotographerServices.length) {
+      // also removes orphaned shoot_bookings not captured in seededShootBookings (e.g. when PI call fails)
+      await q(`DELETE FROM photographer_availability WHERE shoot_booking_id IN (SELECT id FROM shoot_bookings WHERE service_id = ANY($1::varchar[]))`, [seededPhotographerServices]);
+      await q(`DELETE FROM shoot_bookings WHERE service_id = ANY($1::varchar[])`, [seededPhotographerServices]);
       await q(`DELETE FROM photographer_services WHERE id = ANY($1::varchar[])`, [seededPhotographerServices]);
     }
     if (seededPhotographers.length) {
+      await q(`DELETE FROM weekly_availability WHERE provider_id = ANY($1::varchar[]) AND provider_type = 'photographer'`, [seededPhotographers]);
       await q(`DELETE FROM photographers WHERE id = ANY($1::varchar[])`, [seededPhotographers]);
     }
     if (seededUsers.length) {

@@ -713,7 +713,10 @@ export async function sendShootBookingConfirmationToConsumer(params: {
     const consumerTotal = chargedBase + consumerUpcharge;
     const bookingRef = `#S${String(params.bookingNumber).padStart(4, '0')}`;
     const isDeposit = params.depositAmountCents != null;
-    const addonRows = (params.addons ?? []).map(a => ({ label: `  + ${a.name}`, value: cents(a.priceCents) }));
+    const esc = (s: string) => s.replace(/[<>&"]/g, c => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;', '"': '&quot;' }[c] ?? c));
+    const addonRows = (params.addons ?? []).map((a) =>
+      ({ label: `Add-on: ${esc(a.name)}`, value: isDeposit ? `${cents(a.priceCents)} (paid in person)` : cents(a.priceCents) })
+    );
 
     const rows = [
       { label: 'Booking', value: bookingRef },
@@ -723,7 +726,6 @@ export async function sendShootBookingConfirmationToConsumer(params: {
       { label: 'Time', value: params.time },
       ...(params.location ? [{ label: 'Location', value: params.location }] : []),
       ...addonRows,
-      ...(params.customerDetails ? [{ label: 'Notes', value: params.customerDetails }] : []),
       ...(isDeposit ? [
         { label: 'Service Total', value: cents(params.basePrice) },
         { label: 'Deposit Paid', value: cents(consumerTotal) },
@@ -732,6 +734,13 @@ export async function sendShootBookingConfirmationToConsumer(params: {
         { label: 'Total Paid', value: cents(consumerTotal) },
       ]),
     ].map((r, i) => detailRow(r.label, r.value, i % 2 === 0)).join('');
+
+    const customerDetailsBlock = params.customerDetails
+      ? `<tr><td style="background:#1A1A1A;padding:12px 32px 4px;">
+          <p style="color:#E8B930;font-size:12px;margin:0 0 4px 0;font-weight:600;">Customer Details:</p>
+          <p style="color:#CCCCCC;font-size:13px;margin:0;white-space:pre-wrap;">${esc(params.customerDetails)}</p>
+        </td></tr>`
+      : '';
 
     const contactLines = [
       ...(params.photographerContactEmail ? [`<span style="color:#FFFFFF;">${params.photographerName}:</span> <a href="mailto:${params.photographerContactEmail}" style="color:#E8B930;">${params.photographerContactEmail}</a>`] : []),
@@ -743,6 +752,7 @@ export async function sendShootBookingConfirmationToConsumer(params: {
       <tr><td style="background:#1A1A1A;padding:0 32px;">
         <table width="100%" cellpadding="0" cellspacing="0" style="border-radius:6px;overflow:hidden;">${rows}</table>
       </td></tr>
+      ${customerDetailsBlock}
       <tr><td style="background:#1A1A1A;padding:16px 32px;">
         <p style="color:#888888;font-size:13px;margin:0 0 6px 0;font-weight:600;">Have questions? Reach out:</p>
         <ul style="margin:0;padding-left:18px;color:#AAAAAA;font-size:13px;line-height:1.8;">${contactLines}</ul>
@@ -787,7 +797,10 @@ export async function sendShootBookingNotificationToPhotographer(params: {
 
     const clientDisplay = params.consumerDisplayName || params.consumerName;
     const usernameDisplay = params.consumerUsername ? `@${params.consumerUsername}` : '';
-    const addonRows = (params.addons ?? []).map(a => ({ label: `  + ${a.name}`, value: cents(a.priceCents) }));
+    const esc = (s: string) => s.replace(/[<>&"]/g, c => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;', '"': '&quot;' }[c] ?? c));
+    const addonRows = (params.addons ?? []).map((a) =>
+      ({ label: `Add-on: ${esc(a.name)}`, value: isDeposit ? `${cents(a.priceCents)} (paid in person)` : cents(a.priceCents) })
+    );
 
     const rows = [
       { label: 'Booking', value: bookingRef },
@@ -798,7 +811,6 @@ export async function sendShootBookingNotificationToPhotographer(params: {
       { label: 'Time', value: params.time },
       ...(params.location ? [{ label: 'Location', value: params.location }] : []),
       ...addonRows,
-      ...(params.customerDetails ? [{ label: 'Client Notes', value: params.customerDetails }] : []),
       ...(isDeposit ? [
         { label: 'Service Total', value: cents(params.basePrice) },
         { label: 'Deposit Collected', value: cents(chargedBase) },
@@ -809,11 +821,19 @@ export async function sendShootBookingNotificationToPhotographer(params: {
       ]),
     ].map((r, i) => detailRow(r.label, r.value, i % 2 === 0)).join('');
 
+    const customerDetailsBlock = params.customerDetails
+      ? `<tr><td style="background:#1A1A1A;padding:12px 32px 4px;">
+          <p style="color:#E8B930;font-size:12px;margin:0 0 4px 0;font-weight:600;">Customer Details:</p>
+          <p style="color:#CCCCCC;font-size:13px;margin:0;white-space:pre-wrap;">${esc(params.customerDetails)}</p>
+        </td></tr>`
+      : '';
+
     const html = wrapEmail(`
       ${emailHeader('New Shoot Booking! 🎉', 'Congratulations! You have a new shoot booking.')}
       <tr><td style="background:#1A1A1A;padding:0 32px;">
         <table width="100%" cellpadding="0" cellspacing="0" style="border-radius:6px;overflow:hidden;">${rows}</table>
       </td></tr>
+      ${customerDetailsBlock}
       <tr><td style="background:#1A1A1A;padding:12px 32px 4px;">
         <p style="color:#555555;font-size:12px;margin:0;">Outsyde platform fee: 2% (${cents(vendorFee)})</p>
       </td></tr>

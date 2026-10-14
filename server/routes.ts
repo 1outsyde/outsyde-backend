@@ -5171,7 +5171,7 @@ export async function registerRoutes(
           // Validate against photographer_service_addons
           const photographerService = await storage.getPhotographerService(serviceId as string);
           if (!photographerService) {
-            return res.status(404).json({ error: 'Photographer service not found' });
+            return res.status(400).json({ error: 'One or more add-on IDs are invalid or do not belong to this service' });
           }
           if (photographerService.isContactForPricing) {
             return res.status(400).json({ code: 'CONTACT_FOR_PRICING', error: 'Add-ons are not available on contact-for-pricing services' });
@@ -5229,7 +5229,7 @@ export async function registerRoutes(
       let holdDepositAmountCents: number | null = null;
       if (providerType === 'photographer') {
         const photographerService = await storage.getPhotographerService(serviceId as string);
-        holdDepositAmountCents = photographerBookingDepositCents(photographerService, totalPriceCents);
+        holdDepositAmountCents = photographerBookingDepositCents(photographerService, result.servicePriceCents);
       } else if (providerType === 'business' && staffMemberId) {
         const staffService = await storage.getStaffService(serviceId as string);
         holdDepositAmountCents = typeof staffService?.depositAmountCents === 'number' ? staffService.depositAmountCents : null;
@@ -5788,22 +5788,31 @@ export async function registerRoutes(
         // connected account. holdId is passed in metadata so the webhook can
         // call markHoldAsConverted once payment succeeds (mirrors how the
         // 'appointment' branch handles hold conversion).
+        const hasAddons = holdAddons.length > 0 || holdAddonsTotalCents > 0;
+        const addonNamesStr = holdAddons.map((a: { name: string }) => a.name).join(', ');
+        const piBaseMetadata: Record<string, string> = {
+          type: 'shoot_booking',
+          bookingId: shootBooking.id,
+          clientId: userId,
+          holdId: hold.id,
+          providerId: hold.providerId,
+          serviceId: hold.serviceId || '',
+          vendorPayoutCents: String(photographerFees.vendorNetCents),
+          platformFeeCents: String(photographerFees.platformFeeCents),
+        };
+        if (hasAddons) {
+          piBaseMetadata.addonsTotalCents = String(holdAddonsTotalCents);
+          piBaseMetadata.addonNames = addonNamesStr.slice(0, 450);
+        }
+        const piBaseDescription = `Photography booking with ${photographer.displayName || 'photographer'}`;
+        const piDescription = hasAddons ? (piBaseDescription + ` + ${addonNamesStr}`).slice(0, 450) : piBaseDescription;
+
         const photographerPI = await stripeService.createPlatformPaymentIntent({
           amountCents: shootQuote.dueNowCents,
           customerId: photographerStripeCustomerId,
           captureMethod,
-          metadata: {
-            type: 'shoot_booking',
-            bookingId: shootBooking.id,
-            clientId: userId,
-            holdId: hold.id,
-            providerId: hold.providerId,
-            serviceId: hold.serviceId || '',
-            vendorPayoutCents: String(photographerFees.vendorNetCents),
-            platformFeeCents: String(photographerFees.platformFeeCents),
-            addonsTotalCents: String(holdAddonsTotalCents),
-          },
-          description: `Photography booking with ${photographer.displayName || 'photographer'}`,
+          metadata: piBaseMetadata,
+          description: piDescription,
           saveForFutureUse: true,
         });
 
@@ -5828,6 +5837,10 @@ export async function registerRoutes(
           addonsTotalCents: holdAddonsTotalCents,
           depositAmountCents: shootDepositCents,
           inPersonDueCents,
+          serviceTotalCents: shootQuote.serviceTotalCents,
+          chargeAmountCents: shootQuote.chargeAmountCents,
+          dueNowCents: shootQuote.dueNowCents,
+          addons: holdAddons,
           feeBreakdown: {
             subtotalAmount: photographerFees.subtotalCents,
             consumerServiceFeeAmount: photographerFees.consumerServiceFeeCents,
