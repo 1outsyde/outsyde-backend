@@ -704,6 +704,8 @@ export async function sendShootBookingConfirmationToConsumer(params: {
   // Set only when a deposit was charged instead of the full service price.
   depositAmountCents?: number;
   remainderDueCents?: number;
+  addons?: Array<{ name: string; priceCents: number }>;
+  customerDetails?: string | null;
 }): Promise<void> {
   try {
     const chargedBase = params.depositAmountCents ?? params.basePrice;
@@ -711,6 +713,7 @@ export async function sendShootBookingConfirmationToConsumer(params: {
     const consumerTotal = chargedBase + consumerUpcharge;
     const bookingRef = `#S${String(params.bookingNumber).padStart(4, '0')}`;
     const isDeposit = params.depositAmountCents != null;
+    const addonRows = (params.addons ?? []).map(a => ({ label: `  + ${a.name}`, value: cents(a.priceCents) }));
 
     const rows = [
       { label: 'Booking', value: bookingRef },
@@ -719,6 +722,8 @@ export async function sendShootBookingConfirmationToConsumer(params: {
       { label: 'Date', value: params.date },
       { label: 'Time', value: params.time },
       ...(params.location ? [{ label: 'Location', value: params.location }] : []),
+      ...addonRows,
+      ...(params.customerDetails ? [{ label: 'Notes', value: params.customerDetails }] : []),
       ...(isDeposit ? [
         { label: 'Service Total', value: cents(params.basePrice) },
         { label: 'Deposit Paid', value: cents(consumerTotal) },
@@ -770,6 +775,8 @@ export async function sendShootBookingNotificationToPhotographer(params: {
   // Set only when a deposit was charged instead of the full service price.
   depositAmountCents?: number;
   remainderDueCents?: number;
+  addons?: Array<{ name: string; priceCents: number }>;
+  customerDetails?: string | null;
 }): Promise<void> {
   try {
     const chargedBase = params.depositAmountCents ?? params.basePrice;
@@ -780,6 +787,7 @@ export async function sendShootBookingNotificationToPhotographer(params: {
 
     const clientDisplay = params.consumerDisplayName || params.consumerName;
     const usernameDisplay = params.consumerUsername ? `@${params.consumerUsername}` : '';
+    const addonRows = (params.addons ?? []).map(a => ({ label: `  + ${a.name}`, value: cents(a.priceCents) }));
 
     const rows = [
       { label: 'Booking', value: bookingRef },
@@ -789,6 +797,8 @@ export async function sendShootBookingNotificationToPhotographer(params: {
       { label: 'Date', value: params.date },
       { label: 'Time', value: params.time },
       ...(params.location ? [{ label: 'Location', value: params.location }] : []),
+      ...addonRows,
+      ...(params.customerDetails ? [{ label: 'Client Notes', value: params.customerDetails }] : []),
       ...(isDeposit ? [
         { label: 'Service Total', value: cents(params.basePrice) },
         { label: 'Deposit Collected', value: cents(chargedBase) },

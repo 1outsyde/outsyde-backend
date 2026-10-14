@@ -248,6 +248,10 @@ export async function sendShootBookingReceipts(
   const depositCents = (booking.depositAmountCents ?? 0) > 0 ? booking.depositAmountCents! : undefined;
   const remainderCents = depositCents != null ? Math.max(0, (booking.totalPrice || 0) - depositCents) : undefined;
 
+  const bookingAddons = (booking.addons as Array<{id:string;name:string;priceCents:number;durationMinutes:number}> | null | undefined) ?? [];
+  const emailAddons = bookingAddons.length > 0 ? bookingAddons.map(a => ({ name: a.name, priceCents: a.priceCents })) : undefined;
+  const bookingCustomerDetails = (booking.customerDetails as string | null | undefined) ?? null;
+
   await sendTransactionReceipts(opts.txnType, bookingId, {
     consumer: {
       email: customer?.email,
@@ -264,6 +268,8 @@ export async function sendShootBookingReceipts(
         basePrice: booking.totalPrice || 0,
         depositAmountCents: depositCents,
         remainderDueCents: remainderCents,
+        addons: emailAddons,
+        customerDetails: bookingCustomerDetails,
       }),
     },
     vendor: {
@@ -281,6 +287,8 @@ export async function sendShootBookingReceipts(
         basePrice: booking.totalPrice || 0,
         depositAmountCents: depositCents,
         remainderDueCents: remainderCents,
+        addons: emailAddons,
+        customerDetails: bookingCustomerDetails,
       }),
     },
     admin: () => sendInternalEventAlert({
