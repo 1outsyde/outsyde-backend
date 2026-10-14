@@ -1,9 +1,12 @@
 // server/Photographers/photographers.controller.ts
 import { Request, Response } from "express";
 import { z } from "zod";
+import { eq, and, inArray } from "drizzle-orm";
 import { PhotographerService } from "./photographers.service";
 import { stripeService } from "../stripe/stripeService";
 import { storage } from "../storage";
+import { db } from "../db";
+import { photographerServiceAddons } from "../../shared/schema";
 import { verifyAccessToken, AuthenticatedRequest } from "../auth";
 import { toPublicPhotographerDTO } from "../serializers/photographer";
 import { provisionConnectedCatalogItem } from "../services/connectedCatalog";
@@ -993,12 +996,179 @@ export class PhotographerController {
     }
   }
 
+  // ==================== SERVICE ADD-ON CRUD ====================
+
+  static async getServiceAddons(req: Request, res: Response) {
+    try {
+      const { photographer, error } = await resolvePhotographerForUser(req);
+      if (error) return res.status(error.status).json({ error: error.message });
+      if (!photographer) return res.status(400).json({ error: "Photographer profile not found", setupRequired: true });
+
+      const { serviceId } = req.params;
+      const service = await storage.getPhotographerService(serviceId);
+      if (!service) return res.status(404).json({ error: "Service not found" });
+      if (service.photographerId !== photographer.id) return res.status(403).json({ error: "Not authorized" });
+
+      const addons = await db
+        .select()
+        .from(photographerServiceAddons)
+        .where(eq(photographerServiceAddons.photographerServiceId, serviceId))
+        .orderBy(photographerServiceAddons.sortOrder, photographerServiceAddons.name);
+
+      res.json({ addons });
+    } catch (err) {
+      console.error("GET photographer service addons error:", err);
+      res.status(500).json({ error: "Failed to fetch add-ons" });
+    }
+  }
+
+  static async createServiceAddon(req: Request, res: Response) {
+    try {
+      const { photographer, error } = await resolvePhotographerForUser(req);
+      if (error) return res.status(error.status).json({ error: error.message });
+      if (!photographer) return res.status(400).json({ error: "Photographer profile not found", setupRequired: true });
+
+      const { serviceId } = req.params;
+      const service = await storage.getPhotographerService(serviceId);
+      if (!service) return res.status(404).json({ error: "Service not found" });
+      if (service.photographerId !== photographer.id) return res.status(403).json({ error: "Not authorized" });
+      if (service.isContactForPricing) {
+        return res.status(400).json({ code: "CONTACT_FOR_PRICING", error: "Add-ons are not available on contact-for-pricing services" });
+      }
+
+      const existing = await db
+        .select({ id: photographerServiceAddons.id })
+        .from(photographerServiceAddons)
+        .where(eq(photographerServiceAddons.photographerServiceId, serviceId));
+      if (existing.length >= 20) {
+        return res.status(400).json({ code: "TOO_MANY_ADDONS", error: "A service may have at most 20 add-ons" });
+      }
+
+      const bodySchema = z.object({
+        name: z.string().trim().min(1).max(80),
+        description: z.string().max(300).nullable().optional(),
+        priceCents: z.number().int().min(0).max(100000),
+        durationMinutes: z.number().int().min(0).max(480),
+        sortOrder: z.number().int().min(0).default(0),
+        isActive: z.boolean().default(true),
+      });
+      const validated = bodySchema.parse(req.body);
+
+      const [addon] = await db
+        .insert(photographerServiceAddons)
+        .values({ photographerServiceId: serviceId, ...validated, description: validated.description ?? null })
+        .returning();
+
+      res.status(201).json({ addon });
+    } catch (err) {
+      if (err instanceof z.ZodError) return res.status(400).json({ error: "Invalid data", details: err.errors });
+      console.error("POST photographer service addon error:", err);
+      res.status(500).json({ error: "Failed to create add-on" });
+    }
+  }
+
+  static async updateServiceAddon(req: Request, res: Response) {
+    try {
+      const { photographer, error } = await resolvePhotographerForUser(req);
+      if (error) return res.status(error.status).json({ error: error.message });
+      if (!photographer) return res.status(400).json({ error: "Photographer profile not found", setupRequired: true });
+
+      const { serviceId, addonId } = req.params;
+      const service = await storage.getPhotographerService(serviceId);
+      if (!service) return res.status(404).json({ error: "Service not found" });
+      if (service.photographerId !== photographer.id) return res.status(403).json({ error: "Not authorized" });
+
+      const [existing] = await db
+        .select()
+        .from(photographerServiceAddons)
+        .where(and(eq(photographerServiceAddons.id, addonId), eq(photographerServiceAddons.photographerServiceId, serviceId)));
+      if (!existing) return res.status(404).json({ error: "Add-on not found" });
+
+      const patchSchema = z.object({
+        name: z.string().trim().min(1).max(80).optional(),
+        description: z.string().max(300).nullable().optional(),
+        priceCents: z.number().int().min(0).max(100000).optional(),
+        durationMinutes: z.number().int().min(0).max(480).optional(),
+        sortOrder: z.number().int().min(0).optional(),
+        isActive: z.boolean().optional(),
+      });
+      const validated = patchSchema.parse(req.body);
+
+      const [addon] = await db
+        .update(photographerServiceAddons)
+        .set({ ...validated, updatedAt: new Date() })
+        .where(eq(photographerServiceAddons.id, addonId))
+        .returning();
+
+      res.json({ addon });
+    } catch (err) {
+      if (err instanceof z.ZodError) return res.status(400).json({ error: "Invalid data", details: err.errors });
+      console.error("PATCH photographer service addon error:", err);
+      res.status(500).json({ error: "Failed to update add-on" });
+    }
+  }
+
+  static async deleteServiceAddon(req: Request, res: Response) {
+    try {
+      const { photographer, error } = await resolvePhotographerForUser(req);
+      if (error) return res.status(error.status).json({ error: error.message });
+      if (!photographer) return res.status(400).json({ error: "Photographer profile not found", setupRequired: true });
+
+      const { serviceId, addonId } = req.params;
+      const service = await storage.getPhotographerService(serviceId);
+      if (!service) return res.status(404).json({ error: "Service not found" });
+      if (service.photographerId !== photographer.id) return res.status(403).json({ error: "Not authorized" });
+
+      const deleted = await db
+        .delete(photographerServiceAddons)
+        .where(and(eq(photographerServiceAddons.id, addonId), eq(photographerServiceAddons.photographerServiceId, serviceId)))
+        .returning({ id: photographerServiceAddons.id });
+
+      if (deleted.length === 0) return res.status(404).json({ error: "Add-on not found" });
+
+      res.json({ success: true });
+    } catch (err) {
+      console.error("DELETE photographer service addon error:", err);
+      res.status(500).json({ error: "Failed to delete add-on" });
+    }
+  }
+
   // GET /api/photographers/:id/services - Get all services for a photographer (public)
   static async getPublicServices(req: Request, res: Response) {
     try {
       const { id } = req.params;
       const services = await storage.getPhotographerServices(id);
-      res.json({ services });
+
+      if (services.length === 0) {
+        return res.json({ services });
+      }
+
+      // Attach active add-ons to each service (single batch query — no N+1)
+      const serviceIds = services.map((s) => s.id);
+      const allAddons = await db
+        .select()
+        .from(photographerServiceAddons)
+        .where(
+          and(
+            inArray(photographerServiceAddons.photographerServiceId, serviceIds),
+            eq(photographerServiceAddons.isActive, true),
+          )
+        )
+        .orderBy(photographerServiceAddons.sortOrder, photographerServiceAddons.name);
+
+      const addonsByService = new Map<string, typeof allAddons>();
+      for (const addon of allAddons) {
+        const list = addonsByService.get(addon.photographerServiceId) ?? [];
+        list.push(addon);
+        addonsByService.set(addon.photographerServiceId, list);
+      }
+
+      const servicesWithAddons = services.map((s) => ({
+        ...s,
+        addons: addonsByService.get(s.id) ?? [],
+      }));
+
+      res.json({ services: servicesWithAddons });
     } catch (error) {
       console.error("Get public photographer services error:", error);
       res.status(500).json({ error: "Failed to get services" });
