@@ -175,6 +175,7 @@ import {
   staffMembers,
   pointTransactions,
   serviceAddons,
+  photographerServiceAddons,
 } from "@shared/schema";
 import { and, ilike, ne, asc } from "drizzle-orm";
 
@@ -5026,14 +5027,26 @@ export async function registerRoutes(
       if (addonIds && typeof addonIds === 'string' && addonIds.trim() !== '' && serviceId) {
         const ids = addonIds.split(',').map(s => s.trim()).filter(Boolean);
         if (ids.length > 0) {
-          const resolvedAddons = await db
-            .select({ durationMinutes: serviceAddons.durationMinutes })
-            .from(serviceAddons)
-            .where(and(
-              inArray(serviceAddons.id, ids),
-              eq(serviceAddons.serviceId, serviceId as string),
-              eq(serviceAddons.isActive, true),
-            ));
+          let resolvedAddons: Array<{ durationMinutes: number }>;
+          if (providerType === 'photographer') {
+            resolvedAddons = await db
+              .select({ durationMinutes: photographerServiceAddons.durationMinutes })
+              .from(photographerServiceAddons)
+              .where(and(
+                inArray(photographerServiceAddons.id, ids),
+                eq(photographerServiceAddons.photographerServiceId, serviceId as string),
+                eq(photographerServiceAddons.isActive, true),
+              ));
+          } else {
+            resolvedAddons = await db
+              .select({ durationMinutes: serviceAddons.durationMinutes })
+              .from(serviceAddons)
+              .where(and(
+                inArray(serviceAddons.id, ids),
+                eq(serviceAddons.serviceId, serviceId as string),
+                eq(serviceAddons.isActive, true),
+              ));
+          }
           if (resolvedAddons.length !== ids.length) {
             return res.status(400).json({ error: 'One or more add-on IDs are invalid or inactive' });
           }
@@ -5146,27 +5159,47 @@ export async function registerRoutes(
       if (trimmedDetails !== undefined && trimmedDetails.length > 1000) {
         return res.status(400).json({ error: 'customerDetails must be at most 1,000 characters' });
       }
-      // Add-ons only allowed for business (vendor service) bookings
+      // Validate add-ons (business vendor service or photographer service)
       const validatedAddonIds: string[] = [];
       if (Array.isArray(addonIds) && addonIds.length > 0) {
-        if (providerType !== 'business') {
-          return res.status(400).json({ error: 'Add-ons are only available for business bookings' });
-        }
-        // Must not have a staffMemberId (business-owned services only)
+        // Must not have a staffMemberId
         if (staffMemberId) {
           return res.status(400).json({ error: 'Add-ons are only available for business-owned services, not staff services' });
         }
         const ids = (addonIds as string[]).filter(Boolean);
-        const resolvedAddons = await db
-          .select()
-          .from(serviceAddons)
-          .where(and(
-            inArray(serviceAddons.id, ids),
-            eq(serviceAddons.serviceId, serviceId as string),
-            eq(serviceAddons.isActive, true),
-          ));
-        if (resolvedAddons.length !== ids.length) {
-          return res.status(400).json({ error: 'One or more add-on IDs are invalid or do not belong to this service' });
+        if (providerType === 'photographer') {
+          // Validate against photographer_service_addons
+          const photographerService = await storage.getPhotographerService(serviceId as string);
+          if (!photographerService) {
+            return res.status(404).json({ error: 'Photographer service not found' });
+          }
+          if (photographerService.isContactForPricing) {
+            return res.status(400).json({ code: 'CONTACT_FOR_PRICING', error: 'Add-ons are not available on contact-for-pricing services' });
+          }
+          const resolvedAddons = await db
+            .select()
+            .from(photographerServiceAddons)
+            .where(and(
+              inArray(photographerServiceAddons.id, ids),
+              eq(photographerServiceAddons.photographerServiceId, serviceId as string),
+              eq(photographerServiceAddons.isActive, true),
+            ));
+          if (resolvedAddons.length !== ids.length) {
+            return res.status(400).json({ error: 'One or more add-on IDs are invalid or do not belong to this service' });
+          }
+        } else {
+          // Business: validate against service_addons
+          const resolvedAddons = await db
+            .select()
+            .from(serviceAddons)
+            .where(and(
+              inArray(serviceAddons.id, ids),
+              eq(serviceAddons.serviceId, serviceId as string),
+              eq(serviceAddons.isActive, true),
+            ));
+          if (resolvedAddons.length !== ids.length) {
+            return res.status(400).json({ error: 'One or more add-on IDs are invalid or do not belong to this service' });
+          }
         }
         validatedAddonIds.push(...ids);
       }
