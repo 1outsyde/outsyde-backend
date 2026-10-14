@@ -993,11 +993,17 @@ export const shootBookings = pgTable("shoot_bookings", {
 
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
+
+  // Add-ons selected at booking time (photographer services only)
+  addons: jsonb("addons").$type<Array<{id: string; name: string; priceCents: number; durationMinutes: number}>>().default([]),
+  addonsTotalCents: integer("addons_total_cents").notNull().default(0),
+  addonsDurationMinutes: integer("addons_duration_minutes").notNull().default(0),
+  customerDetails: text("customer_details"),
 }, (table) => ({
   // Prevent double bookings: unique constraint on photographer + date + time
   uniquePhotographerSlot: unique("unique_photographer_slot").on(
-    table.photographerId, 
-    table.date, 
+    table.photographerId,
+    table.date,
     table.startTime
   ),
   // Index for draft expiry cleanup job
@@ -1007,6 +1013,27 @@ export const shootBookings = pgTable("shoot_bookings", {
   // Index for pending provider expiry cleanup
   shootPendingProviderIdx: index("idx_shoot_bookings_pending_provider").on(table.status, table.pendingProviderExpiresAt),
 }));
+
+/* =====================================================
+   PHOTOGRAPHER SERVICE ADD-ONS
+===================================================== */
+export const photographerServiceAddons = pgTable("photographer_service_addons", {
+  id: varchar("id", { length: 36 }).primaryKey().default(sql`gen_random_uuid()`),
+  photographerServiceId: varchar("photographer_service_id", { length: 36 }).notNull().references(() => photographerServices.id, { onDelete: "cascade" }),
+  name: text("name").notNull(),
+  description: text("description"),
+  priceCents: integer("price_cents").notNull().default(0),
+  durationMinutes: integer("duration_minutes").notNull().default(0),
+  isActive: boolean("is_active").notNull().default(true),
+  sortOrder: integer("sort_order").notNull().default(0),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+}, (table) => ({
+  serviceActiveIdx: index("idx_photographer_service_addons_service").on(table.photographerServiceId, table.isActive, table.sortOrder, table.name),
+}));
+
+export type PhotographerServiceAddon = typeof photographerServiceAddons.$inferSelect;
+export type InsertPhotographerServiceAddon = typeof photographerServiceAddons.$inferInsert;
 
 /* =====================================================
    APPOINTMENTS (Service Bookings) - State Machine
