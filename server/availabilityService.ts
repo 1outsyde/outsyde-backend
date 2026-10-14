@@ -15,6 +15,7 @@ import {
   providerBlocks,
   bookingHolds,
   serviceAddons,
+  photographerServiceAddons,
   BOOKING_STATES,
   type BookingHold
 } from "@shared/schema";
@@ -1506,19 +1507,31 @@ export async function createBookingHold(params: CreateHoldParams): Promise<HoldR
     throw new AvailabilityError(AVAILABILITY_ERRORS.SERVICE_NOT_FOUND, 'Service not found');
   }
 
-  // Resolve add-ons (business-owned vendor services only; already validated by caller)
+  // Resolve add-ons (already validated by caller; no staff add-ons)
   type AddonSnapshot = { id: string; name: string; priceCents: number; durationMinutes: number };
   let resolvedAddons: AddonSnapshot[] = [];
-  if (params.addonIds && params.addonIds.length > 0 && params.providerType === 'business' && !params.staffMemberId) {
-    const rows = await db
-      .select({ id: serviceAddons.id, name: serviceAddons.name, priceCents: serviceAddons.priceCents, durationMinutes: serviceAddons.durationMinutes })
-      .from(serviceAddons)
-      .where(and(
-        inArray(serviceAddons.id, params.addonIds),
-        eq(serviceAddons.serviceId, params.serviceId),
-        eq(serviceAddons.isActive, true),
-      ));
-    resolvedAddons = rows;
+  if (params.addonIds && params.addonIds.length > 0 && !params.staffMemberId) {
+    if (params.providerType === 'photographer') {
+      const rows = await db
+        .select({ id: photographerServiceAddons.id, name: photographerServiceAddons.name, priceCents: photographerServiceAddons.priceCents, durationMinutes: photographerServiceAddons.durationMinutes })
+        .from(photographerServiceAddons)
+        .where(and(
+          inArray(photographerServiceAddons.id, params.addonIds),
+          eq(photographerServiceAddons.photographerServiceId, params.serviceId),
+          eq(photographerServiceAddons.isActive, true),
+        ));
+      resolvedAddons = rows;
+    } else if (params.providerType === 'business') {
+      const rows = await db
+        .select({ id: serviceAddons.id, name: serviceAddons.name, priceCents: serviceAddons.priceCents, durationMinutes: serviceAddons.durationMinutes })
+        .from(serviceAddons)
+        .where(and(
+          inArray(serviceAddons.id, params.addonIds),
+          eq(serviceAddons.serviceId, params.serviceId),
+          eq(serviceAddons.isActive, true),
+        ));
+      resolvedAddons = rows;
+    }
   }
   const addonsTotalCents = resolvedAddons.reduce((s, a) => s + a.priceCents, 0);
   const addonsDurationMinutes = resolvedAddons.reduce((s, a) => s + a.durationMinutes, 0);
