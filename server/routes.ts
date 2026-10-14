@@ -5690,12 +5690,18 @@ export async function registerRoutes(
           return res.status(400).json({ error: "Photographer has not completed Stripe onboarding" });
         }
 
+        // Total service price = base + add-ons. Deposit validity is checked
+        // against B only (photographerBookingDepositCents); the charge uses B+A.
+        const holdAddonsTotalCents = hold.addonsTotalCents ?? 0;
+        const totalServicePriceCents = hold.servicePriceCents + holdAddonsTotalCents;
+
         // Same deposit rule as the hold response, from the same service
         // record. Deposit bookings charge D + 8% now; fees and the
-        // photographer's net are on the charged amount.
+        // photographer's net are on the charged amount. Deposit validity is
+        // checked against B; quoteDeposit uses B+A as the full amount.
         const photographerService = hold.serviceId ? await storage.getPhotographerService(hold.serviceId) : undefined;
         const shootDepositCents = photographerBookingDepositCents(photographerService, hold.servicePriceCents);
-        const shootQuote = quoteDeposit(hold.servicePriceCents, shootDepositCents);
+        const shootQuote = quoteDeposit(totalServicePriceCents, shootDepositCents);
 
         // Same calculateBookingFees() as the business branch — one fee model,
         // one place to update when rates change.
@@ -5713,6 +5719,10 @@ export async function registerRoutes(
         // shootType rather than doing a redundant service lookup.
         const durationHours = Math.ceil(hold.durationMinutes / 60);
 
+        const holdAddons = (hold.addons as Array<{id:string;name:string;priceCents:number;durationMinutes:number}> | null) ?? [];
+        const holdAddonsDurationMinutes = hold.addonsDurationMinutes ?? 0;
+        const holdCustomerDetails = (hold.customerDetails as string | null | undefined) ?? null;
+
         const shootBooking = await storage.createShootBooking({
           photographerId: hold.providerId,
           clientId: hold.userId,
@@ -5722,12 +5732,16 @@ export async function registerRoutes(
           startTime: hold.startTime,
           endTime: hold.endTime,
           durationHours,
-          totalPrice: hold.servicePriceCents,
+          totalPrice: totalServicePriceCents,
           depositAmountCents: shootDepositCents,
           platformFee: photographerFees.platformFeeCents,
           vendorNet: photographerFees.vendorNetCents,
           status: BOOKING_STATES.PENDING_PAYMENT,
           draftExpiresAt: null,
+          addons: holdAddons,
+          addonsTotalCents: holdAddonsTotalCents,
+          addonsDurationMinutes: holdAddonsDurationMinutes,
+          customerDetails: holdCustomerDetails,
         });
 
         // Permanently block the photographer's calendar slot. This mirrors the
@@ -5787,6 +5801,7 @@ export async function registerRoutes(
             serviceId: hold.serviceId || '',
             vendorPayoutCents: String(photographerFees.vendorNetCents),
             platformFeeCents: String(photographerFees.platformFeeCents),
+            addonsTotalCents: String(holdAddonsTotalCents),
           },
           description: `Photography booking with ${photographer.displayName || 'photographer'}`,
           saveForFutureUse: true,
@@ -5801,12 +5816,18 @@ export async function registerRoutes(
 
         console.log(`[Booking] Created shoot_booking PaymentIntent ${photographerPI.id} from hold ${holdId} (shootBooking ${shootBooking.id}, charged: ${photographerFees.customerTotalBeforeTaxCents}¢, vendor: ${photographerFees.vendorNetCents}¢)`);
 
+        const inPersonDueCents = shootQuote.dueAtAppointmentCents;
+
         return res.json({
           clientSecret: photographerPI.client_secret,
           paymentIntentId: photographerPI.id,
           shootBookingId: shootBooking.id,
           bookingNumber: shootBooking.bookingNumber,
           captureMethod,
+          totalPrice: totalServicePriceCents,
+          addonsTotalCents: holdAddonsTotalCents,
+          depositAmountCents: shootDepositCents,
+          inPersonDueCents,
           feeBreakdown: {
             subtotalAmount: photographerFees.subtotalCents,
             consumerServiceFeeAmount: photographerFees.consumerServiceFeeCents,
@@ -9409,6 +9430,11 @@ export async function registerRoutes(
           // Deposit bookings charge D + 8% now; the rest of price is paid in person.
           depositAmountCents: hasDeposit(booking) ? booking.depositAmountCents : null,
           chargedAmountCents: quoteDeposit(booking.totalPrice ?? 0, hasDeposit(booking) ? booking.depositAmountCents : null).dueNowCents,
+          inPersonDueCents: quoteDeposit(booking.totalPrice ?? 0, hasDeposit(booking) ? booking.depositAmountCents : null).dueAtAppointmentCents,
+          // Add-ons and customer details
+          addons: (booking.addons as Array<{id:string;name:string;priceCents:number;durationMinutes:number}> | null) ?? [],
+          addonsTotalCents: booking.addonsTotalCents ?? 0,
+          customerDetails: booking.customerDetails ?? null,
           // Service details
           serviceName: service?.name ?? null,
           serviceDurationMinutes: service?.estimatedDurationMinutes ?? null,
