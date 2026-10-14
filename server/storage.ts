@@ -396,6 +396,12 @@ export interface IStorage {
     vendorNet: number;
     paymentIntentId: string | null;
     status: string | null;
+    addons: Array<{id: string; name: string; priceCents: number; durationMinutes: number}>;
+    addonsTotalCents: number;
+    customerDetails: string | null;
+    depositAmountCents: number | null;
+    chargedAmountCents: number;
+    inPersonDueCents: number;
   }[]>;
   createShootBooking(data: {
     photographerId: string;
@@ -415,6 +421,10 @@ export interface IStorage {
     vendorNet: number;
     status?: string;
     draftExpiresAt?: Date | null;
+    addons?: Array<{id: string; name: string; priceCents: number; durationMinutes: number}> | null;
+    addonsTotalCents?: number;
+    addonsDurationMinutes?: number;
+    customerDetails?: string | null;
   }): Promise<ShootBooking>;
 
   // Chat (Real-time messaging)
@@ -1682,6 +1692,12 @@ export class DatabaseStorage implements IStorage {
     vendorNet: number;
     paymentIntentId: string | null;
     status: string | null;
+    addons: Array<{id: string; name: string; priceCents: number; durationMinutes: number}>;
+    addonsTotalCents: number;
+    customerDetails: string | null;
+    depositAmountCents: number | null;
+    chargedAmountCents: number;
+    inPersonDueCents: number;
   }[]> {
     const bookingRecords = await db.select({
       recordId: shootBookings.id,
@@ -1702,6 +1718,10 @@ export class DatabaseStorage implements IStorage {
       vendorNet: shootBookings.vendorNet,
       paymentIntentId: shootBookings.stripePaymentIntentId,
       status: shootBookings.status,
+      addons: shootBookings.addons,
+      addonsTotalCents: shootBookings.addonsTotalCents,
+      customerDetails: shootBookings.customerDetails,
+      depositAmountCents: shootBookings.depositAmountCents,
     })
       .from(shootBookings)
       .leftJoin(users, eq(shootBookings.clientId, users.id))
@@ -1709,25 +1729,34 @@ export class DatabaseStorage implements IStorage {
       .where(eq(shootBookings.photographerId, photographerId))
       .orderBy(sql`${shootBookings.createdAt} DESC`);
 
-    return bookingRecords.map(b => ({
-      recordId: b.recordId,
-      clientId: b.clientId,
-      firstName: b.firstName,
-      lastName: b.lastName,
-      email: b.email,
-      shootType: b.shootType,
-      serviceName: b.serviceName,
-      serviceId: b.serviceId,
-      locationDetails: b.locationDetails,
-      specialRequests: b.specialRequests,
-      orderedAt: b.orderedAt,
-      bookingDateTime: `${b.date} ${b.startTime}`,
-      totalPaid: b.totalPaid,
-      platformFee: b.platformFee || 0,
-      vendorNet: b.vendorNet || 0,
-      paymentIntentId: b.paymentIntentId,
-      status: b.status,
-    }));
+    return bookingRecords.map(b => {
+      const fields = appointmentChargeFields(b.totalPaid ?? 0, b.depositAmountCents);
+      return {
+        recordId: b.recordId,
+        clientId: b.clientId,
+        firstName: b.firstName,
+        lastName: b.lastName,
+        email: b.email,
+        shootType: b.shootType,
+        serviceName: b.serviceName,
+        serviceId: b.serviceId,
+        locationDetails: b.locationDetails,
+        specialRequests: b.specialRequests,
+        orderedAt: b.orderedAt,
+        bookingDateTime: `${b.date} ${b.startTime}`,
+        totalPaid: b.totalPaid,
+        platformFee: b.platformFee || 0,
+        vendorNet: b.vendorNet || 0,
+        paymentIntentId: b.paymentIntentId,
+        status: b.status,
+        addons: (b.addons as Array<{id:string;name:string;priceCents:number;durationMinutes:number}> | null) ?? [],
+        addonsTotalCents: b.addonsTotalCents ?? 0,
+        customerDetails: b.customerDetails ?? null,
+        depositAmountCents: b.depositAmountCents ?? null,
+        chargedAmountCents: fields.chargedAmountCents,
+        inPersonDueCents: fields.dueAtAppointmentCents,
+      };
+    });
   }
 
   // Create a new shoot booking
@@ -1749,6 +1778,10 @@ export class DatabaseStorage implements IStorage {
     vendorNet: number;
     status?: string;
     draftExpiresAt?: Date | null;
+    addons?: Array<{id: string; name: string; priceCents: number; durationMinutes: number}> | null;
+    addonsTotalCents?: number;
+    addonsDurationMinutes?: number;
+    customerDetails?: string | null;
   }): Promise<ShootBooking> {
     const [booking] = await db
       .insert(shootBookings)
@@ -1770,6 +1803,10 @@ export class DatabaseStorage implements IStorage {
         vendorNet: data.vendorNet,
         status: data.status || "pending",
         draftExpiresAt: data.draftExpiresAt || null,
+        addons: data.addons ?? [],
+        addonsTotalCents: data.addonsTotalCents ?? 0,
+        addonsDurationMinutes: data.addonsDurationMinutes ?? 0,
+        customerDetails: data.customerDetails ?? null,
       })
       .returning();
     return booking;

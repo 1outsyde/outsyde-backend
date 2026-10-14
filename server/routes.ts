@@ -175,6 +175,7 @@ import {
   staffMembers,
   pointTransactions,
   serviceAddons,
+  photographerServiceAddons,
 } from "@shared/schema";
 import { and, ilike, ne, asc } from "drizzle-orm";
 
@@ -5026,14 +5027,26 @@ export async function registerRoutes(
       if (addonIds && typeof addonIds === 'string' && addonIds.trim() !== '' && serviceId) {
         const ids = addonIds.split(',').map(s => s.trim()).filter(Boolean);
         if (ids.length > 0) {
-          const resolvedAddons = await db
-            .select({ durationMinutes: serviceAddons.durationMinutes })
-            .from(serviceAddons)
-            .where(and(
-              inArray(serviceAddons.id, ids),
-              eq(serviceAddons.serviceId, serviceId as string),
-              eq(serviceAddons.isActive, true),
-            ));
+          let resolvedAddons: Array<{ durationMinutes: number }>;
+          if (providerType === 'photographer') {
+            resolvedAddons = await db
+              .select({ durationMinutes: photographerServiceAddons.durationMinutes })
+              .from(photographerServiceAddons)
+              .where(and(
+                inArray(photographerServiceAddons.id, ids),
+                eq(photographerServiceAddons.photographerServiceId, serviceId as string),
+                eq(photographerServiceAddons.isActive, true),
+              ));
+          } else {
+            resolvedAddons = await db
+              .select({ durationMinutes: serviceAddons.durationMinutes })
+              .from(serviceAddons)
+              .where(and(
+                inArray(serviceAddons.id, ids),
+                eq(serviceAddons.serviceId, serviceId as string),
+                eq(serviceAddons.isActive, true),
+              ));
+          }
           if (resolvedAddons.length !== ids.length) {
             return res.status(400).json({ error: 'One or more add-on IDs are invalid or inactive' });
           }
@@ -5146,27 +5159,47 @@ export async function registerRoutes(
       if (trimmedDetails !== undefined && trimmedDetails.length > 1000) {
         return res.status(400).json({ error: 'customerDetails must be at most 1,000 characters' });
       }
-      // Add-ons only allowed for business (vendor service) bookings
+      // Validate add-ons (business vendor service or photographer service)
       const validatedAddonIds: string[] = [];
       if (Array.isArray(addonIds) && addonIds.length > 0) {
-        if (providerType !== 'business') {
-          return res.status(400).json({ error: 'Add-ons are only available for business bookings' });
-        }
-        // Must not have a staffMemberId (business-owned services only)
+        // Must not have a staffMemberId
         if (staffMemberId) {
           return res.status(400).json({ error: 'Add-ons are only available for business-owned services, not staff services' });
         }
         const ids = (addonIds as string[]).filter(Boolean);
-        const resolvedAddons = await db
-          .select()
-          .from(serviceAddons)
-          .where(and(
-            inArray(serviceAddons.id, ids),
-            eq(serviceAddons.serviceId, serviceId as string),
-            eq(serviceAddons.isActive, true),
-          ));
-        if (resolvedAddons.length !== ids.length) {
-          return res.status(400).json({ error: 'One or more add-on IDs are invalid or do not belong to this service' });
+        if (providerType === 'photographer') {
+          // Validate against photographer_service_addons
+          const photographerService = await storage.getPhotographerService(serviceId as string);
+          if (!photographerService) {
+            return res.status(400).json({ error: 'One or more add-on IDs are invalid or do not belong to this service' });
+          }
+          if (photographerService.isContactForPricing) {
+            return res.status(400).json({ code: 'CONTACT_FOR_PRICING', error: 'Add-ons are not available on contact-for-pricing services' });
+          }
+          const resolvedAddons = await db
+            .select()
+            .from(photographerServiceAddons)
+            .where(and(
+              inArray(photographerServiceAddons.id, ids),
+              eq(photographerServiceAddons.photographerServiceId, serviceId as string),
+              eq(photographerServiceAddons.isActive, true),
+            ));
+          if (resolvedAddons.length !== ids.length) {
+            return res.status(400).json({ error: 'One or more add-on IDs are invalid or do not belong to this service' });
+          }
+        } else {
+          // Business: validate against service_addons
+          const resolvedAddons = await db
+            .select()
+            .from(serviceAddons)
+            .where(and(
+              inArray(serviceAddons.id, ids),
+              eq(serviceAddons.serviceId, serviceId as string),
+              eq(serviceAddons.isActive, true),
+            ));
+          if (resolvedAddons.length !== ids.length) {
+            return res.status(400).json({ error: 'One or more add-on IDs are invalid or do not belong to this service' });
+          }
         }
         validatedAddonIds.push(...ids);
       }
@@ -5196,7 +5229,7 @@ export async function registerRoutes(
       let holdDepositAmountCents: number | null = null;
       if (providerType === 'photographer') {
         const photographerService = await storage.getPhotographerService(serviceId as string);
-        holdDepositAmountCents = photographerBookingDepositCents(photographerService, totalPriceCents);
+        holdDepositAmountCents = photographerBookingDepositCents(photographerService, result.servicePriceCents);
       } else if (providerType === 'business' && staffMemberId) {
         const staffService = await storage.getStaffService(serviceId as string);
         holdDepositAmountCents = typeof staffService?.depositAmountCents === 'number' ? staffService.depositAmountCents : null;
@@ -5657,12 +5690,18 @@ export async function registerRoutes(
           return res.status(400).json({ error: "Photographer has not completed Stripe onboarding" });
         }
 
+        // Total service price = base + add-ons. Deposit validity is checked
+        // against B only (photographerBookingDepositCents); the charge uses B+A.
+        const holdAddonsTotalCents = hold.addonsTotalCents ?? 0;
+        const totalServicePriceCents = hold.servicePriceCents + holdAddonsTotalCents;
+
         // Same deposit rule as the hold response, from the same service
         // record. Deposit bookings charge D + 8% now; fees and the
-        // photographer's net are on the charged amount.
+        // photographer's net are on the charged amount. Deposit validity is
+        // checked against B; quoteDeposit uses B+A as the full amount.
         const photographerService = hold.serviceId ? await storage.getPhotographerService(hold.serviceId) : undefined;
         const shootDepositCents = photographerBookingDepositCents(photographerService, hold.servicePriceCents);
-        const shootQuote = quoteDeposit(hold.servicePriceCents, shootDepositCents);
+        const shootQuote = quoteDeposit(totalServicePriceCents, shootDepositCents);
 
         // Same calculateBookingFees() as the business branch — one fee model,
         // one place to update when rates change.
@@ -5680,6 +5719,10 @@ export async function registerRoutes(
         // shootType rather than doing a redundant service lookup.
         const durationHours = Math.ceil(hold.durationMinutes / 60);
 
+        const holdAddons = (hold.addons as Array<{id:string;name:string;priceCents:number;durationMinutes:number}> | null) ?? [];
+        const holdAddonsDurationMinutes = hold.addonsDurationMinutes ?? 0;
+        const holdCustomerDetails = (hold.customerDetails as string | null | undefined) ?? null;
+
         const shootBooking = await storage.createShootBooking({
           photographerId: hold.providerId,
           clientId: hold.userId,
@@ -5689,12 +5732,16 @@ export async function registerRoutes(
           startTime: hold.startTime,
           endTime: hold.endTime,
           durationHours,
-          totalPrice: hold.servicePriceCents,
+          totalPrice: totalServicePriceCents,
           depositAmountCents: shootDepositCents,
           platformFee: photographerFees.platformFeeCents,
           vendorNet: photographerFees.vendorNetCents,
           status: BOOKING_STATES.PENDING_PAYMENT,
           draftExpiresAt: null,
+          addons: holdAddons,
+          addonsTotalCents: holdAddonsTotalCents,
+          addonsDurationMinutes: holdAddonsDurationMinutes,
+          customerDetails: holdCustomerDetails,
         });
 
         // Permanently block the photographer's calendar slot. This mirrors the
@@ -5741,21 +5788,31 @@ export async function registerRoutes(
         // connected account. holdId is passed in metadata so the webhook can
         // call markHoldAsConverted once payment succeeds (mirrors how the
         // 'appointment' branch handles hold conversion).
+        const hasAddons = holdAddons.length > 0 || holdAddonsTotalCents > 0;
+        const addonNamesStr = holdAddons.map((a: { name: string }) => a.name).join(', ');
+        const piBaseMetadata: Record<string, string> = {
+          type: 'shoot_booking',
+          bookingId: shootBooking.id,
+          clientId: userId,
+          holdId: hold.id,
+          providerId: hold.providerId,
+          serviceId: hold.serviceId || '',
+          vendorPayoutCents: String(photographerFees.vendorNetCents),
+          platformFeeCents: String(photographerFees.platformFeeCents),
+        };
+        if (hasAddons) {
+          piBaseMetadata.addonsTotalCents = String(holdAddonsTotalCents);
+          piBaseMetadata.addonNames = addonNamesStr.slice(0, 450);
+        }
+        const piBaseDescription = `Photography booking with ${photographer.displayName || 'photographer'}`;
+        const piDescription = hasAddons ? (piBaseDescription + ` + ${addonNamesStr}`).slice(0, 450) : piBaseDescription;
+
         const photographerPI = await stripeService.createPlatformPaymentIntent({
           amountCents: shootQuote.dueNowCents,
           customerId: photographerStripeCustomerId,
           captureMethod,
-          metadata: {
-            type: 'shoot_booking',
-            bookingId: shootBooking.id,
-            clientId: userId,
-            holdId: hold.id,
-            providerId: hold.providerId,
-            serviceId: hold.serviceId || '',
-            vendorPayoutCents: String(photographerFees.vendorNetCents),
-            platformFeeCents: String(photographerFees.platformFeeCents),
-          },
-          description: `Photography booking with ${photographer.displayName || 'photographer'}`,
+          metadata: piBaseMetadata,
+          description: piDescription,
           saveForFutureUse: true,
         });
 
@@ -5768,12 +5825,22 @@ export async function registerRoutes(
 
         console.log(`[Booking] Created shoot_booking PaymentIntent ${photographerPI.id} from hold ${holdId} (shootBooking ${shootBooking.id}, charged: ${photographerFees.customerTotalBeforeTaxCents}¢, vendor: ${photographerFees.vendorNetCents}¢)`);
 
+        const inPersonDueCents = shootQuote.dueAtAppointmentCents;
+
         return res.json({
           clientSecret: photographerPI.client_secret,
           paymentIntentId: photographerPI.id,
           shootBookingId: shootBooking.id,
           bookingNumber: shootBooking.bookingNumber,
           captureMethod,
+          totalPrice: totalServicePriceCents,
+          addonsTotalCents: holdAddonsTotalCents,
+          depositAmountCents: shootDepositCents,
+          inPersonDueCents,
+          serviceTotalCents: shootQuote.serviceTotalCents,
+          chargeAmountCents: shootQuote.chargeAmountCents,
+          dueNowCents: shootQuote.dueNowCents,
+          addons: holdAddons,
           feeBreakdown: {
             subtotalAmount: photographerFees.subtotalCents,
             consumerServiceFeeAmount: photographerFees.consumerServiceFeeCents,
@@ -9376,6 +9443,11 @@ export async function registerRoutes(
           // Deposit bookings charge D + 8% now; the rest of price is paid in person.
           depositAmountCents: hasDeposit(booking) ? booking.depositAmountCents : null,
           chargedAmountCents: quoteDeposit(booking.totalPrice ?? 0, hasDeposit(booking) ? booking.depositAmountCents : null).dueNowCents,
+          inPersonDueCents: quoteDeposit(booking.totalPrice ?? 0, hasDeposit(booking) ? booking.depositAmountCents : null).dueAtAppointmentCents,
+          // Add-ons and customer details
+          addons: (booking.addons as Array<{id:string;name:string;priceCents:number;durationMinutes:number}> | null) ?? [],
+          addonsTotalCents: booking.addonsTotalCents ?? 0,
+          customerDetails: booking.customerDetails ?? null,
           // Service details
           serviceName: service?.name ?? null,
           serviceDurationMinutes: service?.estimatedDurationMinutes ?? null,

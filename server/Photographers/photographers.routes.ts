@@ -57,6 +57,12 @@ photographersRouter.delete("/me/services/:serviceId", PhotographerController.del
 photographersRouter.post("/me/services/:serviceId/go-live", PhotographerController.goLiveService);
 photographersRouter.post("/me/services/:serviceId/archive", PhotographerController.archiveService);
 
+// Photographer Service Add-ons (must come before /:id routes)
+photographersRouter.get("/me/services/:serviceId/addons",              PhotographerController.getServiceAddons);
+photographersRouter.post("/me/services/:serviceId/addons",             PhotographerController.createServiceAddon);
+photographersRouter.patch("/me/services/:serviceId/addons/:addonId",   PhotographerController.updateServiceAddon);
+photographersRouter.delete("/me/services/:serviceId/addons/:addonId",  PhotographerController.deleteServiceAddon);
+
 // Photographer Availability (must come before /:id routes)
 photographersRouter.get("/me/availability",          PhotographerController.getAvailability);
 photographersRouter.post("/me/availability",         PhotographerController.createAvailabilitySlot);
