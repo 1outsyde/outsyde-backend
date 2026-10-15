@@ -138,13 +138,16 @@ export interface ReminderResult {
 
 /**
  * Finds every account with a reminder due and (unless dryRun) sends it.
+ * `userIds` (admin "send to the people I picked") limits the run to those accounts; they still have
+ * to be due, so a picked person who was already emailed or has finished is skipped, never re-sent.
  * The log row is written first (unique per user + reminder number) so two runs can't double-send;
  * if the email fails the row is removed so the next run retries.
  */
-export async function sendDueReminders(opts: { dryRun: boolean; now?: Date }): Promise<ReminderResult[]> {
+export async function sendDueReminders(opts: { dryRun: boolean; now?: Date; userIds?: string[] }): Promise<ReminderResult[]> {
   const now = opts.now ?? new Date();
   const results: ReminderResult[] = [];
-  const candidates = await loadCandidates();
+  const picked = opts.userIds ? new Set(opts.userIds) : null;
+  const candidates = (await loadCandidates()).filter((c) => !picked || picked.has(c.id));
 
   for (const c of candidates) {
     // A dry run (admin preview) must write nothing, so it skips the Stripe self-heal, which updates
