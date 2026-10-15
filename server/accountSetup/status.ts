@@ -58,6 +58,14 @@ function step(key: StepKey, state: StepState): SetupStep {
   return { key, state, label: LABELS[key] };
 }
 
+/**
+ * Payouts are ready only when the onboarding flag is set AND a Stripe account exists. A flag with no
+ * account (e.g. Braids by Lana, Oct 2026) means payouts can't actually work, so it stays a todo.
+ */
+export function payoutsReady(flag: boolean | null | undefined, stripeAccountId: string | null | undefined): boolean {
+  return flag === true && typeof stripeAccountId === "string" && stripeAccountId.length > 0;
+}
+
 /** Pure: turns facts about an account into the ordered checklist. */
 export function computeSetupSteps(input: SetupInput): SetupStatus {
   const steps: SetupStep[] = [];
@@ -108,7 +116,7 @@ export async function getAccountSetupStatus(
   if (user.isVendor) {
     const business = await storage.getBusinessByOwnerId(user.id);
     if (business) {
-      let payoutsComplete = !!business.stripeOnboardingComplete;
+      let payoutsComplete = payoutsReady(business.stripeOnboardingComplete, business.stripeAccountId);
       if (!payoutsComplete && business.stripeAccountId && opts.syncStripe) {
         payoutsComplete = await stripeService
           .syncOnboardingStatus({
@@ -138,7 +146,7 @@ export async function getAccountSetupStatus(
   if (!input.business && user.isPhotographer) {
     const photographer = await storage.getPhotographerByUserId(user.id);
     if (photographer) {
-      let payoutsComplete = !!photographer.stripeOnboardingComplete;
+      let payoutsComplete = payoutsReady(photographer.stripeOnboardingComplete, photographer.stripeAccountId);
       if (!payoutsComplete && photographer.stripeAccountId && opts.syncStripe) {
         payoutsComplete = await stripeService
           .syncOnboardingStatus({
@@ -158,7 +166,7 @@ export async function getAccountSetupStatus(
     const staffRows = await storage.getStaffMembersByUserId(user.id);
     const active = staffRows.filter((s) => s.status === "active");
     if (active.length > 0) {
-      input.staff = active.map((s) => ({ payoutsComplete: !!s.stripeOnboardingComplete }));
+      input.staff = active.map((s) => ({ payoutsComplete: payoutsReady(s.stripeOnboardingComplete, s.stripeAccountId) }));
     }
   }
 

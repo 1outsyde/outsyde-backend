@@ -2388,7 +2388,9 @@ export async function registerRoutes(
 
       // Resolve user by email, username, or auto-detected identifier
       let user = null;
+      let signedInWithEmail = false; // only then may an error echo the account's email back
       if (email) {
+        signedInWithEmail = true;
         user = await storage.getUserByEmail(email);
       } else if (username) {
         const { validateUsername: valUn } = await import('./usernameUtils');
@@ -2397,6 +2399,7 @@ export async function registerRoutes(
       } else if (identifier) {
         const isEmail = identifier.includes('@') && identifier.includes('.');
         if (isEmail) {
+          signedInWithEmail = true;
           user = await storage.getUserByEmail(identifier);
         } else {
           const { validateUsername: valUn } = await import('./usernameUtils');
@@ -2428,8 +2431,9 @@ export async function registerRoutes(
             error: {
               code: "ACCOUNT_NEEDS_SETUP",
               message: "Your account needs a password. We emailed you a 6-digit code to finish setting it up.",
-              email: user.email,
-              firstName: user.firstName ?? firstNameOf(user.name),
+              // Email and first name only when the person typed the email: a username must never
+              // reveal who owns it.
+              ...(signedInWithEmail ? { email: user.email, firstName: user.firstName ?? firstNameOf(user.name) } : {}),
               hasUsername: !!user.username,
             },
           });

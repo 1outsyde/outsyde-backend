@@ -53,6 +53,23 @@ const sha = (s: string) => createHash("sha256").update(s).digest("hex");
     return { status: res.status, json, text, location: res.headers.get("location") };
   };
 
+  // Optional local Stripe stub: counts every Stripe API call and answers "onboarding complete".
+  const stubPort = process.env.SETUP_TEST_STRIPE_STUB_PORT;
+  let stripeHits: { count: number } | null = null;
+  let stubServer: any = null;
+  if (stubPort) {
+    const http = await import("http");
+    stripeHits = { count: 0 };
+    const hits = stripeHits;
+    stubServer = http.createServer((req, res) => {
+      hits.count++;
+      const m = (req.url || "").match(/\/v1\/accounts\/([^/?]+)/);
+      res.setHeader("Content-Type", "application/json");
+      res.end(JSON.stringify({ id: m?.[1] ?? "acct_stub", object: "account", charges_enabled: true, payouts_enabled: true, details_submitted: true, requirements: { currently_due: [], eventually_due: [], past_due: [], disabled_reason: null } }));
+    });
+    await new Promise<void>((ok) => stubServer.listen(Number(stubPort), "127.0.0.1", () => ok()));
+  }
+
   const P = `ast-${Date.now().toString(36)}`;
   const id = (s: string) => `${P}-${s}`;
   const email = (s: string) => `${id(s)}@x.test`;
@@ -67,6 +84,12 @@ const sha = (s: string) => createHash("sha256").update(s).digest("hex");
     await q(`INSERT INTO users (id, email, password) VALUES ($1, $2, 'x')`, [id("nouser"), email("nouser")]);
     await q(`INSERT INTO users (id, email, password, is_photographer, username) VALUES ($1, $2, 'x', true, $3)`, [id("photo"), email("photo"), `p${Date.now().toString(36)}`]);
     await q(`INSERT INTO photographers (id, user_id, display_name, hourly_rate) VALUES ($1, $2, 'Lens Co', 100)`, [id("ph"), id("photo")]);
+    const wixUsername = `wu${Date.now().toString(36)}`;
+    await q(`INSERT INTO users (id, email, name, first_name, username) VALUES ($1, $2, 'Una Wix', 'Una', $3)`, [id("wixun"), email("wixun"), wixUsername]);
+    await q(`INSERT INTO users (id, email, password, is_photographer, username, created_at) VALUES ($1, $2, 'x', true, $3, now() - interval '3 days')`, [id("photo2"), email("photo2"), `p2${Date.now().toString(36)}`]);
+    await q(`INSERT INTO photographers (id, user_id, display_name, hourly_rate, stripe_account_id, stripe_onboarding_complete) VALUES ($1, $2, 'Stub Lens', 100, 'acct_stub_ph2', false)`, [id("ph2"), id("photo2")]);
+    await q(`INSERT INTO users (id, email, password, is_vendor, username) VALUES ($1, $2, 'x', true, $3)`, [id("lana"), email("lana"), `ln${Date.now().toString(36)}`]);
+    await q(`INSERT INTO businesses (id, owner_id, name, category, approval_status, stripe_onboarding_complete, stripe_account_id) VALUES ($1, $2, 'Flag Only Braids', 'beauty', 'approved', true, NULL)`, [id("lanabiz"), id("lana")]);
 
     // ── 1. passwordless login → needs setup ─────────────────────────────────
     let r = await call("POST", "/api/auth/mobile/login", { email: email("wix"), password: "anything" });
@@ -79,6 +102,16 @@ const sha = (s: string) => createHash("sha256").update(s).digest("hex");
     r = await call("POST", "/api/auth/mobile/login", { email: email("wix"), password: "again" });
     const secondHash = (await q(`SELECT reset_code_hash FROM users WHERE id = $1`, [id("wix")]))[0].reset_code_hash;
     assert(r.json?.error?.code === "ACCOUNT_NEEDS_SETUP" && secondHash === firstHash, "second attempt within 60 s → same code, no resend");
+
+    // ── 1b. username login never reveals the account's email or name ────────
+    r = await call("POST", "/api/auth/mobile/login", { username: wixUsername, password: "anything" });
+    assert(r.status === 401 && r.json?.error?.code === "ACCOUNT_NEEDS_SETUP", "username login on passwordless account → ACCOUNT_NEEDS_SETUP", r.json);
+    assert(r.json?.error?.email === undefined && r.json?.error?.firstName === undefined, "username login: no email or first name in the response", r.json?.error);
+    assert(r.json?.error?.hasUsername === true, "username login: hasUsername still returned", r.json?.error);
+    r = await call("POST", "/api/auth/mobile/login", { identifier: wixUsername, password: "anything" });
+    assert(r.json?.error?.code === "ACCOUNT_NEEDS_SETUP" && r.json?.error?.email === undefined && r.json?.error?.firstName === undefined, "identifier=username: no email or first name", r.json?.error);
+    r = await call("POST", "/api/auth/mobile/login", { identifier: email("wixun"), password: "anything" });
+    assert(r.json?.error?.email === email("wixun") && r.json?.error?.firstName === "Una", "identifier=email: email + first name still returned", r.json?.error);
 
     r = await call("POST", "/api/auth/mobile/login", { email: email("vendor"), password: "wrong" });
     assert(r.status === 401 && r.json?.error?.code === "INVALID_CREDENTIALS", "wrong password on a normal account → unchanged INVALID_CREDENTIALS", r.json);
@@ -180,6 +213,7 @@ const sha = (s: string) => createHash("sha256").update(s).digest("hex");
       await q(`INSERT INTO users (id, email, password, is_admin, username) VALUES ($1, 'info@goutsyde.com', 'x', true, $2)`, [adminId, `adm${Date.now().toString(36)}`]);
     }
     await q(`UPDATE users SET created_at = now() - interval '3 days' WHERE id = $1`, [id("photo")]);
+    if (stripeHits) stripeHits.count = 0; // count every Stripe call the previews make
     const before = (await q(`SELECT count(*)::int n FROM account_setup_reminders`))[0].n;
     r = await call("GET", "/api/admin/account-setup/preview", undefined, generateAccessToken({ userId: adminId, isVendor: false, isAdmin: true } as any));
     const after = (await q(`SELECT count(*)::int n FROM account_setup_reminders`))[0].n;
@@ -187,6 +221,25 @@ const sha = (s: string) => createHash("sha256").update(s).digest("hex");
     assert(r.status === 200 && mine?.reminderNumber === 1 && mine?.template === "steps_left" && mine.steps.includes("payouts"), "preview lists the 3-day-old photographer for reminder 1", mine ?? r.json);
     assert(!(r.json?.reminders ?? []).some((x: any) => x.userId === id("vendor")), "opted-out vendor is not in the preview");
     assert(before === after, "preview wrote nothing");
+
+    // ── 11. preview never calls Stripe or writes onboarding flags; live /status still self-heals ──
+    if (stripeHits) {
+      r = await call("GET", "/api/admin/account-setup/preview", undefined, generateAccessToken({ userId: adminId, isVendor: false, isAdmin: true } as any));
+      const ph2 = (await q(`SELECT stripe_onboarding_complete FROM photographers WHERE id = $1`, [id("ph2")]))[0];
+      assert(r.status === 200 && stripeHits.count === 0, "previews made no Stripe calls", stripeHits.count);
+      assert(ph2.stripe_onboarding_complete === false, "preview left the photographer's onboarding flag untouched", ph2);
+      r = await call("GET", "/api/account-setup/status", undefined, generateAccessToken({ userId: id("photo2"), isVendor: false, isPhotographer: true, photographerId: id("ph2") } as any));
+      const healed = (await q(`SELECT stripe_onboarding_complete FROM photographers WHERE id = $1`, [id("ph2")]))[0];
+      assert(stripeHits.count > 0 && healed.stripe_onboarding_complete === true, "live /status still self-heals from Stripe", { hits: stripeHits.count, healed });
+      assert(r.json?.steps?.find((x: any) => x.key === "payouts")?.state === "done", "…and reports payouts done", r.json);
+    } else {
+      console.log("  ⏭  Stripe stub checks skipped: set SETUP_TEST_STRIPE_STUB_PORT (server needs the same STRIPE_STUB_PORT)");
+    }
+
+    // ── 12. onboarding flag without a Stripe account is NOT done (Lana case) ──
+    r = await call("GET", "/api/account-setup/status", undefined, generateAccessToken({ userId: id("lana"), isVendor: true, businessId: id("lanabiz") } as any));
+    const lanaPayouts = r.json?.steps?.find((x: any) => x.key === "payouts");
+    assert(r.status === 200 && lanaPayouts?.state === "todo", "flag true + no Stripe account → payouts todo", r.json);
     if (adminId === id("admin")) await q(`DELETE FROM users WHERE id = $1`, [adminId]);
   } finally {
     await q(`DELETE FROM refresh_tokens WHERE user_id LIKE $1`, [`${P}%`]).catch(() => {});
@@ -194,6 +247,7 @@ const sha = (s: string) => createHash("sha256").update(s).digest("hex");
     await q(`DELETE FROM businesses WHERE id LIKE $1`, [`${P}%`]).catch(() => {});
     await q(`DELETE FROM users WHERE id LIKE $1`, [`${P}%`]).catch(() => {});
     await db.end();
+    if (stubServer) stubServer.close();
   }
 
   console.log(`\n${passed} passed, ${failed} failed`);

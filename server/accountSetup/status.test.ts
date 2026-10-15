@@ -2,7 +2,7 @@
  * Pure tests for computeSetupSteps — run with: npx tsx server/accountSetup/status.test.ts
  * No database, no network.
  */
-import { computeSetupSteps, type SetupInput } from "./status";
+import { computeSetupSteps, payoutsReady, type SetupInput } from "./status";
 
 let passed = 0;
 let failed = 0;
@@ -64,6 +64,13 @@ assert(s.role === "consumer" && s.complete, "no active staff rows → treated as
 // ordering: password always first
 s = computeSetupSteps({ ...base, hasLoginMethod: false, business: { approvalStatus: "approved", subscription: null, tier: null, payoutsComplete: false } });
 assert(s.next === "password" && s.steps[0].key === "password", "password comes before plan/payouts", s);
+
+// payouts count as done only with a real Stripe account (flag alone is not enough)
+assert(payoutsReady(true, "acct_123") === true, "flag + account → payouts ready");
+assert(payoutsReady(true, null) === false, "flag true but no account (Lana case) → not ready");
+assert(payoutsReady(true, "") === false, "flag true, empty account id → not ready");
+assert(payoutsReady(false, "acct_123") === false, "account but flag false → not ready");
+assert(payoutsReady(null, undefined) === false, "nothing → not ready");
 
 console.log(`\n${passed} passed, ${failed} failed`);
 process.exit(failed ? 1 : 0);

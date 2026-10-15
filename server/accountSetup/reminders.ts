@@ -147,7 +147,9 @@ export async function sendDueReminders(opts: { dryRun: boolean; now?: Date }): P
   const candidates = await loadCandidates();
 
   for (const c of candidates) {
-    const status = await getAccountSetupStatus(c.id, { syncStripe: true }).catch((err) => {
+    // A dry run (admin preview) must write nothing, so it skips the Stripe self-heal, which updates
+    // onboarding flags. A real run self-heals first so nobody is reminded about a step they finished.
+    const status = await getAccountSetupStatus(c.id, { syncStripe: !opts.dryRun }).catch((err) => {
       console.error(`[SetupReminders] status failed for ${c.id}:`, err);
       return null;
     });
