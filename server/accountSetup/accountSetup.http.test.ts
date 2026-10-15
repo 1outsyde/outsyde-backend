@@ -241,12 +241,34 @@ const sha = (s: string) => createHash("sha256").update(s).digest("hex");
     // No RESEND_API_KEY locally, so the email fails and its log row is removed for a retry.
     assert(r.json?.reminders?.[0]?.outcome === "failed" && (await q(`SELECT count(*)::int n FROM account_setup_reminders`))[0].n === before, "failed email leaves no log row (retryable)", r.json?.reminders);
 
+    // ── 10c. email preview: the exact email for one account, admin only, writes nothing ──
+    r = await call("GET", `/api/admin/account-setup/preview/${encodeURIComponent(id("photo"))}/email`, undefined, nouserJwt);
+    assert(r.status === 403, "non-admin → 403 on email preview", r.status);
+    r = await call("GET", `/api/admin/account-setup/preview/${encodeURIComponent(id("photo"))}/email`, undefined, adminJwt);
+    assert(r.status === 200 && r.json?.template === "steps_left" && r.json?.reminderNumber === 1 && r.json?.userId === id("photo"), "email preview for a due photographer → steps_left #1", r.json && { ...r.json, html: undefined });
+    assert(r.json?.subject === "One step from your first Outsyde booking" && String(r.json?.html).includes("Get paid for every shoot") && String(r.json?.text).includes("/finish"), "email preview returns subject, html and text", r.json?.subject);
+    assert((await q(`SELECT count(*)::int n FROM account_setup_reminders`))[0].n === before, "email preview wrote no log row");
+    r = await call("GET", `/api/admin/account-setup/preview/${encodeURIComponent(id("vendor"))}/email`, undefined, adminJwt);
+    assert(r.status === 404 && r.json?.error?.code === "NOT_DUE", "opted-out account → 404 NOT_DUE", r.json);
+    r = await call("GET", `/api/admin/account-setup/preview/nobody/email`, undefined, adminJwt);
+    assert(r.status === 404 && r.json?.error?.code === "NOT_DUE", "unknown account → 404 NOT_DUE", r.json);
+    await q(`UPDATE users SET created_at = now() - interval '3 days' WHERE id = $1`, [id("wixun")]);
+    const tokenBefore = (await q(`SELECT reset_token_hash, reset_token_expires_at FROM users WHERE id = $1`, [id("wixun")]))[0];
+    r = await call("GET", `/api/admin/account-setup/preview/${encodeURIComponent(id("wixun"))}/email`, undefined, adminJwt);
+    const tokenAfter = (await q(`SELECT reset_token_hash, reset_token_expires_at FROM users WHERE id = $1`, [id("wixun")]))[0];
+    assert(r.status === 200 && r.json?.template === "claim" && String(r.json?.html).includes("/claim?token=preview&amp;email=") === false && String(r.json?.html).includes("/claim?token=preview&email="), "claim preview uses the placeholder link", r.json?.subject);
+    assert(JSON.stringify(tokenBefore) === JSON.stringify(tokenAfter), "claim preview minted no token", { tokenBefore, tokenAfter });
+    assert((await q(`SELECT count(*)::int n FROM account_setup_reminders`))[0].n === before, "claim preview wrote no log row");
+
     // ── 11. preview never calls Stripe or writes onboarding flags; live /status still self-heals ──
     if (stripeHits) {
       r = await call("GET", "/api/admin/account-setup/preview", undefined, generateAccessToken({ userId: adminId, isVendor: false, isAdmin: true } as any));
       const ph2 = (await q(`SELECT stripe_onboarding_complete FROM photographers WHERE id = $1`, [id("ph2")]))[0];
       assert(r.status === 200 && stripeHits.count === 0, "previews made no Stripe calls", stripeHits.count);
       assert(ph2.stripe_onboarding_complete === false, "preview left the photographer's onboarding flag untouched", ph2);
+      r = await call("GET", `/api/admin/account-setup/preview/${encodeURIComponent(id("photo2"))}/email`, undefined, generateAccessToken({ userId: adminId, isVendor: false, isAdmin: true } as any));
+      const ph2b = (await q(`SELECT stripe_onboarding_complete FROM photographers WHERE id = $1`, [id("ph2")]))[0];
+      assert(r.status === 200 && stripeHits.count === 0 && ph2b.stripe_onboarding_complete === false, "email preview made no Stripe calls and wrote no flag", { status: r.status, hits: stripeHits.count, ph2b });
       r = await call("GET", "/api/account-setup/status", undefined, generateAccessToken({ userId: id("photo2"), isVendor: false, isPhotographer: true, photographerId: id("ph2") } as any));
       const healed = (await q(`SELECT stripe_onboarding_complete FROM photographers WHERE id = $1`, [id("ph2")]))[0];
       assert(stripeHits.count > 0 && healed.stripe_onboarding_complete === true, "live /status still self-heals from Stripe", { hits: stripeHits.count, healed });

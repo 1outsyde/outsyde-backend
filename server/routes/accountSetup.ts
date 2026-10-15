@@ -31,7 +31,7 @@ import { sanitizeUserForResponse } from "../routes";
 import { getAccountSetupStatus } from "../accountSetup/status";
 import { isClaimable, issueClaimCode, resetTokenMatches } from "../accountSetup/claim";
 import { verifyUnsubscribeSig } from "../accountSetup/emails";
-import { sendDueReminders } from "../accountSetup/reminders";
+import { sendDueReminders, previewReminderEmail } from "../accountSetup/reminders";
 import { requirePlatformAdmin } from "../middleware/requirePlatformAdmin";
 
 const router = Router();
@@ -267,6 +267,23 @@ accountSetupAdminRouter.get("/preview", requirePlatformAdmin, async (_req: Reque
   } catch (err) {
     console.error("[AccountSetup] preview error:", err);
     fail(res, 500, "SERVER_ERROR", "Could not build the reminder preview");
+  }
+});
+
+/**
+ * The exact email one account would get right now (subject, html, text), built but never sent.
+ * Writes nothing: no Stripe self heal, no reminder log, and claim emails show a placeholder link.
+ */
+accountSetupAdminRouter.get("/preview/:userId/email", requirePlatformAdmin, async (req: Request, res: Response) => {
+  try {
+    const userId = String(req.params.userId || "");
+    if (!userId || userId.length > 100) return fail(res, 400, "INVALID_USER_ID", "userId is required");
+    const preview = await previewReminderEmail(userId);
+    if (!preview) return fail(res, 404, "NOT_DUE", "Nothing is due for this account right now");
+    res.json({ success: true, ...preview });
+  } catch (err) {
+    console.error("[AccountSetup] email preview error:", err);
+    fail(res, 500, "SERVER_ERROR", "Could not build the email preview");
   }
 });
 

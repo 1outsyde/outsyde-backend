@@ -12,7 +12,10 @@ import { storage } from "../storage";
 import { sendExpoPush } from "../expoPushService";
 import { getAccountSetupStatus, type SetupStatus, type StepKey } from "./status";
 import { issueClaimLinkToken, firstNameOf } from "./claim";
-import { sendClaimReminderEmail, sendStepsLeftEmail, frontendUrl } from "./emails";
+import {
+  sendClaimReminderEmail, sendStepsLeftEmail, renderClaimReminderEmail, renderStepsLeftEmail, frontendUrl,
+  type BuiltEmail, type StepsLeftParams,
+} from "./emails";
 
 export const MAX_REMINDERS = 4;
 /** Days after reminder 1 at which reminders 2, 3 and 4 are due. */
@@ -77,7 +80,7 @@ export function inSendWindow(now: Date): boolean {
 }
 
 const PUSH_COPY: Partial<Record<StepKey, (name: string) => { title: string; body: string }>> = {
-  payouts: (name) => ({ title: "You're 1 step from getting paid", body: `Connect payouts so customers can book ${name}. Tap to finish — about 3 minutes.` }),
+  payouts: (name) => ({ title: "You're 1 step from getting paid", body: `Connect payouts so customers can book ${name}. Tap to finish. It takes about 3 minutes.` }),
   plan: (name) => ({ title: "Choose your plan to go live", body: `${name} is approved. Pick a plan so customers can book and buy. Tap to finish.` }),
   username: () => ({ title: "Pick your username", body: "Finish your Outsyde profile so people can find you. Tap to finish." }),
 };
@@ -95,6 +98,20 @@ interface CandidateRow {
   sent_count: number;
   first_sent_at: string | Date | null;
   last_sent_at: string | Date | null;
+}
+
+/** The steps left email's inputs for one account. Shared by real sends and the admin preview. */
+function stepsLeftParams(c: CandidateRow, status: SetupStatus): StepsLeftParams {
+  return {
+    to: c.email,
+    userId: c.id,
+    displayName: c.display_name,
+    role: status.role,
+    steps: status.steps
+      .filter((s) => s.state !== "waiting" && s.key !== "password")
+      .map((s) => ({ key: s.key, label: s.label, done: s.state === "done" })),
+    awaitingApproval: status.steps.some((s) => s.key === "approval" && s.state === "waiting"),
+  };
 }
 
 async function loadCandidates(): Promise<CandidateRow[]> {
@@ -218,15 +235,7 @@ export async function sendDueReminders(opts: { dryRun: boolean; now?: Date; user
           hasUsername: !!c.username,
         });
       } else {
-        await sendStepsLeftEmail({
-          to: c.email,
-          userId: c.id,
-          displayName: c.display_name,
-          role: status.role,
-          steps: status.steps
-            .filter((s) => s.state !== "waiting" && s.key !== "password")
-            .map((s) => ({ key: s.key, label: s.label, done: s.state === "done" })),
-        });
+        await sendStepsLeftEmail(stepsLeftParams(c, status));
       }
       result.outcome = "sent";
     } catch (err) {
@@ -271,4 +280,51 @@ export function startAccountSetupReminderJob(intervalMs = 60 * 60 * 1000): void 
     }
   };
   setInterval(run, intervalMs);
+}
+
+/** Link shown in a claim email preview. Never a real token: issuing one writes to the database. */
+export const PREVIEW_CLAIM_TOKEN = "preview";
+
+export interface ReminderEmailPreview extends BuiltEmail {
+  userId: string;
+  email: string;
+  template: Template;
+  reminderNumber: number;
+}
+
+/**
+ * Admin preview of the exact email one account would get right now, without sending it.
+ * Same candidate filters, status and schedule as a real run, but read only: no Stripe self heal,
+ * no reminder log row, no claim token. Returns null when nothing is due for that account.
+ */
+export async function previewReminderEmail(userId: string, opts: { now?: Date } = {}): Promise<ReminderEmailPreview | null> {
+  const now = opts.now ?? new Date();
+  const c = (await loadCandidates()).find((row) => row.id === userId);
+  if (!c) return null;
+  const status = await getAccountSetupStatus(c.id, { syncStripe: false });
+  if (!status) return null;
+  const planned = planReminder({
+    createdAt: new Date(c.created_at),
+    status,
+    optedOut: c.opted_out,
+    now,
+    log: {
+      count: Number(c.sent_count) || 0,
+      firstSentAt: c.first_sent_at ? new Date(c.first_sent_at) : null,
+      lastSentAt: c.last_sent_at ? new Date(c.last_sent_at) : null,
+    },
+  });
+  if (!planned) return null;
+
+  const built = planned.template === "claim"
+    ? renderClaimReminderEmail({
+        to: c.email,
+        userId: c.id,
+        firstName: c.first_name ?? firstNameOf(c.name),
+        claimUrl: `${frontendUrl()}/claim?token=${PREVIEW_CLAIM_TOKEN}&email=${encodeURIComponent(c.email)}`,
+        hasUsername: !!c.username,
+      })
+    : renderStepsLeftEmail(stepsLeftParams(c, status));
+
+  return { userId: c.id, email: c.email, template: planned.template, reminderNumber: planned.reminderNumber, ...built };
 }
