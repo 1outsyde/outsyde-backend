@@ -3489,3 +3489,22 @@ export const promoCodes = pgTable("promo_codes", {
 }));
 
 export type PromoCode = typeof promoCodes.$inferSelect;
+
+/* =====================================================
+   ACCOUNT SETUP REMINDERS (migration 042)
+   One row per setup reminder sent; opt-outs from "Stop these reminders".
+===================================================== */
+export const accountSetupReminders = pgTable("account_setup_reminders", {
+  id: varchar("id", { length: 36 }).primaryKey().default(sql`gen_random_uuid()`),
+  userId: varchar("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
+  template: text("template").notNull(),
+  reminderNumber: integer("reminder_number").notNull(),
+  channels: text("channels").array().notNull().default(sql`'{}'`),
+  steps: text("steps").array().notNull().default(sql`'{}'`),
+  sentAt: timestamp("sent_at", { withTimezone: true }).defaultNow().notNull(),
+});
+
+export const accountSetupOptouts = pgTable("account_setup_optouts", {
+  userId: varchar("user_id").primaryKey().references(() => users.id, { onDelete: "cascade" }),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+});

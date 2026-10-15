@@ -21,7 +21,7 @@
 - Production DB is read-only. Migration 042 is re-runnable SQL that Legend hand-runs in Neon before merge (Render's `preDeployCommand` re-runs it harmlessly).
 - Reminders never send unless `ACCOUNT_SETUP_REMINDERS_ENABLED=true` on Render. Legend reviews the dry-run list first.
 - Sign-in emails never auto-login. The only token in an email is the claim token for accounts with no password (7-day expiry, stored in the existing `reset_token_hash`).
-- Usernames go through `validateUsername()` (lowercase, `[a-z0-9_]`, 3–30).
+- Usernames go through `validateUsername()` (lowercase, `[a-z0-9_]`, 3–20).
 - Emails use the existing `wrapEmail/emailHeader/emailCta/emailFooter` shell, CAN-SPAM address, a "Stop these reminders" link and a `List-Unsubscribe` header.
 - Links point at `FRONTEND_URL` (https://www.goutsyde.com). App Store link: `https://apps.apple.com/app/outsyde/id6738926870`.
 - Copy matches the canvas mockups (Claim email, Steps-left email, /claim, /finish, push, app home card).
@@ -101,7 +101,7 @@ Excluded from reminders: `is_admin`, `is_active = false`, `deletion_status <> 'a
 - [ ] AUDIT [Backend]: confirm 042 is the next free number in `migrations/`, that `_schema_migrations` has no `042_*`, and that neither table exists (`to_regclass`).
 - [ ] REGRESSION [Backend]: grep every repo for `account_setup_`; confirm nothing reads these names; confirm `accountDeletionService` needs no change because both tables use `ON DELETE CASCADE` on `users(id)`.
 - [ ] BUILD: SQL, all `IF NOT EXISTS`:
-  - `account_setup_reminders(id varchar(36) pk default gen_random_uuid(), user_id varchar references users(id) on delete cascade not null, template text not null, reminder_number int not null, channels text[] not null, steps text[] not null, sent_at timestamptz not null default now())`, unique `(user_id, template, reminder_number)`, index `(user_id, sent_at desc)`.
+  - `account_setup_reminders(id varchar(36) pk default gen_random_uuid(), user_id varchar references users(id) on delete cascade not null, template text not null, reminder_number int not null, channels text[] not null, steps text[] not null, sent_at timestamptz not null default now())`, unique `(user_id, reminder_number)`, index `(user_id, sent_at desc)`.
   - `account_setup_optouts(user_id varchar primary key references users(id) on delete cascade, created_at timestamptz not null default now())`.
 - [ ] Legend hand-runs it in Neon; Claude confirms with `to_regclass` (read-only).
 - [ ] Commit `feat(account-setup): migration 042 reminder log + opt-outs`.

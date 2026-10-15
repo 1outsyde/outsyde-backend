@@ -1025,6 +1025,7 @@ export class DatabaseStorage implements IStorage {
       selectedIndustries: (insertUser.selectedIndustries as string[]) || [],
       industryNiches: (insertUser.industryNiches as Record<string, string[]>) || {},
       industryValues: (insertUser.industryValues as Record<string, string[]>) || {},
+      source: insertUser.source ?? null,
     }).returning();
     return result[0];
   }

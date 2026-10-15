@@ -8,6 +8,8 @@ import { storage } from "./storage";
 import { registerRoutes } from "./routes";
 import { authMiddleware } from "./auth";
 import vendorSubscriptionRouter from "./routes/vendorSubscription";
+import accountSetupRouter, { accountSetupAdminRouter } from "./routes/accountSetup";
+import { startAccountSetupReminderJob } from "./accountSetup/reminders";
 import vendorAnalyticsRouter from "./routes/vendorAnalytics";
 // stripe-replit-sync removed — no longer on Replit
 import { WebhookHandlers } from "./stripe/webhookHandlers";
@@ -340,6 +342,10 @@ if (process.env.NODE_ENV === 'production') {
 
   await registerRoutes(httpServer, app);
   app.use('/api/vendor/subscription', authMiddleware, vendorSubscriptionRouter);
+  app.use('/api/account-setup', accountSetupRouter);
+  app.use('/api/admin/account-setup', accountSetupAdminRouter);
+  // Setup reminders: hourly, a no-op unless ACCOUNT_SETUP_REMINDERS_ENABLED=true
+  startAccountSetupReminderJob();
   app.use('/api/vendor/analytics', authMiddleware, vendorAnalyticsRouter);
   setupWebSocket(httpServer);
 
