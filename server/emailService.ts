@@ -487,7 +487,7 @@ function detailRow(label: string, value: string, odd: boolean): string {
   </tr>`;
 }
 
-function emailHeader(heading: string, subheading: string): string {
+export function emailHeader(heading: string, subheading: string): string {
   return `
   <tr>
     <td style="background:#1A1A1A;border-radius:10px 10px 0 0;padding:28px 32px 0;text-align:center;border-bottom:2px solid #E8B930;">
@@ -504,7 +504,7 @@ function emailHeader(heading: string, subheading: string): string {
   </tr>`;
 }
 
-function emailCta(label: string, url: string): string {
+export function emailCta(label: string, url: string): string {
   return `<tr>
     <td style="background:#1A1A1A;padding:24px 32px;">
       <div style="text-align:center;">
@@ -514,7 +514,7 @@ function emailCta(label: string, url: string): string {
   </tr>`;
 }
 
-function emailFooter(extra?: string): string {
+export function emailFooter(extra?: string): string {
   return `<tr>
     <td style="background:#111111;border-radius:0 0 10px 10px;padding:20px 32px;text-align:center;">
       ${extra ? `<p style="color:#AAAAAA;font-size:13px;margin:0 0 10px 0;">${extra}</p>` : ''}
@@ -525,7 +525,7 @@ function emailFooter(extra?: string): string {
   </tr>`;
 }
 
-function wrapEmail(innerRows: string): string {
+export function wrapEmail(innerRows: string): string {
   return `<!DOCTYPE html><html><body style="margin:0;padding:0;background:#0D0D0D;font-family:'Helvetica Neue',Arial,sans-serif;">
   <table width="100%" cellpadding="0" cellspacing="0" style="background:#0D0D0D;padding:32px 0;">
     <tr><td align="center">

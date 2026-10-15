@@ -284,10 +284,17 @@ export class PhotographerController {
         return res.status(400).json({ error: "User email required for Stripe onboarding" });
       }
 
-      const host = req.get('host') || process.env.REPLIT_DOMAINS?.split(',')[0];
-      const forwardedProto = req.get('x-forwarded-proto');
-      const protocol = forwardedProto || (host?.includes('replit') ? 'https' : req.protocol) || 'https';
-      const baseUrl = host ? `${protocol}://${host}` : '';
+      // Stripe returns through the shared /api/stripe/connect-return handler, which marks onboarding
+      // complete and then sends the photographer back to where they started:
+      //   app (default)          → outsyde://stripe-return?type=photographer
+      //   web (webRedirect:true) → goutsyde.com/photographer-dashboard?stripe=success
+      //   returnTo:"finish"      → goutsyde.com/finish?stripe=done
+      // (Previously the return URL was built from this request's host, i.e. the backend itself.)
+      const apiBase = process.env.API_BASE_URL || 'https://outsyde-backend.onrender.com';
+      const returnToFinish = req.body?.returnTo === 'finish';
+      const webRedirect = req.body?.webRedirect === true || returnToFinish;
+      const returnType = webRedirect ? 'photographer-web' : 'photographer';
+      const finishSuffix = returnToFinish ? '&return=finish' : '';
 
       let stripeAccountId = photographer.stripeAccountId;
       
@@ -303,8 +310,8 @@ export class PhotographerController {
 
       const accountLink = await stripeService.createConnectOnboardingLink(
         stripeAccountId,
-        `${baseUrl}/photographer-onboarding?refresh=true`,
-        `${baseUrl}/photographer-dashboard?stripe=success`
+        `${apiBase}/api/stripe/connect-refresh?account=${stripeAccountId}&type=${returnType}${finishSuffix}`,
+        `${apiBase}/api/stripe/connect-return?account=${stripeAccountId}&type=${returnType}${finishSuffix}`
       );
 
       res.json({ url: accountLink.url });

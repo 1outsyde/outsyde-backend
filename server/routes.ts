@@ -51,7 +51,7 @@ function manualAcceptDisabledFor(id: string): boolean {
 // Helper to sanitize user data for non-admin responses (removes sensitive fields)
 // DOB: replaced with age range for privacy
 // Ethnicity/race: never exposed at individual level, only aggregated
-function sanitizeUserForResponse(user: User, options: { includeOwnData?: boolean } = {}) {
+export function sanitizeUserForResponse(user: User, options: { includeOwnData?: boolean } = {}) {
   const {
     dateOfBirth,
     password,
@@ -109,6 +109,7 @@ import {
 } from "./auth";
 import rateLimit from "express-rate-limit";
 import { stripeService } from "./stripe/stripeService";
+import { isClaimable, issueClaimCode, firstNameOf } from "./accountSetup/claim";
 import { sendAppointmentReceipts, sendShootBookingReceipts } from "./stripe/webhookHandlers";
 import { getStripePublishableKey, getUncachableStripeClient } from "./stripe/stripeClient";
 import { isAllowedClientOrigin, normalizeClientOrigin } from "./clientOrigins";
@@ -2387,7 +2388,9 @@ export async function registerRoutes(
 
       // Resolve user by email, username, or auto-detected identifier
       let user = null;
+      let signedInWithEmail = false; // only then may an error echo the account's email back
       if (email) {
+        signedInWithEmail = true;
         user = await storage.getUserByEmail(email);
       } else if (username) {
         const { validateUsername: valUn } = await import('./usernameUtils');
@@ -2396,6 +2399,7 @@ export async function registerRoutes(
       } else if (identifier) {
         const isEmail = identifier.includes('@') && identifier.includes('.');
         if (isEmail) {
+          signedInWithEmail = true;
           user = await storage.getUserByEmail(identifier);
         } else {
           const { validateUsername: valUn } = await import('./usernameUtils');
@@ -2416,6 +2420,23 @@ export async function registerRoutes(
         }
         if (user.isOAuthUser || user.googleSub) {
           return res.status(401).json({ success: false, error: { code: "OAUTH_ONLY", message: "This account uses Google sign-in. Please continue with Google." } });
+        }
+        // Account exists (e.g. imported signup) but was never given a password: email a 6-digit code
+        // and tell the client to open the claim flow. Same 401 + error.message shape, so older app
+        // builds and other clients still show a readable sentence.
+        if (isClaimable(user)) {
+          await issueClaimCode(user);
+          return res.status(401).json({
+            success: false,
+            error: {
+              code: "ACCOUNT_NEEDS_SETUP",
+              message: "Your account needs a password. We emailed you a 6-digit code to finish setting it up.",
+              // Email and first name only when the person typed the email: a username must never
+              // reveal who owns it.
+              ...(signedInWithEmail ? { email: user.email, firstName: user.firstName ?? firstNameOf(user.name) } : {}),
+              hasUsername: !!user.username,
+            },
+          });
         }
         return res.status(401).json({ success: false, error: { code: "INVALID_CREDENTIALS", message: "Invalid credentials" } });
       }
@@ -10254,14 +10275,17 @@ export async function registerRoutes(
         }
 
         // Generate onboarding link with HTTPS redirect URLs (Stripe rejects deep links)
-        const webRedirect = req.body?.webRedirect === true;
+        // returnTo:"finish" (goutsyde.com/finish) = a web return that lands back on the setup checklist.
+        const returnToFinish = req.body?.returnTo === 'finish';
+        const webRedirect = req.body?.webRedirect === true || returnToFinish;
+        const finishSuffix = returnToFinish ? '&return=finish' : '';
         const onboardingLink = await stripeService.createConnectOnboardingLink(
           stripeAccountId,
           webRedirect
-            ? `${baseUrl}/api/stripe/connect-refresh?account=${stripeAccountId}&type=vendor-web`
+            ? `${baseUrl}/api/stripe/connect-refresh?account=${stripeAccountId}&type=vendor-web${finishSuffix}`
             : `${baseUrl}/api/stripe/connect-refresh?account=${stripeAccountId}&type=vendor`,
           webRedirect
-            ? `${baseUrl}/api/stripe/connect-return?account=${stripeAccountId}&type=vendor-web`
+            ? `${baseUrl}/api/stripe/connect-return?account=${stripeAccountId}&type=vendor-web${finishSuffix}`
             : `${baseUrl}/api/stripe/connect-return?account=${stripeAccountId}&type=vendor`
         );
 
@@ -10436,7 +10460,7 @@ export async function registerRoutes(
             if (business) {
               await storage.updateBusiness(business.id, { stripeOnboardingComplete: true });
             }
-          } else if (type === 'photographer') {
+          } else if (type === 'photographer' || type === 'photographer-web') {
             const photographer = await storage.getPhotographerByStripeAccountId(account as string);
             if (photographer) {
               await storage.updatePhotographer(photographer.id, { stripeOnboardingComplete: true });
@@ -10452,8 +10476,15 @@ export async function registerRoutes(
         console.error("[Stripe Connect] Failed to retrieve account on return:", e);
       }
     }
+    // Started from goutsyde.com/finish (any account type): back to the setup checklist.
+    if (req.query.return === 'finish') {
+      return res.redirect(`${process.env.FRONTEND_URL}/finish?stripe=done`);
+    }
     if (type === 'vendor-web') {
       return res.redirect(`${process.env.FRONTEND_URL}/vendor-dashboard/stripe/return?status=complete`);
+    }
+    if (type === 'photographer-web') {
+      return res.redirect(`${process.env.FRONTEND_URL}/photographer-dashboard?stripe=success`);
     }
     let deepLink = `outsyde://stripe-return?status=complete&type=${type || 'vendor'}`;
     if (type === 'staff' && staffId) {
@@ -10476,8 +10507,14 @@ export async function registerRoutes(
     }
 
     const { type, staffId } = req.query;
+    if (req.query.return === 'finish') {
+      return res.redirect(`${process.env.FRONTEND_URL}/finish?stripe=refresh`);
+    }
     if (type === 'vendor-web') {
       return res.redirect(`${process.env.FRONTEND_URL}/vendor-dashboard/stripe/refresh`);
+    }
+    if (type === 'photographer-web') {
+      return res.redirect(`${process.env.FRONTEND_URL}/photographer-dashboard?stripe=refresh`);
     }
     let deepLink = `outsyde://stripe-return?status=refresh&type=${type || 'vendor'}`;
     if (type === 'staff' && staffId) {
@@ -14719,10 +14756,12 @@ export async function registerRoutes(
       // app via the outsyde:// deep link, passing type=staff so the app can distinguish
       // this from the vendor/business onboarding return.
       const baseUrl = process.env.API_BASE_URL || 'https://outsyde-backend.onrender.com';
+      // returnTo:"finish" = started on goutsyde.com/finish; connect-return sends them back there.
+      const finishSuffix = req.body?.returnTo === 'finish' ? '&return=finish' : '';
       const accountLink = await stripeService.createConnectOnboardingLink(
         accountId,
-        `${baseUrl}/api/stripe/connect-refresh?account=${accountId}&type=staff&staffId=${staff.id}`,
-        `${baseUrl}/api/stripe/connect-return?account=${accountId}&type=staff&staffId=${staff.id}`,
+        `${baseUrl}/api/stripe/connect-refresh?account=${accountId}&type=staff&staffId=${staff.id}${finishSuffix}`,
+        `${baseUrl}/api/stripe/connect-return?account=${accountId}&type=staff&staffId=${staff.id}${finishSuffix}`,
       );
 
       await storage.updateStaffMember(staff.id, {
