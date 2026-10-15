@@ -270,16 +270,35 @@ accountSetupAdminRouter.get("/preview", requirePlatformAdmin, async (_req: Reque
   }
 });
 
+/** Max people per manual send (goutsyde.com/admin/account-setup sends the ones ticked). */
+export const MAX_PICKED_USERS = 200;
+
 accountSetupAdminRouter.post("/send", requirePlatformAdmin, async (req: Request, res: Response) => {
   try {
     const dryRun = req.body?.dryRun !== false;
-    const results = await sendDueReminders({ dryRun });
+    const raw = req.body?.userIds;
+    let userIds: string[] | undefined;
+    if (raw !== undefined) {
+      if (
+        !Array.isArray(raw) ||
+        raw.length === 0 ||
+        raw.length > MAX_PICKED_USERS ||
+        !raw.every((v: unknown) => typeof v === "string" && v.length > 0 && v.length <= 100)
+      ) {
+        return fail(res, 400, "INVALID_USER_IDS", `userIds must be a list of 1–${MAX_PICKED_USERS} account ids`);
+      }
+      userIds = Array.from(new Set(raw as string[]));
+    }
+    const results = await sendDueReminders({ dryRun, userIds });
+    const handled = new Set(results.map((r) => r.userId));
     res.json({
       success: true,
       dryRun,
       sent: results.filter((r) => r.outcome === "sent").length,
       failed: results.filter((r) => r.outcome === "failed").length,
       reminders: results,
+      // Picked accounts with nothing due right now (already emailed, finished, opted out, or not found).
+      ...(userIds ? { notDue: userIds.filter((id) => !handled.has(id)) } : {}),
     });
   } catch (err) {
     console.error("[AccountSetup] send error:", err);

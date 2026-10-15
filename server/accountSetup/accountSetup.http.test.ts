@@ -222,6 +222,25 @@ const sha = (s: string) => createHash("sha256").update(s).digest("hex");
     assert(!(r.json?.reminders ?? []).some((x: any) => x.userId === id("vendor")), "opted-out vendor is not in the preview");
     assert(before === after, "preview wrote nothing");
 
+    // ── 10b. manual send to picked people only ──────────────────────────────
+    const adminJwt = generateAccessToken({ userId: adminId, isVendor: false, isAdmin: true } as any);
+    r = await call("POST", "/api/admin/account-setup/send", { dryRun: false, userIds: [id("photo")] }, nouserJwt);
+    assert(r.status === 403, "non-admin → 403 on send", r.status);
+    for (const bad of [[], "x", [""], [1], Array.from({ length: 201 }, (_, i) => `u${i}`)]) {
+      r = await call("POST", "/api/admin/account-setup/send", { dryRun: false, userIds: bad }, adminJwt);
+      assert(r.status === 400 && r.json?.error?.code === "INVALID_USER_IDS", `bad userIds ${JSON.stringify(bad).slice(0, 20)} → 400`, r.json);
+    }
+    r = await call("POST", "/api/admin/account-setup/send", { dryRun: true, userIds: [id("photo"), id("vendor"), "nobody"] }, adminJwt);
+    const dryIds = (r.json?.reminders ?? []).map((x: any) => x.userId);
+    assert(r.status === 200 && r.json?.dryRun === true && dryIds.length === 1 && dryIds[0] === id("photo"), "dry run with picks → only the picked, due account", r.json);
+    assert(JSON.stringify([...(r.json?.notDue ?? [])].sort()) === JSON.stringify([id("vendor"), "nobody"].sort()), "opted-out and unknown picks come back as notDue", r.json?.notDue);
+    assert((await q(`SELECT count(*)::int n FROM account_setup_reminders`))[0].n === before, "dry run with picks wrote nothing");
+    r = await call("POST", "/api/admin/account-setup/send", { dryRun: false, userIds: [id("photo")] }, adminJwt);
+    const realIds = (r.json?.reminders ?? []).map((x: any) => x.userId);
+    assert(r.status === 200 && r.json?.dryRun === false && realIds.length === 1 && realIds[0] === id("photo"), "real send with picks → attempted only the picked account", r.json);
+    // No RESEND_API_KEY locally, so the email fails and its log row is removed for a retry.
+    assert(r.json?.reminders?.[0]?.outcome === "failed" && (await q(`SELECT count(*)::int n FROM account_setup_reminders`))[0].n === before, "failed email leaves no log row (retryable)", r.json?.reminders);
+
     // ── 11. preview never calls Stripe or writes onboarding flags; live /status still self-heals ──
     if (stripeHits) {
       r = await call("GET", "/api/admin/account-setup/preview", undefined, generateAccessToken({ userId: adminId, isVendor: false, isAdmin: true } as any));
