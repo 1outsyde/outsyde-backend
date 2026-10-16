@@ -10,6 +10,8 @@ import { authMiddleware } from "./auth";
 import vendorSubscriptionRouter from "./routes/vendorSubscription";
 import accountSetupRouter, { accountSetupAdminRouter } from "./routes/accountSetup";
 import { startAccountSetupReminderJob } from "./accountSetup/reminders";
+import { emailAdminRouter, broadcastPublicRouter } from "./routes/emailAdmin";
+import { resumeBroadcasts } from "./broadcasts/broadcasts";
 import vendorAnalyticsRouter from "./routes/vendorAnalytics";
 // stripe-replit-sync removed — no longer on Replit
 import { WebhookHandlers } from "./stripe/webhookHandlers";
@@ -344,6 +346,11 @@ if (process.env.NODE_ENV === 'production') {
   app.use('/api/vendor/subscription', authMiddleware, vendorSubscriptionRouter);
   app.use('/api/account-setup', accountSetupRouter);
   app.use('/api/admin/account-setup', accountSetupAdminRouter);
+  // Admin Emails page: broadcasts, email history, daily budget (all requirePlatformAdmin)
+  app.use('/api/admin/emails', emailAdminRouter);
+  app.use('/api/broadcasts', broadcastPublicRouter);
+  // Finish any broadcast a restart interrupted (never re-sends an email that may have gone out)
+  resumeBroadcasts().catch((err) => console.error("[Broadcasts] resume failed:", err));
   // Setup reminders: hourly, a no-op unless ACCOUNT_SETUP_REMINDERS_ENABLED=true
   startAccountSetupReminderJob();
   app.use('/api/vendor/analytics', authMiddleware, vendorAnalyticsRouter);

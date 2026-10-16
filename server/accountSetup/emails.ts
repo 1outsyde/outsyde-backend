@@ -58,7 +58,11 @@ export interface BuiltEmail {
   text: string;
 }
 
-async function send(params: { to: string; subject: string; html: string; text: string; unsubscribe?: string }): Promise<void> {
+/**
+ * Sends one email through Resend from the Outsyde address with reply to info@goutsyde.com.
+ * Returns the Resend email id. Throws on any Resend error. Also used by admin broadcasts.
+ */
+export async function sendViaResend(params: { to: string; subject: string; html: string; text: string; unsubscribe?: string }): Promise<string | null> {
   const apiKey = process.env.RESEND_API_KEY;
   if (!apiKey) throw new Error("[accountSetup] RESEND_API_KEY not set");
   const resend = new Resend(apiKey);
@@ -79,7 +83,10 @@ async function send(params: { to: string; subject: string; html: string; text: s
       : String(result.error);
     throw new Error(`Resend error: ${msg}`);
   }
+  return (result.data as { id?: string } | null)?.id ?? null;
 }
+
+const send = sendViaResend;
 
 function paragraph(html: string): string {
   return `<tr><td style="background:#1A1A1A;padding:8px 32px;"><p style="color:#DDDDDD;font-size:15px;line-height:1.6;margin:0;">${html}</p></td></tr>`;
@@ -137,9 +144,9 @@ export function renderClaimReminderEmail(params: ClaimReminderParams): BuiltEmai
 }
 
 /** Reminder for accounts with no password: "your account is saved, claim it". */
-export async function sendClaimReminderEmail(params: ClaimReminderParams): Promise<void> {
+export async function sendClaimReminderEmail(params: ClaimReminderParams): Promise<string | null> {
   const built = renderClaimReminderEmail(params);
-  await send({ to: params.to, ...built, unsubscribe: unsubscribeUrl(params.userId) });
+  return send({ to: params.to, ...built, unsubscribe: unsubscribeUrl(params.userId) });
 }
 
 // ── steps left email ────────────────────────────────────────────────────────
@@ -314,7 +321,7 @@ export function renderStepsLeftEmail(params: StepsLeftParams): BuiltEmail {
 }
 
 /** Reminder for signed-up accounts with steps left (plan, payouts, username). */
-export async function sendStepsLeftEmail(params: StepsLeftParams): Promise<void> {
+export async function sendStepsLeftEmail(params: StepsLeftParams): Promise<string | null> {
   const built = renderStepsLeftEmail(params);
-  await send({ to: params.to, ...built, unsubscribe: unsubscribeUrl(params.userId) });
+  return send({ to: params.to, ...built, unsubscribe: unsubscribeUrl(params.userId) });
 }

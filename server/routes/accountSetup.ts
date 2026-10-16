@@ -33,6 +33,7 @@ import { isClaimable, issueClaimCode, resetTokenMatches } from "../accountSetup/
 import { verifyUnsubscribeSig } from "../accountSetup/emails";
 import { sendDueReminders, previewReminderEmail } from "../accountSetup/reminders";
 import { requirePlatformAdmin } from "../middleware/requirePlatformAdmin";
+import { getBudget } from "../emailHistory";
 
 const router = Router();
 
@@ -306,7 +307,18 @@ accountSetupAdminRouter.post("/send", requirePlatformAdmin, async (req: Request,
       }
       userIds = Array.from(new Set(raw as string[]));
     }
-    const results = await sendDueReminders({ dryRun, userIds });
+    if (!dryRun) {
+      // Daily limit (emails started from the admin page, see emailHistory.ts): count what would go out first.
+      const planned = (await sendDueReminders({ dryRun: true, userIds })).length;
+      const budget = await getBudget();
+      if (budget.remaining !== null && planned > budget.remaining) {
+        return fail(res, 429, "OVER_DAILY_LIMIT",
+          `This would send ${planned} emails, but only ${budget.remaining} are left today. Send fewer people or try tomorrow.`,
+          { budget, planned });
+      }
+    }
+    const adminId = (req as unknown as { adminUser?: { id?: string } }).adminUser?.id ?? null;
+    const results = await sendDueReminders({ dryRun, userIds, sentBy: dryRun ? null : adminId });
     const handled = new Set(results.map((r) => r.userId));
     res.json({
       success: true,

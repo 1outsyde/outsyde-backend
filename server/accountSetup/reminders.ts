@@ -12,6 +12,7 @@ import { storage } from "../storage";
 import { sendExpoPush } from "../expoPushService";
 import { getAccountSetupStatus, type SetupStatus, type StepKey } from "./status";
 import { issueClaimLinkToken, firstNameOf } from "./claim";
+import { createSend, logEmail, finishSend } from "../emailHistory";
 import {
   sendClaimReminderEmail, sendStepsLeftEmail, renderClaimReminderEmail, renderStepsLeftEmail, frontendUrl,
   type BuiltEmail, type StepsLeftParams,
@@ -160,9 +161,22 @@ export interface ReminderResult {
  * The log row is written first (unique per user + reminder number) so two runs can't double-send;
  * if the email fails the row is removed so the next run retries.
  */
-export async function sendDueReminders(opts: { dryRun: boolean; now?: Date; userIds?: string[] }): Promise<ReminderResult[]> {
+export async function sendDueReminders(opts: {
+  dryRun: boolean; now?: Date; userIds?: string[];
+  /** Admin who started a manual send (email history). Null for the hourly job. */
+  sentBy?: string | null;
+}): Promise<ReminderResult[]> {
   const now = opts.now ?? new Date();
   const results: ReminderResult[] = [];
+  // Email history: one email_sends row per real run that emails anyone, created on first use.
+  // Best effort: a history failure never stops or changes a send.
+  let historySendId: string | null | undefined;
+  const historySend = async (): Promise<string | null> => {
+    if (historySendId === undefined) {
+      historySendId = await createSend({ kind: "setup", createdBy: opts.sentBy ?? null, audience: opts.userIds ? "picked" : "all_due" });
+    }
+    return historySendId;
+  };
   const picked = opts.userIds ? new Set(opts.userIds) : null;
   const candidates = (await loadCandidates()).filter((c) => !picked || picked.has(c.id));
 
@@ -221,13 +235,14 @@ export async function sendDueReminders(opts: { dryRun: boolean; now?: Date; user
     }
     const logId = (claimed.rows[0] as { id: string }).id;
 
+    let resendId: string | null = null;
     try {
       if (planned.template === "claim") {
         const user = await storage.getUser(c.id);
         if (!user) throw new Error("user disappeared");
         const token = await issueClaimLinkToken(user);
         const claimUrl = `${frontendUrl()}/claim?token=${encodeURIComponent(token)}&email=${encodeURIComponent(c.email)}`;
-        await sendClaimReminderEmail({
+        resendId = await sendClaimReminderEmail({
           to: c.email,
           userId: c.id,
           firstName: c.first_name ?? firstNameOf(c.name),
@@ -235,7 +250,7 @@ export async function sendDueReminders(opts: { dryRun: boolean; now?: Date; user
           hasUsername: !!c.username,
         });
       } else {
-        await sendStepsLeftEmail(stepsLeftParams(c, status));
+        resendId = await sendStepsLeftEmail(stepsLeftParams(c, status));
       }
       result.outcome = "sent";
     } catch (err) {
@@ -244,6 +259,16 @@ export async function sendDueReminders(opts: { dryRun: boolean; now?: Date; user
       await db.execute(sql`DELETE FROM account_setup_reminders WHERE id = ${logId}`).catch(() => {});
       console.error(`[SetupReminders] email failed for ${c.id}:`, err);
     }
+
+    await logEmail({
+      sendId: await historySend(),
+      userId: c.id,
+      kind: planned.template === "claim" ? "setup_claim" : "setup_steps_left",
+      label: `${planned.template === "claim" ? "Claim email" : "Steps left email"} #${planned.reminderNumber}`,
+      status: result.outcome === "sent" ? "sent" : "failed",
+      error: result.error ?? null,
+      resendId,
+    });
 
     if (result.outcome === "sent" && canPush && pushStep) {
       const copy = PUSH_COPY[pushStep]!(c.display_name || "your business");
@@ -258,6 +283,7 @@ export async function sendDueReminders(opts: { dryRun: boolean; now?: Date; user
     results.push(result);
   }
 
+  if (historySendId) await finishSend(historySendId);
   return results;
 }
 

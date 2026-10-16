@@ -3508,3 +3508,42 @@ export const accountSetupOptouts = pgTable("account_setup_optouts", {
   userId: varchar("user_id").primaryKey().references(() => users.id, { onDelete: "cascade" }),
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
 });
+
+/* =====================================================
+   EMAIL HISTORY + BROADCASTS (migration 043)
+   email_sends: one row per admin send (broadcast, test, setup batch) or setup job run.
+   email_log: one row per email to one person. No email address, name or rendered subject.
+   broadcast_optouts: unsubscribed from announcements only.
+===================================================== */
+export const emailSends = pgTable("email_sends", {
+  id: varchar("id", { length: 36 }).primaryKey().default(sql`gen_random_uuid()`),
+  kind: text("kind").notNull(),
+  createdBy: varchar("created_by").references(() => users.id, { onDelete: "set null" }),
+  audience: text("audience"),
+  subject: text("subject"),
+  html: text("html"),
+  status: text("status").notNull().default("sending"),
+  recipientCount: integer("recipient_count").notNull().default(0),
+  sentCount: integer("sent_count").notNull().default(0),
+  failedCount: integer("failed_count").notNull().default(0),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  finishedAt: timestamp("finished_at", { withTimezone: true }),
+});
+
+export const emailLog = pgTable("email_log", {
+  id: varchar("id", { length: 36 }).primaryKey().default(sql`gen_random_uuid()`),
+  sendId: varchar("send_id", { length: 36 }).references(() => emailSends.id, { onDelete: "cascade" }),
+  userId: varchar("user_id").references(() => users.id, { onDelete: "cascade" }),
+  kind: text("kind").notNull(),
+  label: text("label"),
+  status: text("status").notNull().default("pending"),
+  error: text("error"),
+  resendId: text("resend_id"),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  sentAt: timestamp("sent_at", { withTimezone: true }),
+});
+
+export const broadcastOptouts = pgTable("broadcast_optouts", {
+  userId: varchar("user_id").primaryKey().references(() => users.id, { onDelete: "cascade" }),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+});
