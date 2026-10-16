@@ -375,6 +375,8 @@ export const businesses = pgTable("businesses", {
 
   // Booking settings
   autoAcceptBookings: boolean("auto_accept_bookings").default(true).notNull(),
+  // Migration 044: business-level bookings may end after closing (start must be in open hours, end by 23:59)
+  allowPastClosing: boolean("allow_past_closing").default(false).notNull(),
   defaultServiceLocationType: text("default_service_location_type").default("business"),
 
   // Storefront display toggles

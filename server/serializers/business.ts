@@ -60,6 +60,7 @@ export function toPublicBusinessDTO(
     defaultServiceLocationType: business.defaultServiceLocationType,
 
     autoAcceptBookings: business.autoAcceptBookings,
+    allowPastClosing: business.allowPastClosing ?? false,
     responseTimeValue: business.showResponseTime ? business.responseTimeValue : null,
     responseTimeUnit: business.showResponseTime ? business.responseTimeUnit : null,
 

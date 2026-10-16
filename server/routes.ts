@@ -11621,7 +11621,11 @@ export async function registerRoutes(
         "showWebsite",
         "showStoreHours",
         "showAddress",
+        "allowPastClosing",
       ]);
+      if (otherFields.allowPastClosing !== undefined && typeof otherFields.allowPastClosing !== "boolean") {
+        return res.status(400).json({ error: "allowPastClosing must be true or false" });
+      }
       const droppedKeys = Object.keys(otherFields).filter((key) => !VENDOR_MY_BUSINESS_ALLOWED_FIELDS.has(key));
       if (droppedKeys.length > 0) {
         console.warn(`[my-business] dropped keys: ${droppedKeys.join(", ")} | businessId: ${business.id}`);
