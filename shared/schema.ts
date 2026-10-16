@@ -1982,6 +1982,14 @@ export type InsertAdminIssue = z.infer<typeof insertAdminIssueSchema>;
 /* =====================================================
    FEED POSTS
 ===================================================== */
+export type PostMediaItem = {
+  url: string;
+  type: "image";
+  width?: number;
+  height?: number;
+  aspectRatio?: number;
+};
+
 export const feedPosts = pgTable("feed_posts", {
   id: varchar("id", { length: 36 }).primaryKey().default(sql`gen_random_uuid()`),
 
@@ -2002,6 +2010,9 @@ export const feedPosts = pgTable("feed_posts", {
   mediaWidth: integer("media_width"),
   mediaHeight: integer("media_height"),
   aspectRatio: doublePrecision("aspect_ratio"),
+  // Multi-photo posts (migration 045): ordered photos, 2-10 items. [] = single media (use mediaUrl).
+  // Photo 1 is also written to mediaUrl/imageUrl so older readers and app builds keep working.
+  mediaItems: jsonb("media_items").$type<PostMediaItem[]>().default([]).notNull(),
 
   taggedBusinessId: varchar("tagged_business_id", { length: 36 }).references(() => businesses.id),
   taggedPhotographerId: varchar("tagged_photographer_id", { length: 36 }).references(() => photographers.id),
