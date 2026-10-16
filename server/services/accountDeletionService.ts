@@ -16,7 +16,6 @@ import {
   follows,
   postLikes,
   postComments,
-  profileComments,
   pulseEngagements,
   userInterests,
   userSavedPosts,
@@ -27,24 +26,17 @@ import {
   pointTransactions,
   userBlocks,
   bookingAuditLog,
-  messages,
-  reviews,
   feedPosts,
   orders,
-  orderGroups,
   shootBookings,
   appointments,
-  scheduling,
-  refundRequests,
-  alaCartePurchases,
-  vendorSubscriptions,
   benefitUsage,
-  fulfillmentTasks,
   sponsoredPosts,
-  referrals,
-  messageReports,
-  moderationQueue,
   adminIssues,
+  postDistribution,
+  stories,
+  storyViews,
+  storyHighlights,
 } from "../../shared/schema";
 import { eq, or, lte, and, inArray, sql } from "drizzle-orm";
 import { getUncachableStripeClient } from "../stripe/stripeClient";
@@ -117,8 +109,8 @@ export async function purgePostMediaAssets(
   console.log(`[accountDeletion] User ${userId}: purged media for ${posts.length} post(s)`);
 }
 
-async function deleteUserFeedPosts(userId: string, tx: typeof db): Promise<void> {
-  const posts = await tx
+async function deleteUserFeedPosts(userId: string): Promise<void> {
+  const posts = await db
     .select({ id: feedPosts.id, mediaUrl: feedPosts.mediaUrl, imageUrl: feedPosts.imageUrl, mediaType: feedPosts.mediaType, mediaItems: feedPosts.mediaItems })
     .from(feedPosts)
     .where(eq(feedPosts.authorId, userId));
@@ -129,174 +121,236 @@ async function deleteUserFeedPosts(userId: string, tx: typeof db): Promise<void>
   await purgePostMediaAssets(userId, posts);
 
   const postIds = posts.map(p => p.id);
-  await tx.delete(postLikes).where(inArray(postLikes.postId, postIds));
-  await tx.delete(postComments).where(inArray(postComments.postId, postIds));
-  await tx.delete(feedPosts).where(eq(feedPosts.authorId, userId));
+  // Every table with a foreign key to feed_posts (all ON DELETE NO ACTION in Neon, checked 2026-10-16).
+  // Rows written by OTHER users (their saves, likes, comments, engagement) must go first or the post delete fails.
+  await db.delete(postLikes).where(inArray(postLikes.postId, postIds));
+  await db.delete(postComments).where(inArray(postComments.postId, postIds));
+  await db.delete(userSavedPosts).where(inArray(userSavedPosts.postId, postIds));
+  await db.delete(pulseEngagements).where(inArray(pulseEngagements.postId, postIds));
+  await db.delete(feedEngagementEvents).where(inArray(feedEngagementEvents.postId, postIds));
+  await db.delete(postDistribution).where(inArray(postDistribution.postId, postIds));
+  await db.delete(sponsoredPosts).where(inArray(sponsoredPosts.postId, postIds));
+  await db.delete(feedPosts).where(eq(feedPosts.authorId, userId));
 }
 
+async function purgeMediaUrl(url: string | null | undefined, label: string): Promise<void> {
+  if (!url) return;
+  if (url.includes("stream.mux.com")) {
+    const match = url.match(/stream\.mux\.com\/([^.]+)\.m3u8/);
+    if (!match) return;
+    try {
+      const assetId = await getMuxAssetIdByPlaybackId(match[1]);
+      if (assetId) await deleteMuxAsset(assetId);
+    } catch (err) {
+      console.warn(`[accountDeletion] Mux delete failed for ${label}:`, err);
+    }
+    return;
+  }
+  await deleteImageAsset(url, label);
+}
+
+async function deleteUserStories(userId: string): Promise<void> {
+  const userStories = await db
+    .select({ id: stories.id, mediaType: stories.mediaType, mediaUrl: stories.mediaUrl, muxAssetId: stories.muxAssetId, isActive: stories.isActive })
+    .from(stories)
+    .where(eq(stories.authorId, userId));
+
+  // Expired stories already had their media removed by cleanupExpiredStories; only purge live ones.
+  for (const story of userStories) {
+    if (!story.isActive) continue;
+    try {
+      if (story.mediaType === "video" && story.muxAssetId) {
+        await deleteMuxAsset(story.muxAssetId);
+      } else if (story.mediaUrl) {
+        await deleteImageAsset(story.mediaUrl, `story ${story.id}`);
+      }
+    } catch (err) {
+      console.warn(`[accountDeletion] Story media delete failed for ${story.id}:`, err);
+    }
+  }
+
+  const storyIds = userStories.map(s => s.id);
+  // story_views and story_highlights reference stories (ON DELETE NO ACTION), so they go first.
+  await db.delete(storyViews).where(eq(storyViews.viewerId, userId));
+  await db.delete(storyHighlights).where(eq(storyHighlights.userId, userId));
+  if (storyIds.length > 0) {
+    await db.delete(storyViews).where(inArray(storyViews.storyId, storyIds));
+    await db.delete(storyHighlights).where(inArray(storyHighlights.storyId, storyIds));
+    await db.delete(stories).where(eq(stories.authorId, userId));
+  }
+}
+
+/**
+ * Deletes one account whose 30-day grace period has passed.
+ *
+ * The Neon HTTP driver has no transactions (db.transaction() always throws), so the steps run in order
+ * and every step is safe to run again. The users row is marked "deleted" LAST: if any step fails, the
+ * account stays "pending_deletion" and the next daily run starts over from the top.
+ *
+ * The users row itself is kept but scrubbed of personal data. Orders, bookings, messages, comments and
+ * reviews keep pointing at it (those columns are NOT NULL in Neon), so they are left attached to an
+ * anonymous "deleted_..." account rather than emptied.
+ */
 async function processSingleUserDeletion(userId: string): Promise<void> {
   console.log(`[accountDeletion] Starting deletion for user ${userId}`);
 
-  await db.transaction(async (tx) => {
-    // Group 0: force logout
-    await tx.delete(refreshTokens).where(eq(refreshTokens.userId, userId));
+  const [account] = await db
+    .select({ deletionStatus: users.deletionStatus, profileImageUrl: users.profileImageUrl, coverMediaUrl: users.coverMediaUrl })
+    .from(users)
+    .where(eq(users.id, userId));
+  if (!account || account.deletionStatus !== "pending_deletion") {
+    console.log(`[accountDeletion] User ${userId} is no longer pending deletion, skipping`);
+    return;
+  }
 
-    // Group 1: pure engagement / session data
-    await tx.delete(pushSubscriptions).where(eq(pushSubscriptions.userId, userId));
-    await tx.delete(notifications).where(eq(notifications.userId, userId));
-    await tx.delete(cartItems).where(eq(cartItems.userId, userId));
-    await tx.delete(bookingHolds).where(eq(bookingHolds.userId, userId));
-    await tx.delete(follows).where(or(eq(follows.followerUserId, userId), eq(follows.targetUserId, userId)));
-    await tx.delete(pulseEngagements).where(eq(pulseEngagements.userId, userId));
-    await tx.delete(userInterests).where(eq(userInterests.userId, userId));
-    await tx.delete(userSavedPosts).where(eq(userSavedPosts.userId, userId));
-    await tx.delete(feedEngagementEvents).where(eq(feedEngagementEvents.userId, userId));
-    await tx.delete(influencerApplications).where(eq(influencerApplications.userId, userId));
-    await tx.delete(vendorEmailSequence).where(eq(vendorEmailSequence.vendorId, userId));
-    await tx.delete(pointTransactions).where(eq(pointTransactions.userId, userId));
-    await tx.delete(influencerAttributions).where(eq(influencerAttributions.userId, userId));
-    await tx.delete(benefitUsage).where(eq(benefitUsage.vendorId, userId));
-    await tx.delete(postLikes).where(eq(postLikes.userId, userId));
+  // Group 0: force logout
+  await db.delete(refreshTokens).where(eq(refreshTokens.userId, userId));
 
-    // Group 2: soft-reference cleanup (no FK constraints in DB)
-    await tx.delete(userBlocks).where(or(eq(userBlocks.blockerId, userId), eq(userBlocks.blockedId, userId)));
-    await tx
-      .update(bookingAuditLog)
-      .set({ triggeredBy: null } as any)
-      .where(eq(bookingAuditLog.triggeredBy, userId));
+  // Group 1: pure engagement / session data
+  await db.delete(pushSubscriptions).where(eq(pushSubscriptions.userId, userId));
+  await db.delete(notifications).where(eq(notifications.userId, userId));
+  await db.delete(cartItems).where(eq(cartItems.userId, userId));
+  await db.delete(bookingHolds).where(eq(bookingHolds.userId, userId));
+  await db.delete(follows).where(or(eq(follows.followerUserId, userId), eq(follows.targetUserId, userId)));
+  await db.delete(pulseEngagements).where(eq(pulseEngagements.userId, userId));
+  await db.delete(userInterests).where(eq(userInterests.userId, userId));
+  await db.delete(userSavedPosts).where(eq(userSavedPosts.userId, userId));
+  await db.delete(feedEngagementEvents).where(eq(feedEngagementEvents.userId, userId));
+  await db.delete(influencerApplications).where(eq(influencerApplications.userId, userId));
+  await db.delete(vendorEmailSequence).where(eq(vendorEmailSequence.vendorId, userId));
+  await db.delete(pointTransactions).where(eq(pointTransactions.userId, userId));
+  await db.delete(influencerAttributions).where(eq(influencerAttributions.userId, userId));
+  await db.delete(benefitUsage).where(eq(benefitUsage.vendorId, userId));
+  await db.delete(postLikes).where(eq(postLikes.userId, userId));
 
-    // Group 3: social content — anonymize, preserve threads for other participants
-    await tx.update(postComments).set({ userId: null } as any).where(eq(postComments.userId, userId));
-    await tx.update(profileComments).set({ userId: null } as any).where(eq(profileComments.userId, userId));
-    await tx.update(messages).set({ senderId: null } as any).where(eq(messages.senderId, userId));
-    await tx.update(reviews).set({ reviewerId: null } as any).where(eq(reviews.reviewerId, userId));
+  // Group 2: soft-reference cleanup
+  await db.delete(userBlocks).where(or(eq(userBlocks.blockerId, userId), eq(userBlocks.blockedId, userId)));
+  await db
+    .update(bookingAuditLog)
+    .set({ triggeredBy: null } as any)
+    .where(eq(bookingAuditLog.triggeredBy, userId));
 
-    // Group 4: feed posts + purge media assets (GCS images / Mux videos)
-    await deleteUserFeedPosts(userId, tx);
+  // Group 3: social content. Comments, profile comments, messages and reviews stay attached to the
+  // scrubbed users row (user/sender/reviewer columns are NOT NULL in Neon), so threads stay readable.
 
-    // Group 5: financial records — anonymize FK, retain row
-    await tx.update(orders).set({ customerId: null } as any).where(eq(orders.customerId, userId));
-    await tx.update(orderGroups).set({ customerId: null } as any).where(eq(orderGroups.customerId, userId));
-    await tx.update(shootBookings).set({ clientId: null } as any).where(eq(shootBookings.clientId, userId));
-    await tx.update(appointments).set({ clientId: null } as any).where(eq(appointments.clientId, userId));
-    await tx.update(scheduling).set({ clientId: null } as any).where(eq(scheduling.clientId, userId));
-    await tx.update(refundRequests).set({ requesterId: null } as any).where(eq(refundRequests.requesterId, userId));
-    await tx.update(alaCartePurchases).set({ vendorId: null } as any).where(eq(alaCartePurchases.vendorId, userId));
-    await tx.update(vendorSubscriptions).set({ vendorId: null } as any).where(eq(vendorSubscriptions.vendorId, userId));
-    await tx.update(fulfillmentTasks).set({ vendorId: null } as any).where(eq(fulfillmentTasks.vendorId, userId));
-    await tx.update(sponsoredPosts).set({ vendorId: null } as any).where(eq(sponsoredPosts.vendorId, userId));
-    await tx.update(referrals).set({ referrerId: null } as any).where(eq(referrals.referrerId, userId));
-    await tx.update(referrals).set({ referredUserId: null } as any).where(eq(referrals.referredUserId, userId));
+  // Group 4: feed posts + stories, with their media (R2 / legacy GCS images, Mux videos)
+  await deleteUserFeedPosts(userId);
+  await deleteUserStories(userId);
 
-    // Group 6: trust & safety — anonymize, retain
-    await tx
-      .update(messageReports)
-      .set({ reporterId: null, reportedUserId: null } as any)
-      .where(or(eq(messageReports.reporterId, userId), eq(messageReports.reportedUserId, userId)));
-    await tx.update(moderationQueue).set({ reporterId: null } as any).where(eq(moderationQueue.reporterId, userId));
-    await tx.update(adminIssues).set({ createdBy: null } as any).where(eq(adminIssues.createdBy, userId));
+  // Group 5 + 6: financial records (orders, bookings, refunds, subscriptions, referrals) and trust & safety
+  // reports are retained and stay attached to the scrubbed users row. Only nullable references are cleared.
+  await db.update(adminIssues).set({ createdBy: null } as any).where(eq(adminIssues.createdBy, userId));
 
-    // Group 7: staff unlink (userId is nullable on staffMembers)
-    await tx.update(staffMembers).set({ userId: null } as any).where(eq(staffMembers.userId, userId));
+  // Group 7: staff unlink (userId is nullable on staffMembers)
+  await db.update(staffMembers).set({ userId: null } as any).where(eq(staffMembers.userId, userId));
 
-    // Group 8: vendor/profile deactivation + PII scrub
-    // businesses has no isActive column; rejecting the approvalStatus hides it from
-    // isBusinessVisibleToPublic() which is the gate on all public storefront endpoints.
-    await tx.update(businesses).set({
-      approvalStatus: "rejected",
-      contactEmail: null,
-      contactPhone: null,
-      address: null,
-      city: null,
-      state: null,
-      zipCode: null,
-      latitude: null,
-      longitude: null,
-      websiteUrl: null,
-      socialMedia: null,
-      coverImage: null,
-      logoImage: null,
-      billingAddress: null,
-    } as any).where(eq(businesses.ownerId, userId));
+  // Group 8: vendor/profile deactivation + PII scrub
+  // businesses has no isActive column; rejecting the approvalStatus hides it from
+  // isBusinessVisibleToPublic() which is the gate on all public storefront endpoints.
+  await db.update(businesses).set({
+    approvalStatus: "rejected",
+    contactEmail: null,
+    contactPhone: null,
+    address: null,
+    city: null,
+    state: null,
+    zipCode: null,
+    latitude: null,
+    longitude: null,
+    websiteUrl: null,
+    socialMedia: null,
+    coverImage: null,
+    logoImage: null,
+    billingAddress: null,
+  } as any).where(eq(businesses.ownerId, userId));
 
-    // photographers has no isActive column; setting visibilityStatus to 'hidden' removes
-    // it from PhotographerService.list() and .get() which both filter on visibilityStatus = 'public'.
-    await tx.update(photographers).set({
-      visibilityStatus: "hidden",
-      bio: null,
-      city: null,
-      state: null,
-      latitude: null,
-      longitude: null,
-      portfolioUrl: null,
-      studioName: null,
-      studioAddress: null,
-      coverImage: null,
-      logoImage: null,
-      billingAddress: null,
-      serviceLocations: null,
-    } as any).where(eq(photographers.userId, userId));
+  // photographers has no isActive column; setting visibilityStatus to 'hidden' removes
+  // it from PhotographerService.list() and .get() which both filter on visibilityStatus = 'public'.
+  await db.update(photographers).set({
+    visibilityStatus: "hidden",
+    bio: null,
+    city: null,
+    state: null,
+    latitude: null,
+    longitude: null,
+    portfolioUrl: null,
+    studioName: null,
+    studioAddress: null,
+    coverImage: null,
+    logoImage: null,
+    billingAddress: null,
+    serviceLocations: null,
+  } as any).where(eq(photographers.userId, userId));
 
-    // influencerProfiles has no visibility gate, but scrub social handles and promo code.
-    await tx.update(influencerProfiles).set({
-      bio: null,
-      instagramUrl: null,
-      tiktokUrl: null,
-      youtubeUrl: null,
-      twitterUrl: null,
-      promoCode: null,
-    } as any).where(eq(influencerProfiles.userId, userId));
-    // influencer_referral_events / earning_ledger / payouts survive through influencer_profiles.id — no action needed
+  // influencerProfiles has no visibility gate, but scrub social handles and promo code.
+  await db.update(influencerProfiles).set({
+    bio: null,
+    instagramUrl: null,
+    tiktokUrl: null,
+    youtubeUrl: null,
+    twitterUrl: null,
+    promoCode: null,
+  } as any).where(eq(influencerProfiles.userId, userId));
+  // influencer_referral_events / earning_ledger / payouts survive through influencer_profiles.id — no action needed
 
-    // Group 10: scrub PII from the users row (do NOT delete — it anchors anonymized FKs)
-    const deletedUsername = `deleted_${userId.replace(/-/g, "").slice(0, 10)}`;
-    await tx.update(users).set({
-      deletionStatus: "deleted",
-      email: null,
-      phone: null,
-      name: null,
-      firstName: null,
-      lastName: null,
-      bio: null,
-      address: null,
-      aptUnit: null,
-      city: null,
-      state: null,
-      zipCode: null,
-      latitude: null,
-      longitude: null,
-      billingAddress: null,
-      billingStreet: null,
-      billingAptUnit: null,
-      billingCity: null,
-      billingState: null,
-      billingZip: null,
-      billingCountry: null,
-      dateOfBirth: null,
-      gender: null,
-      ethnicity: null,
-      nationality: null,
-      householdSize: null,
-      incomeRange: null,
-      education: null,
-      occupation: null,
-      shoppingFrequency: null,
-      expoPushToken: null,
-      pushTokenType: null,
-      googleSub: null,
-      appleId: null,
-      stripeCustomerId: null,
-      defaultPaymentMethodId: null,
-      resetTokenHash: null,
-      resetTokenExpiresAt: null,
-      resetCodeHash: null,
-      resetCodeExpiresAt: null,
-      resetCodeAttempts: 0,
-      username: deletedUsername,
-      isAdmin: false,
-      referralCode: null,
-    } as any).where(eq(users.id, userId));
-  });
+  // Group 9: profile photo and cover media files
+  await purgeMediaUrl(account.profileImageUrl, "profile image");
+  await purgeMediaUrl(account.coverMediaUrl, "cover media");
+
+  // Group 10 (LAST): scrub PII from the users row (do NOT delete — it anchors retained records).
+  // isActive=false + password=null blocks every login path (isUserAllowedToAuthenticate).
+  const deletedUsername = `deleted_${userId.replace(/-/g, "").slice(0, 10)}`;
+  await db.update(users).set({
+    deletionStatus: "deleted",
+    isActive: false,
+    password: null,
+    email: null,
+    phone: null,
+    name: null,
+    firstName: null,
+    lastName: null,
+    bio: null,
+    profileImageUrl: null,
+    coverMediaUrl: null,
+    coverMediaType: null,
+    address: null,
+    aptUnit: null,
+    city: null,
+    state: null,
+    zipCode: null,
+    latitude: null,
+    longitude: null,
+    billingAddress: null,
+    billingStreet: null,
+    billingAptUnit: null,
+    billingCity: null,
+    billingState: null,
+    billingZip: null,
+    billingCountry: null,
+    dateOfBirth: null,
+    gender: null,
+    ethnicity: null,
+    nationality: null,
+    householdSize: null,
+    incomeRange: null,
+    education: null,
+    occupation: null,
+    shoppingFrequency: null,
+    expoPushToken: null,
+    pushTokenType: null,
+    googleSub: null,
+    appleId: null,
+    stripeCustomerId: null,
+    defaultPaymentMethodId: null,
+    resetTokenHash: null,
+    resetTokenExpiresAt: null,
+    resetCodeHash: null,
+    resetCodeExpiresAt: null,
+    resetCodeAttempts: 0,
+    username: deletedUsername,
+    isAdmin: false,
+    referralCode: null,
+  } as any).where(eq(users.id, userId));
 
   console.log(`[accountDeletion] Completed deletion for user ${userId}`);
 }
