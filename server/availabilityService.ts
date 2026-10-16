@@ -139,6 +139,54 @@ function doTimesOverlap(
   return s1 < e2 && e1 > s2;
 }
 
+// ============================================
+// PAST-CLOSING RULE (migration 044, businesses.allow_past_closing)
+// ============================================
+
+/** Latest minute of the day a booking may end at when it runs past closing (23:59). Never crosses midnight. */
+export const PAST_CLOSING_MAX_END_MINUTES = 23 * 60 + 59;
+
+/**
+ * True when a booking from startMins to endMins is allowed by the day's open windows.
+ * - Normal rule (always): starts and ends inside one window.
+ * - allowPastClosing: may also start inside the day's LAST window and end after it closes,
+ *   up to PAST_CLOSING_MAX_END_MINUTES. Never extends an earlier window into a break.
+ * Blocks, bookings and holds are checked separately over the full start→end range.
+ */
+export function fitsOpenHours(
+  windows: { startTime: string; endTime: string }[],
+  startMins: number,
+  endMins: number,
+  allowPastClosing: boolean
+): boolean {
+  if (isNaN(startMins) || isNaN(endMins) || endMins < startMins) return false;
+  const parsed = windows
+    .map(w => ({ start: timeToMinutes(w.startTime), end: timeToMinutes(w.endTime) }))
+    .filter(w => !isNaN(w.start) && !isNaN(w.end));
+  if (parsed.some(w => startMins >= w.start && endMins <= w.end)) return true;
+  if (!allowPastClosing || parsed.length === 0) return false;
+  const lastEnd = Math.max(...parsed.map(w => w.end));
+  return endMins <= PAST_CLOSING_MAX_END_MINUTES && parsed.some(w =>
+    w.end === lastEnd && startMins >= w.start && startMins < w.end
+  );
+}
+
+/**
+ * Whether the past-closing rule applies. Business-level bookings only (no staff member);
+ * staff schedules and photographers keep the normal rule.
+ */
+export async function getAllowPastClosing(
+  providerType: string,
+  providerId: string,
+  staffMemberId?: string | null
+): Promise<boolean> {
+  if (providerType !== 'business' || staffMemberId) return false;
+  const [row] = await db.select({ allowPastClosing: businesses.allowPastClosing })
+    .from(businesses)
+    .where(eq(businesses.id, providerId));
+  return row?.allowPastClosing === true;
+}
+
 // Map dayOfWeek (0=Sunday...6=Saturday) to hoursOfOperation keys
 const DAY_OF_WEEK_TO_KEY: Record<number, string> = {
   0: 'sunday',
@@ -993,7 +1041,12 @@ export async function generateAvailabilitySlots(
   
   // 5. Generate slots for each window
   const allSlots: GeneratedSlot[] = [];
-  
+
+  // Past-closing rule (migration 044): only the day's last window may run past its end.
+  const allowPastClosing = await getAllowPastClosing(providerType, providerId, staffMemberId);
+  const parsedEnds = windows.map(w => timeToMinutes(w.endTime)).filter(n => !isNaN(n));
+  const lastWindowEnd = parsedEnds.length > 0 ? Math.max(...parsedEnds) : NaN;
+
   for (const window of windows) {
     const windowStart = timeToMinutes(window.startTime);
     const windowEnd = timeToMinutes(window.endTime);
@@ -1014,8 +1067,15 @@ export async function generateAvailabilitySlots(
     
     let currentMinutes = windowStart;
     let slotCount = 0;
-    
-    while (currentMinutes + serviceDurationMinutes <= windowEnd) {
+
+    // Normal: the service must end by the window end. Past closing (last window only):
+    // the service must start before the window ends and end by 23:59.
+    const runsPastClosing = allowPastClosing && windowEnd === lastWindowEnd;
+    const fitsSlot = (start: number) => runsPastClosing
+      ? start < windowEnd && start + serviceDurationMinutes <= PAST_CLOSING_MAX_END_MINUTES
+      : start + serviceDurationMinutes <= windowEnd;
+
+    while (fitsSlot(currentMinutes)) {
       slotCount++;
       const startHours = Math.floor(currentMinutes / 60);
       const startMins = currentMinutes % 60;
@@ -1240,13 +1300,10 @@ export async function validateBookingSlot(
     };
   }
   
-  // Check if the full duration fits within a window
-  const fitsInWindow = windows.some(w => {
-    const windowStart = timeToMinutes(w.startTime);
-    const windowEnd = timeToMinutes(w.endTime);
-    return slotStartMins >= windowStart && slotEndMins <= windowEnd;
-  });
-  
+  // Check if the full duration fits within a window (or runs past closing, migration 044)
+  const allowPastClosing = await getAllowPastClosing(providerType, providerId, staffMemberId);
+  const fitsInWindow = fitsOpenHours(windows, slotStartMins, slotEndMins, allowPastClosing);
+
   if (!fitsInWindow) {
     return {
       valid: false,
@@ -1865,11 +1922,11 @@ export async function checkProviderAvailability(
   const slotStartMins = timeToMinutes(startTime);
   const slotEndMins = timeToMinutes(endTime);
 
-  const fitsInWindow = windows.some(w => {
-    const windowStart = timeToMinutes(w.startTime);
-    const windowEnd = timeToMinutes(w.endTime);
-    return slotStartMins >= windowStart && slotEndMins <= windowEnd;
-  });
+  // Past-closing rule (migration 044): business-level only, never staff or photographer.
+  const allowPastClosing = providerType === 'business'
+    ? await getAllowPastClosing('business', providerId, null)
+    : false;
+  const fitsInWindow = fitsOpenHours(windows, slotStartMins, slotEndMins, allowPastClosing);
 
   if (!fitsInWindow) {
     return { available: false, reason: 'Requested time is outside of open hours' };
