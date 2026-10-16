@@ -10,6 +10,7 @@ import type { StepKey, SetupRole } from "./status";
 
 const FROM = `Outsyde <${process.env.RESEND_FROM_EMAIL || "noreply@info.goutsyde.com"}>`;
 export const APP_STORE_URL = "https://apps.apple.com/app/outsyde/id6738926870";
+export const PLAY_STORE_URL = "https://play.google.com/store/apps/details?id=com.outsyde.app";
 
 export function frontendUrl(): string {
   return (process.env.FRONTEND_URL || "https://www.goutsyde.com").replace(/\/+$/, "");
@@ -135,7 +136,7 @@ export function renderClaimReminderEmail(params: ClaimReminderParams): BuiltEmai
     paragraph("We kept your details from when you joined Outsyde. To start booking, shopping and earning points, you just need a password" + (params.hasUsername ? "." : " and a username.")) +
     checklist(items) +
     emailCta("Claim my account", params.claimUrl) +
-    paragraph(`This button only works for you and expires in 7 days. If it expires, sign in at ${escapeHtml(frontendUrl().replace(/^https?:\/\//, ""))} with this email and we&#39;ll send you a code. Prefer the app? <a href="${APP_STORE_URL}" style="color:#E8B930;">Get Outsyde on the App Store</a>.`) +
+    paragraph(`This button only works for you and expires in 7 days. If it expires, sign in at ${escapeHtml(frontendUrl().replace(/^https?:\/\//, ""))} with this email and we&#39;ll send you a code. Prefer the app? Get Outsyde on the <a href="${APP_STORE_URL}" style="color:#E8B930;">App Store</a> or <a href="${PLAY_STORE_URL}" style="color:#E8B930;">Google Play</a>.`) +
     emailFooter(unsubFooterLine(unsub)),
   );
   const text = `${params.firstName ? params.firstName + ", your" : "Your"} Outsyde account is saved. Finish it here: ${params.claimUrl}\n\nStop these reminders: ${unsub}`;
