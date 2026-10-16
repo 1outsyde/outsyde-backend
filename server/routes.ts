@@ -177,6 +177,8 @@ import {
   pointTransactions,
   serviceAddons,
   photographerServiceAddons,
+  businessAddons,
+  vendorServices,
 } from "@shared/schema";
 import { and, ilike, ne, asc } from "drizzle-orm";
 
@@ -12936,7 +12938,10 @@ export async function registerRoutes(
         .where(eq(serviceAddons.serviceId, req.params.id))
         .orderBy(serviceAddons.sortOrder, serviceAddons.name);
 
-      res.json({ addons });
+      // Additive (migration 046): library price + whether the vendor should be
+      // asked to sync. Every existing key stays as it was.
+      const libraryPrices = await getLibraryPrices(addons.map((a) => a.businessAddonId));
+      res.json({ addons: addons.map((a) => withLibraryPriceState(a, libraryPrices)) });
     } catch (err) {
       console.error('GET service addons error:', err);
       res.status(500).json({ error: 'Failed to fetch add-ons' });
@@ -12975,10 +12980,58 @@ export async function registerRoutes(
       });
       const validated = bodySchema.parse(req.body);
 
-      const [addon] = await db
-        .insert(serviceAddons)
-        .values({ serviceId: req.params.id, ...validated, description: validated.description ?? null })
-        .returning();
+      // Migration 046: an add-on written inside one service also lands in the
+      // vendor's library (matched by name), but is attached to THIS service only.
+      let library = await findLibraryAddonByName(business.id, validated.name);
+      let createdLibraryId: string | null = null;
+      if (library) {
+        const [alreadyOnService] = await db
+          .select({ id: serviceAddons.id })
+          .from(serviceAddons)
+          .where(and(eq(serviceAddons.serviceId, req.params.id), eq(serviceAddons.businessAddonId, library.id)));
+        if (alreadyOnService) {
+          return res.status(409).json({ code: 'DUPLICATE_ADDON', error: 'This service already has that add-on' });
+        }
+      } else {
+        [library] = await db
+          .insert(businessAddons)
+          .values({
+            businessId: business.id,
+            name: validated.name,
+            description: validated.description ?? null,
+            priceCents: validated.priceCents,
+            durationMinutes: validated.durationMinutes,
+            sortOrder: validated.sortOrder,
+          })
+          .returning();
+        createdLibraryId = library.id;
+      }
+
+      const priceSynced = validated.priceCents === library.priceCents;
+      let addon;
+      try {
+        [addon] = await db
+          .insert(serviceAddons)
+          .values({
+            serviceId: req.params.id,
+            ...validated,
+            description: validated.description ?? null,
+            businessAddonId: library.id,
+            priceSynced,
+            // A different price chosen at creation counts as already seen:
+            // no prompt until the library price changes.
+            declinedLibraryPriceCents: priceSynced ? null : library.priceCents,
+          })
+          .returning();
+      } catch (insertErr) {
+        if (createdLibraryId) {
+          await db.delete(businessAddons).where(eq(businessAddons.id, createdLibraryId)).catch(() => {});
+        }
+        if (isUniqueViolation(insertErr)) {
+          return res.status(409).json({ code: 'DUPLICATE_ADDON', error: 'This service already has that add-on' });
+        }
+        throw insertErr;
+      }
 
       res.status(201).json({ addon });
     } catch (err) {
@@ -13018,9 +13071,23 @@ export async function registerRoutes(
       });
       const validated = patchSchema.parse(req.body);
 
+      // Migration 046: web and app send the price on every save, so a copy only
+      // counts as "custom price" when the saved price differs from the library.
+      const priceState: { priceSynced?: boolean; declinedLibraryPriceCents?: null } = {};
+      if (existing.businessAddonId && validated.priceCents !== undefined) {
+        const [library] = await db
+          .select({ priceCents: businessAddons.priceCents })
+          .from(businessAddons)
+          .where(eq(businessAddons.id, existing.businessAddonId));
+        if (library) {
+          priceState.priceSynced = validated.priceCents === library.priceCents;
+          if (priceState.priceSynced) priceState.declinedLibraryPriceCents = null;
+        }
+      }
+
       const [addon] = await db
         .update(serviceAddons)
-        .set({ ...validated, updatedAt: new Date() })
+        .set({ ...validated, ...priceState, updatedAt: new Date() })
         .where(eq(serviceAddons.id, req.params.addonId))
         .returning();
 
@@ -13057,6 +13124,416 @@ export async function registerRoutes(
     } catch (err) {
       console.error('DELETE service addon error:', err);
       res.status(500).json({ error: 'Failed to delete add-on' });
+    }
+  });
+
+  // ── Add-on library (migration 046) ───────────────────────────────────────
+  // A vendor's add-ons, created once and attached to the services she picks.
+  // Each attachment is its own service_addons row, so slots, holds, payments,
+  // webhooks and emails are untouched: they only ever read service_addons.
+  // neon-http has no transactions, so every multi-row change is ONE statement.
+
+  const ADDON_FIELDS_SCHEMA = {
+    name: z.string().trim().min(1).max(80),
+    description: z.string().max(300).nullable().optional(),
+    priceCents: z.number().int().min(0).max(100000),
+    durationMinutes: z.number().int().min(0).max(480),
+    sortOrder: z.number().int().min(0),
+  };
+
+  function isUniqueViolation(err: unknown): boolean {
+    const e = err as { code?: string; cause?: { code?: string } } | null;
+    return e?.code === '23505' || e?.cause?.code === '23505';
+  }
+
+  // Asked once per library price change: only when the copy keeps its own
+  // price, differs from the library, and that library price wasn't turned down.
+  function needsAddonPriceReview(
+    copy: { businessAddonId: string | null; priceSynced: boolean; priceCents: number; declinedLibraryPriceCents: number | null },
+    libraryPriceCents: number | null | undefined,
+  ): boolean {
+    if (!copy.businessAddonId || libraryPriceCents == null) return false;
+    if (copy.priceSynced) return false;
+    if (copy.priceCents === libraryPriceCents) return false;
+    return copy.declinedLibraryPriceCents !== libraryPriceCents;
+  }
+
+  async function getLibraryPrices(libraryIds: Array<string | null>): Promise<Map<string, number>> {
+    const ids = Array.from(new Set(libraryIds.filter((x): x is string => !!x)));
+    if (ids.length === 0) return new Map();
+    const rows = await db
+      .select({ id: businessAddons.id, priceCents: businessAddons.priceCents })
+      .from(businessAddons)
+      .where(inArray(businessAddons.id, ids));
+    return new Map(rows.map((r) => [r.id, r.priceCents]));
+  }
+
+  function withLibraryPriceState<T extends { businessAddonId: string | null; priceSynced: boolean; priceCents: number; declinedLibraryPriceCents: number | null }>(
+    copy: T,
+    libraryPrices: Map<string, number>,
+  ) {
+    const libraryPriceCents = copy.businessAddonId ? libraryPrices.get(copy.businessAddonId) ?? null : null;
+    return { ...copy, libraryPriceCents, needsPriceReview: needsAddonPriceReview(copy, libraryPriceCents) };
+  }
+
+  async function findLibraryAddonByName(businessId: string, name: string) {
+    const [row] = await db
+      .select()
+      .from(businessAddons)
+      .where(and(
+        eq(businessAddons.businessId, businessId),
+        sql`lower(trim(${businessAddons.name})) = ${name.trim().toLowerCase()}`,
+      ))
+      .limit(1);
+    return row ?? null;
+  }
+
+  // Resolves the caller's business (same rule as the per-service add-on routes)
+  // and the library add-on, which must belong to that business.
+  async function resolveLibraryAddon(req: any, res: any) {
+    const userId = req.session?.userId || getUserIdFromRequest(req);
+    if (!userId) { res.status(401).json({ error: 'Not authenticated' }); return null; }
+    const business = await resolveBusinessForAddonRoute(userId, req.headers['x-business-id'] as string | undefined);
+    if (!business) { res.status(404).json({ error: 'No business found' }); return null; }
+    const [library] = await db
+      .select()
+      .from(businessAddons)
+      .where(and(eq(businessAddons.id, req.params.id), eq(businessAddons.businessId, business.id)));
+    if (!library) { res.status(404).json({ error: 'Add-on not found' }); return null; }
+    return { business, library };
+  }
+
+  // GET /api/vendor/addon-library
+  app.get("/api/vendor/addon-library", async (req, res) => {
+    const userId = req.session?.userId || getUserIdFromRequest(req);
+    if (!userId) return res.status(401).json({ error: 'Not authenticated' });
+    try {
+      const business = await resolveBusinessForAddonRoute(userId, req.headers['x-business-id'] as string | undefined);
+      if (!business) return res.status(404).json({ error: 'No business found' });
+
+      const library = await db
+        .select()
+        .from(businessAddons)
+        .where(eq(businessAddons.businessId, business.id))
+        .orderBy(businessAddons.sortOrder, businessAddons.name);
+
+      const libraryIds = library.map((a) => a.id);
+      const copies = libraryIds.length === 0 ? [] : await db
+        .select({
+          businessAddonId: serviceAddons.businessAddonId,
+          addonId: serviceAddons.id,
+          serviceId: serviceAddons.serviceId,
+          serviceName: vendorServices.name,
+          serviceStatus: vendorServices.status,
+          priceCents: serviceAddons.priceCents,
+          isActive: serviceAddons.isActive,
+          priceSynced: serviceAddons.priceSynced,
+          declinedLibraryPriceCents: serviceAddons.declinedLibraryPriceCents,
+        })
+        .from(serviceAddons)
+        .innerJoin(vendorServices, eq(vendorServices.id, serviceAddons.serviceId))
+        .where(inArray(serviceAddons.businessAddonId, libraryIds))
+        .orderBy(vendorServices.name);
+
+      const addons = library.map((lib) => ({
+        id: lib.id,
+        name: lib.name,
+        description: lib.description,
+        priceCents: lib.priceCents,
+        durationMinutes: lib.durationMinutes,
+        isActive: lib.isActive,
+        sortOrder: lib.sortOrder,
+        services: copies
+          .filter((c) => c.businessAddonId === lib.id)
+          .map((c) => ({
+            serviceId: c.serviceId,
+            serviceName: c.serviceName,
+            serviceStatus: c.serviceStatus,
+            addonId: c.addonId,
+            priceCents: c.priceCents,
+            isActive: c.isActive,
+            priceSynced: c.priceSynced,
+            needsPriceReview: needsAddonPriceReview(c, lib.priceCents),
+          })),
+      }));
+
+      res.json({ addons });
+    } catch (err) {
+      console.error('GET addon library error:', err);
+      res.status(500).json({ error: 'Failed to fetch add-on library' });
+    }
+  });
+
+  // POST /api/vendor/addon-library — creates a library add-on on NO service
+  app.post("/api/vendor/addon-library", async (req, res) => {
+    const userId = req.session?.userId || getUserIdFromRequest(req);
+    if (!userId) return res.status(401).json({ error: 'Not authenticated' });
+    try {
+      const business = await resolveBusinessForAddonRoute(userId, req.headers['x-business-id'] as string | undefined);
+      if (!business) return res.status(404).json({ error: 'No business found' });
+
+      const validated = z.object({
+        ...ADDON_FIELDS_SCHEMA,
+        sortOrder: ADDON_FIELDS_SCHEMA.sortOrder.default(0),
+      }).parse(req.body);
+
+      if (await findLibraryAddonByName(business.id, validated.name)) {
+        return res.status(409).json({ code: 'DUPLICATE_ADDON', error: 'You already have an add-on with that name' });
+      }
+
+      const [addon] = await db
+        .insert(businessAddons)
+        .values({ businessId: business.id, ...validated, description: validated.description ?? null })
+        .returning();
+
+      res.status(201).json({ addon });
+    } catch (err) {
+      if (err instanceof z.ZodError) return res.status(400).json({ error: 'Invalid data', details: err.errors });
+      console.error('POST addon library error:', err);
+      res.status(500).json({ error: 'Failed to create add-on' });
+    }
+  });
+
+  // PATCH /api/vendor/addon-library/:id — name, description and minutes reach
+  // every attached service; price only reaches services that follow the library.
+  app.patch("/api/vendor/addon-library/:id", async (req, res) => {
+    try {
+      const resolved = await resolveLibraryAddon(req, res);
+      if (!resolved) return;
+      const { business, library } = resolved;
+
+      const validated = z.object({
+        name: ADDON_FIELDS_SCHEMA.name.optional(),
+        description: ADDON_FIELDS_SCHEMA.description,
+        priceCents: ADDON_FIELDS_SCHEMA.priceCents.optional(),
+        durationMinutes: ADDON_FIELDS_SCHEMA.durationMinutes.optional(),
+        sortOrder: ADDON_FIELDS_SCHEMA.sortOrder.optional(),
+      }).parse(req.body);
+
+      if (validated.name !== undefined && validated.name.toLowerCase() !== library.name.trim().toLowerCase()) {
+        const clash = await findLibraryAddonByName(business.id, validated.name);
+        if (clash && clash.id !== library.id) {
+          return res.status(409).json({ code: 'DUPLICATE_ADDON', error: 'You already have an add-on with that name' });
+        }
+      }
+
+      const [addon] = await db
+        .update(businessAddons)
+        .set({ ...validated, updatedAt: new Date() })
+        .where(eq(businessAddons.id, library.id))
+        .returning();
+
+      const updatedServiceIds = new Set<string>();
+
+      const sharedFields: { name?: string; description?: string | null; durationMinutes?: number } = {};
+      if (validated.name !== undefined) sharedFields.name = validated.name;
+      if (validated.description !== undefined) sharedFields.description = validated.description ?? null;
+      if (validated.durationMinutes !== undefined) sharedFields.durationMinutes = validated.durationMinutes;
+      if (Object.keys(sharedFields).length > 0) {
+        const rows = await db
+          .update(serviceAddons)
+          .set({ ...sharedFields, updatedAt: new Date() })
+          .where(eq(serviceAddons.businessAddonId, library.id))
+          .returning({ serviceId: serviceAddons.serviceId });
+        rows.forEach((r) => updatedServiceIds.add(r.serviceId));
+      }
+
+      let customPriceServices: Array<{ serviceId: string; serviceName: string; priceCents: number }> = [];
+      if (validated.priceCents !== undefined && validated.priceCents !== library.priceCents) {
+        const rows = await db
+          .update(serviceAddons)
+          .set({ priceCents: validated.priceCents, updatedAt: new Date() })
+          .where(and(eq(serviceAddons.businessAddonId, library.id), eq(serviceAddons.priceSynced, true)))
+          .returning({ serviceId: serviceAddons.serviceId });
+        rows.forEach((r) => updatedServiceIds.add(r.serviceId));
+
+        customPriceServices = await db
+          .select({ serviceId: serviceAddons.serviceId, serviceName: vendorServices.name, priceCents: serviceAddons.priceCents })
+          .from(serviceAddons)
+          .innerJoin(vendorServices, eq(vendorServices.id, serviceAddons.serviceId))
+          .where(and(eq(serviceAddons.businessAddonId, library.id), eq(serviceAddons.priceSynced, false)));
+      }
+
+      res.json({ addon, updatedServiceIds: Array.from(updatedServiceIds), customPriceServices });
+    } catch (err) {
+      if (err instanceof z.ZodError) return res.status(400).json({ error: 'Invalid data', details: err.errors });
+      console.error('PATCH addon library error:', err);
+      res.status(500).json({ error: 'Failed to update add-on' });
+    }
+  });
+
+  // POST /api/vendor/addon-library/:id/active — library on/off, applied only to
+  // the services the vendor ticked in the confirmation pop-up.
+  app.post("/api/vendor/addon-library/:id/active", async (req, res) => {
+    try {
+      const resolved = await resolveLibraryAddon(req, res);
+      if (!resolved) return;
+      const { library } = resolved;
+
+      const { isActive, serviceIds } = z.object({
+        isActive: z.boolean(),
+        serviceIds: z.array(z.string().min(1)).max(100),
+      }).parse(req.body);
+      const ids = Array.from(new Set(serviceIds));
+
+      if (ids.length > 0) {
+        const linked = await db
+          .select({ serviceId: serviceAddons.serviceId })
+          .from(serviceAddons)
+          .where(and(eq(serviceAddons.businessAddonId, library.id), inArray(serviceAddons.serviceId, ids)));
+        if (linked.length !== ids.length) {
+          return res.status(400).json({ code: 'NOT_ATTACHED', error: 'This add-on is not on one or more of those services' });
+        }
+      }
+
+      const [addon] = await db
+        .update(businessAddons)
+        .set({ isActive, updatedAt: new Date() })
+        .where(eq(businessAddons.id, library.id))
+        .returning();
+
+      let updatedServiceIds: string[] = [];
+      if (ids.length > 0) {
+        const rows = await db
+          .update(serviceAddons)
+          .set({ isActive, updatedAt: new Date() })
+          .where(and(eq(serviceAddons.businessAddonId, library.id), inArray(serviceAddons.serviceId, ids)))
+          .returning({ serviceId: serviceAddons.serviceId });
+        updatedServiceIds = rows.map((r) => r.serviceId);
+      }
+
+      res.json({ addon, updatedServiceIds });
+    } catch (err) {
+      if (err instanceof z.ZodError) return res.status(400).json({ error: 'Invalid data', details: err.errors });
+      console.error('POST addon library active error:', err);
+      res.status(500).json({ error: 'Failed to update add-on' });
+    }
+  });
+
+  // DELETE /api/vendor/addon-library/:id — removes it from every service (FK
+  // cascade). Past holds and appointments keep their own add-on snapshot.
+  app.delete("/api/vendor/addon-library/:id", async (req, res) => {
+    try {
+      const resolved = await resolveLibraryAddon(req, res);
+      if (!resolved) return;
+      const { library } = resolved;
+
+      const copies = await db
+        .select({ serviceId: serviceAddons.serviceId })
+        .from(serviceAddons)
+        .where(eq(serviceAddons.businessAddonId, library.id));
+
+      await db.delete(businessAddons).where(eq(businessAddons.id, library.id));
+
+      res.json({ success: true, removedFromServiceIds: copies.map((c) => c.serviceId) });
+    } catch (err) {
+      console.error('DELETE addon library error:', err);
+      res.status(500).json({ error: 'Failed to delete add-on' });
+    }
+  });
+
+  // POST /api/vendor/addon-library/:id/services — attach to the services the
+  // vendor picked ("Apply to other services"). Nothing else gets it.
+  app.post("/api/vendor/addon-library/:id/services", async (req, res) => {
+    try {
+      const resolved = await resolveLibraryAddon(req, res);
+      if (!resolved) return;
+      const { business, library } = resolved;
+
+      const { serviceIds } = z.object({
+        serviceIds: z.array(z.string().min(1)).min(1).max(100),
+      }).parse(req.body);
+      const ids = Array.from(new Set(serviceIds));
+
+      const services = await db
+        .select({ id: vendorServices.id, businessId: vendorServices.businessId, status: vendorServices.status })
+        .from(vendorServices)
+        .where(inArray(vendorServices.id, ids));
+      if (services.length !== ids.length || services.some((s) => s.businessId !== business.id)) {
+        return res.status(404).json({ error: 'Service not found' });
+      }
+      const statusById = new Map(services.map((s) => [s.id, s.status]));
+
+      const added: string[] = [];
+      const skipped: Array<{ serviceId: string; reason: 'archived' | 'already_added' | 'limit' }> = [];
+      for (const serviceId of ids) {
+        if (statusById.get(serviceId) === 'archived') { skipped.push({ serviceId, reason: 'archived' }); continue; }
+        const existing = await db
+          .select({ id: serviceAddons.id, businessAddonId: serviceAddons.businessAddonId })
+          .from(serviceAddons)
+          .where(eq(serviceAddons.serviceId, serviceId));
+        if (existing.some((e) => e.businessAddonId === library.id)) { skipped.push({ serviceId, reason: 'already_added' }); continue; }
+        if (existing.length >= 20) { skipped.push({ serviceId, reason: 'limit' }); continue; }
+        try {
+          await db.insert(serviceAddons).values({
+            serviceId,
+            name: library.name,
+            description: library.description,
+            priceCents: library.priceCents,
+            durationMinutes: library.durationMinutes,
+            isActive: library.isActive,
+            sortOrder: library.sortOrder,
+            businessAddonId: library.id,
+            priceSynced: true,
+          });
+          added.push(serviceId);
+        } catch (insertErr) {
+          if (isUniqueViolation(insertErr)) { skipped.push({ serviceId, reason: 'already_added' }); continue; }
+          throw insertErr;
+        }
+      }
+
+      res.json({ added, skipped });
+    } catch (err) {
+      if (err instanceof z.ZodError) return res.status(400).json({ error: 'Invalid data', details: err.errors });
+      console.error('POST addon library services error:', err);
+      res.status(500).json({ error: 'Failed to add to services' });
+    }
+  });
+
+  // POST /api/vendor/services/:serviceId/addons/:addonId/price-review
+  // The answer to "Library price is now $X. Sync this service?"
+  app.post("/api/vendor/services/:serviceId/addons/:addonId/price-review", async (req, res) => {
+    const userId = req.session?.userId || getUserIdFromRequest(req);
+    if (!userId) return res.status(401).json({ error: 'Not authenticated' });
+    try {
+      const business = await resolveBusinessForAddonRoute(userId, req.headers['x-business-id'] as string | undefined);
+      if (!business) return res.status(404).json({ error: 'No business found' });
+
+      const service = await storage.getVendorService(req.params.serviceId);
+      if (!service || service.businessId !== business.id) {
+        return res.status(404).json({ error: 'Service not found' });
+      }
+
+      const { action } = z.object({ action: z.enum(['sync', 'keep']) }).parse(req.body);
+
+      const [copy] = await db
+        .select()
+        .from(serviceAddons)
+        .where(and(eq(serviceAddons.id, req.params.addonId), eq(serviceAddons.serviceId, req.params.serviceId)));
+      if (!copy) return res.status(404).json({ error: 'Add-on not found' });
+      if (!copy.businessAddonId) {
+        return res.status(400).json({ code: 'NOT_IN_LIBRARY', error: 'This add-on is not in your library' });
+      }
+      const [library] = await db
+        .select({ priceCents: businessAddons.priceCents })
+        .from(businessAddons)
+        .where(eq(businessAddons.id, copy.businessAddonId));
+      if (!library) return res.status(400).json({ code: 'NOT_IN_LIBRARY', error: 'This add-on is not in your library' });
+
+      const [addon] = await db
+        .update(serviceAddons)
+        .set(action === 'sync'
+          ? { priceCents: library.priceCents, priceSynced: true, declinedLibraryPriceCents: null, updatedAt: new Date() }
+          : { declinedLibraryPriceCents: library.priceCents, updatedAt: new Date() })
+        .where(eq(serviceAddons.id, copy.id))
+        .returning();
+
+      res.json({ addon: withLibraryPriceState(addon, new Map([[copy.businessAddonId, library.priceCents]])) });
+    } catch (err) {
+      if (err instanceof z.ZodError) return res.status(400).json({ error: 'Invalid data', details: err.errors });
+      console.error('POST addon price review error:', err);
+      res.status(500).json({ error: 'Failed to update add-on' });
     }
   });
 
