@@ -529,6 +529,27 @@ export const vendorServices = pgTable("vendor_services", {
 /* =====================================================
    SERVICE ADD-ONS (Optional extras for vendor services)
 ===================================================== */
+// Add-on library (migration 046): a vendor's add-ons, created once and attached
+// to services. Each attachment is still its own service_addons row; bookings,
+// holds and payments only ever read service_addons.
+export const businessAddons = pgTable("business_addons", {
+  id: varchar("id", { length: 36 }).primaryKey().default(sql`gen_random_uuid()`),
+  businessId: varchar("business_id", { length: 36 }).notNull().references(() => businesses.id, { onDelete: "cascade" }),
+  name: text("name").notNull(),
+  description: text("description"),
+  priceCents: integer("price_cents").notNull().default(0),
+  durationMinutes: integer("duration_minutes").notNull().default(0),
+  isActive: boolean("is_active").notNull().default(true),
+  sortOrder: integer("sort_order").notNull().default(0),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+}, (table) => ({
+  businessActiveIdx: index("idx_business_addons_business").on(table.businessId, table.isActive, table.sortOrder, table.name),
+}));
+
+export type BusinessAddon = typeof businessAddons.$inferSelect;
+export type InsertBusinessAddon = typeof businessAddons.$inferInsert;
+
 export const serviceAddons = pgTable("service_addons", {
   id: varchar("id", { length: 36 }).primaryKey().default(sql`gen_random_uuid()`),
   serviceId: varchar("service_id", { length: 36 }).notNull().references(() => vendorServices.id, { onDelete: "cascade" }),
@@ -540,8 +561,14 @@ export const serviceAddons = pgTable("service_addons", {
   sortOrder: integer("sort_order").notNull().default(0),
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
+  // Migration 046: link to the library + price sync state
+  businessAddonId: varchar("business_addon_id", { length: 36 }).references(() => businessAddons.id, { onDelete: "cascade" }),
+  priceSynced: boolean("price_synced").notNull().default(true),
+  declinedLibraryPriceCents: integer("declined_library_price_cents"),
 }, (table) => ({
   serviceActiveIdx: index("idx_service_addons_service").on(table.serviceId, table.isActive, table.sortOrder, table.name),
+  businessAddonIdx: index("idx_service_addons_business_addon").on(table.businessAddonId),
+  serviceLibraryUq: uniqueIndex("uq_service_addons_service_library").on(table.serviceId, table.businessAddonId).where(sql`business_addon_id IS NOT NULL`),
 }));
 
 /* =====================================================
