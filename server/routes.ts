@@ -15273,21 +15273,30 @@ export async function registerRoutes(
       // Get unread counts per conversation
       const unreadCounts = await storage.getUnreadCountPerConversation(userId);
       
+      // Public identity (business name + logo for vendors, same rule as the feed). Batched, no N+1.
+      const { resolvePublicIdentities, pickPublicIdentity } = await import("./publicIdentity");
+      const identities = await resolvePublicIdentities(conversations.map(c => c.otherParticipant));
+
       // Sanitize user data and include unread count
-      const sanitizedConversations = conversations.map(convo => ({
-        ...convo,
-        otherParticipant: {
-          id: convo.otherParticipant.id,
-          displayName: convo.otherParticipant.name || convo.otherParticipant.username,
-          avatar: convo.otherParticipant.profileImageUrl,
-          type: convo.otherParticipant.isPhotographer
-            ? "photographer"
-            : convo.otherParticipant.isVendor
-              ? "business"
-              : "consumer",
-        },
-        unreadCount: unreadCounts.get(convo.id) || 0,
-      }));
+      const sanitizedConversations = conversations.map(convo => {
+        const who = identities.get(convo.otherParticipant.id) ?? pickPublicIdentity(convo.otherParticipant);
+        return {
+          ...convo,
+          otherParticipant: {
+            id: convo.otherParticipant.id,
+            displayName: who.publicName,
+            avatar: who.avatarUrl,
+            type: who.kind,
+            // Additive (2026-10-16): explicit public identity fields
+            publicName: who.publicName,
+            avatarUrl: who.avatarUrl,
+            username: convo.otherParticipant.username || null,
+            businessId: who.businessId,
+            photographerId: who.photographerId,
+          },
+          unreadCount: unreadCounts.get(convo.id) || 0,
+        };
+      });
       res.json({ conversations: sanitizedConversations });
     } catch (error) {
       console.error("Get conversations error:", error);
@@ -15379,14 +15388,24 @@ export async function registerRoutes(
             : otherUserRecord?.isVendor
               ? "business"
               : "consumer";
+      // Public identity (business name + logo for vendors, same rule as the feed)
+      const { resolvePublicIdentity } = await import("./publicIdentity");
+      const who = otherUserRecord ? await resolvePublicIdentity(otherUserRecord) : null;
+      const publicName = who?.publicName || otherUserName;
       res.json({
         conversation,
         otherParticipant: {
           id: otherUserId,
-          name: otherUserName,
-          displayName: otherUserName,
-          avatar: otherUserRecord?.profileImageUrl || null,
+          name: publicName,
+          displayName: publicName,
+          avatar: who?.avatarUrl ?? otherUserRecord?.profileImageUrl ?? null,
           type: resolvedType,
+          // Additive (2026-10-16)
+          publicName,
+          avatarUrl: who?.avatarUrl ?? null,
+          username: otherUserRecord?.username || null,
+          businessId: who?.businessId ?? null,
+          photographerId: who?.photographerId ?? null,
         },
       });
     } catch (error) {
@@ -15505,6 +15524,8 @@ export async function registerRoutes(
           const subscriptions = await storage.getUserPushSubscriptions(otherUserId);
           if (subscriptions.length > 0) {
             const sender = await storage.getUser(userId);
+            const { resolvePublicIdentity } = await import('./publicIdentity');
+            const senderPublicName = sender ? (await resolvePublicIdentity(sender)).publicName : null;
             const totalUnreadCount = await storage.getUnreadCount(otherUserId);
             
             const messagePreview = content.length > 50 
@@ -15512,14 +15533,14 @@ export async function registerRoutes(
               : content;
             
             const pushPayload = {
-              title: sender?.name || "New Message",
+              title: senderPublicName || "New Message",
               body: messagePreview,
               url: `/messages?conversation=${req.params.id}`,
               tag: `message-${req.params.id}`,
               data: {
                 type: "new_message",
                 conversationId: req.params.id,
-                senderDisplayName: sender?.name || "Unknown",
+                senderDisplayName: senderPublicName || "Unknown",
                 messagePreview,
                 badgeCount: totalUnreadCount,
               },

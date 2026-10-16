@@ -3,6 +3,7 @@ import type { Server } from "http";
 import { storage } from "./storage";
 import { verifyAccessToken } from "./auth";
 import { sendPushNotification, isPushConfigured } from "./pushService";
+import { resolvePublicIdentity } from "./publicIdentity";
 
 interface AuthenticatedWebSocket extends WebSocket {
   userId?: string;
@@ -173,10 +174,12 @@ async function handleSendMessage(ws: AuthenticatedWebSocket, payload: { conversa
     });
 
     const sender = await storage.getUser(ws.userId);
+    // Public identity (business name for vendors, same rule as the feed)
+    const senderPublicName = sender ? (await resolvePublicIdentity(sender)).publicName : null;
 
     const messagePayload = {
       ...message,
-      senderName: sender?.name || "Unknown",
+      senderName: senderPublicName || "Unknown",
     };
 
     ws.send(JSON.stringify({ type: "message_sent", payload: messagePayload }));
@@ -206,14 +209,14 @@ async function handleSendMessage(ws: AuthenticatedWebSocket, payload: { conversa
             : payload.content;
           
           const pushPayload = {
-            title: sender?.name || "New Message",
+            title: senderPublicName || "New Message",
             body: messagePreview,
             url: `/messages?conversation=${payload.conversationId}`,
             tag: `message-${payload.conversationId}`, // Group by conversation
             data: {
               type: "new_message",
               conversationId: payload.conversationId,
-              senderDisplayName: sender?.name || "Unknown",
+              senderDisplayName: senderPublicName || "Unknown",
               messagePreview,
               badgeCount: totalUnreadCount,
             },
