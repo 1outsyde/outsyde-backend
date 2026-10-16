@@ -9,7 +9,7 @@ import { Router, type Request, type Response } from "express";
 import { sql } from "drizzle-orm";
 import { db } from "../db";
 import { requirePlatformAdmin } from "../middleware/requirePlatformAdmin";
-import { getBudget } from "../emailHistory";
+import { getBudget, getResendUsage } from "../emailHistory";
 import {
   AUDIENCES, MAX_HTML, MAX_PICKED, MAX_SUBJECT, type Audience,
   audienceCounts, countRecipients, searchPeople, sendBroadcastTest, startBroadcast, verifyBroadcastUnsubSig,
@@ -51,10 +51,15 @@ export function checkAudience(body: unknown): { audience: Audience; userIds?: st
 export const emailAdminRouter = Router();
 emailAdminRouter.use(requirePlatformAdmin);
 
-/** How many emails the admin page sent today and how many are left before the daily limit. */
+/**
+ * How many emails the admin page sent today and how many are left before the daily limit, plus
+ * `resend`: every email on the Resend account today per Resend itself ({ used, limit, resetsAt }, or
+ * null when Resend can't be asked). Additive field (PR C2); `resend` never blocks a send.
+ */
 emailAdminRouter.get("/budget", async (_req, res) => {
   try {
-    res.json({ success: true, ...(await getBudget()) });
+    const [budget, resend] = await Promise.all([getBudget(), getResendUsage()]);
+    res.json({ success: true, ...budget, resend });
   } catch (err) {
     console.error("[EmailAdmin] budget error:", err);
     fail(res, 500, "SERVER_ERROR", "Could not load today's email count");
@@ -118,7 +123,7 @@ emailAdminRouter.post("/broadcasts", async (req, res) => {
     const budget = await getBudget();
     if (budget.remaining !== null && recipients > budget.remaining) {
       return fail(res, 429, "OVER_DAILY_LIMIT",
-        `This would send ${recipients} emails, but only ${budget.remaining} are left today. Send it tomorrow or pick fewer people.`,
+        `This would send ${recipients} emails, but only ${budget.remaining} ${budget.remaining === 1 ? "is" : "are"} left today. Send it tomorrow or pick fewer people.`,
         { budget, recipients });
     }
     const started = await startBroadcast({ ...target, ...content, createdBy: adminOf(req).id });

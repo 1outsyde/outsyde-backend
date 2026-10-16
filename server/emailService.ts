@@ -1,4 +1,19 @@
 import { Resend } from 'resend';
+import type { EmailLogTag } from './emailHistory';
+
+// History logging for emails to customers, vendors and photographers (PR C2). emailHistory is loaded
+// lazily so importing this file still never loads the database module (server/accountSetup tests and
+// scripts import the email helpers on their own). Fire and forget, never throws.
+function logTransactionalEmail(
+  tag: EmailLogTag | undefined,
+  to: string | null | undefined,
+  outcome: { resendId?: string | null; error?: unknown },
+): void {
+  if (!tag || !to) return;
+  import('./emailHistory')
+    .then((m) => m.logTransactionalEmail(tag, to, outcome))
+    .catch((err) => console.error('[EmailHistory] could not load the logger:', err));
+}
 
 const FROM_ORDERS = 'orders@info.goutsyde.com';
 
@@ -25,6 +40,8 @@ export interface AdminEmailParams {
   subject: string;
   html: string;
   text?: string;
+  /** Set only for emails to customers or vendors; internal alerts stay unlogged (PR C2). */
+  log?: EmailLogTag;
 }
 
 export async function sendAdminEmail(params: AdminEmailParams): Promise<boolean> {
@@ -45,13 +62,16 @@ export async function sendAdminEmail(params: AdminEmailParams): Promise<boolean>
 
     if (result.error) {
       console.error('[Email] Failed to send email:', result.error);
+      logTransactionalEmail(params.log, params.to, { error: result.error.message ?? result.error });
       return false;
     }
 
     console.log(`[Email] Sent to ${params.to}: ${params.subject}`);
+    logTransactionalEmail(params.log, params.to, { resendId: result.data?.id });
     return true;
   } catch (error) {
     console.error('[Email] Error sending email:', error);
+    if (process.env.RESEND_API_KEY) logTransactionalEmail(params.log, params.to, { error });
     return false;
   }
 }
@@ -325,6 +345,7 @@ Welcome to the Outsyde family!
     subject,
     html,
     text,
+    log: { kind: 'account', label: 'Business approved' },
   });
 }
 
@@ -396,6 +417,7 @@ Thank you for considering Outsyde.
     subject,
     html,
     text,
+    log: { kind: 'account', label: 'Business application not approved' },
   });
 }
 
@@ -414,19 +436,29 @@ const BRAND = {
 } as const;
 
 
-async function sendBrandedEmail(to: string, subject: string, html: string): Promise<void> {
+// `log` is set for emails to customers, vendors and photographers; internal alerts pass none and are
+// never logged. Logging never changes what this function returns or throws (PR C2).
+async function sendBrandedEmail(to: string, subject: string, html: string, log?: EmailLogTag): Promise<void> {
   const apiKey = process.env.RESEND_API_KEY;
   if (!apiKey) {
     throw new Error('[emailService] RESEND_API_KEY not set');
   }
   const resend = new Resend(apiKey);
-  const result = await resend.emails.send({ from: FROM_ORDERS, to, subject, html });
+  let result: Awaited<ReturnType<typeof resend.emails.send>>;
+  try {
+    result = await resend.emails.send({ from: FROM_ORDERS, to, subject, html });
+  } catch (err) {
+    logTransactionalEmail(log, to, { error: err });
+    throw err;
+  }
   if (result.error) {
     const errMsg = typeof result.error === 'object' && result.error !== null
       ? (result.error as { message?: string }).message ?? JSON.stringify(result.error)
       : String(result.error);
+    logTransactionalEmail(log, to, { error: errMsg });
     throw new Error(`Resend error: ${errMsg}`);
   }
+  logTransactionalEmail(log, to, { resendId: result.data?.id });
 }
 
 function buildEmailShell(
@@ -600,7 +632,7 @@ export async function sendAppointmentConfirmationToConsumer(params: {
       ${emailFooter()}
     `);
 
-    await sendBrandedEmail(params.toEmail, `🎉 Your appointment is confirmed — ${params.serviceName}`, html);
+    await sendBrandedEmail(params.toEmail, `🎉 Your appointment is confirmed — ${params.serviceName}`, html, { kind: 'booking', label: 'Booking confirmation' });
     console.log(`[Email] Appointment confirmation sent to ${params.toEmail}`);
   } catch (err) {
     console.error('[Email] sendAppointmentConfirmationToConsumer failed:', err);
@@ -681,7 +713,7 @@ export async function sendAppointmentNotificationToVendor(params: {
       ${emailFooter()}
     `);
 
-    await sendBrandedEmail(params.toEmail, `🎉 New booking received — ${params.serviceName}`, html);
+    await sendBrandedEmail(params.toEmail, `🎉 New booking received — ${params.serviceName}`, html, { kind: 'booking', label: 'New booking (vendor)' });
     console.log(`[Email] Appointment vendor notification sent to ${params.toEmail}`);
   } catch (err) {
     console.error('[Email] sendAppointmentNotificationToVendor failed:', err);
@@ -761,7 +793,7 @@ export async function sendShootBookingConfirmationToConsumer(params: {
       ${emailFooter()}
     `);
 
-    await sendBrandedEmail(params.toEmail, `🎉 Your shoot is confirmed — ${params.shootType}`, html);
+    await sendBrandedEmail(params.toEmail, `🎉 Your shoot is confirmed — ${params.shootType}`, html, { kind: 'shoot', label: 'Shoot booking confirmation' });
     console.log(`[Email] Shoot confirmation sent to ${params.toEmail}`);
   } catch (err) {
     console.error('[Email] sendShootBookingConfirmationToConsumer failed:', err);
@@ -841,7 +873,7 @@ export async function sendShootBookingNotificationToPhotographer(params: {
       ${emailFooter()}
     `);
 
-    await sendBrandedEmail(params.toEmail, `🎉 New shoot booked — ${params.shootType}`, html);
+    await sendBrandedEmail(params.toEmail, `🎉 New shoot booked — ${params.shootType}`, html, { kind: 'shoot', label: 'New shoot booking (photographer)' });
     console.log(`[Email] Shoot photographer notification sent to ${params.toEmail}`);
   } catch (err) {
     console.error('[Email] sendShootBookingNotificationToPhotographer failed:', err);
@@ -878,7 +910,7 @@ export async function sendShootBookingAcceptedToPhotographer(params: {
       ${emailCta('View in Dashboard', 'https://goutsyde.com/vendor/bookings')}
       ${emailFooter()}
     `);
-    await sendBrandedEmail(params.toEmail, `Booking Confirmed — ${params.consumerName}`, html);
+    await sendBrandedEmail(params.toEmail, `Booking Confirmed — ${params.consumerName}`, html, { kind: 'shoot', label: 'Shoot accepted (photographer)' });
     console.log(`[Email] Shoot booking accepted confirmation sent to photographer ${params.toEmail}`);
   } catch (err) {
     console.error('[Email] sendShootBookingAcceptedToPhotographer failed:', err);
@@ -914,7 +946,7 @@ export async function sendShootBookingDeclinedToPhotographer(params: {
       ${emailCta('View in Dashboard', 'https://goutsyde.com/vendor/bookings')}
       ${emailFooter()}
     `);
-    await sendBrandedEmail(params.toEmail, `Booking Declined — ${params.consumerName}`, html);
+    await sendBrandedEmail(params.toEmail, `Booking Declined — ${params.consumerName}`, html, { kind: 'shoot', label: 'Shoot declined (photographer)' });
     console.log(`[Email] Shoot booking declined confirmation sent to photographer ${params.toEmail}`);
   } catch (err) {
     console.error('[Email] sendShootBookingDeclinedToPhotographer failed:', err);
@@ -950,7 +982,7 @@ export async function sendShootBookingCanceledToPhotographer(params: {
       ${emailCta('View in Dashboard', 'https://goutsyde.com/vendor/bookings')}
       ${emailFooter()}
     `);
-    await sendBrandedEmail(params.toEmail, `Your Booking Was Canceled — ${params.consumerName}`, html);
+    await sendBrandedEmail(params.toEmail, `Your Booking Was Canceled — ${params.consumerName}`, html, { kind: 'shoot', label: 'Shoot canceled (photographer)' });
     console.log(`[Email] Shoot booking canceled notification sent to photographer ${params.toEmail}`);
   } catch (err) {
     console.error('[Email] sendShootBookingCanceledToPhotographer failed:', err);
@@ -979,7 +1011,7 @@ export async function sendShootBookingExpiredToPhotographer(params: {
       ${emailCta('View in Dashboard', 'https://goutsyde.com/vendor/bookings')}
       ${emailFooter()}
     `);
-    await sendBrandedEmail(params.toEmail, `Booking Request Expired`, html);
+    await sendBrandedEmail(params.toEmail, `Booking Request Expired`, html, { kind: 'shoot', label: 'Shoot request expired (photographer)' });
     console.log(`[Email] Shoot booking expiry notification sent to photographer ${params.toEmail}`);
   } catch (err) {
     console.error('[Email] sendShootBookingExpiredToPhotographer failed:', err);
@@ -1002,7 +1034,7 @@ export async function sendPhotographerWelcomeEmail(toEmail: string, displayName:
       ${emailCta('Go to My Dashboard', 'https://www.goutsyde.com/photographer-dashboard')}
       ${emailFooter('Welcome to the Outsyde community — we\'re glad to have you.')}
     `);
-    await sendBrandedEmail(toEmail, `Welcome to Outsyde — you're almost ready to shoot`, html);
+    await sendBrandedEmail(toEmail, `Welcome to Outsyde — you're almost ready to shoot`, html, { kind: 'account', label: 'Photographer welcome' });
     console.log(`[Email] Photographer welcome email sent to ${toEmail}`);
   } catch (err) {
     console.error('[Email] sendPhotographerWelcomeEmail failed:', err);
@@ -1084,7 +1116,7 @@ export async function sendOrderConfirmationToConsumer(params: {
     `);
 
     const subjectItem = params.items.length > 1 ? `${params.items.length} items` : params.items[0]?.productName || 'your order';
-    await sendBrandedEmail(params.toEmail, `🎉 Order confirmed — ${subjectItem}`, html);
+    await sendBrandedEmail(params.toEmail, `🎉 Order confirmed — ${subjectItem}`, html, { kind: 'order', label: 'Order confirmation' });
     console.log(`[Email] Order confirmation sent to ${params.toEmail}`);
   } catch (err) {
     console.error('[Email] sendOrderConfirmationToConsumer failed:', err);
@@ -1162,7 +1194,7 @@ export async function sendOrderNotificationToVendor(params: {
 
     const subjectItem = params.items[0]?.productName || 'an item';
     const subjectSuffix = params.items.length > 1 ? ' + more' : '';
-    await sendBrandedEmail(params.toEmail, `🎉 New order received — ${subjectItem}${subjectSuffix}`, html);
+    await sendBrandedEmail(params.toEmail, `🎉 New order received — ${subjectItem}${subjectSuffix}`, html, { kind: 'order', label: 'New order (vendor)' });
     console.log(`[Email] Order vendor notification sent to ${params.toEmail}`);
   } catch (err) {
     console.error('[Email] sendOrderNotificationToVendor failed:', err);
@@ -1312,7 +1344,7 @@ export async function sendOrderShippedEmail(params: {
       ${emailCta('Track My Package', params.trackingUrl)}
       ${emailFooter()}
     `);
-    await sendBrandedEmail(params.toEmail, subject, html);
+    await sendBrandedEmail(params.toEmail, subject, html, { kind: 'order', label: 'Order shipped' });
     console.log(`[Email] Order shipped email sent to ${params.toEmail} for order ${params.orderId}`);
   } catch (err) {
     console.error('[Email] sendOrderShippedEmail failed:', err);
@@ -1393,7 +1425,7 @@ export async function sendBookingRequestReceivedToConsumer(params: {
       ${emailCta('View My Bookings', 'https://goutsyde.com/account/bookings')}
       ${emailFooter()}
     `);
-    await sendBrandedEmail(params.toEmail, `Booking request received — ${params.serviceName}`, html);
+    await sendBrandedEmail(params.toEmail, `Booking request received — ${params.serviceName}`, html, { kind: 'booking', label: 'Booking request received' });
   } catch (err) {
     console.error('[Email] sendBookingRequestReceivedToConsumer failed:', err);
   }
@@ -1434,7 +1466,7 @@ export async function sendBookingRequestToVendor(params: {
       ${emailCta('Review in Dashboard', 'https://goutsyde.com/vendor/bookings')}
       ${emailFooter()}
     `);
-    await sendBrandedEmail(params.toEmail, `New booking request — ${params.serviceName} on ${params.date}`, html);
+    await sendBrandedEmail(params.toEmail, `New booking request — ${params.serviceName} on ${params.date}`, html, { kind: 'booking', label: 'New booking request (vendor)' });
   } catch (err) {
     console.error('[Email] sendBookingRequestToVendor failed:', err);
   }
@@ -1467,7 +1499,7 @@ export async function sendBookingAcceptedToConsumer(params: {
       ${emailCta('View My Bookings', 'https://goutsyde.com/account/bookings')}
       ${emailFooter()}
     `);
-    await sendBrandedEmail(params.toEmail, `Booking accepted — ${params.serviceName} on ${params.date}`, html);
+    await sendBrandedEmail(params.toEmail, `Booking accepted — ${params.serviceName} on ${params.date}`, html, { kind: 'booking', label: 'Booking accepted' });
   } catch (err) {
     console.error('[Email] sendBookingAcceptedToConsumer failed:', err);
   }
@@ -1508,7 +1540,7 @@ export async function sendBookingDeclinedToConsumer(params: {
       ${emailCta('Find Another Provider', 'https://goutsyde.com')}
       ${emailFooter()}
     `);
-    await sendBrandedEmail(params.toEmail, subject, html);
+    await sendBrandedEmail(params.toEmail, subject, html, { kind: 'booking', label: 'Booking declined' });
   } catch (err) {
     console.error('[Email] sendBookingDeclinedToConsumer failed:', err);
   }
@@ -1602,7 +1634,7 @@ export async function sendAppointmentReminderEmail(params: {
     </tr>
     ${emailFooter('See you soon!')}
   `);
-  await sendBrandedEmail(params.toEmail, subject, html);
+  await sendBrandedEmail(params.toEmail, subject, html, { kind: 'booking', label: 'Appointment reminder' });
 }
 
 export async function sendAftercareEmail(params: {
@@ -1638,7 +1670,7 @@ export async function sendAftercareEmail(params: {
     </tr>
     ${emailFooter('We look forward to seeing you again soon.')}
   `);
-  await sendBrandedEmail(params.toEmail, subject, html);
+  await sendBrandedEmail(params.toEmail, subject, html, { kind: 'booking', label: 'Aftercare' });
 }
 
 // Deposit booking confirmation to customer — parameterized for any vendor using the deposit flow.
@@ -1695,15 +1727,24 @@ export async function sendBookingConfirmationToCustomer(params: {
     </div>
   `
 
-  const result = await resend.emails.send({
-    from,
-    to: params.toEmail,
-    subject,
-    html,
-  })
+  const logTag: EmailLogTag = { kind: 'booking', label: 'Deposit booking confirmation' }
+  let result: Awaited<ReturnType<typeof resend.emails.send>>
+  try {
+    result = await resend.emails.send({
+      from,
+      to: params.toEmail,
+      subject,
+      html,
+    })
+  } catch (err) {
+    logTransactionalEmail(logTag, params.toEmail, { error: err })
+    throw err
+  }
   if (result.error) {
+    logTransactionalEmail(logTag, params.toEmail, { error: result.error.message ?? result.error })
     throw new Error(`Resend error: ${result.error.message ?? JSON.stringify(result.error)}`)
   }
+  logTransactionalEmail(logTag, params.toEmail, { resendId: result.data?.id })
 }
 
 // Deposit booking alert to vendor — parameterized for any vendor using the deposit flow.
@@ -1766,15 +1807,24 @@ export async function sendNewBookingAlertToVendor(params: {
     </div>
   `
 
-  const result = await resend.emails.send({
-    from,
-    to: toEmail,
-    subject,
-    html,
-  })
+  const logTag: EmailLogTag = { kind: 'booking', label: 'New deposit booking (vendor)' }
+  let result: Awaited<ReturnType<typeof resend.emails.send>>
+  try {
+    result = await resend.emails.send({
+      from,
+      to: toEmail,
+      subject,
+      html,
+    })
+  } catch (err) {
+    logTransactionalEmail(logTag, toEmail, { error: err })
+    throw err
+  }
   if (result.error) {
+    logTransactionalEmail(logTag, toEmail, { error: result.error.message ?? result.error })
     throw new Error(`Resend error: ${result.error.message ?? JSON.stringify(result.error)}`)
   }
+  logTransactionalEmail(logTag, toEmail, { resendId: result.data?.id })
 }
 
 export async function sendOrderDeliveredEmail(params: {
@@ -1809,7 +1859,7 @@ export async function sendOrderDeliveredEmail(params: {
       ${emailCta('View My Orders', 'https://goutsyde.com/account/orders')}
       ${emailFooter()}
     `);
-    await sendBrandedEmail(params.toEmail, `Your order ${orderRef} has been delivered!`, html);
+    await sendBrandedEmail(params.toEmail, `Your order ${orderRef} has been delivered!`, html, { kind: 'order', label: 'Order delivered' });
     console.log(`[Email] Order delivered email sent to ${params.toEmail} for order ${params.orderId}`);
   } catch (err) {
     console.error('[Email] sendOrderDeliveredEmail failed:', err);
@@ -1850,7 +1900,7 @@ export async function sendOrderDeliveredVendorEmail(params: {
       ${emailCta('View in Dashboard', 'https://goutsyde.com/vendor/orders')}
       ${emailFooter()}
     `);
-    await sendBrandedEmail(params.toEmail, `Order ${orderRef} confirmed delivered`, html);
+    await sendBrandedEmail(params.toEmail, `Order ${orderRef} confirmed delivered`, html, { kind: 'order', label: 'Order delivered (vendor)' });
     console.log(`[Email] Order delivered vendor email sent to ${params.toEmail} for order ${params.orderId}`);
   } catch (err) {
     console.error('[Email] sendOrderDeliveredVendorEmail failed:', err);
