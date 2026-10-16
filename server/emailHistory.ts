@@ -11,7 +11,14 @@ import { sql } from "drizzle-orm";
 import { db } from "./db";
 
 export type SendKind = "broadcast" | "broadcast_test" | "setup";
-export type LogKind = "broadcast" | "broadcast_test" | "setup_claim" | "setup_steps_left";
+/**
+ * Booking, shoot, order, staff and account emails the backend sends on its own (PR C2). They are
+ * logged one row per email with a plain label and never count toward the admin daily budget.
+ * Internal alerts to ADMIN_NOTIFICATION_EMAIL and password or claim code emails are never logged
+ * (decided by Legend 2026-10-16): only senders that pass an EmailLogTag are logged.
+ */
+export type TransactionalKind = "booking" | "shoot" | "order" | "staff" | "account";
+export type LogKind = "broadcast" | "broadcast_test" | "setup_claim" | "setup_steps_left" | TransactionalKind;
 export type LogStatus = "pending" | "sending" | "sent" | "failed" | "unknown";
 
 /** Kinds that count toward the admin daily budget (emails started from the admin Emails page). */
@@ -71,6 +78,100 @@ export async function logEmail(params: {
   } catch (err) {
     console.error("[EmailHistory] logEmail failed:", err);
   }
+}
+
+// ── transactional emails (PR C2) ─────────────────────────────────────────────
+
+/** What a sender passes to have its email logged: an area (kind) and a plain label, no personal data. */
+export interface EmailLogTag { kind: TransactionalKind; label: string }
+
+/**
+ * The one account that uses this address (case insensitive), or null when none or more than one
+ * match. users.email is unique but case sensitive (shared/schema.ts).
+ */
+export async function findUserIdByEmail(address: string): Promise<string | null> {
+  const email = address.trim().toLowerCase();
+  if (!email) return null;
+  const r = await db.execute(sql`SELECT id FROM users WHERE lower(email) = ${email} LIMIT 2`);
+  return r.rows.length === 1 ? String((r.rows[0] as { id: string }).id) : null;
+}
+
+/** Error text without any email address in it (email_log never stores addresses). */
+export function scrubError(err: unknown): string {
+  const raw = err instanceof Error ? err.message : typeof err === "string" ? err : JSON.stringify(err);
+  return String(raw ?? "Send failed").replace(/[^\s<>"'(),;:]+@[^\s<>"'(),;:]+/g, "[address]").slice(0, 500);
+}
+
+/**
+ * Logs one transactional email after the send was attempted. Fire and forget: returns at once,
+ * never throws and never changes what the sender returns or throws. No tag or no address = no log.
+ * The address is only used to find the account; it is not stored. No matching account = the row is
+ * kept without a person (decided by Legend 2026-10-16).
+ */
+export function logTransactionalEmail(
+  tag: EmailLogTag | undefined,
+  to: string | null | undefined,
+  outcome: { resendId?: string | null; error?: unknown },
+): void {
+  if (!tag || !to) return;
+  void (async () => {
+    try {
+      const userId = await findUserIdByEmail(to);
+      const failed = outcome.error !== undefined && outcome.error !== null;
+      await logEmail({
+        sendId: null, userId, kind: tag.kind, label: tag.label,
+        status: failed ? "failed" : "sent",
+        error: failed ? scrubError(outcome.error) : null,
+        resendId: outcome.resendId ?? null,
+      });
+    } catch (err) {
+      console.error("[EmailHistory] logTransactionalEmail failed:", err);
+    }
+  })();
+}
+
+// ── Resend account usage (decision 4a) ───────────────────────────────────────
+
+/** Every email on the Resend account today (backend, goutsyde.com, forms), per Resend's own count. */
+export interface ResendUsage { used: number; limit: number | null; resetsAt: string | null }
+
+const USAGE_CACHE_MS = 60_000;
+let usageCache: { at: number; value: ResendUsage | null } | null = null;
+
+/**
+ * GET {RESEND_BASE_URL or https://api.resend.com}/usage with RESEND_API_KEY (needs a full access
+ * key; Render's is full access, Legend 2026-10-16). Cached for a minute. Returns null on any
+ * problem so the admin page just hides the line. Never throws.
+ */
+export async function getResendUsage(now: number = Date.now()): Promise<ResendUsage | null> {
+  if (usageCache && now - usageCache.at < USAGE_CACHE_MS) return usageCache.value;
+  const key = process.env.RESEND_API_KEY;
+  if (!key) return null;
+  const base = (process.env.RESEND_BASE_URL || "https://api.resend.com").replace(/\/+$/, "");
+  let value: ResendUsage | null = null;
+  try {
+    const res = await fetch(`${base}/usage`, {
+      headers: { Authorization: `Bearer ${key}` },
+      signal: AbortSignal.timeout(3000),
+    });
+    if (res.ok) {
+      const body = (await res.json()) as { emails?: { daily?: { used?: unknown; limit?: unknown; resets_at?: unknown } } };
+      const daily = body?.emails?.daily;
+      if (daily && typeof daily.used === "number") {
+        value = {
+          used: daily.used,
+          limit: typeof daily.limit === "number" ? daily.limit : null,
+          resetsAt: typeof daily.resets_at === "string" ? daily.resets_at : null,
+        };
+      }
+    } else {
+      console.warn(`[EmailHistory] Resend usage returned ${res.status}`);
+    }
+  } catch (err) {
+    console.warn("[EmailHistory] Resend usage failed:", err instanceof Error ? err.message : err);
+  }
+  usageCache = { at: now, value };
+  return value;
 }
 
 /** Recounts a send from its log rows and closes it. Never throws. */

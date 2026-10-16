@@ -36,8 +36,10 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
     let body = "";
     req.on("data", (c) => (body += c));
     req.on("end", () => {
-      const j = body ? JSON.parse(body) : {};
       res.setHeader("Content-Type", "application/json");
+      // GET /usage = Resend account usage for the budget line (PR C2), not an email.
+      if (req.method === "GET" && req.url === "/usage") return res.end(JSON.stringify({ emails: { daily: { used: 3, limit: 100, resets_at: "2026-10-17T00:00:00.000Z" } } }));
+      const j = body ? JSON.parse(body) : {};
       if (String(j.to).includes("+fail")) { res.statusCode = 422; return res.end(JSON.stringify({ name: "validation_error", message: "stub rejected this address" })); }
       sent.push({ path: req.url, ...j });
       res.end(JSON.stringify({ id: `stub_${sent.length}` }));
@@ -116,6 +118,7 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
     // ── 2. budget, audiences, search ────────────────────────────────────────
     let r = await call("GET", "/api/admin/emails/budget", undefined, adminJwt);
     assert(r.status === 200 && r.json.limit === 12 && r.json.sentToday === 0 && r.json.remaining === 12, "budget starts at 0 of 12", r.json);
+    assert(r.json.resend?.used === 3 && r.json.resend?.limit === 100 && r.json.resend?.resetsAt === "2026-10-17T00:00:00.000Z", "budget includes Resend's own daily count (PR C2)", r.json.resend);
     r = await call("GET", "/api/admin/emails/audiences", undefined, adminJwt);
     const counts = r.json?.counts;
     assert(r.status === 200 && counts && counts.all >= 5, "audience counts returned", counts);

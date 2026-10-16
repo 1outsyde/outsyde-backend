@@ -1,4 +1,14 @@
 import { Resend } from 'resend';
+import type { EmailLogTag } from '../emailHistory';
+
+// History logging (PR C2): staff and account emails are logged; the support contact email goes to
+// the Outsyde inbox and stays unlogged. Loaded lazily, fire and forget, never throws.
+function logStaffEmail(tag: EmailLogTag, to: string | null | undefined, outcome: { resendId?: string | null; error?: unknown }): void {
+  if (!to) return;
+  import('../emailHistory')
+    .then((m) => m.logTransactionalEmail(tag, to, outcome))
+    .catch((err) => console.error('[EmailHistory] could not load the logger:', err));
+}
 
 const INVITE_FROM = process.env.RESEND_FROM_EMAIL
   ? `Outsyde <${process.env.RESEND_FROM_EMAIL}>`
@@ -86,14 +96,17 @@ export async function sendStaffInviteEmail(
         ? (result.error as { message?: string }).message ?? JSON.stringify(result.error)
         : String(result.error);
       console.warn(`[resendService] Email send failed for ${toEmail}:`, errMsg);
-      return { sent: false, error: errMsg };
+      logStaffEmail({ kind: 'staff', label: 'Staff invite' }, toEmail, { error: errMsg });
+    return { sent: false, error: errMsg };
     }
 
     console.log(`[resendService] Staff invite sent to ${toEmail} (code: ${inviteCode})`);
+    logStaffEmail({ kind: 'staff', label: 'Staff invite' }, toEmail, { resendId: result.data?.id });
     return { sent: true };
   } catch (err) {
     const errMsg = err instanceof Error ? err.message : String(err);
     console.warn(`[resendService] Unexpected error sending invite to ${toEmail}:`, errMsg);
+    logStaffEmail({ kind: 'staff', label: 'Staff invite' }, toEmail, { error: errMsg });
     return { sent: false, error: errMsg };
   }
 }
@@ -174,14 +187,17 @@ export async function sendStaffPayoutSetupEmail(params: {
         ? (result.error as { message?: string }).message ?? JSON.stringify(result.error)
         : String(result.error);
       console.warn(`[resendService] Payout setup email failed for ${toEmail}:`, errMsg);
-      return { sent: false, error: errMsg };
+      logStaffEmail({ kind: 'staff', label: 'Staff payout setup' }, toEmail, { error: errMsg });
+    return { sent: false, error: errMsg };
     }
 
     console.log(`[resendService] Staff payout setup email sent to ${toEmail}`);
+    logStaffEmail({ kind: 'staff', label: 'Staff payout setup' }, toEmail, { resendId: result.data?.id });
     return { sent: true };
   } catch (err) {
     const errMsg = err instanceof Error ? err.message : String(err);
     console.warn(`[resendService] Unexpected error sending payout setup email to ${toEmail}:`, errMsg);
+    logStaffEmail({ kind: 'staff', label: 'Staff payout setup' }, toEmail, { error: errMsg });
     return { sent: false, error: errMsg };
   }
 }
@@ -243,14 +259,17 @@ export async function sendStaffAcceptedOwnerEmail(params: {
         ? (result.error as { message?: string }).message ?? JSON.stringify(result.error)
         : String(result.error);
       console.warn(`[resendService] Staff-accepted owner email failed for ${toEmail}:`, errMsg);
-      return { sent: false, error: errMsg };
+      logStaffEmail({ kind: 'staff', label: 'Staff member joined (owner)' }, toEmail, { error: errMsg });
+    return { sent: false, error: errMsg };
     }
 
     console.log(`[resendService] Staff-accepted owner email sent to ${toEmail}`);
+    logStaffEmail({ kind: 'staff', label: 'Staff member joined (owner)' }, toEmail, { resendId: result.data?.id });
     return { sent: true };
   } catch (err) {
     const errMsg = err instanceof Error ? err.message : String(err);
     console.warn(`[resendService] Unexpected error sending staff-accepted owner email to ${toEmail}:`, errMsg);
+    logStaffEmail({ kind: 'staff', label: 'Staff member joined (owner)' }, toEmail, { error: errMsg });
     return { sent: false, error: errMsg };
   }
 }
@@ -307,14 +326,17 @@ export async function sendStaffOnboardingCompleteOwnerEmail(params: {
         ? (result.error as { message?: string }).message ?? JSON.stringify(result.error)
         : String(result.error);
       console.warn(`[resendService] Staff-onboarding-complete owner email failed for ${toEmail}:`, errMsg);
-      return { sent: false, error: errMsg };
+      logStaffEmail({ kind: 'staff', label: 'Staff payouts ready (owner)' }, toEmail, { error: errMsg });
+    return { sent: false, error: errMsg };
     }
 
     console.log(`[resendService] Staff-onboarding-complete owner email sent to ${toEmail}`);
+    logStaffEmail({ kind: 'staff', label: 'Staff payouts ready (owner)' }, toEmail, { resendId: result.data?.id });
     return { sent: true };
   } catch (err) {
     const errMsg = err instanceof Error ? err.message : String(err);
     console.warn(`[resendService] Unexpected error sending staff-onboarding-complete owner email to ${toEmail}:`, errMsg);
+    logStaffEmail({ kind: 'staff', label: 'Staff payouts ready (owner)' }, toEmail, { error: errMsg });
     return { sent: false, error: errMsg };
   }
 }
@@ -435,14 +457,17 @@ export async function sendDeletionConfirmationEmail(params: {
         ? (result.error as { message?: string }).message ?? JSON.stringify(result.error)
         : String(result.error);
       console.warn(`[resendService] Deletion confirmation email failed for ${toEmail}:`, errMsg);
-      return { sent: false, error: errMsg };
+      logStaffEmail({ kind: 'account', label: 'Account deletion scheduled' }, toEmail, { error: errMsg });
+    return { sent: false, error: errMsg };
     }
 
     console.log(`[resendService] Deletion confirmation email sent to ${toEmail}`);
+    logStaffEmail({ kind: 'account', label: 'Account deletion scheduled' }, toEmail, { resendId: result.data?.id });
     return { sent: true };
   } catch (err) {
     const errMsg = err instanceof Error ? err.message : String(err);
     console.warn(`[resendService] Unexpected error sending deletion confirmation to ${toEmail}:`, errMsg);
+    logStaffEmail({ kind: 'account', label: 'Account deletion scheduled' }, toEmail, { error: errMsg });
     return { sent: false, error: errMsg };
   }
 }
