@@ -2290,15 +2290,18 @@ export class DatabaseStorage implements IStorage {
             eq(messages.conversationId, conversationId),
             sql`${messages.createdAt} < ${beforeMessage[0].createdAt}`
           )
-        ).limit(limit);
+        ).orderBy(desc(messages.createdAt)).limit(limit);
       } else {
         query = await db.select().from(messages)
           .where(eq(messages.conversationId, conversationId))
+          .orderBy(desc(messages.createdAt))
           .limit(limit);
       }
     } else {
+      // Newest `limit` messages (was unordered, so long chats could drop the latest ones)
       query = await db.select().from(messages)
         .where(eq(messages.conversationId, conversationId))
+        .orderBy(desc(messages.createdAt))
         .limit(limit);
     }
 
