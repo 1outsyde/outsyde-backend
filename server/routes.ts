@@ -11339,7 +11339,16 @@ export async function registerRoutes(
       if (targetType !== "business" && targetType !== "photographer") {
         return res.status(400).json({ error: "Invalid target type" });
       }
-      const comments = await storage.getProfileComments(targetType, targetId);
+      const raw = await storage.getProfileComments(targetType, targetId);
+      // Same public identity rule as the feed and messaging
+      const commenterIds = Array.from(new Set(raw.map(c => c.userId)));
+      const commenters = (await Promise.all(commenterIds.map(id => storage.getUser(id)))).filter(Boolean) as any[];
+      const { resolvePublicIdentities } = await import("./publicIdentity");
+      const identities = await resolvePublicIdentities(commenters);
+      const comments = raw.map(c => {
+        const who = identities.get(c.userId);
+        return who ? { ...c, authorName: who.publicName, authorImage: who.avatarUrl } : c;
+      });
       res.json({ comments });
     } catch (error) {
       console.error("Get profile comments error:", error);
@@ -11376,15 +11385,17 @@ export async function registerRoutes(
         content: content.trim()
       });
 
-      // Get author info
+      // Get author info (same public identity rule as the feed and messaging)
       const user = await storage.getUser(userId);
+      const { resolvePublicIdentity } = await import("./publicIdentity");
+      const who = user ? await resolvePublicIdentity(user) : null;
 
       res.status(201).json({ 
         comment: {
           ...comment,
-          authorName: user?.name || null,
+          authorName: who?.publicName || user?.name || null,
           authorUsername: user?.username || null,
-          authorImage: user?.profileImageUrl || null
+          authorImage: who ? who.avatarUrl : (user?.profileImageUrl || null)
         }
       });
     } catch (error) {
@@ -21343,22 +21354,42 @@ export async function registerRoutes(
     try {
       const { postId } = req.params;
       const comments = await storage.getPostComments(postId);
-      
-      // Enrich with user info
-      const enrichedComments = await Promise.all(comments.map(async (comment) => {
-        const user = await storage.getUser(comment.userId);
+
+      // Commenter identity = same rule as the feed and messaging (business name + logo for
+      // vendors, photographer name + logo, otherwise the person's name). Batched, no N+1.
+      const commenterIds = Array.from(new Set(comments.map(c => c.userId)));
+      const commenters = (await Promise.all(commenterIds.map(id => storage.getUser(id)))).filter(Boolean) as any[];
+      const usersById = new Map(commenters.map(u => [u.id, u]));
+      const { resolvePublicIdentities } = await import("./publicIdentity");
+      const identities = await resolvePublicIdentities(commenters);
+
+      const enrichedComments = comments.map((comment) => {
+        const user = usersById.get(comment.userId);
+        const who = user ? identities.get(user.id) : undefined;
         return {
           ...comment,
-          user: user ? { 
-            id: user.id, 
-            name: user.name, 
+          user: user ? {
+            id: user.id,
+            name: who?.publicName ?? user.name,
             username: user.username,
             firstName: user.firstName,
-            lastName: user.lastName,
-            profileImageUrl: user.profileImageUrl 
+            // Last name is no longer exposed on public comments (clients only used it when
+            // name and username were both missing; name is now always set).
+            lastName: null,
+            profileImageUrl: who ? who.avatarUrl : user.profileImageUrl,
+          } : null,
+          // Additive: same shape as the feed's canonical author object
+          author: user && who ? {
+            userId: user.id,
+            username: user.username || null,
+            displayName: who.publicName,
+            profilePhotoUrl: who.avatarUrl,
+            role: who.kind === "business" ? "vendor" : who.kind,
+            businessId: who.businessId,
+            photographerId: who.photographerId,
           } : null,
         };
-      }));
+      });
       
       res.json({ comments: enrichedComments });
     } catch (error) {
