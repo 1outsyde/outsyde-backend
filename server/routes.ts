@@ -3919,6 +3919,7 @@ export async function registerRoutes(
           id: post.id,
           mediaUrl: post.mediaUrl || post.imageUrl || null,
           mediaType: post.mediaType || 'image',
+          mediaItems: post.mediaItems ?? [],
           postIntent: post.postIntent,
           likeCount: post.likesCount || 0,
           duration: null,
@@ -4006,6 +4007,7 @@ export async function registerRoutes(
           feedSurface: feedPosts.feedSurface,
           createdAt: feedPosts.createdAt,
           aspectRatio: feedPosts.aspectRatio,
+          mediaItems: feedPosts.mediaItems,
           likesCount: feedPosts.likesCount,
           commentsCount: feedPosts.commentsCount,
           productId: feedPosts.productId,
@@ -20447,9 +20449,17 @@ export async function registerRoutes(
         productId: z.string().optional(),
         serviceId: z.string().optional(),
         photographerServiceId: z.string().optional(),
+        // Multi-photo posts (migration 045): 2-10 photos, in display order. Photos only.
+        mediaItems: z.array(z.object({
+          url: z.string().url().startsWith("https://"),
+          type: z.literal("image"),
+          width: z.number().int().positive().optional(),
+          height: z.number().int().positive().optional(),
+          aspectRatio: z.number().positive().optional(),
+        })).min(2).max(10).optional(),
       }).refine(data => {
         // Normalize: check for media URL from either format (all possible fields)
-        const hasMediaUrl = data.media?.url || data.videoUrl || data.mediaUrl || data.imageUrl;
+        const hasMediaUrl = data.media?.url || data.videoUrl || data.mediaUrl || data.imageUrl || (data.mediaItems && data.mediaItems.length > 0);
         const mediaType = data.media?.type || data.mediaType;
         
         // For Pulse posts with video, content is optional (caption)
@@ -20469,6 +20479,31 @@ export async function registerRoutes(
       }, { message: "Content is required for text posts without media" });
 
       const data = schema.parse(req.body);
+
+      // Multi-photo posts are photos only, and every photo must live in our own R2 bucket
+      // (blocks outside links, and lets account deletion remove every photo).
+      if (data.mediaItems) {
+        const hasVideo =
+          data.feedSurface === 'pulse' ||
+          data.mediaType === 'video' ||
+          data.media?.type === 'video' ||
+          !!data.videoUrl;
+        if (hasVideo) {
+          return res.status(400).json({
+            code: "MULTI_MEDIA_IMAGES_ONLY",
+            message: "Multi-photo posts can only contain photos",
+          });
+        }
+        const r2Base = process.env.R2_PUBLIC_URL;
+        const r2Prefix = r2Base ? `${r2Base.replace(/\/+$/, '')}/` : null;
+        if (!r2Prefix || !data.mediaItems.every(item => item.url.startsWith(r2Prefix))) {
+          return res.status(400).json({
+            code: "INVALID_MEDIA_URL",
+            message: "Photos must be uploaded through Outsyde",
+          });
+        }
+      }
+
       const user = await storage.getUser(userId);
       
       if (!user) {
@@ -20583,8 +20618,10 @@ export async function registerRoutes(
       // NORMALIZE: Support both nested media object (web) and flat fields (mobile app)
       // Mobile sends: { videoUrl, mediaType, thumbnailUrl } or { mediaUrl, mediaType }
       // Web sends: { media: { url, type, thumbnailUrl } }
-      const normalizedMediaUrl = data.media?.url || data.videoUrl || data.mediaUrl || data.imageUrl;
-      const normalizedMediaType = data.media?.type || data.mediaType;
+      // Multi-photo posts: photo 1 fills the single-media columns so every existing reader keeps working.
+      const firstMediaItem = data.mediaItems?.[0];
+      const normalizedMediaUrl = firstMediaItem?.url || data.media?.url || data.videoUrl || data.mediaUrl || data.imageUrl;
+      const normalizedMediaType = firstMediaItem ? 'image' : (data.media?.type || data.mediaType);
       const normalizedThumbnailUrl = data.media?.thumbnailUrl || data.thumbnailUrl;
       
       // Validate: Pulse video posts MUST have a media URL
@@ -20611,9 +20648,10 @@ export async function registerRoutes(
         mediaUrl: normalizedMediaUrl,
         mediaType: normalizedMediaType,
         thumbnailUrl: normalizedThumbnailUrl,
-        mediaWidth: data.media?.width,
-        mediaHeight: data.media?.height,
-        aspectRatio: data.media?.aspectRatio,
+        mediaWidth: firstMediaItem ? firstMediaItem.width : data.media?.width,
+        mediaHeight: firstMediaItem ? firstMediaItem.height : data.media?.height,
+        aspectRatio: firstMediaItem ? firstMediaItem.aspectRatio : data.media?.aspectRatio,
+        mediaItems: data.mediaItems ?? [],
         taggedBusinessId: data.taggedBusinessId,
         taggedPhotographerId: data.taggedPhotographerId,
         productId: data.productId,

@@ -84,9 +84,9 @@ async function deleteImageAsset(url: string, postId: string): Promise<void> {
   }
 }
 
-async function purgePostMediaAssets(
+export async function purgePostMediaAssets(
   userId: string,
-  posts: Array<{ id: string; mediaUrl: string | null; imageUrl: string | null; mediaType: string | null }>
+  posts: Array<{ id: string; mediaUrl: string | null; imageUrl: string | null; mediaType: string | null; mediaItems?: Array<{ url: string }> | null }>
 ): Promise<void> {
   for (const post of posts) {
     // Mux video asset
@@ -107,13 +107,19 @@ async function purgePostMediaAssets(
     }
     // Legacy imageUrl field — GCS or R2 depending on age of the post
     if (post.imageUrl) await deleteImageAsset(post.imageUrl, post.id);
+    // Multi-photo posts (migration 045): photos 2-10 live only in mediaItems.
+    // Photo 1 equals mediaUrl/imageUrl and was deleted above, so skip those.
+    for (const item of post.mediaItems ?? []) {
+      if (!item?.url || item.url === post.mediaUrl || item.url === post.imageUrl) continue;
+      await deleteImageAsset(item.url, post.id);
+    }
   }
   console.log(`[accountDeletion] User ${userId}: purged media for ${posts.length} post(s)`);
 }
 
 async function deleteUserFeedPosts(userId: string, tx: typeof db): Promise<void> {
   const posts = await tx
-    .select({ id: feedPosts.id, mediaUrl: feedPosts.mediaUrl, imageUrl: feedPosts.imageUrl, mediaType: feedPosts.mediaType })
+    .select({ id: feedPosts.id, mediaUrl: feedPosts.mediaUrl, imageUrl: feedPosts.imageUrl, mediaType: feedPosts.mediaType, mediaItems: feedPosts.mediaItems })
     .from(feedPosts)
     .where(eq(feedPosts.authorId, userId));
 
