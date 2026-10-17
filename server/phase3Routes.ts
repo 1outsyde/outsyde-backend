@@ -23,6 +23,7 @@ import { eq, and, sql, desc, asc, gte, lte, or } from "drizzle-orm";
 import { randomUUID } from "crypto";
 import { calculateProductFee, calculateBookingFee, PRODUCT_FEE_PERCENT, BOOKING_FEE_PERCENT } from "./fees";
 import type { AuthenticatedRequest } from "./auth";
+import { bookingRevenueWhereSql, bookingRevenueAmountSql, paidOrderWhereSql, orderRevenueDateSql } from "./revenue";
 import { optionalAuthMiddleware, getUserIdFromRequest } from "./auth";
 
 export function registerPhase3Routes(app: Express, requireAdmin: (req: Request, res: Response, next: () => void) => void) {
@@ -510,45 +511,49 @@ export function registerPhase3Routes(app: Express, requireAdmin: (req: Request, 
       const periodDays = period === '7d' ? 7 : period === '90d' ? 90 : period === 'all' ? 3650 : 30;
       const periodStart = new Date(Date.now() - periodDays * 24 * 60 * 60 * 1000);
 
-      // Product orders
-      const productStats = await db.select({
-        gmv: sql<number>`COALESCE(SUM(${orders.totalAmount}), 0)`,
-        fees: sql<number>`COALESCE(SUM(${orders.platformFee}), 0)`,
-      }).from(orders).where(and(
-        or(eq(orders.status, 'paid'), eq(orders.status, 'shipped'), eq(orders.status, 'delivered')),
-        gte(orders.createdAt, periodStart),
-      ));
-
-      // Business appointments
-      const appointmentStats = await db.select({
-        gmv: sql<number>`COALESCE(SUM(${appointments.totalPrice}), 0)`,
-        fees: sql<number>`COALESCE(SUM(${appointments.platformFee}), 0)`,
-      }).from(appointments).where(and(
-        or(eq(appointments.status, 'confirmed'), eq(appointments.status, 'completed')),
-        gte(appointments.createdAt, periodStart),
-      ));
-
-      // Photographer bookings
-      const bookingStats = await db.select({
-        gmv: sql<number>`COALESCE(SUM(${shootBookings.totalPrice}), 0)`,
-        fees: sql<number>`COALESCE(SUM(${shootBookings.platformFee}), 0)`,
-      }).from(shootBookings).where(and(
-        or(eq(shootBookings.status, 'confirmed'), eq(shootBookings.status, 'completed')),
-        gte(shootBookings.createdAt, periodStart),
-      ));
+      // One revenue rule (server/revenue.ts): only money captured through Outsyde counts.
+      // Orders land on their paid date, bookings on their appointment date; refunds are already
+      // taken out of GMV. Cancellation fees are Outsyde income and are added to fees.
+      const productRes = await db.execute<{ gmv: number; fees: number }>(sql`
+        SELECT COALESCE(SUM(total_amount), 0)::int AS gmv, COALESCE(SUM(platform_fee), 0)::int AS fees
+        FROM orders WHERE ${paidOrderWhereSql} AND ${orderRevenueDateSql} >= ${periodStart.toISOString()}
+      `);
+      const periodStartDay = periodStart.toISOString().slice(0, 10);
+      const apptRes = await db.execute<{ gmv: number; fees: number; cancel_fees: number }>(sql`
+        SELECT COALESCE(SUM(${bookingRevenueAmountSql}) FILTER (WHERE ${bookingRevenueWhereSql}), 0)::int AS gmv,
+               COALESCE(SUM(platform_fee) FILTER (WHERE ${bookingRevenueWhereSql}), 0)::int AS fees,
+               COALESCE(SUM(cancellation_fee_kept_cents), 0)::int AS cancel_fees
+        FROM appointments WHERE appointment_date >= ${periodStartDay}
+      `);
+      const shootRes = await db.execute<{ gmv: number; fees: number; cancel_fees: number }>(sql`
+        SELECT COALESCE(SUM(${bookingRevenueAmountSql}) FILTER (WHERE ${bookingRevenueWhereSql}), 0)::int AS gmv,
+               COALESCE(SUM(platform_fee) FILTER (WHERE ${bookingRevenueWhereSql}), 0)::int AS fees,
+               COALESCE(SUM(cancellation_fee_kept_cents), 0)::int AS cancel_fees
+        FROM shoot_bookings WHERE date >= ${periodStartDay}
+      `);
+      const productStats = [productRes.rows[0]];
+      const appointmentStats = [{
+        gmv: Number(apptRes.rows[0]?.gmv || 0),
+        fees: Number(apptRes.rows[0]?.fees || 0) + Number(apptRes.rows[0]?.cancel_fees || 0),
+      }];
+      const bookingStats = [{
+        gmv: Number(shootRes.rows[0]?.gmv || 0),
+        fees: Number(shootRes.rows[0]?.fees || 0) + Number(shootRes.rows[0]?.cancel_fees || 0),
+      }];
 
       // Sponsored revenue
       const sponsoredStats = await db.select({
         revenue: sql<number>`COALESCE(SUM(${sponsoredPosts.spentCents}), 0)`,
       }).from(sponsoredPosts).where(gte(sponsoredPosts.createdAt, periodStart));
 
-      // Refunds
-      const refundStats = await db.select({
-        total: sql<number>`COALESCE(SUM(${appointments.refundAmount}), 0)`,
-      }).from(appointments).where(and(
-        eq(appointments.status, 'refunded' as string),
-        gte(appointments.createdAt, periodStart),
-      ));
+      // Refunds issued in the period (appointments + photographer bookings), for information.
+      const refundRes = await db.execute<{ total: number }>(sql`
+        SELECT (
+          (SELECT COALESCE(SUM(refund_amount), 0) FROM appointments WHERE refunded_at >= ${periodStart.toISOString()}) +
+          (SELECT COALESCE(SUM(refund_amount), 0) FROM shoot_bookings WHERE refunded_at >= ${periodStart.toISOString()})
+        )::int AS total
+      `);
+      const refundStats = [refundRes.rows[0]];
 
       const productGmv = Number(productStats[0]?.gmv || 0);
       const productFees = Number(productStats[0]?.fees || 0);
@@ -568,7 +573,8 @@ export function registerPhase3Routes(app: Express, requireAdmin: (req: Request, 
           platformFeesCollected,
           vendorPayouts,
           refundsIssued,
-          netRevenue: platformFeesCollected - refundsIssued,
+          // Refunds are already out of GMV and fees, so they are not subtracted twice.
+          netRevenue: platformFeesCollected,
           periodStart: periodStart.toISOString(),
           periodEnd: new Date().toISOString(),
           breakdown: {

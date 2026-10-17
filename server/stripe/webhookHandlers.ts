@@ -138,7 +138,8 @@ async function bestEffort(label: string, fn: () => Promise<unknown>): Promise<vo
  */
 async function claimOrderPaid(orderId: string, paymentIntentId: string): Promise<boolean> {
   const rows = await db.update(orders)
-    .set({ status: 'paid', stripePaymentIntentId: paymentIntentId })
+    // paid_at (migration 048): keep the first paid time if one is already set.
+    .set({ status: 'paid', stripePaymentIntentId: paymentIntentId, paidAt: sql`COALESCE(${orders.paidAt}, now())` })
     .where(and(eq(orders.id, orderId), sql`${orders.status} IS DISTINCT FROM 'paid'`))
     .returning({ id: orders.id });
   return rows.length > 0;

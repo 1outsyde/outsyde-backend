@@ -468,7 +468,8 @@ export class PhotographerController {
 
       const bookings = await storage.getPhotographerBookingRecords(photographer.id);
       const totalEarnedCents = bookings
-        .filter(b => b.status === 'confirmed' || b.status === 'completed')
+        // Payouts (net) on bookings whose money was captured and kept. A no-show keeps the deposit.
+        .filter(b => b.status === 'confirmed' || b.status === 'completed' || b.status === 'no_show')
         .reduce((sum, b) => sum + (b.vendorNet || 0), 0);
       res.json({ bookings, totalEarnedCents });
     } catch (error) {

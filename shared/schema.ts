@@ -992,6 +992,8 @@ export const shootBookings = pgTable("shoot_bookings", {
   stripeRefundId: text("stripe_refund_id"),
   refundedAt: timestamp("refunded_at"),
   refundAmount: integer("refund_amount"), // Amount refunded in cents
+  // Cancellation fee charged on customer cancel (migration 048). Goes to Outsyde, not the business.
+  cancellationFeeKeptCents: integer("cancellation_fee_kept_cents"),
   
   // State machine status: draft, pending_payment, pending_provider, confirmed, completed, canceled, expired, no_show, declined
   status: text("status").default("draft").notNull(),
@@ -1122,6 +1124,8 @@ export const appointments = pgTable("appointments", {
   stripeRefundId: text("stripe_refund_id"),
   refundedAt: timestamp("refunded_at"),
   refundAmount: integer("refund_amount"), // Amount refunded in cents
+  // Cancellation fee charged on customer cancel (migration 048). Goes to Outsyde, not the business.
+  cancellationFeeKeptCents: integer("cancellation_fee_kept_cents"),
   
   // State machine status: draft, pending_payment, pending_provider, confirmed, completed, canceled, expired, no_show, declined
   status: text("status").default("draft").notNull(),
@@ -1249,6 +1253,8 @@ export const orders = pgTable("orders", {
   outsydeGrossRevenue: integer("outsyde_gross_revenue").default(0), // consumerServiceFee + platformFee
   stripeFeeAmount: integer("stripe_fee_amount").default(0), // estimated/actual Stripe processing fee
   taxAmount: integer("tax_amount").default(0),
+  // When the order became paid (migration 048). NULL on orders paid before 048: read COALESCE(paid_at, created_at).
+  paidAt: timestamp("paid_at", { withTimezone: true }),
 
   // Influencer attribution
   attributedInfluencerId: varchar("attributed_influencer_id", { length: 36 }),
