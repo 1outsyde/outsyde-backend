@@ -393,6 +393,29 @@ export async function releasePromoReservation(ref: PromoRef, codeId?: string): P
   return result.map(r => r.id);
 }
 
+/** True when this checkout holds at least one code. */
+export async function refHoldsAnyPromo(ref: PromoRef): Promise<boolean> {
+  const [r] = await rows(sql`
+    SELECT 1 AS ok FROM promo_codes
+    WHERE status = 'reserved' AND used_on_reference_type = ${ref.type} AND used_on_order_id = ${ref.id}
+    LIMIT 1
+  `);
+  return !!r;
+}
+
+/** Give back every code this checkout holds except keepCodeId (null = give back all of them). */
+export async function releasePromoReservationsExcept(ref: PromoRef, keepCodeId: string | null): Promise<string[]> {
+  const result = await rows<{ id: string }>(sql`
+    UPDATE promo_codes
+    SET status = 'active', used_on_reference_type = NULL, used_on_order_id = NULL
+    WHERE status = 'reserved'
+      AND used_on_reference_type = ${ref.type} AND used_on_order_id = ${ref.id}
+      AND (${keepCodeId}::varchar IS NULL OR id <> ${keepCodeId}::varchar)
+    RETURNING id
+  `);
+  return result.map(r => r.id);
+}
+
 /**
  * Give the customer back the code used on a purchase that was cancelled with a full refund (or
  * a hold that never got paid). The code becomes active again with at least PROMO_CODE_DAYS left.
