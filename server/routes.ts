@@ -11761,6 +11761,10 @@ export async function registerRoutes(
         "showStoreHours",
         "showAddress",
         "allowPastClosing",
+        // Industry from the shared list (migration 047). Checked below with validateIndustrySelection.
+        "categoryCode",
+        "specialties",
+        "otherDescription",
       ]);
       if (otherFields.allowPastClosing !== undefined && typeof otherFields.allowPastClosing !== "boolean") {
         return res.status(400).json({ error: "allowPastClosing must be true or false" });
@@ -11773,6 +11777,56 @@ export async function registerRoutes(
       for (const key of Object.keys(otherFields)) {
         if (VENDOR_MY_BUSINESS_ALLOWED_FIELDS.has(key)) {
           updates[key] = otherFields[key];
+        }
+      }
+
+      // Industry (2026-10-17, Legend): the stored code is the source of truth for future
+      // customer matching. Whenever this save touches the industry or the offer type of a
+      // business that has (or is getting) a code, the merged result must pass the same check
+      // as signup, or the whole save is rejected. Businesses without a code keep the old behaviour.
+      const industryError = (error: string, details?: string[]) =>
+        res.status(400).json({ error, field: "industry", ...(details ? { details } : {}) });
+      const touchesIndustry = ["categoryCode", "specialties", "otherDescription", "hasProducts", "hasServices", "category"]
+        .some((key) => updates[key] !== undefined);
+      if (touchesIndustry) {
+        if (updates.categoryCode !== undefined && (typeof updates.categoryCode !== "string" || !updates.categoryCode.trim())) {
+          return industryError("Choose your industry");
+        }
+        if (updates.specialties !== undefined && (!Array.isArray(updates.specialties) || !updates.specialties.every((s: unknown) => typeof s === "string"))) {
+          return industryError("specialties must be a list of codes");
+        }
+        if (updates.otherDescription !== undefined && updates.otherDescription !== null && typeof updates.otherDescription !== "string") {
+          return industryError("otherDescription must be text");
+        }
+        const nextCode: string | null = updates.categoryCode !== undefined ? updates.categoryCode.trim() : (business.categoryCode ?? null);
+        if (!nextCode) {
+          if (updates.specialties !== undefined || updates.otherDescription !== undefined) {
+            return industryError("Choose your industry first");
+          }
+          // No code stored or sent: legacy business, nothing to check (category / offer flags save as before).
+        } else {
+          for (const flag of ["hasProducts", "hasServices"] as const) {
+            if (updates[flag] !== undefined && typeof updates[flag] !== "boolean") {
+              return res.status(400).json({ error: `${flag} must be true or false` });
+            }
+          }
+          const hasProducts: boolean = updates.hasProducts ?? business.hasProducts ?? false;
+          const hasServices: boolean = updates.hasServices ?? business.hasServices ?? false;
+          if (!hasProducts && !hasServices) {
+            return industryError("Choose products, services or both");
+          }
+          const offerType = hasProducts && hasServices ? "both" : hasProducts ? "products" : "services";
+          const specialties: string[] = updates.specialties ?? business.specialties ?? [];
+          const rawDescription = updates.otherDescription !== undefined ? updates.otherDescription : business.otherDescription;
+          const otherDescription = typeof rawDescription === "string" && rawDescription.trim() ? rawDescription.trim() : null;
+          const problems = validateIndustrySelection({ categoryCode: nextCode, specialties, offerType, otherDescription });
+          if (problems.length > 0) {
+            return industryError(problems[0], problems);
+          }
+          if (updates.categoryCode !== undefined) updates.categoryCode = nextCode;
+          if (updates.otherDescription !== undefined) updates.otherDescription = otherDescription;
+          // The readable name always follows the code, so search and cards never disagree with matching.
+          updates.category = getCategory(nextCode)!.label;
         }
       }
 
