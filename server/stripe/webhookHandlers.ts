@@ -24,7 +24,7 @@ import {
 } from "../emailService";
 import { processInfluencerCommission, reverseInfluencerCommission } from "../influencerPayoutService";
 import { settleAppointmentBooking, settleShootBooking } from "../bookingSettlement";
-import { qualifyReferral, releaseAfterForBooking } from "../loyaltyLedger";
+import { qualifyReferral, releaseAfterForBooking, releasePromoReservation, type PromoRef } from "../loyaltyLedger";
 import { isComplimentaryTier, isTerminalStripeStatus } from "../complimentary";
 
 // XO Beauty & Lashes' own deposit-email sender (the legacy
@@ -171,6 +171,7 @@ export async function sendAppointmentReceipts(
   // is display only.
   const depositCents = opts.forceFullPayment ? undefined : appointment.depositAmountCents ?? undefined;
   const remainderCents = depositCents != null ? Math.max(0, appointment.totalPrice - depositCents) : undefined;
+  const rewardsDiscountCents = appointment.discountAmountCents && appointment.discountAmountCents > 0 ? appointment.discountAmountCents : undefined;
 
   await sendTransactionReceipts(opts.txnType, appointmentId, {
     consumer: {
@@ -188,6 +189,7 @@ export async function sendAppointmentReceipts(
         basePrice: appointment.totalPrice,
         depositAmountCents: depositCents,
         remainderDueCents: remainderCents,
+        rewardsDiscountCents,
         addons: (appointment.addons as Array<{ name: string; priceCents: number }> | null) ?? [],
       }),
     },
@@ -206,6 +208,7 @@ export async function sendAppointmentReceipts(
         basePrice: appointment.totalPrice,
         depositAmountCents: depositCents,
         remainderDueCents: remainderCents,
+        rewardsDiscountCents,
         addons: (appointment.addons as Array<{ name: string; priceCents: number }> | null) ?? [],
         customerDetails: appointment.customerDetails ?? null,
       }),
@@ -222,6 +225,7 @@ export async function sendAppointmentReceipts(
       amountChargedCents: depositCents ?? appointment.totalPrice,
       serviceTotalCents: appointment.totalPrice,
       stripeChargeCents: opts.stripeChargeCents,
+      rewardsDiscountCents,
       date: appointment.appointmentDate,
       time: appointment.appointmentTime,
     }),
@@ -249,6 +253,7 @@ export async function sendShootBookingReceipts(
   // is display only.
   const depositCents = (booking.depositAmountCents ?? 0) > 0 ? booking.depositAmountCents! : undefined;
   const remainderCents = depositCents != null ? Math.max(0, (booking.totalPrice || 0) - depositCents) : undefined;
+  const rewardsDiscountCents = booking.discountAmountCents && booking.discountAmountCents > 0 ? booking.discountAmountCents : undefined;
 
   const bookingAddons = (booking.addons as Array<{id:string;name:string;priceCents:number;durationMinutes:number}> | null | undefined) ?? [];
   const emailAddons = bookingAddons.length > 0 ? bookingAddons.map(a => ({ name: a.name, priceCents: a.priceCents })) : undefined;
@@ -270,6 +275,7 @@ export async function sendShootBookingReceipts(
         basePrice: booking.totalPrice || 0,
         depositAmountCents: depositCents,
         remainderDueCents: remainderCents,
+        rewardsDiscountCents,
         addons: emailAddons,
         customerDetails: bookingCustomerDetails,
       }),
@@ -289,6 +295,7 @@ export async function sendShootBookingReceipts(
         basePrice: booking.totalPrice || 0,
         depositAmountCents: depositCents,
         remainderDueCents: remainderCents,
+        rewardsDiscountCents,
         addons: emailAddons,
         customerDetails: bookingCustomerDetails,
       }),
@@ -305,6 +312,7 @@ export async function sendShootBookingReceipts(
       amountChargedCents: depositCents ?? (booking.totalPrice || 0),
       serviceTotalCents: booking.totalPrice || 0,
       stripeChargeCents: opts.stripeChargeCents,
+      rewardsDiscountCents,
       date: booking.date || '',
       time: booking.startTime || '',
     }),
@@ -636,6 +644,14 @@ export class WebhookHandlers {
 
         console.log(`[Stripe] Appointment ${bookingId} confirmed via PaymentIntent`);
       } else if (type === 'shoot_booking') {
+        // The points code this payment carried is used now (also when another path confirmed
+        // the booking first). Repeats are a no-op.
+        if (metadata.promoCodeId && bookingId) {
+          await storage.applyPromoCode(metadata.promoCodeId, 'shoot_booking', bookingId).catch(err =>
+            console.error(`[Stripe] Failed to apply promo code ${metadata.promoCodeId} for shoot booking ${bookingId}:`, err)
+          );
+        }
+
         // Capture current status before the atomic claim for the audit log
         // fromState. Safe: if the UPDATE succeeds, this value is the correct
         // pre-update state because the claim guard prevents re-entry.
@@ -709,13 +725,6 @@ export class WebhookHandlers {
         // Hold conversion, photographer payout, points and referral, once.
         await settleShootBooking(bookingId, paymentIntent);
 
-        const { promoCodeId: sbPromoCodeId } = metadata;
-        if (sbPromoCodeId) {
-          await storage.applyPromoCode(sbPromoCodeId, 'shoot_booking', bookingId).catch(err =>
-            console.error(`[Stripe] Failed to apply promo code ${sbPromoCodeId} for shoot booking ${bookingId}:`, err)
-          );
-        }
-
         // In-app + push notifications (best-effort)
         try {
           console.log(`[Notify:shoot_booking] Sending notifications for shoot booking ${bookingId}`);
@@ -761,6 +770,14 @@ export class WebhookHandlers {
         if (!appointment) {
           console.error(`[Stripe] Appointment ${appointmentId} not found`);
           return;
+        }
+
+        // The points code this payment carried is used now (also when the vendor Accept route
+        // confirmed the booking first). Repeats are a no-op.
+        if (metadata.promoCodeId) {
+          await storage.applyPromoCode(metadata.promoCodeId, 'appointment', appointmentId).catch(err =>
+            console.error(`[Stripe] Failed to apply promo code ${metadata.promoCodeId} for appointment ${appointmentId}:`, err)
+          );
         }
 
         if (appointment.status !== BOOKING_STATES.PENDING_PAYMENT &&
@@ -1042,6 +1059,8 @@ export class WebhookHandlers {
         }));
         const piVendorItems = piOrderItems.map(({ vendorName: _vn, vendorContactEmail: _vce, ...rest }) => rest);
 
+        const piRewardsCents = Number(metadata.discountCents) > 0 && metadata.promoCodeId ? Number(metadata.discountCents) : undefined;
+
         // Receipts first, so later side effects can never skip them.
         await sendTransactionReceipts('product_purchase', orderId, {
           consumer: {
@@ -1056,6 +1075,7 @@ export class WebhookHandlers {
               items: piOrderItems,
               totalAmountCents: order.grossChargeAmount ?? undefined,
               platformFeeCents: order.consumerServiceFee ?? undefined,
+              rewardsDiscountCents: piRewardsCents,
             }),
           },
           vendor: {
@@ -1069,6 +1089,7 @@ export class WebhookHandlers {
               orderNumber: order.orderNumber,
               items: piVendorItems,
               vendorNetCents: order.vendorNet ?? undefined,
+              rewardsDiscountCents: piRewardsCents,
             }),
           },
           admin: () => sendInternalEventAlert({
@@ -1080,6 +1101,7 @@ export class WebhookHandlers {
             vendorEmail: vendor?.email || '',
             items: piVendorItems,
             stripeChargeCents: paymentIntent.amount,
+            rewardsDiscountCents: piRewardsCents,
           }),
         });
 
@@ -1546,6 +1568,21 @@ export class WebhookHandlers {
   static async handlePaymentIntentCanceled(paymentIntent: any) {
     const metadata = paymentIntent.metadata || {};
     const { type, bookingId } = metadata;
+
+    // A cancelled payment never used its points code: give the hold back. Only a hold by this
+    // same checkout is released (a newer checkout that took the code over keeps it).
+    if (metadata.promoCodeId) {
+      const ref: PromoRef | null =
+        type === 'appointment' && metadata.appointmentId ? { type: 'appointment', id: metadata.appointmentId }
+        : type === 'shoot_booking' && bookingId ? { type: 'shoot_booking', id: bookingId }
+        : type === 'product_purchase' && metadata.orderId ? { type: 'order', id: metadata.orderId }
+        : type === 'appointment_booking' && bookingId ? { type: 'appointment', id: bookingId }
+        : null;
+      if (ref) {
+        await releasePromoReservation(ref, metadata.promoCodeId)
+          .catch(err => console.error(`[Stripe] Failed to release promo code ${metadata.promoCodeId}:`, err));
+      }
+    }
 
     // Handle product order cancellation
     if (metadata.orderId && !metadata.bookingId) {

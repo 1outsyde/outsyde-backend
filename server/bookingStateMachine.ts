@@ -10,7 +10,7 @@ import {
 } from "@shared/schema";
 import { eq, and, or, lt, inArray } from "drizzle-orm";
 import { expireOldHolds } from "./availabilityService";
-import { rejectPendingForReference } from "./loyaltyLedger";
+import { rejectPendingForReference, releasePromoReservation } from "./loyaltyLedger";
 
 // A booking that ends any way other than completed never releases its pending points.
 const POINTS_REJECT_STATES: ReadonlySet<string> = new Set([
@@ -30,6 +30,14 @@ async function rejectPendingPointsOnEnd(
     await rejectPendingForReference(referenceType, bookingId, `Booking ${toState}`);
   } catch (err) {
     console.error(`[Points] Failed to reject pending points for ${referenceType} ${bookingId}:`, err);
+  }
+  // A points code still only held by this booking (never paid: abandoned, declined, expired)
+  // goes back to the customer. A code that was used stays used; a full refund gives it back
+  // separately (restorePromoForReference at the refund).
+  try {
+    await releasePromoReservation({ type: referenceType, id: bookingId });
+  } catch (err) {
+    console.error(`[Points] Failed to release points code for ${referenceType} ${bookingId}:`, err);
   }
 }
 

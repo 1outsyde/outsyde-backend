@@ -324,6 +324,9 @@ export interface IStorage {
     addonsTotalCents: number;
     addonsDurationMinutes: number;
     customerDetails: string | null;
+    discountAmountCents: number;
+    pointsRedeemed: number;
+    customerPaidNowCents: number;
   }[]>;
   getAppointmentsByClient(clientId: string): Promise<Appointment[]>;
   getAppointmentsByClientWithDetails(clientId: string): Promise<{
@@ -418,6 +421,9 @@ export interface IStorage {
     depositAmountCents: number | null;
     chargedAmountCents: number;
     inPersonDueCents: number;
+    discountAmountCents: number;
+    pointsRedeemed: number;
+    customerPaidNowCents: number;
   }[]>;
   createShootBooking(data: {
     photographerId: string;
@@ -1711,6 +1717,9 @@ export class DatabaseStorage implements IStorage {
     depositAmountCents: number | null;
     chargedAmountCents: number;
     inPersonDueCents: number;
+    discountAmountCents: number;
+    pointsRedeemed: number;
+    customerPaidNowCents: number;
   }[]> {
     const bookingRecords = await db.select({
       recordId: shootBookings.id,
@@ -1735,6 +1744,8 @@ export class DatabaseStorage implements IStorage {
       addonsTotalCents: shootBookings.addonsTotalCents,
       customerDetails: shootBookings.customerDetails,
       depositAmountCents: shootBookings.depositAmountCents,
+      discountAmountCents: shootBookings.discountAmountCents,
+      pointsRedeemed: shootBookings.pointsRedeemed,
     })
       .from(shootBookings)
       .leftJoin(users, eq(shootBookings.clientId, users.id))
@@ -1768,6 +1779,10 @@ export class DatabaseStorage implements IStorage {
         depositAmountCents: b.depositAmountCents ?? null,
         chargedAmountCents: fields.chargedAmountCents,
         inPersonDueCents: fields.dueAtAppointmentCents,
+        // Outsyde rewards the customer used (paid by Outsyde; vendorNet unchanged).
+        discountAmountCents: b.discountAmountCents ?? 0,
+        pointsRedeemed: b.pointsRedeemed ?? 0,
+        customerPaidNowCents: fields.chargedAmountCents - (b.discountAmountCents ?? 0),
       };
     });
   }
@@ -1915,8 +1930,13 @@ export class DatabaseStorage implements IStorage {
     addonsTotalCents: number;
     addonsDurationMinutes: number;
     customerDetails: string | null;
+    discountAmountCents: number;
+    pointsRedeemed: number;
+    customerPaidNowCents: number;
   }[]> {
     const rows = await db.select({
+      discountAmountCents: appointments.discountAmountCents,
+      pointsRedeemed: appointments.pointsRedeemed,
       id: appointments.id,
       date: appointments.appointmentDate,
       time: appointments.appointmentTime,
@@ -1967,6 +1987,11 @@ export class DatabaseStorage implements IStorage {
         addonsTotalCents: row.addonsTotalCents ?? 0,
         addonsDurationMinutes: row.addonsDurationMinutes ?? 0,
         customerDetails: row.customerDetails ?? null,
+        // Outsyde rewards the customer used on this booking. Outsyde pays it; the business payout
+        // (vendorNetAmount) is unchanged. customerPaidNowCents = what the customer's card paid.
+        discountAmountCents: row.discountAmountCents ?? 0,
+        pointsRedeemed: row.pointsRedeemed ?? 0,
+        customerPaidNowCents: chargeFields.chargedAmountCents - (row.discountAmountCents ?? 0),
       };
     });
   }

@@ -3561,7 +3561,7 @@ export const promoCodes = pgTable("promo_codes", {
   userId: varchar("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
   pointsCost: integer("points_cost").notNull(),
   discountCents: integer("discount_cents").notNull(),
-  status: text("status").notNull().default("active"), // 'active' | 'used' | 'expired'
+  status: text("status").notNull().default("active"), // 'active' | 'reserved' (held by one checkout) | 'used' | 'expired'
   createdAt: timestamp("created_at").defaultNow().notNull(),
   expiresAt: timestamp("expires_at").notNull(),
   usedAt: timestamp("used_at"),
