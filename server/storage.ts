@@ -1171,6 +1171,9 @@ export class DatabaseStorage implements IStorage {
       subscriptionActive: insertBusiness.subscriptionActive ?? false,
       vendorAgreementAccepted: insertBusiness.vendorAgreementAccepted ?? false,
       vendorAgreementAcceptedAt: insertBusiness.vendorAgreementAcceptedAt || null,
+      categoryCode: insertBusiness.categoryCode || null,
+      specialties: Array.isArray(insertBusiness.specialties) ? [...insertBusiness.specialties] : [],
+      otherDescription: insertBusiness.otherDescription || null,
     }).returning();
 
     return result[0];
