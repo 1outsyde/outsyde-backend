@@ -110,7 +110,7 @@ import {
   type TokenPayload,
 } from "./auth";
 import rateLimit from "express-rate-limit";
-import { stripeService } from "./stripe/stripeService";
+import { stripeService, isUnreachableConnectAccountError } from "./stripe/stripeService";
 import { isClaimable, issueClaimCode, firstNameOf } from "./accountSetup/claim";
 import { sendAppointmentReceipts, sendShootBookingReceipts } from "./stripe/webhookHandlers";
 import { getStripePublishableKey, getUncachableStripeClient } from "./stripe/stripeClient";
@@ -14490,7 +14490,7 @@ export async function registerRoutes(
       }
 
       // Create Stripe Express account using the staff-specific function so
-      // capabilities (transfers-only), MCC, and metadata (role:"staff") are correct.
+      // capabilities (card_payments + transfers), MCC, and metadata (role:"staff") are correct.
       // This matters for the account.updated webhook — metadata.role="staff" must
       // match for the staff branch to trigger without falling to the fallback lookup.
       const account = await stripeService.createStaffConnectAccount(
@@ -15293,25 +15293,24 @@ export async function registerRoutes(
       }
       const staff = resolved.staff;
 
-      let accountId = staff.stripeAccountId;
-
       // Create Stripe account if doesn't exist.
       // Must use createStaffConnectAccount (not the generic photographer alias) so
       // metadata.role="staff" is set — the webhook handler's staff branch depends on it.
-      if (!accountId) {
+      const createStaffAccount = async () => {
         const account = await stripeService.createStaffConnectAccount(
           staff.email || `staff-${staff.id}@outsyde.app`,
           staff.id,
           staff.businessId,
           staff.displayName,
         );
-        accountId = account.id;
-
         await storage.updateStaffMember(staff.id, {
-          stripeAccountId: accountId,
+          stripeAccountId: account.id,
           stripeOnboardingComplete: false,
         });
-      }
+        return account.id;
+      };
+
+      let accountId = staff.stripeAccountId || (await createStaffAccount());
 
       // Generate onboarding link.
       // Redirect URLs must be HTTPS (Stripe rejects custom-scheme deep links directly).
@@ -15321,11 +15320,24 @@ export async function registerRoutes(
       const baseUrl = process.env.API_BASE_URL || 'https://outsyde-backend.onrender.com';
       // returnTo:"finish" = started on goutsyde.com/finish; connect-return sends them back there.
       const finishSuffix = req.body?.returnTo === 'finish' ? '&return=finish' : '';
-      const accountLink = await stripeService.createConnectOnboardingLink(
-        accountId,
-        `${baseUrl}/api/stripe/connect-refresh?account=${accountId}&type=staff&staffId=${staff.id}${finishSuffix}`,
-        `${baseUrl}/api/stripe/connect-return?account=${accountId}&type=staff&staffId=${staff.id}${finishSuffix}`,
-      );
+      const makeLink = (id: string) =>
+        stripeService.createConnectOnboardingLink(
+          id,
+          `${baseUrl}/api/stripe/connect-refresh?account=${id}&type=staff&staffId=${staff.id}${finishSuffix}`,
+          `${baseUrl}/api/stripe/connect-return?account=${id}&type=staff&staffId=${staff.id}${finishSuffix}`,
+        );
+
+      let accountLink;
+      try {
+        accountLink = await makeLink(accountId);
+      } catch (linkErr) {
+        // Saved account is deleted or belongs to another platform/mode (e.g. an old sandbox
+        // account): replace it once with a fresh account. Any other error is unchanged (500 below).
+        if (!staff.stripeAccountId || !isUnreachableConnectAccountError(linkErr)) throw linkErr;
+        console.warn(`[Staff Stripe] Saved account ${staff.stripeAccountId} unreachable for staff ${staff.id}; creating a new one`);
+        accountId = await createStaffAccount();
+        accountLink = await makeLink(accountId);
+      }
 
       await storage.updateStaffMember(staff.id, {
         stripeOnboardingUrl: accountLink.url,
