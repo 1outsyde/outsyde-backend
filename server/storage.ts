@@ -174,6 +174,7 @@ import {
   promoCodes,
 } from "@shared/schema";
 import { db } from "./db";
+import { coverStillImage, nonEmpty } from "./coverMedia";
 import { eq, ilike, or, and, sql, isNull, isNotNull, desc, asc, gte, lte, ne, inArray, notInArray } from "drizzle-orm";
 import { randomUUID, createHash } from "crypto";
 import { quoteDeposit } from "./fees";
@@ -924,6 +925,12 @@ export interface UnifiedSearchResult {
   title: string;
   subtitle: string | null;
   imageUrl: string | null;
+  /** Additive (2026-10-17): the circle picture only (logo / profile photo), never the cover. */
+  avatarUrl?: string | null;
+  /** Additive (2026-10-17): card background. Always a still image (a Mux video cover becomes its thumbnail). */
+  coverImage?: string | null;
+  /** Additive (2026-10-17): 'image' | 'video' as stored, for clients that can play the video. */
+  coverMediaType?: string | null;
   ratingAvg: number | null;
   ratingCount: number | null;
   category: string | null;
@@ -6433,6 +6440,9 @@ export class DatabaseStorage implements IStorage {
           title: displayName,
           subtitle: [u.city, u.state].filter(Boolean).join(', ') || null,
           imageUrl: u.profileImageUrl || null,
+          avatarUrl: nonEmpty(u.profileImageUrl),
+          coverImage: coverStillImage(u.coverMediaUrl, u.coverMediaType),
+          coverMediaType: u.coverMediaUrl ? (u.coverMediaType ?? null) : null,
           ratingAvg: null,
           ratingCount: null,
           category: null,
@@ -6491,6 +6501,9 @@ export class DatabaseStorage implements IStorage {
           title: p.displayName || 'Photographer',
           subtitle: [p.city, p.state].filter(Boolean).join(', ') || null,
           imageUrl: p.logoImage || p.coverImage || null,
+          avatarUrl: nonEmpty(p.logoImage),
+          coverImage: coverStillImage(p.coverImage, p.coverMediaType),
+          coverMediaType: p.coverImage ? (p.coverMediaType ?? null) : null,
           ratingAvg: p.rating ? p.rating / 10 : null,
           ratingCount: p.reviewCount || null,
           category: (p.specialties || [])[0] || 'Photography',
@@ -6567,6 +6580,9 @@ export class DatabaseStorage implements IStorage {
             .filter(Boolean)
             .join(' · ') || null,
           imageUrl: b.logoImage || b.coverImage || null,
+          avatarUrl: nonEmpty(b.logoImage),
+          coverImage: coverStillImage(b.coverImage, b.coverMediaType),
+          coverMediaType: b.coverImage ? (b.coverMediaType ?? null) : null,
           ratingAvg: b.rating ? b.rating / 10 : null,
           ratingCount: b.reviewCount || null,
           category: b.category || null,
@@ -6635,6 +6651,9 @@ export class DatabaseStorage implements IStorage {
             ? `@ ${row.bName}${row.bCity ? ` · ${row.bCity}` : ''}`
             : null,
           imageUrl: row.st.profileImageUrl || null,
+          avatarUrl: nonEmpty(row.st.profileImageUrl),
+          coverImage: coverStillImage(row.st.coverImage, row.st.coverMediaType),
+          coverMediaType: row.st.coverImage ? (row.st.coverMediaType ?? null) : null,
           ratingAvg: row.st.rating || null,
           ratingCount: row.st.reviewCount || null,
           category: (row.st.specialties || [])[0] || null,
@@ -6733,6 +6752,7 @@ export class DatabaseStorage implements IStorage {
         .select({
           s: vendorServices,
           bName: businesses.name,
+          bLogo: businesses.logoImage,
           bCity: businesses.city,
           bState: businesses.state,
           bOwnerId: businesses.ownerId,
@@ -6782,6 +6802,10 @@ export class DatabaseStorage implements IStorage {
             ? `by ${row.bName}${row.bCity ? ` · ${row.bCity}` : ''}`
             : null,
           imageUrl: null,
+          // Additive: circle = the business logo, background = the service photo
+          avatarUrl: nonEmpty(row.bLogo),
+          coverImage: nonEmpty(row.s.imageUrl),
+          coverMediaType: nonEmpty(row.s.imageUrl) ? 'image' : null,
           ratingAvg: null,
           ratingCount: null,
           category: row.s.category || null,
@@ -6804,6 +6828,7 @@ export class DatabaseStorage implements IStorage {
           s: photographerServices,
           pId: photographers.id,
           pName: photographers.displayName,
+          pLogo: photographers.logoImage,
           pCity: photographers.city,
           pState: photographers.state,
           pUserId: photographers.userId,
@@ -6848,6 +6873,10 @@ export class DatabaseStorage implements IStorage {
             ? `by ${row.pName}${row.pCity ? ` · ${row.pCity}` : ''}`
             : null,
           imageUrl: null,
+          // Additive: circle = the photographer logo, background = the service photo
+          avatarUrl: nonEmpty(row.pLogo),
+          coverImage: nonEmpty(row.s.imageUrl),
+          coverMediaType: nonEmpty(row.s.imageUrl) ? 'image' : null,
           ratingAvg: null,
           ratingCount: null,
           category: row.s.category || 'Photography',
