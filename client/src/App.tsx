@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { queryClient, getQueryFn } from "./lib/queryClient";
 import { QueryClientProvider, useQuery } from "@tanstack/react-query";
 import { Toaster } from "@/components/ui/toaster";
@@ -26,6 +26,7 @@ import OrderSuccessPage from "@/pages/order-success";
 import CheckoutContinuePage from "@/pages/checkout-continue";
 import VendorOnboardingPage from "@/pages/vendor-onboarding";
 import PulsePage from "@/pages/pulse";
+import StripeConnectModal from "@/components/StripeConnectModal";
 
 import jewelryImage from "@assets/generated_images/jewelry_artisan_vendor_image.png";
 import type { User } from "@shared/schema";
@@ -94,6 +95,27 @@ function AppContent() {
   const isVendor = user?.isVendor ?? false;
   const isPhotographer = user?.isPhotographer ?? false;
   const isInfluencer = user?.isInfluencer ?? false;
+
+  // stripeConnectComplete is now included in /api/auth/user response
+  const stripeConnectComplete = (user as any)?.stripeConnectComplete as boolean | undefined;
+
+  // Dismissed flag resets whenever a different user signs in
+  const [connectModalDismissed, setConnectModalDismissed] = useState(false);
+  const trackedUserIdRef = useRef<string | null>(null);
+  useEffect(() => {
+    const nextId = user?.id ?? null;
+    if (nextId !== trackedUserIdRef.current) {
+      trackedUserIdRef.current = nextId;
+      // Reset dismissal so the modal re-appears for the new user
+      setConnectModalDismissed(false);
+    }
+  }, [user?.id]);
+
+  const showConnectModal =
+    isAuthenticated &&
+    (isVendor || isPhotographer) &&
+    stripeConnectComplete === false &&
+    !connectModalDismissed;
 
   const { 
     items: dbCartItems, 
@@ -396,6 +418,14 @@ function AppContent() {
         />
       </div>
       <Toaster />
+      {showConnectModal && (
+        <StripeConnectModal
+          isVendor={isVendor}
+          isPhotographer={isPhotographer}
+          onDismiss={() => setConnectModalDismissed(true)}
+          onComplete={() => refetchUser()}
+        />
+      )}
     </>
   );
 }
