@@ -278,9 +278,11 @@ export class StripeService {
 
   /**
    * Create a Stripe Express account for a staff member.
-   * Staff receive payouts via transfers from Outsyde (merchant of record);
-   * they never independently process card payments, so only transfers capability
-   * is requested — matching the influencer pattern.
+   * Requests card_payments + transfers, same as photographers. Transfers-only is rejected
+   * in live mode ("Your platform needs approval for accounts to have requested the
+   * `transfers` capability without the `card_payments` capability", Render 2026-10-17),
+   * and the staff account.updated branch only marks onboarding complete when
+   * charges_enabled is true, which a transfers-only account never reaches.
    */
   async createStaffConnectAccount(
     email: string,
@@ -295,6 +297,7 @@ export class StripeService {
       email,
       business_type: "individual",
       capabilities: {
+        card_payments: { requested: true },
         transfers: { requested: true },
       },
       business_profile: {
@@ -1331,3 +1334,16 @@ export class StripeService {
 }
 
 export const stripeService = new StripeService();
+
+/**
+ * True when Stripe says a saved Connect account id is unusable from this platform: deleted, or
+ * created under another platform or mode (e.g. an old sandbox account). Seen on Render 2026-10-17
+ * from accountLinks.create: "You requested an account link for an account that is not connected
+ * to your platform or does not exist."
+ */
+export function isUnreachableConnectAccountError(err: unknown): boolean {
+  const e = err as { type?: string; code?: string; message?: string } | null;
+  if (!e || e.type !== "StripeInvalidRequestError") return false;
+  if (e.code === "account_invalid") return true;
+  return /not connected to your platform or does not exist/i.test(e.message ?? "");
+}
