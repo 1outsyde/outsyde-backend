@@ -5,6 +5,7 @@ import { storage } from "./storage";
 import { stripeService } from "./stripe/stripeService";
 import { markHoldAsConverted } from "./availabilityService";
 import { calculateBookingFees } from "./fees";
+import { releaseAfterForBooking } from "./loyaltyLedger";
 
 export type SettlementResult =
   | { settled: true; transferId: string | null }
@@ -111,16 +112,19 @@ export async function settleAppointmentBooking(appointmentId: string): Promise<S
     }
   }
 
-  // Pending points on totalPrice (full service value), approved at completion.
+  // Pending points on what went through Outsyde (deposit or full charge, plus the service fee),
+  // released when the business marks it complete or 3 days after the appointment. The referral
+  // check runs at release, once the booking is final.
   try {
     await storage.createPendingPointTransaction({
       userId: appointment.clientId,
-      dollarAmountCents: appointment.totalPrice,
+      dollarAmountCents: calculateBookingFees(chargedAmountCents).customerTotalBeforeTaxCents,
       transactionType: 'business_transaction',
       referenceType: 'appointment',
       referenceId: appointmentId,
       description: 'Points earned from service booking',
       businessId,
+      releaseAfter: releaseAfterForBooking(appointment.appointmentDate, appointment.appointmentEndTime ?? appointment.appointmentTime),
     });
   } catch (pointsErr) {
     if (isUniqueViolation(pointsErr)) {
@@ -128,14 +132,6 @@ export async function settleAppointmentBooking(appointmentId: string): Promise<S
     } else {
       console.error(`[Settlement] createPendingPointTransaction for appointment ${appointmentId} failed:`, pointsErr);
     }
-  }
-
-  try {
-    // Dynamic import: webhookHandlers imports this module.
-    const { WebhookHandlers } = await import("./stripe/webhookHandlers");
-    await WebhookHandlers.tryCompleteReferral(appointment.clientId, appointmentId, 'appointment');
-  } catch (referralErr) {
-    console.error(`[Settlement] tryCompleteReferral for appointment ${appointmentId} failed:`, referralErr);
   }
 
   return { settled: true, transferId };
@@ -228,27 +224,23 @@ export async function settleShootBooking(
     }
   }
 
-  // Points on the original pre-discount total, earned immediately.
+  // Pending points on the original pre-discount total, released 3 days after the shoot unless it
+  // is cancelled. The referral check runs at release, once the booking is final.
   const pointsBase = metadata.originalConsumerTotalCents ? Number(metadata.originalConsumerTotalCents) : paymentIntent.amount;
-  const user = metadata.clientId ? await storage.getUser(metadata.clientId).catch(() => undefined) : undefined;
-  if (user) {
+  const clientId = metadata.clientId || booking.clientId;
+  if (clientId) {
     try {
-      await storage.earnPoints({
-        userId: user.id,
+      await storage.createPendingPointTransaction({
+        userId: clientId,
         dollarAmountCents: pointsBase,
         transactionType: 'photographer_booking',
         referenceType: 'shoot_booking',
         referenceId: bookingId,
         description: 'Points earned from photographer booking',
+        releaseAfter: releaseAfterForBooking(booking.date, booking.endTime ?? booking.startTime),
       });
     } catch (pointsErr) {
-      console.error(`[Settlement] earnPoints for shoot booking ${bookingId} failed:`, pointsErr);
-    }
-    try {
-      const { WebhookHandlers } = await import("./stripe/webhookHandlers");
-      await WebhookHandlers.tryCompleteReferral(user.id, bookingId, 'shoot_booking');
-    } catch (referralErr) {
-      console.error(`[Settlement] tryCompleteReferral for shoot booking ${bookingId} failed:`, referralErr);
+      console.error(`[Settlement] pending points for shoot booking ${bookingId} failed:`, pointsErr);
     }
   }
 

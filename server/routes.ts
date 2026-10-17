@@ -144,6 +144,18 @@ import {
   getPendingProviderExpiryTime
 } from "./bookingStateMachine";
 import { settleAppointmentBooking, settleShootBooking } from "./bookingSettlement";
+import { requirePlatformAdmin } from "./middleware/requirePlatformAdmin";
+import {
+  pointsForGrossCents,
+  pointsValueCents,
+  promoMinimumBaseCents,
+  releasePendingForReference,
+  rejectPendingForReference,
+  creditPoints,
+  adjustPoints,
+  REDEMPTION_TIERS,
+  REFERRAL_BONUS_POINTS,
+} from "./loyaltyLedger";
 import { calculateProductFee, calculateBookingFee, calculateConsumerServiceFee, calculateBookingFees, quoteDeposit } from "./fees";
 import { validateDeposit, invalidDepositBody, validatePhotographerDeposit, photographerBookingDepositCents } from "./deposits";
 import {
@@ -7681,15 +7693,25 @@ export async function registerRoutes(
       const consumerUpchargeCents = Math.round(basePriceCents * 0.08);
       const totalChargedToConsumerCents = basePriceCents + consumerUpchargeCents;
       const platformFeeCents = totalChargedToConsumerCents - vendorPayoutCents;
-      const outsydePointsEarned = Math.round(totalChargedToConsumerCents * 40 / 108);
+      const outsydePointsEarned = pointsForGrossCents(totalChargedToConsumerCents);
 
       // Optional promo code — validated here, marked used only after payment succeeds
       const { promoCodeId } = req.body;
       let discountCents = 0;
       if (promoCodeId) {
         const promoCode = await storage.getPromoCodeById(promoCodeId);
-        if (!promoCode || promoCode.status !== 'active' || promoCode.usedAt !== null) {
+        if (!promoCode || promoCode.status !== 'active' || promoCode.usedAt !== null || promoCode.userId !== userId
+            || new Date(promoCode.expiresAt).getTime() <= Date.now()) {
           return res.status(400).json({ error: 'Invalid or already used promo code' });
+        }
+        // A code needs an order base of at least 10x its value, so the discount comes only out of
+        // Outsyde's share and the charge always covers the vendor's payout.
+        if (basePriceCents < promoMinimumBaseCents(promoCode.discountCents)
+            || totalChargedToConsumerCents - promoCode.discountCents < vendorPayoutCents) {
+          return res.status(400).json({
+            error: `This code needs an order of at least $${(promoMinimumBaseCents(promoCode.discountCents) / 100).toFixed(2)} before the service fee.`,
+            code: 'PROMO_MINIMUM_NOT_MET',
+          });
         }
         discountCents = promoCode.discountCents;
       }
@@ -7866,15 +7888,25 @@ export async function registerRoutes(
       const consumerUpchargeCents = Math.round(basePriceCents * 0.08);
       const totalChargedToConsumerCents = basePriceCents + consumerUpchargeCents;
       const platformFeeCents = totalChargedToConsumerCents - vendorPayoutCents;
-      const outsydePointsEarned = Math.round(totalChargedToConsumerCents * 40 / 108);
+      const outsydePointsEarned = pointsForGrossCents(totalChargedToConsumerCents);
 
       // Optional promo code — validated here, marked used only after payment succeeds
       const { promoCodeId } = req.body;
       let discountCents = 0;
       if (promoCodeId) {
         const promoCode = await storage.getPromoCodeById(promoCodeId);
-        if (!promoCode || promoCode.status !== 'active' || promoCode.usedAt !== null) {
+        if (!promoCode || promoCode.status !== 'active' || promoCode.usedAt !== null || promoCode.userId !== userId
+            || new Date(promoCode.expiresAt).getTime() <= Date.now()) {
           return res.status(400).json({ error: 'Invalid or already used promo code' });
+        }
+        // A code needs an order base of at least 10x its value, so the discount comes only out of
+        // Outsyde's share and the charge always covers the vendor's payout.
+        if (basePriceCents < promoMinimumBaseCents(promoCode.discountCents)
+            || totalChargedToConsumerCents - promoCode.discountCents < vendorPayoutCents) {
+          return res.status(400).json({
+            error: `This code needs an order of at least $${(promoMinimumBaseCents(promoCode.discountCents) / 100).toFixed(2)} before the service fee.`,
+            code: 'PROMO_MINIMUM_NOT_MET',
+          });
         }
         discountCents = promoCode.discountCents;
       }
@@ -8052,6 +8084,12 @@ export async function registerRoutes(
       // Collect unique vendor IDs (keyed on vendorId, not client-supplied Stripe account)
       const vendorIds = new Set(items.map((i: { vendorId: string }) => i.vendorId));
 
+      if (vendorIds.size > 1 && promoCodeId) {
+        // Codes are not supported on multi-shop carts yet; refuse rather than charge full price
+        // while the page shows a discount.
+        return res.status(400).json({ success: false, error: { code: 'PROMO_SINGLE_SHOP_ONLY', message: 'Codes can only be used on orders from one shop. Remove the code or check out each shop separately.' } });
+      }
+
       if (vendorIds.size === 1) {
         // ── SINGLE-VENDOR PATH (unchanged) ──────────────────────────────────
 
@@ -8079,14 +8117,21 @@ export async function registerRoutes(
         const feeBreakdown = calculateProductFees(basePriceCents, { influencerAttributed: isInfluencerAttributed });
 
         const totalChargedToConsumerCents = feeBreakdown.customerTotalBeforeTaxCents;
-        const outsydePointsEarned = Math.round(totalChargedToConsumerCents * 40 / 108);
+        const outsydePointsEarned = pointsForGrossCents(totalChargedToConsumerCents);
 
         // Optional promo code — validated here, marked used only after payment succeeds
         let discountCents = 0;
         if (promoCodeId) {
           const promoCode = await storage.getPromoCodeById(promoCodeId);
-          if (!promoCode || promoCode.status !== 'active' || promoCode.usedAt !== null) {
+          if (!promoCode || promoCode.status !== 'active' || promoCode.usedAt !== null || promoCode.userId !== userId
+              || new Date(promoCode.expiresAt).getTime() <= Date.now()) {
             return res.status(400).json({ success: false, error: { code: 'INVALID_PROMO', message: 'Invalid or already used promo code' } });
+          }
+          // A code needs an order base of at least 10x its value, so the discount comes only out of
+          // Outsyde's share and the charge always covers the vendor's payout.
+          if (basePriceCents < promoMinimumBaseCents(promoCode.discountCents)
+              || totalChargedToConsumerCents - promoCode.discountCents < feeBreakdown.vendorNetCents) {
+            return res.status(400).json({ success: false, error: { code: 'PROMO_MINIMUM_NOT_MET', message: `This code needs an order of at least $${(promoMinimumBaseCents(promoCode.discountCents) / 100).toFixed(2)} before the service fee.` } });
           }
           discountCents = promoCode.discountCents;
         }
@@ -8962,30 +9007,14 @@ export async function registerRoutes(
         metadata: { action: 'business_complete' },
       });
 
-      // Approve the pending loyalty points transaction created at booking payment time.
-      // The pending transaction holds points on totalPrice until the appointment completes.
+      // Release the pending loyalty points held since payment (deposit or full charge), and
+      // check whether this completes the customer's referral. No extra completion bonus.
+      let pointsReleased = 0;
       try {
-        const pendingTx = await storage.getPendingPointTransactionByReference('appointment', appointmentId);
-        if (pendingTx) {
-          await storage.approvePendingPointTransaction(pendingTx.id, userId);
-        }
+        const released = await releasePendingForReference('appointment', appointmentId, userId);
+        pointsReleased = released?.pointsEarned ?? 0;
       } catch (pointsErr) {
-        console.error('[complete] Failed to approve pending loyalty points:', pointsErr);
-      }
-
-      // Award completion bonus points to the client
-      const COMPLETION_POINTS = 250;
-      try {
-        await storage.earnPoints({
-          userId: appointment.clientId,
-          dollarAmountCents: COMPLETION_POINTS,
-          transactionType: 'bonus',
-          referenceType: 'appointment',
-          referenceId: appointmentId,
-          description: `Appointment completed — ${appointment.serviceName ?? 'service'}`,
-        });
-      } catch (pointsErr) {
-        console.error('[complete] Failed to award completion points:', pointsErr);
+        console.error('[complete] Failed to release pending loyalty points:', pointsErr);
       }
 
       // Send aftercare email to the client (best-effort)
@@ -8997,14 +9026,14 @@ export async function registerRoutes(
             customerName: client.name ?? client.email,
             serviceName: appointment.serviceName ?? 'your service',
             businessName: business.name,
-            loyaltyPointsEarned: COMPLETION_POINTS,
+            loyaltyPointsEarned: pointsReleased || undefined,
           });
         }
       } catch (emailErr) {
         console.error('[complete] Failed to send aftercare email:', emailErr);
       }
 
-      res.json({ success: true, appointmentId, status: BOOKING_STATES.COMPLETED, pointsAwarded: COMPLETION_POINTS });
+      res.json({ success: true, appointmentId, status: BOOKING_STATES.COMPLETED, pointsAwarded: pointsReleased });
     } catch (error: any) {
       console.error('[complete] Error completing appointment:', error);
       res.status(500).json({ error: 'Failed to complete appointment', details: error.message });
@@ -15881,8 +15910,8 @@ export async function registerRoutes(
   });
 
   // ==================== OUTSYDE POINTS (LOYALTY) ROUTES ====================
-  // $1 = 100 points | 100 points = $1 discount
-  // Points can be redeemed at ANY Outsyde business
+  // 500 points = $1. Earned: half the service fee. Redeemed for a code at fixed tiers.
+  // Points can be redeemed at ANY Outsyde business. Rules: server/loyaltyLedger.ts
 
   // Get user's points balance and summary
   app.get("/api/points/balance", async (req, res) => {
@@ -15893,13 +15922,25 @@ export async function registerRoutes(
 
     try {
       const balance = await storage.getUserPointsBalance(userId);
-      const dollarValue = balance / 100; // 100 points = $1
-      
+      const dollarValue = pointsValueCents(balance) / 100; // 500 points = $1
+      const activeCodes = await db.query.promoCodes.findMany({
+        where: and(
+          eq(promoCodes.userId, userId),
+          eq(promoCodes.status, 'active'),
+        ),
+        orderBy: [desc(promoCodes.createdAt)],
+      });
+      const now = Date.now();
+
       res.json({ 
         balance, 
         dollarValue,
         formattedBalance: balance.toLocaleString(),
         formattedDollarValue: `$${dollarValue.toFixed(2)}`,
+        canRedeem: balance >= REDEMPTION_TIERS[0].points,
+        activeCodes: activeCodes
+          .filter(c => new Date(c.expiresAt).getTime() > now)
+          .map(c => ({ code: c.code, discountCents: c.discountCents, expiresAt: c.expiresAt })),
       });
     } catch (error) {
       console.error("Get points balance error:", error);
@@ -15925,8 +15966,8 @@ export async function registerRoutes(
     }
   });
 
-  // Valid redemption tiers: points → cents (1 pt = $0.01)
-  const VALID_TIERS: Record<number, number> = { 2500: 500, 5000: 1000, 12500: 2500, 25000: 5000, 50000: 10000 };
+  // Valid redemption tiers: points → cents (500 points = $1)
+  const VALID_TIERS: Record<number, number> = Object.fromEntries(REDEMPTION_TIERS.map(t => [t.points, t.valueCents]));
   const availableTiersResponse = Object.entries(VALID_TIERS).map(([pts, cents]) => ({
     points: Number(pts),
     discountDollars: cents / 100,
@@ -15940,7 +15981,7 @@ export async function registerRoutes(
     const { pointsToRedeem } = req.body;
     if (!VALID_TIERS[pointsToRedeem]) {
       return res.status(400).json({
-        error: `${pointsToRedeem} is not a valid tier. Choose one of: ${Object.keys(VALID_TIERS).map(p => `${p} pts ($${Number(p) / 100})`).join(', ')}.`,
+        error: `${pointsToRedeem} is not a valid tier. Choose one of: ${REDEMPTION_TIERS.map(t => `${t.points} pts ($${t.valueCents / 100})`).join(', ')}.`,
         availableTiers: availableTiersResponse,
       });
     }
@@ -15964,7 +16005,7 @@ export async function registerRoutes(
     const { pointsToRedeem } = req.body;
     if (!VALID_TIERS[pointsToRedeem]) {
       return res.status(400).json({
-        error: `${pointsToRedeem} is not a valid tier. Choose one of: ${Object.keys(VALID_TIERS).map(p => `${p} pts ($${Number(p) / 100})`).join(', ')}.`,
+        error: `${pointsToRedeem} is not a valid tier. Choose one of: ${REDEMPTION_TIERS.map(t => `${t.points} pts ($${t.valueCents / 100})`).join(', ')}.`,
         availableTiers: availableTiersResponse,
       });
     }
@@ -15979,22 +16020,14 @@ export async function registerRoutes(
       });
       const data = redeemSchema.parse(req.body);
 
-      const result = await storage.redeemPoints({
-        userId,
-        points: data.pointsToRedeem,
-        businessId: data.businessId,
-        businessName: data.businessName,
-        referenceType: data.referenceType,
-        referenceId: data.referenceId,
-      });
+      // One statement: takes the points, writes the ledger row and creates the code together.
+      const result = await storage.redeemPointsForCode(userId, data.pointsToRedeem);
 
-      if ('error' in result) {
+      if (!result.ok) {
         return res.status(400).json({ success: false, error: result.error });
       }
 
-      const { discountCents } = result;
-      const code = await storage.generatePromoCode(userId, data.pointsToRedeem, discountCents);
-      const newBalance = await storage.getUserPointsBalance(userId);
+      const { discountCents, code, newBalance } = result;
 
       res.json({
         success: true,
@@ -16003,6 +16036,7 @@ export async function registerRoutes(
         discountCents,
         expiresInDays: 30,
         newBalance,
+        minimumOrderCents: promoMinimumBaseCents(discountCents),
       });
     } catch (error) {
       if (error instanceof z.ZodError) {
@@ -16030,11 +16064,22 @@ export async function registerRoutes(
         return res.status(400).json({ error: result.reason });
       }
 
+      // Optional: the order base (before the service fee). A code needs an order at least 10x its value.
+      const minimumOrderCents = promoMinimumBaseCents(result.discountCents!);
+      const baseCents = Number(req.body?.baseCents);
+      if (Number.isFinite(baseCents) && baseCents > 0 && baseCents < minimumOrderCents) {
+        return res.status(400).json({
+          error: `This code needs an order of at least $${(minimumOrderCents / 100).toFixed(2)} before the service fee.`,
+          minimumOrderCents,
+        });
+      }
+
       return res.json({
         valid: true,
         discountDollars: result.discountCents! / 100,
         discountCents: result.discountCents,
         codeId: result.codeId,
+        minimumOrderCents,
       });
     } catch (error) {
       console.error("Validate promo code error:", error);
@@ -16088,8 +16133,8 @@ export async function registerRoutes(
       res.json({
         referralCode: code,
         referralLink: `${req.protocol}://${req.get('host')}/signup?ref=${code}`,
-        bonusForReferrer: 500, // $5 worth, awarded after referred user's first transaction
-        bonusForNewUser: 250, // $2.50 welcome bonus, awarded immediately
+        bonusForReferrer: REFERRAL_BONUS_POINTS, // awarded when the friend's first purchase is final
+        bonusForNewUser: REFERRAL_BONUS_POINTS, // awarded to the friend at the same time
         referredBy: user?.referredBy || null,
         stats: {
           totalReferrals: stats.totalReferrals,
@@ -16097,7 +16142,7 @@ export async function registerRoutes(
           pendingReferrals: stats.pendingReferrals,
           totalPointsEarned: stats.totalPointsEarned,
         },
-        note: "Your referral bonus (500 points) is awarded after your friend completes their first purchase.",
+        note: `You and your friend each get ${REFERRAL_BONUS_POINTS} points when your friend makes their first purchase.`,
       });
     } catch (error) {
       console.error("Get referral code error:", error);
@@ -16128,8 +16173,8 @@ export async function registerRoutes(
 
       res.json({
         success: true,
-        message: "Referral applied! You've earned 250 welcome bonus points. Your friend will earn 500 points when you complete your first purchase.",
-        pointsEarned: 250,
+        message: `Referral applied. You and your friend will each get ${REFERRAL_BONUS_POINTS} points after your first purchase.`,
+        pointsEarned: 0,
         newBalance,
         referrerBonusPending: true,
       });
@@ -16167,61 +16212,53 @@ export async function registerRoutes(
     }
   });
 
-  // Earn points (typically called after successful payment - internal use)
-  // In production, this would be triggered by Stripe webhooks
-  app.post("/api/points/earn", async (req, res) => {
-    const userId = req.session?.userId;
-    if (!userId) {
-      return res.status(401).json({ error: "Not authenticated" });
-    }
-
+  // Manual points credit — platform admins only (R5). Customers earn points only through payments.
+  // Every credit is a ledger row with its own reference, so it shows in the user's history.
+  app.post("/api/points/earn", requirePlatformAdmin, async (req, res) => {
+    const adminId = (req as any).adminUser.id as string;
     try {
       const earnSchema = z.object({
-        dollarAmountCents: z.number().int().positive(),
-        transactionType: z.enum(['photographer_booking', 'business_transaction', 'bonus']),
-        businessId: z.string().optional(),
-        businessName: z.string().optional(),
-        referenceType: z.string().optional(),
-        referenceId: z.string().optional(),
+        userId: z.string().min(1),
+        points: z.number().int().positive().max(100000),
+        description: z.string().min(1).max(200),
       });
       const data = earnSchema.parse(req.body);
 
-      const transaction = await storage.earnPoints({
-        userId,
-        dollarAmountCents: data.dollarAmountCents,
-        transactionType: data.transactionType,
-        businessId: data.businessId,
-        businessName: data.businessName,
-        referenceType: data.referenceType,
-        referenceId: data.referenceId,
+      const credited = await creditPoints({
+        userId: data.userId,
+        points: data.points,
+        dollarAmountCents: 0,
+        referenceType: 'admin_adjustment',
+        referenceId: randomUUID(),
+        description: data.description,
       });
+      if (!credited) return res.status(409).json({ error: "Points were not credited" });
 
-      const newBalance = await storage.getUserPointsBalance(userId);
-
+      console.log(`[Points] Admin ${adminId} credited ${data.points} points to ${data.userId}: ${data.description}`);
       res.json({
         success: true,
-        transaction,
-        pointsEarned: transaction.points,
-        newBalance,
-        formattedNewBalance: newBalance.toLocaleString(),
+        transactionId: credited.id,
+        pointsEarned: data.points,
+        newBalance: credited.balanceAfter,
+        formattedNewBalance: credited.balanceAfter.toLocaleString(),
       });
-    } catch (error) {
+    } catch (error: any) {
       if (error instanceof z.ZodError) {
         return res.status(400).json({ error: "Invalid data", details: error.errors });
       }
-      console.error("Earn points error:", error);
-      res.status(500).json({ error: "Failed to earn points" });
+      if (String(error?.message || '').includes('not found')) {
+        return res.status(404).json({ error: "User not found" });
+      }
+      console.error("Admin points credit error:", error);
+      res.status(500).json({ error: "Failed to credit points" });
     }
   });
 
   // ==================== ADMIN: PENDING POINTS REVIEW ====================
 
   // List pending point transactions awaiting admin review
-  app.get("/api/admin/points/pending", async (req, res) => {
-    const userId = req.session?.userId;
-    if (!userId) return res.status(401).json({ error: "Not authenticated" });
-    const user = await storage.getUser(userId);
-    if (!user?.isAdmin) return res.status(403).json({ error: "Admin access required" });
+  app.get("/api/admin/points/pending", requirePlatformAdmin, async (req, res) => {
+    const userId = (req as any).adminUser.id as string;
 
     try {
       const status = (req.query.status as string) || 'pending';
@@ -16237,11 +16274,8 @@ export async function registerRoutes(
   });
 
   // Approve a pending point transaction — credits points to user balance
-  app.post("/api/admin/points/pending/:id/approve", async (req, res) => {
-    const userId = req.session?.userId;
-    if (!userId) return res.status(401).json({ error: "Not authenticated" });
-    const user = await storage.getUser(userId);
-    if (!user?.isAdmin) return res.status(403).json({ error: "Admin access required" });
+  app.post("/api/admin/points/pending/:id/approve", requirePlatformAdmin, async (req, res) => {
+    const userId = (req as any).adminUser.id as string;
 
     try {
       const { id } = req.params;
@@ -16256,11 +16290,8 @@ export async function registerRoutes(
   });
 
   // Reject a pending point transaction — no points credited
-  app.post("/api/admin/points/pending/:id/reject", async (req, res) => {
-    const userId = req.session?.userId;
-    if (!userId) return res.status(401).json({ error: "Not authenticated" });
-    const user = await storage.getUser(userId);
-    if (!user?.isAdmin) return res.status(403).json({ error: "Admin access required" });
+  app.post("/api/admin/points/pending/:id/reject", requirePlatformAdmin, async (req, res) => {
+    const userId = (req as any).adminUser.id as string;
 
     try {
       const { id } = req.params;
@@ -17876,10 +17907,17 @@ export async function registerRoutes(
           await storage.releaseBusinessSlot(request.targetId);
         }
 
-        // Reverse loyalty points earned from this transaction (full reversal for admin-approved refunds)
+        // Bookings: points are still pending until the booking is final, so reject them.
+        if ((request.targetType === 'appointment' || request.targetType === 'shoot_booking') && request.targetId) {
+          await rejectPendingForReference(request.targetType, request.targetId, 'Refund approved')
+            .catch(err => console.error('[refund-requests] Failed to reject pending points:', err));
+        }
+
+        // Reverse loyalty points earned from this transaction (full reversal for admin-approved refunds).
+        // Product orders earn under reference type 'cart_order' (see webhookHandlers.ts).
         const pointReversal = await storage.reversePointsForRefund(
           request.requesterId,
-          request.targetType || 'refund',
+          request.targetType === 'order' ? 'cart_order' : (request.targetType || 'refund'),
           request.targetId || id,
           { description: 'Points reversed from refund' }
         );
@@ -23404,24 +23442,21 @@ export async function registerRoutes(
         return res.status(404).json({ error: "User not found" });
       }
 
-      // Apply delta to user's loyaltyPoints
-      const currentBalance = user.loyaltyPoints ?? 0;
-      const newBalance = Math.max(0, currentBalance + pointsDelta);
-      await db.update(users).set({ loyaltyPoints: newBalance }).where(eq(users.id, userId));
-
-      // Insert an immediate point transaction record
-      const [txn] = await db.insert(pointTransactions).values({
-        id: randomUUID(),
+      // One statement: balance change + ledger row together (neon-http has no transactions).
+      // A positive delta is credited once per referenceId; a retry returns the current balance.
+      const applied = await adjustPoints({
         userId,
-        type: pointsDelta >= 0 ? 'earn' : 'reversal',
-        points: Math.abs(pointsDelta),
-        dollarAmountCents: Math.abs(pointsDelta),
+        delta: pointsDelta,
         referenceType: referenceType ?? 'internal_event',
         referenceId: referenceId ?? null,
-        balanceAfter: newBalance,
         description: description ?? `Internal event: ${event}`,
-        capped: false,
-      }).returning();
+      });
+      if (!applied) {
+        const current = await storage.getUserPointsBalance(userId);
+        return res.json({ success: true, alreadyApplied: true, transactionId: null, newBalance: current });
+      }
+      const txn = { id: applied.id };
+      const newBalance = applied.balanceAfter;
 
       console.log(`[internal/rewards] event=${event} userId=${userId} delta=${pointsDelta} newBalance=${newBalance}`);
       res.json({ success: true, transactionId: txn.id, newBalance });
@@ -23493,6 +23528,18 @@ export async function registerRoutes(
       if (!appt) return res.status(404).json({ error: 'Appointment not found' });
 
       const updated = await storage.updateAppointment(id, { status: status as any });
+
+      // This route writes status directly (skips the state machine), so apply the points rule here:
+      // completed releases pending points, cancelled / no-show rejects them.
+      try {
+        if (status === 'completed') {
+          await releasePendingForReference('appointment', id, 'system');
+        } else if (status === 'cancelled' || status === 'no_show') {
+          await rejectPendingForReference('appointment', id, `Booking ${status}`);
+        }
+      } catch (pointsErr) {
+        console.error('[internal/xo/bookings PATCH] points update failed:', pointsErr);
+      }
       return res.json({ appointment: updated });
     } catch (err) {
       console.error('[internal/xo/bookings PATCH]', err);
