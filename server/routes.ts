@@ -19684,6 +19684,9 @@ export async function registerRoutes(
         isActive: u.isActive,
         createdAt: u.createdAt,
         loyaltyPoints: u.loyaltyPoints,
+        // Additive (2026-10-16): lets admin screens mark scheduled / deleted accounts.
+        deletionStatus: u.deletionStatus ?? "active",
+        scheduledDeletionAt: u.scheduledDeletionAt ?? null,
       }));
 
       res.json({ users: safeUsers, total: users.length });
@@ -19850,11 +19853,78 @@ export async function registerRoutes(
         return res.status(404).json({ error: "User not found" });
       }
 
+      if (user.deletionStatus === "deleted") {
+        return res.status(409).json({ error: "This account was deleted and can't be re-enabled" });
+      }
+
       await storage.updateUser(userId, { isActive: true });
       res.json({ success: true, user: { id: user.id, email: user.email, isActive: true } });
     } catch (error) {
       console.error("Enable user error:", error);
       res.status(500).json({ error: "Failed to enable user" });
+    }
+  });
+
+  // Admin: schedule an account for deletion (e.g. a request from goutsyde.com/delete-account-request).
+  // Same rules and outcome as POST /api/account/delete-request: 30-day grace period, blocked by
+  // pending Stripe balances or active orders/bookings, sessions revoked, confirmation email.
+  // The user can still cancel by signing in during the 30 days.
+  app.post("/api/admin/users/:userId/schedule-deletion", requireAdmin, async (req, res) => {
+    try {
+      const { userId } = req.params;
+      const user = await storage.getUser(userId);
+      if (!user) return res.status(404).json({ error: "User not found" });
+      if (user.isAdmin) return res.status(403).json({ error: "Admin accounts can't be deleted here" });
+      if (user.deletionStatus === "deleted") return res.status(409).json({ error: "Account already deleted" });
+      if (user.deletionStatus === "pending_deletion") {
+        return res.json({ success: true, alreadyPending: true, scheduledDeletionAt: user.scheduledDeletionAt });
+      }
+
+      const stripeCheck = await checkVendorStripeBalances(userId);
+      if (stripeCheck.blocked) return res.status(409).json({ error: stripeCheck.reason, blocked: true });
+      const orderCheck = await checkActiveOrders(userId);
+      if (orderCheck.blocked) return res.status(409).json({ error: orderCheck.reason, blocked: true });
+
+      const now = new Date();
+      const scheduledDeletionAt = new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000);
+      await db.update(users).set({
+        deletionStatus: "pending_deletion",
+        deletionRequestedAt: now,
+        scheduledDeletionAt,
+      } as any).where(eq(users.id, userId));
+      await db.delete(refreshTokens).where(eq(refreshTokens.userId, userId));
+
+      if (user.email) {
+        sendDeletionConfirmationEmail({ toEmail: user.email, scheduledDeletionAt }).catch(err =>
+          console.warn("[accountDeletion] Admin-scheduled confirmation email failed:", err)
+        );
+      }
+      console.log(`[accountDeletion] Admin scheduled deletion for user ${userId} on ${scheduledDeletionAt.toISOString()}`);
+      return res.json({ success: true, scheduledDeletionAt });
+    } catch (error) {
+      console.error("Admin schedule deletion error:", error);
+      return res.status(500).json({ error: "Failed to schedule account deletion" });
+    }
+  });
+
+  // Admin: cancel a scheduled deletion (same effect as the user's own POST /api/account/cancel-deletion).
+  app.post("/api/admin/users/:userId/cancel-deletion", requireAdmin, async (req, res) => {
+    try {
+      const { userId } = req.params;
+      const user = await storage.getUser(userId);
+      if (!user) return res.status(404).json({ error: "User not found" });
+      if (user.deletionStatus !== "pending_deletion") {
+        return res.status(400).json({ error: "No pending deletion to cancel" });
+      }
+      await db.update(users).set({
+        deletionStatus: "active",
+        deletionRequestedAt: null,
+        scheduledDeletionAt: null,
+      } as any).where(eq(users.id, userId));
+      return res.json({ success: true });
+    } catch (error) {
+      console.error("Admin cancel deletion error:", error);
+      return res.status(500).json({ error: "Failed to cancel account deletion" });
     }
   });
 
