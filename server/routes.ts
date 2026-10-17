@@ -182,6 +182,8 @@ import {
   businessAddons,
   vendorServices,
 } from "@shared/schema";
+import { BUSINESS_CATEGORIES, TAXONOMY_VERSION, MAX_SPECIALTIES, getCategory, validateIndustrySelection } from "@shared/businessTaxonomy";
+import { buildSignupDetailsPayload } from "./adminApplicationDetails";
 import { and, ilike, ne, asc } from "drizzle-orm";
 
 import { createStory, getStoriesByUser, getStory, deleteStory, recordView, createStoryHighlight, getStoryHighlights, deleteStoryHighlight } from "./services/stories";
@@ -939,6 +941,23 @@ export async function registerRoutes(
   // Route alias used by client websites (xo-lashes-web etc.) for a consistent path
   app.post("/api/auth/register", authRateLimiter, handleCustomerSignup);
 
+  // Shared business industry list (shared/businessTaxonomy.ts). Public: the app and
+  // goutsyde.com signup screens load it so both always show the same choices.
+  app.get("/api/taxonomy/business-categories", (_req, res) => {
+    res.set("Cache-Control", "public, max-age=300");
+    res.json({
+      version: TAXONOMY_VERSION,
+      maxSpecialties: MAX_SPECIALTIES,
+      categories: BUSINESS_CATEGORIES.filter((c) => !c.retired).map((c) => ({
+        code: c.code,
+        label: c.label,
+        specialties: c.specialties
+          .filter((sp) => !sp.retired)
+          .map((sp) => ({ code: sp.code, label: sp.label, kind: sp.kind })),
+      })),
+    });
+  });
+
   // Vendor signup
   app.post("/api/auth/vendor/signup", authRateLimiter, async (req, res) => {
     try {
@@ -952,6 +971,29 @@ export async function registerRoutes(
       });
 
       const data = vendorSignupSchema.parse(req.body);
+
+      // Industry (migration 047): validated against the shared list BEFORE any row is created.
+      // Optional so older app versions and clients that don't send it keep working unchanged.
+      let industry: { categoryCode: string; categoryLabel: string; specialties: string[]; otherDescription: string | null } | null = null;
+      if (data.categoryCode) {
+        const specialties = data.specialties ?? [];
+        const otherDescription = data.otherDescription?.trim() || null;
+        const problems = validateIndustrySelection({
+          categoryCode: data.categoryCode,
+          specialties,
+          offerType: data.offerType,
+          otherDescription,
+        });
+        if (problems.length > 0) {
+          return res.status(400).json({ error: problems[0], field: "industry", details: problems });
+        }
+        industry = {
+          categoryCode: data.categoryCode,
+          categoryLabel: getCategory(data.categoryCode)!.label,
+          specialties,
+          otherDescription,
+        };
+      }
 
       const {
         validateUsername: valUnV,
@@ -1017,7 +1059,11 @@ export async function registerRoutes(
       const business = await storage.createBusiness({
         ownerId: user.id,
         name: data.businessName,
-        category: data.businessCategory,
+        // With an industry code the readable label is stored, so search and cards keep working.
+        category: industry ? industry.categoryLabel : data.businessCategory,
+        categoryCode: industry?.categoryCode ?? null,
+        specialties: industry?.specialties ?? [],
+        otherDescription: industry?.otherDescription ?? null,
         description: data.businessDescription,
         hasProducts: data.offerType === "products" || data.offerType === "both",
         hasServices: data.offerType === "services" || data.offerType === "both",
@@ -1068,16 +1114,21 @@ export async function registerRoutes(
           .catch(err => console.error('[Geocode] Business geocode failed:', err));
       }
 
-      // Send in-app notification to all admins
-      await NotificationTriggers.newVendorApplication({
-        businessId: business.id,
-        businessName: business.name,
-        businessCategory: business.category,
-        ownerName: data.name,
-        ownerEmail: data.email,
-        city: data.city,
-        state: data.state,
-      });
+      // Send in-app notification to all admins. The app defers this only when it still has a
+      // logo to upload; it then calls POST /api/admin/notifications/business-application itself.
+      if (data.deferAdminNotification !== true) {
+        await NotificationTriggers.newVendorApplication({
+          businessId: business.id,
+          businessName: business.name,
+          businessCategory: business.category,
+          ownerName: data.name,
+          ownerEmail: data.email,
+          city: data.city,
+          state: data.state,
+        });
+      } else {
+        console.log(`[VendorSignup] admin notification deferred by client for business ${business.id}`);
+      }
 
       if (req.session) {
         req.session.userId = user.id;
@@ -17132,6 +17183,9 @@ export async function registerRoutes(
 
   // Trigger admin notification for new business application (called by mobile app after vendor signup)
   // Requires authentication - caller must be the business owner
+  // Business ids whose deferred admin alert was already sent (in memory; a restart only
+  // re-allows one more send inside the 24 hour window).
+  const businessApplicationNotified = new Set<string>();
   app.post("/api/admin/notifications/business-application", async (req, res) => {
     try {
       // Check for JWT auth (mobile) or session auth (web)
@@ -17174,6 +17228,18 @@ export async function registerRoutes(
       if ((business as any).ownerId !== userId) {
         return res.status(403).json({ error: "Not authorized to trigger notifications for this business" });
       }
+
+      // Only for a new application: pending and created in the last 24 hours. Stops an owner
+      // from re-sending the admin alert later (the app calls this once, right after signup).
+      const createdAtMs = business.createdAt ? new Date(business.createdAt).getTime() : 0;
+      if (business.approvalStatus !== "pending" || !createdAtMs || Date.now() - createdAtMs > 24 * 60 * 60 * 1000) {
+        return res.status(409).json({ error: "This application was already sent for review" });
+      }
+      // A retry from the same app session must not email the admin twice.
+      if (businessApplicationNotified.has(business.id)) {
+        return res.json({ success: true, message: "Admin notification already sent" });
+      }
+      businessApplicationNotified.add(business.id);
       
       const owner = await storage.getUser((business as any).ownerId);
       if (!owner) {
@@ -17208,8 +17274,9 @@ export async function registerRoutes(
       // the spread — it is the unsanitized users record (password hash, reset
       // token, Stripe customer ID) and must never reach a client. The ownerX
       // fields below are the only owner data this endpoint exposes.
+      // Stripe ids are stripped too (no admin screen reads them; audited 2026-10-17).
       const enriched = applications.map((business) => {
-        const { owner, ...businessFields } = business;
+        const { owner, stripeAccountId: _sa, stripeOnboardingUrl: _su, ...businessFields } = business;
         return {
           ...businessFields,
           ownerName: owner?.name || null,
@@ -17219,6 +17286,9 @@ export async function registerRoutes(
           ownerCity: owner?.city || null,
           ownerState: owner?.state || null,
           ownerZipCode: owner?.zipCode || null,
+          ownerUsername: owner?.username || null,
+          ownerCreatedAt: owner?.createdAt || null,
+          signupDetails: buildSignupDetailsPayload(business, owner ?? null),
         };
       });
 
@@ -17240,10 +17310,13 @@ export async function registerRoutes(
       }
       
       const owner = await storage.getUser((business as any).ownerId);
-      
+      const { stripeAccountId: _sa, stripeOnboardingUrl: _su, ...businessFields } = business;
+
       res.json({
         application: {
-          ...business,
+          ...businessFields,
+          ownerUsername: owner?.username || null,
+          signupDetails: buildSignupDetailsPayload(business, owner ?? null),
           ownerName: owner?.name || null,
           ownerEmail: owner?.email || null,
           ownerPhone: owner?.phone || null,
@@ -20033,7 +20106,15 @@ export async function registerRoutes(
           name: owner.name,
           profileImage: owner.profileImageUrl,
           phone: owner.phone,
+          username: owner.username,
+          address: owner.address,
+          city: owner.city,
+          state: owner.state,
+          zipCode: owner.zipCode,
+          createdAt: owner.createdAt,
         } : null,
+        // Every signup answer as labelled rows (same as the admin email), 2026-10-17.
+        signupDetails: buildSignupDetailsPayload(business, owner ?? null),
         products,
         services,
         staff,

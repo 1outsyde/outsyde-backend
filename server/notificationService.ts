@@ -556,6 +556,17 @@ export const NotificationTriggers = {
     const adminUsers = await storage.getAdminUsers();
     const location = params.city && params.state ? `${params.city}, ${params.state}` : null;
     const adminTitle = 'New Vendor Application';
+
+    // Load the saved records so the email shows every answer the business gave (2026-10-17).
+    // A failed lookup never blocks the alert: the email falls back to the params above.
+    let savedBusiness: Awaited<ReturnType<typeof storage.getBusiness>> | null = null;
+    let savedOwner: Awaited<ReturnType<typeof storage.getUser>> | null = null;
+    try {
+      savedBusiness = (await storage.getBusiness(params.businessId)) ?? null;
+      savedOwner = savedBusiness ? (await storage.getUser(savedBusiness.ownerId)) ?? null : null;
+    } catch (err) {
+      console.error(`[AdminSignupNotify] Could not load business ${params.businessId} for the email:`, err);
+    }
     const adminMessage = `${params.businessName} (${params.businessCategory}) has applied to join Outsyde. Owner: ${params.ownerName}`;
 
     for (const admin of adminUsers) {
@@ -605,6 +616,8 @@ export const NotificationTriggers = {
               ownerEmail: params.ownerEmail,
               location,
               businessId: params.businessId,
+              business: savedBusiness,
+              owner: savedOwner,
             });
           }
         } catch (err) {

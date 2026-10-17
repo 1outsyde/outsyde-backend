@@ -351,6 +351,12 @@ export const businesses = pgTable("businesses", {
   brandColors: jsonb("brand_colors").$type<{ primary?: string; secondary?: string }>(),
   knownFor: jsonb("known_for").$type<string[]>().default([]),
 
+  // Industry (migration 047). Codes come from shared/businessTaxonomy.ts and never change;
+  // used later to match consumers to businesses. Private: not in the public business DTO.
+  categoryCode: text("category_code"),
+  specialties: jsonb("specialties").$type<string[]>().notNull().default([]),
+  otherDescription: text("other_description"),
+
   hasProducts: boolean("has_products").default(false),
   hasServices: boolean("has_services").default(false),
   isMultiStaff: boolean("is_multi_staff").notNull().default(false),
@@ -2578,6 +2584,14 @@ export const vendorSignupSchema = z.object({
   billingCity: z.string().optional(),
   billingState: z.string().optional(),
   billingZipCode: z.string().optional(),
+  // Industry (migration 047), validated against shared/businessTaxonomy.ts in the route.
+  // All optional so older app versions and clients keep working unchanged.
+  categoryCode: z.string().max(40).optional(),
+  specialties: z.array(z.string().max(80)).max(10).optional(),
+  otherDescription: z.string().max(500).optional(),
+  // App only: the app uploads the logo right after signup, then triggers the admin email
+  // itself via POST /api/admin/notifications/business-application so the logo is included.
+  deferAdminNotification: z.boolean().optional(),
   acceptedSubscription: z.boolean().refine((val) => val === true, {
     message: "You must accept the subscription terms",
   }),
