@@ -3,6 +3,10 @@ import pg from 'pg';
 
 const { Pool } = pg;
 
+// Return dates and timestamps as Postgres text, exactly like Neon's HTTP API. Turning them into
+// ISO strings ('...Z') made drizzle read timestamp-without-time-zone columns as Invalid Date locally.
+for (const oid of [1082, 1114, 1184]) pg.types.setTypeParser(oid, (v) => v);
+
 const DATABASE_URL = process.env.LOCAL_PG_URL || 'postgresql://outsyde:outsyde@localhost:5432/outsyde';
 const PORT = parseInt(process.env.NEON_PROXY_PORT || '4444', 10);
 

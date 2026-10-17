@@ -7074,6 +7074,10 @@ export class DatabaseStorage implements IStorage {
     }
 
     const beforeState = { ...currentOrder };
+    // paid_at (migration 048): record when an order first becomes paid.
+    if (updates.status === 'paid' && currentOrder.status !== 'paid' && !currentOrder.paidAt) {
+      updates = { ...updates, paidAt: new Date() };
+    }
     const result = await db.update(orders)
       .set(updates)
       .where(eq(orders.id, orderId))

@@ -192,6 +192,10 @@ import { photographersRouter } from "./Photographers/photographers.routes";
 import { toPublicBusinessDTO } from "./serializers/business";
 import { grantToken } from "./utils/grantToken";
 import {
+  bookingRevenueCents, bookingInPersonCents, bookingCountsAsRevenue, isPaidOrder, orderRevenueDate, monthKey, monthOf,
+  bookingRevenueWhereSql, bookingRevenueAmountSql, paidOrderWhereSql, orderRevenueDateSql,
+} from "./revenue";
+import {
   clampAdminListLimit,
   complimentaryGrantSchema,
   isComplimentaryTier,
@@ -8872,6 +8876,13 @@ export async function registerRoutes(
               description: `Cancellation fee for appointment ${appointmentId}`,
             });
             feeCharged = true;
+            // Record the kept fee (migration 048). Outsyde revenue only; never fail the cancel over it.
+            try {
+              await db.update(appointments).set({ cancellationFeeKeptCents: feeAmountCents })
+                .where(eq(appointments.id, appointmentId));
+            } catch (recordError) {
+              console.error(`[Cancel] Could not record kept fee for appointment ${appointmentId}:`, recordError);
+            }
           } else {
             feeNeedsManualCollection = true;
           }
@@ -9224,6 +9235,8 @@ export async function registerRoutes(
         canceledAt: new Date(),
         canceledBy: userId,
         cancellationReason: 'Consumer-initiated cancellation',
+        // Kept fee (migration 048). Outsyde revenue only.
+        ...(feeCharged ? { cancellationFeeKeptCents: feeAmountCents } : {}),
       }).where(eq(shootBookings.id, bookingId));
 
       // ── Release photographer availability slot ────────────────────────────
@@ -16954,7 +16967,7 @@ export async function registerRoutes(
       if (completedOrderId && typeof completedOrderId === 'string') {
         const completedOrder = await storage.getOrder(completedOrderId);
         if (completedOrder && completedOrder.customerId === userId && completedOrder.orderGroupId === orderGroupId) {
-          await storage.updateOrder(completedOrderId, { status: 'paid' });
+          await storage.updateOrder(completedOrderId, { status: 'paid', paidAt: completedOrder.paidAt ?? new Date() });
           
           // Update the order group completed count
           const currentCompleted = orderGroup.completedVendors || 0;
@@ -17792,6 +17805,7 @@ export async function registerRoutes(
         return res.status(400).json({ error: "Refund request has already been processed" });
       }
 
+      let approvedStripeRefundId: string | null = null;
       if (data.status === 'approved') {
         // Issue Stripe refund for the actual payment BEFORE any DB write, so a
         // Stripe failure leaves the request untouched and still actionable.
@@ -17826,6 +17840,7 @@ export async function registerRoutes(
                 idempotencyKey: `refund_req_${id}`,
               });
               stripeRefundId = refund.id;
+              approvedStripeRefundId = refund.id;
               console.log(`[Refund] Stripe refund ${refund.id} issued for ${existing.targetType} ${existing.targetId}: ${existing.amount}¢`);
             } else {
               console.warn(`[Refund] No Stripe payment found for ${existing.targetType} ${existing.targetId} — skipping Stripe refund`);
@@ -17873,6 +17888,35 @@ export async function registerRoutes(
           }
           await storage.releasePhotographerSlot(request.targetId);
         } else if (request.targetType === 'appointment' && request.targetId) {
+          // Mark the appointment refunded (Part A): the refund leaves revenue, and the booking is
+          // canceled like a vendor refund (routes.ts /refund), so a later customer cancel can't run
+          // a second refund or reverse points twice.
+          try {
+            const appt = await storage.getAppointment(request.targetId);
+            await db.update(appointments).set({
+              refundAmount: (appt?.refundAmount ?? 0) + request.amount,
+              refundedAt: new Date(),
+              ...(approvedStripeRefundId ? { stripeRefundId: approvedStripeRefundId } : {}),
+            }).where(eq(appointments.id, request.targetId));
+            if (appt?.status === BOOKING_STATES.CONFIRMED) {
+              const transition = await transitionAppointmentState(request.targetId, BOOKING_STATES.CANCELED, {
+                triggeredBy: adminUser.id,
+                triggerSource: 'api',
+                metadata: { action: 'admin_refund', refundRequestId: id, refundAmountCents: String(request.amount) },
+              });
+              if (!transition.success) {
+                console.warn(`[Refund] Appointment ${request.targetId} refunded but not canceled:`, transition.error);
+              } else {
+                await db.update(appointments).set({
+                  canceledAt: new Date(),
+                  canceledBy: adminUser.id,
+                  cancellationReason: 'Refunded by Outsyde',
+                }).where(eq(appointments.id, request.targetId));
+              }
+            }
+          } catch (apptError) {
+            console.error(`[Refund] Could not mark appointment ${request.targetId} refunded:`, apptError);
+          }
           await storage.releaseBusinessSlot(request.targetId);
         }
 
@@ -19536,27 +19580,33 @@ export async function registerRoutes(
       if (!bizRecord) return res.status(404).json({ error: "Business not found" });
 
       const now = new Date();
-      const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
 
-      const paidStatuses = ['paid', 'shipped', 'delivered'];
-      const paidOrders = allOrders.filter(o => paidStatuses.includes(o.status || ''));
+      // One revenue rule (server/revenue.ts): only money captured through Outsyde counts.
+      // Orders land on their paid date, bookings on their appointment date.
+      const thisMonth = monthKey(now);
+      const paidOrders = allOrders.filter(o => isPaidOrder(o));
       const monthlyRevenue = paidOrders
-        .filter(o => new Date(o.createdAt) >= monthStart)
+        .filter(o => { const d = orderRevenueDate(o); return !!d && monthKey(d) === thisMonth; })
         .reduce((sum, o) => sum + (o.totalAmount || 0), 0);
 
-      const confirmedBookings = bookings.filter(b =>
-        b.status === 'confirmed' || b.status === 'completed' || b.status === 'pending_payment'
-      );
-
-      const monthlyBookingRevenue = confirmedBookings
-        .filter(b => new Date(b.createdAt) >= monthStart)
-        .reduce((sum, b) => sum + (b.totalPrice || 0), 0);
+      const confirmedBookings = bookings.filter(b => b.status === 'confirmed' || b.status === 'completed');
+      const monthBookings = bookings.filter(b => monthOf(b.appointmentDate) === thisMonth);
+      const monthlyBookingRevenue = monthBookings.reduce((sum, b) => sum + bookingRevenueCents(b), 0);
+      const inPersonDueCents = monthBookings
+        .filter(b => b.status === 'confirmed')
+        .reduce((sum, b) => sum + bookingInPersonCents(b), 0);
+      const inPersonCollectedCents = monthBookings
+        .filter(b => b.status === 'completed')
+        .reduce((sum, b) => sum + bookingInPersonCents(b), 0);
 
       res.json({
         stats: {
           orderCount: paidOrders.length,
           bookingCount: confirmedBookings.length,
           monthlyRevenueCents: monthlyRevenue + monthlyBookingRevenue,
+          // In-person balance this month (not processed through Outsyde). Additive keys.
+          inPersonDueCents,
+          inPersonCollectedCents,
           reviewCount: bizRecord.reviewCount || 0,
           averageRating: bizRecord.rating ? (bizRecord.rating / 10) : 0,
         },
@@ -19633,8 +19683,23 @@ export async function registerRoutes(
       const bookings = await storage.getAllShootBookings();
       const refundRequests = await storage.getAllPendingRefundRequests();
 
-      const totalRevenue = orders.reduce((sum, order) => sum + (order.totalAmount || 0), 0);
-      const totalBookingRevenue = bookings.reduce((sum, booking) => sum + (booking.totalPrice || 0), 0);
+      // One revenue rule (server/revenue.ts): only money captured through Outsyde counts,
+      // all time, across orders, business appointments and photographer bookings.
+      // Outsyde-only cancellation fees are added here (they never go to the business).
+      const totalRevenue = orders.filter(o => isPaidOrder(o)).reduce((sum, order) => sum + (order.totalAmount || 0), 0);
+      const apptRevenue = await db.execute<{ revenue: number; fees: number }>(sql`
+        SELECT COALESCE(SUM(${bookingRevenueAmountSql}) FILTER (WHERE ${bookingRevenueWhereSql}), 0)::int AS revenue,
+               COALESCE(SUM(cancellation_fee_kept_cents), 0)::int AS fees
+        FROM appointments
+      `);
+      const shootRevenue = await db.execute<{ revenue: number; fees: number }>(sql`
+        SELECT COALESCE(SUM(${bookingRevenueAmountSql}) FILTER (WHERE ${bookingRevenueWhereSql}), 0)::int AS revenue,
+               COALESCE(SUM(cancellation_fee_kept_cents), 0)::int AS fees
+        FROM shoot_bookings
+      `);
+      const totalBookingRevenue =
+        Number(apptRevenue.rows[0]?.revenue || 0) + Number(apptRevenue.rows[0]?.fees || 0) +
+        Number(shootRevenue.rows[0]?.revenue || 0) + Number(shootRevenue.rows[0]?.fees || 0);
 
       res.json({
         stats: {
@@ -20842,6 +20907,7 @@ export async function registerRoutes(
       const periodDays = period === '7d' ? 7 : period === '90d' ? 90 : period === 'all' ? 3650 : 30;
       const periodStart = new Date(Date.now() - periodDays * 24 * 60 * 60 * 1000);
       const periodEnd = new Date();
+      const periodStartDay = periodStart.toISOString().slice(0, 10);
 
       const business = await storage.getBusinessByOwnerId(userId);
       const photographer = await storage.getPhotographerByUserId(userId);
@@ -20856,49 +20922,43 @@ export async function registerRoutes(
       let platformFeesCollected = 0;
 
       if (business) {
-        // Revenue from orders (SQL aggregation)
-        const orderStats = await db.select({
-          revenue: sql<number>`COALESCE(SUM(${orders.totalAmount}), 0)`,
-          count: sql<number>`COUNT(*)`,
-          fees: sql<number>`COALESCE(SUM(${orders.platformFee}), 0)`,
-        }).from(orders).where(and(
-          eq(orders.businessId, business.id),
-          or(eq(orders.status, 'paid'), eq(orders.status, 'shipped'), eq(orders.status, 'delivered')),
-          gte(orders.createdAt, periodStart),
-        ));
-        totalOrders = Number(orderStats[0]?.count || 0);
-        totalRevenue += Number(orderStats[0]?.revenue || 0);
-        platformFeesCollected += Number(orderStats[0]?.fees || 0);
+        // One revenue rule (server/revenue.ts): only money captured through Outsyde counts.
+        const orderStats = await db.execute<{ revenue: number; count: number; fees: number }>(sql`
+          SELECT COALESCE(SUM(total_amount), 0)::int AS revenue, COUNT(*)::int AS count,
+                 COALESCE(SUM(platform_fee), 0)::int AS fees
+          FROM orders
+          WHERE business_id = ${business.id} AND ${paidOrderWhereSql}
+            AND ${orderRevenueDateSql} >= ${periodStart.toISOString()}
+        `);
+        totalOrders = Number(orderStats.rows[0]?.count || 0);
+        totalRevenue += Number(orderStats.rows[0]?.revenue || 0);
+        platformFeesCollected += Number(orderStats.rows[0]?.fees || 0);
 
-        // Revenue from appointments (SQL aggregation)
-        const apptStats = await db.select({
-          revenue: sql<number>`COALESCE(SUM(${appointments.totalPrice}), 0)`,
-          count: sql<number>`COUNT(*)`,
-          fees: sql<number>`COALESCE(SUM(${appointments.platformFee}), 0)`,
-        }).from(appointments).where(and(
-          eq(appointments.businessId, business.id),
-          or(eq(appointments.status, 'confirmed'), eq(appointments.status, 'completed')),
-          gte(appointments.createdAt, periodStart),
-        ));
-        totalBookings += Number(apptStats[0]?.count || 0);
-        totalRevenue += Number(apptStats[0]?.revenue || 0);
-        platformFeesCollected += Number(apptStats[0]?.fees || 0);
+        const apptStats = await db.execute<{ revenue: number; count: number; fees: number }>(sql`
+          SELECT COALESCE(SUM(${bookingRevenueAmountSql}), 0)::int AS revenue,
+                 COUNT(*) FILTER (WHERE status IN ('confirmed','completed'))::int AS count,
+                 COALESCE(SUM(platform_fee), 0)::int AS fees
+          FROM appointments
+          WHERE business_id = ${business.id} AND ${bookingRevenueWhereSql}
+            AND appointment_date >= ${periodStartDay}
+        `);
+        totalBookings += Number(apptStats.rows[0]?.count || 0);
+        totalRevenue += Number(apptStats.rows[0]?.revenue || 0);
+        platformFeesCollected += Number(apptStats.rows[0]?.fees || 0);
       }
 
       if (photographer) {
-        // Revenue from shoot bookings (SQL aggregation)
-        const shootStats = await db.select({
-          revenue: sql<number>`COALESCE(SUM(${shootBookings.totalPrice}), 0)`,
-          count: sql<number>`COUNT(*)`,
-          fees: sql<number>`COALESCE(SUM(${shootBookings.platformFee}), 0)`,
-        }).from(shootBookings).where(and(
-          eq(shootBookings.photographerId, photographer.id),
-          or(eq(shootBookings.status, 'confirmed'), eq(shootBookings.status, 'completed')),
-          gte(shootBookings.createdAt, periodStart),
-        ));
-        totalBookings += Number(shootStats[0]?.count || 0);
-        totalRevenue += Number(shootStats[0]?.revenue || 0);
-        platformFeesCollected += Number(shootStats[0]?.fees || 0);
+        const shootStats = await db.execute<{ revenue: number; count: number; fees: number }>(sql`
+          SELECT COALESCE(SUM(${bookingRevenueAmountSql}), 0)::int AS revenue,
+                 COUNT(*) FILTER (WHERE status IN ('confirmed','completed'))::int AS count,
+                 COALESCE(SUM(platform_fee), 0)::int AS fees
+          FROM shoot_bookings
+          WHERE photographer_id = ${photographer.id} AND ${bookingRevenueWhereSql}
+            AND date >= ${periodStartDay}
+        `);
+        totalBookings += Number(shootStats.rows[0]?.count || 0);
+        totalRevenue += Number(shootStats.rows[0]?.revenue || 0);
+        platformFeesCollected += Number(shootStats.rows[0]?.fees || 0);
       }
 
       res.json({
