@@ -4,6 +4,8 @@ import { randomUUID } from "crypto";
 import multer from "multer";
 import { storage, appointmentChargeFields } from "./storage";
 import { db } from "./db";
+import { coverPosterUrl, isMuxUploadId, resolveCoverVideoValue } from "./coverMedia";
+import { verifyMuxSignature } from "./muxWebhookSignature";
 import {
   customerSignupSchema,
   vendorSignupSchema,
@@ -3329,7 +3331,10 @@ export async function registerRoutes(
     try {
       const updateSchema = z.object({
         profileImageUrl: z.string().url().optional().nullable(),
-        coverMediaUrl: z.string().url().optional().nullable(),
+        // A URL, or a Mux upload id while a video cover is still processing
+        // (coverMediaType must then be "video" — checked below).
+        // http(s) only: zod's .url() alone also accepts phone paths like file:///var/mobile/…
+        coverMediaUrl: z.union([z.string().url().regex(/^https?:\/\//i), z.string().regex(/^[A-Za-z0-9]{8,128}$/)]).optional().nullable(),
         coverMediaType: z.enum(['image', 'video']).optional().nullable(),
         bio: z.string().optional().nullable(),
         firstName: z.string().max(100).optional().nullable(),
@@ -3348,7 +3353,17 @@ export async function registerRoutes(
       // Validate that coverMediaType is provided when coverMediaUrl is set
       if (validated.data.coverMediaUrl && !validated.data.coverMediaType) {
         return res.status(400).json({ 
-          error: "coverMediaType is required when setting coverMediaUrl" 
+          error: "coverMediaType is required when setting coverMediaUrl"
+        });
+      }
+      if (
+        validated.data.coverMediaUrl &&
+        isMuxUploadId(validated.data.coverMediaUrl) &&
+        validated.data.coverMediaType !== 'video'
+      ) {
+        return res.status(400).json({
+          error: "Invalid data",
+          details: [{ path: ["coverMediaUrl"], message: "coverMediaUrl must be a URL unless coverMediaType is video" }],
         });
       }
 
@@ -3357,7 +3372,10 @@ export async function registerRoutes(
         updateData.profileImageUrl = validated.data.profileImageUrl;
       }
       if (validated.data.coverMediaUrl !== undefined) {
-        updateData.coverMediaUrl = validated.data.coverMediaUrl;
+        updateData.coverMediaUrl = await resolveCoverVideoValue(
+          validated.data.coverMediaUrl,
+          validated.data.coverMediaType,
+        );
       }
       if (validated.data.coverMediaType !== undefined) {
         updateData.coverMediaType = validated.data.coverMediaType;
@@ -11760,7 +11778,7 @@ export async function registerRoutes(
       
       // Require coverMediaType when setting coverImage
       if (coverImage !== undefined) {
-        updates.coverImage = coverImage;
+        updates.coverImage = await resolveCoverVideoValue(coverImage, coverMediaType);
         if (coverImage !== null && coverMediaType === undefined) {
           return res.status(400).json({ error: "coverMediaType is required when setting coverImage" });
         }
@@ -14682,7 +14700,7 @@ export async function registerRoutes(
         updates.coverMediaType = coverMediaType;
       }
       if (coverImage !== undefined) {
-        updates.coverImage = coverImage;
+        updates.coverImage = await resolveCoverVideoValue(coverImage, coverMediaType);
         if (coverImage !== null && coverMediaType === undefined) {
           return res.status(400).json({ error: "coverMediaType is required when setting coverImage" });
         }
@@ -15711,6 +15729,8 @@ export async function registerRoutes(
         avatarUrl: user.profileImageUrl,
         coverMediaUrl: user.coverMediaUrl,
         coverMediaType: user.coverMediaType,
+        // Still picture for image-only screens (Mux thumbnail for video covers). Additive.
+        coverPosterUrl: coverPosterUrl(user.coverMediaUrl, user.coverMediaType),
         // Location (coarse — city/state only, not full address)
         city: user.city,
         state: user.state,
@@ -22788,6 +22808,16 @@ export async function registerRoutes(
   // the right row once the asset is ready.
   app.post("/api/webhooks/mux", async (req, res) => {
     try {
+      const signature = verifyMuxSignature(
+        (req as any).rawBody,
+        req.headers["mux-signature"],
+        process.env.MUX_WEBHOOK_SECRET,
+      );
+      if (!signature.ok) {
+        console.warn(`[Mux] webhook rejected: ${signature.reason}`);
+        return res.status(401).json({ error: "Invalid signature" });
+      }
+
       const { type, data } = req.body ?? {};
 
       if (type === "video.asset.ready") {
@@ -22835,6 +22865,15 @@ export async function registerRoutes(
             .where(eq(staffMembers.coverImage, uploadId));
           console.log(
             `[Mux] webhook: updated staff coverImage for uploadId=${uploadId} -> ${videoUrl}`
+          );
+
+          // Customer / personal profile covers (users.cover_media_url).
+          await db
+            .update(users)
+            .set({ coverMediaUrl: videoUrl })
+            .where(eq(users.coverMediaUrl, uploadId));
+          console.log(
+            `[Mux] webhook: updated users coverMediaUrl for uploadId=${uploadId} -> ${videoUrl}`
           );
 
           // At story creation time the mobile app stores the Mux upload_id in

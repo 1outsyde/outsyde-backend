@@ -9,6 +9,7 @@ import { db } from "../db";
 import { photographerServiceAddons } from "../../shared/schema";
 import { verifyAccessToken, AuthenticatedRequest } from "../auth";
 import { toPublicPhotographerDTO } from "../serializers/photographer";
+import { resolveCoverVideoValue } from "../coverMedia";
 import { provisionConnectedCatalogItem } from "../services/connectedCatalog";
 import { validatePhotographerDeposit, invalidDepositBody } from "../deposits";
 
@@ -203,7 +204,7 @@ export class PhotographerController {
       if (hourlyRate !== undefined) updates.hourlyRate = Math.round(Number(hourlyRate) * 100);
       if (specialties !== undefined && Array.isArray(specialties)) updates.specialties = specialties;
       // Storefront customization
-      if (coverImage !== undefined) updates.coverImage = coverImage;
+      if (coverImage !== undefined) updates.coverImage = await resolveCoverVideoValue(coverImage, coverMediaType);
       // Validate coverMediaType when coverImage is set (must be 'image' or 'video')
       if (coverMediaType !== undefined) {
         if (coverMediaType !== null && coverMediaType !== 'image' && coverMediaType !== 'video') {

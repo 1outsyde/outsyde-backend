@@ -165,7 +165,15 @@ app.post(
 // =======================
 // Standard Middleware
 // =======================
-app.use(express.json());
+app.use(express.json({
+  // Keep the exact bytes for the Mux webhook only, so its signature can be
+  // checked (server/muxWebhookSignature.ts). Every other route is unchanged.
+  verify: (req, _res, buf) => {
+    if ((req as any).originalUrl === "/api/webhooks/mux") {
+      (req as any).rawBody = Buffer.from(buf);
+    }
+  },
+}));
 app.use(express.urlencoded({ extended: false }));
 
 app.use((req, res, next) => {
