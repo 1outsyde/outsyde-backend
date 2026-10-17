@@ -1060,12 +1060,13 @@ export const shootBookings = pgTable("shoot_bookings", {
   addonsDurationMinutes: integer("addons_duration_minutes").notNull().default(0),
   customerDetails: text("customer_details"),
 }, (table) => ({
-  // Prevent double bookings: unique constraint on photographer + date + time
-  uniquePhotographerSlot: unique("unique_photographer_slot").on(
+  // Prevent double bookings: only one ACTIVE booking per photographer + date + start time.
+  // Partial index (migration 050): expired / canceled / declined bookings no longer block the slot.
+  uniquePhotographerSlot: uniqueIndex("uq_photographer_active_slot").on(
     table.photographerId,
     table.date,
     table.startTime
-  ),
+  ).where(sql`status NOT IN ('canceled', 'cancelled', 'expired', 'declined', 'refunded')`),
   // Index for draft expiry cleanup job
   shootDraftExpiryIdx: index("idx_shoot_bookings_draft_expiry").on(table.status, table.draftExpiresAt),
   // Index for availability queries
