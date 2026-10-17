@@ -258,9 +258,14 @@ export async function applyPromoCodeAtomic(
 // ── Reversals ────────────────────────────────────────────────────────────
 
 /**
- * Take back points earned on a refunded/cancelled purchase, in one statement. Never takes more
- * than was earned on that reference (minus what earlier partial refunds already took back), and
- * never takes the balance below 0 (the rest is reported as shortfall).
+ * Take back points earned on a refunded/cancelled purchase. Never takes more than was earned on
+ * that reference (minus what earlier refunds already took back), and never takes the balance
+ * below 0. The ledger row records what was actually taken.
+ *
+ * Concurrency: the totals are read, then the write only applies if the balance is still exactly
+ * what was read (compare-and-swap, re-checked by Postgres under the row lock). If anything changed
+ * the balance in between (e.g. a second refund of the same booking), it reads again and retries,
+ * so two refunds can never both take back the same points.
  */
 export async function reversePointsForReference(
   userId: string,
@@ -268,51 +273,100 @@ export async function reversePointsForReference(
   referenceId: string,
   opts?: { refundFraction?: number; description?: string },
 ): Promise<{ reversed: boolean; pointsReversed: number; shortfall: number }> {
-  const [totals] = await rows<{ earned: number; already: number }>(sql`
-    SELECT
-      COALESCE((SELECT SUM(points) FROM point_transactions
-        WHERE user_id = ${userId} AND type = 'earn'
-          AND reference_type = ${referenceType} AND reference_id = ${referenceId}), 0)::int AS earned,
-      COALESCE((SELECT SUM(-points) FROM point_transactions
-        WHERE user_id = ${userId} AND type = 'reversal'
-          AND reference_type = 'refund_reversal' AND reference_id = ${referenceId}), 0)::int AS already
-  `);
-  const earned = Number(totals?.earned ?? 0);
-  const already = Number(totals?.already ?? 0);
-  if (earned <= 0) return { reversed: false, pointsReversed: 0, shortfall: 0 };
-
   const fraction = opts?.refundFraction !== undefined ? Math.min(1, Math.max(0, opts.refundFraction)) : 1;
-  const wanted = Math.min(Math.round(earned * fraction), Math.max(0, earned - already));
-  if (wanted <= 0) return { reversed: false, pointsReversed: 0, shortfall: 0 };
-
   const description = opts?.description
     || (fraction < 1 ? `Points reversed from partial refund (${referenceType})` : `Points reversed from refund (${referenceType})`);
 
-  const result = await rows<{ taken: number }>(sql`
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const [state] = await rows<{ balance: number | null; earned: number; already: number }>(sql`
+      SELECT
+        (SELECT loyalty_points FROM users WHERE id = ${userId}) AS balance,
+        COALESCE((SELECT SUM(points) FROM point_transactions
+          WHERE user_id = ${userId} AND type = 'earn'
+            AND reference_type = ${referenceType} AND reference_id = ${referenceId}), 0)::int AS earned,
+        COALESCE((SELECT SUM(-points) FROM point_transactions
+          WHERE user_id = ${userId} AND type = 'reversal'
+            AND reference_type = 'refund_reversal' AND reference_id = ${referenceId}), 0)::int AS already
+    `);
+    if (!state || state.balance === null || state.balance === undefined) return { reversed: false, pointsReversed: 0, shortfall: 0 };
+    const balance = Number(state.balance);
+    const earned = Number(state.earned);
+    const already = Number(state.already);
+    if (earned <= 0) return { reversed: false, pointsReversed: 0, shortfall: 0 };
+
+    const wanted = Math.min(Math.round(earned * fraction), Math.max(0, earned - already));
+    if (wanted <= 0) return { reversed: false, pointsReversed: 0, shortfall: 0 };
+    const taken = Math.min(balance, wanted);
+    const shortfall = wanted - taken;
+
+    const result = await rows<{ id: string }>(sql`
+      WITH upd AS (
+        UPDATE users SET loyalty_points = loyalty_points - ${taken}::int
+        WHERE id = ${userId} AND loyalty_points = ${balance}::int
+        RETURNING loyalty_points AS after
+      ), ins AS (
+        INSERT INTO point_transactions
+          (id, user_id, type, points, dollar_amount_cents, reference_type, reference_id,
+           balance_after, description, capped)
+        SELECT ${randomUUID()}, ${userId}, 'reversal', ${-taken}::int, 0, 'refund_reversal', ${referenceId},
+               upd.after, ${shortfall > 0 ? `${description} (${shortfall} points could not be taken back)` : description}, false
+        FROM upd
+        RETURNING id
+      )
+      SELECT id FROM ins
+    `);
+    if (!result[0]) continue; // balance moved since the read: read again
+    if (shortfall > 0) {
+      console.warn(`[Points] Clawback shortfall for user ${userId} on ${referenceType} ${referenceId}: wanted ${wanted}, balance allowed ${taken}.`);
+    }
+    return { reversed: taken > 0, pointsReversed: taken, shortfall };
+  }
+  throw new Error(`Points reversal for ${referenceType} ${referenceId} kept conflicting; try again`);
+}
+
+/**
+ * Add (delta > 0) or remove (delta < 0, never below 0) points with a ledger row, in one statement.
+ * The row records the change actually applied. Used by the internal rewards events endpoint.
+ * A positive delta with a referenceId is credited once per reference (duplicate -> null).
+ */
+export async function adjustPoints(input: {
+  userId: string;
+  delta: number;
+  referenceType: string;
+  referenceId: string | null;
+  description: string;
+}): Promise<{ id: string; balanceAfter: number } | null> {
+  const delta = Math.trunc(input.delta);
+  if (delta > 0) {
+    return creditPoints({
+      userId: input.userId,
+      points: delta,
+      dollarAmountCents: 0,
+      referenceType: input.referenceType,
+      referenceId: input.referenceId,
+      description: input.description,
+    });
+  }
+  const result = await rows<{ id: string; balance_after: number }>(sql`
     WITH cur AS (
-      SELECT id, loyalty_points FROM users WHERE id = ${userId} FOR UPDATE
+      SELECT id, loyalty_points FROM users WHERE id = ${input.userId} FOR UPDATE
     ), upd AS (
-      UPDATE users SET loyalty_points = users.loyalty_points - LEAST(cur.loyalty_points, ${wanted}::int)
+      UPDATE users SET loyalty_points = GREATEST(0, cur.loyalty_points + ${delta}::int)
       FROM cur WHERE users.id = cur.id
-      RETURNING users.loyalty_points AS after, LEAST(cur.loyalty_points, ${wanted}::int) AS taken
+      RETURNING users.loyalty_points AS after, cur.loyalty_points AS before
     ), ins AS (
       INSERT INTO point_transactions
         (id, user_id, type, points, dollar_amount_cents, reference_type, reference_id,
          balance_after, description, capped)
-      SELECT ${randomUUID()}, ${userId}, 'reversal', ${-wanted}::int, 0, 'refund_reversal', ${referenceId},
-             upd.after, ${description}, false
+      SELECT ${randomUUID()}, ${input.userId}, 'reversal', upd.after - upd.before, 0,
+             ${input.referenceType}, ${input.referenceId}, upd.after, ${input.description}, false
       FROM upd
-      RETURNING id
+      RETURNING id, balance_after
     )
-    SELECT upd.taken FROM upd, ins
+    SELECT id, balance_after FROM ins
   `);
-  if (!result[0]) return { reversed: false, pointsReversed: 0, shortfall: 0 };
-  const taken = Number(result[0].taken);
-  const shortfall = wanted - taken;
-  if (shortfall > 0) {
-    console.warn(`[Points] Clawback shortfall for user ${userId} on ${referenceType} ${referenceId}: tried ${wanted}, balance only allowed ${taken}.`);
-  }
-  return { reversed: true, pointsReversed: wanted, shortfall };
+  if (!result[0]) throw new Error(`User ${input.userId} not found`);
+  return { id: result[0].id, balanceAfter: Number(result[0].balance_after) };
 }
 
 /** Reverse one ledger row (earn or redeem) by id, once. Used by no route today; kept atomic. */
@@ -325,18 +379,19 @@ export async function reverseLedgerRow(userId: string, originalTransactionId: st
           SELECT 1 FROM point_transactions r
           WHERE r.reference_type = 'reversal' AND r.reference_id = ${originalTransactionId}
         )
+    ), cur AS (
+      SELECT users.id, users.loyalty_points FROM users JOIN orig ON orig.user_id = users.id FOR UPDATE OF users
     ), upd AS (
-      UPDATE users SET loyalty_points = GREATEST(0, users.loyalty_points
+      UPDATE users SET loyalty_points = GREATEST(0, cur.loyalty_points
         + CASE WHEN orig.type = 'earn' THEN -orig.points ELSE orig.points END)
-      FROM orig WHERE users.id = orig.user_id
-      RETURNING users.loyalty_points AS after,
-        CASE WHEN orig.type = 'earn' THEN -orig.points ELSE orig.points END AS delta,
+      FROM cur, orig WHERE users.id = cur.id
+      RETURNING users.loyalty_points AS after, cur.loyalty_points AS before,
         orig.dollar_amount_cents, orig.business_id, orig.business_name
     ), ins AS (
       INSERT INTO point_transactions
         (id, user_id, type, points, dollar_amount_cents, business_id, business_name,
          reference_type, reference_id, balance_after, description, capped)
-      SELECT ${randomUUID()}, ${userId}, 'reversal', upd.delta, upd.dollar_amount_cents, upd.business_id,
+      SELECT ${randomUUID()}, ${userId}, 'reversal', upd.after - upd.before, upd.dollar_amount_cents, upd.business_id,
              upd.business_name, 'reversal', ${originalTransactionId}, upd.after, ${`Reversal: ${reason}`}, false
       FROM upd
       RETURNING id
@@ -362,10 +417,33 @@ export interface PendingInput {
   description?: string | null;
 }
 
-/** Hold points until the booking is final. Returns false if this reference already has a row. */
-export async function createPending(input: PendingInput): Promise<boolean> {
+/**
+ * Hold points until the booking is final. Returns false if this reference already has a row.
+ * reviveRejected: a REJECTED row for the same reference is put back to pending with the new
+ * values (used when a referral re-qualifies after its first purchase was cancelled). Pending or
+ * approved rows are never touched.
+ */
+export async function createPending(input: PendingInput, opts?: { reviveRejected?: boolean }): Promise<boolean> {
   const points = Math.trunc(input.points);
   if (points <= 0) return false;
+  if (opts?.reviveRejected) {
+    const revived = await rows<{ id: string }>(sql`
+      INSERT INTO pending_points_transactions
+        (id, user_id, dollar_amount_cents, transaction_type, points_earned, outsyde_revenue_cents,
+         business_id, business_name, reference_type, reference_id, description, status, release_after)
+      VALUES (${randomUUID()}, ${input.userId}, ${Math.trunc(input.dollarAmountCents)}, ${input.transactionType},
+              ${points}, ${pointsValueCents(points)}, ${input.businessId ?? null}, ${input.businessName ?? null},
+              ${input.referenceType}, ${input.referenceId}, ${input.description ?? `Pending ${points} points`},
+              'pending', ${input.releaseAfter ? input.releaseAfter.toISOString() : null}::timestamptz)
+      ON CONFLICT (reference_type, reference_id) DO UPDATE
+        SET status = 'pending', points_earned = EXCLUDED.points_earned,
+            outsyde_revenue_cents = EXCLUDED.outsyde_revenue_cents, release_after = EXCLUDED.release_after,
+            reviewed_at = NULL, reviewed_by = NULL, review_note = NULL, live_transaction_id = NULL, updated_at = now()
+        WHERE pending_points_transactions.status = 'rejected'
+      RETURNING id
+    `);
+    return revived.length > 0;
+  }
   const result = await rows<{ id: string }>(sql`
     INSERT INTO pending_points_transactions
       (id, user_id, dollar_amount_cents, transaction_type, points_earned, outsyde_revenue_cents,
@@ -404,6 +482,7 @@ export async function releasePendingRow(pendingId: string, reviewerId: string, n
         SET status = 'approved', reviewed_at = now(), reviewed_by = ${reviewerId},
             review_note = ${note ?? null}, live_transaction_id = ${liveId}, updated_at = now()
         WHERE id = ${pendingId} AND status = 'pending'
+          AND EXISTS (SELECT 1 FROM users u WHERE u.id = pending_points_transactions.user_id)
         RETURNING *
       ), upd AS (
         UPDATE users SET loyalty_points = users.loyalty_points + p.points_earned
@@ -564,7 +643,7 @@ export async function qualifyReferral(
     referenceId: referral.id,
     releaseAfter,
     description: 'Referral reward: your friend made their first purchase',
-  });
+  }, { reviveRejected: true });
   await createPending({
     userId: referredUserId,
     points: REFERRAL_BONUS_POINTS,
@@ -574,7 +653,7 @@ export async function qualifyReferral(
     referenceId: referral.id,
     releaseAfter,
     description: 'Referral reward: welcome to Outsyde',
-  });
+  }, { reviveRejected: true });
 
   if (purchase.final) await releaseReferralBonuses(referral.id, 'system');
   return 'qualified';
@@ -607,10 +686,10 @@ async function releaseReferralBonuses(referralId: string, reviewerId: string): P
     UPDATE referrals
     SET status = 'completed', referrer_bonus_paid_at = now(), referred_bonus_paid_at = now()
     WHERE id = ${referralId} AND status = 'qualifying'
-      AND NOT EXISTS (
-        SELECT 1 FROM pending_points_transactions
-        WHERE reference_type IN ('referral_referrer', 'referral_referred') AND reference_id = ${referralId} AND status = 'pending'
-      )
+      AND (
+        SELECT count(*) FROM pending_points_transactions
+        WHERE reference_type IN ('referral_referrer', 'referral_referred') AND reference_id = ${referralId} AND status = 'approved'
+      ) = 2
   `);
 }
 
@@ -638,10 +717,10 @@ export async function releasePendingById(pendingId: string, reviewerId: string, 
       await rows(sql`
         UPDATE referrals SET status = 'completed', referrer_bonus_paid_at = now(), referred_bonus_paid_at = now()
         WHERE id = ${released.referenceId} AND status = 'qualifying'
-          AND NOT EXISTS (
-            SELECT 1 FROM pending_points_transactions
-            WHERE reference_type IN ('referral_referrer', 'referral_referred') AND reference_id = ${released.referenceId} AND status = 'pending'
-          )
+          AND (
+            SELECT count(*) FROM pending_points_transactions
+            WHERE reference_type IN ('referral_referrer', 'referral_referred') AND reference_id = ${released.referenceId} AND status = 'approved'
+          ) = 2
       `);
     } else {
       await afterRelease(released);

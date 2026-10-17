@@ -2783,9 +2783,9 @@ export class WebhookHandlers {
 
         // Pending points on the amount charged (incl. service fee), released when the booking is
         // final; the referral check runs then.
-        await bestEffort(`pending points for appointment ${appointmentId}`, () => storage.createPendingPointTransaction({
+        if (session.amount_total > 0) await bestEffort(`pending points for appointment ${appointmentId}`, () => storage.createPendingPointTransaction({
           userId: clientId,
-          dollarAmountCents: session.amount_total ?? 0,
+          dollarAmountCents: session.amount_total,
           transactionType: 'business_transaction',
           referenceType: "appointment",
           referenceId: appointmentId,
@@ -2937,9 +2937,9 @@ export class WebhookHandlers {
 
         // Pending points on the amount charged (incl. service fee), released 3 days after the shoot
         // unless cancelled; the referral check runs then.
-        await bestEffort(`pending points for shoot booking ${shootBookingId}`, () => storage.createPendingPointTransaction({
+        if (session.amount_total > 0) await bestEffort(`pending points for shoot booking ${shootBookingId}`, () => storage.createPendingPointTransaction({
           userId: clientId,
-          dollarAmountCents: session.amount_total ?? 0,
+          dollarAmountCents: session.amount_total,
           transactionType: 'photographer_booking',
           referenceType: "shoot_booking",
           referenceId: shootBookingId,

@@ -202,6 +202,32 @@ const isLocal = (u?: string) => !!u && ['localhost', '127.0.0.1'].includes(new U
     }
   }
 
+  console.log('\n8. Internal rewards events: one write, retries never double credit');
+  if (process.env.INTERNAL_API_KEY) {
+    const u = await mkUser('evt', { points: 100 });
+    const ref = crypto.randomUUID();
+    const send = (delta: number, referenceId?: string) => fetch(`${BASE}/api/internal/rewards/events`, {
+      method: 'POST', headers: { 'content-type': 'application/json', 'x-internal-key': process.env.INTERNAL_API_KEY! },
+      body: JSON.stringify({ userId: u, event: 'test', pointsDelta: delta, referenceId }),
+    }).then(async r => ({ status: r.status, json: await r.json() }));
+    const e1 = await send(250, ref);
+    const e2 = await send(250, ref);
+    assert(e1.status === 200 && e2.status === 200 && e2.json.alreadyApplied === true && (await balance(u)) === 350, 'same event twice credits once', { e1: e1.json, e2: e2.json });
+    const e3 = await send(-1000);
+    const row = (await q(`SELECT points, balance_after FROM point_transactions WHERE user_id=$1 AND type='reversal'`, [u]))[0];
+    assert(e3.status === 200 && (await balance(u)) === 0 && row.points === -350 && row.balance_after === 0, 'debit stops at 0 and the row records -350', { e3: e3.json, row });
+  } else {
+    console.log('  ⏭  INTERNAL_API_KEY not set: skipped');
+  }
+
+  console.log('\n9. Expired codes are refused at checkout');
+  {
+    await q(`UPDATE promo_codes SET status='active', used_at=NULL, expires_at = now() - interval '1 day' WHERE id=$1`, [codeId]);
+    const addr = { line1: '1 Test St', city: 'Freeport', state: 'NY', zipCode: '11520' };
+    const r = await call('POST', '/api/cart/payment-intent', tok(rich), { items: [{ isExternalProduct: true, vendorId: bizId, priceCents: 6000, quantity: 1, name: 'Test item' }], shippingAddress: addr, promoCodeId: codeId });
+    assert(r.status === 400 && r.json?.error?.code === 'INVALID_PROMO', 'expired code: refused', r.json);
+  }
+
   stub.close();
   await db.end();
   console.log(`\n${passed} passed, ${failed} failed`);

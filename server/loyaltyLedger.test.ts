@@ -179,6 +179,26 @@ function assert(condition: boolean, name: string, detail?: unknown) {
     assert(half.pointsReversed === 1000 && full.pointsReversed === 1000 && !extra.reversed && (await balance(u)) === 0,
       '50% then full refund takes back exactly 2000, a third call nothing', { half, full, extra, bal: await balance(u) });
     assert((await ledgerSum(u)) === (await balance(u)), 'balance equals ledger');
+
+    // Two refunds of the same order at the same time never take back the points twice
+    const v = await user(5000);
+    const ref2 = crypto.randomUUID();
+    await storage.earnPoints({ userId: v, dollarAmountCents: 10800, transactionType: 'business_transaction', referenceType: 'cart_order', referenceId: ref2 });
+    await Promise.all([1, 2, 3, 4].map(() => storage.reversePointsForRefund(v, 'cart_order', ref2).catch(() => null)));
+    const revRows = await q(`SELECT COALESCE(SUM(points),0)::int s FROM point_transactions WHERE user_id=$1 AND type='reversal'`, [v]);
+    assert((await balance(v)) === 5000 && revRows[0].s === -2000,
+      '4 parallel full refunds take back the 2000 points exactly once', { bal: await balance(v), reversed: revRows[0].s });
+
+    // Shortfall: the ledger row records what was really taken
+    const w = await user();
+    const ref3 = crypto.randomUUID();
+    await storage.earnPoints({ userId: w, dollarAmountCents: 10800, transactionType: 'business_transaction', referenceType: 'cart_order', referenceId: ref3 });
+    await q(`UPDATE users SET loyalty_points = 300 WHERE id = $1`, [w]); // simulate points already spent elsewhere
+    await q(`INSERT INTO point_transactions (id, user_id, type, points, dollar_amount_cents, reference_type, reference_id, balance_after, description, capped) VALUES ($1,$2,'redeem',1700,0,'promo_code',$3,300,'test spend',false)`, [crypto.randomUUID(), w, crypto.randomUUID()]);
+    const sf = await storage.reversePointsForRefund(w, 'cart_order', ref3);
+    const lastRow = (await q(`SELECT points FROM point_transactions WHERE user_id=$1 AND type='reversal'`, [w]))[0];
+    assert(sf.pointsReversed === 300 && sf.shortfall === 1700 && lastRow.points === -300 && (await balance(w)) === 0 && (await ledgerSum(w)) === 0,
+      'shortfall: takes 300, ledger row says -300, balance equals ledger', { sf, lastRow });
   }
 
   console.log('\n7. Referrals: 500 each, only when the first purchase is final');
@@ -216,6 +236,26 @@ function assert(condition: boolean, name: string, detail?: unknown) {
     await ledger.releaseDuePendingPoints();
     const ref2 = (await q('SELECT status FROM referrals WHERE referred_user_id=$1', [D]))[0];
     assert((await balance(C)) === 0 && (await balance(D)) === 0 && ref2.status === 'pending', 'cancelled first order: no bonus, referral reopened', ref2);
+
+    // Reopened referral re-qualifies on the next purchase and pays exactly once
+    const o2b = await order(D, shop);
+    const again = await ledger.qualifyReferral(D, { type: 'order', id: o2b, grossCents: 2160, final: false });
+    const revived = await q(`SELECT status FROM pending_points_transactions WHERE reference_type LIKE 'referral_%' AND user_id = ANY($1)`, [[C, D]]);
+    assert(again === 'qualified' && revived.length === 2 && revived.every((r: any) => r.status === 'pending'), 'second purchase re-qualifies: both bonus rows pending again', { again, revived });
+    await q(`UPDATE pending_points_transactions SET release_after = now() - interval '1 minute' WHERE reference_type LIKE 'referral_%' AND user_id = ANY($1)`, [[C, D]]);
+    await ledger.releaseDuePendingPoints();
+    const ref2b = (await q('SELECT status FROM referrals WHERE referred_user_id=$1', [D]))[0];
+    assert((await balance(C)) === 500 && (await balance(D)) === 500 && ref2b.status === 'completed', 'then both get 500 once and the referral completes', { c: await balance(C), d: await balance(D), ref2b });
+
+    // A referral is only marked completed when both bonuses were really paid
+    const I = await user();
+    const J = await user();
+    await storage.processReferral(J, await storage.generateReferralCode(I));
+    const refJ = (await q('SELECT id FROM referrals WHERE referred_user_id=$1', [J]))[0].id;
+    await q(`UPDATE referrals SET status='qualifying', first_transaction_type='order', first_transaction_id=$2 WHERE id=$1`, [refJ, await order(J, shop)]);
+    await ledger.releaseDuePendingPoints();
+    const refJs = (await q('SELECT status FROM referrals WHERE id=$1', [refJ]))[0].status;
+    assert(refJs === 'qualifying', 'qualifying referral with no bonus rows is never marked completed', refJs);
 
     // Buying from the referrer's own business never pays
     const E = await user();

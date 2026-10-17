@@ -152,6 +152,7 @@ import {
   releasePendingForReference,
   rejectPendingForReference,
   creditPoints,
+  adjustPoints,
   REDEMPTION_TIERS,
   REFERRAL_BONUS_POINTS,
 } from "./loyaltyLedger";
@@ -7699,7 +7700,8 @@ export async function registerRoutes(
       let discountCents = 0;
       if (promoCodeId) {
         const promoCode = await storage.getPromoCodeById(promoCodeId);
-        if (!promoCode || promoCode.status !== 'active' || promoCode.usedAt !== null || promoCode.userId !== userId) {
+        if (!promoCode || promoCode.status !== 'active' || promoCode.usedAt !== null || promoCode.userId !== userId
+            || new Date(promoCode.expiresAt).getTime() <= Date.now()) {
           return res.status(400).json({ error: 'Invalid or already used promo code' });
         }
         // A code needs an order base of at least 10x its value, so the discount comes only out of
@@ -7893,7 +7895,8 @@ export async function registerRoutes(
       let discountCents = 0;
       if (promoCodeId) {
         const promoCode = await storage.getPromoCodeById(promoCodeId);
-        if (!promoCode || promoCode.status !== 'active' || promoCode.usedAt !== null || promoCode.userId !== userId) {
+        if (!promoCode || promoCode.status !== 'active' || promoCode.usedAt !== null || promoCode.userId !== userId
+            || new Date(promoCode.expiresAt).getTime() <= Date.now()) {
           return res.status(400).json({ error: 'Invalid or already used promo code' });
         }
         // A code needs an order base of at least 10x its value, so the discount comes only out of
@@ -8120,7 +8123,8 @@ export async function registerRoutes(
         let discountCents = 0;
         if (promoCodeId) {
           const promoCode = await storage.getPromoCodeById(promoCodeId);
-          if (!promoCode || promoCode.status !== 'active' || promoCode.usedAt !== null || promoCode.userId !== userId) {
+          if (!promoCode || promoCode.status !== 'active' || promoCode.usedAt !== null || promoCode.userId !== userId
+              || new Date(promoCode.expiresAt).getTime() <= Date.now()) {
             return res.status(400).json({ success: false, error: { code: 'INVALID_PROMO', message: 'Invalid or already used promo code' } });
           }
           // A code needs an order base of at least 10x its value, so the discount comes only out of
@@ -23438,24 +23442,21 @@ export async function registerRoutes(
         return res.status(404).json({ error: "User not found" });
       }
 
-      // Apply delta to user's loyaltyPoints
-      const currentBalance = user.loyaltyPoints ?? 0;
-      const newBalance = Math.max(0, currentBalance + pointsDelta);
-      await db.update(users).set({ loyaltyPoints: newBalance }).where(eq(users.id, userId));
-
-      // Insert an immediate point transaction record
-      const [txn] = await db.insert(pointTransactions).values({
-        id: randomUUID(),
+      // One statement: balance change + ledger row together (neon-http has no transactions).
+      // A positive delta is credited once per referenceId; a retry returns the current balance.
+      const applied = await adjustPoints({
         userId,
-        type: pointsDelta >= 0 ? 'earn' : 'reversal',
-        points: Math.abs(pointsDelta),
-        dollarAmountCents: Math.abs(pointsDelta),
+        delta: pointsDelta,
         referenceType: referenceType ?? 'internal_event',
         referenceId: referenceId ?? null,
-        balanceAfter: newBalance,
         description: description ?? `Internal event: ${event}`,
-        capped: false,
-      }).returning();
+      });
+      if (!applied) {
+        const current = await storage.getUserPointsBalance(userId);
+        return res.json({ success: true, alreadyApplied: true, transactionId: null, newBalance: current });
+      }
+      const txn = { id: applied.id };
+      const newBalance = applied.balanceAfter;
 
       console.log(`[internal/rewards] event=${event} userId=${userId} delta=${pointsDelta} newBalance=${newBalance}`);
       res.json({ success: true, transactionId: txn.id, newBalance });
