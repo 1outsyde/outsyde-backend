@@ -693,6 +693,7 @@ export interface IStorage {
   getSavedPosts(userId: string): Promise<any[]>;
   hasUserLikedPost(postId: string, userId: string): Promise<boolean>;
   getLikedPostIds(userId: string, postIds: string[]): Promise<Set<string>>;
+  getSavedPostIds(userId: string, postIds: string[]): Promise<Set<string>>;
   addPostComment(data: InsertPostComment): Promise<PostComment>;
   getPostComments(postId: string): Promise<PostComment[]>;
   canCustomerTagBusiness(customerId: string, businessId: string): Promise<boolean>;
@@ -6096,21 +6097,15 @@ export class DatabaseStorage implements IStorage {
   }
 
   async savePost(postId: string, userId: string): Promise<boolean> {
-    const existing = await db.select()
-      .from(userSavedPosts)
-      .where(and(
-        eq(userSavedPosts.postId, postId),
-        eq(userSavedPosts.userId, userId)
-      ));
-
-    if (existing.length > 0) return true;
-
+    // One statement: a second save of the same post (double tap, retry) hits the
+    // unique (user_id, post_id) index and is ignored instead of throwing a 500.
     await db.insert(userSavedPosts)
       .values({
         id: randomUUID(),
         postId,
         userId,
-      });
+      })
+      .onConflictDoNothing({ target: [userSavedPosts.userId, userSavedPosts.postId] });
 
     return true;
   }
@@ -6175,6 +6170,18 @@ export class DatabaseStorage implements IStorage {
       .where(and(
         eq(postLikes.userId, userId),
         inArray(postLikes.postId, postIds)
+      ));
+    return new Set(rows.map(r => r.postId));
+  }
+
+  async getSavedPostIds(userId: string, postIds: string[]): Promise<Set<string>> {
+    if (postIds.length === 0) return new Set();
+    const rows = await db
+      .select({ postId: userSavedPosts.postId })
+      .from(userSavedPosts)
+      .where(and(
+        eq(userSavedPosts.userId, userId),
+        inArray(userSavedPosts.postId, postIds)
       ));
     return new Set(rows.map(r => r.postId));
   }
