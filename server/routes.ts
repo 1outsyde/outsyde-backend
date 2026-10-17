@@ -7974,7 +7974,7 @@ export async function registerRoutes(
     }
 
     try {
-      const { items, shippingAddress: rawShippingAddress, promoCodeId } = req.body;
+      const { items: requestItems, shippingAddress: rawShippingAddress, promoCodeId } = req.body;
 
       // ── Address guard (validate structure + ensure address is present) ────────
       const shippingAddrSchema = z.object({
@@ -8015,22 +8015,42 @@ export async function registerRoutes(
       }
       // ── End address guard ─────────────────────────────────────────────────────
 
-      if (!Array.isArray(items) || items.length === 0) {
+      if (!Array.isArray(requestItems) || requestItems.length === 0) {
         return res.status(400).json({ success: false, error: { code: 'INVALID_INPUT', message: 'Items array is required and must not be empty' } });
       }
 
-      // Collect unique vendor IDs (keyed on vendorId, not client-supplied Stripe account)
-      const vendorIds = new Set(items.map((i: { vendorId: string }) => i.vendorId));
-
       // Validate item fields
-      for (const item of items) {
+      for (const item of requestItems) {
         if (!item.priceCents || typeof item.priceCents !== 'number' || item.priceCents <= 0 || !Number.isInteger(item.priceCents)) {
           return res.status(400).json({ success: false, error: { code: 'INVALID_INPUT', message: 'All items must have a positive integer priceCents' } });
         }
-        if (!item.quantity || typeof item.quantity !== 'number' || item.quantity <= 0) {
+        if (!item.quantity || typeof item.quantity !== 'number' || item.quantity <= 0 || !Number.isInteger(item.quantity)) {
           return res.status(400).json({ success: false, error: { code: 'INVALID_INPUT', message: 'All items must have a positive quantity' } });
         }
       }
+
+      // Price every line that names a real product from the database (variant
+      // price when a variant is picked), with vendor, live-status, variant and
+      // stock checks. Lines with no known product keep the client price as
+      // before and are logged. See server/cartPricing.ts.
+      const { priceCartLines, toOrderItem } = await import('./cartPricing');
+      const priced = await priceCartLines(requestItems, {
+        getProduct: async (id) => (await storage.getVendorProduct(id)) as any,
+        getActiveVariants: (productId) =>
+          db.select().from(productVariants).where(and(
+            eq(productVariants.productId, productId),
+            eq(productVariants.isActive, true),
+          )) as any,
+        logLegacyLine: (line) =>
+          console.warn(`[Cart] Client-priced line (no known product): productId=${line.productId ?? 'none'} vendorId=${line.vendorId} priceCents=${line.priceCents} qty=${line.quantity}`),
+      });
+      if (!priced.ok) {
+        return res.status(400).json({ success: false, error: priced.error });
+      }
+      const items = priced.lines;
+
+      // Collect unique vendor IDs (keyed on vendorId, not client-supplied Stripe account)
+      const vendorIds = new Set(items.map((i: { vendorId: string }) => i.vendorId));
 
       if (vendorIds.size === 1) {
         // ── SINGLE-VENDOR PATH (unchanged) ──────────────────────────────────
@@ -8090,12 +8110,7 @@ export async function registerRoutes(
           feeModelVersion: feeBreakdown.feeModelVersion,
           status: 'pending',
           shippingAddress: JSON.stringify(resolvedShippingAddress),
-          items: items.map((i: { productId: string; name: string; quantity: number; priceCents: number }) => ({
-            productId: i.productId,
-            name: i.name,
-            quantity: i.quantity,
-            price: i.priceCents,
-          })),
+          items: items.map(toOrderItem),
         });
 
         // Ensure Stripe Customer exists for card vaulting
@@ -8203,12 +8218,7 @@ export async function registerRoutes(
             feeModelVersion: feeBreakdown.feeModelVersion,
             status: 'pending',
             shippingAddress: JSON.stringify(resolvedShippingAddress),
-            items: vendorItems.map((i: { productId: string; name: string; quantity: number; priceCents: number }) => ({
-              productId: i.productId,
-              name: i.name,
-              quantity: i.quantity,
-              price: i.priceCents,
-            })),
+            items: vendorItems.map(toOrderItem),
           });
 
           vendorOrders.push({ orderId: order.id, businessId: vendorId, vendorNetCents: feeBreakdown.vendorNetCents });
@@ -19233,7 +19243,7 @@ export async function registerRoutes(
               customer_id: order.customerId,
               customer_name: order.customerName,
               items: Array.isArray(order.items)
-                ? order.items.map((it) => ({ name: it.name, qty: it.quantity, price: it.price }))
+                ? order.items.map((it) => ({ name: it.name, qty: it.quantity, price: it.price, ...(it.variantLabel ? { variant_label: it.variantLabel } : {}) }))
                 : [],
               total_amount: order.totalAmount,
               status: order.status ?? "pending",
