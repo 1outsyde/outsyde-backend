@@ -21,6 +21,7 @@ import { setupAuth, getSession } from "./replitAuth";
 import { initializePushService, sendCartReminderNotifications, isPushConfigured } from "./pushService";
 import { startDraftCleanupJob } from "./bookingStateMachine";
 import { startReminderJob } from "./reminderService";
+import { startPointsReleaseJob } from "./loyaltyLedger";
 import { processScheduledDeletions } from "./services/accountDeletionService";
 import { cleanupExpiredStories } from "./services/stories";
 import { expireComplimentarySubscriptions } from "./services/complimentarySubscription";
@@ -334,6 +335,10 @@ if (process.env.NODE_ENV === 'production') {
 
   // Start appointment reminder job (runs every 15 minutes)
   startReminderJob(15 * 60 * 1000);
+
+  // Release pending loyalty points 3 days after a booking that still stands (runs hourly)
+  startPointsReleaseJob(60 * 60 * 1000);
+  console.log("Loyalty points release job started");
 
   // Daily account deletion job — processes users whose 30-day grace period has expired
   processScheduledDeletions().catch(err => console.error("[accountDeletion] Initial run failed:", err));

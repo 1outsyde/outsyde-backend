@@ -24,6 +24,7 @@ import {
 } from "../emailService";
 import { processInfluencerCommission, reverseInfluencerCommission } from "../influencerPayoutService";
 import { settleAppointmentBooking, settleShootBooking } from "../bookingSettlement";
+import { qualifyReferral, releaseAfterForBooking } from "../loyaltyLedger";
 import { isComplimentaryTier, isTerminalStripeStatus } from "../complimentary";
 
 // XO Beauty & Lashes' own deposit-email sender (the legacy
@@ -576,17 +577,19 @@ export class WebhookHandlers {
             console.error(`[Stripe] Failed to apply promo code ${abPromoCodeId} for appointment ${bookingId}:`, err)
           );
         }
+        // Pending until the booking is final (completed, or 3 days after it); the referral check runs then.
         const abPointsBase = abOriginalTotal ? Number(abOriginalTotal) : paymentIntent.amount;
         if (user) {
-          await bestEffort(`earnPoints for appointment ${bookingId}`, () => storage.earnPoints({
+          await bestEffort(`pending points for appointment ${bookingId}`, () => storage.createPendingPointTransaction({
             userId: user.id,
             dollarAmountCents: abPointsBase,
             transactionType: 'business_transaction',
             referenceType: 'appointment',
             referenceId: bookingId,
             description: 'Points earned from appointment booking',
+            businessId: appointment.businessId,
+            releaseAfter: releaseAfterForBooking(appointment.appointmentDate, appointment.appointmentEndTime ?? appointment.appointmentTime),
           }));
-          await bestEffort(`tryCompleteReferral for appointment ${bookingId}`, () => this.tryCompleteReferral(user.id, bookingId, 'appointment'));
         }
 
         // In-app notifications (best-effort: each recipient is independently try/catch'd)
@@ -1123,7 +1126,7 @@ export class WebhookHandlers {
             referenceId: orderId,
             description: 'Points earned from purchase',
           }));
-          await bestEffort(`tryCompleteReferral for order ${orderId}`, () => this.tryCompleteReferral(purchaser.id, orderId, 'cart_order'));
+          await bestEffort(`referral check for order ${orderId}`, () => this.tryCompleteReferral(purchaser.id, { type: 'order', id: orderId, grossCents: ppPointsBase }));
         }
 
         // Notify the business of the new order
@@ -1320,7 +1323,7 @@ export class WebhookHandlers {
             referenceId: metadata.orderGroupId,
             description: 'Points earned from purchase',
           }));
-          await bestEffort(`tryCompleteReferral for order group ${orderGroupTxnId}`, () => this.tryCompleteReferral(purchaser.id, metadata.orderGroupId, 'multi_vendor_order'));
+          await bestEffort(`referral check for order group ${orderGroupTxnId}`, () => this.tryCompleteReferral(purchaser.id, { type: 'multi_vendor_order', id: metadata.orderGroupId, grossCents: paymentIntent.amount }));
         }
 
         NotificationTriggers.orderConfirmed({
@@ -1681,38 +1684,34 @@ export class WebhookHandlers {
     const user = await this.findUserByStripeCustomer(session.customer);
     if (!user) return;
 
-    await storage.earnPoints({
+    // Best effort: a points failure must never fail the webhook (Stripe would retry it).
+    await bestEffort(`earnPoints for checkout session ${session.id}`, () => storage.earnPoints({
       userId: user.id,
       dollarAmountCents: session.amount_total,
       transactionType: 'business_transaction',
       referenceType: "checkout_session",
       referenceId: session.id,
       description: "Points earned from purchase",
-    });
-
-    // Complete referral bonus if this is the referred user's first transaction
-    await this.tryCompleteReferral(user.id, session.id, 'checkout_session');
+    }));
   }
 
   /* =====================================================
      REFERRAL COMPLETION (Triggered on first transaction)
   ===================================================== */
-  static async tryCompleteReferral(userId: string, transactionId: string, transactionType: string) {
+  static async tryCompleteReferral(
+    userId: string,
+    purchase: { type: 'order' | 'multi_vendor_order'; id: string; grossCents: number },
+  ) {
+    // Product purchases only. Bookings qualify a referral when their points are released
+    // (server/loyaltyLedger.ts), so a cancelled booking never pays a referral.
     try {
-      // Check if user was referred and has a pending referral
-      const pendingReferral = await storage.getPendingReferral(userId);
-      if (!pendingReferral || pendingReferral.status === 'completed') {
-        return; // No pending referral or already completed
-      }
-
-      // Complete the referral - awards bonus to referrer
-      const result = await storage.completeReferral(userId, transactionId, transactionType);
-      if (result.success) {
-        console.log(`Referral bonus awarded for user ${userId}'s first transaction`);
+      const result = await qualifyReferral(userId, { ...purchase, final: false });
+      if (result === 'qualified') {
+        console.log(`[Referral] ${purchase.type} ${purchase.id} qualified user ${userId}'s referral; bonuses release in 3 days if it stands`);
       }
     } catch (error) {
-      console.error('Error completing referral:', error);
-      // Don't throw - referral completion shouldn't block the main flow
+      console.error('Error checking referral:', error);
+      // Don't throw - referral checks must never block the main flow
     }
   }
 
@@ -1819,7 +1818,6 @@ export class WebhookHandlers {
         description: `Your ${tierName} subscription payment was successful.`,
       });
 
-      await this.tryCompleteReferral(vendorId, subscriptionId, 'vendor_subscription');
     } catch (error) {
       console.error('[Webhook] checkout.session.completed subscription activation failed:', error);
       console.error('[Webhook] Event data:', JSON.stringify(session));
@@ -1860,8 +1858,6 @@ export class WebhookHandlers {
       purchaseId,
     });
 
-    // Complete referral bonus if this is the vendor's first paid transaction
-    await this.tryCompleteReferral(purchase.vendorId, purchaseId, 'ala_carte_purchase');
   }
 
   /* =====================================================
@@ -1969,7 +1965,7 @@ export class WebhookHandlers {
         description: "Points earned from purchase",
       }));
 
-      await bestEffort(`tryCompleteReferral for order ${orderId}`, () => this.tryCompleteReferral(user.id, orderId, 'cart_order'));
+      await bestEffort(`referral check for order ${orderId}`, () => this.tryCompleteReferral(user.id, { type: 'order', id: orderId, grossCents: session.amount_total }));
     }
 
     // Notify the business of the new order
@@ -2179,7 +2175,7 @@ export class WebhookHandlers {
       }));
 
       // Complete referral bonus if this is the user's first transaction
-      await bestEffort(`tryCompleteReferral for order group ${orderGroupId}`, () => this.tryCompleteReferral(user.id, orderGroupId, 'multi_vendor_order'));
+      await bestEffort(`referral check for order group ${orderGroupId}`, () => this.tryCompleteReferral(user.id, { type: 'multi_vendor_order', id: orderGroupId, grossCents: session.amount_total }));
 
       // In-app notification for consumer
       NotificationTriggers.orderConfirmed({
@@ -2785,19 +2781,18 @@ export class WebhookHandlers {
           }).catch(err => console.error("[ExpoPush] Appointment push error:", err));
         }
 
-        // Award points for the booking
-        await bestEffort(`earnPoints for appointment ${appointmentId}`, () => storage.earnPoints({
+        // Pending points on the amount charged (incl. service fee), released when the booking is
+        // final; the referral check runs then.
+        await bestEffort(`pending points for appointment ${appointmentId}`, () => storage.createPendingPointTransaction({
           userId: clientId,
-          dollarAmountCents: appointment.totalPrice,
+          dollarAmountCents: session.amount_total ?? 0,
           transactionType: 'business_transaction',
           referenceType: "appointment",
           referenceId: appointmentId,
           description: "Points earned from service booking",
           businessId: appointment.businessId,
+          releaseAfter: releaseAfterForBooking(appointment.appointmentDate, appointment.appointmentEndTime ?? appointment.appointmentTime),
         }));
-
-        // Complete referral bonus if applicable
-        await bestEffort(`tryCompleteReferral for appointment ${appointmentId}`, () => this.tryCompleteReferral(clientId, appointmentId, 'appointment'));
       }
     } catch (error) {
       console.error(`[Stripe] Error confirming appointment ${appointmentId}:`, error);
@@ -2940,18 +2935,17 @@ export class WebhookHandlers {
           customerName: undefined,
         }).catch(err => console.error("[ExpoPush] Shoot booking push error:", err));
 
-        // Award points for the booking
-        await bestEffort(`earnPoints for shoot booking ${shootBookingId}`, () => storage.earnPoints({
+        // Pending points on the amount charged (incl. service fee), released 3 days after the shoot
+        // unless cancelled; the referral check runs then.
+        await bestEffort(`pending points for shoot booking ${shootBookingId}`, () => storage.createPendingPointTransaction({
           userId: clientId,
-          dollarAmountCents: booking.totalPrice,
+          dollarAmountCents: session.amount_total ?? 0,
           transactionType: 'photographer_booking',
           referenceType: "shoot_booking",
           referenceId: shootBookingId,
           description: "Points earned from photography booking",
+          releaseAfter: releaseAfterForBooking(booking.date, booking.endTime ?? booking.startTime),
         }));
-
-        // Complete referral bonus if applicable
-        await bestEffort(`tryCompleteReferral for shoot booking ${shootBookingId}`, () => this.tryCompleteReferral(clientId, shootBookingId, 'shoot_booking'));
       }
     } catch (error) {
       console.error(`[Stripe] Error confirming shoot booking ${shootBookingId}:`, error);

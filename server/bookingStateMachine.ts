@@ -10,6 +10,28 @@ import {
 } from "@shared/schema";
 import { eq, and, or, lt, inArray } from "drizzle-orm";
 import { expireOldHolds } from "./availabilityService";
+import { rejectPendingForReference } from "./loyaltyLedger";
+
+// A booking that ends any way other than completed never releases its pending points.
+const POINTS_REJECT_STATES: ReadonlySet<string> = new Set([
+  BOOKING_STATES.CANCELED,
+  BOOKING_STATES.DECLINED,
+  BOOKING_STATES.EXPIRED,
+  BOOKING_STATES.NO_SHOW,
+]);
+
+async function rejectPendingPointsOnEnd(
+  referenceType: 'appointment' | 'shoot_booking',
+  bookingId: string,
+  toState: string,
+): Promise<void> {
+  if (!POINTS_REJECT_STATES.has(toState)) return;
+  try {
+    await rejectPendingForReference(referenceType, bookingId, `Booking ${toState}`);
+  } catch (err) {
+    console.error(`[Points] Failed to reject pending points for ${referenceType} ${bookingId}:`, err);
+  }
+}
 
 const PENDING_PROVIDER_TTL_HOURS = 48;
 
@@ -216,6 +238,8 @@ export async function transitionAppointmentState(
     toState
   );
 
+  await rejectPendingPointsOnEnd('appointment', appointmentId, toState);
+
   return { 
     success: true, 
     previousState: currentState, 
@@ -368,6 +392,8 @@ export async function transitionShootBookingState(
     currentState,
     toState
   );
+
+  await rejectPendingPointsOnEnd('shoot_booking', shootBookingId, toState);
 
   return { 
     success: true, 

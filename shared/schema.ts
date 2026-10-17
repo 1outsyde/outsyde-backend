@@ -1384,6 +1384,8 @@ export const pendingPointTransactions = pgTable("pending_points_transactions", {
   reviewedBy: varchar("reviewed_by", { length: 36 }),
   reviewNote: text("review_note"),
   liveTransactionId: varchar("live_transaction_id", { length: 36 }), // set on approval
+  // When the row may auto-release (migration 048). NULL = only released by a person.
+  releaseAfter: timestamp("release_after", { withTimezone: true }),
 
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),

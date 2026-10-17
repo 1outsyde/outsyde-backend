@@ -176,6 +176,21 @@ import {
 import { db } from "./db";
 import { coverPosterUrl, coverStillImage, nonEmpty } from "./coverMedia";
 import { eq, ilike, or, and, sql, isNull, isNotNull, desc, asc, gte, lte, ne, inArray, notInArray } from "drizzle-orm";
+import {
+  creditPoints,
+  createPending,
+  pointsForGrossCents,
+  pointsValueCents,
+  redeemPointsForCode,
+  applyPromoCodeAtomic,
+  reverseLedgerRow,
+  reversePointsForReference,
+  releasePendingById,
+  REDEMPTION_TIERS,
+  REFERRAL_BONUS_POINTS,
+  MAX_SUCCESSFUL_REFERRALS,
+  type RedeemResult,
+} from "./loyaltyLedger";
 import { randomUUID, createHash } from "crypto";
 import { quoteDeposit } from "./fees";
 import { isExpiredUnbilledActiveRow } from "./complimentary";
@@ -438,10 +453,8 @@ export interface IStorage {
   getUnreadCount(userId: string): Promise<number>;
   getUnreadCountPerConversation(userId: string): Promise<Map<string, number>>;
 
-  // Outsyde Points (Loyalty System)
-  // Formula: points_earned = base_charge * 4  (where base_charge is pre-upcharge amount in dollars)
-  // Equivalently: points_earned = round(consumer_total_cents * 4 / 108)
-  // Redemption: 100 points = $1
+  // Outsyde Points (Loyalty System) — rules in server/loyaltyLedger.ts
+  // points = round(gross_charge_cents * 20 / 108) (half the service fee); 500 points = $1
   getUserPointsBalance(userId: string): Promise<number>;
   earnPoints(data: {
     userId: string;
@@ -462,24 +475,13 @@ export interface IStorage {
     referenceType?: string;
     referenceId?: string;
     description?: string;
+    releaseAfter?: Date | null;
   }): Promise<PendingPointTransaction>;
   getPendingPointTransactionByReference(referenceType: string, referenceId: string): Promise<PendingPointTransaction | null>;
   getPendingPointTransactions(opts?: { userId?: string; status?: string; limit?: number }): Promise<PendingPointTransaction[]>;
   approvePendingPointTransaction(pendingId: string, reviewerId: string, note?: string): Promise<{ pending: PendingPointTransaction; live: PointTransaction }>;
   rejectPendingPointTransaction(pendingId: string, reviewerId: string, note?: string): Promise<PendingPointTransaction>;
-  redeemPoints(data: {
-    userId: string;
-    points: number;
-    orderTotalCents?: number;
-    businessId?: string;
-    businessName?: string;
-    referenceType?: string;
-    referenceId?: string;
-    description?: string;
-    isFirstBooking?: boolean;
-    isDeposit?: boolean;
-    isSubscription?: boolean;
-  }): Promise<{ transaction: PointTransaction; discountCents: number } | { error: string }>;
+  redeemPointsForCode(userId: string, points: number): Promise<RedeemResult>;
   reversePoints(data: {
     userId: string;
     originalTransactionId: string;
@@ -495,7 +497,6 @@ export interface IStorage {
   getUserByReferralCode(code: string): Promise<User | undefined>;
   processReferral(newUserId: string, referralCode: string): Promise<{ success: boolean; referrerId?: string; error?: string }>;
   getPendingReferral(referredUserId: string): Promise<Referral | undefined>;
-  completeReferral(referredUserId: string, transactionId: string, transactionType: string): Promise<{ success: boolean; error?: string }>;
   getReferralStats(userId: string): Promise<{ totalReferrals: number; completedReferrals: number; pendingReferrals: number; totalPointsEarned: number }>;
   getSuccessfulReferralCount(referrerId: string): Promise<number>;
 
@@ -2402,23 +2403,17 @@ export class DatabaseStorage implements IStorage {
   // =========================
   // OUTSYDE POINTS (Loyalty System)
   // =========================
-  // Conversion: $1 = 100 points
-  // Redemption: 100 points = $1 discount
-
-  private readonly POINTS_PER_DOLLAR = 100;
+  // Rules and every balance write live in server/loyaltyLedger.ts (one SQL statement each,
+  // because the neon-http driver has no transactions). 500 points = $1.
 
   async getUserPointsBalance(userId: string): Promise<number> {
     const user = await this.getUser(userId);
     return user?.loyaltyPoints || 0;
   }
 
-  // Calculate points for a purchase/booking using the canonical formula:
-  //   base_charge = consumer_total / 1.08  (reverse the 8% upcharge)
-  //   points_earned = base_charge * 0.04 * 100  =  consumer_total_cents * 40 / 108
-  //   outsyde_revenue_cents = points_earned  (same numeric value; 100 pts == $1)
-  private calcPurchasePoints(consumerTotalCents: number): { pointsEarned: number; outsydeRevenueCents: number } {
-    const pointsEarned = Math.round(consumerTotalCents * 40 / 108);
-    return { pointsEarned, outsydeRevenueCents: pointsEarned };
+  private async getPointTransactionById(id: string): Promise<PointTransaction | undefined> {
+    const [row] = await db.select().from(pointTransactions).where(eq(pointTransactions.id, id));
+    return row;
   }
 
   async earnPoints(data: {
@@ -2431,39 +2426,37 @@ export class DatabaseStorage implements IStorage {
     referenceId?: string;
     description?: string;
   }): Promise<PointTransaction> {
-    // Bonus = direct point award (referrals, promotions); purchase/booking = formula-derived.
-    const pointsEarned = data.transactionType === 'bonus'
-      ? data.dollarAmountCents
-      : this.calcPurchasePoints(data.dollarAmountCents).pointsEarned;
+    // Bonus = a direct point amount; purchases use the formula on the gross charge.
+    const points = data.transactionType === 'bonus'
+      ? Math.trunc(data.dollarAmountCents)
+      : pointsForGrossCents(data.dollarAmountCents);
 
-    return db.transaction(async (tx) => {
-      const [userRow] = await tx.select({ loyaltyPoints: users.loyaltyPoints })
-        .from(users)
-        .where(eq(users.id, data.userId));
-      const currentBalance = userRow?.loyaltyPoints ?? 0;
-      const newBalance = currentBalance + pointsEarned;
-
-      await tx.update(users)
-        .set({ loyaltyPoints: newBalance })
-        .where(eq(users.id, data.userId));
-
-      const [result] = await tx.insert(pointTransactions).values({
-        id: randomUUID(),
-        userId: data.userId,
-        type: 'earn',
-        points: pointsEarned,
-        dollarAmountCents: data.dollarAmountCents,
-        businessId: data.businessId || null,
-        businessName: data.businessName || null,
-        referenceType: data.referenceType || null,
-        referenceId: data.referenceId || null,
-        balanceAfter: newBalance,
-        description: data.description || `Earned ${pointsEarned} points`,
-        capped: false,
-      }).returning();
-
-      return result;
+    const credited = await creditPoints({
+      userId: data.userId,
+      points,
+      dollarAmountCents: data.dollarAmountCents,
+      businessId: data.businessId,
+      businessName: data.businessName,
+      referenceType: data.referenceType,
+      referenceId: data.referenceId,
+      description: data.description || `Earned ${points} points`,
     });
+
+    if (credited) {
+      const row = await this.getPointTransactionById(credited.id);
+      if (row) return row;
+    }
+    // Already credited for this reference (retried webhook) or nothing to credit: return the existing row.
+    if (data.referenceType && data.referenceId) {
+      const [existing] = await db.select().from(pointTransactions).where(and(
+        eq(pointTransactions.userId, data.userId),
+        eq(pointTransactions.type, 'earn'),
+        eq(pointTransactions.referenceType, data.referenceType),
+        eq(pointTransactions.referenceId, data.referenceId),
+      ));
+      if (existing) return existing;
+    }
+    throw new Error(points <= 0 ? 'No points to credit' : 'Points were not credited');
   }
 
   async createPendingPointTransaction(data: {
@@ -2475,23 +2468,32 @@ export class DatabaseStorage implements IStorage {
     referenceType?: string;
     referenceId?: string;
     description?: string;
+    releaseAfter?: Date | null;
   }): Promise<PendingPointTransaction> {
-    const { pointsEarned, outsydeRevenueCents } = this.calcPurchasePoints(data.dollarAmountCents);
-    const [result] = await db.insert(pendingPointTransactions).values({
-      id: randomUUID(),
+    if (!data.referenceType || !data.referenceId) {
+      throw new Error('Pending points need a referenceType and referenceId');
+    }
+    const points = data.transactionType === 'bonus'
+      ? Math.trunc(data.dollarAmountCents)
+      : pointsForGrossCents(data.dollarAmountCents);
+    await createPending({
       userId: data.userId,
+      points,
       dollarAmountCents: data.dollarAmountCents,
       transactionType: data.transactionType,
-      pointsEarned,
-      outsydeRevenueCents,
-      businessId: data.businessId || null,
-      businessName: data.businessName || null,
-      referenceType: data.referenceType || null,
-      referenceId: data.referenceId || null,
-      description: data.description || `Pending ${pointsEarned} points`,
-      status: 'pending',
-    }).returning();
-    return result;
+      referenceType: data.referenceType,
+      referenceId: data.referenceId,
+      releaseAfter: data.releaseAfter ?? null,
+      businessId: data.businessId,
+      businessName: data.businessName,
+      description: data.description || `Pending ${points} points`,
+    });
+    const [row] = await db.select().from(pendingPointTransactions).where(and(
+      eq(pendingPointTransactions.referenceType, data.referenceType),
+      eq(pendingPointTransactions.referenceId, data.referenceId),
+    ));
+    if (!row) throw new Error('Pending points were not created');
+    return row;
   }
 
   async getPendingPointTransactionByReference(referenceType: string, referenceId: string): Promise<PendingPointTransaction | null> {
@@ -2519,47 +2521,16 @@ export class DatabaseStorage implements IStorage {
   }
 
   async approvePendingPointTransaction(pendingId: string, reviewerId: string, note?: string): Promise<{ pending: PendingPointTransaction; live: PointTransaction }> {
-    const [pending] = await db.select().from(pendingPointTransactions).where(eq(pendingPointTransactions.id, pendingId));
-    if (!pending) throw new Error(`Pending transaction ${pendingId} not found`);
-    if (pending.status !== 'pending') throw new Error(`Transaction ${pendingId} is already ${pending.status}`);
+    const [before] = await db.select().from(pendingPointTransactions).where(eq(pendingPointTransactions.id, pendingId));
+    if (!before) throw new Error(`Pending transaction ${pendingId} not found`);
+    if (before.status !== 'pending') throw new Error(`Transaction ${pendingId} is already ${before.status}`);
 
-    const pointsToCredit = pending.pointsEarned;
-
-    return db.transaction(async (tx) => {
-      const [userRow] = await tx.select({ loyaltyPoints: users.loyaltyPoints })
-        .from(users)
-        .where(eq(users.id, pending.userId));
-      const currentBalance = userRow?.loyaltyPoints ?? 0;
-      const newBalance = currentBalance + pointsToCredit;
-
-      await tx.update(users)
-        .set({ loyaltyPoints: newBalance })
-        .where(eq(users.id, pending.userId));
-
-      const liveId = randomUUID();
-      const [live] = await tx.insert(pointTransactions).values({
-        id: liveId,
-        userId: pending.userId,
-        type: 'earn',
-        points: pointsToCredit,
-        dollarAmountCents: pending.dollarAmountCents,
-        businessId: pending.businessId || null,
-        businessName: pending.businessName || null,
-        referenceType: pending.referenceType || null,
-        referenceId: pending.referenceId || null,
-        balanceAfter: newBalance,
-        description: pending.description || `Earned ${pointsToCredit} points`,
-        capped: false,
-      }).returning();
-
-      const now = new Date();
-      const [updatedPending] = await tx.update(pendingPointTransactions)
-        .set({ status: 'approved', reviewedAt: now, reviewedBy: reviewerId, reviewNote: note || null, liveTransactionId: liveId, updatedAt: now })
-        .where(eq(pendingPointTransactions.id, pendingId))
-        .returning();
-
-      return { pending: updatedPending, live };
-    });
+    const released = await releasePendingById(pendingId, reviewerId, note);
+    const [after] = await db.select().from(pendingPointTransactions).where(eq(pendingPointTransactions.id, pendingId));
+    if (!released || !after) throw new Error(`Transaction ${pendingId} is already ${after?.status ?? 'changed'}`);
+    const live = await this.getPointTransactionById(released.liveTransactionId);
+    if (!live) throw new Error(`Transaction ${pendingId} was approved but its ledger row is missing`);
+    return { pending: after, live };
   }
 
   async rejectPendingPointTransaction(pendingId: string, reviewerId: string, note?: string): Promise<PendingPointTransaction> {
@@ -2570,157 +2541,19 @@ export class DatabaseStorage implements IStorage {
     const now = new Date();
     const [updated] = await db.update(pendingPointTransactions)
       .set({ status: 'rejected', reviewedAt: now, reviewedBy: reviewerId, reviewNote: note || null, updatedAt: now })
-      .where(eq(pendingPointTransactions.id, pendingId))
+      .where(and(eq(pendingPointTransactions.id, pendingId), eq(pendingPointTransactions.status, 'pending')))
       .returning();
-
+    if (!updated) throw new Error(`Transaction ${pendingId} is already changed`);
     return updated;
   }
 
-  // Fixed redemption tiers - NO custom amounts allowed
-  private readonly REDEMPTION_TIERS = [
-    { points: 2500,  valueCents: 500  },   // $5
-    { points: 5000,  valueCents: 1000 },   // $10
-    { points: 12500, valueCents: 2500 },   // $25
-    { points: 25000, valueCents: 5000 },   // $50
-    { points: 50000, valueCents: 10000 },  // $100
-  ];
-  
-  // Max discount as percentage of order total
-  private readonly MAX_REDEMPTION_PERCENT = 30;
-
-  async redeemPoints(data: {
-    userId: string;
-    points: number;
-    orderTotalCents?: number; // Required for 30% cap validation
-    businessId?: string;
-    businessName?: string;
-    referenceType?: string;
-    referenceId?: string;
-    description?: string;
-    isFirstBooking?: boolean; // Block redemption on first-time bookings
-    isDeposit?: boolean; // Block redemption on deposits
-    isSubscription?: boolean; // Block redemption on subscriptions
-  }): Promise<{ transaction: PointTransaction; discountCents: number } | { error: string }> {
-    // TIER-BASED REDEMPTION: Only allow fixed tier amounts
-    const tier = this.REDEMPTION_TIERS.find(t => t.points === data.points);
-    if (!tier) {
-      const validTiers = this.REDEMPTION_TIERS.map(t => t.points).join(', ');
-      return { error: `Invalid redemption amount. Points must be one of: ${validTiers}` };
-    }
-    
-    // MAX 1 REDEMPTION PER TRANSACTION: Check if already redeemed for this referenceId
-    if (data.referenceId) {
-      const existingRedemptions = await db.select()
-        .from(pointTransactions)
-        .where(and(
-          eq(pointTransactions.userId, data.userId),
-          eq(pointTransactions.referenceId, data.referenceId),
-          eq(pointTransactions.type, 'redeem')
-        ));
-      
-      if (existingRedemptions.length > 0) {
-        return { error: 'Only one redemption allowed per transaction' };
-      }
-    }
-    
-    // Block redemption on restricted transaction types
-    if (data.isDeposit) {
-      return { error: 'Points cannot be redeemed on deposits' };
-    }
-    if (data.isFirstBooking) {
-      return { error: 'Points cannot be redeemed on first-time bookings' };
-    }
-    if (data.isSubscription) {
-      return { error: 'Points cannot be redeemed on subscription payments' };
-    }
-    
-    // Check user has enough points
-    const currentBalance = await this.getUserPointsBalance(data.userId);
-    
-    if (data.points > currentBalance) {
-      return { error: `Insufficient points. You have ${currentBalance} points but tried to redeem ${data.points}` };
-    }
-
-    // Validate 30% max of order total (if order total provided)
-    if (data.orderTotalCents) {
-      const maxDiscountCents = Math.floor(data.orderTotalCents * this.MAX_REDEMPTION_PERCENT / 100);
-      if (tier.valueCents > maxDiscountCents) {
-        return { error: `Redemption value cannot exceed 30% of order total. Max allowed: $${(maxDiscountCents / 100).toFixed(2)}` };
-      }
-    }
-
-    const discountCents = tier.valueCents;
-    const newBalance = currentBalance - data.points;
-
-    return db.transaction(async (tx) => {
-      await tx.update(users)
-        .set({ loyaltyPoints: newBalance })
-        .where(eq(users.id, data.userId));
-
-      const id = randomUUID();
-      const [result] = await tx.insert(pointTransactions).values({
-        id,
-        userId: data.userId,
-        type: 'redeem',
-        points: data.points,
-        dollarAmountCents: discountCents,
-        businessId: data.businessId || null,
-        businessName: data.businessName || null,
-        referenceType: data.referenceType || null,
-        referenceId: data.referenceId || null,
-        balanceAfter: newBalance,
-        description: data.description || `Redeemed ${data.points} points for $${(discountCents / 100).toFixed(2)} discount`,
-        capped: false,
-      }).returning();
-
-      return {
-        transaction: result,
-        discountCents
-      };
-    });
+  async redeemPointsForCode(userId: string, points: number): Promise<RedeemResult> {
+    return redeemPointsForCode(userId, points);
   }
-  
+
   // Get available redemption tiers for a user based on their balance
   getAvailableRedemptionTiers(balance: number): { points: number; valueCents: number }[] {
-    return this.REDEMPTION_TIERS.filter(tier => tier.points <= balance);
-  }
-
-  async generatePromoCode(
-    userId: string,
-    pointsCost: number,
-    discountCents: number
-  ): Promise<string> {
-    const existing = await db.query.promoCodes.findFirst({
-      where: and(
-        eq(promoCodes.userId, userId),
-        eq(promoCodes.discountCents, discountCents),
-        eq(promoCodes.status, 'active')
-      ),
-    });
-    if (existing) {
-      throw new Error(`You already have an active $${discountCents / 100} code: ${existing.code}. Use it before generating a new one.`);
-    }
-
-    const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
-    const random = Array.from({ length: 4 }, () =>
-      chars[Math.floor(Math.random() * chars.length)]
-    ).join('');
-    const dollarValue = discountCents / 100;
-    const code = `OP-${random}-${dollarValue}`;
-
-    const expiresAt = new Date();
-    expiresAt.setDate(expiresAt.getDate() + 30);
-
-    await db.insert(promoCodes).values({
-      code,
-      userId,
-      pointsCost,
-      discountCents,
-      status: 'active',
-      expiresAt,
-    });
-
-    return code;
+    return REDEMPTION_TIERS.filter(tier => tier.points <= balance);
   }
 
   async validatePromoCode(
@@ -2769,144 +2602,42 @@ export class DatabaseStorage implements IStorage {
     referenceType: 'order' | 'appointment' | 'shoot_booking',
     referenceId: string
   ): Promise<void> {
-    await db.transaction(async (tx) => {
-      const promo = await tx.query.promoCodes.findFirst({
-        where: eq(promoCodes.id, codeId),
-      });
-      if (!promo || promo.status !== 'active') {
-        throw new Error('Code is no longer valid');
-      }
-
-      await tx.update(promoCodes).set({
-        status: 'used',
-        usedAt: new Date(),
-        usedOnOrderId: referenceId,
-        usedOnReferenceType: referenceType,
-      }).where(eq(promoCodes.id, codeId));
-
-      if (referenceType === 'order') {
-        await tx.update(orders).set({
-          promoCodeUsed: promo.code,
-          discountAmountCents: promo.discountCents,
-          pointsRedeemed: promo.pointsCost,
-        }).where(eq(orders.id, referenceId));
-      } else if (referenceType === 'appointment') {
-        await tx.update(appointments).set({
-          promoCodeUsed: promo.code,
-          discountAmountCents: promo.discountCents,
-          pointsRedeemed: promo.pointsCost,
-        }).where(eq(appointments.id, referenceId));
-      } else if (referenceType === 'shoot_booking') {
-        await tx.update(shootBookings).set({
-          promoCodeUsed: promo.code,
-          discountAmountCents: promo.discountCents,
-          pointsRedeemed: promo.pointsCost,
-        }).where(eq(shootBookings.id, referenceId));
-      }
-    });
+    await applyPromoCodeAtomic(codeId, referenceType, referenceId);
   }
 
   async getPromoCodeById(id: string) {
     return db.query.promoCodes.findFirst({ where: eq(promoCodes.id, id) });
   }
 
-  // Reverse points for refunds and cancellations
+  // Reverse one ledger row (earn or redeem). No route calls this today.
   async reversePoints(data: {
     userId: string;
     originalTransactionId: string;
     reason: string;
   }): Promise<PointTransaction | { error: string }> {
-    // Find the original transaction
-    const [originalTransaction] = await db.select()
-      .from(pointTransactions)
-      .where(eq(pointTransactions.id, data.originalTransactionId));
-    
-    if (!originalTransaction) {
-      return { error: 'Original transaction not found' };
-    }
-    
-    if (originalTransaction.userId !== data.userId) {
-      return { error: 'Transaction does not belong to this user' };
-    }
-    
-    // Check if already reversed (look for existing reversal)
-    const existingReversals = await db.select()
-      .from(pointTransactions)
-      .where(and(
-        eq(pointTransactions.referenceId, data.originalTransactionId),
-        eq(pointTransactions.type, 'reversal')
-      ));
-    
-    if (existingReversals.length > 0) {
-      return { error: 'Transaction has already been reversed' };
-    }
-    
-    const currentBalance = await this.getUserPointsBalance(data.userId);
-    let newBalance: number;
-    let pointsToReverse: number;
-    
-    if (originalTransaction.type === 'earn') {
-      // Earned points being reversed = subtract from balance
-      pointsToReverse = -originalTransaction.points;
-      newBalance = Math.max(0, currentBalance - originalTransaction.points);
-    } else if (originalTransaction.type === 'redeem') {
-      // Redeemed points being reversed = add back to balance
-      pointsToReverse = originalTransaction.points;
-      newBalance = currentBalance + originalTransaction.points;
-    } else {
-      return { error: 'Cannot reverse a reversal transaction' };
-    }
-    
-    return db.transaction(async (tx) => {
-      await tx.update(users)
-        .set({ loyaltyPoints: newBalance })
-        .where(eq(users.id, data.userId));
-
-      const id = randomUUID();
-      const [result] = await tx.insert(pointTransactions).values({
-        id,
-        userId: data.userId,
-        type: 'reversal',
-        points: pointsToReverse,
-        dollarAmountCents: originalTransaction.dollarAmountCents,
-        businessId: originalTransaction.businessId,
-        businessName: originalTransaction.businessName,
-        referenceType: 'reversal',
-        referenceId: data.originalTransactionId,
-        balanceAfter: newBalance,
-        description: `Reversal: ${data.reason}`,
-        capped: false,
-      }).returning();
-
-      return result;
-    });
+    const result = await reverseLedgerRow(data.userId, data.originalTransactionId, data.reason);
+    if ('error' in result) return result;
+    const row = await this.getPointTransactionById(result.id);
+    return row ?? { error: 'Reversal written but not found' };
   }
 
   async getPointTransactions(userId: string, limit: number = 50): Promise<PointTransaction[]> {
-    const transactions = await db.select().from(pointTransactions)
+    return db.select().from(pointTransactions)
       .where(eq(pointTransactions.userId, userId))
+      .orderBy(desc(pointTransactions.createdAt))
       .limit(limit);
-    
-    // Sort by creation time (most recent first)
-    return transactions.sort((a, b) => 
-      new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
-    );
   }
 
   calculatePointsValue(points: number): number {
-    // 100 points = $1 = 100 cents
-    return points;
+    // 500 points = $1 (100 cents)
+    return pointsValueCents(points);
   }
 
   // =========================
   // REFERRAL SYSTEM (Deferred Rewards)
   // =========================
-  // Referrer bonus is ONLY paid after referred user completes first transaction
-  // Referred user gets welcome bonus immediately upon applying code
-
-  private readonly REFERRAL_BONUS_POINTS = 500; // $5 for referrer (paid after first transaction)
-  private readonly NEW_USER_REFERRAL_BONUS = 250; // $2.50 for new user (paid immediately)
-  private readonly MAX_SUCCESSFUL_REFERRALS = 50; // One-to-many abuse prevention
+  // Nothing is paid when a code is applied. When the referred user's first qualifying purchase is
+  // final, BOTH people get REFERRAL_BONUS_POINTS (see qualifyReferral in server/loyaltyLedger.ts).
 
   async generateReferralCode(userId: string): Promise<string> {
     const user = await this.getUser(userId);
@@ -2949,7 +2680,7 @@ export class DatabaseStorage implements IStorage {
       .from(referrals)
       .where(and(
         eq(referrals.referrerId, referrerId),
-        eq(referrals.status, 'completed')
+        inArray(referrals.status, ['qualifying', 'completed'])
       ));
     return Number(result[0]?.count || 0);
   }
@@ -2979,7 +2710,7 @@ export class DatabaseStorage implements IStorage {
 
     // One-to-many abuse prevention: limit referrals per user
     const successfulCount = await this.getSuccessfulReferralCount(referrer.id);
-    if (successfulCount >= this.MAX_SUCCESSFUL_REFERRALS) {
+    if (successfulCount >= MAX_SUCCESSFUL_REFERRALS) {
       return { success: false, error: 'Referrer has reached the maximum number of referrals' };
     }
 
@@ -2995,24 +2726,9 @@ export class DatabaseStorage implements IStorage {
       referrerId: referrer.id,
       referredUserId: newUserId,
       status: 'pending',
-      referrerBonusPoints: this.REFERRAL_BONUS_POINTS,
-      referredBonusPoints: this.NEW_USER_REFERRAL_BONUS,
+      referrerBonusPoints: REFERRAL_BONUS_POINTS,
+      referredBonusPoints: REFERRAL_BONUS_POINTS,
     });
-
-    // Award welcome bonus to new user immediately
-    await this.earnPoints({
-      userId: newUserId,
-      dollarAmountCents: this.NEW_USER_REFERRAL_BONUS,
-      transactionType: 'bonus',
-      referenceType: 'referral_welcome',
-      referenceId: referrer.id,
-      description: `Welcome bonus for joining via referral`,
-    });
-
-    // Update referral record to mark referred bonus as paid
-    await db.update(referrals)
-      .set({ referredBonusPaidAt: new Date() })
-      .where(eq(referrals.id, referralId));
 
     return { success: true, referrerId: referrer.id };
   }
@@ -3022,43 +2738,6 @@ export class DatabaseStorage implements IStorage {
       .from(referrals)
       .where(eq(referrals.referredUserId, referredUserId));
     return result[0];
-  }
-
-  async completeReferral(referredUserId: string, transactionId: string, transactionType: string): Promise<{ success: boolean; error?: string }> {
-    // Find the pending referral for this user
-    const referral = await this.getPendingReferral(referredUserId);
-    
-    if (!referral) {
-      return { success: false, error: 'No referral found for this user' };
-    }
-
-    if (referral.status === 'completed') {
-      return { success: false, error: 'Referral already completed' };
-    }
-
-    // Award bonus to referrer now that referred user has completed a transaction
-    await this.earnPoints({
-      userId: referral.referrerId,
-      dollarAmountCents: referral.referrerBonusPoints,
-      transactionType: 'bonus',
-      referenceType: 'referral',
-      referenceId: referredUserId,
-      description: `Referral bonus - your friend completed their first purchase!`,
-    });
-
-    // Update referral record to completed
-    await db.update(referrals)
-      .set({
-        status: 'completed',
-        referrerBonusPaidAt: new Date(),
-        firstTransactionId: transactionId,
-        firstTransactionType: transactionType,
-      })
-      .where(eq(referrals.id, referral.id));
-
-    console.log(`Referral completed: referrer ${referral.referrerId} earned ${referral.referrerBonusPoints} points for referring ${referredUserId}`);
-
-    return { success: true };
   }
 
   async getReferralStats(userId: string): Promise<{ totalReferrals: number; completedReferrals: number; pendingReferrals: number; totalPointsEarned: number }> {
@@ -7155,67 +6834,7 @@ export class DatabaseStorage implements IStorage {
     referenceId: string,
     opts?: { refundFraction?: number; description?: string }
   ): Promise<{ reversed: boolean; pointsReversed: number; shortfall: number }> {
-    const earnedTransactions = await db.select()
-      .from(pointTransactions)
-      .where(and(
-        eq(pointTransactions.userId, userId),
-        eq(pointTransactions.type, 'earn'),
-        eq(pointTransactions.referenceType, referenceType),
-        eq(pointTransactions.referenceId, referenceId)
-      ));
-
-    if (earnedTransactions.length === 0) {
-      return { reversed: false, pointsReversed: 0, shortfall: 0 };
-    }
-
-    const totalPointsEarned = earnedTransactions.reduce((sum, tx) => sum + tx.points, 0);
-
-    // Proportional clawback: fraction 0.0–1.0 for partial refunds, omit for full reversal.
-    const fraction = opts?.refundFraction !== undefined
-      ? Math.min(1, Math.max(0, opts.refundFraction))
-      : 1;
-    const pointsToReverse = Math.round(totalPointsEarned * fraction);
-
-    if (pointsToReverse === 0) {
-      return { reversed: false, pointsReversed: 0, shortfall: 0 };
-    }
-
-    const currentBalance = await this.getUserPointsBalance(userId);
-    const actualDecrement = Math.min(currentBalance, pointsToReverse);
-    const newBalance = currentBalance - actualDecrement;
-    const shortfall = pointsToReverse - actualDecrement;
-
-    if (shortfall > 0) {
-      console.warn(
-        `[Points] Clawback shortfall for user ${userId} on ${referenceType} ${referenceId}: ` +
-        `tried to reverse ${pointsToReverse} pts, balance was only ${currentBalance}. ` +
-        `${shortfall} pts could not be recovered (already redeemed).`
-      );
-    }
-
-    await db.update(users)
-      .set({ loyaltyPoints: newBalance })
-      .where(eq(users.id, userId));
-
-    const description = opts?.description
-      || (fraction < 1
-        ? `Points reversed from partial refund (${referenceType})`
-        : `Points reversed from refund (${referenceType})`);
-
-    await db.insert(pointTransactions).values({
-      id: randomUUID(),
-      userId,
-      type: 'reversal',
-      points: -pointsToReverse,
-      dollarAmountCents: 0,
-      referenceType: 'refund_reversal',
-      referenceId,
-      balanceAfter: newBalance,
-      description,
-      capped: false,
-    });
-
-    return { reversed: true, pointsReversed: pointsToReverse, shortfall };
+    return reversePointsForReference(userId, referenceType, referenceId, opts);
   }
 
   // =========================
