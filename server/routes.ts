@@ -25,7 +25,9 @@ import {
   influencerProfiles,
   promoCodes,
   productVariants,
+  productOptions,
   vendorProducts,
+  type VendorProduct,
   type User,
   type StaffMember,
   type StaffInvite,
@@ -91,6 +93,7 @@ export function sanitizeUserForResponse(user: User, options: { includeOwnData?: 
   };
 }
 import { eq, desc, sql, gte, lte, or, isNull, gt, inArray, and } from "drizzle-orm";
+import { validateOptionsPayload, planVariantSync, withEffectivePrice } from "./productOptions";
 import { z } from "zod";
 import {
   hashPassword,
@@ -12599,8 +12602,43 @@ export async function registerRoutes(
   });
 
   // ==================== PRODUCT VARIANTS ====================
+  // Options + variants model: server/productOptions.ts, migration 049.
+  // Every variant a client sees carries a numeric priceCents (its own price,
+  // else the product's) plus hasOwnPrice, so app versions that read priceCents
+  // as a number keep working.
 
-  // Public single product detail (new — no existing endpoint)
+  const loadProductOptions = async (productId: string) =>
+    db
+      .select()
+      .from(productOptions)
+      .where(eq(productOptions.productId, productId))
+      .orderBy(productOptions.position);
+
+  // Owner of the product's business, or the platform admin with x-business-id
+  // (same bypass as /api/vendor/products). Returns the product or an error reply.
+  const resolveVendorProduct = async (
+    req: import("express").Request,
+    productId: string,
+  ): Promise<{ product: VendorProduct } | { status: number; error: string }> => {
+    const userId = getUserIdFromRequest(req);
+    if (!userId) return { status: 401, error: "Not authenticated" };
+    const headerBizId = req.headers['x-business-id'] as string | undefined;
+    const authHeader = req.headers.authorization;
+    const isAdmin = authHeader?.startsWith('Bearer ')
+      ? (verifyAccessToken(authHeader.substring(7))?.isAdmin === true)
+      : false;
+    const business = isAdmin && headerBizId
+      ? await storage.getBusiness(headerBizId)
+      : await storage.getBusinessByOwnerId(userId);
+    if (!business) return { status: 404, error: "No business found" };
+    const product = await storage.getVendorProduct(productId);
+    if (!product || product.businessId !== business.id) return { status: 403, error: "Forbidden" };
+    return { product };
+  };
+
+  // Public single product detail. Note: the app's vendor editor also loads
+  // variants for draft products through this route, so it must not filter on
+  // status = live until the editor uses the vendor route below.
   app.get("/api/products/:productId", async (req, res) => {
     try {
       const { productId } = req.params;
@@ -12616,7 +12654,12 @@ export async function registerRoutes(
           eq(productVariants.isActive, true)
         ))
         .orderBy(productVariants.sortOrder);
-      res.json({ ...product, variants });
+      const options = await loadProductOptions(productId);
+      res.json({
+        ...product,
+        options,
+        variants: variants.map((v) => withEffectivePrice(v, product.price)),
+      });
     } catch (error) {
       console.error("Get product detail error:", error);
       res.status(500).json({ error: "Failed to get product" });
@@ -12627,6 +12670,7 @@ export async function registerRoutes(
   app.get("/api/products/:productId/variants", async (req, res) => {
     try {
       const { productId } = req.params;
+      const product = await storage.getVendorProduct(productId);
       const variants = await db
         .select()
         .from(productVariants)
@@ -12635,29 +12679,116 @@ export async function registerRoutes(
           eq(productVariants.isActive, true)
         ))
         .orderBy(productVariants.sortOrder);
-      res.json({ variants });
+      res.json({
+        variants: product
+          ? variants.map((v) => withEffectivePrice(v, product.price))
+          : variants,
+      });
     } catch (error) {
       console.error("Get product variants error:", error);
       res.status(500).json({ error: "Failed to get variants" });
     }
   });
 
-  // Vendor creates a variant
-  app.post("/api/business/products/:productId/variants", async (req, res) => {
-    const userId = getUserIdFromRequest(req);
-    if (!userId) {
-      return res.status(401).json({ error: "Not authenticated" });
-    }
+  // Vendor: options + every variant (switched-off ones too), for the editor.
+  app.get("/api/business/products/:productId/options", async (req, res) => {
     try {
-      const { productId } = req.params;
-      const business = await storage.getBusinessByOwnerId(userId);
-      if (!business) {
-        return res.status(404).json({ error: "No business found" });
+      const resolved = await resolveVendorProduct(req, req.params.productId);
+      if ('error' in resolved) return res.status(resolved.status).json({ error: resolved.error });
+      const { product } = resolved;
+      const [options, variants] = await Promise.all([
+        loadProductOptions(product.id),
+        db.select().from(productVariants)
+          .where(eq(productVariants.productId, product.id))
+          .orderBy(productVariants.sortOrder),
+      ]);
+      res.json({
+        productPriceCents: product.price,
+        options,
+        variants: variants.map((v) => withEffectivePrice(v, product.price)),
+      });
+    } catch (error) {
+      console.error("Get product options error:", error);
+      res.status(500).json({ error: "Failed to get options" });
+    }
+  });
+
+  // Vendor: save options and the full list of variations in one go.
+  // Variations left out are switched off (never deleted). Atomic (db.batch).
+  app.put("/api/business/products/:productId/options", async (req, res) => {
+    try {
+      const resolved = await resolveVendorProduct(req, req.params.productId);
+      if ('error' in resolved) return res.status(resolved.status).json({ error: resolved.error });
+      const { product } = resolved;
+
+      const validated = validateOptionsPayload(req.body?.options ?? [], req.body?.variants ?? []);
+      if (!validated.ok) return res.status(400).json({ error: validated.error });
+
+      const existing = await db.select().from(productVariants).where(eq(productVariants.productId, product.id));
+      const planned = planVariantSync(existing as any, validated.variants);
+      if (!planned.ok) return res.status(400).json({ error: planned.error });
+      const { plan } = planned;
+
+      const now = new Date();
+      const queries: any[] = [];
+      // Options: write positions 1..n, then remove positions above n.
+      for (const o of validated.options) {
+        queries.push(
+          db.insert(productOptions)
+            .values({ productId: product.id, position: o.position, name: o.name, values: o.values })
+            .onConflictDoUpdate({
+              target: [productOptions.productId, productOptions.position],
+              set: { name: o.name, values: o.values, updatedAt: now },
+            }),
+        );
       }
-      const product = await storage.getVendorProduct(productId);
-      if (!product || product.businessId !== business.id) {
-        return res.status(403).json({ error: "Forbidden" });
+      queries.push(
+        db.delete(productOptions).where(and(
+          eq(productOptions.productId, product.id),
+          gt(productOptions.position, validated.options.length),
+        )),
+      );
+      for (const u of plan.updates) {
+        queries.push(
+          db.update(productVariants).set(u.values)
+            .where(and(eq(productVariants.id, u.id), eq(productVariants.productId, product.id))),
+        );
       }
+      if (plan.inserts.length > 0) {
+        queries.push(db.insert(productVariants).values(plan.inserts.map((v) => ({ ...v, productId: product.id }))));
+      }
+      if (plan.deactivateIds.length > 0) {
+        queries.push(
+          db.update(productVariants).set({ isActive: false })
+            .where(and(eq(productVariants.productId, product.id), inArray(productVariants.id, plan.deactivateIds))),
+        );
+      }
+      await db.batch(queries as [any, ...any[]]);
+
+      const [options, variants] = await Promise.all([
+        loadProductOptions(product.id),
+        db.select().from(productVariants)
+          .where(eq(productVariants.productId, product.id))
+          .orderBy(productVariants.sortOrder),
+      ]);
+      res.json({
+        productPriceCents: product.price,
+        options,
+        variants: variants.map((v) => withEffectivePrice(v, product.price)),
+      });
+    } catch (error) {
+      console.error("Save product options error:", error);
+      res.status(500).json({ error: "Failed to save options" });
+    }
+  });
+
+  // Vendor creates a variant (label-only editor in current app versions)
+  app.post("/api/business/products/:productId/variants", async (req, res) => {
+    try {
+      const resolved = await resolveVendorProduct(req, req.params.productId);
+      if ('error' in resolved) return res.status(resolved.status).json({ error: resolved.error });
+      const { product } = resolved;
+      const productId = product.id;
       const bodySchema = z.object({
         label: z.string().min(1),
         priceCents: z.number().int().positive(),
@@ -12687,7 +12818,7 @@ export async function registerRoutes(
           sortOrder,
         })
         .returning();
-      res.status(201).json({ variant: created });
+      res.status(201).json({ variant: withEffectivePrice(created, product.price) });
     } catch (error) {
       if (error instanceof z.ZodError) {
         return res.status(400).json({ error: "Invalid data", details: error.errors });
@@ -12699,27 +12830,22 @@ export async function registerRoutes(
 
   // Vendor updates a variant
   app.patch("/api/business/products/:productId/variants/:variantId", async (req, res) => {
-    const userId = getUserIdFromRequest(req);
-    if (!userId) {
-      return res.status(401).json({ error: "Not authenticated" });
-    }
     try {
-      const { productId, variantId } = req.params;
-      const business = await storage.getBusinessByOwnerId(userId);
-      if (!business) {
-        return res.status(404).json({ error: "No business found" });
-      }
-      const product = await storage.getVendorProduct(productId);
-      if (!product || product.businessId !== business.id) {
-        return res.status(403).json({ error: "Forbidden" });
-      }
+      const resolved = await resolveVendorProduct(req, req.params.productId);
+      if ('error' in resolved) return res.status(resolved.status).json({ error: resolved.error });
+      const { product } = resolved;
+      const { variantId } = req.params;
       const bodySchema = z.object({
         label: z.string().min(1).optional(),
-        priceCents: z.number().int().positive().optional(),
+        // null = use the product's price
+        priceCents: z.number().int().positive().nullable().optional(),
         compareAtPriceCents: z.number().int().optional().nullable(),
         inventory: z.number().int().optional().nullable(),
         isActive: z.boolean().optional(),
         sortOrder: z.number().int().optional(),
+        sku: z.string().max(64).optional().nullable(),
+        trackInventory: z.boolean().optional(),
+        imageUrl: z.string().url().startsWith("https://").max(2000).optional().nullable(),
       });
       const body = bodySchema.parse(req.body);
       const [updated] = await db
@@ -12727,13 +12853,13 @@ export async function registerRoutes(
         .set({ ...body })
         .where(and(
           eq(productVariants.id, variantId),
-          eq(productVariants.productId, productId)
+          eq(productVariants.productId, product.id)
         ))
         .returning();
       if (!updated) {
         return res.status(404).json({ error: "Variant not found" });
       }
-      res.json({ variant: updated });
+      res.json({ variant: withEffectivePrice(updated, product.price) });
     } catch (error) {
       if (error instanceof z.ZodError) {
         return res.status(400).json({ error: "Invalid data", details: error.errors });
@@ -12745,26 +12871,17 @@ export async function registerRoutes(
 
   // Vendor soft-deletes a variant
   app.delete("/api/business/products/:productId/variants/:variantId", async (req, res) => {
-    const userId = getUserIdFromRequest(req);
-    if (!userId) {
-      return res.status(401).json({ error: "Not authenticated" });
-    }
     try {
-      const { productId, variantId } = req.params;
-      const business = await storage.getBusinessByOwnerId(userId);
-      if (!business) {
-        return res.status(404).json({ error: "No business found" });
-      }
-      const product = await storage.getVendorProduct(productId);
-      if (!product || product.businessId !== business.id) {
-        return res.status(403).json({ error: "Forbidden" });
-      }
+      const resolved = await resolveVendorProduct(req, req.params.productId);
+      if ('error' in resolved) return res.status(resolved.status).json({ error: resolved.error });
+      const { product } = resolved;
+      const { variantId } = req.params;
       await db
         .update(productVariants)
         .set({ isActive: false })
         .where(and(
           eq(productVariants.id, variantId),
-          eq(productVariants.productId, productId)
+          eq(productVariants.productId, product.id)
         ));
       res.json({ success: true });
     } catch (error) {
@@ -16489,7 +16606,10 @@ export async function registerRoutes(
           return res.status(400).json({ success: false, error: { code: 'INVALID_VARIANT', message: 'Invalid or inactive variant' } });
         }
 
-        resolvedPriceCents = variant.priceCents;
+        // null = the variant uses the product's price (migration 049)
+        resolvedPriceCents = variant.priceCents
+          ?? (await storage.getVendorProduct(data.productId))?.price
+          ?? data.priceInCents;
         resolvedVariantLabel = variant.label;
       } else {
         // No variantId — check if this product requires one

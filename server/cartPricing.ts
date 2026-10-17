@@ -49,7 +49,8 @@ export interface VariantRow {
   id: string;
   productId: string;
   label: string;
-  priceCents: number;
+  /** null = use the product's price (migration 049) */
+  priceCents: number | null;
   inventory: number | null;
   trackInventory: boolean | null;
   isActive: boolean | null;
@@ -155,7 +156,7 @@ export async function priceCartLines(
       ...rest,
       productId: product.id,
       name: product.name,
-      priceCents: variant ? variant.priceCents : product.price,
+      priceCents: variant ? (variant.priceCents ?? product.price) : product.price,
       ...(variant ? { variantId: variant.id, variantLabel: variant.label } : {}),
       dbPriced: true,
     });

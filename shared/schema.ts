@@ -469,7 +469,9 @@ export const productVariants = pgTable("product_variants", {
   productId: varchar("product_id").notNull()
     .references(() => vendorProducts.id, { onDelete: "cascade" }),
   label: text("label").notNull(),
-  priceCents: integer("price_cents").notNull(),
+  // NULL = use the product's price (migration 049). Public responses always
+  // return the effective price; see server/productOptions.ts.
+  priceCents: integer("price_cents"),
   compareAtPriceCents: integer("compare_at_price_cents"),
   inventory: integer("inventory"),
   trackInventory: boolean("track_inventory").default(true),
@@ -477,7 +479,28 @@ export const productVariants = pgTable("product_variants", {
   sortOrder: integer("sort_order").notNull().default(0),
   isActive: boolean("is_active").default(true),
   createdAt: timestamp("created_at").default(sql`now()`),
+  // Value picked for product_options position 1/2/3 (migration 049). NULL on
+  // label-only variants created before options existed.
+  option1: text("option1"),
+  option2: text("option2"),
+  option3: text("option3"),
+  imageUrl: text("image_url"),
 });
+
+// Up to 3 named options per product (migration 049), e.g. Length, Size, Color.
+// values: [{ value: "Black", swatchHex?: "#0A0A0A" }] in display order.
+export const productOptions = pgTable("product_options", {
+  id: varchar("id", { length: 36 }).primaryKey().default(sql`gen_random_uuid()`),
+  productId: varchar("product_id", { length: 36 }).notNull()
+    .references(() => vendorProducts.id, { onDelete: "cascade" }),
+  position: integer("position").notNull(),
+  name: text("name").notNull(),
+  values: jsonb("values").$type<Array<{ value: string; swatchHex?: string | null }>>().notNull().default(sql`'[]'::jsonb`),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().default(sql`now()`),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().default(sql`now()`),
+});
+
+export type ProductOption = typeof productOptions.$inferSelect;
 
 export type ProductVariant = typeof productVariants.$inferSelect;
 export type InsertProductVariant = typeof productVariants.$inferInsert;

@@ -21,7 +21,12 @@ const variants: Record<string, VariantRow[]> = {
     { id: "v30", productId: "bundle", label: '30"', priceCents: 22500, inventory: 0, trackInventory: true, isActive: true },
     { id: "v32", productId: "bundle", label: '32"', priceCents: 23500, inventory: null, trackInventory: true, isActive: true },
   ],
+  tee: [
+    { id: "black-m", productId: "tee", label: "Black / M", priceCents: null, inventory: 5, trackInventory: true, isActive: true },
+    { id: "black-xl", productId: "tee", label: "Black / XL", priceCents: 4000, inventory: 5, trackInventory: true, isActive: true },
+  ],
 };
+products.tee = { id: "tee", businessId: LOTUS, name: "Classic Tee", price: 3500, inventory: null, trackInventory: true, isActive: true, status: "live" };
 
 const legacyLogged: unknown[] = [];
 const deps: CartPricingDeps = {
@@ -144,6 +149,19 @@ async function test(name: string, fn: () => Promise<void>) {
     const r = await priceCartLines([{ productId: "tea", vendorId: LOTUS, priceCents: 1200, quantity: 1 }], deps);
     assert.ok(r.ok);
     assert.deepEqual(Object.keys(toOrderItem(r.lines[0])).sort(), ["name", "price", "productId", "quantity"]);
+  });
+
+  await test("variant with no price of its own is charged the product price", async () => {
+    const r = await priceCartLines([{ productId: "tee", variantId: "black-m", vendorId: LOTUS, priceCents: 1, quantity: 1 }], deps);
+    assert.ok(r.ok);
+    assert.equal(r.lines[0].priceCents, 3500);
+    assert.equal(r.lines[0].variantLabel, "Black / M");
+  });
+
+  await test("variant with its own price keeps it next to an inheriting one", async () => {
+    const r = await priceCartLines([{ productId: "tee", variantId: "black-xl", vendorId: LOTUS, priceCents: 1, quantity: 1 }], deps);
+    assert.ok(r.ok);
+    assert.equal(r.lines[0].priceCents, 4000);
   });
 
   console.log(`\n${passed} passed`);
