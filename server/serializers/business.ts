@@ -1,5 +1,6 @@
 // server/serializers/business.ts
 import type { Business } from "@shared/schema";
+import { coverPosterUrl } from "../coverMedia";
 
 export interface PublicBusinessDTOOptions {
   followerCount: number;
@@ -42,6 +43,8 @@ export function toPublicBusinessDTO(
 
     coverImage: business.coverImage,
     coverMediaType: business.coverMediaType,
+    // Still picture for image-only screens (Mux thumbnail for video covers). Additive.
+    coverPosterUrl: coverPosterUrl(business.coverImage, business.coverMediaType),
     logoImage: business.logoImage,
 
     rating: business.rating,

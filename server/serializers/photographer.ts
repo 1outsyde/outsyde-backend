@@ -1,5 +1,6 @@
 // server/serializers/photographer.ts
 import type { Photographer } from "@shared/schema";
+import { coverPosterUrl } from "../coverMedia";
 
 export interface PublicPhotographerDTOOptions {
   followerCount: number;
@@ -37,6 +38,8 @@ export function toPublicPhotographerDTO(
 
     coverImage: photographer.coverImage,
     coverMediaType: photographer.coverMediaType,
+    // Still picture for image-only screens (Mux thumbnail for video covers). Additive.
+    coverPosterUrl: coverPosterUrl(photographer.coverImage, photographer.coverMediaType),
     logoImage: photographer.logoImage,
     brandColors: photographer.brandColors,
 

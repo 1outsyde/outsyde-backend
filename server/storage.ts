@@ -174,7 +174,7 @@ import {
   promoCodes,
 } from "@shared/schema";
 import { db } from "./db";
-import { coverStillImage, nonEmpty } from "./coverMedia";
+import { coverPosterUrl, coverStillImage, nonEmpty } from "./coverMedia";
 import { eq, ilike, or, and, sql, isNull, isNotNull, desc, asc, gte, lte, ne, inArray, notInArray } from "drizzle-orm";
 import { randomUUID, createHash } from "crypto";
 import { quoteDeposit } from "./fees";
@@ -3402,7 +3402,7 @@ export class DatabaseStorage implements IStorage {
         longitude: business.longitude || undefined,
         rating: business.rating || 0,
         reviewCount: business.reviewCount || 0,
-        imageUrl: business.logoImage || business.coverImage || undefined,
+        imageUrl: business.logoImage || coverPosterUrl(business.coverImage, business.coverMediaType) || undefined,
         isActive: business.subscriptionActive || false,
         hasActiveSubscription: business.subscriptionActive || false,
         isDemo: business.isDemo || false,
@@ -3485,7 +3485,7 @@ export class DatabaseStorage implements IStorage {
         rating: photographer.rating || 0,
         reviewCount: photographer.reviewCount || 0,
         priceCents: photographer.hourlyRate * 100,
-        imageUrl: photographer.logoImage || photographer.coverImage || undefined,
+        imageUrl: photographer.logoImage || coverPosterUrl(photographer.coverImage, photographer.coverMediaType) || undefined,
         isActive: photographer.stripeOnboardingComplete || false,
         isDemo: photographer.isDemo || false,
       });
@@ -6500,7 +6500,7 @@ export class DatabaseStorage implements IStorage {
           type: 'photographer',
           title: p.displayName || 'Photographer',
           subtitle: [p.city, p.state].filter(Boolean).join(', ') || null,
-          imageUrl: p.logoImage || p.coverImage || null,
+          imageUrl: p.logoImage || coverPosterUrl(p.coverImage, p.coverMediaType) || null,
           avatarUrl: nonEmpty(p.logoImage),
           coverImage: coverStillImage(p.coverImage, p.coverMediaType),
           coverMediaType: p.coverImage ? (p.coverMediaType ?? null) : null,
@@ -6579,7 +6579,7 @@ export class DatabaseStorage implements IStorage {
           subtitle: [b.category, [b.city, b.state].filter(Boolean).join(', ')]
             .filter(Boolean)
             .join(' · ') || null,
-          imageUrl: b.logoImage || b.coverImage || null,
+          imageUrl: b.logoImage || coverPosterUrl(b.coverImage, b.coverMediaType) || null,
           avatarUrl: nonEmpty(b.logoImage),
           coverImage: coverStillImage(b.coverImage, b.coverMediaType),
           coverMediaType: b.coverImage ? (b.coverMediaType ?? null) : null,
