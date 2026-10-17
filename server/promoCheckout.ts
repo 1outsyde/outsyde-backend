@@ -20,9 +20,11 @@ import { db } from "./db";
 import { appointments, orders, shootBookings } from "@shared/schema";
 import { stripeService } from "./stripe/stripeService";
 import {
+  releasePromoReservation,
   movePromoReservation,
   reservePromoCode,
   isPromoReservedFor,
+  refHoldsAnyPromo,
   type PromoCodeRow,
   type PromoRef,
 } from "./loyaltyLedger";
@@ -129,6 +131,39 @@ export async function confirmPromoStillHeld(codeId: string, ref: PromoRef, payme
     console.error(`[Promo] Lost code ${codeId} on ${ref.type} ${ref.id}; could not cancel PaymentIntent ${paymentIntentId}:`, err);
   }
   return false;
+}
+
+/**
+ * A booking or order ended without being paid (cancelled, declined, expired). Give its held code
+ * back, but only once its PaymentIntent can no longer be paid: an unpaid one is cancelled first.
+ * One that is paid, processing or awaiting capture keeps the code (the payment webhook or the
+ * void decides). Returns the codes given back.
+ */
+export async function releasePromoForEndedCheckout(ref: PromoRef): Promise<string[]> {
+  // Bookings without a held code are left exactly as before (no Stripe call).
+  if (!(await refHoldsAnyPromo(ref))) return [];
+  const piId = await paymentIntentIdForRef(ref);
+  if (piId) {
+    try {
+      const refused = await releaseOldCheckout(piId);
+      if (refused) return [];
+    } catch (err) {
+      console.error(`[Promo] Could not check PaymentIntent ${piId} for ${ref.type} ${ref.id}; keeping its code:`, err);
+      return [];
+    }
+  }
+  return releasePromoReservation(ref);
+}
+
+/**
+ * payment_intent.canceled: give the code back only if this PaymentIntent is still the checkout's
+ * current one (or it has none). A late event for an older PaymentIntent must not free a code the
+ * checkout now holds for a newer one.
+ */
+export async function releasePromoForCanceledPaymentIntent(ref: PromoRef, paymentIntentId: string, codeId: string): Promise<string[]> {
+  const current = await paymentIntentIdForRef(ref);
+  if (current && current !== paymentIntentId) return [];
+  return releasePromoReservation(ref, codeId);
 }
 
 export const PROMO_TAKEN_RESPONSE = {

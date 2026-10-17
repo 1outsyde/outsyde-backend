@@ -670,12 +670,17 @@ export class StripeService {
     // smaller than the service price some callers default to, and Stripe rejects that refund
     // outright. Capped at the amount received (fixed for this PaymentIntent), so a retried call
     // sends the same amount and the idempotency key still returns the original refund.
+    // If that read fails, the refund goes ahead exactly as asked (as before this cap).
     let amountCents = params.amountCents;
     if (amountCents !== undefined) {
-      const state = await this.getPaymentIntentForRefund(params.paymentIntentId);
-      if (state.amountReceived > 0 && amountCents > state.amountReceived) {
-        console.warn(`[Refund] capped pi=${params.paymentIntentId}: asked ${amountCents}, charged ${state.amountReceived}`);
-        amountCents = state.amountReceived;
+      try {
+        const state = await this.getPaymentIntentForRefund(params.paymentIntentId);
+        if (state.amountReceived > 0 && amountCents > state.amountReceived) {
+          console.warn(`[Refund] capped pi=${params.paymentIntentId}: asked ${amountCents}, charged ${state.amountReceived}`);
+          amountCents = state.amountReceived;
+        }
+      } catch (err) {
+        console.error(`[Refund] could not read pi=${params.paymentIntentId} for the cap; refunding as asked:`, err);
       }
     }
 
@@ -711,12 +716,16 @@ export class StripeService {
 
     // Never more than the customer was charged (a points code can make the charge smaller than
     // the order base, and Stripe rejects a larger refund outright).
-    const refundState = await this.getPaymentIntentForRefund(params.paymentIntentId);
-    const refundAmountCents = refundState.amountReceived > 0
-      ? Math.min(params.refundAmountCents, refundState.amountReceived)
-      : params.refundAmountCents;
-    if (refundAmountCents < params.refundAmountCents) {
-      console.warn(`[Refund] order refund capped pi=${params.paymentIntentId}: asked ${params.refundAmountCents}, charged ${refundState.amountReceived}`);
+    // If that read fails, the refund goes ahead exactly as asked (as before this cap).
+    let refundAmountCents = params.refundAmountCents;
+    try {
+      const refundState = await this.getPaymentIntentForRefund(params.paymentIntentId);
+      if (refundState.amountReceived > 0 && refundAmountCents > refundState.amountReceived) {
+        console.warn(`[Refund] order refund capped pi=${params.paymentIntentId}: asked ${params.refundAmountCents}, charged ${refundState.amountReceived}`);
+        refundAmountCents = refundState.amountReceived;
+      }
+    } catch (err) {
+      console.error(`[Refund] could not read pi=${params.paymentIntentId} for the cap; refunding as asked:`, err);
     }
 
     // Step 1: refund the customer; do NOT touch the transfer or application fee automatically
