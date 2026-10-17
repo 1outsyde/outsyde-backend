@@ -20958,6 +20958,9 @@ export async function registerRoutes(
       const likedSet = userId
         ? await storage.getLikedPostIds(userId, activePostIds)
         : new Set<string>();
+      const savedSet = userId
+        ? await storage.getSavedPostIds(userId, activePostIds)
+        : new Set<string>();
       // TODO: remove before final merge
       console.log('[isLiked]', 'feed=main', 'viewer=', userId, 'likedCount=', likedSet.size);
 
@@ -21045,6 +21048,8 @@ export async function registerRoutes(
           media: mediaObj,
           // Per-viewer like status — false for logged-out viewers
           isLiked: likedSet.has(post.id),
+          // Per-viewer save status — false for logged-out viewers
+          isSaved: savedSet.has(post.id),
           // Legacy identity fields for backwards compatibility
           userId: post.authorId,
           username: author.username || null,
@@ -21436,7 +21441,9 @@ export async function registerRoutes(
 
   // Save a post
   app.post("/api/feed/:postId/save", async (req, res) => {
-    const userId = req.session?.userId;
+    // Session (web) or Bearer token (app). The app's session cookie expires after
+    // 7 days while its token keeps refreshing, so session-only auth would 401.
+    const userId = req.session?.userId || getUserIdFromRequest(req);
     if (!userId) {
       return res.status(401).json({ error: "Not authenticated" });
     }
@@ -21459,7 +21466,9 @@ export async function registerRoutes(
 
   // Unsave a post
   app.delete("/api/feed/:postId/save", async (req, res) => {
-    const userId = req.session?.userId;
+    // Session (web) or Bearer token (app). The app's session cookie expires after
+    // 7 days while its token keeps refreshing, so session-only auth would 401.
+    const userId = req.session?.userId || getUserIdFromRequest(req);
     if (!userId) {
       return res.status(401).json({ error: "Not authenticated" });
     }
@@ -21476,7 +21485,9 @@ export async function registerRoutes(
 
   // Get current user's saved posts
   app.get("/api/users/me/saved-posts", async (req, res) => {
-    const userId = req.session?.userId;
+    // Session (web) or Bearer token (app). The app's session cookie expires after
+    // 7 days while its token keeps refreshing, so session-only auth would 401.
+    const userId = req.session?.userId || getUserIdFromRequest(req);
     if (!userId) {
       return res.status(401).json({ error: "Not authenticated" });
     }
@@ -21675,7 +21686,12 @@ export async function registerRoutes(
         return res.status(404).json({ error: "Post not found" });
       }
 
-      res.json({ post });
+      const viewerId = req.session?.userId || getUserIdFromRequest(req);
+      const isSaved = viewerId
+        ? (await storage.getSavedPostIds(viewerId, [postId])).has(postId)
+        : false;
+
+      res.json({ post: { ...post, isSaved } });
     } catch (error) {
       console.error("Get post error:", error);
       res.status(500).json({ error: "Failed to get post" });
@@ -21760,10 +21776,14 @@ export async function registerRoutes(
       const pulseLikedSet = userId
         ? await storage.getLikedPostIds(userId, pulsePostIds)
         : new Set<string>();
+      const pulseSavedSet = userId
+        ? await storage.getSavedPostIds(userId, pulsePostIds)
+        : new Set<string>();
       // TODO: remove before final merge
       console.log('[isLiked]', 'feed=pulse', 'viewer=', userId, 'likedCount=', pulseLikedSet.size);
       for (const card of videos) {
         card.isLiked = pulseLikedSet.has(card.id);
+        card.isSaved = pulseSavedSet.has(card.id);
       }
 
       const nextOffset = offset + videos.length;
