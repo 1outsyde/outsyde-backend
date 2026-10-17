@@ -14,8 +14,15 @@
 //   - Referrals: when the referred user's first paid purchase of at least $7 (base) is final,
 //     both people get 500 points. Nothing is paid if they buy from the referrer's own business,
 //     staff profile or photographer profile. Max 50 successful referrals per referrer.
-//   - A promo code can only be used when the order base is at least 10x the code value, so the
-//     discount never cuts into the vendor's payout (Outsyde's share is 10% of the base).
+//   - Product orders: a promo code can only be used when the order base is at least 10x the code
+//     value, so the discount never cuts into the vendor's payout (product charges are destination
+//     charges: the charge must cover the transfer).
+//   - Bookings (decided 2026-10-17): any code may be used while the customer still pays at least
+//     $1 now (BOOKING_MIN_CHARGE_CENTS). Booking charges land on the platform balance and the
+//     business is paid its full share by a separate transfer, so the discount never touches it.
+//   - A code is held by one checkout at a time ('reserved'), marked 'used' when that payment
+//     succeeds, and given back ('active') when the checkout is abandoned, voided, or the purchase
+//     is cancelled with a full refund.
 //
 // Why raw SQL: the neon-http driver has no transactions (db.transaction() always throws, R2).
 // Every balance change below is ONE SQL statement (data-modifying CTEs), so it either fully
@@ -43,6 +50,13 @@ export const REDEMPTION_TIERS: ReadonlyArray<{ points: number; valueCents: numbe
   { points: 50000, valueCents: 10000 },
 ];
 export const PROMO_CODE_DAYS = 30;
+/** Bookings: the customer must still pay at least this much now after a code. */
+export const BOOKING_MIN_CHARGE_CENTS = 100;
+
+/** Largest code (cents) a booking charging dueNowCents now can take. */
+export function bookingMaxDiscountCents(dueNowCents: number): number {
+  return Math.max(0, dueNowCents - BOOKING_MIN_CHARGE_CENTS);
+}
 
 /** Points for a purchase: half the service fee, at 500 points per $1. gross = base + 8% fee. */
 export function pointsForGrossCents(grossCents: number): number {
@@ -169,7 +183,7 @@ export async function redeemPointsForCode(userId: string, points: number): Promi
             AND NOT EXISTS (
               SELECT 1 FROM promo_codes
               WHERE user_id = ${userId} AND discount_cents = ${tier.valueCents}
-                AND status = 'active' AND expires_at > now()
+                AND status IN ('active', 'reserved') AND expires_at > now()
             )
           RETURNING loyalty_points
         ), pc AS (
@@ -205,7 +219,7 @@ export async function redeemPointsForCode(userId: string, points: number): Promi
         SELECT (SELECT loyalty_points FROM users WHERE id = ${userId}) AS balance,
                (SELECT code FROM promo_codes
                  WHERE user_id = ${userId} AND discount_cents = ${tier.valueCents}
-                   AND status = 'active' AND expires_at > now()
+                   AND status IN ('active', 'reserved') AND expires_at > now()
                  ORDER BY created_at DESC LIMIT 1) AS active_code
       `);
       if (state?.balance === null || state?.balance === undefined) return { ok: false, error: 'User not found' };
@@ -222,20 +236,30 @@ export async function redeemPointsForCode(userId: string, points: number): Promi
   return { ok: false, error: 'Could not create a code. Please try again.' };
 }
 
+export type PromoRefType = 'order' | 'appointment' | 'shoot_booking';
+export interface PromoRef { type: PromoRefType; id: string }
+
 /**
  * Mark a code used and copy it onto the order / appointment / shoot booking, in one statement.
- * Throws 'Code is no longer valid' if the code is not active (already used), like before.
+ * Called when the payment that carried the code succeeds. The code is consumed by that payment,
+ * so it is accepted while active or reserved (by any checkout), and a repeat for the same
+ * reference is a no-op success. Throws 'Code is no longer valid' if it was already used elsewhere
+ * or given back.
  */
 export async function applyPromoCodeAtomic(
   codeId: string,
-  referenceType: 'order' | 'appointment' | 'shoot_booking',
+  referenceType: PromoRefType,
   referenceId: string,
 ): Promise<void> {
   const result = await rows<{ n: number }>(sql`
     WITH used AS (
       UPDATE promo_codes
-      SET status = 'used', used_at = now(), used_on_order_id = ${referenceId}, used_on_reference_type = ${referenceType}
-      WHERE id = ${codeId} AND status = 'active'
+      SET status = 'used',
+          used_at = CASE WHEN status = 'used' THEN used_at ELSE now() END,
+          used_on_order_id = ${referenceId}, used_on_reference_type = ${referenceType}
+      WHERE id = ${codeId}
+        AND (status IN ('active', 'reserved')
+          OR (status = 'used' AND used_on_order_id = ${referenceId} AND used_on_reference_type = ${referenceType}))
       RETURNING code, discount_cents, points_cost
     ), o AS (
       UPDATE orders SET promo_code_used = used.code, discount_amount_cents = used.discount_cents, points_redeemed = used.points_cost
@@ -253,6 +277,146 @@ export async function applyPromoCodeAtomic(
     SELECT (SELECT count(*) FROM used)::int AS n
   `);
   if (!result[0] || Number(result[0].n) === 0) throw new Error('Code is no longer valid');
+}
+
+// ── Code holds (one checkout at a time) ──────────────────────────────────
+
+export interface PromoCodeRow {
+  id: string;
+  code: string;
+  userId: string;
+  discountCents: number;
+  pointsCost: number;
+  status: string;
+  expiresAt: Date;
+  refType: string | null;
+  refId: string | null;
+}
+
+function toPromoRow(r: any): PromoCodeRow {
+  return {
+    id: r.id,
+    code: r.code,
+    userId: r.user_id,
+    discountCents: Number(r.discount_cents),
+    pointsCost: Number(r.points_cost),
+    status: r.status,
+    expiresAt: new Date(r.expires_at),
+    refType: r.used_on_reference_type ?? null,
+    refId: r.used_on_order_id ?? null,
+  };
+}
+
+export async function getPromoCodeRow(codeId: string): Promise<PromoCodeRow | undefined> {
+  const [r] = await rows(sql`
+    SELECT id, code, user_id, discount_cents, points_cost, status, expires_at, used_on_reference_type, used_on_order_id
+    FROM promo_codes WHERE id = ${codeId}
+  `);
+  return r ? toPromoRow(r) : undefined;
+}
+
+export async function getPromoCodeRowByCode(code: string): Promise<PromoCodeRow | undefined> {
+  const [r] = await rows(sql`
+    SELECT id, code, user_id, discount_cents, points_cost, status, expires_at, used_on_reference_type, used_on_order_id
+    FROM promo_codes WHERE code = ${code}
+  `);
+  return r ? toPromoRow(r) : undefined;
+}
+
+export type ReserveResult =
+  | { ok: true; code: PromoCodeRow }
+  | { ok: false; reason: 'not_found' | 'not_yours' | 'expired' | 'used' }
+  | { ok: false; reason: 'held'; heldBy: PromoRef; code: PromoCodeRow };
+
+/**
+ * Hold a code for one checkout (an order, appointment or shoot booking). Succeeds when the code
+ * is the user's, unexpired, and active or already held by this same checkout. When another
+ * checkout holds it, reports which one (the caller decides whether it can take it over).
+ */
+export async function reservePromoCode(codeId: string, userId: string, ref: PromoRef): Promise<ReserveResult> {
+  const [r] = await rows(sql`
+    UPDATE promo_codes
+    SET status = 'reserved', used_on_reference_type = ${ref.type}, used_on_order_id = ${ref.id}
+    WHERE id = ${codeId} AND user_id = ${userId} AND expires_at > now()
+      AND (status = 'active'
+        OR (status = 'reserved' AND used_on_reference_type = ${ref.type} AND used_on_order_id = ${ref.id}))
+    RETURNING id, code, user_id, discount_cents, points_cost, status, expires_at, used_on_reference_type, used_on_order_id
+  `);
+  if (r) return { ok: true, code: toPromoRow(r) };
+  const row = await getPromoCodeRow(codeId);
+  if (!row) return { ok: false, reason: 'not_found' };
+  if (row.userId !== userId) return { ok: false, reason: 'not_yours' };
+  if (row.status === 'used') return { ok: false, reason: 'used' };
+  if (row.expiresAt.getTime() <= Date.now() || row.status === 'expired') return { ok: false, reason: 'expired' };
+  if (row.status === 'reserved' && row.refType && row.refId) {
+    return { ok: false, reason: 'held', heldBy: { type: row.refType as PromoRefType, id: row.refId }, code: row };
+  }
+  return { ok: false, reason: 'not_found' };
+}
+
+/** Move a hold from one checkout to another, only if `from` still holds it. */
+export async function movePromoReservation(codeId: string, from: PromoRef, to: PromoRef): Promise<PromoCodeRow | null> {
+  const [r] = await rows(sql`
+    UPDATE promo_codes
+    SET used_on_reference_type = ${to.type}, used_on_order_id = ${to.id}
+    WHERE id = ${codeId} AND status = 'reserved'
+      AND used_on_reference_type = ${from.type} AND used_on_order_id = ${from.id}
+    RETURNING id, code, user_id, discount_cents, points_cost, status, expires_at, used_on_reference_type, used_on_order_id
+  `);
+  return r ? toPromoRow(r) : null;
+}
+
+/** True while this checkout still holds the code. */
+export async function isPromoReservedFor(codeId: string, ref: PromoRef): Promise<boolean> {
+  const [r] = await rows(sql`
+    SELECT 1 AS ok FROM promo_codes
+    WHERE id = ${codeId} AND status = 'reserved'
+      AND used_on_reference_type = ${ref.type} AND used_on_order_id = ${ref.id}
+  `);
+  return !!r;
+}
+
+/**
+ * Give back a code this checkout holds but never paid with (abandoned, voided, declined,
+ * expired). A code that was used is untouched. Optional codeId limits it to one code.
+ * Returns the codes given back.
+ */
+export async function releasePromoReservation(ref: PromoRef, codeId?: string): Promise<string[]> {
+  const result = await rows<{ id: string }>(sql`
+    UPDATE promo_codes
+    SET status = 'active', used_on_reference_type = NULL, used_on_order_id = NULL
+    WHERE status = 'reserved'
+      AND used_on_reference_type = ${ref.type} AND used_on_order_id = ${ref.id}
+      AND (${codeId ?? null}::varchar IS NULL OR id = ${codeId ?? null}::varchar)
+    RETURNING id
+  `);
+  return result.map(r => r.id);
+}
+
+/**
+ * Give the customer back the code used on a purchase that was cancelled with a full refund (or
+ * a hold that never got paid). The code becomes active again with at least PROMO_CODE_DAYS left.
+ * Only touches the code tied to this reference. Returns the codes given back.
+ */
+export async function restorePromoForReference(ref: PromoRef): Promise<string[]> {
+  const result = await rows<{ id: string }>(sql`
+    UPDATE promo_codes
+    SET status = 'active', used_at = NULL, used_on_reference_type = NULL, used_on_order_id = NULL,
+        expires_at = GREATEST(expires_at, now() + make_interval(days => ${PROMO_CODE_DAYS}::int))
+    WHERE status IN ('used', 'reserved')
+      AND used_on_reference_type = ${ref.type} AND used_on_order_id = ${ref.id}
+    RETURNING id
+  `);
+  return result.map(r => r.id);
+}
+
+/** Total value (cents) and count of codes currently used on purchases (given-back codes excluded). */
+export async function rewardsRedeemedTotals(): Promise<{ cents: number; count: number }> {
+  const [r] = await rows<{ cents: number; count: number }>(sql`
+    SELECT COALESCE(SUM(discount_cents), 0)::int AS cents, count(*)::int AS count
+    FROM promo_codes WHERE status = 'used'
+  `);
+  return { cents: Number(r?.cents ?? 0), count: Number(r?.count ?? 0) };
 }
 
 // ── Reversals ────────────────────────────────────────────────────────────

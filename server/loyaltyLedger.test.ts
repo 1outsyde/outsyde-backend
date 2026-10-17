@@ -163,9 +163,14 @@ function assert(condition: boolean, name: string, detail?: unknown) {
     const ord = (await q('SELECT promo_code_used, discount_amount_cents, points_redeemed FROM orders WHERE id=$1', [o]))[0];
     const pc = (await q('SELECT status, used_on_order_id FROM promo_codes WHERE id=$1', [r.codeId]))[0];
     assert(pc.status === 'used' && pc.used_on_order_id === o && ord.discount_amount_cents === 500 && ord.points_redeemed === 2500, 'code marked used and copied onto the order', { pc, ord });
+    // A repeat for the same purchase (a re-delivered webhook) is a no-op; another purchase is refused.
     let threw = false;
     try { await storage.applyPromoCode(r.codeId, 'order', o); } catch { threw = true; }
-    assert(threw, 'applying the same code again is refused');
+    assert(!threw, 'applying the code again to the same order is a no-op');
+    const o2 = await order(u, b);
+    threw = false;
+    try { await storage.applyPromoCode(r.codeId, 'order', o2); } catch { threw = true; }
+    assert(threw, 'applying the same code to another order is refused');
   }
 
   console.log('\n6. Refund clawback never exceeds what was earned');

@@ -600,12 +600,17 @@ export async function sendAppointmentConfirmationToConsumer(params: {
   // Set only when a deposit was charged instead of the full service price.
   depositAmountCents?: number;
   remainderDueCents?: number;
+  // Outsyde rewards (points code) taken off what the customer paid now. Outsyde pays it.
+  rewardsDiscountCents?: number;
   addons?: Array<{ name: string; priceCents: number }>;
 }): Promise<void> {
   try {
     const chargedBase = params.depositAmountCents ?? params.basePrice;
     const consumerUpcharge = chargedBase * 0.08;
     const consumerTotal = chargedBase + consumerUpcharge;
+    const rewardsCents = params.rewardsDiscountCents && params.rewardsDiscountCents > 0 ? params.rewardsDiscountCents : 0;
+    const paidNow = consumerTotal - rewardsCents;
+    const rewardsRows = rewardsCents > 0 ? [{ label: 'Outsyde Rewards', value: `${cents(rewardsCents)} off` }] : [];
     const bookingRef = `#A${String(params.bookingNumber).padStart(4, '0')}`;
     const isDeposit = params.depositAmountCents != null;
     const addonRows = (params.addons ?? []).map((a) =>
@@ -621,10 +626,12 @@ export async function sendAppointmentConfirmationToConsumer(params: {
       ...(params.location ? [{ label: 'Location', value: params.location }] : []),
       ...(isDeposit ? [
         { label: 'Service Total', value: cents(params.basePrice) },
-        { label: 'Deposit Paid', value: cents(consumerTotal) },
+        ...rewardsRows,
+        { label: 'Deposit Paid', value: cents(paidNow) },
         { label: 'Due at Appointment', value: cents(params.remainderDueCents ?? 0) },
       ] : [
-        { label: 'Total Paid', value: cents(consumerTotal) },
+        ...rewardsRows,
+        { label: 'Total Paid', value: cents(paidNow) },
       ]),
     ].map((r, i) => detailRow(r.label, r.value, i % 2 === 0)).join('');
 
@@ -670,6 +677,8 @@ export async function sendAppointmentNotificationToVendor(params: {
   // Set only when a deposit was charged instead of the full service price.
   depositAmountCents?: number;
   remainderDueCents?: number;
+  // Outsyde rewards the customer used (paid by Outsyde; the payout is unchanged).
+  rewardsDiscountCents?: number;
   addons?: Array<{ name: string; priceCents: number }>;
   customerDetails?: string | null;
 }): Promise<void> {
@@ -677,6 +686,7 @@ export async function sendAppointmentNotificationToVendor(params: {
     const chargedBase = params.depositAmountCents ?? params.basePrice;
     const vendorFee = chargedBase * 0.02;
     const vendorPayout = chargedBase - vendorFee;
+    const rewardsCents = params.rewardsDiscountCents && params.rewardsDiscountCents > 0 ? params.rewardsDiscountCents : 0;
     const bookingRef = `#A${String(params.bookingNumber).padStart(4, '0')}`;
     const isDeposit = params.depositAmountCents != null;
 
@@ -705,6 +715,7 @@ export async function sendAppointmentNotificationToVendor(params: {
       ] : [
         { label: 'Your Payout', value: cents(vendorPayout) },
       ]),
+      ...(rewardsCents > 0 ? [{ label: 'Outsyde Rewards Used', value: `${cents(rewardsCents)}, paid by Outsyde. Your payout is unchanged.` }] : []),
     ].map((r, i) => detailRow(r.label, r.value, i % 2 === 0)).join('');
 
     const customerDetailsBlock = params.customerDetails
@@ -750,6 +761,8 @@ export async function sendShootBookingConfirmationToConsumer(params: {
   // Set only when a deposit was charged instead of the full service price.
   depositAmountCents?: number;
   remainderDueCents?: number;
+  // Outsyde rewards (points code) taken off what the customer paid now. Outsyde pays it.
+  rewardsDiscountCents?: number;
   addons?: Array<{ name: string; priceCents: number }>;
   customerDetails?: string | null;
 }): Promise<void> {
@@ -757,6 +770,9 @@ export async function sendShootBookingConfirmationToConsumer(params: {
     const chargedBase = params.depositAmountCents ?? params.basePrice;
     const consumerUpcharge = chargedBase * 0.08;
     const consumerTotal = chargedBase + consumerUpcharge;
+    const rewardsCents = params.rewardsDiscountCents && params.rewardsDiscountCents > 0 ? params.rewardsDiscountCents : 0;
+    const paidNow = consumerTotal - rewardsCents;
+    const rewardsRows = rewardsCents > 0 ? [{ label: 'Outsyde Rewards', value: `${cents(rewardsCents)} off` }] : [];
     const bookingRef = `#S${String(params.bookingNumber).padStart(4, '0')}`;
     const isDeposit = params.depositAmountCents != null;
     const esc = (s: string) => s.replace(/[<>&"]/g, c => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;', '"': '&quot;' }[c] ?? c));
@@ -774,10 +790,12 @@ export async function sendShootBookingConfirmationToConsumer(params: {
       ...addonRows,
       ...(isDeposit ? [
         { label: 'Service Total', value: cents(params.basePrice) },
-        { label: 'Deposit Paid', value: cents(consumerTotal) },
+        ...rewardsRows,
+        { label: 'Deposit Paid', value: cents(paidNow) },
         { label: 'Due at Appointment', value: cents(params.remainderDueCents ?? 0) },
       ] : [
-        { label: 'Total Paid', value: cents(consumerTotal) },
+        ...rewardsRows,
+        { label: 'Total Paid', value: cents(paidNow) },
       ]),
     ].map((r, i) => detailRow(r.label, r.value, i % 2 === 0)).join('');
 
@@ -831,6 +849,8 @@ export async function sendShootBookingNotificationToPhotographer(params: {
   // Set only when a deposit was charged instead of the full service price.
   depositAmountCents?: number;
   remainderDueCents?: number;
+  // Outsyde rewards the customer used (paid by Outsyde; the payout is unchanged).
+  rewardsDiscountCents?: number;
   addons?: Array<{ name: string; priceCents: number }>;
   customerDetails?: string | null;
 }): Promise<void> {
@@ -838,6 +858,7 @@ export async function sendShootBookingNotificationToPhotographer(params: {
     const chargedBase = params.depositAmountCents ?? params.basePrice;
     const vendorFee = chargedBase * 0.02;
     const vendorPayout = chargedBase - vendorFee;
+    const rewardsCents = params.rewardsDiscountCents && params.rewardsDiscountCents > 0 ? params.rewardsDiscountCents : 0;
     const bookingRef = `#S${String(params.bookingNumber).padStart(4, '0')}`;
     const isDeposit = params.depositAmountCents != null;
 
@@ -865,6 +886,7 @@ export async function sendShootBookingNotificationToPhotographer(params: {
       ] : [
         { label: 'Your Payout', value: cents(vendorPayout) },
       ]),
+      ...(rewardsCents > 0 ? [{ label: 'Outsyde Rewards Used', value: `${cents(rewardsCents)}, paid by Outsyde. Your payout is unchanged.` }] : []),
     ].map((r, i) => detailRow(r.label, r.value, i % 2 === 0)).join('');
 
     const customerDetailsBlock = params.customerDetails
@@ -1071,6 +1093,8 @@ export async function sendOrderConfirmationToConsumer(params: {
   // Pre-computed amounts from the DB orders row — preferred over recomputing from basePrice.
   totalAmountCents?: number;
   platformFeeCents?: number;
+  // Outsyde rewards (points code) taken off the charge. Outsyde pays it.
+  rewardsDiscountCents?: number;
 }): Promise<void> {
   try {
     const orderRef = `#${String(params.orderNumber).padStart(4, '0')}`;
@@ -1091,10 +1115,12 @@ export async function sendOrderConfirmationToConsumer(params: {
     let totalRows: string;
     if (hasTotals) {
       const subtotalCents = params.totalAmountCents! - params.platformFeeCents!;
+      const rewardsCents = params.rewardsDiscountCents && params.rewardsDiscountCents > 0 ? params.rewardsDiscountCents : 0;
       totalRows = `
         ${detailRow('Subtotal', cents(subtotalCents), true)}
         ${detailRow('Outsyde fee', cents(params.platformFeeCents!), false)}
-        ${detailRow('Total charged', cents(params.totalAmountCents!), true)}
+        ${rewardsCents > 0 ? detailRow('Outsyde Rewards', `${cents(rewardsCents)} off`, true) : ''}
+        ${detailRow('Total charged', cents(params.totalAmountCents! - rewardsCents), rewardsCents > 0 ? false : true)}
       `;
     } else {
       let computed = 0;
@@ -1154,6 +1180,8 @@ export async function sendOrderNotificationToVendor(params: {
   }>;
   // Pre-computed payout from the DB orders.vendorNet column — preferred over recomputing.
   vendorNetCents?: number;
+  // Outsyde rewards the customer used (paid by Outsyde; the payout is unchanged).
+  rewardsDiscountCents?: number;
 }): Promise<void> {
   try {
     const orderRef = `#${String(params.orderNumber).padStart(4, '0')}`;
@@ -1201,6 +1229,7 @@ export async function sendOrderNotificationToVendor(params: {
           </tr>
         </table>
         <p style="color:#555555;font-size:12px;margin:8px 0 0 0;">Outsyde platform fee deducted from payout</p>
+        ${params.rewardsDiscountCents && params.rewardsDiscountCents > 0 ? `<p style="color:#E8B930;font-size:12px;margin:6px 0 0 0;">The customer used ${cents(params.rewardsDiscountCents)} in Outsyde Rewards, paid by Outsyde. Your payout is unchanged.</p>` : ''}
       </td></tr>
       ${emailCta('View in Dashboard', 'https://goutsyde.com/vendor/orders')}
       ${emailFooter()}
@@ -1235,6 +1264,8 @@ export async function sendInternalEventAlert(params: {
   serviceTotalCents?: number;
   // PaymentIntent amount as Stripe recorded it, shown for reconciliation.
   stripeChargeCents?: number;
+  // Points code value taken off the charge (Outsyde pays it).
+  rewardsDiscountCents?: number;
 }): Promise<void> {
   try {
     const totalBase = params.amountChargedCents
@@ -1259,6 +1290,8 @@ export async function sendInternalEventAlert(params: {
         detailRow('Due at Appointment (in person, no fee)', cents(Math.max(0, params.serviceTotalCents - totalBase)), false),
       ] : []),
       ...(params.stripeChargeCents != null ? [detailRow('Stripe Charge (actual)', cents(params.stripeChargeCents), true)] : []),
+      ...(params.rewardsDiscountCents && params.rewardsDiscountCents > 0
+        ? [detailRow('Outsyde Rewards Redeemed (paid by Outsyde)', cents(params.rewardsDiscountCents), false)] : []),
     ].join('');
 
     let itemBreakdown = '';

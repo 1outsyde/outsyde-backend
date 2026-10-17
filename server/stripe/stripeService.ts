@@ -568,6 +568,19 @@ export class StripeService {
   }
 
   /**
+   * Change the amount and metadata of a PaymentIntent the customer has not paid yet
+   * (requires_payment_method / requires_confirmation / requires_action). Used when the
+   * customer adds, changes or removes a points code before paying.
+   */
+  async updateUnpaidPaymentIntent(paymentIntentId: string, params: { amountCents: number; metadata: Record<string, string> }) {
+    const stripe = await getUncachableStripeClient();
+    return stripe.paymentIntents.update(paymentIntentId, {
+      amount: params.amountCents,
+      metadata: params.metadata,
+    });
+  }
+
+  /**
    * Retrieve a PaymentIntent to check its status
    */
   async getPaymentIntent(paymentIntentId: string) {
@@ -653,10 +666,23 @@ export class StripeService {
   }) {
     const stripe = await getUncachableStripeClient();
 
+    // Never ask for more than the customer was charged: a points code can make the charge
+    // smaller than the service price some callers default to, and Stripe rejects that refund
+    // outright. Capped at the amount received (fixed for this PaymentIntent), so a retried call
+    // sends the same amount and the idempotency key still returns the original refund.
+    let amountCents = params.amountCents;
+    if (amountCents !== undefined) {
+      const state = await this.getPaymentIntentForRefund(params.paymentIntentId);
+      if (state.amountReceived > 0 && amountCents > state.amountReceived) {
+        console.warn(`[Refund] capped pi=${params.paymentIntentId}: asked ${amountCents}, charged ${state.amountReceived}`);
+        amountCents = state.amountReceived;
+      }
+    }
+
     return stripe.refunds.create(
       {
         payment_intent: params.paymentIntentId,
-        amount: params.amountCents,
+        amount: amountCents,
         reason: params.reason || 'requested_by_customer',
         metadata: params.metadata,
       },
@@ -683,10 +709,20 @@ export class StripeService {
   }) {
     const stripe = await getUncachableStripeClient();
 
+    // Never more than the customer was charged (a points code can make the charge smaller than
+    // the order base, and Stripe rejects a larger refund outright).
+    const refundState = await this.getPaymentIntentForRefund(params.paymentIntentId);
+    const refundAmountCents = refundState.amountReceived > 0
+      ? Math.min(params.refundAmountCents, refundState.amountReceived)
+      : params.refundAmountCents;
+    if (refundAmountCents < params.refundAmountCents) {
+      console.warn(`[Refund] order refund capped pi=${params.paymentIntentId}: asked ${params.refundAmountCents}, charged ${refundState.amountReceived}`);
+    }
+
     // Step 1: refund the customer; do NOT touch the transfer or application fee automatically
     const refund = await stripe.refunds.create({
       payment_intent: params.paymentIntentId,
-      amount: params.refundAmountCents,
+      amount: refundAmountCents,
       reverse_transfer: false,
       refund_application_fee: false,
       reason: 'requested_by_customer',

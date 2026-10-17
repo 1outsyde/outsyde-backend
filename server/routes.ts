@@ -158,7 +158,15 @@ import {
   adjustPoints,
   REDEMPTION_TIERS,
   REFERRAL_BONUS_POINTS,
+  bookingMaxDiscountCents,
+  getPromoCodeRow,
+  getPromoCodeRowByCode,
+  releasePromoReservation,
+  restorePromoForReference,
+  rewardsRedeemedTotals,
+  type PromoRef,
 } from "./loyaltyLedger";
+import { claimPromoForCheckout, confirmPromoStillHeld, PROMO_TAKEN_RESPONSE } from "./promoCheckout";
 import { calculateProductFee, calculateBookingFee, calculateConsumerServiceFee, calculateBookingFees, quoteDeposit } from "./fees";
 import { validateDeposit, invalidDepositBody, validatePhotographerDeposit, photographerBookingDepositCents } from "./deposits";
 import {
@@ -5583,7 +5591,13 @@ export async function registerRoutes(
     bookingNumber: number;
     addons?: Array<{ id: string; name: string; priceCents: number; durationMinutes: number }> | null;
     addonsTotalCents?: number | null;
+    promoCodeUsed?: string | null;
+    discountAmountCents?: number | null;
   };
+
+  // A points code held by a booking (code row id + value). The booking row stores the code text
+  // and discount; the id is looked up from the text.
+  type BookingPromo = { id: string; code: string; discountCents: number } | null;
 
   // Get or create the Stripe customer — recovers stale/deleted IDs, not just null.
   async function resolveBookingStripeCustomer(userId: string, user: User): Promise<string> {
@@ -5599,7 +5613,7 @@ export async function registerRoutes(
     return stripeCustomerId;
   }
 
-  function buildAppointmentPaymentIntentParams(appt: HoldAppointmentRow, businessName: string, stripeCustomerId: string) {
+  function buildAppointmentPaymentIntentParams(appt: HoldAppointmentRow, businessName: string, stripeCustomerId: string, promo: BookingPromo = null) {
     const addonsTotalCents = appt.addonsTotalCents ?? 0;
     const addons = appt.addons ?? [];
     const hasAddons = addonsTotalCents > 0 || addons.length > 0;
@@ -5625,15 +5639,97 @@ export async function registerRoutes(
       description = (baseDescription + suffix).slice(0, 450);
     }
 
+    // A points code lowers what is charged now; points are still earned on the full amount
+    // (originalConsumerTotalCents) and the business payout is unchanged (paid by transfer).
+    // No code: identical parameters and key to before, so existing resumes are unaffected.
+    const dueNowCents = quoteDeposit(appt.totalPrice, appt.depositAmountCents).dueNowCents;
+    let amountCents = dueNowCents;
+    let key = `hold_pi_${appt.id}`;
+    if (promo && promo.discountCents > 0) {
+      amountCents = dueNowCents - promo.discountCents;
+      baseMetadata.promoCodeId = promo.id;
+      baseMetadata.discountCents = String(promo.discountCents);
+      baseMetadata.originalConsumerTotalCents = String(dueNowCents);
+      key = `hold_pi_${appt.id}_promo_${promo.id}`;
+    }
+
     return {
-      amountCents: quoteDeposit(appt.totalPrice, appt.depositAmountCents).dueNowCents,
+      amountCents,
       customerId: stripeCustomerId,
       captureMethod: (appt.captureMethod === 'manual' ? 'manual' : 'automatic') as 'automatic' | 'manual',
       metadata: baseMetadata,
       description,
       saveForFutureUse: true,
-      idempotencyKey: `hold_pi_${appt.id}`,
+      idempotencyKey: key,
     };
+  }
+
+  // What a points code takes off a booking, and what is still charged now. Additive response fields.
+  function bookingDiscountFields(dueNowCents: number, discountCents: number | null | undefined, code: string | null | undefined) {
+    const d = discountCents && discountCents > 0 ? discountCents : 0;
+    return {
+      discountCents: d,
+      promoCode: d > 0 ? (code ?? null) : null,
+      amountChargedNowCents: dueNowCents - d,
+    };
+  }
+
+  // Check a points code for a booking before anything is written. Bookings: any code while the
+  // customer still pays at least $1 now (loyaltyLedger.ts bookingMaxDiscountCents).
+  async function checkBookingPromo(promoCodeId: string, userId: string, dueNowCents: number):
+    Promise<{ ok: true; promo: NonNullable<BookingPromo> } | { ok: false; status: number; body: Record<string, unknown> }> {
+    const row = await getPromoCodeRow(promoCodeId);
+    if (!row || row.userId !== userId || !['active', 'reserved'].includes(row.status) || row.expiresAt.getTime() <= Date.now()) {
+      return { ok: false, status: 400, body: { error: 'Invalid or already used promo code', code: 'INVALID_PROMO' } };
+    }
+    const maxCents = bookingMaxDiscountCents(dueNowCents);
+    if (row.discountCents > maxCents) {
+      return {
+        ok: false,
+        status: 400,
+        body: {
+          error: `This code is worth more than this booking. Pick a code of $${(maxCents / 100).toFixed(2)} or less.`,
+          code: 'PROMO_TOO_LARGE',
+          maxDiscountCents: maxCents,
+        },
+      };
+    }
+    return { ok: true, promo: { id: row.id, code: row.code, discountCents: row.discountCents } };
+  }
+
+  // The code a booking row holds (from its stored code text), or null.
+  async function bookingPromoFromRow(promoCodeUsed: string | null | undefined, discountAmountCents: number | null | undefined): Promise<BookingPromo> {
+    if (!promoCodeUsed || !discountAmountCents || discountAmountCents <= 0) return null;
+    const row = await getPromoCodeRowByCode(promoCodeUsed);
+    return row ? { id: row.id, code: row.code, discountCents: discountAmountCents } : null;
+  }
+
+  // Full refund or cancellation: the customer gets their points code back (decided 2026-10-17).
+  // A partial refund keeps it used. Best effort; never blocks the refund response.
+  async function giveBackPromoCode(ref: PromoRef, why: string) {
+    try {
+      const ids = await restorePromoForReference(ref);
+      if (ids.length) console.log(`[Promo] Gave back code ${ids.join(',')} for ${ref.type} ${ref.id} (${why})`);
+    } catch (err) {
+      console.error(`[Promo] Could not give back the code for ${ref.type} ${ref.id}:`, err);
+    }
+  }
+
+  // Same, when it depends on whether Stripe shows the whole charge refunded.
+  async function giveBackPromoCodeIfFullyRefunded(ref: PromoRef, paymentIntentId: string, why: string) {
+    try {
+      const state = await stripeService.getPaymentIntentForRefund(paymentIntentId);
+      if (state.status === 'canceled' || (state.amountReceived > 0 && state.amountRefunded >= state.amountReceived)) {
+        await giveBackPromoCode(ref, why);
+      }
+    } catch (err) {
+      console.error(`[Promo] Could not check refund for ${ref.type} ${ref.id}:`, err);
+    }
+  }
+
+  function requestedPromoCodeId(req: import("express").Request): string | null {
+    const v = req.body?.promoCodeId;
+    return typeof v === 'string' && v.trim() ? v.trim() : null;
   }
 
   // Deposit/fee fields of a hold-based appointment, from its stored row.
@@ -5641,6 +5737,7 @@ export async function registerRoutes(
     const quote = quoteDeposit(appt.totalPrice, appt.depositAmountCents);
     const fb = quote.feeBreakdown;
     return {
+      ...bookingDiscountFields(quote.dueNowCents, appt.discountAmountCents, appt.promoCodeUsed),
       requiresApproval: appt.captureMethod === 'manual',
       status: appt.status,
       depositAmountCents: quote.depositAmountCents,
@@ -5670,6 +5767,56 @@ export async function registerRoutes(
     }
     console.error(`[Booking] PI creation FAILED appointment=${appt.id} hold=${appt.holdId} key=${idempotencyKeyUsed}:`, error);
     return res.status(500).json({ error: "Failed to create payment intent" });
+  }
+
+  // Add, change or remove the points code on a booking whose PaymentIntent is still unpaid: the
+  // same PaymentIntent gets the new amount, so the customer's payment sheet stays valid.
+  async function changePromoOnUnpaidBooking(opts: {
+    ref: PromoRef;
+    userId: string;
+    paymentIntent: { id: string; metadata?: Record<string, string> | null };
+    dueNowCents: number;
+    current: BookingPromo;
+    requestedId: string | null;
+    saveRow: (promo: BookingPromo) => Promise<void>;
+  }): Promise<{ ok: true; promo: BookingPromo } | { ok: false; status: number; body: Record<string, unknown> }> {
+    const { ref, userId, paymentIntent, dueNowCents, current, requestedId } = opts;
+    if ((requestedId ?? null) === (current?.id ?? null)) return { ok: true, promo: current };
+
+    let next: BookingPromo = null;
+    if (requestedId) {
+      const checked = await checkBookingPromo(requestedId, userId, dueNowCents);
+      if (!checked.ok) return checked;
+      const claim = await claimPromoForCheckout(requestedId, userId, ref);
+      if (!claim.ok) return { ok: false, status: claim.status, body: { error: claim.error, code: claim.code } };
+      next = checked.promo;
+    }
+
+    const d = next?.discountCents ?? 0;
+    try {
+      await stripeService.updateUnpaidPaymentIntent(paymentIntent.id, {
+        amountCents: dueNowCents - d,
+        metadata: {
+          ...(paymentIntent.metadata ?? {}),
+          promoCodeId: next?.id ?? '',
+          discountCents: d > 0 ? String(d) : '',
+          originalConsumerTotalCents: d > 0 ? String(dueNowCents) : '',
+        },
+      });
+    } catch (err) {
+      console.error(`[Promo] Could not update PaymentIntent ${paymentIntent.id} for ${ref.type} ${ref.id}:`, err);
+      if (next) await releasePromoReservation(ref, next.id).catch(() => {});
+      return { ok: false, status: 502, body: { error: 'We could not update your total. Please try again.', code: 'PROMO_UPDATE_FAILED' } };
+    }
+
+    await opts.saveRow(next);
+    if (current && current.id !== next?.id) {
+      await releasePromoReservation(ref, current.id).catch(err => console.error(`[Promo] release ${current.id} failed:`, err));
+    }
+    if (next && !(await confirmPromoStillHeld(next.id, ref, paymentIntent.id))) {
+      return { ok: false, status: 409, body: PROMO_TAKEN_RESPONSE };
+    }
+    return { ok: true, promo: next };
   }
 
   // When manual acceptance is required, notify the business owner and the
@@ -5776,29 +5923,152 @@ export async function registerRoutes(
               eq(shootBookings.clientId, hold.userId)
             )
           );
-        if (existingShoot) {
-          if (existingShoot.stripePaymentIntentId) {
-            try {
-              const existingPI = await stripeService.getPaymentIntent(existingShoot.stripePaymentIntentId);
-              if (['requires_payment_method', 'requires_confirmation', 'requires_action'].includes(existingPI.status)) {
-                return res.json({
-                  clientSecret: existingPI.client_secret,
-                  paymentIntentId: existingPI.id,
-                  shootBookingId: existingShoot.id,
-                  captureMethod: existingPI.capture_method,
-                });
-              }
-            } catch (piError) {
-              console.log(`[Booking] Existing PaymentIntent ${existingShoot.stripePaymentIntentId} for hold ${holdId} not found or invalid`);
-            }
-          }
-          return res.status(409).json({ error: "A payment attempt for this hold already exists." });
-        }
-
         const photographer = await storage.getPhotographer(hold.providerId);
         if (!photographer) {
           return res.status(404).json({ error: "Photographer not found" });
         }
+
+        // Respect autoAcceptBookings: shoot_booking is already handled by the
+        // payment_intent.amount_capturable_updated webhook branch, so manual
+        // capture is safe here (unlike the 'appointment' type on the business
+        // branch, which forces 'automatic' because that webhook path does not
+        // recognise 'appointment' type).
+        const captureMethod: 'automatic' | 'manual' = photographer.autoAcceptBookings === false ? 'manual' : 'automatic';
+
+        // Stripe parameters for a shoot booking, all from its row (so a resume rebuilds the same
+        // ones). Platform balance, no transfer_data: after payment_intent.succeeded the webhook's
+        // shoot_booking branch transfers vendorPayoutCents to the photographer. holdId lets the
+        // webhook convert the hold. A points code lowers the charge only; the payout is unchanged
+        // and points are earned on the full amount (originalConsumerTotalCents).
+        const buildShootPaymentIntentParams = (
+          sb: { id: string; totalPrice: number; depositAmountCents: number | null; vendorNet: number | null; platformFee: number | null; addons: unknown; addonsTotalCents: number | null },
+          customerId: string,
+          promo: BookingPromo,
+        ) => {
+          const sbAddons = (sb.addons as Array<{ name: string }> | null) ?? [];
+          const sbAddonsTotal = sb.addonsTotalCents ?? 0;
+          const hasSbAddons = sbAddons.length > 0 || sbAddonsTotal > 0;
+          const sbAddonNames = sbAddons.map(a => a.name).join(', ');
+          const metadata: Record<string, string> = {
+            type: 'shoot_booking',
+            bookingId: sb.id,
+            clientId: userId,
+            holdId: hold.id,
+            providerId: hold.providerId,
+            serviceId: hold.serviceId || '',
+            vendorPayoutCents: String(sb.vendorNet ?? 0),
+            platformFeeCents: String(sb.platformFee ?? 0),
+          };
+          if (hasSbAddons) {
+            metadata.addonsTotalCents = String(sbAddonsTotal);
+            metadata.addonNames = sbAddonNames.slice(0, 450);
+          }
+          const dueNowCents = quoteDeposit(sb.totalPrice, sb.depositAmountCents).dueNowCents;
+          let amountCents = dueNowCents;
+          if (promo && promo.discountCents > 0) {
+            amountCents = dueNowCents - promo.discountCents;
+            metadata.promoCodeId = promo.id;
+            metadata.discountCents = String(promo.discountCents);
+            metadata.originalConsumerTotalCents = String(dueNowCents);
+          }
+          const baseDescription = `Photography booking with ${photographer.displayName || 'photographer'}`;
+          return {
+            amountCents,
+            customerId,
+            captureMethod,
+            metadata,
+            description: hasSbAddons ? (baseDescription + ` + ${sbAddonNames}`).slice(0, 450) : baseDescription,
+            saveForFutureUse: true,
+          };
+        };
+        const resolveShootCustomer = async (): Promise<string | null> => {
+          const u = await storage.getUser(userId);
+          if (!u) return null;
+          return resolveBookingStripeCustomer(userId, u);
+        };
+        const saveShootPromo = async (sbId: string, promo: BookingPromo) => {
+          await db.update(shootBookings).set({
+            promoCodeUsed: promo?.code ?? null,
+            discountAmountCents: promo?.discountCents ?? 0,
+            updatedAt: new Date(),
+          }).where(eq(shootBookings.id, sbId));
+        };
+
+        if (existingShoot) {
+          const shootRef: PromoRef = { type: 'shoot_booking', id: existingShoot.id };
+          const shootDueNow = quoteDeposit(existingShoot.totalPrice, existingShoot.depositAmountCents).dueNowCents;
+          if (existingShoot.stripePaymentIntentId) {
+            let existingPI: Awaited<ReturnType<typeof stripeService.getPaymentIntent>> | undefined;
+            try {
+              existingPI = await stripeService.getPaymentIntent(existingShoot.stripePaymentIntentId);
+            } catch (piError) {
+              console.log(`[Booking] Existing PaymentIntent ${existingShoot.stripePaymentIntentId} for hold ${holdId} not found or invalid`);
+            }
+            if (existingPI && ['requires_payment_method', 'requires_confirmation', 'requires_action'].includes(existingPI.status)) {
+              // The customer may have added, changed or removed a points code: same
+              // PaymentIntent, new amount.
+              let saved: BookingPromo = await bookingPromoFromRow(existingShoot.promoCodeUsed, existingShoot.discountAmountCents);
+              const changed = await changePromoOnUnpaidBooking({
+                ref: shootRef,
+                userId,
+                paymentIntent: existingPI,
+                dueNowCents: shootDueNow,
+                current: saved,
+                requestedId: requestedPromoCodeId(req),
+                saveRow: async (promo) => { saved = promo; await saveShootPromo(existingShoot.id, promo); },
+              });
+              if (!changed.ok) return res.status(changed.status).json(changed.body);
+              return res.json({
+                clientSecret: existingPI.client_secret,
+                paymentIntentId: existingPI.id,
+                shootBookingId: existingShoot.id,
+                captureMethod: existingPI.capture_method,
+                dueNowCents: shootDueNow,
+                ...bookingDiscountFields(shootDueNow, changed.promo?.discountCents, changed.promo?.code),
+              });
+            }
+          } else if (existingShoot.status === BOOKING_STATES.PENDING_PAYMENT) {
+            // Resume: the earlier attempt lost its PaymentIntent (a newer checkout took its points
+            // code). Rebuilt from the row, with the code asked for now.
+            const wantedId = requestedPromoCodeId(req);
+            const currentPromo = await bookingPromoFromRow(existingShoot.promoCodeUsed, existingShoot.discountAmountCents);
+            let resumePromo: BookingPromo = null;
+            if (wantedId) {
+              const checked = await checkBookingPromo(wantedId, userId, shootDueNow);
+              if (!checked.ok) return res.status(checked.status).json(checked.body);
+              const claim = await claimPromoForCheckout(checked.promo.id, userId, shootRef);
+              if (!claim.ok) return res.status(claim.status).json({ error: claim.error, code: claim.code });
+              resumePromo = checked.promo;
+            }
+            await saveShootPromo(existingShoot.id, resumePromo);
+            if (currentPromo && currentPromo.id !== resumePromo?.id) await releasePromoReservation(shootRef, currentPromo.id).catch(() => {});
+            const customerId = await resolveShootCustomer();
+            if (!customerId) return res.status(404).json({ error: "User not found" });
+            const resumedPI = await stripeService.createPlatformPaymentIntent(buildShootPaymentIntentParams(existingShoot, customerId, resumePromo));
+            await db.update(shootBookings).set({
+              stripePaymentIntentId: resumedPI.id,
+              paymentMethod: 'payment_intent',
+              captureMethod,
+              updatedAt: new Date(),
+            }).where(eq(shootBookings.id, existingShoot.id));
+            if (resumePromo && !(await confirmPromoStillHeld(resumePromo.id, shootRef, resumedPI.id))) {
+              await db.update(shootBookings).set({ stripePaymentIntentId: null, promoCodeUsed: null, discountAmountCents: 0, updatedAt: new Date() })
+                .where(eq(shootBookings.id, existingShoot.id));
+              return res.status(409).json(PROMO_TAKEN_RESPONSE);
+            }
+            return res.json({
+              clientSecret: resumedPI.client_secret,
+              paymentIntentId: resumedPI.id,
+              shootBookingId: existingShoot.id,
+              bookingNumber: existingShoot.bookingNumber,
+              captureMethod,
+              dueNowCents: shootDueNow,
+              ...bookingDiscountFields(shootDueNow, resumePromo?.discountCents, resumePromo?.code),
+            });
+          }
+          return res.status(409).json({ error: "A payment attempt for this hold already exists." });
+        }
+
         if (!photographer.stripeAccountId || !photographer.stripeOnboardingComplete) {
           return res.status(400).json({ error: "Photographer has not completed Stripe onboarding" });
         }
@@ -5820,12 +6090,15 @@ export async function registerRoutes(
         // one place to update when rates change.
         const photographerFees = calculateBookingFees(shootQuote.chargeAmountCents);
 
-        // Respect autoAcceptBookings: shoot_booking is already handled by the
-        // payment_intent.amount_capturable_updated webhook branch, so manual
-        // capture is safe here (unlike the 'appointment' type on the business
-        // branch, which forces 'automatic' because that webhook path does not
-        // recognise 'appointment' type).
-        const captureMethod = photographer.autoAcceptBookings === false ? 'manual' : 'automatic';
+        // Optional points code, checked before anything is written (any code while the customer
+        // still pays at least $1 now).
+        const wantedShootPromoId = requestedPromoCodeId(req);
+        let shootPromo: BookingPromo = null;
+        if (wantedShootPromoId) {
+          const checked = await checkBookingPromo(wantedShootPromoId, userId, shootQuote.dueNowCents);
+          if (!checked.ok) return res.status(checked.status).json(checked.body);
+          shootPromo = checked.promo;
+        }
 
         // hold.serviceName was resolved and stored at hold-creation time (via
         // resolveServiceForHold in availabilityService.ts). Use it directly for
@@ -5856,6 +6129,8 @@ export async function registerRoutes(
           addonsDurationMinutes: holdAddonsDurationMinutes,
           customerDetails: holdCustomerDetails,
         });
+        const newShootRef: PromoRef = { type: 'shoot_booking', id: shootBooking.id };
+        if (shootPromo) await saveShootPromo(shootBooking.id, shootPromo);
 
         // Permanently block the photographer's calendar slot. This mirrors the
         // same step in POST /api/bookings/photographer/draft. The hold already
@@ -5880,54 +6155,24 @@ export async function registerRoutes(
           return res.status(409).json({ error: "Failed to reserve time slot. Please try again." });
         }
 
+        if (shootPromo) {
+          const claim = await claimPromoForCheckout(shootPromo.id, userId, newShootRef);
+          if (!claim.ok) {
+            // Keep the booking (a retry resumes it) but without the code.
+            await saveShootPromo(shootBooking.id, null);
+            return res.status(claim.status).json({ error: claim.error, code: claim.code, shootBookingId: shootBooking.id });
+          }
+        }
+
         // Get or create Stripe customer (platform customer, NOT Connect).
-        const photographerUser = await storage.getUser(userId);
-        if (!photographerUser) {
+        const photographerStripeCustomerId = await resolveShootCustomer();
+        if (!photographerStripeCustomerId) {
           return res.status(404).json({ error: "User not found" });
         }
-        const photographerStripeCustomerId = await stripeService.getOrCreateStripeCustomer({
-          userId,
-          email: photographerUser.email!,
-          name: photographerUser.name || undefined,
-          existingStripeCustomerId: photographerUser.stripeCustomerId,
-        });
-        if (!photographerUser.stripeCustomerId || photographerUser.stripeCustomerId !== photographerStripeCustomerId) {
-          await storage.updateUser(userId, { stripeCustomerId: photographerStripeCustomerId });
-        }
 
-        // PaymentIntent on platform balance — no transfer_data. After
-        // payment_intent.succeeded fires, the webhook's shoot_booking branch
-        // (webhookHandlers.ts) transfers vendorPayoutCents to the photographer's
-        // connected account. holdId is passed in metadata so the webhook can
-        // call markHoldAsConverted once payment succeeds (mirrors how the
-        // 'appointment' branch handles hold conversion).
-        const hasAddons = holdAddons.length > 0 || holdAddonsTotalCents > 0;
-        const addonNamesStr = holdAddons.map((a: { name: string }) => a.name).join(', ');
-        const piBaseMetadata: Record<string, string> = {
-          type: 'shoot_booking',
-          bookingId: shootBooking.id,
-          clientId: userId,
-          holdId: hold.id,
-          providerId: hold.providerId,
-          serviceId: hold.serviceId || '',
-          vendorPayoutCents: String(photographerFees.vendorNetCents),
-          platformFeeCents: String(photographerFees.platformFeeCents),
-        };
-        if (hasAddons) {
-          piBaseMetadata.addonsTotalCents = String(holdAddonsTotalCents);
-          piBaseMetadata.addonNames = addonNamesStr.slice(0, 450);
-        }
-        const piBaseDescription = `Photography booking with ${photographer.displayName || 'photographer'}`;
-        const piDescription = hasAddons ? (piBaseDescription + ` + ${addonNamesStr}`).slice(0, 450) : piBaseDescription;
-
-        const photographerPI = await stripeService.createPlatformPaymentIntent({
-          amountCents: shootQuote.dueNowCents,
-          customerId: photographerStripeCustomerId,
-          captureMethod,
-          metadata: piBaseMetadata,
-          description: piDescription,
-          saveForFutureUse: true,
-        });
+        const photographerPI = await stripeService.createPlatformPaymentIntent(
+          buildShootPaymentIntentParams(shootBooking, photographerStripeCustomerId, shootPromo),
+        );
 
         await db.update(shootBookings).set({
           stripePaymentIntentId: photographerPI.id,
@@ -5936,7 +6181,13 @@ export async function registerRoutes(
           updatedAt: new Date(),
         }).where(eq(shootBookings.id, shootBooking.id));
 
-        console.log(`[Booking] Created shoot_booking PaymentIntent ${photographerPI.id} from hold ${holdId} (shootBooking ${shootBooking.id}, charged: ${photographerFees.customerTotalBeforeTaxCents}¢, vendor: ${photographerFees.vendorNetCents}¢)`);
+        if (shootPromo && !(await confirmPromoStillHeld(shootPromo.id, newShootRef, photographerPI.id))) {
+          await db.update(shootBookings).set({ stripePaymentIntentId: null, promoCodeUsed: null, discountAmountCents: 0, updatedAt: new Date() })
+            .where(eq(shootBookings.id, shootBooking.id));
+          return res.status(409).json({ ...PROMO_TAKEN_RESPONSE, shootBookingId: shootBooking.id });
+        }
+
+        console.log(`[Booking] Created shoot_booking PaymentIntent ${photographerPI.id} from hold ${holdId} (shootBooking ${shootBooking.id}, charged: ${photographerPI.amount}¢, vendor: ${photographerFees.vendorNetCents}¢)`);
 
         const inPersonDueCents = shootQuote.dueAtAppointmentCents;
 
@@ -5953,6 +6204,7 @@ export async function registerRoutes(
           serviceTotalCents: shootQuote.serviceTotalCents,
           chargeAmountCents: shootQuote.chargeAmountCents,
           dueNowCents: shootQuote.dueNowCents,
+          ...bookingDiscountFields(shootQuote.dueNowCents, shootPromo?.discountCents, shootPromo?.code),
           addons: holdAddons,
           feeBreakdown: {
             subtotalAmount: photographerFees.subtotalCents,
@@ -5975,21 +6227,45 @@ export async function registerRoutes(
       // /api/bookings/appointments/:appointmentId/create-payment-intent.
       const [existing] = await db.select().from(appointments).where(eq(appointments.holdId, holdId));
       if (existing) {
+        const existingRef: PromoRef = { type: 'appointment', id: existing.id };
+        const existingDueNow = quoteDeposit(existing.totalPrice, existing.depositAmountCents).dueNowCents;
+        const saveExistingPromo = async (promo: BookingPromo) => {
+          await db.update(appointments).set({
+            promoCodeUsed: promo?.code ?? null,
+            discountAmountCents: promo?.discountCents ?? 0,
+            updatedAt: new Date(),
+          }).where(eq(appointments.id, existing.id));
+          existing.promoCodeUsed = promo?.code ?? null;
+          existing.discountAmountCents = promo?.discountCents ?? 0;
+        };
         if (existing.stripePaymentIntentId) {
+          let existingPI: Awaited<ReturnType<typeof stripeService.getPaymentIntent>> | undefined;
           try {
-            const existingPI = await stripeService.getPaymentIntent(existing.stripePaymentIntentId);
-            if (['requires_payment_method', 'requires_confirmation', 'requires_action'].includes(existingPI.status)) {
-              return res.json({
-                clientSecret: existingPI.client_secret,
-                paymentIntentId: existingPI.id,
-                appointmentId: existing.id,
-                bookingNumber: existing.bookingNumber,
-                captureMethod: existingPI.capture_method,
-                ...appointmentPaymentMoneyFields(existing),
-              });
-            }
+            existingPI = await stripeService.getPaymentIntent(existing.stripePaymentIntentId);
           } catch (piError) {
             console.log(`[Booking] Existing PaymentIntent ${existing.stripePaymentIntentId} for hold ${holdId} not found or invalid`);
+          }
+          if (existingPI && ['requires_payment_method', 'requires_confirmation', 'requires_action'].includes(existingPI.status)) {
+            // The customer may have added, changed or removed a points code since this
+            // PaymentIntent was made: same PaymentIntent, new amount.
+            const changed = await changePromoOnUnpaidBooking({
+              ref: existingRef,
+              userId,
+              paymentIntent: existingPI,
+              dueNowCents: existingDueNow,
+              current: await bookingPromoFromRow(existing.promoCodeUsed, existing.discountAmountCents),
+              requestedId: requestedPromoCodeId(req),
+              saveRow: saveExistingPromo,
+            });
+            if (!changed.ok) return res.status(changed.status).json(changed.body);
+            return res.json({
+              clientSecret: existingPI.client_secret,
+              paymentIntentId: existingPI.id,
+              appointmentId: existing.id,
+              bookingNumber: existing.bookingNumber,
+              captureMethod: existingPI.capture_method,
+              ...appointmentPaymentMoneyFields(existing),
+            });
           }
         } else if (existing.status === BOOKING_STATES.PENDING_PAYMENT || existing.status === BOOKING_STATES.PENDING_PROVIDER) {
           // Resume: an earlier attempt created this appointment but never saved
@@ -6003,8 +6279,32 @@ export async function registerRoutes(
           if (!resumeUser) {
             return res.status(404).json({ error: "User not found" });
           }
+
+          // Points code: the one asked for now (none = no code). A different code than the row
+          // holds is checked and held first, then the row is updated, so the PaymentIntent below
+          // is built from a row that matches the hold.
+          const currentPromo = await bookingPromoFromRow(existing.promoCodeUsed, existing.discountAmountCents);
+          const wantedPromoId = requestedPromoCodeId(req);
+          let resumePromo: BookingPromo = currentPromo;
+          if ((wantedPromoId ?? null) !== (currentPromo?.id ?? null)) {
+            resumePromo = null;
+            if (wantedPromoId) {
+              const checked = await checkBookingPromo(wantedPromoId, userId, existingDueNow);
+              if (!checked.ok) return res.status(checked.status).json(checked.body);
+              resumePromo = checked.promo;
+            }
+          }
+          if (resumePromo) {
+            const claim = await claimPromoForCheckout(resumePromo.id, userId, existingRef);
+            if (!claim.ok) return res.status(claim.status).json({ error: claim.error, code: claim.code });
+          }
+          if ((resumePromo?.id ?? null) !== (currentPromo?.id ?? null)) {
+            await saveExistingPromo(resumePromo);
+            if (currentPromo) await releasePromoReservation(existingRef, currentPromo.id).catch(() => {});
+          }
+
           const resumeCustomerId = await resolveBookingStripeCustomer(userId, resumeUser);
-          const resumeParams = buildAppointmentPaymentIntentParams(existing, resumeBusiness.name, resumeCustomerId);
+          const resumeParams = buildAppointmentPaymentIntentParams(existing, resumeBusiness.name, resumeCustomerId, resumePromo);
           let resumedPI: Awaited<ReturnType<typeof stripeService.createPlatformPaymentIntent>>;
           try {
             resumedPI = await stripeService.createPlatformPaymentIntent(resumeParams);
@@ -6017,6 +6317,12 @@ export async function registerRoutes(
             updatedAt: new Date(),
           }).where(eq(appointments.id, existing.id));
           console.log(`[Booking] Resumed appointment ${existing.id} for hold ${holdId} with PaymentIntent ${resumedPI.id}`);
+
+          if (resumePromo && !(await confirmPromoStillHeld(resumePromo.id, existingRef, resumedPI.id))) {
+            await db.update(appointments).set({ stripePaymentIntentId: null, promoCodeUsed: null, discountAmountCents: 0, updatedAt: new Date() })
+              .where(eq(appointments.id, existing.id));
+            return res.status(409).json(PROMO_TAKEN_RESPONSE);
+          }
 
           if (resumeParams.captureMethod === 'manual') {
             await notifyPendingBookingRequest({
@@ -6112,6 +6418,17 @@ export async function registerRoutes(
         : totalServicePriceCents;
       const feeBreakdown = calculateBookingFees(chargeAmountCents);
 
+      // Optional points code, checked before anything is written. Bookings: any code while the
+      // customer still pays at least $1 now. The business payout does not change.
+      const newApptDueNowCents = quoteDeposit(totalServicePriceCents, serviceDepositAmountCents).dueNowCents;
+      const wantedApptPromoId = requestedPromoCodeId(req);
+      let apptPromo: BookingPromo = null;
+      if (wantedApptPromoId) {
+        const checked = await checkBookingPromo(wantedApptPromoId, userId, newApptDueNowCents);
+        if (!checked.ok) return res.status(checked.status).json(checked.body);
+        apptPromo = checked.promo;
+      }
+
       const isCustomerLocation = serviceForSnapshot?.serviceLocationType === 'customer';
       const customerAddress = isCustomerLocation ? {
         customerServiceAddress: req.body.customerServiceAddress ?? null,
@@ -6157,7 +6474,20 @@ export async function registerRoutes(
         addonsTotalCents: holdAddonsTotalCents,
         addonsDurationMinutes: hold.addonsDurationMinutes ?? 0,
         customerDetails: hold.customerDetails ?? null,
+        promoCodeUsed: apptPromo?.code ?? null,
+        discountAmountCents: apptPromo?.discountCents ?? 0,
       });
+      const apptRef: PromoRef = { type: 'appointment', id: appointment.id };
+
+      if (apptPromo) {
+        const claim = await claimPromoForCheckout(apptPromo.id, userId, apptRef);
+        if (!claim.ok) {
+          // Keep the appointment (a retry resumes it) but without the code.
+          await db.update(appointments).set({ promoCodeUsed: null, discountAmountCents: 0, updatedAt: new Date() })
+            .where(eq(appointments.id, appointment.id));
+          return res.status(claim.status).json({ error: claim.error, code: claim.code, appointmentId: appointment.id });
+        }
+      }
 
       const user = await storage.getUser(userId);
       if (!user) {
@@ -6168,7 +6498,7 @@ export async function registerRoutes(
 
       // Built from the row just written (same deposit, price and capture
       // method as computed above), so a resumed retry sends identical params.
-      const paymentIntentParams = buildAppointmentPaymentIntentParams(appointment, business.name, stripeCustomerId);
+      const paymentIntentParams = buildAppointmentPaymentIntentParams(appointment, business.name, stripeCustomerId, apptPromo);
       let paymentIntent: Awaited<ReturnType<typeof stripeService.createPlatformPaymentIntent>>;
       try {
         paymentIntent = await stripeService.createPlatformPaymentIntent(paymentIntentParams);
@@ -6180,6 +6510,12 @@ export async function registerRoutes(
         stripePaymentIntentId: paymentIntent.id,
         updatedAt: new Date(),
       }).where(eq(appointments.id, appointment.id));
+
+      if (apptPromo && !(await confirmPromoStillHeld(apptPromo.id, apptRef, paymentIntent.id))) {
+        await db.update(appointments).set({ stripePaymentIntentId: null, promoCodeUsed: null, discountAmountCents: 0, updatedAt: new Date() })
+          .where(eq(appointments.id, appointment.id));
+        return res.status(409).json({ ...PROMO_TAKEN_RESPONSE, appointmentId: appointment.id });
+      }
 
       if (!isAutoAccept) {
         await notifyPendingBookingRequest({
@@ -6204,6 +6540,7 @@ export async function registerRoutes(
         depositAmountCents: serviceDepositAmountCents,
         servicePriceCents: hold.servicePriceCents,
         chargeAmountCents,
+        ...bookingDiscountFields(newApptDueNowCents, apptPromo?.discountCents, apptPromo?.code),
         feeBreakdown: {
           subtotalAmount: feeBreakdown.subtotalCents,
           consumerServiceFeeAmount: feeBreakdown.consumerServiceFeeCents,
@@ -7157,6 +7494,7 @@ export async function registerRoutes(
             metadata: { appointmentId, initiatedBy: userId, reason: 'Accepted after pending_provider expiry' },
             idempotencyKey: `accept_expired_refund_${appointmentId}`,
           });
+          await giveBackPromoCode({ type: 'appointment', id: appointmentId }, 'accepted after expiry, refunded');
         } catch (refundError: any) {
           console.error(`[Booking] Refund after expired accept FAILED appointment=${appointmentId} pi=${capturedPaymentIntent.id}:`, refundError);
           return res.status(502).json({ error: "This request expired before you accepted it. The refund failed; please contact support.", code: "REFUND_FAILED" });
@@ -7392,6 +7730,7 @@ export async function registerRoutes(
             metadata: { shootBookingId: bookingId, initiatedBy: userId, reason: 'Accepted after pending_provider expiry' },
             idempotencyKey: `accept_expired_refund_shoot_${bookingId}`,
           });
+          await giveBackPromoCode({ type: 'shoot_booking', id: bookingId }, 'accepted after expiry, refunded');
         } catch (refundError: any) {
           console.error(`[Booking] Refund after expired accept FAILED shoot booking=${bookingId} pi=${capturedPaymentIntent.id}:`, refundError);
           return res.status(502).json({ error: "This request expired before you accepted it. The refund failed; please contact support.", code: "REFUND_FAILED" });
@@ -8130,7 +8469,7 @@ export async function registerRoutes(
         let discountCents = 0;
         if (promoCodeId) {
           const promoCode = await storage.getPromoCodeById(promoCodeId);
-          if (!promoCode || promoCode.status !== 'active' || promoCode.usedAt !== null || promoCode.userId !== userId
+          if (!promoCode || !['active', 'reserved'].includes(promoCode.status) || promoCode.usedAt !== null || promoCode.userId !== userId
               || new Date(promoCode.expiresAt).getTime() <= Date.now()) {
             return res.status(400).json({ success: false, error: { code: 'INVALID_PROMO', message: 'Invalid or already used promo code' } });
           }
@@ -8164,6 +8503,16 @@ export async function registerRoutes(
           shippingAddress: JSON.stringify(resolvedShippingAddress),
           items: items.map(toOrderItem),
         });
+        const orderRef: PromoRef = { type: 'order', id: order.id };
+
+        // Hold the code for this checkout (an older unpaid checkout using it is cancelled).
+        if (promoCodeId && discountCents > 0) {
+          const claim = await claimPromoForCheckout(promoCodeId, userId, orderRef);
+          if (!claim.ok) {
+            await storage.updateOrder(order.id, { status: 'cancelled' }).catch(() => {});
+            return res.status(claim.status).json({ success: false, error: { code: claim.code, message: claim.error } });
+          }
+        }
 
         // Ensure Stripe Customer exists for card vaulting
         const cartUser = await storage.getUser(userId);
@@ -8209,6 +8558,10 @@ export async function registerRoutes(
         // Record the Stripe PaymentIntent ID against the order row
         await storage.updateOrder(order.id, { stripePaymentIntentId: paymentIntent.id });
 
+        if (promoCodeId && discountCents > 0 && !(await confirmPromoStillHeld(promoCodeId, orderRef, paymentIntent.id))) {
+          return res.status(409).json({ success: false, error: { code: PROMO_TAKEN_RESPONSE.code, message: PROMO_TAKEN_RESPONSE.error } });
+        }
+
         console.log(`[Cart] Created PaymentIntent ${paymentIntent.id} for product purchase, order ${order.id} (charged: ${totalChargedToConsumerCents}¢, vendor: ${feeBreakdown.vendorNetCents}¢, platform: ${feeBreakdown.platformFeeCents}¢)`);
 
         res.json({
@@ -8223,6 +8576,8 @@ export async function registerRoutes(
             platformFeeCents: feeBreakdown.platformFeeCents,
             totalChargedToConsumerCents,
             outsydePointsEarned,
+            discountCents,
+            amountChargedCents: chargedToConsumer,
           },
         });
 
@@ -8446,6 +8801,9 @@ export async function registerRoutes(
       } catch (pointsError) {
         console.error("Failed to reverse points:", pointsError);
       }
+
+      // No amount = the provider refunded it in full.
+      if (!amount) await giveBackPromoCode({ type: 'appointment', id: appointmentId }, 'provider full refund');
 
       console.log(`[Booking] Refunded appointment ${appointmentId}: ${refundAmount} cents (refund ID: ${refund.id})`);
 
@@ -8953,6 +9311,11 @@ export async function registerRoutes(
         }
       }
 
+      // Full refund, or the card was never charged: the points code comes back.
+      if (authorizationReleased || (refundTier === 'full' && refundAmountCents > 0)) {
+        await giveBackPromoCode({ type: 'appointment', id: appointmentId }, 'customer cancel, full refund');
+      }
+
       // Quad-code notifications (best-effort)
       try {
         const cancelBusiness = await storage.getBusiness(appointment.businessId);
@@ -9291,6 +9654,11 @@ export async function registerRoutes(
         }
       }
 
+      // Full refund, or the card was never charged: the points code comes back.
+      if (authorizationReleased || (refundTier === 'full' && refundSucceeded)) {
+        await giveBackPromoCode({ type: 'shoot_booking', id: bookingId }, 'customer cancel, full refund');
+      }
+
       // Quad-code notifications (best-effort)
       try {
         const cancelPhotographer = await storage.getPhotographer(booking.photographerId);
@@ -9470,6 +9838,9 @@ export async function registerRoutes(
       } catch (pointsError) {
         console.error("Failed to reverse points:", pointsError);
       }
+
+      // No amount = the provider refunded it in full.
+      if (!amount) await giveBackPromoCode({ type: 'shoot_booking', id: bookingId }, 'provider full refund');
 
       console.log(`[Booking] Refunded shoot booking ${bookingId}: ${refundAmount} cents (refund ID: ${refund.id})`);
 
@@ -16051,30 +16422,58 @@ export async function registerRoutes(
     }
 
     try {
-      const balance = await storage.getUserPointsBalance(userId);
-      const dollarValue = pointsValueCents(balance) / 100; // 500 points = $1
-      const activeCodes = await db.query.promoCodes.findMany({
-        where: and(
-          eq(promoCodes.userId, userId),
-          eq(promoCodes.status, 'active'),
-        ),
-        orderBy: [desc(promoCodes.createdAt)],
-      });
-      const now = Date.now();
-
-      res.json({ 
-        balance, 
-        dollarValue,
-        formattedBalance: balance.toLocaleString(),
-        formattedDollarValue: `$${dollarValue.toFixed(2)}`,
-        canRedeem: balance >= REDEMPTION_TIERS[0].points,
-        activeCodes: activeCodes
-          .filter(c => new Date(c.expiresAt).getTime() > now)
-          .map(c => ({ code: c.code, discountCents: c.discountCents, expiresAt: c.expiresAt })),
-      });
+      res.json(await pointsSummary(userId));
     } catch (error) {
       console.error("Get points balance error:", error);
       res.status(500).json({ error: "Failed to get points balance" });
+    }
+  });
+
+  // Codes the customer can use at checkout: unused and unexpired. A code held by an unpaid
+  // checkout ('reserved') is still theirs to use; checking out with it takes it over.
+  async function usableCodes(userId: string) {
+    const codes = await db.query.promoCodes.findMany({
+      where: and(eq(promoCodes.userId, userId), inArray(promoCodes.status, ['active', 'reserved'])),
+      orderBy: [desc(promoCodes.createdAt)],
+    });
+    const now = Date.now();
+    return codes.filter(c => new Date(c.expiresAt).getTime() > now);
+  }
+
+  async function pointsSummary(userId: string) {
+    const balance = await storage.getUserPointsBalance(userId);
+    const dollarValue = pointsValueCents(balance) / 100; // 500 points = $1
+    const codes = await usableCodes(userId);
+    return {
+      balance,
+      dollarValue,
+      formattedBalance: balance.toLocaleString(),
+      formattedDollarValue: `$${dollarValue.toFixed(2)}`,
+      canRedeem: balance >= REDEMPTION_TIERS[0].points,
+      activeCodes: codes.map(c => ({
+        id: c.id,
+        code: c.code,
+        discountCents: c.discountCents,
+        expiresAt: c.expiresAt,
+        minimumOrderCents: promoMinimumBaseCents(c.discountCents),
+      })),
+      tiers: REDEMPTION_TIERS.map(t => ({ points: t.points, discountCents: t.valueCents, minimumOrderCents: promoMinimumBaseCents(t.valueCents) })),
+    };
+  }
+
+  // Vendor sites' account page: balance, usable codes and recent history in one call.
+  app.get("/api/consumer/points", async (req, res) => {
+    const userId = getUserIdFromRequest(req) ?? req.session?.userId;
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+    try {
+      const summary = await pointsSummary(userId);
+      const transactions = await storage.getPointTransactions(userId, 50);
+      res.json({ ...summary, transactions });
+    } catch (error) {
+      console.error("Get consumer points error:", error);
+      res.status(500).json({ error: "Failed to get points" });
     }
   });
 
@@ -16161,6 +16560,8 @@ export async function registerRoutes(
 
       res.json({
         success: true,
+        codeId: result.codeId,
+        expiresAt: result.expiresAt,
         code,
         discountDollars: discountCents / 100,
         discountCents,
@@ -16194,8 +16595,30 @@ export async function registerRoutes(
         return res.status(400).json({ error: result.reason });
       }
 
-      // Optional: the order base (before the service fee). A code needs an order at least 10x its value.
+      // Optional: a booking's amount due now. Bookings take any code while at least $1 is still
+      // charged now (no 10x minimum).
       const minimumOrderCents = promoMinimumBaseCents(result.discountCents!);
+      const bookingDueNowCents = Number(req.body?.bookingDueNowCents);
+      if (Number.isFinite(bookingDueNowCents) && bookingDueNowCents > 0) {
+        const maxDiscountCents = bookingMaxDiscountCents(bookingDueNowCents);
+        if (result.discountCents! > maxDiscountCents) {
+          return res.status(400).json({
+            error: `This code is worth more than this booking. Pick a code of $${(maxDiscountCents / 100).toFixed(2)} or less.`,
+            code: 'PROMO_TOO_LARGE',
+            maxDiscountCents,
+          });
+        }
+        return res.json({
+          valid: true,
+          discountDollars: result.discountCents! / 100,
+          discountCents: result.discountCents,
+          codeId: result.codeId,
+          maxDiscountCents,
+          amountChargedNowCents: bookingDueNowCents - result.discountCents!,
+        });
+      }
+
+      // Optional: the order base (before the service fee). A product code needs an order at least 10x its value.
       const baseCents = Number(req.body?.baseCents);
       if (Number.isFinite(baseCents) && baseCents > 0 && baseCents < minimumOrderCents) {
         return res.status(400).json({
@@ -16223,16 +16646,13 @@ export async function registerRoutes(
     if (!userId) return res.status(401).json({ error: 'Unauthorized' });
 
     try {
-      const codes = await db.query.promoCodes.findMany({
-        where: and(
-          eq(promoCodes.userId, userId),
-          eq(promoCodes.status, 'active'),
-        ),
-        orderBy: [desc(promoCodes.createdAt)],
-      });
+      const codes = await usableCodes(userId);
 
       return res.json({
         codes: codes.map(c => ({
+          id: c.id,
+          discountCents: c.discountCents,
+          minimumOrderCents: promoMinimumBaseCents(c.discountCents),
           code: c.code,
           discountDollars: c.discountCents / 100,
           expiresAt: c.expiresAt,
@@ -18089,6 +18509,18 @@ export async function registerRoutes(
           console.log(`Reversed ${pointReversal.pointsReversed} points for user ${request.requesterId}`);
         }
 
+        // The points code comes back when the whole charge was refunded.
+        if (request.targetId && (request.targetType === 'order' || request.targetType === 'appointment' || request.targetType === 'shoot_booking')) {
+          const refundedPi = request.targetType === 'order'
+            ? (await storage.getOrder(request.targetId))?.stripePaymentIntentId
+            : request.targetType === 'appointment'
+              ? (await storage.getAppointment(request.targetId))?.stripePaymentIntentId
+              : (await storage.getShootBooking(request.targetId))?.stripePaymentIntentId;
+          if (refundedPi) {
+            await giveBackPromoCodeIfFullyRefunded({ type: request.targetType, id: request.targetId }, refundedPi, 'admin refund');
+          }
+        }
+
         // Revoke reviews associated with the refunded booking/order
         if (request.targetType && request.targetId) {
           const revokedCount = await storage.revokeReviewsForRefund(
@@ -19453,6 +19885,9 @@ export async function registerRoutes(
               created_at: order.createdAt instanceof Date ? order.createdAt.toISOString() : (order.createdAt ?? null),
               tracking_number: shipment?.trackingNumber ?? null,
               carrier: shipment?.carrier ?? null,
+              // Outsyde rewards the customer used. Paid by Outsyde; the business payout is unchanged.
+              discount_amount_cents: order.discountAmountCents ?? 0,
+              points_redeemed: order.pointsRedeemed ?? 0,
             };
           }
           // Default: camelCase shape for mobile (unchanged from before Task 4)
@@ -19544,6 +19979,8 @@ export async function registerRoutes(
         storage.reversePointsForRefund(existingOrder.customerId, 'cart_order', orderId, {
           description: 'Points reversed from refund',
         }).catch(err => console.error('[Points] Clawback failed for order cancellation:', err));
+        // The whole order was cancelled: the points code comes back.
+        await giveBackPromoCode({ type: 'order', id: orderId }, 'business cancelled order');
       }
 
       // Post-refund: audit log + notification (fire-and-forget — order is already cancelled)
@@ -19859,6 +20296,10 @@ export async function registerRoutes(
         Number(apptRevenue.rows[0]?.revenue || 0) + Number(apptRevenue.rows[0]?.fees || 0) +
         Number(shootRevenue.rows[0]?.revenue || 0) + Number(shootRevenue.rows[0]?.fees || 0);
 
+      // Outsyde loyalty rewards customers have spent (codes used on paid purchases; codes given
+      // back after a full refund are not counted). Outsyde pays these; business payouts are unchanged.
+      const rewards = await rewardsRedeemedTotals();
+
       res.json({
         stats: {
           totalUsers: users.length,
@@ -19869,6 +20310,8 @@ export async function registerRoutes(
           pendingRefunds: refundRequests.length,
           totalRevenue: (totalRevenue + totalBookingRevenue) / 100,
           regularCustomers: users.filter(u => !u.isVendor && !u.isPhotographer).length,
+          rewardsRedeemedCents: rewards.cents,
+          rewardsRedeemedCount: rewards.count,
         }
       });
     } catch (error) {
@@ -20837,6 +21280,8 @@ export async function registerRoutes(
           clientPhone: client?.phone,
           ...chargeFields,
           inPersonDueCents: chargeFields.dueAtAppointmentCents,
+          // What the customer's card paid after Outsyde rewards (discountAmountCents, paid by Outsyde).
+          customerPaidNowCents: chargeFields.chargedAmountCents - (appt.discountAmountCents ?? 0),
         };
       }));
 
@@ -23559,6 +24004,7 @@ export async function registerRoutes(
                 refundedAt: new Date(),
                 refundAmount: appt.totalPrice,
               }).where(eq(appointments.id, appt.id));
+              await giveBackPromoCode({ type: 'appointment', id: appt.id }, 'business cancelled the day');
 
               refundedCount++;
             } catch (refundErr: any) {
