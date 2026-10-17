@@ -704,6 +704,13 @@ export function startBookingCleanupJob(intervalMs: number = 60000): NodeJS.Timeo
     } catch (error) {
       console.error("[BookingCleanup] Error during cleanup:", error);
     }
+    // Abandoned checkouts (Part B): own try/catch so it can never starve the steps above.
+    try {
+      const { cleanupAbandonedPendingPayment } = await import("./abandonedCheckouts");
+      await cleanupAbandonedPendingPayment();
+    } catch (error) {
+      console.error("[BookingCleanup] Error during abandoned-checkout cleanup:", error);
+    }
   };
 
   cleanup();
