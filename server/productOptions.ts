@@ -257,3 +257,53 @@ export function withEffectivePrice<T extends { priceCents: number | null }>(
 ): T & { priceCents: number; hasOwnPrice: boolean } {
   return { ...v, priceCents: v.priceCents ?? productPriceCents, hasOwnPrice: v.priceCents !== null };
 }
+
+/**
+ * Short summary of a product's variations for product lists (storefront cards):
+ * how many can be picked, the price range, and how many values each option has
+ * ("From $125 · 11 lengths", "3 colors · 4 sizes"). null when the product has
+ * no active variations, so cards keep showing the product price.
+ *
+ * Same choice of variations as the app's product page: when the product has
+ * options and option-based variations, only those count; otherwise every
+ * active variation (older label-only ones) counts.
+ */
+export interface VariantSummary {
+  count: number;
+  minPriceCents: number;
+  maxPriceCents: number;
+  /** In option order; values counted only when an active variation uses them. Empty for label-only variations. */
+  options: Array<{ name: string; valueCount: number }>;
+}
+
+export function summarizeVariants(
+  productPriceCents: number,
+  activeVariants: Array<{
+    priceCents: number | null;
+    option1?: string | null;
+    option2?: string | null;
+    option3?: string | null;
+  }>,
+  options: Array<{ position: number; name: string }>,
+): VariantSummary | null {
+  const sorted = [...options].sort((a, b) => a.position - b.position);
+  const optionBased = activeVariants.filter((v) => !!v.option1);
+  const useOptions = sorted.length > 0 && optionBased.length > 0;
+  const counted = useOptions ? optionBased : activeVariants;
+  if (counted.length === 0) return null;
+  const prices = counted.map((v) => v.priceCents ?? productPriceCents);
+  const valueAt = (v: (typeof counted)[number], i: number) => (i === 0 ? v.option1 : i === 1 ? v.option2 : v.option3);
+  return {
+    count: counted.length,
+    minPriceCents: Math.min(...prices),
+    maxPriceCents: Math.max(...prices),
+    options: useOptions
+      ? sorted.slice(0, MAX_OPTIONS).map((o, i) => ({
+          name: o.name,
+          valueCount: new Set(
+            counted.map((v) => valueAt(v, i)).filter((x): x is string => !!x).map((x) => x.toLowerCase()),
+          ).size,
+        }))
+      : [],
+  };
+}

@@ -8,6 +8,7 @@ import {
   validateOptionsPayload,
   planVariantSync,
   withEffectivePrice,
+  summarizeVariants,
   type ExistingVariant,
   type OptionInput,
   type VariantInput,
@@ -149,6 +150,42 @@ test("sync: clearing all options switches every variation off", () => {
 test("public price is always a number: blank uses the product price", () => {
   assert.deepEqual(withEffectivePrice({ priceCents: null, label: "Black / M" }, 3500), { priceCents: 3500, label: "Black / M", hasOwnPrice: false });
   assert.deepEqual(withEffectivePrice({ priceCents: 4000, label: "Black / XL" }, 3500), { priceCents: 4000, label: "Black / XL", hasOwnPrice: true });
+});
+
+test("summary: Dia Lux lengths give a From price and 11 lengths", () => {
+  const lengths = [12, 14, 16, 18, 20, 22, 24, 26, 28, 30, 32];
+  const vs = lengths.map((n, i) => ({ priceCents: i === 0 ? null : 12500 + i * 1000, option1: `${n}"` }));
+  assert.deepEqual(summarizeVariants(12500, vs, [{ position: 1, name: "Length" }]), {
+    count: 11, minPriceCents: 12500, maxPriceCents: 22500, options: [{ name: "Length", valueCount: 11 }],
+  });
+});
+
+test("summary: color x size counts values actually used, in option order", () => {
+  const vs = [
+    { priceCents: null, option1: "Black", option2: "M" },
+    { priceCents: null, option1: "black", option2: "L" },
+    { priceCents: 3800, option1: "Cream", option2: "XL" },
+  ];
+  assert.deepEqual(summarizeVariants(3500, vs, [{ position: 2, name: "Size" }, { position: 1, name: "Color" }]), {
+    count: 3, minPriceCents: 3500, maxPriceCents: 3800,
+    options: [{ name: "Color", valueCount: 2 }, { name: "Size", valueCount: 3 }],
+  });
+});
+
+test("summary: older label-only variations count, no option names", () => {
+  assert.deepEqual(summarizeVariants(2000, [{ priceCents: 2500 }, { priceCents: null }], []), {
+    count: 2, minPriceCents: 2000, maxPriceCents: 2500, options: [],
+  });
+});
+
+test("summary: options with leftover label-only rows count only option-based ones (same as product page)", () => {
+  const s = summarizeVariants(1000, [{ priceCents: 9999 }, { priceCents: null, option1: "S" }], [{ position: 1, name: "Size" }]);
+  assert.equal(s?.count, 1);
+  assert.equal(s?.maxPriceCents, 1000);
+});
+
+test("summary: no active variations gives null (card keeps the product price)", () => {
+  assert.equal(summarizeVariants(1000, [], [{ position: 1, name: "Size" }]), null);
 });
 
 console.log(`\n${passed} passed`);
