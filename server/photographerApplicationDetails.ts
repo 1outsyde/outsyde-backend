@@ -99,6 +99,10 @@ export function buildPhotographerApplicationSections(p: Photographer, owner: Own
       title: "Status",
       rows: [
         { label: "Joined", value: formatDate(p.createdAt) },
+        { label: "Account", value: !owner ? NOT_PROVIDED : owner.isActive === false ? "Banned" : "Active" },
+        ...(owner?.deletionStatus === "pending_deletion"
+          ? [{ label: "Deletion scheduled", value: formatDate(owner.scheduledDeletionAt ?? null) }]
+          : []),
         { label: "Visibility", value: text(p.visibilityStatus) },
         { label: "Payouts connected", value: p.stripeOnboardingComplete ? "Yes" : "No" },
         { label: "Admin notes", value: text(p.adminNotes) },

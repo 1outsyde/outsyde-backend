@@ -1004,7 +1004,8 @@ export async function registerRoutes(
       version: PHOTOGRAPHER_TAXONOMY_VERSION,
       maxSpecialties: MAX_PHOTOGRAPHER_SPECIALTIES,
       otherMax: SPECIALTY_OTHER_MAX,
-      specialties: PHOTOGRAPHER_SPECIALTIES.filter((s) => !s.retired).map((s) => ({ code: s.code, label: s.label })),
+      // aliases (2026-10-18): older names, so the app can show a profile saved before the list as picks.
+      specialties: PHOTOGRAPHER_SPECIALTIES.filter((s) => !s.retired).map((s) => ({ code: s.code, label: s.label, aliases: s.aliases ?? [] })),
       options: PHOTOGRAPHER_OPTIONS,
     });
   });
@@ -1282,7 +1283,7 @@ export async function registerRoutes(
           bio: data.bio,
           city: data.city,
           state: data.state,
-          hourlyRate: data.hourlyRate,
+          hourlyRate: data.hourlyRate ?? 0,
           portfolioUrl: data.portfolioUrl,
           specialties: specialtyResult.names,
           specialtyCodes: specialtyResult.codes,
@@ -18291,6 +18292,10 @@ export async function registerRoutes(
       ownerPhone: owner?.phone ?? null,
       ownerUsername: owner?.username ?? null,
       ownerCreatedAt: owner?.createdAt ?? null,
+      // Account state for the admin screens (2026-10-18): Ban sets isActive false, Delete schedules deletion.
+      ownerIsActive: owner ? owner.isActive !== false : null,
+      ownerDeletionStatus: owner?.deletionStatus ?? null,
+      ownerScheduledDeletionAt: owner?.scheduledDeletionAt ?? null,
       // Older app builds read these names.
       email: owner?.email ?? null,
       phone: owner?.phone ?? null,
@@ -18374,6 +18379,146 @@ export async function registerRoutes(
     } catch (error) {
       console.error("Admin update photographer visibility error:", error);
       res.status(500).json({ error: "Failed to update photographer visibility" });
+    }
+  });
+
+  // ==================== ADMIN PHOTOGRAPHER BAN / DELETE (2026-10-18, Legend) ====================
+  // Ban: the owner's account is disabled (every sign-in and token refresh refuses it), every saved
+  // sign-in is removed, and the profile is hidden. Unban turns the account back on; the profile stays
+  // hidden until an admin restores it. Delete: the same 30-day scheduled deletion as the Users page
+  // (POST /api/admin/users/:userId/schedule-deletion), plus the profile is hidden right away.
+  // Every action is written to the audit log. Admin accounts are never banned or deleted here.
+  type LoadedPhotographer =
+    | { error: { status: number; body: { error: string } } }
+    | { photographer: Photographer; owner: User };
+  const loadPhotographerAndOwner = async (id: string): Promise<LoadedPhotographer> => {
+    const photographer = await storage.getPhotographer(id);
+    if (!photographer) return { error: { status: 404, body: { error: "Photographer not found" } } };
+    const owner = await storage.getUser(photographer.userId);
+    if (!owner) return { error: { status: 404, body: { error: "Photographer's account not found" } } };
+    return { photographer, owner };
+  };
+
+  const photographerAdminAudit = async (req: any, action: string, photographerId: string, beforeState: unknown, afterState: unknown) => {
+    try {
+      await storage.createAuditLog({
+        actorId: req.adminUser?.id,
+        actorType: "admin",
+        action,
+        targetType: "photographer",
+        targetId: photographerId,
+        beforeState: beforeState as any,
+        afterState: afterState as any,
+      });
+    } catch (e) {
+      console.warn(`[Admin] Audit log failed for ${action} on photographer ${photographerId}:`, e);
+    }
+  };
+
+  app.post("/api/admin/photographers/:id/ban", requireAdmin, async (req, res) => {
+    try {
+      const found = await loadPhotographerAndOwner(req.params.id);
+      if ("error" in found) return res.status(found.error.status).json(found.error.body);
+      const { photographer, owner } = found;
+      if (owner.isAdmin) return res.status(403).json({ error: "Admin accounts can't be banned" });
+      if (owner.deletionStatus === "deleted") return res.status(409).json({ error: "This account was already deleted" });
+
+      await storage.updateUser(owner.id, { isActive: false });
+      await db.delete(refreshTokens).where(eq(refreshTokens.userId, owner.id));
+      const updated = await storage.updatePhotographer(photographer.id, { visibilityStatus: "hidden" });
+      await photographerAdminAudit(req, "ban_photographer", photographer.id,
+        { isActive: owner.isActive, visibilityStatus: photographer.visibilityStatus },
+        { isActive: false, visibilityStatus: "hidden" });
+
+      console.log(`[Admin] Banned photographer ${photographer.id} (user ${owner.id}) by ${(req as any).adminUser?.email}`);
+      res.json({ success: true, photographer: adminPhotographerRow(updated ?? photographer, { ...owner, isActive: false }) });
+    } catch (error) {
+      console.error("Admin ban photographer error:", error);
+      res.status(500).json({ error: "Failed to ban photographer" });
+    }
+  });
+
+  app.post("/api/admin/photographers/:id/unban", requireAdmin, async (req, res) => {
+    try {
+      const found = await loadPhotographerAndOwner(req.params.id);
+      if ("error" in found) return res.status(found.error.status).json(found.error.body);
+      const { photographer, owner } = found;
+      if (owner.deletionStatus === "deleted") return res.status(409).json({ error: "This account was deleted and can't be re-enabled" });
+
+      await storage.updateUser(owner.id, { isActive: true });
+      await photographerAdminAudit(req, "unban_photographer", photographer.id, { isActive: owner.isActive }, { isActive: true });
+      res.json({ success: true, photographer: adminPhotographerRow(photographer, { ...owner, isActive: true }) });
+    } catch (error) {
+      console.error("Admin unban photographer error:", error);
+      res.status(500).json({ error: "Failed to unban photographer" });
+    }
+  });
+
+  app.post("/api/admin/photographers/:id/schedule-deletion", requireAdmin, async (req, res) => {
+    try {
+      const found = await loadPhotographerAndOwner(req.params.id);
+      if ("error" in found) return res.status(found.error.status).json(found.error.body);
+      const { photographer, owner } = found;
+      if (owner.isAdmin) return res.status(403).json({ error: "Admin accounts can't be deleted here" });
+      if (owner.deletionStatus === "deleted") return res.status(409).json({ error: "Account already deleted" });
+      if (owner.deletionStatus === "pending_deletion") {
+        return res.json({ success: true, alreadyPending: true, scheduledDeletionAt: owner.scheduledDeletionAt, photographer: adminPhotographerRow(photographer, owner) });
+      }
+
+      const stripeCheck = await checkVendorStripeBalances(owner.id);
+      if (stripeCheck.blocked) return res.status(409).json({ error: stripeCheck.reason, blocked: true });
+      const orderCheck = await checkActiveOrders(owner.id);
+      if (orderCheck.blocked) return res.status(409).json({ error: orderCheck.reason, blocked: true });
+
+      const now = new Date();
+      const scheduledDeletionAt = new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000);
+      await db.update(users).set({
+        deletionStatus: "pending_deletion",
+        deletionRequestedAt: now,
+        scheduledDeletionAt,
+      } as any).where(eq(users.id, owner.id));
+      await db.delete(refreshTokens).where(eq(refreshTokens.userId, owner.id));
+      const updated = await storage.updatePhotographer(photographer.id, { visibilityStatus: "hidden" });
+
+      if (owner.email) {
+        sendDeletionConfirmationEmail({ toEmail: owner.email, scheduledDeletionAt }).catch(err =>
+          console.warn("[accountDeletion] Admin-scheduled photographer confirmation email failed:", err)
+        );
+      }
+      await photographerAdminAudit(req, "schedule_photographer_deletion", photographer.id,
+        { deletionStatus: owner.deletionStatus, visibilityStatus: photographer.visibilityStatus },
+        { deletionStatus: "pending_deletion", scheduledDeletionAt, visibilityStatus: "hidden" });
+
+      console.log(`[accountDeletion] Admin scheduled deletion for photographer ${photographer.id} (user ${owner.id}) on ${scheduledDeletionAt.toISOString()}`);
+      res.json({
+        success: true,
+        scheduledDeletionAt,
+        photographer: adminPhotographerRow(updated ?? photographer, { ...owner, deletionStatus: "pending_deletion", scheduledDeletionAt } as any),
+      });
+    } catch (error) {
+      console.error("Admin schedule photographer deletion error:", error);
+      res.status(500).json({ error: "Failed to schedule deletion" });
+    }
+  });
+
+  app.post("/api/admin/photographers/:id/cancel-deletion", requireAdmin, async (req, res) => {
+    try {
+      const found = await loadPhotographerAndOwner(req.params.id);
+      if ("error" in found) return res.status(found.error.status).json(found.error.body);
+      const { photographer, owner } = found;
+      if (owner.deletionStatus !== "pending_deletion") return res.status(400).json({ error: "No pending deletion to cancel" });
+
+      await db.update(users).set({
+        deletionStatus: "active",
+        deletionRequestedAt: null,
+        scheduledDeletionAt: null,
+      } as any).where(eq(users.id, owner.id));
+      await photographerAdminAudit(req, "cancel_photographer_deletion", photographer.id,
+        { deletionStatus: owner.deletionStatus, scheduledDeletionAt: owner.scheduledDeletionAt }, { deletionStatus: "active" });
+      res.json({ success: true, photographer: adminPhotographerRow(photographer, { ...owner, deletionStatus: "active", scheduledDeletionAt: null } as any) });
+    } catch (error) {
+      console.error("Admin cancel photographer deletion error:", error);
+      res.status(500).json({ error: "Failed to cancel deletion" });
     }
   });
 

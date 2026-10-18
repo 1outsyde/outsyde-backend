@@ -472,5 +472,27 @@ export async function checkActiveOrders(userId: string): Promise<{ blocked: bool
     };
   }
 
+  // As the PHOTOGRAPHER (2026-10-18): never delete someone a customer is still booked with.
+  const ownPhotographers = await db
+    .select({ id: photographers.id })
+    .from(photographers)
+    .where(eq(photographers.userId, userId));
+  if (ownPhotographers.length) {
+    const [hostedShoot] = await db
+      .select({ id: shootBookings.id })
+      .from(shootBookings)
+      .where(and(
+        inArray(shootBookings.photographerId, ownPhotographers.map((p) => p.id)),
+        inArray(shootBookings.status, ACTIVE_BOOKING_STATUSES),
+      ))
+      .limit(1);
+    if (hostedShoot) {
+      return {
+        blocked: true,
+        reason: "There are shoots booked with this photographer that must be completed or cancelled before the account can be deleted.",
+      };
+    }
+  }
+
   return { blocked: false };
 }
