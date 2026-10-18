@@ -17,7 +17,7 @@
  *
  * Skips (exit 0) when PR_TEST_BASE_URL is unset; refuses any non-local host.
  *
- * Rules checked (decided 2026-10-17):
+ * Rules checked (decided 2026-10-17; booking 10x rule 2026-10-18):
  *   - bookings: what is paid online now (before the fee) must be at least 10x the code
  *   - the business payout never changes; points are earned on the full amount
  *   - one checkout holds a code at a time; an unpaid older checkout is cancelled and loses it;
@@ -428,6 +428,42 @@ async function call(method: string, path: string, o: { token?: string; body?: un
     const shootTr = transfers.find(x => x.metadata?.bookingId === shootId);
     assert(shootTr?.amount === 4900, 'photographer transfer $49.00 unchanged by the code', shootTr);
     await q(`UPDATE promo_codes SET status='active', used_on_reference_type=NULL, used_on_order_id=NULL WHERE id=$1`, [code5]);
+    // Photographer refusal: a $30 deposit shoot takes no $5 code.
+    const pSvc2 = crypto.randomUUID();
+    await q(`INSERT INTO photographer_services (id, photographer_id, name, price_cents, deposit_amount_cents, is_active, status) VALUES ($1, $2, 'Mini', 30000, 3000, true, 'live')`, [pSvc2, photogId]);
+    const ph2 = await mkHold(pSvc2, 30000, 'photographer', photogId);
+    r = await call('POST', `/api/booking/${ph2}/create-payment-intent`, { token, body: { promoCodeId: code5 } });
+    assert(r.status === 400 && r.body?.code === 'PROMO_TOO_LARGE' && r.body?.minimumOrderCents === 5000, 'shoot with a $30 deposit: $5 code refused', r.body);
+    assert((await q(`SELECT count(*)::int n FROM shoot_bookings WHERE photographer_id=$1 AND service_id=$2`, [photogId, pSvc2]))[0].n === 0, 'refused before any shoot booking was written');
+    await q(`DELETE FROM photographer_services WHERE id=$1`, [pSvc2]).catch(() => {});
+
+    // ── 11. Staff booking ─────────────────────────────────────────────────
+    console.log('\n── 11. staff booking ──');
+    const staffId = crypto.randomUUID();
+    await q(`INSERT INTO staff_members (id, business_id, display_name, stripe_account_id, stripe_onboarding_complete) VALUES ($1, $2, 'PR Staff', 'acct_prstaff', true)`, [staffId, bizId]);
+    const mkStaffHold = async (priceCents: number) => {
+      const staffSvc = crypto.randomUUID();
+      await q(`INSERT INTO staff_services (id, staff_member_id, business_id, name, price_cents, duration_minutes) VALUES ($1, $2, $3, 'Staff Svc', $4, 60)`, [staffSvc, staffId, bizId, priceCents]);
+      const h = await mkHold(staffSvc, priceCents);
+      await q(`UPDATE booking_holds SET staff_member_id=$2 WHERE id=$1`, [h, staffId]);
+      return h;
+    };
+    const sh1 = await mkStaffHold(4000);
+    r = await call('POST', `/api/booking/${sh1}/create-payment-intent`, { token, body: { promoCodeId: code5 } });
+    assert(r.status === 400 && r.body?.code === 'PROMO_TOO_LARGE', '$40 staff booking: $5 code refused (needs $50 online)', r.body);
+    const sh2 = await mkStaffHold(6000);
+    r = await call('POST', `/api/booking/${sh2}/create-payment-intent`, { token, body: { promoCodeId: code5 } });
+    const staffAppt = r.body?.appointmentId as string;
+    assert(r.status === 200 && pis[r.body?.paymentIntentId]?.amount === 5980 && r.body?.amountChargedNowCents === 5980, '$60 staff booking with $5 code: $64.80 - $5 = $59.80', { s: r.status, b: r.body });
+    const [staffRow] = await q(`SELECT staff_member_id, discount_amount_cents, vendor_net FROM appointments WHERE id=$1`, [staffAppt]);
+    assert(staffRow?.staff_member_id === staffId && staffRow?.discount_amount_cents === 500 && staffRow?.vendor_net === 5880, 'staff appointment: discount 500, payout 5880 unchanged (6000 x 98%)', staffRow);
+    r = await call('POST', `/api/booking/${sh2}/create-payment-intent`, { token, body: { promoCodeId: null } });
+    assert(r.status === 200 && (await code(code5)).status === 'active', 'staff booking: code removed and given back', r.status);
+    await q(`DELETE FROM booking_audit_log WHERE booking_id=$1`, [staffAppt]).catch(() => {});
+    await q(`DELETE FROM appointments WHERE staff_member_id=$1`, [staffId]).catch(() => {});
+    await q(`DELETE FROM staff_services WHERE staff_member_id=$1`, [staffId]).catch(() => {});
+    await q(`DELETE FROM staff_members WHERE id=$1`, [staffId]).catch(() => {});
+
     await q(`DELETE FROM photographer_availability WHERE photographer_id=$1`, [photogId]).catch(() => {});
     await q(`DELETE FROM booking_audit_log WHERE booking_id=$1`, [shootId]).catch(() => {});
     await q(`DELETE FROM shoot_bookings WHERE photographer_id=$1`, [photogId]);

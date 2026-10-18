@@ -6131,8 +6131,8 @@ export async function registerRoutes(
         // one place to update when rates change.
         const photographerFees = calculateBookingFees(shootQuote.chargeAmountCents);
 
-        // Optional points code, checked before anything is written (any code while the customer
-        // still pays at least $1 now).
+        // Optional points code, checked before anything is written (10x rule on what is paid
+        // online now, before the service fee).
         const wantedShootPromoId = requestedPromoCodeId(req);
         let shootPromo: BookingPromo = null;
         if (wantedShootPromoId) {
@@ -6472,8 +6472,8 @@ export async function registerRoutes(
         : totalServicePriceCents;
       const feeBreakdown = calculateBookingFees(chargeAmountCents);
 
-      // Optional points code, checked before anything is written. Bookings: any code while the
-      // customer still pays at least $1 now. The business payout does not change.
+      // Optional points code, checked before anything is written. Bookings: what is paid online
+      // now, before the service fee, must be at least 10x the code. The business payout does not change.
       const newApptDueNowCents = quoteDeposit(totalServicePriceCents, serviceDepositAmountCents).dueNowCents;
       const wantedApptPromoId = requestedPromoCodeId(req);
       let apptPromo: BookingPromo = null;
