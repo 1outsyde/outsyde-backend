@@ -2977,6 +2977,14 @@ export const influencerApplications = pgTable("influencer_applications", {
   followerCount: integer("follower_count"),
   contentNiche: text("content_niche"),
   whyInfluencer: text("why_influencer"),
+  // 2026-10-18 (migration 057): every application answer. Followers per platform; what they
+  // post about as shared business industry codes (shared/businessTaxonomy.ts) + their own words.
+  instagramFollowers: integer("instagram_followers"),
+  tiktokFollowers: integer("tiktok_followers"),
+  youtubeFollowers: integer("youtube_followers"),
+  twitterFollowers: integer("twitter_followers"),
+  contentCategories: jsonb("content_categories").$type<string[]>().default([]).notNull(),
+  contentOther: text("content_other"),
   
   status: text("status").default("pending").notNull(),
   adminNotes: text("admin_notes"),

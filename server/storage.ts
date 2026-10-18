@@ -6953,6 +6953,7 @@ export class DatabaseStorage implements IStorage {
     const result = await db.insert(influencerApplications).values({
       id,
       ...data,
+      contentCategories: (data.contentCategories as string[] | undefined) ?? [],
     }).returning();
     return result[0];
   }
