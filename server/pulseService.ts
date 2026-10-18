@@ -12,6 +12,7 @@ import {
   type FeedPost
 } from "@shared/schema";
 import { eq, and, desc, sql, gte, lte, isNull, or, ne, inArray } from "drizzle-orm";
+import { publicDisplayName } from "./personName";
 
 // =====================================================
 // PULSE FEED CONFIGURATION (TikTok 2020-style)
@@ -607,7 +608,7 @@ export async function getPulseFeed(options: PulseFeedOptions): Promise<PulseFeed
       author: {
         userId: author.id,
         username: author.username || null,
-        displayName: author.name || author.firstName || 'Anonymous',
+        displayName: publicDisplayName(author) || 'Anonymous',
         profilePhotoUrl: author.profileImageUrl || null,
         role,
       },

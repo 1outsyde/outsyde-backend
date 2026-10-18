@@ -194,6 +194,7 @@ import {
 import { randomUUID, createHash } from "crypto";
 import { quoteDeposit } from "./fees";
 import { isExpiredUnbilledActiveRow } from "./complimentary";
+import { realName, publicDisplayName } from "./personName";
 
 const pendingRecomputes = new Map<string, NodeJS.Timeout>();
 
@@ -1019,6 +1020,10 @@ export class DatabaseStorage implements IStorage {
       email: insertUser.email,
       password: insertUser.password,
       name: insertUser.name,
+      // Real name (shown only in transactions). Was silently dropped before 2026-10-18.
+      firstName: insertUser.firstName || null,
+      lastName: insertUser.lastName || null,
+      appleId: insertUser.appleId || null,
       phone: insertUser.phone || null,
       isVendor: insertUser.isVendor ?? false,
       isPhotographer: insertUser.isPhotographer ?? false,
@@ -1064,9 +1069,8 @@ export class DatabaseStorage implements IStorage {
         firstName: userData.firstName,
         lastName: userData.lastName,
         profileImageUrl: userData.profileImageUrl,
-        name: userData.firstName && userData.lastName 
-          ? `${userData.firstName} ${userData.lastName}` 
-          : userData.firstName || userData.email?.split('@')[0] || 'User',
+        // Display name = first name (personName.ts); first/last stay in their own columns.
+        name: userData.firstName || userData.email?.split('@')[0] || 'User',
         username: userData.id.slice(0, 20), // temporary username from ID for upsert
         isOAuthUser: true,
       })
@@ -1967,7 +1971,7 @@ export class DatabaseStorage implements IStorage {
       .orderBy(desc(appointments.createdAt));
 
     return rows.map((row) => {
-      const fullName = row.name || `${row.firstName ?? ""} ${row.lastName ?? ""}`.trim();
+      const fullName = realName(row) || "";
       const chargeFields = appointmentChargeFields(row.totalPrice ?? 0, row.depositAmountCents);
       return {
         id: row.id,
@@ -2849,7 +2853,7 @@ export class DatabaseStorage implements IStorage {
     return rows.map(({ orders: order, users: user }) => ({
       ...order,
       customerName: user
-        ? (user.name || [user.firstName, user.lastName].filter(Boolean).join(" ").trim() || user.email || "Customer")
+        ? (realName(user) || user.email || "Customer")
         : "Unknown",
     }));
   }
@@ -3423,8 +3427,8 @@ export class DatabaseStorage implements IStorage {
           or(
             ilike(users.username, `%${query}%`),
             ilike(users.name, `%${query}%`),
-            ilike(users.firstName, `%${query}%`),
-            ilike(users.lastName, `%${query}%`)
+            // Real names are searchable by admins only (personName.ts rule).
+            ...(isAdmin ? [ilike(users.firstName, `%${query}%`), ilike(users.lastName, `%${query}%`)] : []),
           )
         );
       }
@@ -3453,7 +3457,7 @@ export class DatabaseStorage implements IStorage {
         parentType: null,
         parentId: null,
         userId: user.id,
-        name: user.name || `${user.firstName || ''} ${user.lastName || ''}`.trim() || user.username || 'User',
+        name: publicDisplayName(user) || (isAdmin ? realName(user) : null) || 'User',
         description: user.username ? `@${user.username}` : null,
         category: null,
         tags: null,
@@ -5203,8 +5207,6 @@ export class DatabaseStorage implements IStorage {
         businessCity: businesses.city,
         businessState: businesses.state,
         role: staffInvites.role,
-        inviterFirstName: users.firstName,
-        inviterLastName: users.lastName,
         inviterName: users.name,
         expiresAt: staffInvites.expiresAt,
         status: staffInvites.status,
@@ -5217,10 +5219,8 @@ export class DatabaseStorage implements IStorage {
     if (!result[0]) return null;
 
     const row = result[0];
-    const invitedByName =
-      row.inviterFirstName && row.inviterLastName
-        ? `${row.inviterFirstName} ${row.inviterLastName}`
-        : row.inviterName || null;
+    // Shown on the public accept-invite page: the inviter's display name, never their real name.
+    const invitedByName = (row.inviterName || "").trim() || null;
 
     // A pending invite past its expiresAt is effectively dead even though
     // nothing has written status="expired" to the row yet (that happens
@@ -5389,7 +5389,8 @@ export class DatabaseStorage implements IStorage {
       resolvedBy: refundRequests.resolvedBy,
       createdAt: refundRequests.createdAt,
       updatedAt: refundRequests.updatedAt,
-      requesterName: users.name,
+      // Admin screen: real name (personName.ts), else the display name.
+      requesterName: sql<string | null>`coalesce(nullif(trim(concat_ws(' ', ${users.firstName}, ${users.lastName})), ''), ${users.name})`,
       requesterEmail: users.email,
     })
       .from(refundRequests)
@@ -6127,8 +6128,8 @@ export class DatabaseStorage implements IStorage {
             or(
               ilike(users.username, likePattern),
               ilike(users.name, likePattern),
-              ilike(users.firstName, likePattern),
-              ilike(users.lastName, likePattern)
+              // Real names are searchable by admins only (personName.ts rule).
+              ...(isAdmin ? [ilike(users.firstName, likePattern), ilike(users.lastName, likePattern)] : []),
             ),
             city ? ilike(users.city, `%${city}%`) : undefined
           )
@@ -6139,8 +6140,8 @@ export class DatabaseStorage implements IStorage {
       for (const u of consumerRows) {
         if (!isAdmin && u.isAdmin) continue;
         const displayName =
-          u.name ||
-          (u.firstName && u.lastName ? `${u.firstName} ${u.lastName}` : null) ||
+          (u.name || '').trim() ||
+          (isAdmin ? realName(u) : null) ||
           u.username ||
           'Unknown';
 

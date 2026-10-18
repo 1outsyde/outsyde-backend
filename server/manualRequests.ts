@@ -23,6 +23,7 @@ import { db } from "./db";
 import { appointments, shootBookings, BOOKING_STATES } from "@shared/schema";
 import { and, eq, isNull, isNotNull, gt, lt } from "drizzle-orm";
 import type { StateTransitionResult } from "./bookingStateMachine";
+import { realName } from "./personName";
 
 export const DEFAULT_TIME_ZONE = "America/New_York";
 export const REQUEST_WINDOW_MS = 48 * 60 * 60 * 1000;
@@ -143,7 +144,7 @@ export interface ManualRequestDeps {
   transitionShoot: (id: string, toState: string, metadata: Record<string, any>, source: "webhook" | "cron") => Promise<StateTransitionResult>;
   releasePhotographerSlot: (shootBookingId: string) => Promise<unknown>;
   partiesFor: (kind: Kind, providerId: string) => Promise<Parties | null>;
-  getUser: (id: string) => Promise<{ id: string; name?: string | null; email?: string | null; username?: string | null } | undefined>;
+  getUser: (id: string) => Promise<{ id: string; name?: string | null; firstName?: string | null; lastName?: string | null; email?: string | null; username?: string | null } | undefined>;
   notify: Notifier;
 }
 
@@ -201,7 +202,7 @@ function defaultNotifier(): Notifier {
       const email = await import("./emailService");
       const dateLabel = formatDateLabel(req.date);
       const timeLabel = formatTimeLabel(req.time);
-      const customerName = customer?.name || "A customer";
+      const customerName = realName(customer) || "A customer";
       const isShoot = req.kind === "shoot_booking";
       await push(parties.providerUserId, isShoot ? "New Shoot Request" : "New Booking Request",
         `${customerName} requested ${req.serviceName} on ${dateLabel} at ${timeLabel}. Accept by ${formatDeadlineLabel(deadline, parties.timeZone)}.`,
@@ -211,7 +212,7 @@ function defaultNotifier(): Notifier {
         await email.sendBookingRequestToVendor({
           toEmail: provider.email,
           vendorName: parties.providerName,
-          consumerName: customer?.name || "Customer",
+          consumerName: realName(customer) || "Customer",
           consumerUsername: customer?.username ?? undefined,
           serviceName: req.serviceName,
           bookingId: req.id,
@@ -230,7 +231,7 @@ function defaultNotifier(): Notifier {
       if (customer?.email) {
         await email.sendBookingRequestReceivedToConsumer({
           toEmail: customer.email,
-          consumerName: customer.name || customer.email,
+          consumerName: realName(customer) || customer.email,
           vendorName: parties.providerName,
           serviceName: req.serviceName,
           bookingId: req.id,
@@ -244,7 +245,7 @@ function defaultNotifier(): Notifier {
         await email.sendAdminBookingAlert({
           type: "new_pending",
           businessName: parties.providerName,
-          customerName: customer?.name || "Unknown Customer",
+          customerName: realName(customer) || "Unknown Customer",
           serviceName: req.serviceName,
           date: req.date,
           amount: `$${(req.amountCents / 100).toFixed(2)}`,
@@ -276,7 +277,7 @@ function defaultNotifier(): Notifier {
       const email = await import("./emailService");
       const dateLabel = formatDateLabel(req.date);
       const timeLabel = formatTimeLabel(req.time);
-      const customerName = customer?.name || "A customer";
+      const customerName = realName(customer) || "A customer";
       const kind = req.kind === "shoot_booking" ? "shoot" as const : "booking" as const;
       await push(parties.providerUserId, "Booking lost",
         `${customerName}'s request for ${req.serviceName} on ${dateLabel} at ${timeLabel} expired before it was accepted. The customer was not charged.`,
@@ -364,7 +365,7 @@ export async function promoteAuthorizedRequest(
   if (parties) {
     const customer = await d.getUser(row.view.clientId).catch(() => undefined);
     await d.notify.newRequest({ ...row.view, amountCents: pi.amount ?? 0 }, parties, deadline, customer
-      ? { id: customer.id, name: customer.name || "", email: customer.email, username: customer.username }
+      ? { id: customer.id, name: realName(customer) || "", email: customer.email, username: customer.username }
       : undefined).catch((err) => console.error(`[ManualRequest] ${kind} ${id}: new request notices failed`, err));
   }
   return "promoted";
@@ -429,7 +430,7 @@ async function sendDueReminders(now: Date, d: ManualRequestDeps): Promise<number
       const parties = await d.partiesFor(o.kind, row.providerId);
       if (!parties) continue;
       const customer = await d.getUser(row.view.clientId).catch(() => undefined);
-      await d.notify.reminder(row.view, parties, new Date(row.deadline), customer?.name || "A customer");
+      await d.notify.reminder(row.view, parties, new Date(row.deadline), realName(customer) || "A customer");
       sent++;
       console.log(`[ManualRequest] ${o.kind} ${o.id}: reminder sent`);
     } catch (err) {
@@ -522,7 +523,7 @@ export async function expireDueRequests(now: Date, d: ManualRequestDeps): Promis
         const parties = await d.partiesFor(r.kind, row.providerId);
         const customer = await d.getUser(row.view.clientId).catch(() => undefined);
         if (parties) {
-          await d.notify.expired(row.view, parties, customer ? { id: customer.id, name: customer.name || "", email: customer.email } : undefined)
+          await d.notify.expired(row.view, parties, customer ? { id: customer.id, name: realName(customer) || "", email: customer.email } : undefined)
             .catch((err) => console.error(`[ManualRequest] ${r.kind} ${r.id}: expiry notices failed`, err));
         }
       }

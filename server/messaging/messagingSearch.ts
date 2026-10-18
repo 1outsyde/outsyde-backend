@@ -88,20 +88,20 @@ export async function searchRecipients(me: string, rawQuery: unknown, limit = 25
           WHEN ph_id IS NULL AND biz_id IS NOT NULL AND nullif(trim(biz_name), '') IS NOT NULL THEN trim(biz_name)
           ELSE NULL
         END AS brand_name,
-        coalesce(nullif(trim(name), ''), nullif(trim(first_name), '')) AS personal_name
+        nullif(trim(name), '') AS personal_name
       FROM candidates
     ),
     searchable AS (
       SELECT *,
         coalesce(brand_name, personal_name) AS public_name,
         -- What a person can be FOUND by. A business or photographer: its own name. Anyone else: their
-        -- first name only (first_name, or the first word of name). Never a last name, never a name that
-        -- is just the email's local part (older web signups saved that as the name).
+        -- display name (users.name). Never the real first/last name columns (personName.ts rule), never a
+        -- name that is just the email's local part (older web signups saved that as the name).
         CASE
           WHEN brand_name IS NOT NULL THEN brand_name
           WHEN personal_name IS NULL THEN NULL
-          WHEN email IS NOT NULL AND lower(personal_name) = lower(split_part(email, '@', 1)) THEN nullif(trim(first_name), '')
-          ELSE coalesce(nullif(trim(first_name), ''), split_part(personal_name, ' ', 1))
+          WHEN email IS NOT NULL AND lower(personal_name) = lower(split_part(email, '@', 1)) THEN NULL
+          ELSE personal_name
         END AS match_name
       FROM named
     )

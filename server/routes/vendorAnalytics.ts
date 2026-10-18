@@ -275,7 +275,7 @@ router.get("/photographer-match", async (req, res) => {
     const photographerResult = await db.execute<PhotographerRow>(sql`
       SELECT
         u.id,
-        u.name,
+        coalesce(nullif(trim(p.display_name), ''), u.name) AS name,
         u.username,
         u.profile_image_url,
         p.specialties,

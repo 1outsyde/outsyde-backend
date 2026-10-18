@@ -118,6 +118,7 @@ import {
 import rateLimit from "express-rate-limit";
 import { stripeService, isUnreachableConnectAccountError } from "./stripe/stripeService";
 import { isClaimable, issueClaimCode, firstNameOf } from "./accountSetup/claim";
+import { namesForNewAccount, realName, publicDisplayName } from "./personName";
 import { sendAppointmentReceipts, sendShootBookingReceipts } from "./stripe/webhookHandlers";
 import { getStripePublishableKey, getUncachableStripeClient } from "./stripe/stripeClient";
 import { isAllowedClientOrigin, normalizeClientOrigin } from "./clientOrigins";
@@ -384,10 +385,8 @@ async function acceptStaffInvite(
     return { success: false, statusCode: 403, error: "This invite was sent to a different email address" };
   }
 
-  const displayName =
-    user.firstName && user.lastName
-      ? `${user.firstName} ${user.lastName}`
-      : user.name || user.email || "Staff Member";
+  // Public on booking pages and staff pickers: display name, never the real name or email.
+  const displayName = publicDisplayName(user) || "Staff Member";
 
   // Find-or-reactivate: a staff_members row may already exist for this person
   // at this business in any status (e.g. "archived" from a prior offboarding —
@@ -691,9 +690,12 @@ export async function registerRoutes(
       const enablePersonalization =
         personalized === 'true' && !!effectiveViewerUserId;
 
+      // Admin is decided by the signed-in user only. viewerUserId is a plain query param anyone can
+      // set, and admin results include real names (personName.ts rule).
       let isAdmin = false;
-      if (effectiveViewerUserId) {
-        const user = await storage.getUser(effectiveViewerUserId);
+      const signedInUserId = authReq.user?.userId || authReq.session?.userId || null;
+      if (signedInUserId) {
+        const user = await storage.getUser(signedInUserId);
         isAdmin = user?.isAdmin || false;
       }
 
@@ -877,9 +879,8 @@ export async function registerRoutes(
       const user = await storage.createUser({
         email: data.email,
         password: hashedPassword,
-        name: data.name,
-        firstName: data.firstName,
-        lastName: data.lastName,
+        // Display name = first name; the real name goes to first_name/last_name (personName.ts).
+        ...namesForNewAccount({ name: data.name, firstName: data.firstName, lastName: data.lastName, email: data.email }),
         phone: data.phone,
         isVendor: false,
         address: data.address,
@@ -937,7 +938,7 @@ export async function registerRoutes(
       // Notify admins — fire-and-forget, never blocks signup
       NotificationTriggers.newConsumerSignup({
         userId: user.id,
-        userName: user.name || data.email,
+        userName: realName(user) || data.email,
         userEmail: user.email || data.email,
         username: cleanedUsername,
         city: data.city,
@@ -1098,7 +1099,7 @@ export async function registerRoutes(
       const user = await storage.createUser({
         email: data.email,
         password: hashedPassword,
-        name: data.name,
+        ...namesForNewAccount({ name: data.name, email: data.email }),
         phone: data.phone,
         isVendor: true,
         username: unV.cleaned!,
@@ -1266,7 +1267,7 @@ export async function registerRoutes(
       const user = await storage.createUser({
         email: data.email,
         password: hashedPassword,
-        name: data.name,
+        ...namesForNewAccount({ name: data.name, email: data.email }),
         phone: data.phone,
         username: unP.cleaned!,
         isVendor: false,
@@ -1581,9 +1582,7 @@ export async function registerRoutes(
       const user = await storage.createUser({
         email,
         username: unVal.cleaned!,
-        name: name || email.split('@')[0],
-        firstName: firstName || null,
-        lastName: lastName || null,
+        ...namesForNewAccount({ name, firstName, lastName, email }),
         profileImageUrl: profileImageUrl || null,
         address: address || null,
         aptUnit: aptUnit || null,
@@ -1623,7 +1622,7 @@ export async function registerRoutes(
       // Notify admins — fire-and-forget, never blocks signup
       NotificationTriggers.newConsumerSignup({
         userId: fullUser.id,
-        userName: fullUser.name || email,
+        userName: realName(fullUser) || email,
         userEmail: fullUser.email || email,
         username: unVal.cleaned!,
         city: fullUser.city,
@@ -1757,17 +1756,10 @@ export async function registerRoutes(
       const existingApple = await storage.getUserByAppleId(appleId);
       if (existingApple) return res.status(409).json({ success: false, message: "Apple account already linked" });
 
-      const derivedName = fullName
-        || (firstName && lastName ? `${firstName} ${lastName}` : null)
-        || email?.split('@')[0]
-        || 'User';
-
       const user = await storage.createUser({
         email: email || null,
         username: unVal.cleaned!,
-        name: derivedName,
-        firstName: firstName || null,
-        lastName: lastName || null,
+        ...namesForNewAccount({ name: fullName, firstName, lastName, email }),
         isOAuthUser: true,
         appleId,
       });
@@ -1789,7 +1781,7 @@ export async function registerRoutes(
       // Notify admins — fire-and-forget, never blocks signup
       NotificationTriggers.newConsumerSignup({
         userId: fullUser.id,
-        userName: fullUser.name || email || 'New User',
+        userName: realName(fullUser) || email || 'New User',
         userEmail: fullUser.email || email || '',
         username: unVal.cleaned!,
         city: fullUser.city,
@@ -2882,6 +2874,11 @@ export async function registerRoutes(
           email: sessionState.email,
           firstName: sessionState.firstName,
           lastName: sessionState.lastName,
+          // Additive (2026-10-18): the display name and username, so account pages can show and
+          // edit them after a reload (vendor sites used to fall back to the real first name).
+          name: sessionState.displayName ?? null,
+          displayName: sessionState.displayName ?? null,
+          username: sessionState.username ?? null,
           role: sessionState.isAdmin ? 'admin' : sessionState.isVendor ? 'vendor' : sessionState.isPhotographer ? 'photographer' : 'consumer',
           isAdmin: sessionState.isAdmin || false,
           isVendor: sessionState.isVendor || false,
@@ -3771,7 +3768,7 @@ export async function registerRoutes(
 
       // Get follower info for notification
       const followerUser = await storage.getUser(followerUserId);
-      const followerName = followerUser?.name || followerUser?.firstName || "Someone";
+      const followerName = publicDisplayName(followerUser) || "Someone";
 
       // Send notification to target user
       await NotificationTriggers.newFollower({
@@ -3886,7 +3883,7 @@ export async function registerRoutes(
       const following = followingUsers.map(user => ({
         userId: user.id,
         username: user.username || null,
-        displayName: user.name || user.firstName || 'Anonymous',
+        displayName: publicDisplayName(user) || 'Anonymous',
         profilePhotoUrl: user.profileImageUrl || null,
       }));
 
@@ -3922,7 +3919,7 @@ export async function registerRoutes(
       const followers = followerUsers.map(user => ({
         userId: user.id,
         username: user.username || null,
-        displayName: user.name || user.firstName || 'Anonymous',
+        displayName: publicDisplayName(user) || 'Anonymous',
         profilePhotoUrl: user.profileImageUrl || null,
       }));
 
@@ -3960,7 +3957,7 @@ export async function registerRoutes(
       const following = followingUsers.map(user => ({
         userId: user.id,
         username: user.username || null,
-        displayName: user.name || user.firstName || 'Anonymous',
+        displayName: publicDisplayName(user) || 'Anonymous',
         profilePhotoUrl: user.profileImageUrl || null,
       }));
 
@@ -3998,7 +3995,7 @@ export async function registerRoutes(
       const followers = followerUsers.map(user => ({
         userId: user.id,
         username: user.username || null,
-        displayName: user.name || user.firstName || 'Anonymous',
+        displayName: publicDisplayName(user) || 'Anonymous',
         profilePhotoUrl: user.profileImageUrl || null,
       }));
 
@@ -4081,7 +4078,7 @@ export async function registerRoutes(
           author: {
             userId: author.id,
             username: author.username || null,
-            displayName: authorProName || author.name || author.firstName || 'Anonymous',
+            displayName: authorProName || publicDisplayName(author) || 'Anonymous',
             profilePhotoUrl: author.profileImageUrl || null,
             role: authorRole,
           },
@@ -4236,7 +4233,7 @@ export async function registerRoutes(
 
           return {
             id: triggeringUser.id,
-            displayName: triggeringUser.name ?? triggeringUser.firstName ?? null,
+            displayName: publicDisplayName(triggeringUser),
             profilePhotoUrl: resolvedAvatar,
             profileImageUrl: resolvedAvatar,
           };
@@ -5592,7 +5589,7 @@ export async function registerRoutes(
 
       let stripeCustomerId = user.stripeCustomerId;
       if (!stripeCustomerId) {
-        const customer = await stripeService.createCustomer(user.email!, userId, user.name || user.email!);
+        const customer = await stripeService.createCustomer(user.email!, userId, realName(user) || user.email!);
         stripeCustomerId = customer.id;
         await storage.updateUser(userId, { stripeCustomerId: customer.id });
       }
@@ -5660,7 +5657,7 @@ export async function registerRoutes(
     const stripeCustomerId = await stripeService.getOrCreateStripeCustomer({
       userId,
       email: user.email!,
-      name: user.name || undefined,
+      name: realName(user) || undefined,
       existingStripeCustomerId: user.stripeCustomerId,
     });
     if (!user.stripeCustomerId || user.stripeCustomerId !== stripeCustomerId) {
@@ -7620,7 +7617,7 @@ export async function registerRoutes(
         if (client.email) {
           sendBookingAcceptedToConsumer({
             toEmail: client.email,
-            consumerName: client.name || client.email,
+            consumerName: realName(client) || client.email,
             vendorName: business.name,
             serviceName: appointment.serviceName || 'Appointment',
             bookingId: appointmentId,
@@ -7634,7 +7631,7 @@ export async function registerRoutes(
       sendAdminBookingAlert({
         type: 'accepted',
         businessName: business.name,
-        customerName: client?.name || 'Unknown Customer',
+        customerName: realName(client) || 'Unknown Customer',
         serviceName: appointment.serviceName || 'Appointment',
         date: appointment.appointmentDate,
         amount: `$${(appointment.totalPrice / 100).toFixed(2)}`,
@@ -7715,7 +7712,7 @@ export async function registerRoutes(
         if (declClient.email) {
           sendBookingDeclinedToConsumer({
             toEmail: declClient.email,
-            consumerName: declClient.name || declClient.email,
+            consumerName: realName(declClient) || declClient.email,
             vendorName: business.name,
             serviceName: appointment.serviceName || 'Appointment',
             bookingId: appointmentId,
@@ -7728,7 +7725,7 @@ export async function registerRoutes(
       sendAdminBookingAlert({
         type: 'declined',
         businessName: business.name,
-        customerName: declClient?.name || 'Unknown Customer',
+        customerName: realName(declClient) || 'Unknown Customer',
         serviceName: appointment.serviceName || 'Appointment',
         date: appointment.appointmentDate,
         bookingId: appointmentId,
@@ -7860,7 +7857,7 @@ export async function registerRoutes(
         if (shootAcceptClient.email) {
           sendBookingAcceptedToConsumer({
             toEmail: shootAcceptClient.email,
-            consumerName: shootAcceptClient.name || shootAcceptClient.email,
+            consumerName: realName(shootAcceptClient) || shootAcceptClient.email,
             vendorName: photographer.displayName || 'Photographer',
             serviceName: booking.shootType,
             bookingId,
@@ -7874,7 +7871,7 @@ export async function registerRoutes(
       sendAdminBookingAlert({
         type: 'accepted',
         businessName: photographer.displayName || 'Photographer',
-        customerName: shootAcceptClient?.name || 'Unknown Customer',
+        customerName: realName(shootAcceptClient) || 'Unknown Customer',
         serviceName: booking.shootType,
         date: booking.date,
         amount: `$${(booking.totalPrice / 100).toFixed(2)}`,
@@ -7885,7 +7882,7 @@ export async function registerRoutes(
       sendExpoPush({
         userId: photographer.userId,
         title: 'Booking Confirmed',
-        body: `You confirmed the shoot with ${shootAcceptClient?.name || 'your client'}. Payment will be transferred to your account.`,
+        body: `You confirmed the shoot with ${realName(shootAcceptClient) || 'your client'}. Payment will be transferred to your account.`,
         data: { type: 'booking_accepted', bookingId },
       }).catch(() => {});
 
@@ -7894,7 +7891,7 @@ export async function registerRoutes(
         sendShootBookingAcceptedToPhotographer({
           toEmail: shootAcceptPhotographerUser.email,
           photographerName: photographer.displayName || 'Photographer',
-          consumerName: shootAcceptClient?.name || 'Client',
+          consumerName: realName(shootAcceptClient) || 'Client',
           shootType: booking.shootType,
           bookingId,
           bookingNumber: booking.bookingNumber,
@@ -7977,7 +7974,7 @@ export async function registerRoutes(
         if (shootDeclClient.email) {
           sendBookingDeclinedToConsumer({
             toEmail: shootDeclClient.email,
-            consumerName: shootDeclClient.name || shootDeclClient.email,
+            consumerName: realName(shootDeclClient) || shootDeclClient.email,
             vendorName: photographer.displayName || 'Photographer',
             serviceName: booking.shootType,
             bookingId,
@@ -7990,7 +7987,7 @@ export async function registerRoutes(
       sendAdminBookingAlert({
         type: 'declined',
         businessName: photographer.displayName || 'Photographer',
-        customerName: shootDeclClient?.name || 'Unknown Customer',
+        customerName: realName(shootDeclClient) || 'Unknown Customer',
         serviceName: booking.shootType,
         date: booking.date,
         bookingId,
@@ -8001,7 +7998,7 @@ export async function registerRoutes(
       sendExpoPush({
         userId: photographer.userId,
         title: 'Booking Declined',
-        body: `You declined the booking request from ${shootDeclClient?.name || 'your client'}.`,
+        body: `You declined the booking request from ${realName(shootDeclClient) || 'your client'}.`,
         data: { type: 'booking_declined', bookingId },
       }).catch(() => {});
 
@@ -8010,7 +8007,7 @@ export async function registerRoutes(
         sendShootBookingDeclinedToPhotographer({
           toEmail: shootDeclPhotographerUser.email,
           photographerName: photographer.displayName || 'Photographer',
-          consumerName: shootDeclClient?.name || 'Client',
+          consumerName: realName(shootDeclClient) || 'Client',
           shootType: booking.shootType,
           bookingId,
           bookingNumber: booking.bookingNumber,
@@ -8162,7 +8159,7 @@ export async function registerRoutes(
       const stripeCustomerId = await stripeService.getOrCreateStripeCustomer({
         userId,
         email: user.email,
-        name: user.name || undefined,
+        name: realName(user) || undefined,
         existingStripeCustomerId: user.stripeCustomerId,
       });
       if (!user.stripeCustomerId || user.stripeCustomerId !== stripeCustomerId) {
@@ -8368,7 +8365,7 @@ export async function registerRoutes(
       const stripeCustomerId = await stripeService.getOrCreateStripeCustomer({
         userId,
         email: user.email,
-        name: user.name || undefined,
+        name: realName(user) || undefined,
         existingStripeCustomerId: user.stripeCustomerId,
       });
       if (!user.stripeCustomerId || user.stripeCustomerId !== stripeCustomerId) {
@@ -8626,7 +8623,7 @@ export async function registerRoutes(
         const stripeCustomerId = await stripeService.getOrCreateStripeCustomer({
           userId,
           email: cartUser.email,
-          name: cartUser.name || undefined,
+          name: realName(cartUser) || undefined,
           existingStripeCustomerId: cartUser.stripeCustomerId,
         });
         if (!cartUser.stripeCustomerId || cartUser.stripeCustomerId !== stripeCustomerId) {
@@ -8745,7 +8742,7 @@ export async function registerRoutes(
         const stripeCustomerId = await stripeService.getOrCreateStripeCustomer({
           userId,
           email: cartUser.email,
-          name: cartUser.name || undefined,
+          name: realName(cartUser) || undefined,
           existingStripeCustomerId: cartUser.stripeCustomerId,
         });
         if (!cartUser.stripeCustomerId || cartUser.stripeCustomerId !== stripeCustomerId) {
@@ -8918,7 +8915,7 @@ export async function registerRoutes(
         const refundUser = await storage.getUser(appointment.clientId);
         await NotificationTriggers.bookingCanceledOrRefunded({
           consumerUserId: appointment.clientId,
-          consumerName: refundUser?.name || refundUser?.email || 'Customer',
+          consumerName: realName(refundUser) || refundUser?.email || 'Customer',
           providerName: business?.name || 'Business',
           eventType: 'appointment_refunded',
           amountCents: refundAmount,
@@ -9428,7 +9425,7 @@ export async function registerRoutes(
         const cancelUser = await storage.getUser(userId);
         await NotificationTriggers.bookingCanceledOrRefunded({
           consumerUserId: userId,
-          consumerName: cancelUser?.name || cancelUser?.email || 'Customer',
+          consumerName: realName(cancelUser) || cancelUser?.email || 'Customer',
           providerName: cancelBusiness?.name || 'Business',
           eventType: refundAmountCents > 0 ? 'appointment_refunded' : 'appointment_canceled',
           amountCents: refundAmountCents,
@@ -9506,7 +9503,7 @@ export async function registerRoutes(
         if (client?.email) {
           await sendAftercareEmail({
             toEmail: client.email,
-            customerName: client.name ?? client.email,
+            customerName: realName(client) ?? client.email,
             serviceName: appointment.serviceName ?? 'your service',
             businessName: business.name,
             loyaltyPointsEarned: pointsReleased || undefined,
@@ -9771,7 +9768,7 @@ export async function registerRoutes(
         const cancelUser = await storage.getUser(userId);
         await NotificationTriggers.bookingCanceledOrRefunded({
           consumerUserId: userId,
-          consumerName: cancelUser?.name || cancelUser?.email || 'Customer',
+          consumerName: realName(cancelUser) || cancelUser?.email || 'Customer',
           providerName: cancelPhotographer?.displayName || 'Photographer',
           eventType: refundAmountCents > 0 ? 'shoot_booking_refunded' : 'shoot_booking_canceled',
           amountCents: refundAmountCents,
@@ -9956,7 +9953,7 @@ export async function registerRoutes(
         const sbRefundUser = await storage.getUser(booking.clientId);
         await NotificationTriggers.bookingCanceledOrRefunded({
           consumerUserId: booking.clientId,
-          consumerName: sbRefundUser?.name || sbRefundUser?.email || 'Customer',
+          consumerName: realName(sbRefundUser) || sbRefundUser?.email || 'Customer',
           providerName: photographer?.displayName || 'Photographer',
           eventType: 'shoot_booking_refunded',
           amountCents: refundAmount,
@@ -10286,7 +10283,7 @@ export async function registerRoutes(
       // Get or create Stripe customer (platform customer, NOT Connect)
       let stripeCustomerId = user.stripeCustomerId;
       if (!stripeCustomerId) {
-        const customer = await stripeService.createCustomer(user.email!, userId, user.name || user.email!);
+        const customer = await stripeService.createCustomer(user.email!, userId, realName(user) || user.email!);
         stripeCustomerId = customer.id;
         await storage.updateUser(userId, { stripeCustomerId: customer.id });
       }
@@ -17557,7 +17554,7 @@ export async function registerRoutes(
       if (user.stripeCustomerId) {
         stripeCustomerId = user.stripeCustomerId;
       } else {
-        const customer = await stripeService.createCustomer(user.email!, userId, user.name || user.email!);
+        const customer = await stripeService.createCustomer(user.email!, userId, realName(user) || user.email!);
         stripeCustomerId = customer.id;
         await storage.updateUser(userId, { stripeCustomerId: customer.id });
       }
@@ -18106,7 +18103,7 @@ export async function registerRoutes(
         businessId: business.id,
         businessName: business.name,
         businessCategory: business.category,
-        ownerName: owner.name || 'Unknown',
+        ownerName: realName(owner) || 'Unknown',
         ownerEmail: owner.email || '',
         city: business.city,
         state: business.state,
@@ -18134,7 +18131,7 @@ export async function registerRoutes(
         const { owner, stripeAccountId: _sa, stripeOnboardingUrl: _su, ...businessFields } = business;
         return {
           ...businessFields,
-          ownerName: owner?.name || null,
+          ownerName: realName(owner) || null,
           ownerEmail: owner?.email || null,
           ownerPhone: owner?.phone || null,
           ownerAddress: owner?.address || null,
@@ -18172,7 +18169,7 @@ export async function registerRoutes(
           ...businessFields,
           ownerUsername: owner?.username || null,
           signupDetails: buildSignupDetailsPayload(business, owner ?? null),
-          ownerName: owner?.name || null,
+          ownerName: realName(owner) || null,
           ownerEmail: owner?.email || null,
           ownerPhone: owner?.phone || null,
           ownerAddress: owner?.address || null,
@@ -18236,7 +18233,7 @@ export async function registerRoutes(
       if (owner) {
         await NotificationTriggers.vendorApplicationApproved({
           ownerId: owner.id,
-          ownerName: owner.name || owner.email || 'Unknown',
+          ownerName: realName(owner) || owner.email || 'Unknown',
           ownerEmail: owner.email || '',
           businessId: business.id,
           businessName: business.name,
@@ -18306,7 +18303,7 @@ export async function registerRoutes(
       if (owner) {
         await NotificationTriggers.vendorApplicationRejected({
           ownerId: owner.id,
-          ownerName: owner.name || owner.email || 'Unknown',
+          ownerName: realName(owner) || owner.email || 'Unknown',
           ownerEmail: owner.email || '',
           businessId: business.id,
           businessName: business.name,
@@ -18365,7 +18362,7 @@ export async function registerRoutes(
     return {
       ...safe,
       specialtyLabels: photographerSpecialtyNames(p),
-      ownerName: owner?.name ?? null,
+      ownerName: realName(owner) ?? null,
       ownerEmail: owner?.email ?? null,
       ownerPhone: owner?.phone ?? null,
       ownerUsername: owner?.username ?? null,
@@ -18377,7 +18374,7 @@ export async function registerRoutes(
       // Older app builds read these names.
       email: owner?.email ?? null,
       phone: owner?.phone ?? null,
-      name: owner?.name ?? null,
+      name: realName(owner) ?? null,
     };
   };
 
@@ -20512,7 +20509,7 @@ export async function registerRoutes(
             if (consumer?.email) {
               await sendOrderShippedEmail({
                 toEmail: consumer.email,
-                consumerName: consumer.name || consumer.firstName || 'there',
+                consumerName: realName(consumer) || 'there',
                 vendorName: business.name,
                 productName: firstItem?.name || 'your item',
                 orderId,
@@ -21195,7 +21192,7 @@ export async function registerRoutes(
         return {
           ...b,
           ownerEmail: owner?.email,
-          ownerName: owner?.name || `${owner?.firstName || ''} ${owner?.lastName || ''}`.trim(),
+          ownerName: realName(owner) || '',
           subscription: subscriptionSummaries.get(b.id) ?? null,
           hasConnectAccount: !!b.stripeAccountId,
         };
@@ -21233,7 +21230,7 @@ export async function registerRoutes(
         owner: owner ? {
           id: owner.id,
           email: owner.email,
-          name: owner.name,
+          name: realName(owner),
           profileImage: owner.profileImageUrl,
           phone: owner.phone,
           username: owner.username,
@@ -21460,7 +21457,7 @@ export async function registerRoutes(
       if (owner) {
         await NotificationTriggers.vendorApplicationApproved({
           ownerId: owner.id,
-          ownerName: owner.name || owner.email || 'Unknown',
+          ownerName: realName(owner) || owner.email || 'Unknown',
           ownerEmail: owner.email || '',
           businessId: business.id,
           businessName: business.name,
@@ -21529,7 +21526,7 @@ export async function registerRoutes(
       if (owner) {
         await NotificationTriggers.vendorApplicationRejected({
           ownerId: owner.id,
-          ownerName: owner.name || owner.email || 'Unknown',
+          ownerName: realName(owner) || owner.email || 'Unknown',
           ownerEmail: owner.email || '',
           businessId: business.id,
           businessName: business.name,
@@ -21617,7 +21614,7 @@ export async function registerRoutes(
         return {
           ...order,
           customerEmail: customer?.email,
-          customerName: customer?.name || `${customer?.firstName || ''} ${customer?.lastName || ''}`.trim(),
+          customerName: realName(customer) || '',
           businessName: business?.name,
           shipment: shipments[0] || null,
         };
@@ -21648,7 +21645,7 @@ export async function registerRoutes(
           return {
             ...appt,
             clientEmail: client?.email,
-            clientName: client?.name ?? `${client?.firstName ?? ''} ${client?.lastName ?? ''}`.trim(),
+            clientName: realName(client) || '',
           };
         }));
         return res.json({ appointments: enriched, total: appts.length });
@@ -21676,7 +21673,7 @@ export async function registerRoutes(
         return {
           ...booking,
           customerEmail: customer?.email,
-          customerName: customer?.name || `${customer?.firstName || ''} ${customer?.lastName || ''}`.trim(),
+          customerName: realName(customer) || '',
           photographerName: photographer?.displayName,
         };
       }));
@@ -21729,7 +21726,7 @@ export async function registerRoutes(
         return {
           ...appt,
           clientEmail: client?.email,
-          clientName: client?.name ?? `${client?.firstName ?? ''} ${client?.lastName ?? ''}`.trim(),
+          clientName: realName(client) || '',
           clientPhone: client?.phone,
           ...chargeFields,
           inPersonDueCents: chargeFields.dueAtAppointmentCents,
@@ -21770,7 +21767,7 @@ export async function registerRoutes(
           return {
             id: pId,
             email: user?.email,
-            name: user?.name || `${user?.firstName || ''} ${user?.lastName || ''}`.trim(),
+            name: realName(user) || '',
           };
         }));
 
@@ -22178,7 +22175,7 @@ export async function registerRoutes(
           author: {
             userId: author.id,
             username: author.username || null,
-            displayName: authorProName || author.name || author.firstName || 'Anonymous',
+            displayName: authorProName || publicDisplayName(author) || 'Anonymous',
             profilePhotoUrl: authorLogoImage ?? author.profileImageUrl ?? null,
             role: authorRole,
           },
@@ -22191,7 +22188,7 @@ export async function registerRoutes(
           // Legacy identity fields for backwards compatibility
           userId: post.authorId,
           username: author.username || null,
-          displayName: authorProName || author.name || author.firstName || null,
+          displayName: authorProName || publicDisplayName(author) || null,
           providerId: authorPhotographerId || authorBusinessId || null,
           taggedBusiness: taggedBusiness ? { id: taggedBusiness.id, name: taggedBusiness.name, logoImage: taggedBusiness.logoImage } : null,
           taggedPhotographer: taggedPhotographer ? { id: taggedPhotographer.id, displayName: taggedPhotographer.displayName } : null,
@@ -22526,7 +22523,7 @@ export async function registerRoutes(
           author: {
             userId: user.id,
             username: user.username || null,
-            displayName: authorProName || user.name || user.firstName || 'Anonymous',
+            displayName: authorProName || publicDisplayName(user) || 'Anonymous',
             profilePhotoUrl: user.profileImageUrl || null,
             role: authorRoleResponse,
           },
@@ -22692,9 +22689,8 @@ export async function registerRoutes(
             id: user.id,
             name: who?.publicName ?? user.name,
             username: user.username,
-            firstName: user.firstName,
-            // Last name is no longer exposed on public comments (clients only used it when
-            // name and username were both missing; name is now always set).
+            // Real names are never sent on public comments (clients only used them as a last fallback).
+            firstName: null,
             lastName: null,
             profileImageUrl: who ? who.avatarUrl : user.profileImageUrl,
           } : null,
@@ -23193,7 +23189,7 @@ export async function registerRoutes(
           if (consumer?.email) {
             await sendOrderDeliveredEmail({
               toEmail: consumer.email,
-              consumerName: consumer.name || consumer.firstName || 'there',
+              consumerName: realName(consumer) || 'there',
               vendorName: business?.name || 'the vendor',
               orderId,
               orderNumber: order.orderNumber,
@@ -23204,7 +23200,7 @@ export async function registerRoutes(
             await sendOrderDeliveredVendorEmail({
               toEmail: vendorOwner.email,
               vendorName: business?.name || 'Business',
-              consumerName: consumer?.name || 'Customer',
+              consumerName: realName(consumer) || 'Customer',
               orderId,
               orderNumber: order.orderNumber,
               items: orderItems,
@@ -24198,7 +24194,7 @@ export async function registerRoutes(
       const stripeCustomerId = await stripeService.getOrCreateStripeCustomer({
         userId,
         email: user.email,
-        name: user.name || undefined,
+        name: realName(user) || undefined,
         existingStripeCustomerId: user.stripeCustomerId,
       });
       if (!user.stripeCustomerId || user.stripeCustomerId !== stripeCustomerId) {
@@ -24477,7 +24473,7 @@ export async function registerRoutes(
             const consumer = await storage.getUser(appt.clientId);
             await NotificationTriggers.bookingCanceledOrRefunded({
               consumerUserId: appt.clientId,
-              consumerName: consumer?.name || consumer?.email || 'Customer',
+              consumerName: realName(consumer) || consumer?.email || 'Customer',
               providerName,
               eventType: appt.totalPrice > 0 ? 'appointment_refunded' : 'appointment_canceled',
               amountCents: appt.totalPrice,
@@ -24580,7 +24576,7 @@ export async function registerRoutes(
 
       const enriched = await Promise.all(page.map(async (appt) => {
         const client = await storage.getUser(appt.clientId).catch(() => undefined);
-        const name = client?.name || `${client?.firstName ?? ''} ${client?.lastName ?? ''}`.trim();
+        const name = realName(client) || '';
         return {
           ...appt,
           date: appt.appointmentDate,
@@ -24650,20 +24646,22 @@ export async function registerRoutes(
       if (!order) return res.status(404).json({ error: 'Order not found' });
 
       const requestingUserId: string = req.userId || req.session?.userId;
-      const isBusinessAdmin = req.headers['x-business-id'] === order.businessId;
+      const [customer, business, requester] = await Promise.all([
+        storage.getUser(order.customerId).catch(() => undefined),
+        storage.getBusiness(order.businessId).catch(() => undefined),
+        storage.getUser(requestingUserId).catch(() => undefined),
+      ]);
+      // The x-business-id header alone used to count as business access (anyone could send it).
+      // Now: the buyer, the business owner, or an admin.
+      const isBusinessAdmin = (!!business && business.ownerId === requestingUserId) || !!requester?.isAdmin;
       if (!isBusinessAdmin && order.customerId !== requestingUserId) {
         return res.status(403).json({ error: 'Forbidden' });
       }
 
-      const [customer, business] = await Promise.all([
-        storage.getUser(order.customerId).catch(() => undefined),
-        storage.getBusiness(order.businessId).catch(() => undefined),
-      ]);
-
       return res.json({
         order,
         customer: customer
-          ? { id: customer.id, name: customer.name || [customer.firstName, customer.lastName].filter(Boolean).join(' ').trim() || customer.email, email: customer.email }
+          ? { id: customer.id, name: realName(customer) || customer.email, email: customer.email }
           : null,
         business: business
           ? { id: business.id, name: business.name, contactEmail: business.contactEmail, logoImage: business.logoImage }
@@ -24684,21 +24682,22 @@ export async function registerRoutes(
       if (!appointment) return res.status(404).json({ error: 'Appointment not found' });
 
       const requestingUserId: string = req.userId || req.session?.userId;
-      const isBusinessAdmin = req.headers['x-business-id'] === appointment.businessId;
+      const [customer, business, service, requester] = await Promise.all([
+        storage.getUser(appointment.clientId).catch(() => undefined),
+        storage.getBusiness(appointment.businessId).catch(() => undefined),
+        appointment.serviceId ? storage.getVendorService(appointment.serviceId).catch(() => undefined) : Promise.resolve(undefined),
+        storage.getUser(requestingUserId).catch(() => undefined),
+      ]);
+      // Same fix as the order receipt: the header alone is not proof of business access.
+      const isBusinessAdmin = (!!business && business.ownerId === requestingUserId) || !!requester?.isAdmin;
       if (!isBusinessAdmin && appointment.clientId !== requestingUserId) {
         return res.status(403).json({ error: 'Forbidden' });
       }
 
-      const [customer, business, service] = await Promise.all([
-        storage.getUser(appointment.clientId).catch(() => undefined),
-        storage.getBusiness(appointment.businessId).catch(() => undefined),
-        appointment.serviceId ? storage.getVendorService(appointment.serviceId).catch(() => undefined) : Promise.resolve(undefined),
-      ]);
-
       return res.json({
         appointment,
         customer: customer
-          ? { id: customer.id, name: customer.name || [customer.firstName, customer.lastName].filter(Boolean).join(' ').trim() || customer.email, email: customer.email }
+          ? { id: customer.id, name: realName(customer) || customer.email, email: customer.email }
           : null,
         business: business
           ? { id: business.id, name: business.name, contactEmail: business.contactEmail, logoImage: business.logoImage }
@@ -24733,7 +24732,7 @@ export async function registerRoutes(
       return res.json({
         booking,
         customer: customer
-          ? { id: customer.id, name: customer.name || [customer.firstName, customer.lastName].filter(Boolean).join(' ').trim() || customer.email, email: customer.email }
+          ? { id: customer.id, name: realName(customer) || customer.email, email: customer.email }
           : null,
         photographer: photographer
           ? { id: photographer.id, userId: photographer.userId, displayName: photographer.displayName }

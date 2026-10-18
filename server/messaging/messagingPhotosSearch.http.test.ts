@@ -55,7 +55,9 @@ const JPEG = Buffer.from("/9j/4AAQSkZJRgABAQEASABIAAD/2wBDAP////////////////////
     blocker: { name: `Braids${P} Blocker` },
     banned: { name: `Braids${P} Banned`, active: false },
     gone: { name: `Braids${P} Gone`, deleted: true },
-    zed: { name: `Zedd${P} Sur${P}` },
+    zed: { name: `Zedd${P}` },
+    // Display name empty, real name only in first_name/last_name: never searchable by it.
+    quinn: { name: "" },
     mail: { name: "" },
   };
   for (const [who, v] of Object.entries(people)) {
@@ -64,6 +66,8 @@ const JPEG = Buffer.from("/9j/4AAQSkZJRgABAQEASABIAAD/2wBDAP////////////////////
       [id(who), `${who}_${P}`, `${id(who)}@x.test`, v.name, `ExponentPushToken[${id(who)}]`, !!v.vendor, !!v.photographer, v.active !== false, v.deleted ? "deleted" : "active"]);
   }
   await q(`UPDATE users SET name = split_part(email, '@', 1) WHERE id = $1`, [id("mail")]);
+  await q(`UPDATE users SET first_name = $2, last_name = $3 WHERE id = $1`, [id("zed"), `Zedd${P}`, `Sur${P}`]);
+  await q(`UPDATE users SET first_name = $2, last_name = $3 WHERE id = $1`, [id("quinn"), `Quinn${P}`, `Real${P}`]);
   await q(`INSERT INTO businesses (id, owner_id, name, category, approval_status) VALUES ($1, $2, $3, 'Hair', 'approved')`, [id("biz"), id("owner"), `Braids${P} Studio`]);
   await q(`INSERT INTO photographers (id, user_id, display_name, hourly_rate) VALUES ($1, $2, $3, 100)`, [id("ph"), id("lens"), `Lens${P} Pro`]);
   await q(`INSERT INTO user_blocks (blocker_id, blocked_id) VALUES ($1, $2)`, [id("blocker"), id("tia")]);
@@ -144,9 +148,13 @@ const JPEG = Buffer.from("/9j/4AAQSkZJRgABAQEASABIAAD/2wBDAP////////////////////
     const r5 = await call("GET", `/api/messages/recipients?q=${encodeURIComponent("@tia_" + P)}`, auth("tia"));
     assert(r5.json?.results?.length === 0, "never returns yourself", r5.json?.results);
     const r7 = await call("GET", `/api/messages/recipients?q=${encodeURIComponent("zedd" + P)}`, auth("tia"));
-    assert(r7.json?.results?.length === 1 && r7.json.results[0].userId === id("zed"), "customer found by first name", r7.json?.results);
+    assert(r7.json?.results?.length === 1 && r7.json.results[0].userId === id("zed"), "customer found by display name", r7.json?.results);
     const r8 = await call("GET", `/api/messages/recipients?q=${encodeURIComponent("sur" + P)}`, auth("tia"));
-    assert(r8.status === 200 && r8.json.results.length === 0, "customer NOT found by last name", r8.json?.results);
+    assert(r8.status === 200 && r8.json.results.length === 0, "customer NOT found by real last name (last_name column)", r8.json?.results);
+    const r8b = await call("GET", `/api/messages/recipients?q=${encodeURIComponent("quinn" + P)}`, auth("tia"));
+    assert(r8b.status === 200 && r8b.json.results.length === 0, "empty display name: NOT found by real first name", r8b.json?.results);
+    const r8c = await call("GET", `/api/messages/recipients?q=${encodeURIComponent("@quinn_" + P)}`, auth("tia"));
+    assert(r8c.json?.results?.[0]?.publicName === `@quinn_${P}`, "empty display name: shown as @username, never the real name", r8c.json?.results);
     const r9 = await call("GET", `/api/messages/recipients?q=${encodeURIComponent(id("mail"))}`, auth("tia"));
     assert(r9.status === 200 && r9.json.results.length === 0, "name that is the email's local part is not searchable", r9.json?.results);
     const r6 = await call("GET", `/api/messages/recipients?q=${encodeURIComponent("braids" + P)}`, auth("blocker"));
