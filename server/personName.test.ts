@@ -34,6 +34,12 @@ eq(namesForNewAccount({ name: "Jo Lee", lastName: "Lee" }),
 eq(namesForNewAccount({ email: "kay@x.com" }),
   { name: "kay", firstName: null, lastName: null }, "no name at all: email prefix as before");
 eq(namesForNewAccount({}), { name: "Outsyde member", firstName: null, lastName: null }, "nothing at all");
+eq(namesForNewAccount({ email: "jane.smith1987@x.com", username: "janes" }),
+  { name: "janes", firstName: null, lastName: null }, "no name: username before the email's local part");
+eq(namesForNewAccount({ name: "Mary Ann Smith", firstName: "Mary" }),
+  { name: "Mary", firstName: "Mary", lastName: "Ann Smith" }, "first given, last missing: rest of name is the last name");
+eq(namesForNewAccount({ name: "Jo", firstName: "Mary" }),
+  { name: "Mary", firstName: "Mary", lastName: null }, "first given, name doesn't start with it: no guessing");
 
 console.log("realName (transactions, admin)");
 eq(realName({ name: "Jasmine", firstName: "Jasmine", lastName: "Carter" }), "Jasmine Carter", "first + last");

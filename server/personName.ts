@@ -35,7 +35,7 @@ export function splitFullName(full: unknown): { firstName: string | null; lastNa
  * vendor site) and sometimes firstName/lastName too. The real name goes to first_name/last_name,
  * the display name (users.name) is the first name.
  */
-export function namesForNewAccount(input: { name?: unknown; firstName?: unknown; lastName?: unknown; email?: unknown }): {
+export function namesForNewAccount(input: { name?: unknown; firstName?: unknown; lastName?: unknown; email?: unknown; username?: unknown }): {
   name: string;
   firstName: string | null;
   lastName: string | null;
@@ -46,9 +46,17 @@ export function namesForNewAccount(input: { name?: unknown; firstName?: unknown;
     ({ firstName, lastName } = splitFullName(input.name));
   } else if (!firstName && lastName) {
     firstName = splitFullName(input.name).firstName;
+  } else if (firstName && !lastName) {
+    // "Mary Ann Smith" with firstName "Mary" and no lastName: keep the rest as the last name.
+    const full = cleanName(input.name);
+    if (full && full.toLowerCase().startsWith(firstName.toLowerCase() + " ")) {
+      lastName = cleanName(full.slice(firstName.length));
+    }
   }
+  // No name at all: the username (already public), else the email's local part (old behaviour).
+  const username = cleanName(input.username);
   const emailPrefix = typeof input.email === "string" ? cleanName(input.email.split("@")[0]) : null;
-  return { name: firstName || emailPrefix || "Outsyde member", firstName, lastName };
+  return { name: firstName || username || emailPrefix || "Outsyde member", firstName, lastName };
 }
 
 /** Real name for transactions and admin: "First Last", else the display name, else null. */

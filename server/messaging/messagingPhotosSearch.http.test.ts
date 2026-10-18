@@ -58,6 +58,8 @@ const JPEG = Buffer.from("/9j/4AAQSkZJRgABAQEASABIAAD/2wBDAP////////////////////
     zed: { name: `Zedd${P}` },
     // Display name empty, real name only in first_name/last_name: never searchable by it.
     quinn: { name: "" },
+    // Older account whose display name is still "First Last": not findable by the second word.
+    legacy: { name: `Lee${P} Old${P}` },
     mail: { name: "" },
   };
   for (const [who, v] of Object.entries(people)) {
@@ -151,6 +153,10 @@ const JPEG = Buffer.from("/9j/4AAQSkZJRgABAQEASABIAAD/2wBDAP////////////////////
     assert(r7.json?.results?.length === 1 && r7.json.results[0].userId === id("zed"), "customer found by display name", r7.json?.results);
     const r8 = await call("GET", `/api/messages/recipients?q=${encodeURIComponent("sur" + P)}`, auth("tia"));
     assert(r8.status === 200 && r8.json.results.length === 0, "customer NOT found by real last name (last_name column)", r8.json?.results);
+    const r8d = await call("GET", `/api/messages/recipients?q=${encodeURIComponent("old" + P)}`, auth("tia"));
+    assert(r8d.status === 200 && r8d.json.results.length === 0, "older 'First Last' display name: NOT found by its last word", r8d.json?.results);
+    const r8e = await call("GET", `/api/messages/recipients?q=${encodeURIComponent("lee" + P)}`, auth("tia"));
+    assert(r8e.json?.results?.[0]?.userId === id("legacy"), "older 'First Last' display name: found by its first word", r8e.json?.results);
     const r8b = await call("GET", `/api/messages/recipients?q=${encodeURIComponent("quinn" + P)}`, auth("tia"));
     assert(r8b.status === 200 && r8b.json.results.length === 0, "empty display name: NOT found by real first name", r8b.json?.results);
     const r8c = await call("GET", `/api/messages/recipients?q=${encodeURIComponent("@quinn_" + P)}`, auth("tia"));

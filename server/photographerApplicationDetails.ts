@@ -5,6 +5,7 @@
  * Same rules as businesses (Legend 2026-10-17/18): show ALL answers, empty → "Not provided",
  * never show password, tokens or Stripe ids. App and website answers are both shown readable.
  */
+import { realName } from "./personName";
 import type { Photographer } from "@shared/schema";
 import { optionLabel, photographerSpecialtyLabels } from "@shared/photographerTaxonomy";
 import {
@@ -87,7 +88,7 @@ export function buildPhotographerApplicationSections(p: Photographer, owner: Own
     {
       title: "Owner",
       rows: [
-        { label: "Name", value: text(owner?.name) },
+        { label: "Name", value: text(realName(owner)) },
         { label: "Email", value: text(owner?.email) },
         { label: "Phone", value: text(owner?.phone) },
         { label: "Username", value: owner?.username ? `@${owner.username}` : NOT_PROVIDED },

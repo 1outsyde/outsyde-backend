@@ -94,14 +94,15 @@ export async function searchRecipients(me: string, rawQuery: unknown, limit = 25
     searchable AS (
       SELECT *,
         coalesce(brand_name, personal_name) AS public_name,
-        -- What a person can be FOUND by. A business or photographer: its own name. Anyone else: their
-        -- display name (users.name). Never the real first/last name columns (personName.ts rule), never a
-        -- name that is just the email's local part (older web signups saved that as the name).
+        -- What a person can be FOUND by. A business or photographer: its own name. Anyone else: the first
+        -- word of their display name (users.name), so an older "First Last" display name can't be searched
+        -- by last name. Never the first_name/last_name columns (personName.ts rule), never a name that is
+        -- just the email's local part (older web signups saved that as the name).
         CASE
           WHEN brand_name IS NOT NULL THEN brand_name
           WHEN personal_name IS NULL THEN NULL
           WHEN email IS NOT NULL AND lower(personal_name) = lower(split_part(email, '@', 1)) THEN NULL
-          ELSE personal_name
+          ELSE split_part(personal_name, ' ', 1)
         END AS match_name
       FROM named
     )

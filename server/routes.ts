@@ -880,7 +880,7 @@ export async function registerRoutes(
         email: data.email,
         password: hashedPassword,
         // Display name = first name; the real name goes to first_name/last_name (personName.ts).
-        ...namesForNewAccount({ name: data.name, firstName: data.firstName, lastName: data.lastName, email: data.email }),
+        ...namesForNewAccount({ name: data.name, firstName: data.firstName, lastName: data.lastName, email: data.email, username: cleanedUsername }),
         phone: data.phone,
         isVendor: false,
         address: data.address,
@@ -1099,7 +1099,7 @@ export async function registerRoutes(
       const user = await storage.createUser({
         email: data.email,
         password: hashedPassword,
-        ...namesForNewAccount({ name: data.name, email: data.email }),
+        ...namesForNewAccount({ name: data.name, email: data.email, username: unV.cleaned }),
         phone: data.phone,
         isVendor: true,
         username: unV.cleaned!,
@@ -1267,7 +1267,7 @@ export async function registerRoutes(
       const user = await storage.createUser({
         email: data.email,
         password: hashedPassword,
-        ...namesForNewAccount({ name: data.name, email: data.email }),
+        ...namesForNewAccount({ name: data.name, email: data.email, username: unP.cleaned }),
         phone: data.phone,
         username: unP.cleaned!,
         isVendor: false,
@@ -1582,7 +1582,7 @@ export async function registerRoutes(
       const user = await storage.createUser({
         email,
         username: unVal.cleaned!,
-        ...namesForNewAccount({ name, firstName, lastName, email }),
+        ...namesForNewAccount({ name, firstName, lastName, email, username: unVal.cleaned }),
         profileImageUrl: profileImageUrl || null,
         address: address || null,
         aptUnit: aptUnit || null,
@@ -1759,7 +1759,7 @@ export async function registerRoutes(
       const user = await storage.createUser({
         email: email || null,
         username: unVal.cleaned!,
-        ...namesForNewAccount({ name: fullName, firstName, lastName, email }),
+        ...namesForNewAccount({ name: fullName, firstName, lastName, email, username: unVal.cleaned }),
         isOAuthUser: true,
         appleId,
       });
@@ -8989,7 +8989,7 @@ export async function registerRoutes(
         const noShowConsumer = await storage.getUser(appointment.clientId);
         await NotificationTriggers.bookingCanceledOrRefunded({
           consumerUserId: appointment.clientId,
-          consumerName: noShowConsumer?.name || noShowConsumer?.email || 'Customer',
+          consumerName: realName(noShowConsumer) || noShowConsumer?.email || 'Customer',
           providerName: noShowBusiness?.name || 'Business',
           eventType: 'appointment_canceled',
           amountCents: 0,
@@ -9788,7 +9788,7 @@ export async function registerRoutes(
           sendExpoPush({
             userId: cancelPhotographerForNotify.userId,
             title: 'Shoot Booking Canceled',
-            body: `${cancelConsumerForNotify?.name || 'Your client'} has canceled their booking. The slot is now available.`,
+            body: `${realName(cancelConsumerForNotify) || 'Your client'} has canceled their booking. The slot is now available.`,
             data: { type: 'booking_canceled', bookingId },
           }).catch(() => {});
 
@@ -9797,7 +9797,7 @@ export async function registerRoutes(
             sendShootBookingCanceledToPhotographer({
               toEmail: cancelPhotographerUser.email,
               photographerName: cancelPhotographerForNotify.displayName || 'Photographer',
-              consumerName: cancelConsumerForNotify?.name || 'Client',
+              consumerName: realName(cancelConsumerForNotify) || 'Client',
               shootType: booking.shootType,
               bookingId,
               bookingNumber: booking.bookingNumber,
@@ -19002,7 +19002,7 @@ export async function registerRoutes(
             }
             await NotificationTriggers.bookingCanceledOrRefunded({
               consumerUserId: request.requesterId,
-              consumerName: refundRequester?.name || refundRequester?.email || 'Customer',
+              consumerName: realName(refundRequester) || refundRequester?.email || 'Customer',
               providerName,
               eventType: 'refund_approved',
               amountCents: request.amount,
@@ -20443,7 +20443,7 @@ export async function registerRoutes(
             const orderConsumer = await storage.getUser(existingOrder.customerId);
             await NotificationTriggers.bookingCanceledOrRefunded({
               consumerUserId: existingOrder.customerId,
-              consumerName: orderConsumer?.name || orderConsumer?.email || 'Customer',
+              consumerName: realName(orderConsumer) || orderConsumer?.email || 'Customer',
               providerName: business.name,
               eventType: 'order_canceled',
               amountCents: existingOrder.totalAmount,
@@ -21802,7 +21802,7 @@ export async function registerRoutes(
         return {
           ...toClientMessage(msg),
           senderEmail: sender?.email,
-          senderName: sender?.name || `${sender?.firstName || ''} ${sender?.lastName || ''}`.trim(),
+          senderName: realName(sender) || '',
         };
       }));
 
@@ -21832,9 +21832,9 @@ export async function registerRoutes(
         return {
           ...report,
           reporterEmail: reporter?.email,
-          reporterName: reporter?.name || `${reporter?.firstName || ''} ${reporter?.lastName || ''}`.trim(),
+          reporterName: realName(reporter) || '',
           reportedUserEmail: reported?.email,
-          reportedUserName: reported?.name || `${reported?.firstName || ''} ${reported?.lastName || ''}`.trim(),
+          reportedUserName: realName(reported) || '',
         };
       }));
 
@@ -21898,9 +21898,9 @@ export async function registerRoutes(
         report: {
           ...report,
           reporterEmail: reporter?.email,
-          reporterName: reporter?.name || `${reporter?.firstName || ''} ${reporter?.lastName || ''}`.trim(),
+          reporterName: realName(reporter) || '',
           reportedUserEmail: reported?.email,
-          reportedUserName: reported?.name || `${reported?.firstName || ''} ${reported?.lastName || ''}`.trim(),
+          reportedUserName: realName(reported) || '',
           messageContent: message?.content,
           messageSentAt: message?.createdAt,
         },
