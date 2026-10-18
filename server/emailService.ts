@@ -1459,9 +1459,11 @@ export async function sendBookingRequestReceivedToConsumer(params: {
   date: string;
   time: string;
   expiresAt: Date;
+  /** IANA zone the deadline is shown in (Part C). Defaults to America/New_York. */
+  timeZone?: string;
 }): Promise<void> {
   try {
-    const expiryStr = params.expiresAt.toLocaleString('en-US', { dateStyle: 'medium', timeStyle: 'short' });
+    const expiryStr = params.expiresAt.toLocaleString('en-US', { month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit', timeZone: params.timeZone || 'America/New_York', timeZoneName: 'short' });
     const html = wrapEmail(`
       ${emailHeader('Booking Request Received', `Your request for ${params.vendorName} is awaiting approval.`)}
       <tr><td style="background:#1A1A1A;padding:0 32px;">
@@ -1478,7 +1480,7 @@ export async function sendBookingRequestReceivedToConsumer(params: {
       ${emailCta('View My Bookings', 'https://goutsyde.com/account/bookings')}
       ${emailFooter()}
     `);
-    await sendBrandedEmail(params.toEmail, `Booking request received — ${params.serviceName}`, html, { kind: 'booking', label: 'Booking request received' });
+    await sendBrandedEmail(params.toEmail, `Booking request received: ${params.serviceName}`, html, { kind: 'booking', label: 'Booking request received' });
   } catch (err) {
     console.error('[Email] sendBookingRequestReceivedToConsumer failed:', err);
   }
@@ -1495,11 +1497,13 @@ export async function sendBookingRequestToVendor(params: {
   time: string;
   basePrice: number;
   expiresAt: Date;
+  /** IANA zone the deadline is shown in (Part C). Defaults to America/New_York. */
+  timeZone?: string;
 }): Promise<void> {
   try {
     const vendorFee = params.basePrice * 0.02;
     const vendorPayout = params.basePrice - vendorFee;
-    const expiryStr = params.expiresAt.toLocaleString('en-US', { dateStyle: 'medium', timeStyle: 'short' });
+    const expiryStr = params.expiresAt.toLocaleString('en-US', { month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit', timeZone: params.timeZone || 'America/New_York', timeZoneName: 'short' });
     const usernameDisplay = params.consumerUsername ? ` (@${params.consumerUsername})` : '';
     const html = wrapEmail(`
       ${emailHeader('New Booking Request! 📋', `${params.consumerName}${usernameDisplay} wants to book ${params.serviceName}.`)}
@@ -1519,7 +1523,7 @@ export async function sendBookingRequestToVendor(params: {
       ${emailCta('Review in Dashboard', 'https://goutsyde.com/vendor/bookings')}
       ${emailFooter()}
     `);
-    await sendBrandedEmail(params.toEmail, `New booking request — ${params.serviceName} on ${params.date}`, html, { kind: 'booking', label: 'New booking request (vendor)' });
+    await sendBrandedEmail(params.toEmail, `New booking request: ${params.serviceName} on ${params.date}`, html, { kind: 'booking', label: 'New booking request (vendor)' });
   } catch (err) {
     console.error('[Email] sendBookingRequestToVendor failed:', err);
   }
@@ -1596,6 +1600,123 @@ export async function sendBookingDeclinedToConsumer(params: {
     await sendBrandedEmail(params.toEmail, subject, html, { kind: 'booking', label: 'Booking declined' });
   } catch (err) {
     console.error('[Email] sendBookingDeclinedToConsumer failed:', err);
+  }
+}
+
+// ─── Manual-accept request reminders and expiry (Part C, approved by Legend 2026-10-18) ──────────
+// Copy rules: real punctuation, no dashes, never the service fee percentage. Dates and times arrive
+// already formatted for the business/photographer's time zone (server/manualRequests.ts).
+
+function escHtml(v: string): string {
+  return v.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+export interface RequestEmailParams {
+  toEmail: string;
+  /** 'booking' for a business appointment, 'shoot' for a photographer shoot. */
+  kind: 'booking' | 'shoot';
+  customerName: string;
+  providerName: string;
+  serviceName: string;
+  /** e.g. "Sat, Oct 18" */
+  dateLabel: string;
+  /** e.g. "10:00 AM" */
+  timeLabel: string;
+  /** e.g. "Fri, Oct 17, 9:30 PM EDT" (reminder only) */
+  deadlineLabel?: string;
+}
+
+const PROVIDER_DASHBOARD_URL = {
+  booking: 'https://goutsyde.com/vendor-dashboard',
+  shoot: 'https://goutsyde.com/photographer-dashboard',
+} as const;
+
+/** "Action needed" reminder to the business or photographer while the request can still be accepted. */
+export async function sendRequestReminderToProvider(params: RequestEmailParams): Promise<void> {
+  try {
+    const customer = escHtml(params.customerName);
+    const service = escHtml(params.serviceName);
+    const deadline = escHtml(params.deadlineLabel ?? '');
+    const html = wrapEmail(`
+      ${emailHeader('Action needed', `${customer} is waiting for your answer.`)}
+      <tr><td style="background:#1A1A1A;padding:0 32px;">
+        <table width="100%" cellpadding="0" cellspacing="0" style="border-radius:6px;overflow:hidden;">
+          ${detailRow('Customer', customer, true)}
+          ${detailRow('Service', service, false)}
+          ${detailRow('Date', escHtml(params.dateLabel), true)}
+          ${detailRow('Time', escHtml(params.timeLabel), false)}
+          ${detailRow('Respond By', `<strong style="color:#E8B930;">${deadline}</strong>`, true)}
+        </table>
+      </td></tr>
+      <tr><td style="background:#1A1A1A;padding:16px 32px 4px;">
+        <p style="color:#F5F0E8;font-size:14px;line-height:1.5;margin:0;">${customer} already put a hold on their card for ${service} on ${escHtml(params.dateLabel)} at ${escHtml(params.timeLabel)} and is waiting for your answer. If you don't accept or decline by <strong style="color:#E8B930;">${deadline}</strong>, the request expires, the hold is released, and you lose this booking.</p>
+      </td></tr>
+      ${emailCta('Review request', PROVIDER_DASHBOARD_URL[params.kind])}
+      ${emailFooter()}
+    `);
+    await sendBrandedEmail(params.toEmail, `Action needed: ${params.customerName}'s booking request expires soon`, html, {
+      kind: params.kind, label: params.kind === 'shoot' ? 'Shoot request reminder (photographer)' : 'Booking request reminder (vendor)',
+    });
+  } catch (err) {
+    console.error('[Email] sendRequestReminderToProvider failed:', err);
+  }
+}
+
+/** The request expired before the business or photographer accepted it. */
+export async function sendRequestExpiredToProvider(params: RequestEmailParams): Promise<void> {
+  try {
+    const customer = escHtml(params.customerName);
+    const service = escHtml(params.serviceName);
+    const html = wrapEmail(`
+      ${emailHeader('Booking lost', 'A booking request expired before it was accepted.')}
+      <tr><td style="background:#1A1A1A;padding:0 32px;">
+        <table width="100%" cellpadding="0" cellspacing="0" style="border-radius:6px;overflow:hidden;">
+          ${detailRow('Customer', customer, true)}
+          ${detailRow('Service', service, false)}
+          ${detailRow('Date', escHtml(params.dateLabel), true)}
+          ${detailRow('Time', escHtml(params.timeLabel), false)}
+        </table>
+      </td></tr>
+      <tr><td style="background:#1A1A1A;padding:16px 32px 4px;">
+        <p style="color:#F5F0E8;font-size:14px;line-height:1.5;margin:0;">${customer}'s request for ${service} on ${escHtml(params.dateLabel)} at ${escHtml(params.timeLabel)} expired because it wasn't accepted in time, so this booking was lost. The customer was not charged, and the time is open again. Respond to new requests quickly so you don't miss the next one.</p>
+      </td></tr>
+      ${emailCta('Open dashboard', PROVIDER_DASHBOARD_URL[params.kind])}
+      ${emailFooter()}
+    `);
+    await sendBrandedEmail(params.toEmail, 'You missed a booking request', html, {
+      kind: params.kind, label: params.kind === 'shoot' ? 'Shoot request expired (photographer)' : 'Booking request expired (vendor)',
+    });
+  } catch (err) {
+    console.error('[Email] sendRequestExpiredToProvider failed:', err);
+  }
+}
+
+/** The customer's request expired: nothing charged, card hold released. */
+export async function sendRequestExpiredToCustomer(params: RequestEmailParams): Promise<void> {
+  try {
+    const provider = escHtml(params.providerName);
+    const service = escHtml(params.serviceName);
+    const html = wrapEmail(`
+      ${emailHeader('Your booking request expired', 'Nothing was charged.')}
+      <tr><td style="background:#1A1A1A;padding:0 32px;">
+        <table width="100%" cellpadding="0" cellspacing="0" style="border-radius:6px;overflow:hidden;">
+          ${detailRow(params.kind === 'shoot' ? 'Photographer' : 'Business', provider, true)}
+          ${detailRow('Service', service, false)}
+          ${detailRow('Date', escHtml(params.dateLabel), true)}
+          ${detailRow('Time', escHtml(params.timeLabel), false)}
+        </table>
+      </td></tr>
+      <tr><td style="background:#1A1A1A;padding:16px 32px 4px;">
+        <p style="color:#F5F0E8;font-size:14px;line-height:1.5;margin:0;">${provider} wasn't able to confirm ${service} on ${escHtml(params.dateLabel)} at ${escHtml(params.timeLabel)} in time, so your request has expired. Nothing was charged, and the hold on your card has been released. Times fill up fast, so grab another slot while it's open.</p>
+      </td></tr>
+      ${emailCta('Book again', 'https://goutsyde.com')}
+      ${emailFooter()}
+    `);
+    await sendBrandedEmail(params.toEmail, 'Your booking request expired', html, {
+      kind: params.kind, label: params.kind === 'shoot' ? 'Shoot request expired (customer)' : 'Booking request expired (customer)',
+    });
+  } catch (err) {
+    console.error('[Email] sendRequestExpiredToCustomer failed:', err);
   }
 }
 

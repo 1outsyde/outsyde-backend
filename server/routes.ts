@@ -148,8 +148,8 @@ import {
 import {
   transitionAppointmentState,
   transitionShootBookingState,
-  getPendingProviderExpiryTime
 } from "./bookingStateMachine";
+import { isValidTimeZone } from "./manualRequests";
 import { settleAppointmentBooking, settleShootBooking } from "./bookingSettlement";
 import { requirePlatformAdmin } from "./middleware/requirePlatformAdmin";
 import {
@@ -5903,69 +5903,36 @@ export async function registerRoutes(
     return { ok: true, promo: truth };
   }
 
-  // When manual acceptance is required, notify the business owner and the
-  // customer immediately so neither party is left waiting silently.
-  async function notifyPendingBookingRequest(params: {
-    hold: { providerId: string; serviceName: string; holdDate: string; startTime: string; servicePriceCents: number };
-    business: { name: string };
-    user: User;
-    appointmentId: string;
-    expiresAt: Date;
-    amountCents: number;
-  }) {
-    const { hold, business, user, appointmentId, expiresAt, amountCents } = params;
-    {
-      const owner = await storage.getUserByBusinessOwnerId(hold.providerId).catch(() => undefined);
-      const clientUser = user;
-
-      if (owner) {
-        sendExpoPush({
-          userId: owner.id,
-          title: 'New Booking Request',
-          body: `${clientUser?.name || 'A customer'} requested ${hold.serviceName} on ${hold.holdDate} at ${hold.startTime}`,
-          data: { type: 'booking_request', screen: 'dashboard' },
-        }).catch(() => {});
-
-        if (owner.email) {
-          sendBookingRequestToVendor({
-            toEmail: owner.email,
-            vendorName: business.name,
-            consumerName: clientUser?.name || 'Customer',
-            consumerUsername: (clientUser as any)?.username ?? undefined,
-            serviceName: hold.serviceName,
-            bookingId: appointmentId,
-            date: hold.holdDate,
-            time: hold.startTime,
-            basePrice: hold.servicePriceCents,
-            expiresAt,
-          }).catch(() => {});
-        }
-      }
-
-      if (user?.email) {
-        sendBookingRequestReceivedToConsumer({
-          toEmail: user.email,
-          consumerName: user.name || user.email,
-          vendorName: business.name,
-          serviceName: hold.serviceName,
-          bookingId: appointmentId,
-          date: hold.holdDate,
-          time: hold.startTime,
-          expiresAt,
-        }).catch(() => {});
-      }
-
-      sendAdminBookingAlert({
-        type: 'new_pending',
-        businessName: business.name,
-        customerName: user?.name || 'Unknown Customer',
-        serviceName: hold.serviceName,
-        date: hold.holdDate,
-        amount: `$${(amountCents / 100).toFixed(2)}`,
-        bookingId: appointmentId,
-      }).catch(() => {});
+  // POST /api/me/time-zone { timeZone, overwrite? } (Part C, 2026-10-18)
+  // The app and dashboards send the device's IANA zone (Intl.DateTimeFormat().resolvedOptions().timeZone).
+  // Saved on the caller's own business(es) and photographer profile. Without `overwrite: true` it only
+  // fills an empty value, so travelling never moves a business's deadlines; settings pass overwrite.
+  // Used for booking request deadlines and reminders. Null = America/New_York.
+  app.post("/api/me/time-zone", async (req, res) => {
+    const userId = req.session?.userId || getUserIdFromRequest(req);
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
     }
-  }
+    const timeZone = req.body?.timeZone;
+    if (!isValidTimeZone(timeZone)) {
+      return res.status(400).json({ error: "timeZone must be a valid IANA time zone, e.g. America/New_York" });
+    }
+    const overwrite = req.body?.overwrite === true;
+    try {
+      const businessRows = await db.update(businesses)
+        .set({ timeZone })
+        .where(overwrite ? eq(businesses.ownerId, userId) : and(eq(businesses.ownerId, userId), isNull(businesses.timeZone)))
+        .returning({ id: businesses.id });
+      const photographerRows = await db.update(photographers)
+        .set({ timeZone })
+        .where(overwrite ? eq(photographers.userId, userId) : and(eq(photographers.userId, userId), isNull(photographers.timeZone)))
+        .returning({ id: photographers.id });
+      res.json({ timeZone, businessesUpdated: businessRows.length, photographersUpdated: photographerRows.length });
+    } catch (error) {
+      console.error("Save time zone error:", error);
+      res.status(500).json({ error: "Failed to save time zone" });
+    }
+  });
 
   // POST /api/booking/:holdId/create-payment-intent - Convert a confirmed hold
   // into a real booking record and create a platform-balance PaymentIntent for it.
@@ -6429,17 +6396,6 @@ export async function registerRoutes(
             return res.status(409).json(PROMO_TAKEN_RESPONSE);
           }
 
-          if (resumeParams.captureMethod === 'manual') {
-            await notifyPendingBookingRequest({
-              hold,
-              business: resumeBusiness,
-              user: resumeUser,
-              appointmentId: existing.id,
-              expiresAt: existing.pendingProviderExpiresAt!,
-              amountCents: resumeParams.amountCents,
-            });
-          }
-
           return res.json({
             holdExpiresAt: new Date(hold.expiresAt).toISOString(), // Part B: payment screen counts down to this
             clientSecret: resumedPI.client_secret,
@@ -6470,15 +6426,16 @@ export async function registerRoutes(
       }
 
       // Respect autoAcceptBookings: when false the card is authorized only
-      // (manual capture). The appointment is created directly in
-      // pending_provider so the business sees it immediately. The business
-      // has 48h to accept (capture) or decline (cancel) via the
-      // accept/decline endpoints; the payment_intent.succeeded webhook
-      // already handles type:'appointment' for both pending_payment and
-      // pending_provider → confirmed once captured.
+      // (manual capture). Part C: the appointment starts in pending_payment
+      // either way. A manual booking becomes a request (pending_provider,
+      // business notified, deadline set) only once Stripe confirms the card
+      // hold: payment_intent.amount_capturable_updated, or the cleanup job if
+      // that event is late (server/manualRequests.ts). An unpaid checkout is
+      // never shown to the business; the Part B job expires it quietly. The
+      // business then accepts (capture) or declines (cancel); the
+      // payment_intent.succeeded webhook handles pending_provider → confirmed.
       const isAutoAccept = business.autoAcceptBookings !== false;
       const captureMethod = isAutoAccept ? 'automatic' : 'manual';
-      const pendingProviderExpiresAt = isAutoAccept ? undefined : getPendingProviderExpiryTime();
 
       // Fetch service for location-type check and cancellation-policy snapshot.
       // For staff bookings hold.serviceId is a staff_services.id; for vendor
@@ -6558,10 +6515,9 @@ export async function registerRoutes(
         totalPrice: totalServicePriceCents,
         platformFee: feeBreakdown.platformFeeCents,
         vendorNet: feeBreakdown.vendorNetCents,
-        status: isAutoAccept ? BOOKING_STATES.PENDING_PAYMENT : BOOKING_STATES.PENDING_PROVIDER,
+        status: BOOKING_STATES.PENDING_PAYMENT,
         paymentMethod: 'payment_intent',
         captureMethod,
-        pendingProviderExpiresAt,
         ...customerAddress,
         // Service snapshot — preserved even if service is later edited or archived
         serviceName: hold.serviceName,
@@ -6623,17 +6579,6 @@ export async function registerRoutes(
         return res.status(409).json({ ...PROMO_TAKEN_RESPONSE, appointmentId: appointment.id });
       }
 
-      if (!isAutoAccept) {
-        await notifyPendingBookingRequest({
-          hold,
-          business,
-          user,
-          appointmentId: appointment.id,
-          expiresAt: pendingProviderExpiresAt!,
-          amountCents: feeBreakdown.customerTotalBeforeTaxCents,
-        });
-      }
-
       res.json({
         holdExpiresAt: new Date(hold.expiresAt).toISOString(), // Part B: payment screen counts down to this
         clientSecret: paymentIntent.client_secret,
@@ -6642,7 +6587,9 @@ export async function registerRoutes(
         bookingNumber: appointment.bookingNumber,
         captureMethod,
         requiresApproval: !isAutoAccept,
-        status: isAutoAccept ? BOOKING_STATES.PENDING_PAYMENT : BOOKING_STATES.PENDING_PROVIDER,
+        // Always pending_payment now; a manual booking becomes pending_provider once the card hold
+        // is confirmed. No client reads this field (Part C regression addendum, 2026-10-18).
+        status: BOOKING_STATES.PENDING_PAYMENT,
         // Deposit fields — null when full price is charged at booking
         depositAmountCents: serviceDepositAmountCents,
         servicePriceCents: hold.servicePriceCents,
@@ -7606,6 +7553,11 @@ export async function registerRoutes(
           console.error(`[Booking] Refund after expired accept FAILED appointment=${appointmentId} pi=${capturedPaymentIntent.id}:`, refundError);
           return res.status(502).json({ error: "This request expired before you accepted it. The refund failed; please contact support.", code: "REFUND_FAILED" });
         }
+        // Part C: the state machine no longer expires a past-due request on the spot, and the
+        // expiry job never touches a captured PaymentIntent, so end the request here.
+        await transitionAppointmentState(appointmentId, BOOKING_STATES.EXPIRED, {
+          triggeredBy: userId, triggerSource: 'api', metadata: { action: 'accept_after_expiry_refunded' },
+        }).catch(err => console.error(`[Booking] Could not expire appointment ${appointmentId} after refund:`, err));
         return res.status(400).json({ error: "This request expired before you accepted it. The customer was refunded." });
       }
 
@@ -7842,6 +7794,11 @@ export async function registerRoutes(
           console.error(`[Booking] Refund after expired accept FAILED shoot booking=${bookingId} pi=${capturedPaymentIntent.id}:`, refundError);
           return res.status(502).json({ error: "This request expired before you accepted it. The refund failed; please contact support.", code: "REFUND_FAILED" });
         }
+        // Part C: end the request here (see the appointment accept route); free the photographer's slot.
+        const expiredNow = await transitionShootBookingState(bookingId, BOOKING_STATES.EXPIRED, {
+          triggeredBy: userId, triggerSource: 'api', metadata: { action: 'accept_after_expiry_refunded' },
+        }).catch(err => { console.error(`[Booking] Could not expire shoot booking ${bookingId} after refund:`, err); return null; });
+        if (expiredNow?.success) await storage.releasePhotographerSlot(bookingId).catch(() => {});
         return res.status(400).json({ error: "This request expired before you accepted it. The customer was refunded." });
       }
 

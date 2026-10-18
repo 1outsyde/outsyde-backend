@@ -77,6 +77,13 @@ export function getPendingProviderExpiryTime(): Date {
   return new Date(Date.now() + PENDING_PROVIDER_TTL_HOURS * 60 * 60 * 1000);
 }
 
+/** The deadline a caller worked out (48h or the appointment start, Part C), else 48h from now. */
+function pendingProviderDeadlineFrom(context: { metadata?: Record<string, any> }): Date {
+  const given = context.metadata?.pendingProviderExpiresAt;
+  const d = given ? new Date(given) : null;
+  return d && Number.isFinite(d.getTime()) ? d : getPendingProviderExpiryTime();
+}
+
 export function isPendingProviderExpired(expiresAt: Date | null): boolean {
   if (!expiresAt) return true;
   return new Date() > new Date(expiresAt);
@@ -145,24 +152,10 @@ export async function transitionAppointmentState(
     return { success: false, code: 'BOOKING_EXPIRED', error: "Booking draft has expired. Please restart booking." };
   }
 
-  // Check for pending_provider expiry
-  if (currentState === 'pending_provider' && isPendingProviderExpired(appointment.pendingProviderExpiresAt)) {
-    await db.update(appointments)
-      .set({ 
-        status: BOOKING_STATES.EXPIRED,
-        stateChangedAt: new Date(),
-        stateChangedBy: 'system',
-        previousState: currentState,
-        updatedAt: new Date(),
-      })
-      .where(and(eq(appointments.id, appointmentId), eq(appointments.status, BOOKING_STATES.PENDING_PROVIDER)));
-    
-    await logAuditEntry(
-      { bookingType: 'appointment', bookingId: appointmentId, triggeredBy: 'system', triggerSource: 'cron' },
-      currentState,
-      BOOKING_STATES.EXPIRED
-    );
-    
+  // Past its deadline: refuse the change but leave the row alone. The cleanup job releases the
+  // card hold, expires the request through this state machine and tells both sides, once
+  // (server/manualRequests.ts, Part C). Expiring is the one move still allowed here.
+  if (currentState === 'pending_provider' && toState !== BOOKING_STATES.EXPIRED && isPendingProviderExpired(appointment.pendingProviderExpiresAt)) {
     return { success: false, code: 'PENDING_PROVIDER_EXPIRED', error: "Provider did not respond in time. Please restart booking." };
   }
 
@@ -210,7 +203,8 @@ export async function transitionAppointmentState(
 
   // Handle pending_provider transition - set expiry time
   if (toState === BOOKING_STATES.PENDING_PROVIDER) {
-    updateData.pendingProviderExpiresAt = getPendingProviderExpiryTime();
+    updateData.pendingProviderExpiresAt = pendingProviderDeadlineFrom(context);
+    updateData.providerReminderSentAt = null;
   }
 
   // Handle decline transition
@@ -300,24 +294,10 @@ export async function transitionShootBookingState(
     return { success: false, code: 'BOOKING_EXPIRED', error: "Booking draft has expired. Please restart booking." };
   }
 
-  // Check for pending_provider expiry
-  if (currentState === 'pending_provider' && isPendingProviderExpired(booking.pendingProviderExpiresAt)) {
-    await db.update(shootBookings)
-      .set({ 
-        status: BOOKING_STATES.EXPIRED,
-        stateChangedAt: new Date(),
-        stateChangedBy: 'system',
-        previousState: currentState,
-        updatedAt: new Date(),
-      })
-      .where(eq(shootBookings.id, shootBookingId));
-    
-    await logAuditEntry(
-      { bookingType: 'shoot_booking', bookingId: shootBookingId, triggeredBy: 'system', triggerSource: 'cron' },
-      currentState,
-      BOOKING_STATES.EXPIRED
-    );
-    
+  // Past its deadline: refuse the change but leave the row alone. The cleanup job releases the
+  // card hold, expires the request through this state machine and tells both sides, once
+  // (server/manualRequests.ts, Part C). Expiring is the one move still allowed here.
+  if (currentState === 'pending_provider' && toState !== BOOKING_STATES.EXPIRED && isPendingProviderExpired(booking.pendingProviderExpiresAt)) {
     return { success: false, code: 'PENDING_PROVIDER_EXPIRED', error: "Provider did not respond in time. Please restart booking." };
   }
 
@@ -365,7 +345,8 @@ export async function transitionShootBookingState(
 
   // Handle pending_provider transition - set expiry time
   if (toState === BOOKING_STATES.PENDING_PROVIDER) {
-    updateData.pendingProviderExpiresAt = getPendingProviderExpiryTime();
+    updateData.pendingProviderExpiresAt = pendingProviderDeadlineFrom(context);
+    updateData.providerReminderSentAt = null;
   }
 
   // Handle decline transition
@@ -472,226 +453,11 @@ export async function cleanupExpiredDrafts(): Promise<{ appointments: number; sh
 }
 
 export async function cleanupExpiredPendingProvider(): Promise<{ appointments: number; shootBookings: number }> {
-  const now = new Date();
-  
-  // Find expired appointments (with all fields needed for notifications)
-  const expiredAptsWithPayment = await db.select({
-    id: appointments.id,
-    clientId: appointments.clientId,
-    businessId: appointments.businessId,
-    serviceName: appointments.serviceName,
-    appointmentDate: appointments.appointmentDate,
-    stripePaymentIntentId: appointments.stripePaymentIntentId,
-    captureMethod: appointments.captureMethod,
-  })
-  .from(appointments)
-  .where(
-    and(
-      eq(appointments.status, BOOKING_STATES.PENDING_PROVIDER),
-      lt(appointments.pendingProviderExpiresAt, now)
-    )
-  );
-
-  // Cancel PaymentIntents for manual capture appointments
-  for (const apt of expiredAptsWithPayment) {
-    if (apt.captureMethod === 'manual' && apt.stripePaymentIntentId) {
-      try {
-        const { stripeService } = await import('./stripe/stripeService');
-        await stripeService.cancelPaymentIntent(apt.stripePaymentIntentId, 'abandoned');
-        console.log(`[PendingProviderCleanup] Canceled PaymentIntent ${apt.stripePaymentIntentId} for expired appointment ${apt.id}`);
-      } catch (stripeError) {
-        console.error(`[PendingProviderCleanup] Failed to cancel PaymentIntent for appointment ${apt.id}:`, stripeError);
-      }
-    }
-  }
-
-  // Update expired appointments
-  const expiredAppointments = await db.update(appointments)
-    .set({
-      status: BOOKING_STATES.EXPIRED,
-      stateChangedAt: now,
-      stateChangedBy: 'system',
-      previousState: BOOKING_STATES.PENDING_PROVIDER,
-      updatedAt: now,
-    })
-    .where(
-      and(
-        eq(appointments.status, BOOKING_STATES.PENDING_PROVIDER),
-        lt(appointments.pendingProviderExpiresAt, now)
-      )
-    )
-    .returning({ id: appointments.id });
-
-  // Find expired shoot bookings (with all fields needed for notifications)
-  const expiredShootsWithPayment = await db.select({
-    id: shootBookings.id,
-    clientId: shootBookings.clientId,
-    photographerId: shootBookings.photographerId,
-    shootType: shootBookings.shootType,
-    date: shootBookings.date,
-    stripePaymentIntentId: shootBookings.stripePaymentIntentId,
-    captureMethod: shootBookings.captureMethod,
-  })
-  .from(shootBookings)
-  .where(
-    and(
-      eq(shootBookings.status, BOOKING_STATES.PENDING_PROVIDER),
-      lt(shootBookings.pendingProviderExpiresAt, now)
-    )
-  );
-
-  // Cancel PaymentIntents for manual capture shoot bookings
-  for (const booking of expiredShootsWithPayment) {
-    if (booking.captureMethod === 'manual' && booking.stripePaymentIntentId) {
-      try {
-        const { stripeService } = await import('./stripe/stripeService');
-        await stripeService.cancelPaymentIntent(booking.stripePaymentIntentId, 'abandoned');
-        console.log(`[PendingProviderCleanup] Canceled PaymentIntent ${booking.stripePaymentIntentId} for expired shoot booking ${booking.id}`);
-      } catch (stripeError) {
-        console.error(`[PendingProviderCleanup] Failed to cancel PaymentIntent for shoot booking ${booking.id}:`, stripeError);
-      }
-    }
-  }
-
-  // Update expired shoot bookings
-  const expiredShootBookings = await db.update(shootBookings)
-    .set({
-      status: BOOKING_STATES.EXPIRED,
-      stateChangedAt: now,
-      stateChangedBy: 'system',
-      previousState: BOOKING_STATES.PENDING_PROVIDER,
-      updatedAt: now,
-    })
-    .where(
-      and(
-        eq(shootBookings.status, BOOKING_STATES.PENDING_PROVIDER),
-        lt(shootBookings.pendingProviderExpiresAt, now)
-      )
-    )
-    .returning({ id: shootBookings.id });
-
-  for (const apt of expiredAppointments) {
-    await logAuditEntry(
-      { bookingType: 'appointment', bookingId: apt.id, triggeredBy: 'system', triggerSource: 'cron' },
-      BOOKING_STATES.PENDING_PROVIDER,
-      BOOKING_STATES.EXPIRED
-    );
-  }
-
-  for (const booking of expiredShootBookings) {
-    await logAuditEntry(
-      { bookingType: 'shoot_booking', bookingId: booking.id, triggeredBy: 'system', triggerSource: 'cron' },
-      BOOKING_STATES.PENDING_PROVIDER,
-      BOOKING_STATES.EXPIRED
-    );
-  }
-
-  // Notify customers of expired appointments (best-effort, non-blocking)
-  if (expiredAptsWithPayment.length > 0) {
-    const { sendExpoPush } = await import('./expoPushService');
-    const { sendBookingDeclinedToConsumer } = await import('./emailService');
-    const { storage } = await import('./storage');
-
-    for (const apt of expiredAptsWithPayment) {
-      try {
-        const client = await storage.getUser(apt.clientId);
-        if (!client) continue;
-
-        const business = apt.businessId ? await storage.getBusiness(apt.businessId) : undefined;
-
-        sendExpoPush({
-          userId: client.id,
-          title: 'Booking Request Expired',
-          body: `Your request for ${apt.serviceName || 'an appointment'} was not accepted in time. No charge was made.`,
-          data: { type: 'booking_expired', screen: 'bookings' },
-        }).catch(() => {});
-
-        if (client.email) {
-          sendBookingDeclinedToConsumer({
-            toEmail: client.email,
-            consumerName: client.name || client.email,
-            vendorName: business?.name || 'the business',
-            serviceName: apt.serviceName || 'Appointment',
-            bookingId: apt.id,
-            date: apt.appointmentDate,
-            expired: true,
-          }).catch(() => {});
-        }
-      } catch (notifyErr) {
-        console.error(`[PendingProviderCleanup] Failed to notify customer for expired appointment ${apt.id}:`, notifyErr);
-      }
-    }
-  }
-
-  // Notify customers of expired shoot bookings (best-effort, non-blocking)
-  if (expiredShootsWithPayment.length > 0) {
-    const { sendExpoPush } = await import('./expoPushService');
-    const { sendBookingDeclinedToConsumer, sendShootBookingExpiredToPhotographer } = await import('./emailService');
-    const { storage } = await import('./storage');
-
-    for (const booking of expiredShootsWithPayment) {
-      try {
-        const client = await storage.getUser(booking.clientId);
-        if (!client) continue;
-
-        sendExpoPush({
-          userId: client.id,
-          title: 'Shoot Request Expired',
-          body: `Your ${booking.shootType || 'shoot'} request was not accepted in time. No charge was made.`,
-          data: { type: 'booking_expired', screen: 'bookings' },
-        }).catch(() => {});
-
-        if (client.email) {
-          sendBookingDeclinedToConsumer({
-            toEmail: client.email,
-            consumerName: client.name || client.email,
-            vendorName: 'your photographer',
-            serviceName: booking.shootType || 'Shoot',
-            bookingId: booking.id,
-            date: booking.date,
-            expired: true,
-          }).catch(() => {});
-        }
-      } catch (notifyErr) {
-        console.error(`[PendingProviderCleanup] Failed to notify customer for expired shoot booking ${booking.id}:`, notifyErr);
-      }
-
-      // Notify photographer — unanswered booking request expired (best-effort)
-      try {
-        const photographer = await storage.getPhotographer(booking.photographerId);
-        if (photographer?.userId) {
-          sendExpoPush({
-            userId: photographer.userId,
-            title: 'Booking Request Expired',
-            body: 'A booking request wasn\'t responded to in time and has expired.',
-            data: { type: 'booking_expired', bookingId: booking.id },
-          }).catch(() => {});
-
-          const photographerUser = await storage.getUser(photographer.userId).catch(() => undefined);
-          if (photographerUser?.email) {
-            sendShootBookingExpiredToPhotographer({
-              toEmail: photographerUser.email,
-              photographerName: photographer.displayName || 'Photographer',
-              shootType: booking.shootType || 'Shoot',
-              bookingId: booking.id,
-              date: booking.date,
-            }).catch(() => {});
-          }
-        }
-      } catch (notifyPhotographerErr) {
-        console.error(`[PendingProviderCleanup] Failed to notify photographer for expired shoot booking ${booking.id}:`, notifyPhotographerErr);
-      }
-    }
-  }
-
-  if (expiredAppointments.length > 0 || expiredShootBookings.length > 0) {
-    console.log(`[PendingProviderCleanup] Expired ${expiredAppointments.length} appointments, ${expiredShootBookings.length} shoot bookings`);
-  }
-
-  return {
-    appointments: expiredAppointments.length,
-    shootBookings: expiredShootBookings.length,
-  };
+  // Part C: one expiry path for both tables (release the card hold first, per-row conditional
+  // transition, both sides told once, shoot slot released). See server/manualRequests.ts.
+  const { expireDueRequests, manualRequestDefaultDeps } = await import("./manualRequests");
+  const r = await expireDueRequests(new Date(), await manualRequestDefaultDeps());
+  return { appointments: r.appointments, shootBookings: r.shootBookings };
 }
 
 export function startBookingCleanupJob(intervalMs: number = 60000): NodeJS.Timeout {
@@ -700,11 +466,18 @@ export function startBookingCleanupJob(intervalMs: number = 60000): NodeJS.Timeo
   const cleanup = async () => {
     try {
       await cleanupExpiredDrafts();
-      await cleanupExpiredPendingProvider();
       // Also expire old booking holds
       await expireOldHolds();
     } catch (error) {
       console.error("[BookingCleanup] Error during cleanup:", error);
+    }
+    // Manual-accept requests (Part C): paid checkouts become requests, reminders, expiry.
+    // Own try/catch so it can never starve the steps above or below.
+    try {
+      const { runManualRequestJob } = await import("./manualRequests");
+      await runManualRequestJob();
+    } catch (error) {
+      console.error("[BookingCleanup] Error during manual-request step:", error);
     }
     // Abandoned checkouts (Part B): own try/catch so it can never starve the steps above.
     try {

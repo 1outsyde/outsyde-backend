@@ -383,6 +383,9 @@ export const businesses = pgTable("businesses", {
   autoAcceptBookings: boolean("auto_accept_bookings").default(true).notNull(),
   // Migration 044: business-level bookings may end after closing (start must be in open hours, end by 23:59)
   allowPastClosing: boolean("allow_past_closing").default(false).notNull(),
+  // IANA time zone (e.g. "America/New_York") from the owner's phone or browser (migration 054).
+  // Null = America/New_York. Used for the request deadline and reminder times (Part C).
+  timeZone: text("time_zone"),
   defaultServiceLocationType: text("default_service_location_type").default("business"),
 
   // Storefront display toggles
@@ -864,6 +867,8 @@ export const photographers = pgTable("photographers", {
 
   // Booking settings
   autoAcceptBookings: boolean("auto_accept_bookings").default(true).notNull(),
+  // IANA time zone from the photographer's phone or browser (migration 054). Null = America/New_York.
+  timeZone: text("time_zone"),
 
   // Booking defaults (mirror businesses)
   defaultServiceLocationType: text("default_service_location_type").default("business"),
@@ -1029,6 +1034,8 @@ export const shootBookings = pgTable("shoot_bookings", {
   
   // Pending provider TTL - 24h window for provider to accept/decline (only used when autoAccept=false)
   pendingProviderExpiresAt: timestamp("pending_provider_expires_at"),
+  // When the "request expiring soon" reminder went to the photographer (migration 054). Sent once.
+  providerReminderSentAt: timestamp("provider_reminder_sent_at", { withTimezone: true }),
   
   // Cancellation tracking
   canceledAt: timestamp("canceled_at"),
@@ -1162,6 +1169,8 @@ export const appointments = pgTable("appointments", {
   
   // Pending provider TTL - 24h window for provider to accept/decline (only used when autoAccept=false)
   pendingProviderExpiresAt: timestamp("pending_provider_expires_at"),
+  // When the "request expiring soon" reminder went to the business (migration 054). Sent once.
+  providerReminderSentAt: timestamp("provider_reminder_sent_at", { withTimezone: true }),
   
   // Cancellation tracking
   canceledAt: timestamp("canceled_at"),
