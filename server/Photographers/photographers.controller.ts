@@ -13,6 +13,7 @@ import { resolveCoverVideoValue } from "../coverMedia";
 import { provisionConnectedCatalogItem } from "../services/connectedCatalog";
 import { validatePhotographerDeposit, invalidDepositBody } from "../deposits";
 import { resolvePhotographerSpecialties } from "../../shared/photographerTaxonomy";
+import { filterProviderBookings } from "../providerBookingLists";
 
 // Rate limit for displayName changes (7 days cooldown)
 const DISPLAY_NAME_CHANGE_COOLDOWN_DAYS = 7;
@@ -481,8 +482,10 @@ export class PhotographerController {
         return res.json({ bookings: [], setupRequired: true });
       }
 
-      const bookings = await storage.getPhotographerBookingRecords(photographer.id);
-      const totalEarnedCents = bookings
+      const allBookings = await storage.getPhotographerBookingRecords(photographer.id);
+      // Part D: no draft / unpaid checkouts in the list; ?status=<one status> returns exactly that status.
+      const bookings = filterProviderBookings(allBookings, req.query.status);
+      const totalEarnedCents = allBookings
         // Payouts (net) on bookings whose money was captured and kept. A no-show keeps the deposit.
         .filter(b => b.status === 'confirmed' || b.status === 'completed' || b.status === 'no_show')
         .reduce((sum, b) => sum + (b.vendorNet || 0), 0);

@@ -534,7 +534,7 @@ async function call(method: string, path: string, o: { token?: string; body?: un
     }
 
     // GET /api/business/appointments (vendor) — customerDetails INCLUDED
-    r = await call('GET', '/api/business/appointments', { token: vendorToken });
+    r = await call('GET', '/api/business/appointments?status=pending_payment', { token: vendorToken }) /* Part D: unpaid checkouts only when asked for */;
     if (r.status === 200) {
       const apptRow = r.body?.appointments?.find?.((a: any) => a.businessId === bizId);
       if (apptRow) {
@@ -547,7 +547,7 @@ async function call(method: string, path: string, o: { token?: string; body?: un
     // ────────────────────────────────────────────────────────────────────────────────
     console.log('\n── h. Charge fields on GET /api/business/appointments ──');
     {
-      r = await call('GET', '/api/business/appointments', { token: vendorToken });
+      r = await call('GET', '/api/business/appointments?status=pending_payment', { token: vendorToken }) /* Part D: unpaid checkouts only when asked for */;
       assert(r.status === 200, 'GET /api/business/appointments → 200', r.status);
       const appts: any[] = r.body?.appointments ?? [];
 
