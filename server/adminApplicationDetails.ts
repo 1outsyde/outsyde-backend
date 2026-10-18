@@ -86,6 +86,10 @@ export function isHttpUrl(v: string | null | undefined): v is string {
 
 export type OwnerLike = Pick<User, "name" | "email" | "phone" | "username" | "address" | "city" | "state" | "zipCode" | "createdAt"> & {
   source?: string | null;
+  /** Account state (photographer admin Status section, 2026-10-18). Optional so older callers keep working. */
+  isActive?: boolean | null;
+  deletionStatus?: string | null;
+  scheduledDeletionAt?: Date | string | null;
 };
 
 export function buildVendorApplicationSections(business: Business, owner: OwnerLike | null | undefined): DetailSection[] {

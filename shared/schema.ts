@@ -2650,7 +2650,9 @@ export const photographerSignupSchema = z.object({
   bio: z.string().optional(),
   city: z.string().optional(),
   state: z.string().optional(),
-  hourlyRate: z.number().min(1),
+  // Optional since 2026-10-18 (Legend): photographers who don't price by the hour have no rate.
+  // Saved as 0 when missing (the column is NOT NULL). Units are whatever the client sends (known mix).
+  hourlyRate: z.number().min(1).optional(),
   portfolioUrl: z.string().optional().or(z.literal('')),
   specialties: z.array(z.string()).default([]),
 });
