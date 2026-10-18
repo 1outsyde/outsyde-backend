@@ -455,7 +455,7 @@ export interface IStorage {
   getOrCreateConversation(participant1Id: string, participant2Id: string): Promise<Conversation>;
   getConversation(id: string): Promise<Conversation | undefined>;
   getUserConversations(userId: string): Promise<(Conversation & { otherParticipant: User })[]>;
-  createMessage(data: { conversationId: string; senderId: string; content: string }): Promise<Message>;
+  createMessage(data: { conversationId: string; senderId: string; content: string; mediaItems?: string[] }): Promise<Message>;
   getConversationMessages(conversationId: string, limit?: number, before?: string): Promise<Message[]>;
   markMessagesAsRead(conversationId: string, userId: string): Promise<void>;
   getUnreadCount(userId: string): Promise<number>;
@@ -2295,19 +2295,23 @@ export class DatabaseStorage implements IStorage {
     return enriched.filter(c => c.otherParticipant);
   }
 
-  async createMessage(data: { conversationId: string; senderId: string; content: string }): Promise<Message> {
+  async createMessage(data: { conversationId: string; senderId: string; content: string; mediaItems?: string[] }): Promise<Message> {
     const id = randomUUID();
+    const mediaItems = Array.isArray(data.mediaItems) ? data.mediaItems : [];
     const result = await db.insert(messages).values({
       id,
       conversationId: data.conversationId,
       senderId: data.senderId,
       content: data.content,
+      mediaItems,
     }).returning();
 
-    // Update conversation's last message info
-    const preview = data.content.length > 50 
-      ? data.content.substring(0, 50) + '...' 
-      : data.content;
+    // Update conversation's last message info ("Sent a photo" when there is no text)
+    const { messageSummary } = await import('./messaging/messageRules');
+    const summary = messageSummary(data.content, mediaItems);
+    const preview = summary.length > 50 
+      ? summary.substring(0, 50) + '...' 
+      : summary;
     
     await db.update(conversations)
       .set({ 

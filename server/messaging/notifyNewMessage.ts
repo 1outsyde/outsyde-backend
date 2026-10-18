@@ -13,6 +13,8 @@
  * Deps are injectable so the rules can be unit tested without a database or network.
  */
 
+import { messageSummary } from "./messageRules";
+
 export const PUSH_PREVIEW_MAX = 50;
 
 /** Lock screen preview: trimmed text, cut at 50 chars with an ellipsis. */
@@ -27,8 +29,10 @@ export interface NotifyNewMessageInput {
   messageId: string;
   senderId: string;
   recipientId: string;
-  /** The message text as stored. */
+  /** The message text as stored ('' for a photo only message). */
   content: string;
+  /** Photo URLs on the message (preview becomes "Sent a photo" when there is no text). */
+  mediaItems?: string[];
   /** Sender's public name (business name for vendors). Falls back to "New message". */
   senderPublicName: string | null;
 }
@@ -55,7 +59,7 @@ export async function notifyNewMessage(input: NotifyNewMessageInput, deps: Notif
   if (!input.recipientId || input.recipientId === input.senderId) return result;
 
   const title = (input.senderPublicName || "").trim() || "New message";
-  const body = buildMessagePreview(input.content) || "New message";
+  const body = buildMessagePreview(messageSummary(input.content, input.mediaItems)) || "New message";
 
   let badgeCount: number | null = null;
   try {

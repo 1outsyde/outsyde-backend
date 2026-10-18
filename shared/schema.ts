@@ -1505,6 +1505,8 @@ export const messages = pgTable("messages", {
   senderId: varchar("sender_id", { length: 36 }).notNull().references(() => users.id),
 
   content: text("content").notNull(),
+  // Up to 10 photo URLs (R2 "messages" folder). '[]' = text only. Migration 054.
+  mediaItems: jsonb("media_items").$type<string[]>().notNull().default([]),
 
   isRead: boolean("is_read").default(false).notNull(),
   readAt: timestamp("read_at"),

@@ -3,7 +3,7 @@ import type { Server } from "http";
 import { storage } from "./storage";
 import { verifyAccessToken } from "./auth";
 import { notifyNewMessageInBackground } from "./messaging/notifyNewMessage";
-import { checkMessageContent, isRepeatedMessage } from "./messaging/messageRules";
+import { checkOutgoingMessage, isRepeatedMessage, toClientMessage } from "./messaging/messageRules";
 import { resolvePublicIdentity } from "./publicIdentity";
 
 interface AuthenticatedWebSocket extends WebSocket {
@@ -150,7 +150,7 @@ async function handleAuth(ws: AuthenticatedWebSocket, payload: { token: string }
   }
 }
 
-async function handleSendMessage(ws: AuthenticatedWebSocket, payload: { conversationId: string; content: string }) {
+async function handleSendMessage(ws: AuthenticatedWebSocket, payload: { conversationId: string; content?: string; mediaItems?: string[] }) {
   if (!ws.userId) {
     ws.send(JSON.stringify({ type: "error", payload: { message: "Not authenticated" } }));
     return;
@@ -177,14 +177,14 @@ async function handleSendMessage(ws: AuthenticatedWebSocket, payload: { conversa
       ws.send(JSON.stringify({ type: "error", payload: { message: "You cannot send messages in this conversation." } }));
       return;
     }
-    const check = checkMessageContent(payload?.content);
+    const check = checkOutgoingMessage(payload, process.env.R2_PUBLIC_URL);
     if (!check.ok) {
       ws.send(JSON.stringify({ type: "error", payload: { message: check.message } }));
       return;
     }
-    const content = check.content;
+    const { content, mediaItems } = check;
     const recentMessages = await storage.getConversationMessages(payload.conversationId, 5);
-    if (isRepeatedMessage(recentMessages, ws.userId, content)) {
+    if (isRepeatedMessage(recentMessages, ws.userId, content, mediaItems)) {
       ws.send(JSON.stringify({ type: "error", payload: { message: "Please avoid sending the same message repeatedly." } }));
       return;
     }
@@ -193,6 +193,7 @@ async function handleSendMessage(ws: AuthenticatedWebSocket, payload: { conversa
       conversationId: payload.conversationId,
       senderId: ws.userId,
       content,
+      mediaItems,
     });
 
     const sender = await storage.getUser(ws.userId);
@@ -200,7 +201,7 @@ async function handleSendMessage(ws: AuthenticatedWebSocket, payload: { conversa
     const senderPublicName = sender ? (await resolvePublicIdentity(sender)).publicName : null;
 
     const messagePayload = {
-      ...message,
+      ...toClientMessage(message),
       senderName: senderPublicName || "Unknown",
     };
 
@@ -217,6 +218,7 @@ async function handleSendMessage(ws: AuthenticatedWebSocket, payload: { conversa
         senderId: ws.userId,
         recipientId,
         content,
+        mediaItems,
         senderPublicName,
       });
     }
