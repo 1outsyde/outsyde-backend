@@ -75,6 +75,14 @@ function assert(condition: boolean, name: string, detail?: unknown) {
   assert(ledger.pointsValueCents(2500) === 500, '2500 points are worth $5');
   assert(ledger.promoMinimumBaseCents(500) === 5000, '$5 code needs a $50 order');
   assert(ledger.promoMinimumBaseCents(10000) === 100000, '$100 code needs a $1,000 order');
+  // Bookings (2026-10-18): 10x of what is paid online now, before the fee.
+  assert(ledger.bookingMaxDiscountCents(5400) === 500, '$50 paid online ($54 due now) takes up to a $5 code');
+  assert(ledger.bookingMaxDiscountCents(3240) === 300, '$30 deposit ($32.40 due now) takes at most $3, so no tier code');
+  assert(ledger.bookingMaxDiscountCents(10800) === 1000, '$100 paid online takes up to a $10 code');
+  assert(ledger.bookingMaxDiscountCents(0) === 0, 'nothing due now: no code');
+  let baseMismatch = 0;
+  for (let b = 1; b <= 1000000; b++) if (ledger.baseFromGrossCents(b + Math.round(b * 0.08)) !== b) baseMismatch++;
+  assert(baseMismatch === 0, 'base recovered exactly from due now for every price up to $10,000');
 
   console.log('\n2. Product earn: credited once, even on retries and parallel deliveries');
   {

@@ -5676,8 +5676,8 @@ export async function registerRoutes(
     };
   }
 
-  // Check a points code for a booking before anything is written. Bookings: any code while the
-  // customer still pays at least $1 now (loyaltyLedger.ts bookingMaxDiscountCents).
+  // Check a points code for a booking before anything is written. Bookings: what is paid online
+  // now, before the service fee, must be at least 10x the code (loyaltyLedger.ts bookingMaxDiscountCents).
   async function checkBookingPromo(promoCodeId: string, userId: string, dueNowCents: number):
     Promise<{ ok: true; promo: NonNullable<BookingPromo> } | { ok: false; status: number; body: Record<string, unknown> }> {
     const row = await getPromoCodeRow(promoCodeId);
@@ -5690,9 +5690,10 @@ export async function registerRoutes(
         ok: false,
         status: 400,
         body: {
-          error: `This code is worth more than this booking. Pick a code of $${(maxCents / 100).toFixed(2)} or less.`,
+          error: `This code needs at least $${(promoMinimumBaseCents(row.discountCents) / 100).toFixed(2)} paid online for this booking, before the service fee.`,
           code: 'PROMO_TOO_LARGE',
           maxDiscountCents: maxCents,
+          minimumOrderCents: promoMinimumBaseCents(row.discountCents),
         },
       };
     }
@@ -16762,17 +16763,18 @@ export async function registerRoutes(
         return res.status(400).json({ error: result.reason });
       }
 
-      // Optional: a booking's amount due now. Bookings take any code while at least $1 is still
-      // charged now (no 10x minimum).
+      // Optional: a booking's amount due now. Bookings use the 10x rule on what is paid online now,
+      // before the service fee.
       const minimumOrderCents = promoMinimumBaseCents(result.discountCents!);
       const bookingDueNowCents = Number(req.body?.bookingDueNowCents);
       if (Number.isFinite(bookingDueNowCents) && bookingDueNowCents > 0) {
         const maxDiscountCents = bookingMaxDiscountCents(bookingDueNowCents);
         if (result.discountCents! > maxDiscountCents) {
           return res.status(400).json({
-            error: `This code is worth more than this booking. Pick a code of $${(maxDiscountCents / 100).toFixed(2)} or less.`,
+            error: `This code needs at least $${(minimumOrderCents / 100).toFixed(2)} paid online for this booking, before the service fee.`,
             code: 'PROMO_TOO_LARGE',
             maxDiscountCents,
+            minimumOrderCents,
           });
         }
         return res.json({
