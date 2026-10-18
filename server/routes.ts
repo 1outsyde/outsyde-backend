@@ -218,6 +218,7 @@ import {
 } from "@shared/photographerTaxonomy";
 import { buildSignupDetailsPayload } from "./adminApplicationDetails";
 import { buildPhotographerSignupDetailsPayload, photographerSpecialtyNames } from "./photographerApplicationDetails";
+import { buildCustomerSignupDetailsPayload } from "./customerSignupDetails";
 import { and, ilike, ne, asc } from "drizzle-orm";
 
 import { createStory, getStoriesByUser, getStory, deleteStory, recordView, createStoryHighlight, getStoryHighlights, deleteStoryHighlight } from "./services/stories";
@@ -20971,7 +20972,15 @@ export async function registerRoutes(
           isActive: user.isActive,
           createdAt: user.createdAt,
           loyaltyPoints: user.loyaltyPoints,
+          // Additive (2026-10-18): every signup answer for the admin user screens. Never
+          // password, reset fields, Stripe ids or ethnicity.
+          username: user.username,
+          profileImageUrl: user.profileImageUrl ?? null,
+          source: user.source ?? null,
+          deletionStatus: user.deletionStatus ?? "active",
+          scheduledDeletionAt: user.scheduledDeletionAt ?? null,
         },
+        signupDetails: buildCustomerSignupDetailsPayload(user),
         business,
         photographer,
         orders,
