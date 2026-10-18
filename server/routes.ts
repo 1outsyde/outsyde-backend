@@ -5789,6 +5789,8 @@ export async function registerRoutes(
     current: BookingPromo;
     requestedId: string | null;
     saveRow: (promo: BookingPromo) => Promise<void>;
+    /** Forget the PaymentIntent (it was cancelled) so the next request for this hold resumes with a new one. */
+    dropPaymentIntent: () => Promise<void>;
   }): Promise<{ ok: true; promo: BookingPromo } | { ok: false; status: number; body: Record<string, unknown> }> {
     const { ref, userId, paymentIntent, dueNowCents, current, requestedId } = opts;
     if ((requestedId ?? null) === (current?.id ?? null)) return { ok: true, promo: current };
@@ -5839,6 +5841,10 @@ export async function registerRoutes(
     await releasePromoReservationsExcept(ref, truth?.id ?? null).catch(err => console.error(`[Promo] release for ${ref.type} ${ref.id} failed:`, err));
 
     if (truth && !(await confirmPromoStillHeld(truth.id, ref, paymentIntent.id))) {
+      // confirmPromoStillHeld cancelled this PaymentIntent: without this the hold would be stuck
+      // on "A payment attempt for this hold already exists".
+      await opts.saveRow(null).catch(() => {});
+      await opts.dropPaymentIntent().catch(err => console.error(`[Promo] Could not clear PaymentIntent on ${ref.type} ${ref.id}:`, err));
       return { ok: false, status: 409, body: PROMO_TAKEN_RESPONSE };
     }
     return { ok: true, promo: truth };
@@ -6044,6 +6050,10 @@ export async function registerRoutes(
                 current: saved,
                 requestedId: requestedPromoChange(req, saved),
                 saveRow: async (promo) => { saved = promo; await saveShootPromo(existingShoot.id, promo); },
+                dropPaymentIntent: async () => {
+                  await db.update(shootBookings).set({ stripePaymentIntentId: null, updatedAt: new Date() })
+                    .where(eq(shootBookings.id, existingShoot.id));
+                },
               });
               if (!changed.ok) return res.status(changed.status).json(changed.body);
               return res.json({
@@ -6288,6 +6298,10 @@ export async function registerRoutes(
               current: existingCurrentPromo,
               requestedId: requestedPromoChange(req, existingCurrentPromo),
               saveRow: saveExistingPromo,
+              dropPaymentIntent: async () => {
+                await db.update(appointments).set({ stripePaymentIntentId: null, updatedAt: new Date() })
+                  .where(eq(appointments.id, existing.id));
+              },
             });
             if (!changed.ok) return res.status(changed.status).json(changed.body);
             return res.json({
