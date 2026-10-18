@@ -38,6 +38,8 @@ import { sendStaffInviteEmail, sendStaffPayoutSetupEmail, sendStaffAcceptedOwner
 import { checkVendorStripeBalances, checkActiveOrders } from "./services/accountDeletionService";
 import { sendBookingAcceptedToConsumer, sendBookingDeclinedToConsumer, sendBookingRequestToVendor, sendBookingRequestReceivedToConsumer, sendAdminBookingAlert, sendShootBookingAcceptedToPhotographer, sendShootBookingDeclinedToPhotographer, sendShootBookingCanceledToPhotographer, sendAftercareEmail, sendPhotographerWelcomeEmail } from "./emailService";
 import { sendExpoPush } from "./expoPushService";
+import { notifyNewMessageInBackground } from "./messaging/notifyNewMessage";
+import { checkMessageContent, isRepeatedMessage } from "./messaging/messageRules";
 
 // TEMP_MANUAL_ACCEPT_GUARD — delete this helper in its own PR after P1 #6 is proven.
 const MANUAL_ACCEPT_DISABLED_BODY = {
@@ -16123,7 +16125,8 @@ export async function registerRoutes(
 
   // Get user's conversations
   app.get("/api/conversations", async (req, res) => {
-    const userId = req.session?.userId;
+    // App token first (session cookie expires after 7 days), else web session.
+    const userId = getUserIdFromRequest(req);
     if (!userId) {
       return res.status(401).json({ error: "Not authenticated" });
     }
@@ -16167,7 +16170,8 @@ export async function registerRoutes(
 
   // Get or create conversation with another user
   app.post("/api/conversations", async (req, res) => {
-    const userId = req.session?.userId;
+    // App token first (session cookie expires after 7 days), else web session.
+    const userId = getUserIdFromRequest(req);
     if (!userId) {
       return res.status(401).json({ error: "Not authenticated" });
     }
@@ -16280,7 +16284,8 @@ export async function registerRoutes(
 
   // Get messages in a conversation
   app.get("/api/conversations/:id/messages", async (req, res) => {
-    const userId = req.session?.userId;
+    // App token first (session cookie expires after 7 days), else web session.
+    const userId = getUserIdFromRequest(req);
     if (!userId) {
       return res.status(401).json({ error: "Not authenticated" });
     }
@@ -16313,7 +16318,8 @@ export async function registerRoutes(
   // Send a message (REST fallback - WebSocket preferred)
   // Note: General API rate limiting (100 req/min authenticated) applies
   app.post("/api/conversations/:id/messages", async (req, res) => {
-    const userId = req.session?.userId;
+    // App token first (session cookie expires after 7 days), else web session.
+    const userId = getUserIdFromRequest(req);
     if (!userId) {
       return res.status(401).json({ error: "Not authenticated" });
     }
@@ -16340,29 +16346,15 @@ export async function registerRoutes(
         });
       }
 
-      const messageSchema = z.object({
-        content: z.string()
-          .min(1, "Message content is required")
-          .max(2000, "Message cannot exceed 2000 characters"),
-      });
-      const { content } = messageSchema.parse(req.body);
-
-      // Basic content abuse detection
-      const urlPattern = /(https?:\/\/[^\s]+)/gi;
-      const urlCount = (content.match(urlPattern) || []).length;
-      if (urlCount > 5) {
-        return res.status(400).json({ 
-          error: "Message contains too many links",
-          message: "Messages cannot contain more than 5 links."
-        });
+      const check = checkMessageContent(req.body?.content);
+      if (!check.ok) {
+        return res.status(check.status).json({ error: check.error, message: check.message });
       }
+      const content = check.content;
 
       // Detect repeated message spam (same content sent rapidly)
       const recentMessages = await storage.getConversationMessages(req.params.id, 5);
-      const duplicateCount = recentMessages.filter(
-        m => m.senderId === userId && m.content === content
-      ).length;
-      if (duplicateCount >= 2) {
+      if (isRepeatedMessage(recentMessages, userId, content)) {
         return res.status(400).json({ 
           error: "Duplicate message detected",
           message: "Please avoid sending the same message repeatedly."
@@ -16375,54 +16367,25 @@ export async function registerRoutes(
         content,
       });
 
-      // ============================================================
-      // PUSH NOTIFICATION: Send to recipient (REST fallback)
-      // Note: WebSocket handler also sends push notifications
-      // ============================================================
+      // Push to the recipient (app + web). Fire and forget: never delays or fails the send.
       try {
-        const { sendPushNotification, isPushConfigured } = await import('./pushService');
-        if (isPushConfigured()) {
-          const subscriptions = await storage.getUserPushSubscriptions(otherUserId);
-          if (subscriptions.length > 0) {
-            const sender = await storage.getUser(userId);
-            const { resolvePublicIdentity } = await import('./publicIdentity');
-            const senderPublicName = sender ? (await resolvePublicIdentity(sender)).publicName : null;
-            const totalUnreadCount = await storage.getUnreadCount(otherUserId);
-            
-            const messagePreview = content.length > 50 
-              ? content.substring(0, 47) + "..." 
-              : content;
-            
-            const pushPayload = {
-              title: senderPublicName || "New Message",
-              body: messagePreview,
-              url: `/messages?conversation=${req.params.id}`,
-              tag: `message-${req.params.id}`,
-              data: {
-                type: "new_message",
-                conversationId: req.params.id,
-                senderDisplayName: senderPublicName || "Unknown",
-                messagePreview,
-                badgeCount: totalUnreadCount,
-              },
-            };
-            
-            for (const subscription of subscriptions) {
-              await sendPushNotification(subscription, pushPayload);
-            }
-            console.log(`[PUSH/REST] Sent message notification to ${otherUserId}`);
-          }
-        }
+        const sender = await storage.getUser(userId);
+        const { resolvePublicIdentity } = await import('./publicIdentity');
+        const senderPublicName = sender ? (await resolvePublicIdentity(sender)).publicName : null;
+        notifyNewMessageInBackground({
+          conversationId: req.params.id,
+          messageId: message.id,
+          senderId: userId,
+          recipientId: otherUserId,
+          content,
+          senderPublicName,
+        });
       } catch (pushError) {
         console.error("Push notification error (REST):", pushError);
-        // Don't fail message send if push fails
       }
 
       res.json({ message });
     } catch (error) {
-      if (error instanceof z.ZodError) {
-        return res.status(400).json({ error: "Invalid data", details: error.errors });
-      }
       console.error("Send message error:", error);
       res.status(500).json({ error: "Failed to send message" });
     }
@@ -16430,7 +16393,8 @@ export async function registerRoutes(
 
   // Get unread message count (total across all conversations)
   app.get("/api/messages/unread-count", async (req, res) => {
-    const userId = req.session?.userId;
+    // App token first (session cookie expires after 7 days), else web session.
+    const userId = getUserIdFromRequest(req);
     if (!userId) {
       return res.status(401).json({ error: "Not authenticated" });
     }
@@ -16625,7 +16589,8 @@ export async function registerRoutes(
 
   // Get user's submitted reports
   app.get("/api/messages/my-reports", async (req, res) => {
-    const userId = req.session?.userId;
+    // App token first (session cookie expires after 7 days), else web session.
+    const userId = getUserIdFromRequest(req);
     if (!userId) {
       return res.status(401).json({ error: "Not authenticated" });
     }

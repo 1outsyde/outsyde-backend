@@ -2,7 +2,8 @@ import { WebSocketServer, WebSocket } from "ws";
 import type { Server } from "http";
 import { storage } from "./storage";
 import { verifyAccessToken } from "./auth";
-import { sendPushNotification, isPushConfigured } from "./pushService";
+import { notifyNewMessageInBackground } from "./messaging/notifyNewMessage";
+import { checkMessageContent, isRepeatedMessage } from "./messaging/messageRules";
 import { resolvePublicIdentity } from "./publicIdentity";
 
 interface AuthenticatedWebSocket extends WebSocket {
@@ -156,7 +157,7 @@ async function handleSendMessage(ws: AuthenticatedWebSocket, payload: { conversa
   }
 
   try {
-    const conversation = await storage.getConversation(payload.conversationId);
+    const conversation = await storage.getConversation(payload?.conversationId);
     if (!conversation) {
       ws.send(JSON.stringify({ type: "error", payload: { message: "Conversation not found" } }));
       return;
@@ -167,10 +168,31 @@ async function handleSendMessage(ws: AuthenticatedWebSocket, payload: { conversa
       return;
     }
 
+    const recipientId = conversation.participant1Id === ws.userId 
+      ? conversation.participant2Id 
+      : conversation.participant1Id;
+
+    // Same rules as the REST send (R23): block check, content check, repeat check.
+    if (await storage.isUserBlockedEitherWay(ws.userId, recipientId)) {
+      ws.send(JSON.stringify({ type: "error", payload: { message: "You cannot send messages in this conversation." } }));
+      return;
+    }
+    const check = checkMessageContent(payload?.content);
+    if (!check.ok) {
+      ws.send(JSON.stringify({ type: "error", payload: { message: check.message } }));
+      return;
+    }
+    const content = check.content;
+    const recentMessages = await storage.getConversationMessages(payload.conversationId, 5);
+    if (isRepeatedMessage(recentMessages, ws.userId, content)) {
+      ws.send(JSON.stringify({ type: "error", payload: { message: "Please avoid sending the same message repeatedly." } }));
+      return;
+    }
+
     const message = await storage.createMessage({
       conversationId: payload.conversationId,
       senderId: ws.userId,
-      content: payload.content,
+      content,
     });
 
     const sender = await storage.getUser(ws.userId);
@@ -184,54 +206,19 @@ async function handleSendMessage(ws: AuthenticatedWebSocket, payload: { conversa
 
     ws.send(JSON.stringify({ type: "message_sent", payload: messagePayload }));
 
-    const recipientId = conversation.participant1Id === ws.userId 
-      ? conversation.participant2Id 
-      : conversation.participant1Id;
-
     // Send real-time WebSocket message
     sendToUser(recipientId, { type: "new_message", payload: messagePayload });
 
-    // ============================================================
-    // PUSH NOTIFICATION: Send if recipient is NOT actively viewing this conversation
-    // ============================================================
-    const isRecipientViewingConversation = isUserViewingConversation(recipientId, payload.conversationId);
-    
-    if (!isRecipientViewingConversation && isPushConfigured()) {
-      try {
-        const subscriptions = await storage.getUserPushSubscriptions(recipientId);
-        if (subscriptions.length > 0) {
-          // Get total unread count for badge
-          const totalUnreadCount = await storage.getUnreadCount(recipientId);
-          
-          // Create preview (first 50 chars)
-          const messagePreview = payload.content.length > 50 
-            ? payload.content.substring(0, 47) + "..." 
-            : payload.content;
-          
-          const pushPayload = {
-            title: senderPublicName || "New Message",
-            body: messagePreview,
-            url: `/messages?conversation=${payload.conversationId}`,
-            tag: `message-${payload.conversationId}`, // Group by conversation
-            data: {
-              type: "new_message",
-              conversationId: payload.conversationId,
-              senderDisplayName: senderPublicName || "Unknown",
-              messagePreview,
-              badgeCount: totalUnreadCount,
-            },
-          };
-          
-          // Send to all devices
-          for (const subscription of subscriptions) {
-            await sendPushNotification(subscription, pushPayload);
-          }
-          console.log(`[PUSH] Sent message notification to ${recipientId} (${subscriptions.length} devices)`);
-        }
-      } catch (pushError) {
-        console.error("Push notification error:", pushError);
-        // Don't fail message send if push fails
-      }
+    // Push (app + web) unless the recipient is looking at this conversation right now.
+    if (!isUserViewingConversation(recipientId, payload.conversationId)) {
+      notifyNewMessageInBackground({
+        conversationId: payload.conversationId,
+        messageId: message.id,
+        senderId: ws.userId,
+        recipientId,
+        content,
+        senderPublicName,
+      });
     }
   } catch (error) {
     console.error("Send message error:", error);
