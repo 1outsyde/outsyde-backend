@@ -93,7 +93,7 @@ export function sanitizeUserForResponse(user: User, options: { includeOwnData?: 
   };
 }
 import { eq, desc, sql, gte, lte, or, isNull, gt, inArray, and } from "drizzle-orm";
-import { validateOptionsPayload, planVariantSync, withEffectivePrice } from "./productOptions";
+import { validateOptionsPayload, planVariantSync, withEffectivePrice, summarizeVariants, type VariantSummary } from "./productOptions";
 import { z } from "zod";
 import {
   hashPassword,
@@ -11983,7 +11983,42 @@ export async function registerRoutes(
       const products = await storage.getVendorProducts(req.params.id);
       // Only return active AND live products for public view
       const liveProducts = products.filter(p => p.isActive && p.status === 'live');
-      res.json({ products: liveProducts });
+      // variantSummary for storefront cards ("From $125 · 11 lengths"): null when
+      // a product has no active variations. Added field only; if the lookup fails
+      // the list is returned exactly as before.
+      let withSummary: Array<(typeof liveProducts)[number] & { variantSummary?: VariantSummary | null }> = liveProducts;
+      const ids = liveProducts.map((p) => p.id);
+      if (ids.length > 0) {
+        try {
+          const [variantRows, optionRows] = await Promise.all([
+            db
+              .select({
+                productId: productVariants.productId,
+                priceCents: productVariants.priceCents,
+                option1: productVariants.option1,
+                option2: productVariants.option2,
+                option3: productVariants.option3,
+              })
+              .from(productVariants)
+              .where(and(inArray(productVariants.productId, ids), eq(productVariants.isActive, true))),
+            db
+              .select({ productId: productOptions.productId, position: productOptions.position, name: productOptions.name })
+              .from(productOptions)
+              .where(inArray(productOptions.productId, ids)),
+          ]);
+          withSummary = liveProducts.map((p) => ({
+            ...p,
+            variantSummary: summarizeVariants(
+              p.price,
+              variantRows.filter((v) => v.productId === p.id),
+              optionRows.filter((o) => o.productId === p.id),
+            ),
+          }));
+        } catch (summaryError) {
+          console.error("Get business products: variant summary failed, returning list without it:", summaryError);
+        }
+      }
+      res.json({ products: withSummary });
     } catch (error) {
       console.error("Get business products error:", error);
       res.status(500).json({ error: "Failed to get products" });
