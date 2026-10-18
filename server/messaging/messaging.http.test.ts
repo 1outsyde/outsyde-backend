@@ -166,11 +166,54 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
     assert(wsPush.length === 1 && wsPush[0].to === tokenFor("owner"), "websocket send → one Expo push to the recipient", wsPush);
     ws.close();
 
+    console.log("websocket: other people's chats");
+    const ws2 = new WS(wsUrl);
+    const inbox2: any[] = [];
+    ws2.on("message", (d: any) => inbox2.push(JSON.parse(String(d))));
+    await new Promise((r) => ws2.on("open", r));
+    ws2.send(JSON.stringify({ type: "auth", payload: { token: bearer("blocker").Authorization.slice(7) } }));
+    await sleep(400);
+    await q(`UPDATE messages SET is_read = false WHERE conversation_id = $1`, [convId]);
+    ws2.send(JSON.stringify({ type: "mark_read", payload: { conversationId: convId } }));
+    ws2.send(JSON.stringify({ type: "focus_conversation", payload: { conversationId: convId } }));
+    await sleep(800);
+    const stillUnread = (await q(`SELECT count(*)::int n FROM messages WHERE conversation_id = $1 AND is_read = false`, [convId]))[0].n;
+    assert(stillUnread > 0, "non-participant mark_read / focus leaves messages unread", stillUnread);
+    assert(!inbox2.some((m) => m.type === "messages_read"), "non-participant gets no messages_read ack");
+    ws2.close();
+
+    console.log("report a message");
+    const anyMsg = (await q(`SELECT id, sender_id FROM messages WHERE conversation_id = $1 AND sender_id = $2 LIMIT 1`, [convId, id("owner")]))[0];
+    const rep = await call("POST", `/api/messages/${anyMsg.id}/report`, bearer("customer"), { reason: "Spam" });
+    assert(rep.status === 200 && rep.json?.report?.reportedUserId === id("owner") && rep.json?.report?.conversationId === convId, "app shape { reason } works; conversation + reported user come from the message", rep.json);
+    const repOther = await call("POST", `/api/messages/${anyMsg.id}/report`, bearer("blocker"), { reason: "Spam", conversationId: convId, reportedUserId: id("customer") });
+    assert(repOther.status === 403, "non-participant can't report a message in someone else's chat", repOther.status);
+    const repOwn = await call("POST", `/api/messages/${anyMsg.id}/report`, bearer("owner"), { reason: "Spam" });
+    assert(repOwn.status === 400, "can't report your own message", repOwn.status);
+    const repMissing = await call("POST", `/api/messages/00000000-0000-0000-0000-000000000000/report`, bearer("customer"), { reason: "Spam" });
+    assert(repMissing.status === 404, "unknown message → 404", repMissing.status);
+    await q(`DELETE FROM message_reports WHERE reporter_id = ANY($1)`, [[id("customer"), id("owner"), id("blocker")]]);
+
+    console.log("push token: one phone, one account");
+    const shared = tokenFor("customer");
+    const reg = await call("POST", "/api/push/expo-token", bearer("owner"), { expoPushToken: shared });
+    assert(reg.status === 200, "owner registers the phone the customer used", reg.status);
+    const holders = await q(`SELECT id FROM users WHERE expo_push_token = $1`, [shared]);
+    assert(holders.length === 1 && holders[0].id === id("owner"), "token removed from the customer's account", holders);
+    const delWrong = await call("DELETE", "/api/push/expo-token", bearer("owner"), { expoPushToken: "ExponentPushToken[other]" });
+    const stillHas = (await q(`SELECT expo_push_token t FROM users WHERE id = $1`, [id("owner")]))[0].t;
+    assert(delWrong.status === 200 && stillHas === shared, "sign out with a different token leaves the current one", stillHas);
+    const del = await call("DELETE", "/api/push/expo-token", bearer("owner"), { expoPushToken: shared });
+    const cleared = (await q(`SELECT expo_push_token t FROM users WHERE id = $1`, [id("owner")]))[0].t;
+    assert(del.status === 200 && cleared === null, "sign out clears this phone's token", cleared);
+    assert((await call("DELETE", "/api/push/expo-token")).status === 401, "sign out without auth → 401");
+
     const notifCountAfter = (await q(`SELECT count(*)::int n FROM notifications WHERE user_id = ANY($1)`, [[id("customer"), id("owner"), id("blocker")]]))[0].n;
     assert(notifCountAfter === notifCountBefore, "no notifications rows created by messages", { notifCountBefore, notifCountAfter });
   } finally {
     // ── clean up ───────────────────────────────────────────────────────
     const ids = [id("customer"), id("owner"), id("blocker")];
+    await q(`DELETE FROM message_reports WHERE reporter_id = ANY($1)`, [ids]);
     await q(`DELETE FROM messages WHERE sender_id = ANY($1)`, [ids]);
     await q(`DELETE FROM conversations WHERE participant1_id = ANY($1) OR participant2_id = ANY($1)`, [ids]);
     await q(`DELETE FROM user_blocks WHERE blocker_id = ANY($1)`, [ids]);

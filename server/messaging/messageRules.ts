@@ -14,6 +14,8 @@
 export const MESSAGE_MAX_CHARS = 2000;
 export const MESSAGE_MAX_LINKS = 5;
 export const MESSAGE_MAX_PHOTOS = 10;
+/** File name the upload route gives a message photo: uuid v4 + image extension (services/r2.ts). */
+const MESSAGE_PHOTO_NAME = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.(jpeg|jpg|png|webp|heic|heif|gif)$/i;
 
 export type MessageCheck =
   | { ok: true; content: string }
@@ -53,8 +55,16 @@ export function checkOutgoingMessage(body: { content?: unknown; mediaItems?: unk
     }
     mediaItems = rawMedia as string[];
     if (mediaItems.length > 0) {
-      const prefix = r2PublicUrl ? `${r2PublicUrl.replace(/\/+$/, "")}/messages/` : null;
-      if (!prefix || !mediaItems.every((u) => u.startsWith(prefix))) {
+      // services/r2.ts builds `${R2_PUBLIC_URL}/${key}` as is; accept that exact form and the
+      // trimmed form, so a trailing "/" in the env value can't break every photo send.
+      const prefixes = r2PublicUrl
+        ? Array.from(new Set([`${r2PublicUrl}/messages/`, `${r2PublicUrl.replace(/\/+$/, "")}/messages/`]))
+        : [];
+      const prefix = prefixes[0] || null;
+      // Exactly what the upload route produces: <prefix><uuid>.<image ext>. No "..", query or hash.
+      const isUpload = (u: string) =>
+        prefixes.some((p) => u.startsWith(p) && MESSAGE_PHOTO_NAME.test(u.slice(p.length)));
+      if (!prefix || !mediaItems.every(isUpload)) {
         return { ok: false, status: 400, error: "Invalid data", message: "Photos must be uploaded through Outsyde", code: "INVALID_MEDIA_URL" };
       }
     }

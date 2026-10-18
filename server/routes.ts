@@ -16574,12 +16574,24 @@ export async function registerRoutes(
     }
 
     try {
+      // Only the reason comes from the client (the app sends { reason } only). The conversation and the
+      // reported person are read from the message itself, and the reporter must be in that chat.
       const reportSchema = z.object({
         reason: z.string().min(1, "Reason is required").max(500, "Reason too long"),
-        conversationId: z.string(),
-        reportedUserId: z.string(),
       });
-      const { reason, conversationId, reportedUserId } = reportSchema.parse(req.body);
+      const { reason } = reportSchema.parse(req.body);
+
+      const { messages: messagesTable } = await import("@shared/schema");
+      const [reported] = await db.select().from(messagesTable).where(eq(messagesTable.id, req.params.messageId)).limit(1);
+      if (!reported) {
+        return res.status(404).json({ error: "Message not found" });
+      }
+      const conversation = await storage.getConversation(reported.conversationId);
+      if (!conversation || (conversation.participant1Id !== reporterId && conversation.participant2Id !== reporterId)) {
+        return res.status(403).json({ error: "Not a participant in this conversation" });
+      }
+      const conversationId = reported.conversationId;
+      const reportedUserId = reported.senderId;
 
       if (reporterId === reportedUserId) {
         return res.status(400).json({ error: "You cannot report your own messages" });
@@ -17159,11 +17171,37 @@ export async function registerRoutes(
         return res.status(400).json({ success: false, message: "expoPushToken is required" });
       }
 
+      // One phone = one account. A phone that signs into another account must stop getting the
+      // previous account's pushes (message previews), so remove this token from every other user.
+      const { users: usersTable } = await import("@shared/schema");
+      await db.update(usersTable).set({ expoPushToken: null })
+        .where(and(eq(usersTable.expoPushToken, expoPushToken), sql`${usersTable.id} <> ${userId}`));
       await storage.updateUser(userId, { expoPushToken });
       res.json({ success: true, message: "Push token registered" });
     } catch (error) {
       console.error("Register Expo token error:", error);
       res.status(500).json({ success: false, message: "Failed to register push token" });
+    }
+  });
+
+  // Sign out on a phone: stop pushes for this account on that phone. Only clears the token if it
+  // still matches the one the phone sends (another phone may have registered since).
+  app.delete("/api/push/expo-token", async (req, res) => {
+    const userId = getUserIdFromRequest(req);
+    if (!userId) {
+      return res.status(401).json({ success: false, message: "Authentication required" });
+    }
+    try {
+      const expoPushToken = req.body?.expoPushToken;
+      const { users: usersTable } = await import("@shared/schema");
+      const where = typeof expoPushToken === "string" && expoPushToken
+        ? and(eq(usersTable.id, userId), eq(usersTable.expoPushToken, expoPushToken))
+        : eq(usersTable.id, userId);
+      await db.update(usersTable).set({ expoPushToken: null }).where(where);
+      res.json({ success: true });
+    } catch (error) {
+      console.error("Unregister Expo token error:", error);
+      res.status(500).json({ success: false, message: "Failed to unregister push token" });
     }
   });
 

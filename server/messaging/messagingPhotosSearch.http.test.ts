@@ -55,12 +55,15 @@ const JPEG = Buffer.from("/9j/4AAQSkZJRgABAQEASABIAAD/2wBDAP////////////////////
     blocker: { name: `Braids${P} Blocker` },
     banned: { name: `Braids${P} Banned`, active: false },
     gone: { name: `Braids${P} Gone`, deleted: true },
+    zed: { name: `Zedd${P} Sur${P}` },
+    mail: { name: "" },
   };
   for (const [who, v] of Object.entries(people)) {
     await q(`INSERT INTO users (id, username, email, password, name, expo_push_token, is_vendor, is_photographer, is_active, deletion_status)
              VALUES ($1::varchar, $2, $3, 'x', $4, $5, $6, $7, $8, $9)`,
       [id(who), `${who}_${P}`, `${id(who)}@x.test`, v.name, `ExponentPushToken[${id(who)}]`, !!v.vendor, !!v.photographer, v.active !== false, v.deleted ? "deleted" : "active"]);
   }
+  await q(`UPDATE users SET name = split_part(email, '@', 1) WHERE id = $1`, [id("mail")]);
   await q(`INSERT INTO businesses (id, owner_id, name, category, approval_status) VALUES ($1, $2, $3, 'Hair', 'approved')`, [id("biz"), id("owner"), `Braids${P} Studio`]);
   await q(`INSERT INTO photographers (id, user_id, display_name, hourly_rate) VALUES ($1, $2, $3, 100)`, [id("ph"), id("lens"), `Lens${P} Pro`]);
   await q(`INSERT INTO user_blocks (blocker_id, blocked_id) VALUES ($1, $2)`, [id("blocker"), id("tia")]);
@@ -136,10 +139,16 @@ const JPEG = Buffer.from("/9j/4AAQSkZJRgABAQEASABIAAD/2wBDAP////////////////////
     assert(r2.status === 200 && r2.json.results.length === 0, "business owner's personal name never matches", r2.json?.results);
     const r3 = await call("GET", `/api/messages/recipients?q=${encodeURIComponent("@lens_" + P)}`, auth("tia"));
     assert(r3.json?.results?.[0]?.publicName === `Lens${P} Pro` && r3.json.results[0].type === "photographer", "finds a photographer by @username, shows display name", r3.json?.results);
-    const r4 = await call("GET", `/api/messages/recipients?q=${encodeURIComponent("tia " + P)}`, auth("owner"));
-    assert(r4.json?.results?.[0]?.publicName === people.tia.name && r4.json.results[0].type === "consumer" && r4.json.results[0].conversationId === conv, "business finds the customer + existing chat", r4.json?.results);
-    const r5 = await call("GET", `/api/messages/recipients?q=${encodeURIComponent("tia " + P)}`, auth("tia"));
+    const r4 = await call("GET", `/api/messages/recipients?q=${encodeURIComponent("@tia_" + P)}`, auth("owner"));
+    assert(r4.json?.results?.[0]?.publicName === people.tia.name && r4.json.results[0].type === "consumer" && r4.json.results[0].conversationId === conv, "business finds the customer by @username + existing chat", r4.json?.results);
+    const r5 = await call("GET", `/api/messages/recipients?q=${encodeURIComponent("@tia_" + P)}`, auth("tia"));
     assert(r5.json?.results?.length === 0, "never returns yourself", r5.json?.results);
+    const r7 = await call("GET", `/api/messages/recipients?q=${encodeURIComponent("zedd" + P)}`, auth("tia"));
+    assert(r7.json?.results?.length === 1 && r7.json.results[0].userId === id("zed"), "customer found by first name", r7.json?.results);
+    const r8 = await call("GET", `/api/messages/recipients?q=${encodeURIComponent("sur" + P)}`, auth("tia"));
+    assert(r8.status === 200 && r8.json.results.length === 0, "customer NOT found by last name", r8.json?.results);
+    const r9 = await call("GET", `/api/messages/recipients?q=${encodeURIComponent(id("mail"))}`, auth("tia"));
+    assert(r9.status === 200 && r9.json.results.length === 0, "name that is the email's local part is not searchable", r9.json?.results);
     const r6 = await call("GET", `/api/messages/recipients?q=${encodeURIComponent("braids" + P)}`, auth("blocker"));
     assert(!(r6.json?.results || []).some((x: any) => x.userId === id("tia")), "blocker doesn't see the person they blocked either");
     assert((await call("GET", `/api/messages/recipients?q=a`, auth("tia"))).status === 400, "1 char → 400");

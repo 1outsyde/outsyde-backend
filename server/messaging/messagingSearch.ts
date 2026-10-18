@@ -1,10 +1,10 @@
 /**
  * Messaging search (2026-10-18, Legend's decisions):
- *  - People to message: everyone (customers, businesses, photographers), matched on the name other
- *    people SEE (business name for a business owner, display name for a photographer, users.name /
- *    first name for everyone else) or @username. Never matched or returned by email, phone, last
- *    name, or a business owner's personal name. Excludes the caller, anyone blocked either way,
- *    banned (is_active = false) and deleted accounts.
+ *  - People to message: everyone (customers, businesses, photographers). Found by @username, or by
+ *    the business name / photographer display name, or for everyone else by their FIRST name only.
+ *    Never found by email, phone, last name, or a business owner's personal name. Shown with the
+ *    same public name as the inbox and feed (publicIdentity.pickPublicIdentity). Excludes the
+ *    caller, anyone blocked either way, banned (is_active = false) and deleted accounts.
  *  - Message text: only messages in conversations the caller is part of.
  *
  * Both return `participantId` = the other person's user id with `participantType: "user"`, which
@@ -65,7 +65,7 @@ export async function searchRecipients(me: string, rawQuery: unknown, limit = 25
       UNION SELECT blocker_id FROM user_blocks WHERE blocked_id = ${me}
     ),
     candidates AS (
-      SELECT u.id, u.name, u.first_name, u.username, u.profile_image_url, u.is_vendor, u.is_photographer,
+      SELECT u.id, u.name, u.first_name, u.username, u.email, u.profile_image_url, u.is_vendor, u.is_photographer,
              b.id AS biz_id, b.name AS biz_name, b.logo_image AS biz_logo,
              p.id AS ph_id, p.display_name AS ph_name, p.logo_image AS ph_logo
       FROM users u
@@ -81,24 +81,40 @@ export async function searchRecipients(me: string, rawQuery: unknown, limit = 25
         AND u.id NOT IN (SELECT uid FROM blocked)
     ),
     named AS (
+      -- Same order as publicIdentity.pickPublicIdentity: photographer, then business, then personal.
       SELECT *,
         CASE
           WHEN ph_id IS NOT NULL AND nullif(trim(ph_name), '') IS NOT NULL THEN trim(ph_name)
-          WHEN biz_id IS NOT NULL AND nullif(trim(biz_name), '') IS NOT NULL THEN trim(biz_name)
-          ELSE coalesce(nullif(trim(name), ''), nullif(trim(first_name), ''))
-        END AS public_name
+          WHEN ph_id IS NULL AND biz_id IS NOT NULL AND nullif(trim(biz_name), '') IS NOT NULL THEN trim(biz_name)
+          ELSE NULL
+        END AS brand_name,
+        coalesce(nullif(trim(name), ''), nullif(trim(first_name), '')) AS personal_name
       FROM candidates
+    ),
+    searchable AS (
+      SELECT *,
+        coalesce(brand_name, personal_name) AS public_name,
+        -- What a person can be FOUND by. A business or photographer: its own name. Anyone else: their
+        -- first name only (first_name, or the first word of name). Never a last name, never a name that
+        -- is just the email's local part (older web signups saved that as the name).
+        CASE
+          WHEN brand_name IS NOT NULL THEN brand_name
+          WHEN personal_name IS NULL THEN NULL
+          WHEN email IS NOT NULL AND lower(personal_name) = lower(split_part(email, '@', 1)) THEN nullif(trim(first_name), '')
+          ELSE coalesce(nullif(trim(first_name), ''), split_part(personal_name, ' ', 1))
+        END AS match_name
+      FROM named
     )
     SELECT n.*,
       (SELECT c.id FROM conversations c
         WHERE (c.participant1_id = ${me} AND c.participant2_id = n.id)
            OR (c.participant2_id = ${me} AND c.participant1_id = n.id)
         ORDER BY c.last_message_at DESC NULLS LAST LIMIT 1) AS conversation_id
-    FROM named n
-    WHERE n.public_name ILIKE ${pattern} OR n.username ILIKE ${pattern}
+    FROM searchable n
+    WHERE n.match_name ILIKE ${pattern} OR n.username ILIKE ${pattern}
     ORDER BY
-      (lower(n.public_name) = lower(${q}) OR lower(n.username) = lower(${q})) DESC,
-      (n.public_name ILIKE ${prefix} OR n.username ILIKE ${prefix}) DESC,
+      (lower(n.match_name) = lower(${q}) OR lower(n.username) = lower(${q})) DESC,
+      (n.match_name ILIKE ${prefix} OR n.username ILIKE ${prefix}) DESC,
       (n.biz_id IS NOT NULL OR n.ph_id IS NOT NULL) DESC,
       n.public_name ASC
     LIMIT ${Math.max(1, Math.min(limit, 50))}
