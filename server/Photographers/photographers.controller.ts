@@ -12,6 +12,7 @@ import { toPublicPhotographerDTO } from "../serializers/photographer";
 import { resolveCoverVideoValue } from "../coverMedia";
 import { provisionConnectedCatalogItem } from "../services/connectedCatalog";
 import { validatePhotographerDeposit, invalidDepositBody } from "../deposits";
+import { resolvePhotographerSpecialties } from "../../shared/photographerTaxonomy";
 
 // Rate limit for displayName changes (7 days cooldown)
 const DISPLAY_NAME_CHANGE_COOLDOWN_DAYS = 7;
@@ -176,7 +177,7 @@ export class PhotographerController {
         });
       }
 
-      const { displayName, bio, city, state, portfolioUrl, hourlyRate, specialties, coverImage, coverMediaType, logoImage, brandColors, ctaConfig } = req.body;
+      const { displayName, bio, city, state, portfolioUrl, hourlyRate, specialties, specialtyCodes, specialtyOther, coverImage, coverMediaType, logoImage, brandColors, ctaConfig } = req.body;
       
       const updates: any = {};
       
@@ -202,7 +203,21 @@ export class PhotographerController {
       if (portfolioUrl !== undefined) updates.portfolioUrl = portfolioUrl;
       // Convert hourlyRate from dollars to cents for storage
       if (hourlyRate !== undefined) updates.hourlyRate = Math.round(Number(hourlyRate) * 100);
-      if (specialties !== undefined && Array.isArray(specialties)) updates.specialties = specialties;
+      // Specialties on the shared list (2026-10-18): names from older screens are mapped to codes,
+      // new screens send codes; the readable names always follow the codes.
+      if (specialtyCodes !== undefined || specialtyOther !== undefined || (specialties !== undefined && Array.isArray(specialties))) {
+        const resolved = resolvePhotographerSpecialties({
+          specialtyCodes: specialtyCodes !== undefined ? specialtyCodes : specialties === undefined ? photographer.specialtyCodes : undefined,
+          specialties,
+          specialtyOther: specialtyOther !== undefined ? specialtyOther : photographer.specialtyOther,
+        });
+        if ("error" in resolved) {
+          return res.status(400).json({ error: resolved.error, field: "specialties", details: resolved.details });
+        }
+        updates.specialties = resolved.names;
+        updates.specialtyCodes = resolved.codes;
+        updates.specialtyOther = resolved.other;
+      }
       // Storefront customization
       if (coverImage !== undefined) updates.coverImage = await resolveCoverVideoValue(coverImage, coverMediaType);
       // Validate coverMediaType when coverImage is set (must be 'image' or 'video')

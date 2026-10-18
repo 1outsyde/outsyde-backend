@@ -29,6 +29,7 @@ import {
   vendorProducts,
   type VendorProduct,
   type User,
+  type Photographer,
   type StaffMember,
   type StaffInvite,
   type SubscriptionTier,
@@ -208,7 +209,12 @@ import {
   vendorServices,
 } from "@shared/schema";
 import { BUSINESS_CATEGORIES, TAXONOMY_VERSION, MAX_SPECIALTIES, getCategory, validateIndustrySelection } from "@shared/businessTaxonomy";
+import {
+  PHOTOGRAPHER_SPECIALTIES, PHOTOGRAPHER_OPTIONS, PHOTOGRAPHER_TAXONOMY_VERSION, MAX_PHOTOGRAPHER_SPECIALTIES, SPECIALTY_OTHER_MAX,
+  resolvePhotographerSpecialties, toStringList,
+} from "@shared/photographerTaxonomy";
 import { buildSignupDetailsPayload } from "./adminApplicationDetails";
+import { buildPhotographerSignupDetailsPayload, photographerSpecialtyNames } from "./photographerApplicationDetails";
 import { and, ilike, ne, asc } from "drizzle-orm";
 
 import { createStory, getStoriesByUser, getStory, deleteStory, recordView, createStoryHighlight, getStoryHighlights, deleteStoryHighlight } from "./services/stories";
@@ -987,6 +993,19 @@ export async function registerRoutes(
     });
   });
 
+  // Shared photographer specialty list + signup answer choices (shared/photographerTaxonomy.ts,
+  // 2026-10-18). Public: the app and goutsyde.com photographer signups load it.
+  app.get("/api/taxonomy/photographer", (_req, res) => {
+    res.set("Cache-Control", "public, max-age=300");
+    res.json({
+      version: PHOTOGRAPHER_TAXONOMY_VERSION,
+      maxSpecialties: MAX_PHOTOGRAPHER_SPECIALTIES,
+      otherMax: SPECIALTY_OTHER_MAX,
+      specialties: PHOTOGRAPHER_SPECIALTIES.filter((s) => !s.retired).map((s) => ({ code: s.code, label: s.label })),
+      options: PHOTOGRAPHER_OPTIONS,
+    });
+  });
+
   // Vendor signup
   app.post("/api/auth/vendor/signup", authRateLimiter, async (req, res) => {
     try {
@@ -1193,6 +1212,36 @@ export async function registerRoutes(
       const data = photographerSignupSchema.parse(req.body);
       const skipStripe = req.body.skipStripe === true;
 
+      // Specialties on the shared list (2026-10-18). New clients send `specialtyCodes`; older
+      // clients send readable names in `specialties`, which are mapped onto the list. Checked
+      // BEFORE any row is created.
+      const specialtyResult = resolvePhotographerSpecialties({
+        specialtyCodes: req.body.specialtyCodes,
+        specialties: data.specialties,
+        specialtyOther: req.body.specialtyOther,
+      });
+      if ("error" in specialtyResult) {
+        return res.status(400).json({ error: specialtyResult.error, field: "specialties", details: specialtyResult.details });
+      }
+      // Other answers: clean them before creating anything, so a value of the wrong shape
+      // (e.g. one shoot location sent as text) can never fail the insert half way.
+      const str = (v: unknown, max = 500) => (typeof v === "string" && v.trim() ? v.trim().slice(0, max) : null);
+      const priceNumber = typeof req.body.startingPrice === "number" ? req.body.startingPrice : parseFloat(String(req.body.startingPrice ?? ""));
+      const extras = {
+        shootLocation: toStringList(req.body.shootLocation) ?? undefined,
+        studioName: str(req.body.studioName, 200),
+        studioAddress: str(req.body.studioAddress, 300),
+        usesSharedStudio: typeof req.body.usesSharedStudio === "boolean" ? req.body.usesSharedStudio : undefined,
+        travelRadius: str(req.body.travelRadius, 50),
+        pricingType: str(req.body.pricingType, 50),
+        startingPrice: Number.isFinite(priceNumber) && priceNumber > 0 ? Math.round(priceNumber * 100) : null,
+        minimumBooking: str(req.body.minimumBooking, 50),
+        additionalServices: toStringList(req.body.additionalServices) ?? undefined,
+        experienceLevel: str(req.body.experienceLevel, 80),
+        equipmentLevel: str(req.body.equipmentLevel, 80),
+        deliveryTime: str(req.body.deliveryTime, 50),
+      };
+
       // Validate username (mandatory)
       const { validateUsername: valUnP } = await import('./usernameUtils');
       const unP = valUnP(req.body.username);
@@ -1222,29 +1271,29 @@ export async function registerRoutes(
         state: data.state,
       });
 
-      const photographer = await storage.createPhotographer({
-        userId: user.id,
-        displayName: data.displayName,
-        bio: data.bio,
-        city: data.city,
-        state: data.state,
-        hourlyRate: data.hourlyRate,
-        portfolioUrl: data.portfolioUrl,
-        specialties: data.specialties,
-        // Expanded profile fields (all optional)
-        shootLocation: req.body.shootLocation,
-        studioName: req.body.studioName,
-        studioAddress: req.body.studioAddress,
-        usesSharedStudio: req.body.usesSharedStudio,
-        travelRadius: req.body.travelRadius,
-        pricingType: req.body.pricingType,
-        startingPrice: req.body.startingPrice ? Math.round(parseFloat(req.body.startingPrice) * 100) : null,
-        minimumBooking: req.body.minimumBooking,
-        additionalServices: req.body.additionalServices,
-        experienceLevel: req.body.experienceLevel,
-        equipmentLevel: req.body.equipmentLevel,
-        deliveryTime: req.body.deliveryTime,
-      });
+      let photographer: Awaited<ReturnType<typeof storage.createPhotographer>>;
+      try {
+        photographer = await storage.createPhotographer({
+          userId: user.id,
+          displayName: data.displayName,
+          bio: data.bio,
+          city: data.city,
+          state: data.state,
+          hourlyRate: data.hourlyRate,
+          portfolioUrl: data.portfolioUrl,
+          specialties: specialtyResult.names,
+          specialtyCodes: specialtyResult.codes,
+          specialtyOther: specialtyResult.other,
+          // Expanded profile fields (all optional)
+          ...extras,
+        });
+      } catch (createErr) {
+        // Never leave a login with no photographer profile behind (it blocks signing up again).
+        await db.delete(users).where(eq(users.id, user.id)).catch((e) =>
+          console.error(`[PhotographerSignup] Could not remove user ${user.id} after a failed profile insert:`, e),
+        );
+        throw createErr;
+      }
 
       // Auto-geocode photographer location (async, non-blocking)
       if (data.city && data.state) {
@@ -1264,7 +1313,7 @@ export async function registerRoutes(
         ownerEmail: data.email,
         city: data.city,
         state: data.state,
-        specialties: data.specialties,
+        specialties: specialtyResult.names,
       });
 
       // Fire-and-forget welcome email
@@ -18290,13 +18339,51 @@ export async function registerRoutes(
   // ==================== ADMIN PHOTOGRAPHER VISIBILITY ====================
 
   // List all photographers (admin view - includes hidden/flagged)
+  // Admin photographer list (2026-10-18): same bare array as before, plus the owner's contact and
+  // readable specialties (additive). Stripe ids and the onboarding link are never sent to the browser.
+  const adminPhotographerRow = (p: Photographer, owner: User | undefined) => {
+    const { stripeAccountId: _sa, stripeOnboardingUrl: _su, stripeOnboardingLastEventAt: _se, ...safe } = p;
+    return {
+      ...safe,
+      specialtyLabels: photographerSpecialtyNames(p),
+      ownerName: owner?.name ?? null,
+      ownerEmail: owner?.email ?? null,
+      ownerPhone: owner?.phone ?? null,
+      ownerUsername: owner?.username ?? null,
+      ownerCreatedAt: owner?.createdAt ?? null,
+      // Older app builds read these names.
+      email: owner?.email ?? null,
+      phone: owner?.phone ?? null,
+      name: owner?.name ?? null,
+    };
+  };
+
   app.get("/api/admin/photographers", requireAdmin, async (req, res) => {
     try {
       const allPhotographers = await storage.listAllPhotographers();
-      res.json(allPhotographers);
+      const ownerIds = Array.from(new Set(allPhotographers.map((p) => p.userId)));
+      const owners = ownerIds.length ? await db.select().from(users).where(inArray(users.id, ownerIds)) : [];
+      const byId = new Map(owners.map((u) => [u.id, u]));
+      res.json(allPhotographers.map((p) => adminPhotographerRow(p, byId.get(p.userId))));
     } catch (error) {
       console.error("Admin list photographers error:", error);
       res.status(500).json({ error: "Failed to list photographers" });
+    }
+  });
+
+  // Admin photographer detail (2026-10-18): every signup answer for the goutsyde.com and app admin pages.
+  app.get("/api/admin/photographers/:id", requireAdmin, async (req, res) => {
+    try {
+      const photographer = await storage.getPhotographer(req.params.id);
+      if (!photographer) return res.status(404).json({ error: "Photographer not found" });
+      const owner = await storage.getUser(photographer.userId);
+      res.json({
+        photographer: adminPhotographerRow(photographer, owner),
+        signupDetails: buildPhotographerSignupDetailsPayload(photographer, owner ?? null),
+      });
+    } catch (error) {
+      console.error("Admin get photographer error:", error);
+      res.status(500).json({ error: "Failed to get photographer" });
     }
   });
 
@@ -21306,10 +21393,24 @@ export async function registerRoutes(
         state: z.string().optional(),
         hourlyRate: z.number().optional(),
         specialties: z.array(z.string()).optional(),
+        specialtyCodes: z.array(z.string()).optional(),
+        specialtyOther: z.string().nullable().optional(),
       });
 
-      const data = schema.parse(req.body);
-      const photographer = await storage.updatePhotographer(id, data);
+      const { specialties, specialtyCodes, specialtyOther, ...rest } = schema.parse(req.body);
+      const data: Record<string, unknown> = { ...rest };
+      if (specialties !== undefined || specialtyCodes !== undefined || specialtyOther !== undefined) {
+        const current = await storage.getPhotographer(id);
+        if (!current) return res.status(404).json({ error: "Photographer not found" });
+        const resolved = resolvePhotographerSpecialties({
+          specialtyCodes: specialtyCodes !== undefined ? specialtyCodes : specialties === undefined ? current.specialtyCodes : undefined,
+          specialties,
+          specialtyOther: specialtyOther !== undefined ? specialtyOther : current.specialtyOther,
+        });
+        if ("error" in resolved) return res.status(400).json({ error: resolved.error, field: "specialties", details: resolved.details });
+        Object.assign(data, { specialties: resolved.names, specialtyCodes: resolved.codes, specialtyOther: resolved.other });
+      }
+      const photographer = await storage.updatePhotographer(id, data as any);
 
       if (!photographer) {
         return res.status(404).json({ error: "Photographer not found" });
