@@ -1953,3 +1953,43 @@ export async function sendOrderDeliveredVendorEmail(params: {
     console.error('[Email] sendOrderDeliveredVendorEmail failed:', err);
   }
 }
+
+/**
+ * Internal alert: booking payouts Stripe has not sent yet (server/payouts.ts). Goes to the admin
+ * inbox only; not logged in customer email history.
+ */
+export async function sendPayoutAlertToAdmin(params: {
+  items: Array<{ bookingType: string; bookingId: string; recipient: string; amountCents: number; attempts: number; lastError: string; since: string; topUpRequested: boolean }>;
+  totalCents: number;
+  availableCents: number | null;
+  autoTopUpCapCents: number;
+}): Promise<void> {
+  const esc = (v: string) => v.replace(/[<>&"]/g, c => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;', '"': '&quot;' }[c] ?? c));
+  const short = params.availableCents != null ? Math.max(0, params.totalCents - params.availableCents) : null;
+  const summary = [
+    detailRow('Unpaid payouts', String(params.items.length), true),
+    detailRow('Total owed to businesses', cents(params.totalCents), false),
+    detailRow('Stripe available balance', params.availableCents != null ? cents(params.availableCents) : 'Could not read', true),
+    ...(short != null && short > 0 ? [detailRow('Add at least', cents(short), false)] : []),
+    detailRow('Automatic top up', params.autoTopUpCapCents > 0 ? `On, up to ${cents(params.autoTopUpCapCents)}` : 'Off', true),
+  ].join('');
+  const list = params.items.slice(0, 25).map((it, i) => detailRow(
+    `${esc(it.bookingType)} ${esc(it.bookingId.slice(0, 8))} (${esc(it.recipient)})`,
+    `${cents(it.amountCents)}. Tried ${it.attempts} time${it.attempts === 1 ? '' : 's'}. ${esc(it.lastError.slice(0, 160))}${it.topUpRequested ? ' Top up requested.' : ''}`,
+    i % 2 === 0,
+  )).join('');
+  const html = wrapEmail(`
+    ${emailHeader('Business payouts waiting', 'Stripe has not sent these payouts yet. Outsyde retries every hour.')}
+    <tr><td style="background:#1A1A1A;padding:0 32px;">
+      <table width="100%" cellpadding="0" cellspacing="0" style="border-radius:6px;overflow:hidden;">${summary}</table>
+    </td></tr>
+    <tr><td style="background:#1A1A1A;padding:16px 32px 0;">
+      <table width="100%" cellpadding="0" cellspacing="0" style="border-radius:6px;overflow:hidden;">${list}</table>
+    </td></tr>
+    <tr><td style="background:#1A1A1A;padding:16px 32px;">
+      <p style="color:#AAAAAA;font-size:13px;margin:0;">Most often this means the available Stripe balance is too low. Add funds in Stripe (Balance, Add to balance, Payments balance). Payouts go out on the next hourly retry once the money is available.</p>
+    </td></tr>
+    ${emailFooter()}
+  `);
+  await sendBrandedEmail(ADMIN_NOTIFICATION_EMAIL, `[Outsyde] ${params.items.length} business payout${params.items.length === 1 ? '' : 's'} waiting (${cents(params.totalCents)})`, html);
+}

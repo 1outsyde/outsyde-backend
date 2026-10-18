@@ -6,6 +6,7 @@ import { stripeService } from "./stripe/stripeService";
 import { markHoldAsConverted } from "./availabilityService";
 import { calculateBookingFees } from "./fees";
 import { releaseAfterForBooking } from "./loyaltyLedger";
+import { payBookingRecipient } from "./payouts";
 
 export type SettlementResult =
   | { settled: true; transferId: string | null }
@@ -75,40 +76,60 @@ export async function settleAppointmentBooking(appointmentId: string): Promise<S
     if (!staffMember?.stripeAccountId) {
       console.error(`[Settlement] PAYOUT FAILED appointment ${appointmentId}: staff member ${staffMemberId} has no stripeAccountId. Funds remain on platform balance -- manual reconciliation required.`);
     } else {
-      try {
-        const transfer = await stripeService.transferBookingPayout({
+      // Same transfer as before; if Outsyde's balance is short it falls back to the customer's
+      // charge, and anything left unpaid is retried hourly with an alert (server/payouts.ts).
+      const staffAccountId = staffMember.stripeAccountId;
+      const paid = await payBookingRecipient({
+        kind: 'appointment',
+        bookingId: appointmentId,
+        recipient: 'staff',
+        connectedAccountId: staffAccountId,
+        amountCents: vendorNetCents,
+        paymentIntentId: appointment.stripePaymentIntentId ?? null,
+        fastPath: () => stripeService.transferBookingPayout({
           amountInCents: vendorNetCents,
-          connectedAccountId: staffMember.stripeAccountId,
+          connectedAccountId: staffAccountId,
           appointmentId,
           recipient: 'staff',
-        });
-        transferId = transfer.id;
+        }),
+      });
+      if (paid.baseTransferId) {
+        transferId = paid.baseTransferId;
         await db.update(appointments).set({
           staffPayout: vendorNetCents,
-          stripeTransferId: transfer.id,
+          stripeTransferId: paid.baseTransferId,
           updatedAt: new Date(),
         }).where(eq(appointments.id, appointmentId));
-        console.log(`[Settlement] Transferred ${vendorNetCents}c to staff ${staffMemberId} (transfer ${transfer.id}) for appointment ${appointmentId}`);
-      } catch (transferErr) {
-        console.error(`[Settlement] PAYOUT FAILED appointment ${appointmentId}`, transferErr);
+        console.log(`[Settlement] Transferred ${vendorNetCents}c to staff ${staffMemberId} (transfer ${paid.baseTransferId}) for appointment ${appointmentId}`);
+      } else {
+        console.error(`[Settlement] PAYOUT FAILED appointment ${appointmentId}: queued for retry`);
       }
     }
   } else {
-    try {
-      const transfer = await stripeService.transferBookingPayout({
+    const businessAccountId = business.stripeAccountId;
+    const paid = await payBookingRecipient({
+      kind: 'appointment',
+      bookingId: appointmentId,
+      recipient: 'business',
+      connectedAccountId: businessAccountId,
+      amountCents: vendorNetCents,
+      paymentIntentId: appointment.stripePaymentIntentId ?? null,
+      fastPath: () => stripeService.transferBookingPayout({
         amountInCents: vendorNetCents,
-        connectedAccountId: business.stripeAccountId,
+        connectedAccountId: businessAccountId,
         appointmentId,
         recipient: 'business',
-      });
-      transferId = transfer.id;
+      }),
+    });
+    if (paid.baseTransferId) {
+      transferId = paid.baseTransferId;
       await db.update(appointments).set({
-        stripeTransferId: transfer.id,
+        stripeTransferId: paid.baseTransferId,
         updatedAt: new Date(),
       }).where(eq(appointments.id, appointmentId));
-      console.log(`[Settlement] Transferred ${vendorNetCents}c to business ${businessId} (transfer ${transfer.id}) for appointment ${appointmentId}`);
-    } catch (transferErr) {
-      console.error(`[Settlement] PAYOUT FAILED appointment ${appointmentId}`, transferErr);
+      console.log(`[Settlement] Transferred ${vendorNetCents}c to business ${businessId} (transfer ${paid.baseTransferId}) for appointment ${appointmentId}`);
+    } else {
+      console.error(`[Settlement] PAYOUT FAILED appointment ${appointmentId}: queued for retry`);
     }
   }
 
@@ -207,20 +228,29 @@ export async function settleShootBooking(
   } else if (!photographer?.stripeAccountId) {
     console.error(`[Settlement] PAYOUT FAILED shoot booking ${bookingId}: photographer ${booking.photographerId} has no stripeAccountId. Funds remain on platform balance -- manual reconciliation required.`);
   } else {
-    try {
-      const transfer = await stripeService.transferShootBookingPayout({
+    const photographerAccountId = photographer.stripeAccountId;
+    const paid = await payBookingRecipient({
+      kind: 'shoot_booking',
+      bookingId,
+      recipient: 'photographer',
+      connectedAccountId: photographerAccountId,
+      amountCents: vendorNetCents,
+      paymentIntentId: booking.stripePaymentIntentId ?? null,
+      fastPath: () => stripeService.transferShootBookingPayout({
         amountInCents: vendorNetCents,
-        connectedAccountId: photographer.stripeAccountId,
+        connectedAccountId: photographerAccountId,
         bookingId,
-      });
-      transferId = transfer.id;
+      }),
+    });
+    if (paid.baseTransferId) {
+      transferId = paid.baseTransferId;
       await db.update(shootBookings).set({
-        stripeTransferId: transfer.id,
+        stripeTransferId: paid.baseTransferId,
         updatedAt: new Date(),
       }).where(eq(shootBookings.id, bookingId));
-      console.log(`[Settlement] Transferred ${vendorNetCents}c to photographer ${photographer.id} (transfer ${transfer.id}) for shoot booking ${bookingId}`);
-    } catch (transferErr) {
-      console.error(`[Settlement] PAYOUT FAILED shoot booking ${bookingId}`, transferErr);
+      console.log(`[Settlement] Transferred ${vendorNetCents}c to photographer ${photographer.id} (transfer ${paid.baseTransferId}) for shoot booking ${bookingId}`);
+    } else {
+      console.error(`[Settlement] PAYOUT FAILED shoot booking ${bookingId}: queued for retry`);
     }
   }
 
