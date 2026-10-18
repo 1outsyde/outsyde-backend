@@ -76,6 +76,9 @@ export function sanitizeUserForResponse(user: User, options: { includeOwnData?: 
     resetCodeAttempts,
     googleSub,
     appleId,
+    // Customer interests detail (2026-10-18): only the person themselves sees these.
+    interestOther,
+    interestsOriginal,
     ...safeUser
   } = user;
 
@@ -84,6 +87,8 @@ export function sanitizeUserForResponse(user: User, options: { includeOwnData?: 
     return {
       ...safeUser,
       dateOfBirth,
+      interestOther,
+      interestsOriginal,
       ageRange: calculateAgeRange(dateOfBirth),
       loyaltyPoints: user.loyaltyPoints ?? 0,
     };
@@ -219,6 +224,7 @@ import {
 import { buildSignupDetailsPayload } from "./adminApplicationDetails";
 import { buildPhotographerSignupDetailsPayload, photographerSpecialtyNames } from "./photographerApplicationDetails";
 import { buildCustomerSignupDetailsPayload } from "./customerSignupDetails";
+import { normalizeCustomerInterests, customerInterestTaxonomy, interestMatchProfile, interestUpdateFields } from "@shared/customerInterests";
 import { and, ilike, ne, asc } from "drizzle-orm";
 
 import { createStory, getStoriesByUser, getStory, deleteStory, recordView, createStoryHighlight, getStoryHighlights, deleteStoryHighlight } from "./services/stories";
@@ -875,6 +881,7 @@ export async function registerRoutes(
       const effectiveBillingCountry = data.billingSameAsHome ? (data.country ?? 'United States') : (data.billingCountry ?? 'United States');
 
       const hashedPassword = await hashPassword(data.password);
+      const interests = normalizeCustomerInterests(data);
       const user = await storage.createUser({
         email: data.email,
         password: hashedPassword,
@@ -901,9 +908,13 @@ export async function registerRoutes(
         gender: data.gender,
         ethnicity: data.ethnicity,
         shoppingFrequency: data.shoppingFrequency,
-        selectedIndustries: data.selectedIndustries,
-        industryNiches: data.industryNiches,
-        industryValues: data.industryValues,
+        // Interests on the shared business list (2026-10-18): older words are mapped to codes,
+        // the original answers kept. Never rejects a signup.
+        selectedIndustries: interests.selectedIndustries,
+        industryNiches: interests.industryNiches,
+        industryValues: interests.industryValues,
+        interestOther: interests.interestOther,
+        interestsOriginal: interests.original,
         source: data.source || null,
       });
 
@@ -995,6 +1006,13 @@ export async function registerRoutes(
           .map((sp) => ({ code: sp.code, label: sp.label, kind: sp.kind })),
       })),
     });
+  });
+
+  // Shared customer interests list (2026-10-18): industries from the business list, what
+  // they're into, what matters most. Public: the app and goutsyde.com customer signups load it.
+  app.get("/api/taxonomy/customer-interests", (_req, res) => {
+    res.set("Cache-Control", "public, max-age=300");
+    res.json(customerInterestTaxonomy());
   });
 
   // Shared photographer specialty list + signup answer choices (shared/photographerTaxonomy.ts,
@@ -1833,9 +1851,12 @@ export async function registerRoutes(
         updates.isPhotographer = false;
       }
 
-      if (selectedIndustries) updates.selectedIndustries = selectedIndustries;
-      if (industryNiches) updates.industryNiches = industryNiches;
-      if (industryValues) updates.industryValues = industryValues;
+      // Shared list codes (2026-10-18); only the keys sent are changed, as before.
+      Object.assign(updates, interestUpdateFields({
+        selectedIndustries: selectedIndustries || undefined,
+        industryNiches: industryNiches || undefined,
+        industryValues: industryValues || undefined,
+      }));
 
       await storage.updateUser(userId, updates);
       const user = await storage.getUser(userId);
@@ -1882,9 +1903,12 @@ export async function registerRoutes(
         }
       }
 
-      if (selectedIndustries || preferences?.selectedIndustries) updates.selectedIndustries = selectedIndustries || preferences?.selectedIndustries;
-      if (industryNiches || preferences?.industryNiches) updates.industryNiches = industryNiches || preferences?.industryNiches;
-      if (industryValues || preferences?.industryValues) updates.industryValues = industryValues || preferences?.industryValues;
+      // Shared list codes (2026-10-18); only the keys sent are changed, as before.
+      Object.assign(updates, interestUpdateFields({
+        selectedIndustries: selectedIndustries || preferences?.selectedIndustries || undefined,
+        industryNiches: industryNiches || preferences?.industryNiches || undefined,
+        industryValues: industryValues || preferences?.industryValues || undefined,
+      }));
 
       await storage.updateUser(userId, updates);
       const user = await storage.getUser(userId);
@@ -3434,10 +3458,11 @@ export async function registerRoutes(
     try {
       const { selectedIndustries, industryNiches } = req.body;
 
-      const user = await storage.updateUser(userId, {
+      // Shared list codes (2026-10-18). Same as before: missing lists are saved empty.
+      const user = await storage.updateUser(userId, interestUpdateFields({
         selectedIndustries: selectedIndustries || [],
         industryNiches: industryNiches || {},
-      });
+      }) as Partial<User>);
 
       if (!user) {
         return res.status(404).json({ error: "User not found" });

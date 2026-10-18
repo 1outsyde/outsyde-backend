@@ -15,7 +15,7 @@ type CustomerLike = Pick<User,
   | "address" | "aptUnit" | "city" | "state" | "zipCode" | "country"
   | "billingSameAsHome" | "billingStreet" | "billingAptUnit" | "billingCity" | "billingState" | "billingZip" | "billingCountry"
   | "dateOfBirth" | "gender" | "shoppingFrequency"
-  | "selectedIndustries" | "industryNiches" | "industryValues"
+  | "selectedIndustries" | "industryNiches" | "industryValues" | "interestOther" | "interestsOriginal"
   | "source" | "createdAt" | "isActive" | "isVendor" | "isPhotographer" | "isAdmin" | "loyaltyPoints"
 > & { deletionStatus?: string | null; scheduledDeletionAt?: Date | string | null };
 
@@ -38,6 +38,16 @@ function roleText(u: CustomerLike): string {
   return roles.length ? roles.join(", ") : "Customer";
 }
 
+/** The answers exactly as first sent, when older words were mapped to the shared list (2026-10-18). */
+function originalRows(original: unknown): DetailRow[] {
+  if (!original || typeof original !== "object") return [];
+  const o = describeCustomerInterests(original as Record<string, unknown>);
+  const rows: DetailRow[] = [];
+  if (o.industries.length) rows.push({ label: "Originally picked", value: o.industries.map((i) => i.label).join(", ") });
+  for (const g of o.niches) rows.push({ label: `Originally into (${g.industryLabel})`, value: g.items.join(", ") });
+  return rows;
+}
+
 export function buildCustomerSignupSections(u: CustomerLike): DetailSection[] {
   const interests = describeCustomerInterests(u);
   const interestRows: DetailRow[] = [
@@ -58,6 +68,8 @@ export function buildCustomerSignupSections(u: CustomerLike): DetailSection[] {
     ...(interests.values.length
       ? interests.values.map((g) => ({ label: `What matters (${g.industryLabel})`, value: g.items.join(", ") }))
       : [{ label: "What matters most", value: NOT_PROVIDED }]),
+    { label: "Their own words (Other)", value: text(u.interestOther) },
+    ...originalRows(u.interestsOriginal),
   ];
 
   const billing = u.billingSameAsHome !== false
