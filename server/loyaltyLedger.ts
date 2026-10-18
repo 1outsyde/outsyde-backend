@@ -17,9 +17,12 @@
 //   - Product orders: a promo code can only be used when the order base is at least 10x the code
 //     value, so the discount never cuts into the vendor's payout (product charges are destination
 //     charges: the charge must cover the transfer).
-//   - Bookings (decided 2026-10-17): any code may be used while the customer still pays at least
-//     $1 now (BOOKING_MIN_CHARGE_CENTS). Booking charges land on the platform balance and the
-//     business is paid its full share by a separate transfer, so the discount never touches it.
+//   - Bookings (decided 2026-10-18, replaces the 2026-10-17 "$1 now" rule): the same 10x rule,
+//     measured on what is paid online now before the service fee (the deposit, or the full price
+//     when there is no deposit). A $30 deposit takes no code; a $50 deposit takes up to $5. So the
+//     discount always fits inside Outsyde's 10% of that charge and never needs Outsyde's balance.
+//     Booking charges land on the platform balance and the seller is paid its full share by a
+//     separate transfer, so the discount never touches the seller either way.
 //   - A code is held by one checkout at a time ('reserved'), marked 'used' when that payment
 //     succeeds, and given back ('active') when the checkout is abandoned, voided, or the purchase
 //     is cancelled with a full refund.
@@ -50,12 +53,17 @@ export const REDEMPTION_TIERS: ReadonlyArray<{ points: number; valueCents: numbe
   { points: 50000, valueCents: 10000 },
 ];
 export const PROMO_CODE_DAYS = 30;
-/** Bookings: the customer must still pay at least this much now after a code. */
+/** Kept for imports; no longer the booking rule (bookings use the 10x rule since 2026-10-18). */
 export const BOOKING_MIN_CHARGE_CENTS = 100;
 
-/** Largest code (cents) a booking charging dueNowCents now can take. */
+/**
+ * Largest code (cents) a booking charging dueNowCents now can take: a tenth of what is paid
+ * online before the service fee. dueNowCents = base + round(base x 8%) (quoteDeposit), and
+ * baseFromGrossCents recovers that base exactly for every whole-cent base (tested).
+ */
 export function bookingMaxDiscountCents(dueNowCents: number): number {
-  return Math.max(0, dueNowCents - BOOKING_MIN_CHARGE_CENTS);
+  if (!Number.isFinite(dueNowCents) || dueNowCents <= 0) return 0;
+  return Math.floor(baseFromGrossCents(dueNowCents) / PROMO_MIN_BASE_MULTIPLIER);
 }
 
 /** Points for a purchase: half the service fee, at 500 points per $1. gross = base + 8% fee. */

@@ -17,8 +17,8 @@
  *
  * Skips (exit 0) when PR_TEST_BASE_URL is unset; refuses any non-local host.
  *
- * Rules checked (decided 2026-10-17):
- *   - bookings take any code while the customer still pays at least $1 now
+ * Rules checked (decided 2026-10-17; booking 10x rule 2026-10-18):
+ *   - bookings: what is paid online now (before the fee) must be at least 10x the code
  *   - the business payout never changes; points are earned on the full amount
  *   - one checkout holds a code at a time; an unpaid older checkout is cancelled and loses it;
  *     a paid / processing / awaiting-acceptance checkout keeps it
@@ -171,9 +171,12 @@ async function call(method: string, path: string, o: { token?: string; body?: un
   const svcFull = crypto.randomUUID();     // $50, no deposit
   const svcDeposit = crypto.randomUUID();  // $300 service, $30 deposit
   const svcTiny = crypto.randomUUID();     // $5 service, no deposit
+  const svcBigDep = crypto.randomUUID();   // $1,000 service, $100 deposit
+  const svcHundred = crypto.randomUUID();  // $100, no deposit
   await q(`INSERT INTO vendor_services (id, business_id, name, price, duration_minutes, deposit_amount_cents, is_active, status) VALUES
-    ($1, $4, 'Full', 5000, 60, NULL, true, 'live'), ($2, $4, 'Deposit', 30000, 60, 3000, true, 'live'), ($3, $4, 'Tiny', 500, 30, NULL, true, 'live')`,
-    [svcFull, svcDeposit, svcTiny, bizId]);
+    ($1, $4, 'Full', 5000, 60, NULL, true, 'live'), ($2, $4, 'Deposit', 30000, 60, 3000, true, 'live'), ($3, $4, 'Tiny', 500, 30, NULL, true, 'live'),
+    ($5, $4, 'BigDep', 100000, 60, 10000, true, 'live'), ($6, $4, 'Hundred', 10000, 60, NULL, true, 'live')`,
+    [svcFull, svcDeposit, svcTiny, bizId, svcBigDep, svcHundred]);
 
   const customer = await mkUser('cust', 30000);
   const token = generateAccessToken({ userId: customer, isVendor: false, isAdmin: false });
@@ -214,46 +217,58 @@ async function call(method: string, path: string, o: { token?: string; body?: un
     assert(r.status === 200 && Array.isArray(r.body?.transactions) && typeof r.body?.balance === 'number' && r.body?.activeCodes?.length === 2,
       '/api/consumer/points: balance + codes + history', r.body && { balance: r.body.balance, codes: r.body.activeCodes?.length });
 
-    // ── 2. Booking rule: any code while at least $1 is charged now ────────
-    console.log('\n── 2. booking rule ($30 deposit takes a $5 code; $5.40 booking cannot take $5) ──');
-    r = await call('POST', '/api/points/validate-code', { token, body: { code: (await q(`SELECT code FROM promo_codes WHERE id=$1`, [code5]))[0].code, bookingDueNowCents: 3240 } });
-    assert(r.status === 200 && r.body?.amountChargedNowCents === 2740, 'validate-code: $32.40 due now with $5 → $27.40', r.body);
+    // ── 2. Booking rule: 10x of what is paid online now, before the fee ───
+    console.log('\n── 2. booking rule (10x of what is paid online: $50 takes $5; a $30 deposit takes none) ──');
+    const code5Text = (await q(`SELECT code FROM promo_codes WHERE id=$1`, [code5]))[0].code;
+    r = await call('POST', '/api/points/validate-code', { token, body: { code: code5Text, bookingDueNowCents: 5400 } });
+    assert(r.status === 200 && r.body?.amountChargedNowCents === 4900 && r.body?.maxDiscountCents === 500, 'validate-code: $54 due now with $5 → $49', r.body);
+    r = await call('POST', '/api/points/validate-code', { token, body: { code: code5Text, bookingDueNowCents: 3240 } });
+    assert(r.status === 400 && r.body?.code === 'PROMO_TOO_LARGE' && r.body?.minimumOrderCents === 5000 && r.body?.maxDiscountCents === 300, 'validate-code: $30 deposit refuses a $5 code', r.body);
 
     const tinyHold = await mkHold(svcTiny, 500);
     r = await call('POST', `/api/booking/${tinyHold}/create-payment-intent`, { token, body: { promoCodeId: code5 } });
-    assert(r.status === 400 && r.body?.code === 'PROMO_TOO_LARGE' && r.body?.maxDiscountCents === 440, '$5.40 due now: a $5 code is refused (max $4.40)', r.body);
+    assert(r.status === 400 && r.body?.code === 'PROMO_TOO_LARGE' && r.body?.maxDiscountCents === 50 && r.body?.minimumOrderCents === 5000, '$5 booking: a $5 code is refused (needs $50 online)', r.body);
+    assert(typeof r.body?.error === 'string' && !/[\u2013\u2014]/.test(r.body.error) && !r.body.error.includes('8%'), 'refusal text: no dashes, no fee percentage', r.body?.error);
     assert((await q(`SELECT count(*)::int n FROM appointments WHERE hold_id=$1`, [tinyHold]))[0].n === 0, 'refused before any appointment was written');
     assert((await code(code5)).status === 'active', 'code still active after the refusal');
 
-    const depHold = await mkHold(svcDeposit, 30000);
+    // $300 service with a $30 deposit: the full price would qualify, but only $30 is paid online.
+    const smallDepHold = await mkHold(svcDeposit, 30000);
+    r = await call('POST', `/api/booking/${smallDepHold}/create-payment-intent`, { token, body: { promoCodeId: code5 } });
+    assert(r.status === 400 && r.body?.code === 'PROMO_TOO_LARGE' && r.body?.minimumOrderCents === 5000, '$30 deposit on a $300 service: $5 code refused (10x of what is paid online)', r.body);
+    assert((await q(`SELECT count(*)::int n FROM appointments WHERE hold_id=$1`, [smallDepHold]))[0].n === 0, 'refused before any appointment was written');
+    r = await call('POST', `/api/booking/${smallDepHold}/create-payment-intent`, { token, body: { promoCodeId: null } });
+    assert(r.status === 200 && pis[r.body?.paymentIntentId]?.amount === 3240, 'same deposit booking without a code: $32.40, unchanged', { s: r.status, b: r.body });
+
+    const depHold = await mkHold(svcBigDep, 100000);
     r = await call('POST', `/api/booking/${depHold}/create-payment-intent`, { token, body: { promoCodeId: code5 } });
-    assert(r.status === 200, 'deposit booking with $5 code → 200', r.body);
+    assert(r.status === 200, '$100 deposit booking with $5 code → 200', r.body);
     const depAppt = r.body?.appointmentId as string;
     const depPi = pis[r.body?.paymentIntentId];
-    assert(depPi?.amount === 2740, 'charged now = $32.40 - $5 = $27.40 (Stripe amount 2740)', depPi?.amount);
-    assert(depPi?.metadata?.promoCodeId === code5 && depPi?.metadata?.discountCents === '500' && depPi?.metadata?.originalConsumerTotalCents === '3240', 'PaymentIntent metadata carries the code', depPi?.metadata);
-    assert(r.body?.discountCents === 500 && r.body?.amountChargedNowCents === 2740 && r.body?.feeBreakdown?.grossChargeAmount === 3240,
-      'response: discountCents 500, amountChargedNowCents 2740, existing fields unchanged', { d: r.body?.discountCents, a: r.body?.amountChargedNowCents, g: r.body?.feeBreakdown?.grossChargeAmount });
+    assert(depPi?.amount === 10300, 'charged now = $108 - $5 = $103 (Stripe amount 10300)', depPi?.amount);
+    assert(depPi?.metadata?.promoCodeId === code5 && depPi?.metadata?.discountCents === '500' && depPi?.metadata?.originalConsumerTotalCents === '10800', 'PaymentIntent metadata carries the code', depPi?.metadata);
+    assert(r.body?.discountCents === 500 && r.body?.amountChargedNowCents === 10300 && r.body?.feeBreakdown?.grossChargeAmount === 10800,
+      'response: discountCents 500, amountChargedNowCents 10300, existing fields unchanged', { d: r.body?.discountCents, a: r.body?.amountChargedNowCents, g: r.body?.feeBreakdown?.grossChargeAmount });
     let c = await code(code5);
     assert(c.status === 'reserved' && c.t === 'appointment' && c.ref === depAppt, 'code held by this appointment', c);
     const [depRow] = await q(`SELECT promo_code_used, discount_amount_cents, vendor_net FROM appointments WHERE id=$1`, [depAppt]);
-    assert(depRow.discount_amount_cents === 500 && depRow.vendor_net === 2940, 'appointment row: discount 500, vendor net 2940 unchanged (3000 x 98%)', depRow);
+    assert(depRow.discount_amount_cents === 500 && depRow.vendor_net === 9800, 'appointment row: discount 500, vendor net 9800 unchanged (10000 x 98%)', depRow);
 
     // ── 3. Change / remove the code on the same unpaid PaymentIntent ──────
     console.log('\n── 3. change and remove the code before paying ──');
     r = await call('POST', `/api/booking/${depHold}/create-payment-intent`, { token, body: { promoCodeId: null } });
-    assert(r.status === 200 && r.body?.paymentIntentId === depPi.id && pis[depPi.id].amount === 3240 && r.body?.discountCents === 0, 'code removed (promoCodeId: null): same PaymentIntent back to $32.40', { s: r.status, amt: pis[depPi.id].amount, d: r.body?.discountCents });
+    assert(r.status === 200 && r.body?.paymentIntentId === depPi.id && pis[depPi.id].amount === 10800 && r.body?.discountCents === 0, 'code removed (promoCodeId: null): same PaymentIntent back to $108', { s: r.status, amt: pis[depPi.id].amount, d: r.body?.discountCents });
     assert(!pis[depPi.id].metadata.promoCodeId, 'PaymentIntent metadata no longer carries a code', pis[depPi.id].metadata);
     assert((await code(code5)).status === 'active', 'code given back (active)');
     r = await call('POST', `/api/booking/${depHold}/create-payment-intent`, { token, body: { promoCodeId: code10 } });
-    assert(r.status === 200 && pis[depPi.id].amount === 2240 && pis[depPi.id].metadata.promoCodeId === code10, '$10 code: same PaymentIntent now $22.40', { s: r.status, amt: pis[depPi.id].amount });
+    assert(r.status === 200 && pis[depPi.id].amount === 9800 && pis[depPi.id].metadata.promoCodeId === code10, '$10 code: same PaymentIntent now $98', { s: r.status, amt: pis[depPi.id].amount });
     assert((await code(code10)).status === 'reserved', '$10 code held');
 
     // ── 4. One checkout at a time ─────────────────────────────────────────
     console.log('\n── 4. takeover rules ──');
-    const fullHold = await mkHold(svcFull, 5000);
+    const fullHold = await mkHold(svcHundred, 10000);
     r = await call('POST', `/api/booking/${fullHold}/create-payment-intent`, { token, body: { promoCodeId: code10 } });
-    assert(r.status === 200 && pis[r.body?.paymentIntentId]?.amount === 4400, 'second booking takes the $10 code: $54 - $10 = $44', { s: r.status, b: r.body });
+    assert(r.status === 200 && pis[r.body?.paymentIntentId]?.amount === 9800, 'second booking takes the $10 code: $108 - $10 = $98', { s: r.status, b: r.body });
     const fullAppt = r.body?.appointmentId as string;
     const fullPiId = r.body?.paymentIntentId as string;
     assert(pis[depPi.id].status === 'canceled', 'the older unpaid checkout was cancelled', pis[depPi.id].status);
@@ -262,7 +277,7 @@ async function call(method: string, path: string, o: { token?: string; body?: un
 
     // A paid (or processing) checkout keeps its code.
     pis[fullPiId].status = 'processing';
-    const fullHold2 = await mkHold(svcFull, 5000);
+    const fullHold2 = await mkHold(svcHundred, 10000);
     r = await call('POST', `/api/booking/${fullHold2}/create-payment-intent`, { token, body: { promoCodeId: code10 } });
     assert(r.status === 409 && r.body?.code === 'PROMO_IN_USE', 'a processing checkout keeps the code: 409 PROMO_IN_USE', r.body);
     c = await code(code10);
@@ -270,7 +285,7 @@ async function call(method: string, path: string, o: { token?: string; body?: un
     const apptFull2 = (await q(`SELECT id, promo_code_used, discount_amount_cents FROM appointments WHERE hold_id=$1`, [fullHold2]))[0];
     assert(apptFull2 && !apptFull2.promo_code_used && apptFull2.discount_amount_cents === 0, 'refused booking kept without a code (retry resumes it)', apptFull2);
     r = await call('POST', `/api/booking/${fullHold2}/create-payment-intent`, { token, body: {} });
-    assert(r.status === 200 && pis[r.body?.paymentIntentId]?.amount === 5400, 'retry without a code resumes the booking at full price', { s: r.status, b: r.body });
+    assert(r.status === 200 && pis[r.body?.paymentIntentId]?.amount === 10800, 'retry without a code resumes the booking at full price', { s: r.status, b: r.body });
 
     // ── 5. Payment succeeds: code used, payout unchanged, points on full amount ──
     console.log('\n── 5. payment succeeded ──');
@@ -281,16 +296,16 @@ async function call(method: string, path: string, o: { token?: string; body?: un
     const [paidRow] = await q(`SELECT status, promo_code_used, discount_amount_cents, points_redeemed FROM appointments WHERE id=$1`, [fullAppt]);
     assert(paidRow.status === 'confirmed' && paidRow.discount_amount_cents === 1000 && paidRow.points_redeemed === 5000, 'appointment confirmed with discount 1000, points_redeemed 5000', paidRow);
     const tr = transfers.find(t => t.metadata?.appointmentId === fullAppt);
-    assert(tr?.amount === 4900, 'business transfer = $49.00 (5000 x 98%), unchanged by the code', tr);
+    assert(tr?.amount === 9800, 'business transfer = $98.00 (10000 x 98%), unchanged by the code', tr);
     const [pend] = await q(`SELECT points_earned AS points FROM pending_points_transactions WHERE reference_type='appointment' AND reference_id=$1`, [fullAppt]);
-    assert(pend?.points === ledger.pointsForGrossCents(5400), `pending points on the full $54 (${ledger.pointsForGrossCents(5400)})`, pend);
+    assert(pend?.points === 2000 && ledger.pointsForGrossCents(10800) === 2000, 'pending points on the full $108: 2,000 (4% of $100)', pend);
     await WebhookHandlers.handlePaymentIntentSucceeded(pis[fullPiId]);
     assert((await code(code10)).status === 'used', 'repeated webhook is a no-op');
 
     // Vendor + admin views
     r = await call('GET', '/api/business/bookings', { token: ownerToken });
     const vb = r.body?.bookings?.find((b: any) => b.id === fullAppt);
-    assert(vb?.discountAmountCents === 1000 && vb?.customerPaidNowCents === 4400 && vb?.vendorNetAmount === 49, 'vendor bookings: discount 1000, customer paid 4400, payout 49.00', vb && { d: vb.discountAmountCents, p: vb.customerPaidNowCents, n: vb.vendorNetAmount });
+    assert(vb?.discountAmountCents === 1000 && vb?.customerPaidNowCents === 9800 && vb?.vendorNetAmount === 98, 'vendor bookings: discount 1000, customer paid 9800, payout 98.00', vb && { d: vb.discountAmountCents, p: vb.customerPaidNowCents, n: vb.vendorNetAmount });
 
     // ── 6. Payment cancelled: code given back ─────────────────────────────
     console.log('\n── 6. payment cancelled ──');
@@ -413,6 +428,42 @@ async function call(method: string, path: string, o: { token?: string; body?: un
     const shootTr = transfers.find(x => x.metadata?.bookingId === shootId);
     assert(shootTr?.amount === 4900, 'photographer transfer $49.00 unchanged by the code', shootTr);
     await q(`UPDATE promo_codes SET status='active', used_on_reference_type=NULL, used_on_order_id=NULL WHERE id=$1`, [code5]);
+    // Photographer refusal: a $30 deposit shoot takes no $5 code.
+    const pSvc2 = crypto.randomUUID();
+    await q(`INSERT INTO photographer_services (id, photographer_id, name, price_cents, deposit_amount_cents, is_active, status) VALUES ($1, $2, 'Mini', 30000, 3000, true, 'live')`, [pSvc2, photogId]);
+    const ph2 = await mkHold(pSvc2, 30000, 'photographer', photogId);
+    r = await call('POST', `/api/booking/${ph2}/create-payment-intent`, { token, body: { promoCodeId: code5 } });
+    assert(r.status === 400 && r.body?.code === 'PROMO_TOO_LARGE' && r.body?.minimumOrderCents === 5000, 'shoot with a $30 deposit: $5 code refused', r.body);
+    assert((await q(`SELECT count(*)::int n FROM shoot_bookings WHERE photographer_id=$1 AND service_id=$2`, [photogId, pSvc2]))[0].n === 0, 'refused before any shoot booking was written');
+    await q(`DELETE FROM photographer_services WHERE id=$1`, [pSvc2]).catch(() => {});
+
+    // ── 11. Staff booking ─────────────────────────────────────────────────
+    console.log('\n── 11. staff booking ──');
+    const staffId = crypto.randomUUID();
+    await q(`INSERT INTO staff_members (id, business_id, display_name, stripe_account_id, stripe_onboarding_complete) VALUES ($1, $2, 'PR Staff', 'acct_prstaff', true)`, [staffId, bizId]);
+    const mkStaffHold = async (priceCents: number) => {
+      const staffSvc = crypto.randomUUID();
+      await q(`INSERT INTO staff_services (id, staff_member_id, business_id, name, price_cents, duration_minutes) VALUES ($1, $2, $3, 'Staff Svc', $4, 60)`, [staffSvc, staffId, bizId, priceCents]);
+      const h = await mkHold(staffSvc, priceCents);
+      await q(`UPDATE booking_holds SET staff_member_id=$2 WHERE id=$1`, [h, staffId]);
+      return h;
+    };
+    const sh1 = await mkStaffHold(4000);
+    r = await call('POST', `/api/booking/${sh1}/create-payment-intent`, { token, body: { promoCodeId: code5 } });
+    assert(r.status === 400 && r.body?.code === 'PROMO_TOO_LARGE', '$40 staff booking: $5 code refused (needs $50 online)', r.body);
+    const sh2 = await mkStaffHold(6000);
+    r = await call('POST', `/api/booking/${sh2}/create-payment-intent`, { token, body: { promoCodeId: code5 } });
+    const staffAppt = r.body?.appointmentId as string;
+    assert(r.status === 200 && pis[r.body?.paymentIntentId]?.amount === 5980 && r.body?.amountChargedNowCents === 5980, '$60 staff booking with $5 code: $64.80 - $5 = $59.80', { s: r.status, b: r.body });
+    const [staffRow] = await q(`SELECT staff_member_id, discount_amount_cents, vendor_net FROM appointments WHERE id=$1`, [staffAppt]);
+    assert(staffRow?.staff_member_id === staffId && staffRow?.discount_amount_cents === 500 && staffRow?.vendor_net === 5880, 'staff appointment: discount 500, payout 5880 unchanged (6000 x 98%)', staffRow);
+    r = await call('POST', `/api/booking/${sh2}/create-payment-intent`, { token, body: { promoCodeId: null } });
+    assert(r.status === 200 && (await code(code5)).status === 'active', 'staff booking: code removed and given back', r.status);
+    await q(`DELETE FROM booking_audit_log WHERE booking_id=$1`, [staffAppt]).catch(() => {});
+    await q(`DELETE FROM appointments WHERE staff_member_id=$1`, [staffId]).catch(() => {});
+    await q(`DELETE FROM staff_services WHERE staff_member_id=$1`, [staffId]).catch(() => {});
+    await q(`DELETE FROM staff_members WHERE id=$1`, [staffId]).catch(() => {});
+
     await q(`DELETE FROM photographer_availability WHERE photographer_id=$1`, [photogId]).catch(() => {});
     await q(`DELETE FROM booking_audit_log WHERE booking_id=$1`, [shootId]).catch(() => {});
     await q(`DELETE FROM shoot_bookings WHERE photographer_id=$1`, [photogId]);
