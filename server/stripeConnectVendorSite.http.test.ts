@@ -38,12 +38,16 @@ const ORIGINS_AT_7393DEF = [
   'https://braids-with-lana-site.vercel.app',
 ];
 const NAIL_SNIPER = 'https://nail-sniper-web.vercel.app';
+const DIA_LUX = ['https://dialuxkollecionn.com', 'https://www.dialuxkollecionn.com'];
 const NAIL_SNIPER_ENC = encodeURIComponent(NAIL_SNIPER);
 
 function unitTests() {
   console.log('\n— clientOrigins (unit)');
-  assert(JSON.stringify(clientSiteOrigins) === JSON.stringify([...ORIGINS_AT_7393DEF, NAIL_SNIPER]),
-    'clientSiteOrigins = the 7393def list (same order) + nail-sniper-web.vercel.app appended', clientSiteOrigins);
+  assert(JSON.stringify(clientSiteOrigins) === JSON.stringify([...ORIGINS_AT_7393DEF, NAIL_SNIPER, ...DIA_LUX]),
+    'clientSiteOrigins = the 7393def list (same order) + nail-sniper-web.vercel.app + both dialuxkollecionn.com origins appended', clientSiteOrigins);
+  for (const bad of ['https://dialuxkollection.com', 'http://www.dialuxkollecionn.com', 'https://shop.dialuxkollecionn.com']) {
+    assert(!isAllowedClientOrigin(bad), `rejected: ${bad}`);
+  }
   for (const o of clientSiteOrigins) assert(isAllowedClientOrigin(o), `allowed: ${o}`);
   assert(isAllowedClientOrigin(`${NAIL_SNIPER}/`), 'one trailing slash is normalised');
   assert(normalizeClientOrigin(`${NAIL_SNIPER}/`) === NAIL_SNIPER, 'normalizeClientOrigin drops the trailing slash');

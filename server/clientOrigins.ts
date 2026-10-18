@@ -11,6 +11,8 @@ export const clientSiteOrigins = [
   'https://www.braidsbylana.com',
   'https://braids-with-lana-site.vercel.app',
   'https://nail-sniper-web.vercel.app', // The Nail Sniper (custom domain to be added later)
+  'https://dialuxkollecionn.com',       // Dia Lux Kollection (spelled "kollecionn")
+  'https://www.dialuxkollecionn.com',
 ];
 
 /** Drops one trailing slash, so "https://site.com/" and "https://site.com" compare equal. */

@@ -118,6 +118,7 @@ import { isClaimable, issueClaimCode, firstNameOf } from "./accountSetup/claim";
 import { sendAppointmentReceipts, sendShootBookingReceipts } from "./stripe/webhookHandlers";
 import { getStripePublishableKey, getUncachableStripeClient } from "./stripe/stripeClient";
 import { isAllowedClientOrigin, normalizeClientOrigin } from "./clientOrigins";
+import { adminOverrideBusinessId } from "./adminBusinessOverride";
 import { authorizeAndProvisionGoLive, GoLiveError } from "./services/goLiveGate";
 import { ObjectStorageService, ObjectNotFoundError } from "./objectStorage";
 import { ObjectPermission } from "./objectAcl";
@@ -8646,6 +8647,7 @@ export async function registerRoutes(
           clientSecret: paymentIntent.client_secret,
           paymentIntentId: paymentIntent.id,
           orderId: order.id,
+          orderNumber: order.orderNumber,
           feeBreakdown: {
             basePriceCents,
             consumerUpchargeCents: feeBreakdown.consumerServiceFeeCents,
@@ -12651,14 +12653,24 @@ export async function registerRoutes(
   });
 
   // Get vendor's order/booking records
-  app.get("/api/vendor/customers", async (req, res) => {
-    const userId = req.session?.userId;
+  // Bearer (app, vendor sites) or session (web). Platform admin may name a business
+  // with x-business-id or ?businessId.
+  app.get("/api/vendor/customers", hybridAuthMiddleware, async (req, res) => {
+    const authReq = req as AuthenticatedRequest;
+    const userId = authReq.user?.userId || req.session?.userId;
     if (!userId) {
       return res.status(401).json({ error: "Not authenticated" });
     }
 
     try {
-      const business = await storage.getBusinessByOwnerId(userId);
+      const overrideBusinessId = adminOverrideBusinessId(
+        authReq.user?.isAdmin === true,
+        req.headers['x-business-id'],
+        req.query.businessId,
+      );
+      const business = overrideBusinessId
+        ? await storage.getBusiness(overrideBusinessId)
+        : await storage.getBusinessByOwnerId(userId);
       if (!business) {
         return res.status(404).json({ error: "No business found" });
       }
@@ -20082,7 +20094,17 @@ export async function registerRoutes(
       const userId = authReq.user?.userId || req.session?.userId;
       if (!userId) return res.status(401).json({ error: "Not authenticated" });
 
-      const business = await storage.getBusinessByOwnerId(userId);
+      // Platform admin can ship or update an order for any business from a vendor site
+      // dashboard (x-business-id header, or ?businessId like GET /api/business/orders).
+      // Everyone else: the business they own, exactly as before.
+      const overrideBusinessId = adminOverrideBusinessId(
+        authReq.user?.isAdmin === true,
+        req.headers['x-business-id'],
+        req.query.businessId,
+      );
+      const business = overrideBusinessId
+        ? await storage.getBusiness(overrideBusinessId)
+        : await storage.getBusinessByOwnerId(userId);
       if (!business) return res.status(404).json({ error: "Business not found" });
 
       const orderId = req.params.id;
@@ -23143,6 +23165,9 @@ export async function registerRoutes(
               quantity: item.quantity,
               price: item.price,
               imageUrl: imageMap[item.productId] ?? null,
+              // The option the customer picked (e.g. 18"), only when the line has one.
+              ...(item.variantId ? { variantId: item.variantId } : {}),
+              ...(item.variantLabel ? { variantLabel: item.variantLabel } : {}),
             })),
             total: order.totalAmount,
             grossChargeAmount: order.grossChargeAmount,
