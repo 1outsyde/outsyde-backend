@@ -24,7 +24,8 @@ import {
 } from "../emailService";
 import { processInfluencerCommission, reverseInfluencerCommission } from "../influencerPayoutService";
 import { settleAppointmentBooking, settleShootBooking } from "../bookingSettlement";
-import { qualifyReferral, releaseAfterForBooking, releasePromoReservation, type PromoRef } from "../loyaltyLedger";
+import { qualifyReferral, releaseAfterForBooking, type PromoRef } from "../loyaltyLedger";
+import { releasePromoForCanceledPaymentIntent } from "../promoCheckout";
 import { isComplimentaryTier, isTerminalStripeStatus } from "../complimentary";
 
 // XO Beauty & Lashes' own deposit-email sender (the legacy
@@ -1579,7 +1580,7 @@ export class WebhookHandlers {
         : type === 'appointment_booking' && bookingId ? { type: 'appointment', id: bookingId }
         : null;
       if (ref) {
-        await releasePromoReservation(ref, metadata.promoCodeId)
+        await releasePromoForCanceledPaymentIntent(ref, paymentIntent.id, metadata.promoCodeId)
           .catch(err => console.error(`[Stripe] Failed to release promo code ${metadata.promoCodeId}:`, err));
       }
     }
@@ -1625,6 +1626,12 @@ export class WebhookHandlers {
       } else if (type === 'shoot_booking') {
         const booking = await storage.getShootBooking(bookingId);
         if (!booking) return;
+        // Only the booking's current PaymentIntent ends it. A PaymentIntent the booking already
+        // replaced (e.g. its points code was taken and a fresh one was made) does not.
+        if (booking.stripePaymentIntentId !== paymentIntent.id) {
+          console.log(`[Stripe] PaymentIntent ${paymentIntent.id} is not shoot booking ${bookingId}'s current one; booking left as is`);
+          return;
+        }
 
         if ([BOOKING_STATES.PENDING_PAYMENT, BOOKING_STATES.PENDING_PROVIDER, BOOKING_STATES.DRAFT].includes(booking.status as any)) {
           await transitionShootBookingState(

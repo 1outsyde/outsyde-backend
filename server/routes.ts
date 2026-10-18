@@ -162,6 +162,7 @@ import {
   getPromoCodeRow,
   getPromoCodeRowByCode,
   releasePromoReservation,
+  releasePromoReservationsExcept,
   restorePromoForReference,
   rewardsRedeemedTotals,
   type PromoRef,
@@ -5732,6 +5733,14 @@ export async function registerRoutes(
     return typeof v === 'string' && v.trim() ? v.trim() : null;
   }
 
+  // For a booking that already exists: a code id = use it, null or '' = remove the code,
+  // field left out = keep whatever code the booking has (a retry that forgets to resend it
+  // must not quietly raise the price).
+  function requestedPromoChange(req: import("express").Request, current: BookingPromo): string | null {
+    if (!req.body || !Object.prototype.hasOwnProperty.call(req.body, 'promoCodeId')) return current?.id ?? null;
+    return requestedPromoCodeId(req);
+  }
+
   // Deposit/fee fields of a hold-based appointment, from its stored row.
   function appointmentPaymentMoneyFields(appt: HoldAppointmentRow) {
     const quote = quoteDeposit(appt.totalPrice, appt.depositAmountCents);
@@ -5810,13 +5819,28 @@ export async function registerRoutes(
     }
 
     await opts.saveRow(next);
-    if (current && current.id !== next?.id) {
-      await releasePromoReservation(ref, current.id).catch(err => console.error(`[Promo] release ${current.id} failed:`, err));
+
+    // Two quick change requests can interleave. The PaymentIntent's amount and code are always
+    // written together, so it is the truth: make the row match it and give back any other code
+    // this booking still holds.
+    let truth: BookingPromo = next;
+    try {
+      const fresh = await stripeService.getPaymentIntent(paymentIntent.id);
+      const freshId = fresh.metadata?.promoCodeId || null;
+      if ((freshId ?? null) !== (next?.id ?? null)) {
+        const row = freshId ? await getPromoCodeRow(freshId) : undefined;
+        truth = row ? { id: row.id, code: row.code, discountCents: Number(fresh.metadata?.discountCents) || row.discountCents } : null;
+        await opts.saveRow(truth);
+      }
+    } catch (err) {
+      console.error(`[Promo] Could not re-read PaymentIntent ${paymentIntent.id}:`, err);
     }
-    if (next && !(await confirmPromoStillHeld(next.id, ref, paymentIntent.id))) {
+    await releasePromoReservationsExcept(ref, truth?.id ?? null).catch(err => console.error(`[Promo] release for ${ref.type} ${ref.id} failed:`, err));
+
+    if (truth && !(await confirmPromoStillHeld(truth.id, ref, paymentIntent.id))) {
       return { ok: false, status: 409, body: PROMO_TAKEN_RESPONSE };
     }
-    return { ok: true, promo: next };
+    return { ok: true, promo: truth };
   }
 
   // When manual acceptance is required, notify the business owner and the
@@ -6014,7 +6038,7 @@ export async function registerRoutes(
                 paymentIntent: existingPI,
                 dueNowCents: shootDueNow,
                 current: saved,
-                requestedId: requestedPromoCodeId(req),
+                requestedId: requestedPromoChange(req, saved),
                 saveRow: async (promo) => { saved = promo; await saveShootPromo(existingShoot.id, promo); },
               });
               if (!changed.ok) return res.status(changed.status).json(changed.body);
@@ -6030,8 +6054,8 @@ export async function registerRoutes(
           } else if (existingShoot.status === BOOKING_STATES.PENDING_PAYMENT) {
             // Resume: the earlier attempt lost its PaymentIntent (a newer checkout took its points
             // code). Rebuilt from the row, with the code asked for now.
-            const wantedId = requestedPromoCodeId(req);
             const currentPromo = await bookingPromoFromRow(existingShoot.promoCodeUsed, existingShoot.discountAmountCents);
+            const wantedId = requestedPromoChange(req, currentPromo);
             let resumePromo: BookingPromo = null;
             if (wantedId) {
               const checked = await checkBookingPromo(wantedId, userId, shootDueNow);
@@ -6248,13 +6272,14 @@ export async function registerRoutes(
           if (existingPI && ['requires_payment_method', 'requires_confirmation', 'requires_action'].includes(existingPI.status)) {
             // The customer may have added, changed or removed a points code since this
             // PaymentIntent was made: same PaymentIntent, new amount.
+            const existingCurrentPromo = await bookingPromoFromRow(existing.promoCodeUsed, existing.discountAmountCents);
             const changed = await changePromoOnUnpaidBooking({
               ref: existingRef,
               userId,
               paymentIntent: existingPI,
               dueNowCents: existingDueNow,
-              current: await bookingPromoFromRow(existing.promoCodeUsed, existing.discountAmountCents),
-              requestedId: requestedPromoCodeId(req),
+              current: existingCurrentPromo,
+              requestedId: requestedPromoChange(req, existingCurrentPromo),
               saveRow: saveExistingPromo,
             });
             if (!changed.ok) return res.status(changed.status).json(changed.body);
@@ -6284,7 +6309,7 @@ export async function registerRoutes(
           // holds is checked and held first, then the row is updated, so the PaymentIntent below
           // is built from a row that matches the hold.
           const currentPromo = await bookingPromoFromRow(existing.promoCodeUsed, existing.discountAmountCents);
-          const wantedPromoId = requestedPromoCodeId(req);
+          const wantedPromoId = requestedPromoChange(req, currentPromo);
           let resumePromo: BookingPromo = currentPromo;
           if ((wantedPromoId ?? null) !== (currentPromo?.id ?? null)) {
             resumePromo = null;
@@ -6308,6 +6333,11 @@ export async function registerRoutes(
           let resumedPI: Awaited<ReturnType<typeof stripeService.createPlatformPaymentIntent>>;
           try {
             resumedPI = await stripeService.createPlatformPaymentIntent(resumeParams);
+            // The same key can return a PaymentIntent that was cancelled since (its code was
+            // taken by another checkout): make a fresh one.
+            if (resumedPI.status === 'canceled') {
+              resumedPI = await stripeService.createPlatformPaymentIntent({ ...resumeParams, idempotencyKey: `${resumeParams.idempotencyKey}_r${Date.now()}` });
+            }
           } catch (piError) {
             return sendPaymentIntentFailure(res, existing, resumeParams.idempotencyKey, piError);
           }
@@ -8046,7 +8076,7 @@ export async function registerRoutes(
       let discountCents = 0;
       if (promoCodeId) {
         const promoCode = await storage.getPromoCodeById(promoCodeId);
-        if (!promoCode || promoCode.status !== 'active' || promoCode.usedAt !== null || promoCode.userId !== userId
+        if (!promoCode || !['active', 'reserved'].includes(promoCode.status) || promoCode.usedAt !== null || promoCode.userId !== userId
             || new Date(promoCode.expiresAt).getTime() <= Date.now()) {
           return res.status(400).json({ error: 'Invalid or already used promo code' });
         }
@@ -8062,6 +8092,13 @@ export async function registerRoutes(
         discountCents = promoCode.discountCents;
       }
       const chargedToConsumer = Math.max(totalChargedToConsumerCents - discountCents, 50);
+
+      // Hold the code for this checkout (an older unpaid checkout using it is cancelled).
+      const legacyRef: PromoRef = { type: 'appointment', id: appointmentId };
+      if (promoCodeId && discountCents > 0) {
+        const claim = await claimPromoForCheckout(promoCodeId, userId, legacyRef);
+        if (!claim.ok) return res.status(claim.status).json({ error: claim.error, code: claim.code });
+      }
 
       // Get or create Stripe customer for the user
       const user = await storage.getUser(userId);
@@ -8116,6 +8153,10 @@ export async function registerRoutes(
         status: BOOKING_STATES.PENDING_PAYMENT,
         updatedAt: new Date()
       }).where(eq(appointments.id, appointmentId));
+
+      if (promoCodeId && discountCents > 0 && !(await confirmPromoStillHeld(promoCodeId, legacyRef, paymentIntent.id))) {
+        return res.status(409).json(PROMO_TAKEN_RESPONSE);
+      }
 
       console.log(`[Booking] Created PaymentIntent ${paymentIntent.id} for appointment ${appointmentId} (captureMethod: ${captureMethod}, charged: ${totalChargedToConsumerCents}¢, vendor: ${vendorPayoutCents}¢, platform: ${platformFeeCents}¢)`);
 
@@ -8241,7 +8282,7 @@ export async function registerRoutes(
       let discountCents = 0;
       if (promoCodeId) {
         const promoCode = await storage.getPromoCodeById(promoCodeId);
-        if (!promoCode || promoCode.status !== 'active' || promoCode.usedAt !== null || promoCode.userId !== userId
+        if (!promoCode || !['active', 'reserved'].includes(promoCode.status) || promoCode.usedAt !== null || promoCode.userId !== userId
             || new Date(promoCode.expiresAt).getTime() <= Date.now()) {
           return res.status(400).json({ error: 'Invalid or already used promo code' });
         }
@@ -8257,6 +8298,13 @@ export async function registerRoutes(
         discountCents = promoCode.discountCents;
       }
       const chargedToConsumer = Math.max(totalChargedToConsumerCents - discountCents, 50);
+
+      // Hold the code for this checkout (an older unpaid checkout using it is cancelled).
+      const legacyRef: PromoRef = { type: 'shoot_booking', id: bookingId };
+      if (promoCodeId && discountCents > 0) {
+        const claim = await claimPromoForCheckout(promoCodeId, userId, legacyRef);
+        if (!claim.ok) return res.status(claim.status).json({ error: claim.error, code: claim.code });
+      }
 
       // Get user for Stripe customer
       const user = await storage.getUser(userId);
@@ -8319,6 +8367,10 @@ export async function registerRoutes(
         status: BOOKING_STATES.PENDING_PAYMENT,
         updatedAt: new Date()
       }).where(eq(shootBookings.id, bookingId));
+
+      if (promoCodeId && discountCents > 0 && !(await confirmPromoStillHeld(promoCodeId, legacyRef, paymentIntent.id))) {
+        return res.status(409).json(PROMO_TAKEN_RESPONSE);
+      }
 
       console.log(`[Booking] Created PaymentIntent ${paymentIntent.id} for shoot booking ${bookingId} (captureMethod: ${captureMethod}, charged: ${totalChargedToConsumerCents}¢, vendor: ${vendorPayoutCents}¢, platform: ${platformFeeCents}¢)`);
 
@@ -8785,7 +8837,7 @@ export async function registerRoutes(
       await db.update(appointments).set({
         stripeRefundId: refund.id,
         refundedAt: new Date(),
-        refundAmount: refundAmount,
+        refundAmount: refund.amount ?? refundAmount,
         canceledBy: userId,
         cancellationReason: reason || 'Refunded by provider'
       }).where(eq(appointments.id, appointmentId));
@@ -8802,8 +8854,9 @@ export async function registerRoutes(
         console.error("Failed to reverse points:", pointsError);
       }
 
-      // No amount = the provider refunded it in full.
+      // No amount = the provider refunded it in full; with an amount, when it covered the whole charge.
       if (!amount) await giveBackPromoCode({ type: 'appointment', id: appointmentId }, 'provider full refund');
+      else await giveBackPromoCodeIfFullyRefunded({ type: 'appointment', id: appointmentId }, appointment.stripePaymentIntentId!, 'provider refund');
 
       console.log(`[Booking] Refunded appointment ${appointmentId}: ${refundAmount} cents (refund ID: ${refund.id})`);
 
@@ -9822,7 +9875,7 @@ export async function registerRoutes(
       await db.update(shootBookings).set({
         stripeRefundId: refund.id,
         refundedAt: new Date(),
-        refundAmount: refundAmount,
+        refundAmount: refund.amount ?? refundAmount,
         canceledBy: userId,
         cancellationReason: reason || 'Refunded by provider'
       }).where(eq(shootBookings.id, bookingId));
@@ -9839,8 +9892,9 @@ export async function registerRoutes(
         console.error("Failed to reverse points:", pointsError);
       }
 
-      // No amount = the provider refunded it in full.
+      // No amount = the provider refunded it in full; with an amount, when it covered the whole charge.
       if (!amount) await giveBackPromoCode({ type: 'shoot_booking', id: bookingId }, 'provider full refund');
+      else await giveBackPromoCodeIfFullyRefunded({ type: 'shoot_booking', id: bookingId }, booking.stripePaymentIntentId!, 'provider refund');
 
       console.log(`[Booking] Refunded shoot booking ${bookingId}: ${refundAmount} cents (refund ID: ${refund.id})`);
 
@@ -24091,7 +24145,7 @@ export async function registerRoutes(
               await db.update(appointments).set({
                 stripeRefundId: refund.id,
                 refundedAt: new Date(),
-                refundAmount: appt.totalPrice,
+                refundAmount: refund.amount ?? appt.totalPrice,
               }).where(eq(appointments.id, appt.id));
               await giveBackPromoCode({ type: 'appointment', id: appt.id }, 'business cancelled the day');
 

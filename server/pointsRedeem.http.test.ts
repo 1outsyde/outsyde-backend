@@ -63,6 +63,7 @@ async function call(method: string, path: string, o: { token?: string; body?: un
 
   const { generateAccessToken } = await import('./auth');
   const { WebhookHandlers } = await import('./stripe/webhookHandlers');
+  const { transitionAppointmentState } = await import('./bookingStateMachine');
   const ledger = await import('./loyaltyLedger');
   const pgMod: any = await import('pg');
   const pg = pgMod.default ?? pgMod;
@@ -72,6 +73,7 @@ async function call(method: string, path: string, o: { token?: string; body?: un
 
   // ── Stripe stub ───────────────────────────────────────────────────────
   const pis: Record<string, any> = {};
+  const idemKeys: Record<string, string> = {};
   const refunds: any[] = [];
   const transfers: any[] = [];
   let seq = 0;
@@ -98,6 +100,9 @@ async function call(method: string, path: string, o: { token?: string; body?: un
       if (req.method === 'POST' && url === '/v1/customers') return send(200, { id: `cus_stub_${++seq}`, object: 'customer' });
       if (req.method === 'GET' && url.startsWith('/v1/customers/')) return send(200, { id: url.split('/')[3], object: 'customer' });
       if (req.method === 'POST' && url === '/v1/payment_intents') {
+        // Same idempotency key = Stripe returns the PaymentIntent it already made (in its current state).
+        const idem = String(req.headers['idempotency-key'] || '');
+        if (idem && idemKeys[idem]) return send(200, view(pis[idemKeys[idem]]));
         const pi = {
           id: `pi_stub_${Date.now()}_${++seq}`, object: 'payment_intent', status: 'requires_payment_method',
           amount: Number(form.get('amount') || 0), capture_method: form.get('capture_method') || 'automatic',
@@ -105,6 +110,7 @@ async function call(method: string, path: string, o: { token?: string; body?: un
           client_secret: `secret_${seq}`, metadata: meta({}),
         };
         pis[pi.id] = pi;
+        if (idem) idemKeys[idem] = pi.id;
         return send(200, view(pi));
       }
       let m = url.match(/^\/v1\/payment_intents\/([^/]+)\/cancel$/);
@@ -235,8 +241,8 @@ async function call(method: string, path: string, o: { token?: string; body?: un
 
     // ── 3. Change / remove the code on the same unpaid PaymentIntent ──────
     console.log('\n── 3. change and remove the code before paying ──');
-    r = await call('POST', `/api/booking/${depHold}/create-payment-intent`, { token, body: {} });
-    assert(r.status === 200 && r.body?.paymentIntentId === depPi.id && pis[depPi.id].amount === 3240 && r.body?.discountCents === 0, 'no code now: same PaymentIntent back to $32.40', { s: r.status, amt: pis[depPi.id].amount, d: r.body?.discountCents });
+    r = await call('POST', `/api/booking/${depHold}/create-payment-intent`, { token, body: { promoCodeId: null } });
+    assert(r.status === 200 && r.body?.paymentIntentId === depPi.id && pis[depPi.id].amount === 3240 && r.body?.discountCents === 0, 'code removed (promoCodeId: null): same PaymentIntent back to $32.40', { s: r.status, amt: pis[depPi.id].amount, d: r.body?.discountCents });
     assert(!pis[depPi.id].metadata.promoCodeId, 'PaymentIntent metadata no longer carries a code', pis[depPi.id].metadata);
     assert((await code(code5)).status === 'active', 'code given back (active)');
     r = await call('POST', `/api/booking/${depHold}/create-payment-intent`, { token, body: { promoCodeId: code10 } });
@@ -331,6 +337,87 @@ async function call(method: string, path: string, o: { token?: string; body?: un
     assert(r.status === 200 && ref2?.amount === 4900, 'business cancel: refund capped at $49 charged (was asking $50 base, Stripe would refuse)', { s: r.status, b: r.body, ref2 });
     c = await code(code5);
     assert(c.status === 'active', 'cancelled order gives the code back', c);
+
+
+    // ── 9. Review fixes ───────────────────────────────────────────────────
+    console.log('\n── 9. retries, late events, ended bookings ──');
+    // a) A retry that leaves out promoCodeId keeps the code (does not raise the price).
+    const h9 = await mkHold(svcFull, 5000);
+    r = await call('POST', `/api/booking/${h9}/create-payment-intent`, { token, body: { promoCodeId: code5 } });
+    const appt9 = r.body?.appointmentId as string;
+    const pi9 = r.body?.paymentIntentId as string;
+    assert(r.status === 200 && pis[pi9].amount === 4900, 'booking with $5 code: $49', r.body);
+    r = await call('POST', `/api/booking/${h9}/create-payment-intent`, { token, body: {} });
+    assert(r.status === 200 && pis[pi9].amount === 4900 && r.body?.discountCents === 500, 'retry without the field keeps the code ($49 still)', { amt: pis[pi9].amount, d: r.body?.discountCents });
+    r = await call('POST', `/api/booking/${h9}/create-payment-intent`, { token, body: { promoCodeId: null } });
+    assert(r.status === 200 && pis[pi9].amount === 5400 && (await code(code5)).status === 'active', 'promoCodeId: null removes it ($54, code back)', { amt: pis[pi9].amount });
+    r = await call('POST', `/api/booking/${h9}/create-payment-intent`, { token, body: { promoCodeId: code5 } });
+    assert(r.status === 200 && pis[pi9].amount === 4900, 'code added back: $49', pis[pi9].amount);
+
+    // b) After losing its PaymentIntent (code taken), a retry with the same code gets a fresh,
+    //    payable PaymentIntent, not the cancelled one Stripe has under the same key.
+    pis[pi9].status = 'canceled';
+    await q(`UPDATE appointments SET stripe_payment_intent_id = NULL WHERE id = $1`, [appt9]);
+    // The key the first PaymentIntent for this code used:
+    idemKeys[`hold_pi_${appt9}_promo_${code5}`] = pi9;
+    r = await call('POST', `/api/booking/${h9}/create-payment-intent`, { token, body: { promoCodeId: code5 } });
+    const pi9b = r.body?.paymentIntentId as string;
+    assert(r.status === 200 && pi9b && pi9b !== pi9 && pis[pi9b]?.status === 'requires_payment_method' && pis[pi9b]?.amount === 4900,
+      'retry after a lost code: new payable PaymentIntent at $49', { s: r.status, pi9b, st: pis[pi9b]?.status });
+
+    // c) A late cancel event for the old PaymentIntent does not free the code the booking now holds.
+    await WebhookHandlers.handlePaymentIntentCanceled(pis[pi9]);
+    c = await code(code5);
+    assert(c.status === 'reserved' && c.ref === appt9, 'late cancel of the replaced PaymentIntent leaves the hold alone', c);
+
+    // d) A booking that ends unpaid gives the code back only after its PaymentIntent is cancelled.
+    const t = await transitionAppointmentState(appt9, 'canceled' as any, { triggeredBy: customer, triggerSource: 'api' });
+    assert(t.success, 'pending booking cancelled', t);
+    assert(pis[pi9b].status === 'canceled', 'its unpaid PaymentIntent was cancelled (cannot be paid with the code later)', pis[pi9b].status);
+    assert((await code(code5)).status === 'active', 'code given back');
+
+    // e) A booking that ends while its payment is processing keeps the code.
+    const h9e = await mkHold(svcFull, 5000);
+    r = await call('POST', `/api/booking/${h9e}/create-payment-intent`, { token, body: { promoCodeId: code5 } });
+    const appt9e = r.body?.appointmentId as string;
+    pis[r.body?.paymentIntentId].status = 'processing';
+    await transitionAppointmentState(appt9e, 'canceled' as any, { triggeredBy: customer, triggerSource: 'api' });
+    c = await code(code5);
+    assert(c.status === 'reserved' && c.ref === appt9e, 'processing payment keeps its code when the booking ends', c);
+    await q(`UPDATE promo_codes SET status='active', used_on_reference_type=NULL, used_on_order_id=NULL WHERE id=$1`, [code5]);
+
+    // ── 10. Photographer booking ──────────────────────────────────────────
+    console.log('\n── 10. photographer booking ──');
+    const photogUser = await mkUser('photog');
+    const photogId = crypto.randomUUID();
+    await q(`INSERT INTO photographers (id, user_id, display_name, hourly_rate, stripe_account_id, stripe_onboarding_complete, auto_accept_bookings) VALUES ($1, $2, 'PR Photo', 10000, 'acct_prph', true, true)`, [photogId, photogUser]);
+    const pSvc = crypto.randomUUID();
+    await q(`INSERT INTO photographer_services (id, photographer_id, name, price_cents, deposit_amount_cents, is_active, status) VALUES ($1, $2, 'Portrait', 20000, 5000, true, 'live')`, [pSvc, photogId]);
+    const ph = await mkHold(pSvc, 20000, 'photographer', photogId);
+    r = await call('POST', `/api/booking/${ph}/create-payment-intent`, { token, body: { promoCodeId: code5 } });
+    const shootId = r.body?.shootBookingId as string;
+    const shootPi = r.body?.paymentIntentId as string;
+    assert(r.status === 200 && r.body?.dueNowCents === 5400 && pis[shootPi]?.amount === 4900 && r.body?.discountCents === 500,
+      '$50 deposit shoot: $54 due, $49 with the $5 code', { s: r.status, due: r.body?.dueNowCents, amt: pis[shootPi]?.amount, b: r.body?.error });
+    assert(pis[shootPi]?.metadata?.vendorPayoutCents === '4900' && pis[shootPi]?.metadata?.originalConsumerTotalCents === '5400',
+      'photographer payout 4900 (5000 x 98%) unchanged; points on $54', pis[shootPi]?.metadata);
+    r = await call('POST', `/api/booking/${ph}/create-payment-intent`, { token, body: { promoCodeId: null } });
+    assert(r.status === 200 && pis[shootPi].amount === 5400 && (await code(code5)).status === 'active', 'shoot: code removed on the same PaymentIntent', { amt: pis[shootPi].amount });
+    r = await call('POST', `/api/booking/${ph}/create-payment-intent`, { token, body: { promoCodeId: code5 } });
+    pis[shootPi].status = 'succeeded';
+    await WebhookHandlers.handlePaymentIntentSucceeded(pis[shootPi]);
+    c = await code(code5);
+    const [shootRow] = await q(`SELECT status, discount_amount_cents, points_redeemed FROM shoot_bookings WHERE id=$1`, [shootId]);
+    assert(c.status === 'used' && c.ref === shootId && shootRow.status === 'confirmed' && shootRow.discount_amount_cents === 500 && shootRow.points_redeemed === 2500,
+      'shoot paid: code used, booking confirmed with the discount', { c, shootRow });
+    const shootTr = transfers.find(x => x.metadata?.bookingId === shootId);
+    assert(shootTr?.amount === 4900, 'photographer transfer $49.00 unchanged by the code', shootTr);
+    await q(`UPDATE promo_codes SET status='active', used_on_reference_type=NULL, used_on_order_id=NULL WHERE id=$1`, [code5]);
+    await q(`DELETE FROM photographer_availability WHERE photographer_id=$1`, [photogId]).catch(() => {});
+    await q(`DELETE FROM booking_audit_log WHERE booking_id=$1`, [shootId]).catch(() => {});
+    await q(`DELETE FROM shoot_bookings WHERE photographer_id=$1`, [photogId]);
+    await q(`DELETE FROM photographer_services WHERE id=$1`, [pSvc]);
+    await q(`DELETE FROM photographers WHERE id=$1`, [photogId]);
 
     // ── 8. Admin stats ────────────────────────────────────────────────────
     console.log('\n── 8. admin rewards total ──');
