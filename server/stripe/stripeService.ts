@@ -504,6 +504,74 @@ export class StripeService {
   }
 
   /**
+   * One transfer for a booking payout, with the same transfer_group and metadata shape as
+   * transferBookingPayout / transferShootBookingPayout, so their "already paid?" lookups see it.
+   * recipientKey is the metadata recipient ('business', 'staff', 'photographer', or
+   * '<recipient>_rewards' for the part Outsyde adds after a points code). With sourceTransaction
+   * the transfer is tied to that charge: Stripe accepts it even when the available balance is
+   * short and sends the money once the charge's funds are available.
+   */
+  async createBookingTransfer(params: {
+    kind: 'appointment' | 'shoot_booking';
+    bookingId: string;
+    recipientKey: string;
+    connectedAccountId: string;
+    amountInCents: number;
+    sourceTransaction?: string;
+    idempotencyKey: string;
+  }) {
+    const stripe = await getUncachableStripeClient();
+    const transferGroup = params.kind === 'appointment' ? `appointment_${params.bookingId}` : `shoot_booking_${params.bookingId}`;
+    const existing = await stripe.transfers.list({ transfer_group: transferGroup, limit: 20 });
+    const prior = existing.data.find(t => t.metadata?.recipient === params.recipientKey);
+    if (prior) return prior;
+    const metadata: Record<string, string> = params.kind === 'appointment'
+      ? { appointmentId: params.bookingId, recipient: params.recipientKey, type: 'appointment_booking_payout' }
+      : { bookingId: params.bookingId, recipient: params.recipientKey, type: 'shoot_booking_payout' };
+    return stripe.transfers.create({
+      amount: params.amountInCents,
+      currency: 'usd',
+      destination: params.connectedAccountId,
+      transfer_group: transferGroup,
+      metadata,
+      ...(params.sourceTransaction ? { source_transaction: params.sourceTransaction } : {}),
+    }, { idempotencyKey: params.idempotencyKey });
+  }
+
+  /** The charge behind a PaymentIntent: id, amount received and amount already refunded. */
+  async getPaymentIntentCharge(paymentIntentId: string): Promise<{ chargeId: string | null; amountReceived: number; amountRefunded: number }> {
+    const stripe = await getUncachableStripeClient();
+    const pi = await stripe.paymentIntents.retrieve(paymentIntentId, { expand: ['latest_charge'] });
+    const charge = pi.latest_charge && typeof pi.latest_charge === 'object' ? pi.latest_charge : null;
+    return {
+      chargeId: charge?.id ?? (typeof pi.latest_charge === 'string' ? pi.latest_charge : null),
+      amountReceived: pi.amount_received ?? 0,
+      amountRefunded: charge?.amount_refunded ?? 0,
+    };
+  }
+
+  /** Outsyde's available USD balance on Stripe (what booking payouts are paid from), in cents. */
+  async getAvailableBalanceCents(): Promise<number> {
+    const stripe = await getUncachableStripeClient();
+    const balance = await stripe.balance.retrieve();
+    return (balance.available ?? []).filter(b => b.currency === 'usd').reduce((sum, b) => sum + b.amount, 0);
+  }
+
+  /**
+   * Pull money from the platform's verified bank account into the Stripe balance (Stripe
+   * top-up). Needs an approved platform profile and a verified bank; ACH funds take days.
+   */
+  async createBalanceTopUp(amountCents: number, description: string, idempotencyKey: string) {
+    const stripe = await getUncachableStripeClient();
+    return stripe.topups.create({
+      amount: amountCents,
+      currency: 'usd',
+      description,
+      statement_descriptor: 'Outsyde payouts',
+    }, { idempotencyKey });
+  }
+
+  /**
    * Transfer a photographer payout from the platform balance to the photographer's
    * connected account after a platform-balance PaymentIntent has succeeded.
    * Parallel to transferBookingPayout() (business/staff path) — kept separate
