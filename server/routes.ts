@@ -5334,7 +5334,8 @@ export async function registerRoutes(
         serviceId: serviceId as string,
         date: date as string,
         startTime: startTime as string,
-        holdDurationMinutes: holdDurationMinutes ? parseInt(holdDurationMinutes, 10) : undefined,
+        // Part B: the hold is 10 minutes everywhere; never longer, whatever the client sends.
+        holdDurationMinutes: holdDurationMinutes ? Math.min(Math.max(parseInt(holdDurationMinutes, 10) || 10, 1), 10) : undefined,
         addonIds: validatedAddonIds,
         customerDetails: trimmedDetails !== undefined && trimmedDetails.length > 0 ? trimmedDetails : undefined,
       });
@@ -5944,7 +5945,10 @@ export async function registerRoutes(
               eq(shootBookings.photographerId, hold.providerId),
               eq(shootBookings.date, hold.holdDate),
               eq(shootBookings.startTime, hold.startTime),
-              eq(shootBookings.clientId, hold.userId)
+              eq(shootBookings.clientId, hold.userId),
+              // Part B: only a live attempt can be resumed. An expired or canceled row from an
+              // earlier hold must not block the same customer from booking this slot again.
+              inArray(shootBookings.status, [BOOKING_STATES.PENDING_PAYMENT, BOOKING_STATES.PENDING_PROVIDER])
             )
           );
         const photographer = await storage.getPhotographer(hold.providerId);
@@ -6043,6 +6047,7 @@ export async function registerRoutes(
               });
               if (!changed.ok) return res.status(changed.status).json(changed.body);
               return res.json({
+                holdExpiresAt: new Date(hold.expiresAt).toISOString(), // Part B: payment screen counts down to this
                 clientSecret: existingPI.client_secret,
                 paymentIntentId: existingPI.id,
                 shootBookingId: existingShoot.id,
@@ -6081,6 +6086,7 @@ export async function registerRoutes(
               return res.status(409).json(PROMO_TAKEN_RESPONSE);
             }
             return res.json({
+              holdExpiresAt: new Date(hold.expiresAt).toISOString(), // Part B: payment screen counts down to this
               clientSecret: resumedPI.client_secret,
               paymentIntentId: resumedPI.id,
               shootBookingId: existingShoot.id,
@@ -6216,6 +6222,7 @@ export async function registerRoutes(
         const inPersonDueCents = shootQuote.dueAtAppointmentCents;
 
         return res.json({
+          holdExpiresAt: new Date(hold.expiresAt).toISOString(), // Part B: payment screen counts down to this
           clientSecret: photographerPI.client_secret,
           paymentIntentId: photographerPI.id,
           shootBookingId: shootBooking.id,
@@ -6284,6 +6291,7 @@ export async function registerRoutes(
             });
             if (!changed.ok) return res.status(changed.status).json(changed.body);
             return res.json({
+              holdExpiresAt: new Date(hold.expiresAt).toISOString(), // Part B: payment screen counts down to this
               clientSecret: existingPI.client_secret,
               paymentIntentId: existingPI.id,
               appointmentId: existing.id,
@@ -6366,6 +6374,7 @@ export async function registerRoutes(
           }
 
           return res.json({
+            holdExpiresAt: new Date(hold.expiresAt).toISOString(), // Part B: payment screen counts down to this
             clientSecret: resumedPI.client_secret,
             paymentIntentId: resumedPI.id,
             appointmentId: existing.id,
@@ -6559,6 +6568,7 @@ export async function registerRoutes(
       }
 
       res.json({
+        holdExpiresAt: new Date(hold.expiresAt).toISOString(), // Part B: payment screen counts down to this
         clientSecret: paymentIntent.client_secret,
         paymentIntentId: paymentIntent.id,
         appointmentId: appointment.id,
