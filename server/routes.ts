@@ -1003,7 +1003,8 @@ export async function registerRoutes(
       version: PHOTOGRAPHER_TAXONOMY_VERSION,
       maxSpecialties: MAX_PHOTOGRAPHER_SPECIALTIES,
       otherMax: SPECIALTY_OTHER_MAX,
-      specialties: PHOTOGRAPHER_SPECIALTIES.filter((s) => !s.retired).map((s) => ({ code: s.code, label: s.label })),
+      // aliases (2026-10-18): older names, so the app can show a profile saved before the list as picks.
+      specialties: PHOTOGRAPHER_SPECIALTIES.filter((s) => !s.retired).map((s) => ({ code: s.code, label: s.label, aliases: s.aliases ?? [] })),
       options: PHOTOGRAPHER_OPTIONS,
     });
   });

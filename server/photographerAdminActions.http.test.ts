@@ -79,6 +79,11 @@ async function call(method: string, path: string, o: { token?: string; body?: un
   const shootIds: string[] = [];
 
   try {
+    console.log("\n=== Shared list includes older names (for the app editor) ===");
+    const tx = await call("GET", "/api/taxonomy/photographer");
+    const product = (tx.body?.specialties ?? []).find((s: any) => s.code === "photo.product");
+    assert(Array.isArray(product?.aliases) && product.aliases.includes("Products"), "aliases served with each specialty", product);
+
     console.log("\n=== Rate is optional at signup ===");
     let r = await call("POST", "/api/auth/photographer/signup", { body: signupBody("norate", { pricingType: "packages", specialtyCodes: ["photo.events"] }) });
     let p = await photographerOf("norate");
