@@ -104,10 +104,12 @@ async function call(method: string, path: string, o: { token?: string; body?: un
     const val = (t: string, l: string) => rows(t).find((x: any) => x.label === l)?.value;
     assert(r.status === 200 && Array.isArray(r.body?.signupDetails?.sections), "signupDetails.sections present", r.status);
     assert(r.body?.signupDetails?.sections?.[0]?.title === "Interests", "Interests is the first section");
-    assert(val("Interests", "Industries") === "Clothing & Fashion, Beauty Services", "app codes shown readable", val("Interests", "Industries"));
+    assert(val("Interests", "Industries") === "Fashion & Accessories, Beauty & Personal Care", "app codes saved on the shared list, shown readable", val("Interests", "Industries"));
+    assert(val("Interests", "Originally picked") === "Clothing & Fashion, Beauty Services", "original app answers shown");
     assert(val("Interests", "Matches business industries") === "Fashion & Accessories, Beauty & Personal Care", "matched to business industries");
-    assert(val("Interests", "Into (Clothing & Fashion)") === "Vintage, Streetwear", "niches shown");
-    assert(val("Interests", "What matters (Clothing & Fashion)") === "Quality, Fair price", "what matters shown");
+    assert(val("Interests", "Into (Fashion & Accessories)") === "Clothing, Streetwear", "niches shown on the shared list", rows("Interests"));
+    assert(val("Interests", "Originally into (Clothing & Fashion)") === "Vintage, Streetwear", "original niches shown");
+    assert(val("Interests", "What matters (Fashion & Accessories)") === "Quality, Fair price", "what matters shown");
     assert(val("About them", "Gender") === "Female" && val("About them", "Birthday") === "Mar 4, 1999" && val("About them", "Shopping frequency") === "Weekly", "about them rows");
     assert(val("Contact", "Phone") === "5165550100" && val("Contact", "Username") === `@${uname("app")}`, "phone + username rows");
     assert(r.body?.user?.username === uname("app") && r.body?.user?.phone === "5165550100", "user.username (new) + user.phone sent");
@@ -121,7 +123,7 @@ async function call(method: string, path: string, o: { token?: string; body?: un
 
     console.log("\n=== Web customer detail ===");
     r = await call("GET", `/api/admin/users/${webId}`, { token: adminToken });
-    assert(val("Interests", "Industries") === "Fashion & Apparel, Travel & Adventure", "web names kept as typed", val("Interests", "Industries"));
+    assert(val("Interests", "Industries") === "Fashion & Accessories, Other" && val("Interests", "Originally picked") === "Fashion & Apparel, Travel & Adventure", "web names on the shared list, original words shown", val("Interests", "Industries"));
     assert(val("Interests", "Matches business industries") === "Fashion & Accessories, Other", "web only interest goes to Other");
     assert(val("Interests", "What they're into") === "Not provided" && val("Interests", "What matters most") === "Not provided", "no niches → Not provided");
     assert(val("Contact", "Home address") === "1 Main St, Freeport, NY 11520, United States" && val("Contact", "Billing address") === "Same as home", "address rows");
