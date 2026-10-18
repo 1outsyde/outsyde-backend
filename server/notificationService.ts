@@ -641,6 +641,17 @@ export const NotificationTriggers = {
     const adminUsers = await storage.getAdminUsers();
     const location = params.city && params.state ? `${params.city}, ${params.state}` : null;
     const adminTitle = 'New Photographer Application';
+
+    // Load the saved records so the email shows every answer the photographer gave (2026-10-18).
+    // A failed lookup never blocks the alert: the email falls back to the params above.
+    let savedPhotographer: Awaited<ReturnType<typeof storage.getPhotographer>> | null = null;
+    let savedOwner: Awaited<ReturnType<typeof storage.getUser>> | null = null;
+    try {
+      savedPhotographer = (await storage.getPhotographer(params.photographerId)) ?? null;
+      savedOwner = savedPhotographer ? (await storage.getUser(savedPhotographer.userId)) ?? null : null;
+    } catch (err) {
+      console.error(`[AdminSignupNotify] Could not load photographer ${params.photographerId} for the email:`, err);
+    }
     const adminMessage = `${params.displayName} has applied to join Outsyde as a photographer. Location: ${params.city || 'Unknown'}, ${params.state || 'Unknown'}`;
 
     for (const admin of adminUsers) {
@@ -690,6 +701,8 @@ export const NotificationTriggers = {
               location,
               specialties: params.specialties,
               photographerId: params.photographerId,
+              photographer: savedPhotographer,
+              owner: savedOwner,
             });
           }
         } catch (err) {

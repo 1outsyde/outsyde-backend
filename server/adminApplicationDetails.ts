@@ -38,24 +38,24 @@ const BUSINESS_TYPE_LABELS: Record<string, string> = {
   nonprofit: "Nonprofit",
 };
 
-function text(v: unknown): string {
+export function text(v: unknown): string {
   if (v === null || v === undefined) return NOT_PROVIDED;
   const s = String(v).trim();
   return s ? s : NOT_PROVIDED;
 }
 
-function yesNo(v: boolean | null | undefined): string {
+export function yesNo(v: boolean | null | undefined): string {
   if (v === true) return "Yes";
   if (v === false) return "No";
   return NOT_PROVIDED;
 }
 
-function joinParts(parts: Array<string | null | undefined>): string {
+export function joinParts(parts: Array<string | null | undefined>): string {
   const s = parts.map((p) => (p ?? "").trim()).filter(Boolean).join(", ");
   return s || NOT_PROVIDED;
 }
 
-function formatDate(d: Date | string | null | undefined): string {
+export function formatDate(d: Date | string | null | undefined): string {
   if (!d) return NOT_PROVIDED;
   const date = d instanceof Date ? d : new Date(d);
   if (Number.isNaN(date.getTime())) return NOT_PROVIDED;
@@ -80,11 +80,11 @@ function billingText(raw: unknown): string {
   return joinParts([str("line1"), str("line2"), str("city"), [str("state"), str("postalCode")].filter(Boolean).join(" ")]);
 }
 
-function isHttpUrl(v: string | null | undefined): v is string {
+export function isHttpUrl(v: string | null | undefined): v is string {
   return !!v && /^https?:\/\//i.test(v.trim());
 }
 
-type OwnerLike = Pick<User, "name" | "email" | "phone" | "username" | "address" | "city" | "state" | "zipCode" | "createdAt"> & {
+export type OwnerLike = Pick<User, "name" | "email" | "phone" | "username" | "address" | "city" | "state" | "zipCode" | "createdAt"> & {
   source?: string | null;
 };
 

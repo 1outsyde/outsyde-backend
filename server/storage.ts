@@ -208,6 +208,8 @@ export type NewPhotographerInput = {
   hourlyRate: number;
   stripeAccountId?: string | null;
   specialties?: string[];
+  specialtyCodes?: string[];
+  specialtyOther?: string | null;
   // Expanded profile fields (all optional)
   shootLocation?: string[];
   studioName?: string | null;
@@ -1344,6 +1346,8 @@ export class DatabaseStorage implements IStorage {
       stripeAccountId: data.stripeAccountId ?? null,
       stripeOnboardingComplete: false,
       specialties: data.specialties ?? [],
+      specialtyCodes: data.specialtyCodes ?? [],
+      specialtyOther: data.specialtyOther ?? null,
       shootLocation: data.shootLocation,
       studioName: data.studioName,
       studioAddress: data.studioAddress,

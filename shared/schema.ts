@@ -810,6 +810,9 @@ export const photographers = pgTable("photographers", {
   stripeOnboardingLastEventAt: timestamp("stripe_onboarding_last_event_at"),
   stripeOnboardingUrl: text("stripe_onboarding_url"),
   specialties: text("specialties").array(),
+  // Shared list codes (migration 053, shared/photographerTaxonomy.ts). `specialties` keeps the readable names.
+  specialtyCodes: jsonb("specialty_codes").$type<string[]>().notNull().default([]),
+  specialtyOther: text("specialty_other"),
 
   // Storefront customization
   coverImage: text("cover_image"),

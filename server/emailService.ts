@@ -1,6 +1,6 @@
 import { Resend } from 'resend';
 import type { EmailLogTag } from './emailHistory';
-import type { Business, User } from '@shared/schema';
+import type { Business, Photographer, User } from '@shared/schema';
 import {
   buildVendorApplicationSections,
   renderSectionsHtml,
@@ -9,6 +9,7 @@ import {
   NOT_PROVIDED,
   type DetailSection,
 } from './adminApplicationDetails';
+import { buildPhotographerApplicationSections } from './photographerApplicationDetails';
 
 // History logging for emails to customers, vendors and photographers (PR C2). emailHistory is loaded
 // lazily so importing this file still never loads the database module (server/accountSetup tests and
@@ -227,54 +228,59 @@ export async function sendNewPhotographerApplicationEmail(params: {
   location?: string | null;
   specialties?: string[];
   photographerId: string;
+  /** Saved rows (2026-10-18). When present the email lists every signup answer. */
+  photographer?: Photographer | null;
+  owner?: (Pick<User, "name" | "email" | "phone" | "username" | "address" | "city" | "state" | "zipCode" | "createdAt"> & { source?: string | null }) | null;
 }): Promise<boolean> {
-  const subject = `New Photographer Application: ${params.displayName}`;
-  
+  const subject = `New Photographer: ${params.displayName}`;
+  const reviewBase = (process.env.FRONTEND_URL || getAppBaseUrl() || 'https://www.goutsyde.com').replace(/\/+$/, '');
+  const reviewUrl = `${reviewBase}/admin/photographers/${encodeURIComponent(params.photographerId)}`;
+
+  // Fallback rows when the saved records could not be loaded (never blocks the alert).
+  const sections: DetailSection[] = params.photographer
+    ? buildPhotographerApplicationSections(params.photographer, params.owner ?? null)
+    : [{
+        title: 'Profile',
+        rows: [
+          { label: 'Display name', value: params.displayName || NOT_PROVIDED },
+          { label: 'Owner', value: params.ownerName || NOT_PROVIDED },
+          { label: 'Email', value: params.ownerEmail || NOT_PROVIDED },
+          { label: 'Location', value: params.location || NOT_PROVIDED },
+          { label: 'Specialties', value: params.specialties && params.specialties.length ? params.specialties.join('; ') : NOT_PROVIDED },
+        ],
+      }];
+
   const html = `
     <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
       <div style="background: linear-gradient(135deg, #f5a623, #f7b84b); padding: 20px; text-align: center;">
-        <h1 style="color: white; margin: 0;">New Photographer Application</h1>
+        <h1 style="color: white; margin: 0;">New Photographer</h1>
       </div>
-      
+
       <div style="padding: 30px; background: #ffffff;">
-        <p style="font-size: 16px; color: #333;">A new photographer has applied to join Outsyde:</p>
-        
-        <div style="background: #f9f9f9; padding: 20px; border-radius: 8px; margin: 20px 0;">
-          <h2 style="color: #333; margin-top: 0;">${params.displayName}</h2>
-          <p style="margin: 8px 0;"><strong>Name:</strong> ${params.ownerName}</p>
-          <p style="margin: 8px 0;"><strong>Email:</strong> ${params.ownerEmail}</p>
-          ${params.location ? `<p style="margin: 8px 0;"><strong>Location:</strong> ${params.location}</p>` : ''}
-          ${params.specialties && params.specialties.length > 0 ? `<p style="margin: 8px 0;"><strong>Specialties:</strong> ${params.specialties.join(', ')}</p>` : ''}
-        </div>
-        
+        <p style="font-size: 16px; color: #333; margin-top: 0;">A new photographer joined Outsyde. Their profile is public right away. Here is everything they entered.</p>
+        ${renderSectionsHtml(sections)}
         <div style="text-align: center; margin-top: 30px;">
-          <a href="${getAppBaseUrl()}/admin/photographer-applications/${params.photographerId}" 
+          <a href="${escapeHtml(reviewUrl)}"
              style="background: #f5a623; color: white; padding: 12px 30px; text-decoration: none; border-radius: 6px; font-weight: bold;">
-            Review Application
+            Review Photographer
           </a>
         </div>
       </div>
-      
+
       <div style="background: #f5f5f5; padding: 15px; text-align: center; color: #666; font-size: 12px;">
         <p>This is an automated notification from Outsyde.</p>
       </div>
     </div>
   `;
 
-  const baseUrl = getAppBaseUrl();
-  const text = `
-New Photographer Application: ${params.displayName}
+  const text = `New Photographer: ${params.displayName}
 
-A new photographer has applied to join Outsyde:
+A new photographer joined Outsyde. Their profile is public right away. Here is everything they entered.
 
-Display Name: ${params.displayName}
-Name: ${params.ownerName}
-Email: ${params.ownerEmail}
-${params.location ? `Location: ${params.location}` : ''}
-${params.specialties && params.specialties.length > 0 ? `Specialties: ${params.specialties.join(', ')}` : ''}
+${renderSectionsText(sections)}
 
-${baseUrl ? `Review: ${baseUrl}/admin/photographer-applications/${params.photographerId}` : 'Please log in to the admin panel to review this application.'}
-  `;
+Review: ${reviewUrl}
+`;
 
   return sendAdminEmail({
     to: ADMIN_NOTIFICATION_EMAIL,
