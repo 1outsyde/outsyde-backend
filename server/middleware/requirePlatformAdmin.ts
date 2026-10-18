@@ -14,6 +14,11 @@ const isAllowedAdminEmail = (email: string | null | undefined): boolean => {
   return ALLOWED_ADMIN_EMAILS.includes(email.toLowerCase());
 };
 
+/** Same rule as requirePlatformAdmin's DB check: admin flag AND an allowed admin email. */
+export function isPlatformAdminUser(user: { isAdmin?: boolean | null; email?: string | null } | undefined | null): boolean {
+  return !!user?.isAdmin && isAllowedAdminEmail(user.email);
+}
+
 /**
  * Standalone copy of requireAdmin (routes.ts:16070-16118) for routers that cannot reach
  * the registerRoutes closure. JWT first (isAdmin falsy → 403), session fallback, then a DB

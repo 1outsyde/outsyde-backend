@@ -150,8 +150,9 @@ import {
   transitionShootBookingState,
 } from "./bookingStateMachine";
 import { isValidTimeZone } from "./manualRequests";
+import { filterProviderBookings } from "./providerBookingLists";
 import { settleAppointmentBooking, settleShootBooking } from "./bookingSettlement";
-import { requirePlatformAdmin } from "./middleware/requirePlatformAdmin";
+import { requirePlatformAdmin, isPlatformAdminUser } from "./middleware/requirePlatformAdmin";
 import {
   pointsForGrossCents,
   pointsValueCents,
@@ -5919,6 +5920,22 @@ export async function registerRoutes(
     }
     const overwrite = req.body?.overwrite === true;
     try {
+      // Part D: a vendor site names its own business. Allowed for that business's owner, or a
+      // platform admin (vendor-site dashboards are often run from the Outsyde admin account,
+      // whose own businesses must not get the site's zone). Photographer profiles are untouched.
+      const targetBusinessId = typeof req.body?.businessId === "string" && req.body.businessId ? req.body.businessId as string : null;
+      if (targetBusinessId) {
+        const target = await storage.getBusiness(targetBusinessId);
+        if (!target) return res.status(404).json({ error: "Business not found" });
+        if (target.ownerId !== userId && !isPlatformAdminUser(await storage.getUser(userId))) {
+          return res.status(403).json({ error: "Not allowed for this business" });
+        }
+        const rows = await db.update(businesses)
+          .set({ timeZone })
+          .where(overwrite ? eq(businesses.id, targetBusinessId) : and(eq(businesses.id, targetBusinessId), isNull(businesses.timeZone)))
+          .returning({ id: businesses.id });
+        return res.json({ timeZone, businessesUpdated: rows.length, photographersUpdated: 0 });
+      }
       const businessRows = await db.update(businesses)
         .set({ timeZone })
         .where(overwrite ? eq(businesses.ownerId, userId) : and(eq(businesses.ownerId, userId), isNull(businesses.timeZone)))
@@ -15775,7 +15792,8 @@ export async function registerRoutes(
       }
       const staff = resolved.staff;
 
-      const bookings = await storage.getAppointmentsByStaffMember(staff.id);
+      // Part D: no draft / unpaid checkouts; ?status=<one status> returns exactly that status.
+      const bookings = filterProviderBookings(await storage.getAppointmentsByStaffMember(staff.id), req.query.status);
       res.json({ bookings });
     } catch (error) {
       console.error("Get staff bookings error:", error);
@@ -20303,7 +20321,8 @@ export async function registerRoutes(
       const business = await storage.getBusinessByOwnerId(userId);
       if (!business) return res.status(404).json({ error: "Business not found" });
 
-      const bookings = await storage.getAppointmentsByBusinessWithDetails(business.id);
+      // Part D: no draft / unpaid checkouts; ?status=<one status> returns exactly that status.
+      const bookings = filterProviderBookings(await storage.getAppointmentsByBusinessWithDetails(business.id), req.query.status);
       res.json({ bookings });
     } catch (error) {
       console.error("Get business bookings error:", error);
@@ -21471,11 +21490,8 @@ export async function registerRoutes(
       }
 
       const { status, page = "1", limit = "20" } = req.query;
-      let appts = await storage.getAppointmentsByBusiness(business.id);
-
-      if (status) {
-        appts = appts.filter(a => a.status === status);
-      }
+      // Part D: no draft / unpaid checkouts unless one status is asked for (?status=, exact match).
+      let appts = filterProviderBookings(await storage.getAppointmentsByBusiness(business.id), status);
 
       appts.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
 
