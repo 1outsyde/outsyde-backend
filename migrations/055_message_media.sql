@@ -1,4 +1,4 @@
--- Migration 054: photos in direct messages + indexes for chat paging and inbox lookups (2026-10-18)
+-- Migration 055: photos in direct messages + indexes for chat paging and inbox lookups (2026-10-18)
 -- Run manually in the Neon SQL editor BEFORE Render deploys this PR. Never via drizzle-kit push.
 -- Idempotent: safe to re-run. Additive only: one new column with a default, three indexes.
 --

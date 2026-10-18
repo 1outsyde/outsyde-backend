@@ -4,7 +4,7 @@
  *
  * SCRATCH ONLY. Same setup as messaging.http.test.ts, plus the backend must run with a fake R2:
  *   R2_ENDPOINT=http://127.0.0.1:<port> R2_PUBLIC_URL=http://127.0.0.1:<port>/<bucket> (any server
- *   that answers PUT 200), and migration 054 applied to the scratch DB.
+ *   that answers PUT 200), and migration 055 applied to the scratch DB.
  *   MSG_TEST_BASE_URL, MSG_TEST_PG_URL, MSG_TEST_EXPO_FILE, JWT_SECRET as in messaging.http.test.ts.
  *
  * Rules under test:

@@ -6,7 +6,7 @@
  *  - text 1..2000 characters
  *  - at most 5 links
  *  - the same text may not be sent a third time within the last 5 messages
- * Photos (migration 054):
+ * Photos (migration 055):
  *  - up to 10 photo URLs, each uploaded through Outsyde (R2_PUBLIC_URL + "/messages/")
  *  - text is optional when there is at least one photo
  */
