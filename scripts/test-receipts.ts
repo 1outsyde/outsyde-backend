@@ -738,8 +738,21 @@ async function main() {
         check("T-2f", r && r.calls.length === 2 && r.calls[0].params.capture_method === "manual" && r.calls[1].params.capture_method === "manual"
           && r.calls[0].key === `hold_pi_${r.rows[0]?.id}` && r.calls[1].key === r.calls[0].key && same(r.calls[0].params, r.calls[1].params),
           `${label}: capture ${JSON.stringify(r?.calls.map(c => c.params.capture_method))}, keys ${JSON.stringify(r?.calls.map(c => c.key))}`);
-        check("T-2f", r && r.rows.length === 1 && (r.rows[0] as any).status === BOOKING_STATES.PENDING_PROVIDER, `${label}: rows ${r?.rows.length}, status ${(r?.rows[0] as any)?.status}`);
-        check("T-2f", requests.length === 1, `${label}: vendor "New booking request" emails ${requests.length} (want exactly 1)`);
+        // Part C: a manual checkout stays pending_payment and the business hears nothing until Stripe
+        // confirms the card hold (payment_intent.amount_capturable_updated).
+        check("T-2f", r && r.rows.length === 1 && (r.rows[0] as any).status === BOOKING_STATES.PENDING_PAYMENT, `${label}: rows ${r?.rows.length}, status ${(r?.rows[0] as any)?.status} (want pending_payment before the card hold)`);
+        check("T-2f", requests.length === 0, `${label}: vendor "New booking request" emails at checkout ${requests.length} (want 0)`);
+        const { WebhookHandlers: WHc } = await import("../server/stripe/webhookHandlers");
+        const authorizedPI = { id: r?.a2.body?.paymentIntentId, status: "requires_capture", capture_method: "manual",
+          amount: r?.calls[1]?.params.amount, amount_capturable: r?.calls[1]?.params.amount, metadata: r?.calls[1]?.params.metadata };
+        await WHc.handlePaymentIntentCapturableUpdated(authorizedPI);
+        await WHc.handlePaymentIntentCapturableUpdated(authorizedPI); // duplicate delivery
+        await settleEmails();
+        const [afterHold] = await db.select().from(schema.appointments).where(eq(schema.appointments.id, (r?.rows[0] as any)?.id));
+        const requestsAfter = sent.slice(sentBefore).filter(e => e.to === vendorEmail && e.subject.startsWith("New booking request"));
+        check("T-2f", (afterHold as any)?.status === BOOKING_STATES.PENDING_PROVIDER && !!(afterHold as any)?.pendingProviderExpiresAt,
+          `${label}: after the card hold status ${(afterHold as any)?.status}, deadline ${(afterHold as any)?.pendingProviderExpiresAt}`);
+        check("T-2f", requestsAfter.length === 1, `${label}: vendor "New booking request" emails after the card hold ${requestsAfter.length} (want exactly 1, duplicate event sends none)`);
       }
       await db.update(schema.businesses).set({ autoAcceptBookings: true } as any).where(eq(schema.businesses.id, business.id));
     }
@@ -1635,7 +1648,9 @@ async function main() {
   // updated with the old call (status 'paid' + stripePaymentIntentId) in every
   // column except identity/creation columns.
   {
-    const skip = new Set(["id", "order_number", "created_at", "order_group_id"]);
+    // paid_at is new since Part A (#309, revenue counts orders by when they were paid): the old call
+    // never set it, so it is compared on its own below instead of in the column list.
+    const skip = new Set(["id", "order_number", "created_at", "order_group_id", "paid_at"]);
     // Raw row as JSON so timestamps compare as text (the local Neon proxy
     // returns timestamps drizzle can't parse, which would hide differences).
     const { sql } = await import("drizzle-orm");
@@ -1655,6 +1670,7 @@ async function main() {
       const same = JSON.stringify(Object.keys(cNew).sort()) === JSON.stringify(Object.keys(cOld).sort())
         && Object.keys(cOld).every(k => JSON.stringify(cNew[k]) === JSON.stringify(cOld[k]));
       assert(same, `order row parity (${label}): same columns and values as old updateOrder (new=${JSON.stringify(Object.keys(cNew))} old=${JSON.stringify(Object.keys(cOld))})`);
+      assert(!!afterNew.paid_at, `order row parity (${label}): paid_at is set when the order is paid (Part A)`);
     };
     await parity("product_purchase PI", (id, piId) =>
       WebhookHandlers.handlePaymentIntentSucceeded({ id: piId, amount: 2160, metadata: { type: "product_purchase", orderId: id, businessId: business.id, userId: consumer.id } }));
@@ -1687,7 +1703,8 @@ async function main() {
     expect("appt: consumer cancels confirmed (no refund, $5 fee)", "canceled", ["chargeSavedPaymentMethod:500", "getPaymentIntentForRefund", "getPaymentMethodIdFromIntent"], ["admin | [Outsyde Admin] Appointment Canceled"]);
     expect("appt: vendor cancels with refund", "canceled", ["createBookingRefund:12500"]);
     expect("appt: vendor cancels without refund (no-show)", "no_show", []);
-    expect("appt: request expires (cleanupExpiredPendingProvider)", "expired", ["cancelPaymentIntent"], ["consumer | Booking request expired"]);
+    // Part C: the job reads the PaymentIntent, releases the card hold, then tells both sides (new copy).
+    expect("appt: request expires (cleanupExpiredPendingProvider)", "expired", ["cancelPaymentIntent", "getPaymentIntent"], ["consumer | Your booking request expired", "vendor | You missed a booking request"]);
     expect("appt: draft expires (cleanupExpiredDrafts)", "expired", []);
     expect("hold expires (expireOldHolds)", "expired", []);
     expect("appt: reminder job (24h)", "confirmed", [], ["consumer | Your appointment is tomorrow"]);
@@ -1696,7 +1713,7 @@ async function main() {
     expect("shoot: photographer accepts pending request", "confirmed", ["capturePaymentIntent"], ["consumer | 🎉 Your shoot is confirmed", "photographer | 🎉 New shoot booked", "admin | [Outsyde] shoot_booking"]);
     expect("shoot: photographer cancels with refund", "canceled", ["createBookingRefund:15000"]);
     expect("shoot: consumer cancels confirmed", "canceled", [], ["photographer | Your Booking Was Canceled"]);
-    expect("shoot: request expires (cleanupExpiredPendingProvider)", "expired", ["cancelPaymentIntent"], ["consumer | Booking request expired", "photographer | Booking Request Expired"]);
+    expect("shoot: request expires (cleanupExpiredPendingProvider)", "expired", ["cancelPaymentIntent", "getPaymentIntent"], ["consumer | Your booking request expired", "photographer | You missed a booking request"]);
   }
 
   // ── Multi-vendor checkout: points only via the Stripe-customer lookup ─────

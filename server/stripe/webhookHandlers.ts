@@ -6,7 +6,7 @@ import { sql, eq, and, inArray } from "drizzle-orm";
 import { NotificationTriggers } from "../notificationService";
 import { sendStaffOnboardingCompleteOwnerEmail } from "../services/resendService";
 import { stripeService } from "./stripeService";
-import { transitionAppointmentState, transitionShootBookingState, getPendingProviderExpiryTime } from "../bookingStateMachine";
+import { transitionAppointmentState, transitionShootBookingState } from "../bookingStateMachine";
 import { markHoldAsConverted } from "../availabilityService";
 import { sendBookingConfirmationPush, sendExpoPush } from "../expoPushService";
 import {
@@ -17,8 +17,6 @@ import {
   sendOrderConfirmationToConsumer,
   sendOrderNotificationToVendor,
   sendInternalEventAlert,
-  sendBookingRequestReceivedToConsumer,
-  sendBookingRequestToVendor,
   sendBookingConfirmationToCustomer,
   sendNewBookingAlertToVendor,
 } from "../emailService";
@@ -1377,7 +1375,14 @@ export class WebhookHandlers {
    */
   static async handlePaymentIntentCapturableUpdated(paymentIntent: any) {
     const metadata = paymentIntent.metadata || {};
-    const { type, bookingId } = metadata;
+    const { type } = metadata;
+    // Hold-flow appointments carry `appointmentId`; legacy appointments and shoots carry `bookingId`
+    // (one older shoot route uses `shootBookingId`).
+    const bookingId: string | undefined = type === 'appointment'
+      ? (metadata.appointmentId || metadata.bookingId)
+      : type === 'shoot_booking'
+        ? (metadata.bookingId || metadata.shootBookingId)
+        : metadata.bookingId;
 
     if (!type || !bookingId) {
       return;
@@ -1391,172 +1396,16 @@ export class WebhookHandlers {
     console.log(`[Stripe] PaymentIntent ${paymentIntent.id} authorized for ${type} ${bookingId}`);
 
     try {
-      if (type === 'appointment_booking') {
-        const appointment = await storage.getAppointment(bookingId);
-        if (!appointment || appointment.status !== BOOKING_STATES.PENDING_PAYMENT) {
-          return;
-        }
-
-        // Check if provider requires manual approval
-        const business = await storage.getBusiness(appointment.businessId);
-        if (business && business.autoAcceptBookings === false) {
-          // Transition to PENDING_PROVIDER
-          const pendingProviderExpiresAt = getPendingProviderExpiryTime();
-          
-          const result = await transitionAppointmentState(
-            bookingId,
-            BOOKING_STATES.PENDING_PROVIDER,
-            {
-              triggeredBy: 'stripe',
-              triggerSource: 'webhook',
-              metadata: { event: 'payment_intent.amount_capturable_updated' }
-            }
-          );
-
-          if (result.success) {
-            await db.update(appointments).set({
-              stripePaymentIntentId: paymentIntent.id,
-              pendingProviderExpiresAt,
-              updatedAt: new Date()
-            }).where(eq(appointments.id, bookingId));
-
-            console.log(`[Stripe] Appointment ${bookingId} awaiting provider approval (48h timeout)`);
-
-            // Notify business owner — new booking request requires action
-            const aptOwner = await storage.getUserByBusinessOwnerId(appointment.businessId).catch(() => undefined);
-            const aptClient = await storage.getUser(appointment.clientId).catch(() => undefined);
-            const aptService = appointment.serviceName || 'Appointment';
-
-            if (aptOwner) {
-              sendExpoPush({
-                userId: aptOwner.id,
-                title: 'New Booking Request',
-                body: `${aptClient?.name || 'A customer'} requested ${aptService} on ${appointment.appointmentDate} at ${appointment.appointmentTime}`,
-                data: { type: 'booking_request', screen: 'dashboard' },
-              }).catch(() => {});
-
-              if (aptOwner.email) {
-                sendBookingRequestToVendor({
-                  toEmail: aptOwner.email,
-                  vendorName: business.name,
-                  consumerName: aptClient?.name || 'Customer',
-                  consumerUsername: aptClient?.username ?? undefined,
-                  serviceName: aptService,
-                  bookingId,
-                  date: appointment.appointmentDate,
-                  time: appointment.appointmentTime,
-                  basePrice: appointment.totalPrice,
-                  expiresAt: pendingProviderExpiresAt,
-                }).catch(() => {});
-              }
-            }
-
-            // Notify customer — request received, card authorized but not charged
-            if (aptClient) {
-              sendExpoPush({
-                userId: aptClient.id,
-                title: 'Booking Request Sent',
-                body: `Your request for ${aptService} at ${business.name} is awaiting approval`,
-                data: { type: 'booking_request_sent', screen: 'bookings' },
-              }).catch(() => {});
-
-              if (aptClient.email) {
-                sendBookingRequestReceivedToConsumer({
-                  toEmail: aptClient.email,
-                  consumerName: aptClient.name || aptClient.email,
-                  vendorName: business.name,
-                  serviceName: aptService,
-                  bookingId,
-                  date: appointment.appointmentDate,
-                  time: appointment.appointmentTime,
-                  expiresAt: pendingProviderExpiresAt,
-                }).catch(() => {});
-              }
-            }
-          }
-        }
+      // Part C: the card is on hold, so the checkout becomes a real request now (never before).
+      // The same function runs from the cleanup job if this event is late or missing; only one
+      // of them wins the transition and sends the notices.
+      const { promoteAuthorizedRequest } = await import("../manualRequests");
+      if (type === 'appointment' || type === 'appointment_booking') {
+        const outcome = await promoteAuthorizedRequest('appointment', bookingId, paymentIntent, 'webhook');
+        console.log(`[Stripe] Appointment ${bookingId} card hold confirmed: ${outcome}`);
       } else if (type === 'shoot_booking') {
-        const booking = await storage.getShootBooking(bookingId);
-        if (!booking || booking.status !== BOOKING_STATES.PENDING_PAYMENT) {
-          return;
-        }
-
-        const photographer = await storage.getPhotographer(booking.photographerId);
-        if (photographer && photographer.autoAcceptBookings === false) {
-          const pendingProviderExpiresAt = getPendingProviderExpiryTime();
-
-          const result = await transitionShootBookingState(
-            bookingId,
-            BOOKING_STATES.PENDING_PROVIDER,
-            {
-              triggeredBy: 'stripe',
-              triggerSource: 'webhook',
-              metadata: { event: 'payment_intent.amount_capturable_updated' }
-            }
-          );
-
-          if (result.success) {
-            await db.update(shootBookings).set({
-              stripePaymentIntentId: paymentIntent.id,
-              pendingProviderExpiresAt,
-              updatedAt: new Date()
-            }).where(eq(shootBookings.id, bookingId));
-
-            console.log(`[Stripe] Shoot booking ${bookingId} awaiting provider approval (48h timeout)`);
-
-            // Notify photographer — new booking request requires action
-            const shootClient = await storage.getUser(booking.clientId).catch(() => undefined);
-            const photographerUser = await storage.getUser(photographer.userId).catch(() => undefined);
-            const shootService = booking.shootType || 'Shoot';
-
-            if (photographerUser) {
-              sendExpoPush({
-                userId: photographerUser.id,
-                title: 'New Shoot Request',
-                body: `${shootClient?.name || 'A client'} requested ${shootService} on ${booking.date} at ${booking.startTime}`,
-                data: { type: 'booking_request', screen: 'dashboard' },
-              }).catch(() => {});
-
-              if (photographerUser.email) {
-                sendBookingRequestToVendor({
-                  toEmail: photographerUser.email,
-                  vendorName: photographer.displayName || 'Photographer',
-                  consumerName: shootClient?.name || 'Client',
-                  consumerUsername: shootClient?.username ?? undefined,
-                  serviceName: shootService,
-                  bookingId,
-                  date: booking.date,
-                  time: booking.startTime,
-                  basePrice: booking.totalPrice,
-                  expiresAt: pendingProviderExpiresAt,
-                }).catch(() => {});
-              }
-            }
-
-            // Notify customer
-            if (shootClient) {
-              sendExpoPush({
-                userId: shootClient.id,
-                title: 'Shoot Request Sent',
-                body: `Your ${shootService} request with ${photographer.displayName || 'photographer'} is awaiting approval`,
-                data: { type: 'booking_request_sent', screen: 'bookings' },
-              }).catch(() => {});
-
-              if (shootClient.email) {
-                sendBookingRequestReceivedToConsumer({
-                  toEmail: shootClient.email,
-                  consumerName: shootClient.name || shootClient.email,
-                  vendorName: photographer.displayName || 'Photographer',
-                  serviceName: shootService,
-                  bookingId,
-                  date: booking.date,
-                  time: booking.startTime,
-                  expiresAt: pendingProviderExpiresAt,
-                }).catch(() => {});
-              }
-            }
-          }
-        }
+        const outcome = await promoteAuthorizedRequest('shoot_booking', bookingId, paymentIntent, 'webhook');
+        console.log(`[Stripe] Shoot booking ${bookingId} card hold confirmed: ${outcome}`);
       }
     } catch (error) {
       console.error(`[Stripe] Error handling payment_intent.amount_capturable_updated:`, error);
