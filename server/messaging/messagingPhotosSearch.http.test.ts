@@ -155,6 +155,7 @@ const JPEG = Buffer.from("/9j/4AAQSkZJRgABAQEASABIAAD/2wBDAP////////////////////
     assert(s1.status === 200 && convs.includes(conv), "finds text in your own chat", s1.json);
     assert(!convs.includes(lensConv), "never returns other people's chats");
     const hit = s1.json.results.find((x: any) => x.conversationId === conv);
+    assert(/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/.test(hit?.createdAt || "") && Math.abs(Date.parse(hit.createdAt) - Date.now()) < 5 * 60 * 1000, "createdAt is ISO UTC with Z and matches now", hit?.createdAt);
     assert(hit?.otherParticipant?.publicName === `Braids${P} Studio` && hit?.fromMe === false && /saturday/i.test(hit?.snippet || ""), "result shows the other side's public name + snippet", hit);
     const s2 = await call("GET", `/api/messages/search?q=saturday`, auth("owner"));
     assert((s2.json?.results || []).length === 2, "owner sees matches from both of their chats", s2.json?.results?.length);

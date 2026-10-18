@@ -148,7 +148,9 @@ export async function searchMyMessages(me: string, rawQuery: unknown, limit = 50
   const { db } = await import("../db");
 
   const r = await db.execute(sql`
-    SELECT m.id, m.conversation_id, m.content, m.sender_id, m.created_at,
+    SELECT m.id, m.conversation_id, m.content, m.sender_id,
+           -- timestamp without time zone holds UTC; send ISO with Z so phones don't read it as local time
+           to_char(m.created_at, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS created_at_iso,
            CASE WHEN c.participant1_id = ${me} THEN c.participant2_id ELSE c.participant1_id END AS other_id
     FROM messages m
     JOIN conversations c ON c.id = m.conversation_id
@@ -179,7 +181,7 @@ export async function searchMyMessages(me: string, rawQuery: unknown, limit = 50
       conversationId: row.conversation_id,
       snippet: snippetAround(row.content, q),
       fromMe: row.sender_id === me,
-      createdAt: row.created_at,
+      createdAt: row.created_at_iso,
       otherParticipant: {
         id: String(row.other_id),
         publicName: who?.publicName || "Outsyde member",
