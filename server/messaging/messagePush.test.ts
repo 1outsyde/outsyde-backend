@@ -111,7 +111,8 @@ const base = {
 
   console.log("photos: checkOutgoingMessage");
   const R2 = "https://pub-x.r2.dev";
-  const ph = (n: number) => Array.from({ length: n }, (_, i) => `${R2}/messages/p${i}.jpg`);
+  const uuid = (i: number) => `0000000${i}-1111-4222-8333-44444444444${i % 10}`.slice(-36);
+  const ph = (n: number) => Array.from({ length: n }, (_, i) => `${R2}/messages/${uuid(i)}.jpeg`);
   let c = checkOutgoingMessage({ content: "hi" }, R2);
   assert(c.ok && c.content === "hi" && c.mediaItems.length === 0, "text only still works (old app shape)", c);
   c = checkOutgoingMessage({ mediaItems: ph(1) }, R2);
@@ -135,7 +136,17 @@ const base = {
   c = checkOutgoingMessage({ content: "x".repeat(2001), mediaItems: ph(1) }, R2);
   assert(!c.ok, "photos don't bypass the 2000 char limit");
   c = checkOutgoingMessage({ mediaItems: ph(1) }, R2 + "/");
-  assert(c.ok, "trailing slash on R2_PUBLIC_URL handled");
+  assert(c.ok, "trailing slash on R2_PUBLIC_URL handled (trimmed form)");
+  c = checkOutgoingMessage({ mediaItems: [`${R2}//messages/${uuid(1)}.jpeg`] }, R2 + "/");
+  assert(c.ok, "trailing slash on R2_PUBLIC_URL handled (form r2.ts actually builds)");
+  c = checkOutgoingMessage({ mediaItems: [`${R2}/messages/../profiles/${uuid(1)}.jpeg`] }, R2);
+  assert(!c.ok, "path traversal refused");
+  c = checkOutgoingMessage({ mediaItems: [`${R2}/messages/${uuid(1)}.jpeg?x=1`] }, R2);
+  assert(!c.ok, "query string refused");
+  c = checkOutgoingMessage({ mediaItems: [`${R2}/messages/${uuid(1)}.svg`] }, R2);
+  assert(!c.ok, "non-image extension refused");
+  c = checkOutgoingMessage({ mediaItems: [`${R2}/messages/notauuid.jpeg`] }, R2);
+  assert(!c.ok, "file name that the upload route never makes refused");
 
   console.log("messageSummary + toClientMessage");
   assert(messageSummary("hey", ph(2)) === "hey", "text wins over photos");

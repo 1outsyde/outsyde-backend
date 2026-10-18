@@ -228,11 +228,20 @@ async function handleSendMessage(ws: AuthenticatedWebSocket, payload: { conversa
   }
 }
 
+/** The conversation if this socket's user is in it, else null (typing / read / focus must not work on other people's chats). */
+async function getOwnConversation(ws: AuthenticatedWebSocket, conversationId: unknown) {
+  if (!ws.userId || typeof conversationId !== "string" || !conversationId) return null;
+  const conversation = await storage.getConversation(conversationId);
+  if (!conversation) return null;
+  if (conversation.participant1Id !== ws.userId && conversation.participant2Id !== ws.userId) return null;
+  return conversation;
+}
+
 async function handleTyping(ws: AuthenticatedWebSocket, payload: { conversationId: string; isTyping: boolean }) {
   if (!ws.userId) return;
 
   try {
-    const conversation = await storage.getConversation(payload.conversationId);
+    const conversation = await getOwnConversation(ws, payload?.conversationId);
     if (!conversation) return;
 
     const recipientId = conversation.participant1Id === ws.userId 
@@ -256,6 +265,8 @@ async function handleMarkRead(ws: AuthenticatedWebSocket, payload: { conversatio
   if (!ws.userId) return;
 
   try {
+    const conversation = await getOwnConversation(ws, payload?.conversationId);
+    if (!conversation) return;
     await storage.markMessagesAsRead(payload.conversationId, ws.userId);
     
     ws.send(JSON.stringify({ 
@@ -263,8 +274,7 @@ async function handleMarkRead(ws: AuthenticatedWebSocket, payload: { conversatio
       payload: { conversationId: payload.conversationId } 
     }));
 
-    const conversation = await storage.getConversation(payload.conversationId);
-    if (conversation) {
+    {
       const otherUserId = conversation.participant1Id === ws.userId 
         ? conversation.participant2Id 
         : conversation.participant1Id;
@@ -287,6 +297,7 @@ async function handleFocusConversation(ws: AuthenticatedWebSocket, payload: { co
   if (!ws.userId) return;
 
   try {
+    if (!(await getOwnConversation(ws, payload?.conversationId))) return;
     // Remove from previous conversation if any
     if (ws.activeConversationId) {
       const prevViewers = activeConversationViewers.get(ws.activeConversationId);
