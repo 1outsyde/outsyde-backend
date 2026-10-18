@@ -39,7 +39,7 @@ import { checkVendorStripeBalances, checkActiveOrders } from "./services/account
 import { sendBookingAcceptedToConsumer, sendBookingDeclinedToConsumer, sendBookingRequestToVendor, sendBookingRequestReceivedToConsumer, sendAdminBookingAlert, sendShootBookingAcceptedToPhotographer, sendShootBookingDeclinedToPhotographer, sendShootBookingCanceledToPhotographer, sendAftercareEmail, sendPhotographerWelcomeEmail } from "./emailService";
 import { sendExpoPush } from "./expoPushService";
 import { notifyNewMessageInBackground } from "./messaging/notifyNewMessage";
-import { checkMessageContent, isRepeatedMessage } from "./messaging/messageRules";
+import { checkOutgoingMessage, isRepeatedMessage, toClientMessage } from "./messaging/messageRules";
 
 // TEMP_MANUAL_ACCEPT_GUARD — delete this helper in its own PR after P1 #6 is proven.
 const MANUAL_ACCEPT_DISABLED_BODY = {
@@ -16284,7 +16284,7 @@ export async function registerRoutes(
       // Mark messages as read
       await storage.markMessagesAsRead(req.params.id, userId);
 
-      res.json({ messages });
+      res.json({ messages: messages.map(toClientMessage) });
     } catch (error) {
       console.error("Get messages error:", error);
       res.status(500).json({ error: "Failed to get messages" });
@@ -16322,15 +16322,15 @@ export async function registerRoutes(
         });
       }
 
-      const check = checkMessageContent(req.body?.content);
+      const check = checkOutgoingMessage(req.body, process.env.R2_PUBLIC_URL);
       if (!check.ok) {
-        return res.status(check.status).json({ error: check.error, message: check.message });
+        return res.status(check.status).json({ error: check.error, message: check.message, ...(check.code ? { code: check.code } : {}) });
       }
-      const content = check.content;
+      const { content, mediaItems } = check;
 
       // Detect repeated message spam (same content sent rapidly)
       const recentMessages = await storage.getConversationMessages(req.params.id, 5);
-      if (isRepeatedMessage(recentMessages, userId, content)) {
+      if (isRepeatedMessage(recentMessages, userId, content, mediaItems)) {
         return res.status(400).json({ 
           error: "Duplicate message detected",
           message: "Please avoid sending the same message repeatedly."
@@ -16341,6 +16341,7 @@ export async function registerRoutes(
         conversationId: req.params.id,
         senderId: userId,
         content,
+        mediaItems,
       });
 
       // Push to the recipient (app + web). Fire and forget: never delays or fails the send.
@@ -16354,16 +16355,55 @@ export async function registerRoutes(
           senderId: userId,
           recipientId: otherUserId,
           content,
+          mediaItems,
           senderPublicName,
         });
       } catch (pushError) {
         console.error("Push notification error (REST):", pushError);
       }
 
-      res.json({ message });
+      res.json({ message: toClientMessage(message) });
     } catch (error) {
       console.error("Send message error:", error);
       res.status(500).json({ error: "Failed to send message" });
+    }
+  });
+
+  // People you can message (everyone: customers, businesses, photographers). Public names only.
+  app.get("/api/messages/recipients", async (req, res) => {
+    const userId = getUserIdFromRequest(req);
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+    try {
+      const { searchRecipients, SEARCH_MIN_CHARS } = await import("./messaging/messagingSearch");
+      const results = await searchRecipients(userId, req.query.q);
+      if (results === null) {
+        return res.status(400).json({ error: "Invalid query", message: `Type at least ${SEARCH_MIN_CHARS} characters` });
+      }
+      res.json({ results });
+    } catch (error) {
+      console.error("Recipient search error:", error);
+      res.status(500).json({ error: "Search failed" });
+    }
+  });
+
+  // Search the text of your own messages (only conversations you are part of).
+  app.get("/api/messages/search", async (req, res) => {
+    const userId = getUserIdFromRequest(req);
+    if (!userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+    try {
+      const { searchMyMessages, SEARCH_MIN_CHARS } = await import("./messaging/messagingSearch");
+      const results = await searchMyMessages(userId, req.query.q);
+      if (results === null) {
+        return res.status(400).json({ error: "Invalid query", message: `Type at least ${SEARCH_MIN_CHARS} characters` });
+      }
+      res.json({ results });
+    } catch (error) {
+      console.error("Message search error:", error);
+      res.status(500).json({ error: "Search failed" });
     }
   });
 
@@ -21725,7 +21765,7 @@ export async function registerRoutes(
       const enrichedMessages = await Promise.all(messages.map(async (msg) => {
         const sender = await storage.getUser(msg.senderId);
         return {
-          ...msg,
+          ...toClientMessage(msg),
           senderEmail: sender?.email,
           senderName: sender?.name || `${sender?.firstName || ''} ${sender?.lastName || ''}`.trim(),
         };
@@ -23670,9 +23710,13 @@ export async function registerRoutes(
     }
     const file = (req as any).file as Express.Multer.File;
     const folder = (req.body?.folder as string) || "posts";
-    const allowedFolders = ["posts", "profiles", "covers", "products", "logos", "stories", "services", "hero", "gallery", "stylist"];
+    const allowedFolders = ["posts", "profiles", "covers", "products", "logos", "stories", "services", "hero", "gallery", "stylist", "messages"];
     if (!allowedFolders.includes(folder)) {
       return res.status(400).json({ error: "Invalid folder" });
+    }
+    // Message photos: images only (other folders keep today's behavior).
+    if (folder === "messages" && !/^image\/(jpeg|jpg|png|webp|heic|heif|gif)$/i.test(file.mimetype || "")) {
+      return res.status(400).json({ error: "Only photos can be sent in messages", code: "INVALID_FILE_TYPE" });
     }
     try {
       const { uploadImageToR2 } = await import("./services/r2");

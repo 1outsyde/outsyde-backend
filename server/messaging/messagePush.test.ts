@@ -3,7 +3,8 @@
  *   npx tsx server/messaging/messagePush.test.ts
  */
 import { notifyNewMessage, buildMessagePreview, type NotifyDeps } from "./notifyNewMessage";
-import { checkMessageContent, isRepeatedMessage } from "./messageRules";
+import { checkMessageContent, isRepeatedMessage, checkOutgoingMessage, messageSummary, toClientMessage } from "./messageRules";
+import { normalizeQuery, likePattern, snippetAround } from "./messagingSearch";
 
 let passed = 0;
 let failed = 0;
@@ -107,6 +108,59 @@ const base = {
   assert(isRepeatedMessage(recent, "a", "yo") === true, "third identical message from same sender blocked");
   assert(isRepeatedMessage(recent, "b", "yo") === false, "other sender not blocked");
   assert(isRepeatedMessage(recent, "a", "different") === false, "different text not blocked");
+
+  console.log("photos: checkOutgoingMessage");
+  const R2 = "https://pub-x.r2.dev";
+  const ph = (n: number) => Array.from({ length: n }, (_, i) => `${R2}/messages/p${i}.jpg`);
+  let c = checkOutgoingMessage({ content: "hi" }, R2);
+  assert(c.ok && c.content === "hi" && c.mediaItems.length === 0, "text only still works (old app shape)", c);
+  c = checkOutgoingMessage({ mediaItems: ph(1) }, R2);
+  assert(c.ok && c.content === "" && c.mediaItems.length === 1, "photo only, no text: ok", c);
+  c = checkOutgoingMessage({ content: "  ", mediaItems: ph(2) }, R2);
+  assert(c.ok && c.content === "", "photos + blank text: ok, text stored empty", c);
+  c = checkOutgoingMessage({ content: "look", mediaItems: ph(10) }, R2);
+  assert(c.ok && c.mediaItems.length === 10, "10 photos ok");
+  c = checkOutgoingMessage({ content: "look", mediaItems: ph(11) }, R2);
+  assert(!c.ok && (c as any).code === "TOO_MANY_PHOTOS", "11 photos rejected", c);
+  c = checkOutgoingMessage({ mediaItems: ["https://evil.com/messages/a.jpg"] }, R2);
+  assert(!c.ok && (c as any).code === "INVALID_MEDIA_URL", "foreign photo URL rejected", c);
+  c = checkOutgoingMessage({ mediaItems: [`${R2}/posts/a.jpg`] }, R2);
+  assert(!c.ok && (c as any).code === "INVALID_MEDIA_URL", "R2 URL outside the messages folder rejected", c);
+  c = checkOutgoingMessage({ mediaItems: ph(1) }, undefined);
+  assert(!c.ok, "photos refused when R2_PUBLIC_URL is not set");
+  c = checkOutgoingMessage({ mediaItems: "nope" }, R2);
+  assert(!c.ok && (c as any).code === "INVALID_MEDIA", "non-array photos rejected");
+  c = checkOutgoingMessage({ content: "", mediaItems: [] }, R2);
+  assert(!c.ok, "no text and no photos rejected");
+  c = checkOutgoingMessage({ content: "x".repeat(2001), mediaItems: ph(1) }, R2);
+  assert(!c.ok, "photos don't bypass the 2000 char limit");
+  c = checkOutgoingMessage({ mediaItems: ph(1) }, R2 + "/");
+  assert(c.ok, "trailing slash on R2_PUBLIC_URL handled");
+
+  console.log("messageSummary + toClientMessage");
+  assert(messageSummary("hey", ph(2)) === "hey", "text wins over photos");
+  assert(messageSummary("", ph(1)) === "Sent a photo", "1 photo → Sent a photo");
+  assert(messageSummary("", ph(3)) === "Sent 3 photos", "3 photos → Sent 3 photos");
+  assert(messageSummary("", []) === "", "nothing → empty");
+  const cm = toClientMessage({ id: "1", content: "", mediaItems: ph(1) });
+  assert(cm.content === "Sent a photo" && cm.text === "" && cm.mediaItems.length === 1, "photo only: content readable for old apps, text empty for new app", cm);
+  const cm2 = toClientMessage({ id: "2", content: "yo", mediaItems: undefined as any });
+  assert(cm2.content === "yo" && cm2.text === "yo" && Array.isArray(cm2.mediaItems) && cm2.mediaItems.length === 0, "old row without media: mediaItems = []", cm2);
+
+  console.log("repeat check with photos");
+  const rp = [{ senderId: "a", content: "", mediaItems: ph(1) }, { senderId: "a", content: "", mediaItems: ph(1) }];
+  assert(isRepeatedMessage(rp, "a", "", ph(1)) === true, "same photo sent a third time blocked");
+  assert(isRepeatedMessage(rp, "a", "", ph(2)) === false, "different photos not blocked");
+
+  console.log("search helpers");
+  assert(normalizeQuery("@braids") === "braids", "leading @ dropped");
+  assert(normalizeQuery(" a ") === null && normalizeQuery("") === null && normalizeQuery(5) === null, "under 2 chars / non-string → null");
+  assert((normalizeQuery("x".repeat(100)) || "").length === 60, "capped at 60 chars");
+  assert(likePattern("50%_off\\") === "%50\\%\\_off\\\\%", "ILIKE wildcards escaped", likePattern("50%_off\\"));
+  const longText = "word ".repeat(40) + "Saturday at noon works " + "more ".repeat(40);
+  const sn = snippetAround(longText, "saturday");
+  assert(sn.toLowerCase().includes("saturday") && sn.length <= 92 && sn.startsWith("…") && sn.endsWith("…"), "snippet centers on the match", sn);
+  assert(snippetAround("short one", "one") === "short one", "short text unchanged");
 
   console.log(`\n${passed} passed, ${failed} failed`);
   process.exit(failed ? 1 : 0);
