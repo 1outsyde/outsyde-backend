@@ -453,7 +453,7 @@ router.patch("/:id", hybridAuthMiddleware, async (req: Request, res: Response) =
         WHERE id = ${e.id} AND host_user_id = ${userId} AND status = ${e.status}
           AND refund_policy = ${e.refund_policy}
           AND refund_cutoff_hours IS NOT DISTINCT FROM ${e.refund_cutoff_hours == null ? null : Number(e.refund_cutoff_hours)}::int
-          AND (starts_at > now() OR ${b.endsAt === undefined} OR ${newEndsAt}::timestamptz >= ends_at)
+          AND (starts_at > now() OR ${b.endsAt === undefined} OR ${newEndsAt}::timestamptz >= date_trunc('milliseconds', ends_at))
         RETURNING *`);
       if (!updated) return fail(res, 409, "EVENT_CHANGED", "This event just changed. Reload and try again.");
       const types = await loadTicketTypes(e.id);

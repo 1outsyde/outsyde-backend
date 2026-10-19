@@ -140,8 +140,8 @@ router.post("/:id/ticket-types", hybridAuthMiddleware, async (req: Request, res:
     const ctx = await editableEvent(req, res);
     if (!ctx) return;
     const { userId, e } = ctx;
-    const paidAllowed = b.priceCents > 0 && e.status !== "draft";
-    if (paidAllowed && !(await paidOnPublishedAllowed(res, e))) return;
+    const paidOnPublished = b.priceCents > 0 && e.status !== "draft";
+    if (paidOnPublished && !(await paidOnPublishedAllowed(res, e))) return;
     if (!(await checkUnlock(res, e.id, null, b.unlockAfterTicketTypeId))) return;
     const free = b.priceCents === 0;
     // Free RSVP defaults: 1 per order and 1 per account (the host can raise both).
@@ -161,7 +161,7 @@ router.post("/:id/ticket-types", hybridAuthMiddleware, async (req: Request, res:
                ${b.salesEndAt ?? null}, ${b.unlockAfterTicketTypeId ?? null}, ${minPer}, ${maxPer}, ${perAccount},
                ${b.hidden ?? false}, ${b.sortOrder ?? 0}
         FROM events WHERE id = ${e.id} AND host_user_id = ${userId} AND status IN ('draft', 'published')
-          AND (${b.priceCents} = 0 OR status = 'draft' OR ${paidAllowed})
+          AND (${b.priceCents} = 0 OR status = 'draft' OR ${paidOnPublished})
         RETURNING *`);
       if (!created) return fail(res, 409, "EVENT_CHANGED", "This event just changed. Reload and try again.");
       return res.status(201).json({ success: true, ticketType: hostTicketTypeJson(created) });
@@ -188,6 +188,8 @@ router.patch("/:id/ticket-types/:typeId", hybridAuthMiddleware, async (req: Requ
     if (!t) return fail(res, 404, "TICKET_TYPE_NOT_FOUND", "Ticket type not found.");
     if (t.status !== "active") return fail(res, 409, "TICKET_TYPE_ARCHIVED", "This ticket type was removed.");
     let patchPaidAllowed = false;
+    // Edits that keep the saved price are not gated: readiness was checked when the type became paid.
+    const priceUnchanged = b.priceCents === undefined || b.priceCents === Number(t.price_cents);
     if (b.priceCents !== undefined && b.priceCents !== Number(t.price_cents)) {
       if (Number(t.reserved_count) > 0) return fail(res, 409, "PRICE_LOCKED", "The price can't change once tickets are taken.");
       if (b.priceCents > 0 && e.status !== "draft") {
@@ -213,7 +215,8 @@ router.patch("/:id/ticket-types/:typeId", hybridAuthMiddleware, async (req: Requ
         WHERE id = ${t.id} AND event_id = ${e.id} AND status = 'active'
           AND (${b.priceCents === undefined} OR reserved_count = 0 OR price_cents = ${b.priceCents ?? 0})
           AND EXISTS (SELECT 1 FROM events ev WHERE ev.id = ${e.id} AND ev.status IN ('draft', 'published')
-                      AND (ev.status = 'draft' OR ${patchPaidAllowed} OR ${b.priceCents === undefined ? Number(t.price_cents) : b.priceCents} = 0))
+                      AND (ev.status = 'draft' OR ${patchPaidAllowed} OR ${b.priceCents === undefined ? Number(t.price_cents) : b.priceCents} = 0
+                           OR (${priceUnchanged} AND ticket_types.price_cents = ${Number(t.price_cents)})))
         RETURNING *`);
       if (!updated) return fail(res, 409, "TICKET_TYPE_CHANGED", "This ticket type just changed. Reload and try again.");
       return res.json({ success: true, ticketType: hostTicketTypeJson(updated) });

@@ -413,6 +413,18 @@ async function getNoFollow(path: string): Promise<{ status: number; location: st
     assert(r.status === 409 && r.body.error.code === "PAYOUTS_NOT_SET_UP", "switch on: add paid type to published event, not ready -> PAYOUTS_NOT_SET_UP", r);
     r = await addType(evPaidPub, hostReadyU, 1500, PAID);
     assert(r.status === 201 && r.body.ticketType.priceCents === 1500, "switch on: add paid type to published event, ready -> 201", r);
+    const paidTypeId = r.body.ticketType.id as string;
+    const patchT = (evId: string, tid: string, host: string, body: unknown, o: { base?: string } = {}) =>
+      call("PATCH", `/api/events/${evId}/ticket-types/${tid}`, { token: tok(host), body, ...o });
+    r = await patchT(evPaidPub, paidTypeId, hostReadyU, { quantity: 60 }, PAID);
+    assert(r.status === 200 && r.body.ticketType.quantity === 60, "switch on: edit quantity of existing paid type on published event -> 200", r);
+    r = await patchT(evPaidPub, paidTypeId, hostReadyU, { name: "Paid renamed", priceCents: 1500 }, PAID);
+    assert(r.status === 200 && r.body.ticketType.name === "Paid renamed", "switch on: edit name with the same price -> 200", r);
+    r = await patchT(evPaidPub, paidTypeId, hostReadyU, { hidden: true });
+    assert(r.status === 200 && r.body.ticketType.hidden === true, "switch off: edit existing paid type on published event -> 200", r);
+    const sqlType = (await q(`INSERT INTO ticket_types (event_id, name, price_cents, quantity, min_per_order, max_per_order) VALUES ($1, 'SQL paid', 2500, 10, 1, 5) RETURNING id`, [evPaidPub]))[0].id as string;
+    r = await patchT(evPaidPub, sqlType, hostReadyU, { quantity: 20 });
+    assert(r.status === 200 && r.body.ticketType.quantity === 20, "switch off: quantity edit of a paid type created by SQL -> 200", r);
     r = await addType(evPaidPub, hostReadyU, 1500);
     assert(r.status === 409 && r.body.error.code === "PAID_TICKETS_NOT_AVAILABLE", "switch off: ready host adding paid type to published event -> PAID_TICKETS_NOT_AVAILABLE", r);
     r = await addType(evFreePub, hostNotReadyU, 0, PAID);
