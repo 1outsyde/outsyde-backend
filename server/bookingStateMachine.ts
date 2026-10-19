@@ -503,6 +503,15 @@ export function startBookingCleanupJob(intervalMs: number = 60000): NodeJS.Timeo
     } catch (error) {
       console.error("[BookingCleanup] Error during ticket refund job:", error);
     }
+
+    // Event host payouts: one transfer per event, 3 days after it ends (claim + fixed key, safe to run twice).
+    // Own try/catch, after the refund job, so neither can starve the other.
+    try {
+      const { runEventPayoutJob } = await import("./events/eventPayouts");
+      await runEventPayoutJob();
+    } catch (error) {
+      console.error("[BookingCleanup] Error during event payout job:", error);
+    }
   };
 
   cleanup();

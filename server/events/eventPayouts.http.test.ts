@@ -21,6 +21,8 @@ function assert(cond: boolean, name: string, detail?: unknown) {
   if (cond) { passed++; console.log(`  ✅ ${name}`); }
   else { failed++; console.error(`  ❌ ${name}`, detail === undefined ? "" : JSON.stringify(detail).slice(0, 900)); }
 }
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+async function waitFor(check: () => boolean, ms = 5000) { const end = Date.now() + ms; while (!check() && Date.now() < end) await sleep(50); }
 const isLocal = (u: string) => ["localhost", "127.0.0.1", "::1", "[::1]"].includes(new URL(u).hostname);
 
 async function call(method: string, path: string, o: { token?: string; body?: unknown; base?: string } = {}): Promise<{ status: number; body: any }> {
@@ -87,6 +89,36 @@ async function getNoFollow(path: string): Promise<{ status: number; location: st
   const transfersByKey: Record<string, any> = {};
   const transfers: any[] = [];
   const reversals: any[] = [];
+  const transferPosts: Array<{ key: string | null; payoutId: string | null; ok: boolean }> = []; // every POST, failed ones too
+  /** Stripe's rules for POST /v1/transfers, shared by the HTTP stub and the in-process fake. */
+  const doTransfer = (params: Record<string, string>, key: string | null): { code: number; body: any } => {
+    const metadata: Record<string, string> = {};
+    for (const [k, v] of Object.entries(params)) { const m = k.match(/^metadata\[(.+)\]$/); if (m) metadata[m[1]] = v; }
+    const log = (ok: boolean) => transferPosts.push({ key, payoutId: metadata.payoutId ?? null, ok });
+    if (sw.insufficient) { log(false); return { code: 400, body: { error: { type: "invalid_request_error", code: "balance_insufficient", message: "Insufficient funds in Stripe account." } } }; }
+    if (sw.failTransfer) { log(false); return { code: 500, body: { error: { type: "api_error", message: "stub transfer failure" } } }; }
+    log(true);
+    if (key && transfersByKey[key]) return { code: 200, body: transfersByKey[key] };
+    const t = { id: `tr_stub_${transfers.length + 1}`, object: "transfer", amount: Number(params.amount), currency: params.currency, destination: params.destination, transfer_group: params.transfer_group ?? null, metadata, reversed: false, amount_reversed: 0 };
+    transfers.push(t);
+    if (key) transfersByKey[key] = t;
+    return { code: 200, body: t };
+  };
+
+  // Section: /v1/customers, /v1/payment_intents, /v1/refunds (checkout and host refunds, task 6). Same rules as ticketRefunds.http.test.ts.
+  const piStore: Record<string, any> = {};
+  const refundsByKey: Record<string, any> = {};
+  const doRefund = (piId: string, amount: number, key: string | null): { code: number; body: any } => {
+    const pi = piStore[piId];
+    if (!pi) return { code: 404, body: { error: { message: "No such payment_intent" } } };
+    if (key && refundsByKey[key]) return { code: 200, body: refundsByKey[key] };
+    if (amount > pi.amount_received - pi.amount_refunded) return { code: 400, body: { error: { type: "invalid_request_error", message: "amount exceeds what's left" } } };
+    pi.amount_refunded += amount;
+    const refund = { id: `re_${Math.random().toString(36).slice(2, 10)}`, object: "refund", amount, payment_intent: piId, status: "succeeded" };
+    if (key) refundsByKey[key] = refund;
+    return { code: 200, body: refund };
+  };
+  const piJson = (pi: any) => ({ ...pi, latest_charge: { id: `ch_${pi.id}`, object: "charge", amount_refunded: pi.amount_refunded } });
 
   const stub = http.createServer((req, res) => {
     let raw = ""; req.on("data", (c) => (raw += c));
@@ -123,16 +155,8 @@ async function getNoFollow(path: string): Promise<{ status: number; location: st
 
       // /v1/transfers
       if (req.method === "POST" && path === "/v1/transfers") {
-        if (sw.insufficient) return send(400, { error: { type: "invalid_request_error", code: "balance_insufficient", message: "Insufficient funds in Stripe account." } });
-        if (sw.failTransfer) return send(500, { error: { type: "api_error", message: "stub transfer failure" } });
-        if (key && transfersByKey[key]) return send(200, transfersByKey[key]);
-        const params = formParams(form);
-        const metadata: Record<string, string> = {};
-        for (const [k, v] of Object.entries(params)) { const m = k.match(/^metadata\[(.+)\]$/); if (m) metadata[m[1]] = v; }
-        const t = { id: `tr_stub_${transfers.length + 1}`, object: "transfer", amount: Number(params.amount), currency: params.currency, destination: params.destination, transfer_group: params.transfer_group ?? null, metadata, reversed: false, amount_reversed: 0 };
-        transfers.push(t);
-        if (key) transfersByKey[key] = t;
-        return send(200, t);
+        const r = doTransfer(formParams(form), key);
+        return send(r.code, r.body);
       }
       if (req.method === "GET" && path === "/v1/transfers") {
         const group = url.searchParams.get("transfer_group");
@@ -147,6 +171,32 @@ async function getNoFollow(path: string): Promise<{ status: number; location: st
         const rv = { id: `trr_stub_${reversals.length + 1}`, object: "transfer_reversal", transfer: t.id, amount: Number(params.amount) };
         reversals.push(rv); t.amount_reversed += rv.amount;
         return send(200, rv);
+      }
+
+      // /v1/customers, /v1/payment_intents, /v1/refunds
+      if (req.method === "POST" && path === "/v1/customers") return send(200, { id: `cus_stub_${Date.now()}`, object: "customer" });
+      const custM = path.match(/^\/v1\/customers\/([^/]+)$/);
+      if (req.method === "GET" && custM) return send(200, { id: custM[1], object: "customer" });
+      if (req.method === "POST" && path === "/v1/payment_intents") {
+        const metadata: Record<string, string> = {};
+        for (const [k, v] of form.entries()) { const m = k.match(/^metadata\[(.+)\]$/); if (m) metadata[m[1]] = v; }
+        const id = `pi_ep_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+        piStore[id] = { id, object: "payment_intent", amount: Number(form.get("amount") || 0), amount_received: 0, amount_refunded: 0,
+          status: "requires_payment_method", client_secret: `${id}_secret`, metadata };
+        return send(200, piStore[id]);
+      }
+      const cancelM = path.match(/^\/v1\/payment_intents\/([^/]+)\/cancel$/);
+      if (req.method === "POST" && cancelM) {
+        const pi = piStore[cancelM[1]];
+        if (!pi) return send(404, { error: { message: "No such payment_intent" } });
+        if (pi.status === "succeeded") return send(400, { error: { message: "already succeeded" } });
+        pi.status = "canceled"; return send(200, piJson(pi));
+      }
+      const piM = path.match(/^\/v1\/payment_intents\/([^/]+)$/);
+      if (req.method === "GET" && piM) { const pi = piStore[piM[1]]; return pi ? send(200, piJson(pi)) : send(404, { error: { message: "No such payment_intent" } }); }
+      if (req.method === "POST" && path === "/v1/refunds") {
+        const r = doRefund(String(form.get("payment_intent")), Number(form.get("amount")), key);
+        return send(r.code, r.body);
       }
 
       send(404, { error: { type: "invalid_request_error", message: `stub: no route ${req.method} ${req.url}` } });
@@ -475,8 +525,352 @@ async function getNoFollow(path: string): Promise<{ status: number; location: st
     ev = await mkEvent(hostT);
     r = await call("PATCH", `/api/events/${ev}`, { token: tok(hostT), body: { endsAt: inDays(10, 2) } });
     assert(r.status === 200, "event not started: earlier end ok", r);
+
+    // ── Task 6: the payout job (in process, with a fake Stripe that shares the HTTP stub's state) ──
+    console.log("payout job (task 6)");
+    const pushes: any[] = [];
+    const { setNoticeDepsForTest } = await import("./ticketNotices");
+    setNoticeDepsForTest({
+      sendReceipt: async () => {}, sendRefund: async () => {}, sendCancelled: async () => {},
+      sendPush: async (p) => { pushes.push(p); return true; },
+    });
+    const adminEmails: Array<{ subject: string; detail: string }> = [];
+    const { setAdminAlertForTest } = await import("./ticketCheckout");
+    setAdminAlertForTest(async (subject, detail) => { adminEmails.push({ subject, detail }); });
+    const { createDuePayouts, sendPayout, runEventPayoutJob } = await import("./eventPayouts");
+
+    const fakeLog: Array<{ fn: string; id: string }> = []; // readiness: account id; find/create: event id
+    const payoutFake = {
+      getPayoutReadiness: async (id: string) => {
+        fakeLog.push({ fn: "readiness", id });
+        const s = stateOf(id);
+        return { ready: s.charges_enabled && s.payouts_enabled, chargesEnabled: s.charges_enabled, payoutsEnabled: s.payouts_enabled, detailsSubmitted: s.details_submitted };
+      },
+      findEventPayoutTransfer: async (eventId: string, payoutId: string) => {
+        fakeLog.push({ fn: "find", id: eventId });
+        const t = transfers.find((x) => x.transfer_group === `event_${eventId}` && x.metadata.payoutId === payoutId);
+        return t ? { id: t.id as string, amount: t.amount as number } : null;
+      },
+      createEventPayoutTransfer: async (p: { eventId: string; payoutId: string; destination: string; amountCents: number }) => {
+        fakeLog.push({ fn: "create", id: p.eventId });
+        const res = doTransfer({
+          amount: String(p.amountCents), currency: "usd", destination: p.destination, transfer_group: `event_${p.eventId}`,
+          "metadata[type]": "event_payout", "metadata[eventId]": p.eventId, "metadata[payoutId]": p.payoutId,
+        }, `event_payout_${p.payoutId}`);
+        if (res.code !== 200) throw Object.assign(new Error(res.body.error.message), { code: res.body.error.code, type: res.body.error.type });
+        return { id: res.body.id as string };
+      },
+    };
+
+    const mkReadyHost = async (s: string) => {
+      const u = await mkUser(s);
+      const a = `acct_job_${s}_${P}`;
+      await q(`INSERT INTO user_payout_accounts (user_id, stripe_account_id, onboarding_complete) VALUES ($1, $2, true)`, [u, a]);
+      setReady(a);
+      return { u, a };
+    };
+    const buyers: string[] = [];
+    for (let i = 0; i < 8; i++) buyers.push(await mkUser(`jb${i}`));
+    const jobEvent = async (host: string, title: string, priceCents = 2000) => {
+      const c = await call("POST", "/api/events", { token: tok(host), body: { title, startsAt: inDays(5), endsAt: inDays(5, 4), timezone: "America/New_York", capacity: 100 } });
+      if (c.status !== 201 && c.status !== 200) throw new Error("event create failed " + JSON.stringify(c));
+      const id = c.body.event.id as string;
+      const t = await call("POST", `/api/events/${id}/ticket-types`, { token: tok(host), body: { name: priceCents ? "GA" : "Free", priceCents, quantity: 50, maxPerOrder: priceCents ? 4 : 1, perAccountLimit: priceCents ? 4 : 1 } });
+      if (t.status !== 201) throw new Error("type create failed " + JSON.stringify(t));
+      await q(`UPDATE events SET status = 'published', published_at = now() WHERE id = $1`, [id]);
+      return { id, typeId: t.body.ticketType.id as string };
+    };
+    const checkout = async (eventId: string, user: string, typeId: string, quantity = 1) => {
+      const c = await call("POST", `/api/events/${eventId}/checkout`, { token: tok(user), body: { ticketTypeId: typeId, quantity } });
+      if (c.status !== 201) throw new Error(`checkout failed ${JSON.stringify(c)}`);
+      return c.body as { orderId: string; paymentIntentId: string };
+    };
+    /** Checkout + pay through the real webhook handler (in this process). */
+    const buy = async (eventId: string, user: string, typeId: string, quantity = 1) => {
+      const c = await checkout(eventId, user, typeId, quantity);
+      const pi = piStore[c.paymentIntentId];
+      pi.status = "succeeded"; pi.amount_received = pi.amount;
+      await WebhookHandlers.handlePaymentIntentSucceeded(pi);
+      const [o] = await q(`SELECT status FROM ticket_orders WHERE id = $1`, [c.orderId]);
+      if (o?.status !== "completed") throw new Error("order not completed " + JSON.stringify(o));
+      return c.orderId;
+    };
+    const endedHoursAgo = (id: string, h: number) =>
+      q(`UPDATE events SET starts_at = now() - make_interval(hours => $2::int + 5), ends_at = now() - make_interval(hours => $2::int) WHERE id = $1`, [id, h]);
+    const payoutOf = async (eventId: string) => q(`SELECT *, extract(epoch from (next_attempt_at - now()))::int AS due_in FROM event_payouts WHERE event_id = $1`, [eventId]);
+    const tix = async (eventId: string) => q(`SELECT id, order_id, status, payout_id, host_net_cents FROM tickets WHERE event_id = $1 ORDER BY created_at, item_index`, [eventId]);
+    const advance = (payoutId: string) => q(`UPDATE event_payouts SET next_attempt_at = now() - interval '1 second' WHERE id = $1`, [payoutId]);
+
+    console.log("due rule and the created payout");
+    const h1 = await mkReadyHost("j1");
+    const e1 = await jobEvent(h1.u, "Payout Night");
+    await buy(e1.id, buyers[0], e1.typeId, 2);
+    await endedHoursAgo(e1.id, 71);
+    await createDuePayouts();
+    assert((await payoutOf(e1.id)).length === 0, "not due before ends_at + 3 days");
+    await endedHoursAgo(e1.id, 73);
+    let made = await createDuePayouts();
+    let pr = await payoutOf(e1.id);
+    assert(pr.length === 1 && pr[0].gross_cents === 3920 && pr[0].amount_cents === 3920 && pr[0].deducted_cents === 0 && pr[0].status === "pending" && pr[0].attempts === 0,
+      "due creates one payout = sum of valid host_net (2 x 1960 = 3920)", pr);
+    assert(pr[0]?.destination_type === "user" && pr[0]?.connected_account_id === h1.a, "payout records the host's destination", pr[0]);
+    assert(typeof made === "string" && made.split(",").includes(pr[0]?.id), "createDuePayouts returns the new id in a comma list", made);
+    let tk = await tix(e1.id);
+    assert(tk.length === 2 && tk.every((t) => t.payout_id === pr[0].id), "both tickets stamped with the payout", tk);
+    made = await createDuePayouts();
+    assert((await payoutOf(e1.id)).length === 1 && !made.split(",").includes(pr[0].id), "second run creates nothing more", made);
+
+    console.log("refunded and cancelled tickets excluded");
+    const h3 = await mkReadyHost("j3");
+    const e3 = await jobEvent(h3.u, "Mixed Night");
+    const o3a = await buy(e3.id, buyers[1], e3.typeId, 2);
+    const o3b = await buy(e3.id, buyers[2], e3.typeId, 1);
+    const o3c = await buy(e3.id, buyers[3], e3.typeId, 1);
+    r = await call("POST", `/api/events/${e3.id}/orders/${o3b}/refund`, { token: tok(h3.u) });
+    assert(r.status === 200 && r.body.order.status === "refunded", "host refund of one order done", r);
+    await q(`UPDATE tickets SET status = 'cancelled', cancelled_at = now() WHERE id = (SELECT id FROM tickets WHERE order_id = $1 ORDER BY item_index LIMIT 1)`, [o3a]);
+    await endedHoursAgo(e3.id, 80);
+    await createDuePayouts();
+    pr = await payoutOf(e3.id);
+    tk = await tix(e3.id);
+    assert(pr.length === 1 && pr[0].gross_cents === 3920, "gross counts only the 2 valid tickets", { pr, tk });
+    assert(tk.filter((t) => t.payout_id === pr[0]?.id).length === 2 && tk.filter((t) => t.status !== "valid").every((t) => t.payout_id === null)
+      && tk.filter((t) => t.order_id === o3c).every((t) => t.payout_id === pr[0]?.id), "refunded and cancelled tickets not stamped", tk);
+
+    console.log("open orders block, flagged ones don't");
+    const h4 = await mkReadyHost("j4");
+    const e4 = await jobEvent(h4.u, "Blocked Night");
+    const o4a = await buy(e4.id, buyers[0], e4.typeId, 1);
+    const o4b = await buy(e4.id, buyers[1], e4.typeId, 1);
+    const pend4 = await checkout(e4.id, buyers[2], e4.typeId, 1);
+    await q(`UPDATE ticket_orders SET status = 'refunding', refund_reason = 'host', refund_amount_cents = 2000, refund_requested_at = now(),
+               refund_next_attempt_at = now() + interval '1 hour' WHERE id = $1`, [o4b]);
+    await endedHoursAgo(e4.id, 80);
+    await createDuePayouts();
+    assert((await payoutOf(e4.id)).length === 0, "pending order blocks");
+    await q(`UPDATE ticket_orders SET needs_review_at = now(), review_reason = 'test' WHERE id = $1`, [pend4.orderId]);
+    await createDuePayouts();
+    assert((await payoutOf(e4.id)).length === 0, "refunding order blocks (pending one flagged)");
+    await q(`UPDATE ticket_orders SET needs_review_at = now(), review_reason = 'test' WHERE id = $1`, [o4b]);
+    await createDuePayouts();
+    pr = await payoutOf(e4.id);
+    tk = await tix(e4.id);
+    assert(pr.length === 1 && pr[0].gross_cents === 1960 && tk.filter((t) => t.order_id === o4a).every((t) => t.payout_id === pr[0].id)
+      && tk.filter((t) => t.order_id !== o4a).every((t) => t.payout_id === null), "flagged order doesn't block and isn't paid", { pr, tk });
+
+    console.log("free and cancelled events");
+    const h5 = await mkReadyHost("j5");
+    const e5 = await jobEvent(h5.u, "Free Night", 0);
+    r = await call("POST", `/api/events/${e5.id}/rsvp`, { token: tok(buyers[0]), body: { ticketTypeId: e5.typeId } });
+    assert(r.status === 200 || r.status === 201, "free RSVP made", r);
+    await endedHoursAgo(e5.id, 80);
+    await runEventPayoutJob(payoutFake);
+    assert((await payoutOf(e5.id)).length === 0 && (await tix(e5.id)).every((t) => t.payout_id === null), "free event: no payout row, nothing stamped");
+    assert(!fakeLog.some((l) => l.id === e5.id || l.id === h5.a), "free event: no Stripe call", fakeLog);
+    const h6 = await mkReadyHost("j6");
+    const e6 = await jobEvent(h6.u, "Called Off");
+    await buy(e6.id, buyers[1], e6.typeId, 1);
+    await endedHoursAgo(e6.id, 80);
+    await q(`UPDATE events SET status = 'cancelled', cancelled_at = now() WHERE id = $1`, [e6.id]);
+    await createDuePayouts();
+    assert((await payoutOf(e6.id)).length === 0, "cancelled event: no payout");
+
+    console.log("paused events");
+    const e6b = await jobEvent(h6.u, "Paused Night");
+    await buy(e6b.id, buyers[2], e6b.typeId, 1);
+    await endedHoursAgo(e6b.id, 80);
+    await q(`UPDATE events SET status = 'paused' WHERE id = $1`, [e6b.id]);
+    await createDuePayouts();
+    assert((await payoutOf(e6b.id)).length === 0, "paused event: not due");
+    await q(`UPDATE events SET status = 'published' WHERE id = $1`, [e6b.id]);
+    await createDuePayouts();
+    pr = await payoutOf(e6b.id);
+    await q(`UPDATE events SET status = 'paused' WHERE id = $1`, [e6b.id]);
+    let sres = await sendPayout(pr[0].id, payoutFake);
+    pr = await payoutOf(e6b.id);
+    assert(sres === "held" && pr[0].status === "held" && pr[0].hold_reason === "event_paused" && pr[0].due_in > 3500 && pr[0].due_in <= 3600,
+      "payout of an event paused after creation is held (event_paused), rechecked in an hour", { sres, pr });
+    assert(!transferPosts.some((t) => t.payoutId === pr[0].id), "held: no transfer sent");
+    await q(`UPDATE events SET status = 'published' WHERE id = $1`, [e6b.id]);
+    await advance(pr[0].id);
+    sres = await sendPayout(pr[0].id, payoutFake);
+    pr = await payoutOf(e6b.id);
+    assert(sres === "paid" && pr[0].status === "paid" && pr[0].hold_reason === null, "unpaused: paid on the next try", { sres, pr });
+
+    console.log("two runs send one transfer, host gets a push");
+    const h7 = await mkReadyHost("j7");
+    const e7 = await jobEvent(h7.u, "Double Run Night");
+    await buy(e7.id, buyers[3], e7.typeId, 2);
+    await endedHoursAgo(e7.id, 80);
+    const [ra, rb] = await Promise.all([runEventPayoutJob(payoutFake), runEventPayoutJob(payoutFake)]);
+    pr = await payoutOf(e7.id);
+    const g7 = transfers.filter((t) => t.transfer_group === `event_${e7.id}`);
+    assert(pr.length === 1 && pr[0].status === "paid" && pr[0].transfer_id === g7[0]?.id && pr[0].paid_at && pr[0].attempts === 1, "payout paid once", { pr, ra, rb });
+    assert(g7.length === 1 && transferPosts.filter((t) => t.payoutId === pr[0]?.id).length === 1, "stub saw exactly 1 transfer POST", { g7, posts: transferPosts.filter((t) => t.payoutId === pr[0]?.id) });
+    assert(g7[0]?.amount === 3920 && g7[0]?.destination === h7.a && g7[0]?.metadata.type === "event_payout" && g7[0]?.metadata.eventId === e7.id
+      && transferPosts.find((t) => t.payoutId === pr[0]?.id)?.key === `event_payout_${pr[0]?.id}`, "transfer amount, destination, metadata and key", g7[0]);
+    assert(ra.created + rb.created === 1 && ra.paid + rb.paid >= 1, "job counts: one created", { ra, rb });
+    await waitFor(() => pushes.some((p) => p.data?.payoutId === pr[0]?.id));
+    const myPush = pushes.filter((p) => p.data?.payoutId === pr[0]?.id);
+    assert(myPush.length === 1 && myPush[0].userId === h7.u && myPush[0].title === "Payout sent"
+      && myPush[0].body === "Your payout for Double Run Night is on its way to your bank." && myPush[0].data.type === "event_payout_sent", "host push on paid", myPush);
+
+    console.log("sent but unsaved transfer is recorded");
+    const h8 = await mkReadyHost("j8");
+    const e8 = await jobEvent(h8.u, "Lost Reply Night");
+    await buy(e8.id, buyers[4], e8.typeId, 1);
+    await endedHoursAgo(e8.id, 80);
+    await createDuePayouts();
+    pr = await payoutOf(e8.id);
+    const pre = { id: `tr_presaved_${P}`, object: "transfer", amount: 1960, currency: "usd", destination: h8.a, transfer_group: `event_${e8.id}`, metadata: { type: "event_payout", eventId: e8.id, payoutId: pr[0].id }, reversed: false, amount_reversed: 0 };
+    transfers.push(pre);
+    const postsBefore = transferPosts.length;
+    sres = await sendPayout(pr[0].id, payoutFake);
+    pr = await payoutOf(e8.id);
+    assert(sres === "paid" && pr[0].status === "paid" && pr[0].transfer_id === pre.id && transferPosts.length === postsBefore, "existing transfer recorded, no new POST", { sres, pr });
+
+    console.log("held then resumes");
+    const h9 = await mkReadyHost("j9");
+    setReady(h9.a, false);
+    const e9 = await jobEvent(h9.u, "Not Ready Night");
+    await buy(e9.id, buyers[5], e9.typeId, 1);
+    await endedHoursAgo(e9.id, 80);
+    await createDuePayouts();
+    pr = await payoutOf(e9.id);
+    const id9 = pr[0].id as string;
+    let emailsBefore = adminEmails.length;
+    sres = await sendPayout(id9, payoutFake);
+    pr = await payoutOf(e9.id);
+    assert(sres === "held" && pr[0].status === "held" && pr[0].hold_reason === "stripe_not_ready" && pr[0].attempts === 0 && pr[0].due_in > 3500 && pr[0].due_in <= 3600 && pr[0].alerted_at,
+      "host not ready: held, reason saved, attempts not counted, rechecked in an hour", { sres, pr });
+    assert(adminEmails.length === emailsBefore + 1 && adminEmails[adminEmails.length - 1].detail.includes(id9), "one admin email for the hold", adminEmails.slice(emailsBefore));
+    sres = await sendPayout(id9, payoutFake);
+    assert(sres === "not_due", "held payout not retried before its time", sres);
+    await advance(id9);
+    sres = await sendPayout(id9, payoutFake);
+    assert(sres === "held" && adminEmails.length === emailsBefore + 1, "still not ready an hour later: held, no second email", { sres, n: adminEmails.length - emailsBefore });
+    setReady(h9.a, true);
+    await advance(id9);
+    sres = await sendPayout(id9, payoutFake);
+    pr = await payoutOf(e9.id);
+    assert(sres === "paid" && pr[0].status === "paid" && pr[0].hold_reason === null && transfers.some((t) => t.id === pr[0].transfer_id && t.amount === 1960), "ready again: paid", { sres, pr });
+
+    console.log("insufficient platform balance");
+    const h10 = await mkReadyHost("j10");
+    const e10 = await jobEvent(h10.u, "Low Balance Night");
+    await buy(e10.id, buyers[6], e10.typeId, 1);
+    await endedHoursAgo(e10.id, 80);
+    await createDuePayouts();
+    pr = await payoutOf(e10.id);
+    const id10 = pr[0].id as string;
+    emailsBefore = adminEmails.length;
+    sw.insufficient = true;
+    sres = await sendPayout(id10, payoutFake);
+    pr = await payoutOf(e10.id);
+    assert(sres === "insufficient" && pr[0].status === "pending" && pr[0].attempts === 0 && pr[0].due_in > 3500 && pr[0].due_in <= 3600 && pr[0].last_error,
+      "insufficient: stays pending, attempts unchanged, retried in an hour", { sres, pr });
+    assert(adminEmails.length === emailsBefore + 1 && adminEmails[adminEmails.length - 1].detail.includes(id10), "insufficient: one admin email", adminEmails.slice(emailsBefore));
+    await advance(id10);
+    sres = await sendPayout(id10, payoutFake);
+    pr = await payoutOf(e10.id);
+    assert(sres === "insufficient" && pr[0].attempts === 0 && adminEmails.length === emailsBefore + 1, "insufficient again within 24h: no second email, attempts still 0", { sres, pr, n: adminEmails.length - emailsBefore });
+    await q(`UPDATE event_payouts SET alerted_at = now() - interval '25 hours' WHERE id = $1`, [id10]);
+    await advance(id10);
+    sres = await sendPayout(id10, payoutFake);
+    assert(sres === "insufficient" && adminEmails.length === emailsBefore + 2, "insufficient after 24h: emails again", { sres, n: adminEmails.length - emailsBefore });
+    sw.insufficient = false;
+    await advance(id10);
+    sres = await sendPayout(id10, payoutFake);
+    assert(sres === "paid" && (await payoutOf(e10.id))[0].status === "paid", "balance back: paid", sres);
+
+    console.log("other errors back off, then review");
+    const h11 = await mkReadyHost("j11");
+    const e11 = await jobEvent(h11.u, "Broken Night");
+    await buy(e11.id, buyers[7], e11.typeId, 1);
+    await endedHoursAgo(e11.id, 80);
+    await createDuePayouts();
+    pr = await payoutOf(e11.id);
+    const id11 = pr[0].id as string;
+    emailsBefore = adminEmails.length;
+    sw.failTransfer = true;
+    const waits: number[] = [];
+    const results: string[] = [];
+    for (let i = 0; i < 5; i++) {
+      results.push(await sendPayout(id11, payoutFake));
+      const row = (await payoutOf(e11.id))[0];
+      waits.push(row.due_in);
+      await advance(id11);
+    }
+    pr = await payoutOf(e11.id);
+    assert(results.slice(0, 4).every((x) => x === "retry") && results[4] === "review", "4 retries then review", results);
+    assert(waits[0] > 50 && waits[0] <= 60 && waits[1] > 110 && waits[1] <= 120 && waits[2] > 230 && waits[2] <= 240 && waits[3] > 470 && waits[3] <= 480, "backoff 1, 2, 4, 8 minutes", waits);
+    assert(pr[0].status === "review" && pr[0].attempts === 5 && /stub transfer failure/.test(pr[0].last_error ?? ""), "row in review with the last error", pr);
+    assert(adminEmails.length === emailsBefore + 1 && adminEmails[adminEmails.length - 1].detail.includes(id11), "one admin email for review", adminEmails.slice(emailsBefore));
+    sres = await sendPayout(id11, payoutFake);
+    await runEventPayoutJob(payoutFake);
+    assert(sres === "not_due" && adminEmails.length === emailsBefore + 1 && transferPosts.filter((t) => t.payoutId === id11).length === 5, "review is left alone (no more tries or emails)", { sres, n: adminEmails.length - emailsBefore });
+    sw.failTransfer = false;
+
+    console.log("race: host refund vs payout create");
+    const h12 = await mkReadyHost("j12");
+    const e12 = await jobEvent(h12.u, "Race Night");
+    const oR = await buy(e12.id, buyers[4], e12.typeId, 2);
+    await buy(e12.id, buyers[5], e12.typeId, 1);
+    await endedHoursAgo(e12.id, 80);
+    const [rr] = await Promise.all([
+      call("POST", `/api/events/${e12.id}/orders/${oR}/refund`, { token: tok(h12.u) }),
+      createDuePayouts(),
+    ]);
+    assert(rr.status === 200, "refund accepted", rr);
+    await createDuePayouts(); // the refunding order may have blocked the first one
+    pr = await payoutOf(e12.id);
+    tk = await tix(e12.id);
+    const refundedTix = tk.filter((t) => t.order_id === oR);
+    const stampedTix = tk.filter((t) => t.payout_id === pr[0]?.id);
+    const stampedSum = stampedTix.reduce((n, t) => n + Number(t.host_net_cents), 0);
+    const branch = refundedTix.every((t) => t.payout_id === null) ? "refund first" : refundedTix.every((t) => t.payout_id === pr[0]?.id) ? "payout first" : "mixed";
+    console.log(`    (race went: ${branch})`);
+    assert(pr.length === 1 && pr[0].gross_cents === stampedSum && refundedTix.every((t) => t.status === "refunded"), "gross = stamped host_net, refunded order's tickets refunded", { pr, tk });
+    assert((branch === "refund first" && pr[0]?.gross_cents === 1960) || (branch === "payout first" && pr[0]?.gross_cents === 5880),
+      "either not stamped and excluded, or stamped and refunded (Task 7 recovery covers it)", { branch, pr, tk });
+    // Same race with the create started a little later, so the other orderings get a chance too.
+    for (const delay of [15, 40, 80]) {
+      const hx = await mkReadyHost(`jr${delay}`);
+      const ex = await jobEvent(hx.u, `Race Night ${delay}`);
+      const oX = await buy(ex.id, buyers[6], ex.typeId, 2);
+      await buy(ex.id, buyers[7], ex.typeId, 1);
+      await endedHoursAgo(ex.id, 80);
+      const [rx] = await Promise.all([
+        call("POST", `/api/events/${ex.id}/orders/${oX}/refund`, { token: tok(hx.u) }),
+        sleep(delay).then(() => createDuePayouts()),
+      ]);
+      await createDuePayouts();
+      const px = await payoutOf(ex.id);
+      const tx = await tix(ex.id);
+      const rt = tx.filter((t) => t.order_id === oX);
+      const sum = tx.filter((t) => t.payout_id === px[0]?.id).reduce((n, t) => n + Number(t.host_net_cents), 0);
+      const bx = rt.every((t) => t.payout_id === null) ? "refund first" : rt.every((t) => t.payout_id === px[0]?.id) ? "payout first" : "mixed";
+      console.log(`    (race +${delay}ms went: ${bx})`);
+      assert(rx.status === 200 && px.length === 1 && px[0].gross_cents === sum && rt.every((t) => t.status === "refunded")
+        && ((bx === "refund first" && sum === 1960) || (bx === "payout first" && sum === 5880)), `race +${delay}ms: invariant holds`, { bx, px, tx });
+    }
   } finally {
     stub.close();
+    try {
+      (await import("./ticketNotices")).setNoticeDepsForTest(null);
+      (await import("./ticketCheckout")).setAdminAlertForTest(null);
+    } catch { /* not loaded */ }
+    const evIds = (await q(`SELECT id FROM events WHERE host_user_id IN (SELECT id FROM users WHERE email LIKE $1)`, [`${P}-%`])).map((x) => x.id);
+    if (evIds.length) {
+      await q(`UPDATE tickets SET payout_id = NULL WHERE event_id = ANY($1)`, [evIds]);
+      await q(`DELETE FROM event_payout_recoveries WHERE payout_id IN (SELECT id FROM event_payouts WHERE event_id = ANY($1))`, [evIds]);
+      await q(`DELETE FROM event_payouts WHERE event_id = ANY($1)`, [evIds]);
+      await q(`DELETE FROM tickets WHERE event_id = ANY($1)`, [evIds]);
+      await q(`DELETE FROM ticket_order_items WHERE event_id = ANY($1)`, [evIds]);
+      await q(`DELETE FROM ticket_orders WHERE event_id = ANY($1)`, [evIds]);
+      await q(`DELETE FROM ticket_account_counts WHERE ticket_type_id IN (SELECT id FROM ticket_types WHERE event_id = ANY($1))`, [evIds]);
+      await q(`UPDATE ticket_types SET unlock_after_ticket_type_id = NULL WHERE event_id = ANY($1)`, [evIds]);
+    }
     await q(`DELETE FROM ticket_types WHERE event_id IN (SELECT id FROM events WHERE host_user_id IN (SELECT id FROM users WHERE email LIKE $1))`, [`${P}-%`]);
     await q(`DELETE FROM events WHERE host_user_id IN (SELECT id FROM users WHERE email LIKE $1)`, [`${P}-%`]);
     await q(`DELETE FROM user_payout_accounts WHERE user_id IN (SELECT id FROM users WHERE email LIKE $1)`, [`${P}-%`]);
