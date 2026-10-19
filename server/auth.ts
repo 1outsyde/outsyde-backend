@@ -54,6 +54,39 @@ export function verifyAccessToken(token: string): TokenPayload | null {
   }
 }
 
+/**
+ * Google signup proof (2026-10-19). `POST /api/auth/oauth/complete-signup` receives googleSub and
+ * email from the client, so on their own they prove nothing. The two routes that really verify a
+ * Google sign-in (`POST /api/auth/mobile/google`, `GET /api/auth/mobile/google/callback`) hand the
+ * new user this short-lived proof; complete-signup only grants anything identity-based (admin) when
+ * the proof matches. Own secret + audience, so it can never pass verifyAccessToken.
+ */
+const GOOGLE_SIGNUP_PROOF_SECRET = JWT_SECRET + "-google-signup";
+const GOOGLE_SIGNUP_PROOF_AUDIENCE = "outsyde-google-signup";
+const GOOGLE_SIGNUP_PROOF_EXPIRY = "30m";
+
+export function generateGoogleSignupProof(googleSub: string, email: string): string {
+  return jwt.sign(
+    { googleSub, email: email.trim().toLowerCase() },
+    GOOGLE_SIGNUP_PROOF_SECRET,
+    { expiresIn: GOOGLE_SIGNUP_PROOF_EXPIRY, audience: GOOGLE_SIGNUP_PROOF_AUDIENCE },
+  );
+}
+
+/** True only for an unexpired proof issued for exactly this googleSub + email (email case-insensitive). */
+export function isValidGoogleSignupProof(token: unknown, googleSub: unknown, email: unknown): boolean {
+  if (typeof token !== "string" || !token || typeof googleSub !== "string" || typeof email !== "string") return false;
+  try {
+    const p = jwt.verify(token, GOOGLE_SIGNUP_PROOF_SECRET, { audience: GOOGLE_SIGNUP_PROOF_AUDIENCE }) as {
+      googleSub?: unknown;
+      email?: unknown;
+    };
+    return p.googleSub === googleSub && p.email === email.trim().toLowerCase();
+  } catch {
+    return false;
+  }
+}
+
 export function isTokenExpired(token: string): boolean {
   try {
     jwt.verify(token, JWT_SECRET);

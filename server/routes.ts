@@ -107,6 +107,8 @@ import {
   hashPassword,
   verifyPassword,
   generateAccessToken,
+  generateGoogleSignupProof,
+  isValidGoogleSignupProof,
   generateRefreshToken,
   verifyAccessToken,
   verifyRefreshToken,
@@ -1556,12 +1558,21 @@ export async function registerRoutes(
     try {
       const {
         googleSub, email, username, name, firstName, lastName, profileImageUrl,
+        googleSignupToken,
         address, aptUnit, city, state, zipCode, country,
         billingSameAsHome = true, billingStreet, billingAptUnit, billingCity, billingState, billingZip, billingCountry,
       } = req.body;
 
       if (!googleSub || !email) {
         return res.status(400).json({ success: false, message: "googleSub and email are required" });
+      }
+
+      // googleSub + email come from the client. Only a proof issued by /api/auth/mobile/google or
+      // the Google callback shows Google really verified them (2026-10-19). A proof that is sent but
+      // doesn't match is refused; no proof (older app builds) still signs up, but never as admin.
+      const hasGoogleProof = isValidGoogleSignupProof(googleSignupToken, googleSub, email);
+      if (googleSignupToken !== undefined && googleSignupToken !== null && !hasGoogleProof) {
+        return res.status(401).json({ success: false, message: "Google sign-in expired. Please continue with Google again." });
       }
 
       // Validate username
@@ -1589,9 +1600,9 @@ export async function registerRoutes(
         return res.status(409).json({ success: false, message: "Google account already linked" });
       }
 
-      // Admin check
+      // Admin check: allowlisted email AND a Google-verified proof for it (never the body alone)
       const ALLOWED_ADMIN_EMAILS = ['info@goutsyde.com', 'jamesmeyers2304@gmail.com'].map(e => e.toLowerCase());
-      const isAdminEmail = ALLOWED_ADMIN_EMAILS.includes(email.toLowerCase());
+      const isAdminEmail = hasGoogleProof && ALLOWED_ADMIN_EMAILS.includes(email.toLowerCase());
 
       // Auto-sync billing from home if same
       const effBillingStreet = billingSameAsHome ? address : billingStreet;
@@ -1618,11 +1629,15 @@ export async function registerRoutes(
         billingState: effBillingState || null,
         billingZip: effBillingZip || null,
         billingCountry: effBillingCountry,
-        isOAuthUser: true,
-        isAdmin: isAdminEmail,
       });
 
-      await storage.updateUser(user.id, { googleSub });
+      // createUser never saves isAdmin / isOAuthUser (R31, on purpose for isAdmin): set them here,
+      // in this one route, next to googleSub. isAdmin only with the Google proof above.
+      await storage.updateUser(user.id, {
+        googleSub,
+        isOAuthUser: true,
+        ...(isAdminEmail ? { isAdmin: true } : {}),
+      });
       const fullUser = await storage.getUser(user.id);
       if (!fullUser) {
         return res.status(500).json({ success: false, message: "Failed to create user" });
@@ -2016,6 +2031,8 @@ export async function registerRoutes(
             firstName: given_name || null,
             lastName: family_name || null,
             profileImageUrl: picture || null,
+            // Additive: send back to /api/auth/oauth/complete-signup as googleSignupToken.
+            googleSignupToken: generateGoogleSignupProof(googleSub, email),
           },
         });
       }
@@ -2273,6 +2290,8 @@ export async function registerRoutes(
           firstName: given_name || '',
           lastName: family_name || '',
           profileImageUrl: picture || '',
+          // Additive: send back to /api/auth/oauth/complete-signup as googleSignupToken.
+          googleSignupToken: generateGoogleSignupProof(googleSub, email),
         });
         return res.redirect(`${successRedirect}?${newUserParams.toString()}`);
       }
