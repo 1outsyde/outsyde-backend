@@ -9,7 +9,8 @@
  *      unflagged pending or refunding order (those settle first; flagged ones were already sent to the admin and
  *      their tickets are never valid on a completed order, so they are never stamped). Free events never get a row.
  *   2. sendPayout: claim first (attempts + 1, next_attempt_at = now + 10 minutes, the in-flight lock), so two runs
- *      can't both call Stripe, even when one transfer call is slow (it is bounded to about 60 seconds). There is no 'sending' status: the claim plays that role, like processTicketRefund. Then:
+ *      can't both call Stripe. Every Stripe call is bounded (30 s, 1 retry), and the owner re-takes the lock right
+ *      before the lookup + create, so a run whose checks were slow enough to lose the row sends nothing. There is no 'sending' status: the claim plays that role, like processTicketRefund. Then:
  *        event paused, or host can't be paid yet -> 'held' with hold_reason, rechecked hourly, admin emailed once.
  *        a transfer already in Stripe for this payout (sent but not saved) -> recorded as 'paid', not sent again.
  *        otherwise transfer with key event_payout_<payoutId>_<claim time in microseconds>, new on every claim
@@ -35,6 +36,8 @@ export const PAYOUT_MAX_ATTEMPTS = 5;
 export const PAYOUT_JOB_LIMIT = 20;
 /** A claim keeps the row for this long, so a transfer still in flight is never sent again under a new key. */
 export const PAYOUT_LOCK_MINUTES = 10;
+/** Every Stripe call in a payout attempt is bounded, so the attempt ends well inside the lock. */
+const STRIPE_CALL_BOUND = { timeoutMs: 30000, maxNetworkRetries: 1 };
 
 async function realStripe(): Promise<PayoutStripe> {
   const { stripeService } = await import("../stripe/stripeService");
@@ -173,8 +176,10 @@ async function toReview(p: any, e: any, why: string): Promise<SendResult> {
 export async function sendPayout(payoutId: string, s?: PayoutStripe): Promise<SendResult> {
   const [p] = await rows<any>(sql`
     UPDATE event_payouts SET attempts = attempts + 1,
-           -- In-flight lock: longer than one bounded transfer call (30 s timeout, 1 network retry, about 60 s), so no
-           -- other run can claim this row while a transfer may still land. The attempt's end sets the real next time.
+           -- In-flight lock. Re-taken right before the lookup + create (see below), so it only has to outlast those two
+           -- bounded calls: 30 s timeout and 1 network retry each, about 2 minutes with a Retry-After wait, well
+           -- inside 10 minutes. No other run can claim the row while a transfer may still land. The attempt's end sets
+           -- the real next time.
            next_attempt_at = now() + make_interval(mins => ${PAYOUT_LOCK_MINUTES}::int), updated_at = now()
     WHERE id = ${payoutId} AND status IN ('pending', 'held') AND (next_attempt_at IS NULL OR next_attempt_at <= now())
     RETURNING id, event_id, status, amount_cents, attempts, (extract(epoch from updated_at) * 1000000)::bigint::text AS claim_tag`);
@@ -187,15 +192,23 @@ export async function sendPayout(payoutId: string, s?: PayoutStripe): Promise<Se
 
   const st = s ?? (await realStripe());
   const dest = await hostPayoutDestination(e as HostEventRef);
-  const ready = await isHostReady(e as HostEventRef, st);
+  const ready = await isHostReady(e as HostEventRef, st, STRIPE_CALL_BOUND);
   if (!ready.ready || !dest.accountId) return hold(p, e, ready.reason ?? "no_account");
-  if (p.status === "held") {
-    // Ready again: back to pending, and a new problem gets its own email.
-    await rows(sql`UPDATE event_payouts SET status = 'pending', hold_reason = NULL, alerted_at = NULL, updated_at = now() WHERE id = ${p.id} AND status = 'held'`);
-  }
+
+  // Re-take the lock, only if this claim still owns the row: the checks above may have been slow enough for the
+  // lock to run out and another run to claim (its claim changes updated_at). Ready again from a hold -> pending,
+  // and a new problem gets its own email.
+  const [mine] = await rows<any>(sql`
+    UPDATE event_payouts SET next_attempt_at = now() + make_interval(mins => ${PAYOUT_LOCK_MINUTES}::int),
+           status = 'pending', hold_reason = NULL,
+           alerted_at = CASE WHEN status = 'held' THEN NULL ELSE alerted_at END, updated_at = now()
+    WHERE id = ${p.id} AND status IN ('pending', 'held')
+      AND (extract(epoch from updated_at) * 1000000)::bigint::text = ${p.claim_tag}
+    RETURNING id`);
+  if (!mine) return "not_due";
 
   try {
-    const existing = await st.findEventPayoutTransfer(e.id, p.id);
+    const existing = await st.findEventPayoutTransfer(e.id, p.id, STRIPE_CALL_BOUND);
     let transferId: string;
     if (existing) {
       // Sent before but not saved: record it, never send again.
@@ -206,11 +219,12 @@ export async function sendPayout(payoutId: string, s?: PayoutStripe): Promise<Se
     } else {
       // One key per claim (the claim's own timestamp in microseconds, so it only grows): Stripe replays a saved
       // response for 24 hours, errors included, so a fixed key would repeat an insufficient-balance or 500 reply
-      // on every retry. No double payment: claims never overlap (the 10 minute lock outlasts the bounded call),
-      // and the group lookup above runs before every create, so a transfer an earlier try sent is recorded.
+      // on every retry. No double payment: claims never overlap (the lock is re-taken by its owner just before
+      // the bounded lookup + create, and outlasts both), and the group lookup runs before every create, so a
+      // transfer an earlier try sent is recorded.
       transferId = (await st.createEventPayoutTransfer({
         eventId: e.id, payoutId: p.id, destination: dest.accountId, amountCents: amount,
-        idempotencyKey: `event_payout_${p.id}_${p.claim_tag}`,
+        idempotencyKey: `event_payout_${p.id}_${p.claim_tag}`, ...STRIPE_CALL_BOUND,
       })).id;
     }
     const [done] = await rows<any>(sql`

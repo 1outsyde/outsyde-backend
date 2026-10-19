@@ -555,9 +555,13 @@ async function getNoFollow(path: string): Promise<{ status: number; location: st
     const fakeLog: Array<{ fn: string; id: string }> = []; // readiness: account id; find/create: event id
     let holdGate: Promise<void> | null = null;
     let createStarted: (() => void) | null = null;
+    let readinessGate: Promise<void> | null = null;
+    let readinessStarted: (() => void) | null = null;
     const payoutFake = {
-      getPayoutReadiness: async (id: string) => {
+      getPayoutReadiness: async (id: string, _o?: { timeoutMs?: number; maxNetworkRetries?: number }) => {
         fakeLog.push({ fn: "readiness", id });
+        // Held open: a slow Stripe answer before the create (one call only).
+        if (readinessGate) { const g = readinessGate; readinessGate = null; readinessStarted?.(); await g; }
         const s = stateOf(id);
         return { ready: s.charges_enabled && s.payouts_enabled, chargesEnabled: s.charges_enabled, payoutsEnabled: s.payouts_enabled, detailsSubmitted: s.details_submitted };
       },
@@ -895,6 +899,34 @@ async function getNoFollow(path: string): Promise<{ status: number; location: st
     assert(firstRes === "paid" && pr[0].status === "paid" && pr[0].next_attempt_at === null
       && transfers.filter((t) => t.transfer_group === `event_${e15.id}`).length === 1 && transferPosts.filter((t) => t.payoutId === id15).length === 1,
       "exactly 1 transfer at the end", { firstRes, pr });
+
+    console.log("a slow check before the create outlasts the lock: that run sends nothing");
+    const h16 = await mkReadyHost("j16");
+    const e16 = await jobEvent(h16.u, "Slow Check Night");
+    await buy(e16.id, buyers[3], e16.typeId, 1);
+    await endedHoursAgo(e16.id, 80);
+    await createDuePayouts();
+    const id16 = (await payoutOf(e16.id))[0].id as string;
+    let rel16!: () => void;
+    readinessGate = new Promise<void>((r) => { rel16 = r; });
+    const check16 = new Promise<void>((r) => { readinessStarted = r; });
+    const run1 = sendPayout(id16, payoutFake);
+    await check16;
+    // Run 1 is stuck on Stripe for more than 10 minutes: its lock runs out and run 2 claims the row.
+    await q(`UPDATE event_payouts SET next_attempt_at = now() - interval '1 second' WHERE id = $1`, [id16]);
+    let rel16b!: () => void;
+    holdGate = new Promise<void>((r) => { rel16b = r; });
+    const create16 = new Promise<void>((r) => { createStarted = r; });
+    const run2 = sendPayout(id16, payoutFake);
+    await create16; // run 2's transfer is in flight, not yet on Stripe
+    rel16();
+    const r16a = await run1;
+    rel16b();
+    const r16b = await run2;
+    pr = await payoutOf(e16.id);
+    assert(r16a === "not_due" && r16b === "paid" && pr[0].status === "paid", "run 1 can't re-take the lock and sends nothing; run 2 pays", { r16a, r16b, pr });
+    assert(transfers.filter((t) => t.transfer_group === `event_${e16.id}`).length === 1 && transferPosts.filter((t) => t.payoutId === id16).length === 1,
+      "exactly 1 transfer overall", transferPosts.filter((t) => t.payoutId === id16));
 
     console.log("race: host refund vs payout create");
     const h12 = await mkReadyHost("j12");

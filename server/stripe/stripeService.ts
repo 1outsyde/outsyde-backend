@@ -11,6 +11,14 @@ function idempotencyKey(prefix: string): string {
   return `${prefix}_${randomUUID()}`;
 }
 
+/** Per-request bound for the event payout job's Stripe calls (only the fields given are set). */
+function eventPayoutRequestOptions(o: { timeoutMs?: number; maxNetworkRetries?: number }): { timeout?: number; maxNetworkRetries?: number } {
+  return {
+    ...(o.timeoutMs !== undefined ? { timeout: o.timeoutMs } : {}),
+    ...(o.maxNetworkRetries !== undefined ? { maxNetworkRetries: o.maxNetworkRetries } : {}),
+  };
+}
+
 export class StripeService {
   // =========================
   // CUSTOMERS
@@ -569,9 +577,10 @@ export class StripeService {
   }
 
   /** Whether a host's Connect account can take payouts: ready = charges and payouts both enabled. */
-  async getPayoutReadiness(accountId: string): Promise<{ ready: boolean; chargesEnabled: boolean; payoutsEnabled: boolean; detailsSubmitted: boolean }> {
+  async getPayoutReadiness(accountId: string, opts?: { timeoutMs?: number; maxNetworkRetries?: number }): Promise<{ ready: boolean; chargesEnabled: boolean; payoutsEnabled: boolean; detailsSubmitted: boolean }> {
     const stripe = await getUncachableStripeClient();
-    const account = await stripe.accounts.retrieve(accountId);
+    // Optional bound per request (the payout job passes one); without it the client defaults apply as before.
+    const account = opts ? await stripe.accounts.retrieve(accountId, {}, eventPayoutRequestOptions(opts)) : await stripe.accounts.retrieve(accountId);
     const chargesEnabled = !!account.charges_enabled;
     const payoutsEnabled = !!account.payouts_enabled;
     return {
@@ -587,9 +596,10 @@ export class StripeService {
    * transfer_group for the one whose metadata.payoutId matches. A single page of 100 is enough
    * (one transfer per payout plus rare recoveries per event), so no paging is done.
    */
-  async findEventPayoutTransfer(eventId: string, payoutId: string): Promise<{ id: string; amount: number } | null> {
+  async findEventPayoutTransfer(eventId: string, payoutId: string, opts?: { timeoutMs?: number; maxNetworkRetries?: number }): Promise<{ id: string; amount: number } | null> {
     const stripe = await getUncachableStripeClient();
-    const existing = await stripe.transfers.list({ transfer_group: `event_${eventId}`, limit: 100 });
+    const params = { transfer_group: `event_${eventId}`, limit: 100 };
+    const existing = opts ? await stripe.transfers.list(params, eventPayoutRequestOptions(opts)) : await stripe.transfers.list(params);
     const prior = existing.data.find(t => t.metadata?.payoutId === payoutId);
     return prior ? { id: prior.id, amount: prior.amount } : null;
   }

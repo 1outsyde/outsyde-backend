@@ -29,7 +29,7 @@ export type HostEventRef = {
 };
 export type ReadyReason = "no_account" | "not_complete" | "stripe_not_ready";
 export type ReadinessStripe = {
-  getPayoutReadiness(accountId: string): Promise<{ ready: boolean; chargesEnabled: boolean; payoutsEnabled: boolean; detailsSubmitted: boolean }>;
+  getPayoutReadiness(accountId: string, opts?: { timeoutMs?: number; maxNetworkRetries?: number }): Promise<{ ready: boolean; chargesEnabled: boolean; payoutsEnabled: boolean; detailsSubmitted: boolean }>;
 };
 
 async function realStripe(): Promise<ReadinessStripe> {
@@ -52,12 +52,14 @@ export async function hostPayoutDestination(event: HostEventRef): Promise<Payout
 }
 
 /** Can this host be paid right now? Local record first (cheap), then Stripe live (charges and payouts enabled). */
-export async function isHostReady(event: HostEventRef, s?: ReadinessStripe): Promise<{ ready: boolean; reason: ReadyReason | null }> {
+export async function isHostReady(
+  event: HostEventRef, s?: ReadinessStripe, opts?: { timeoutMs?: number; maxNetworkRetries?: number },
+): Promise<{ ready: boolean; reason: ReadyReason | null }> {
   const d = await hostPayoutDestination(event);
   if (!d.accountId) return { ready: false, reason: "no_account" };
   if (!d.localReady) return { ready: false, reason: "not_complete" };
   try {
-    const live = await (s ?? (await realStripe())).getPayoutReadiness(d.accountId);
+    const live = await (s ?? (await realStripe())).getPayoutReadiness(d.accountId, opts);
     if (!live.ready) return { ready: false, reason: "stripe_not_ready" };
   } catch (err) {
     // Unreachable account or Stripe down: not ready (callers rely on this never throwing).
