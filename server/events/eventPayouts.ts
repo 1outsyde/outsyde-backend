@@ -439,8 +439,9 @@ export async function processRecovery(recoveryId: string, s?: RecoveryStripe): P
     return done ? "reversed" : "not_due";
   } catch (err) {
     const msg = String((err as Error)?.message ?? err).slice(0, 300);
-    // Not enough on the host's Stripe balance: owed now, taken from their next event payout.
-    if (await isInsufficientFunds(err)) return owe(r, msg, tag);
+    // Not enough on the host's Stripe balance: owed now, taken from their next event payout (after one more look
+    // on the transfer: owed feeds an automatic deduction, so it must never be set while a reversal exists).
+    if (await isInsufficientFunds(err)) return oweUnlessReversed(msg);
     console.error(`[Events] recovery try ${r.attempts} failed for ${r.id}: ${msg}`);
     const [still] = await rows<any>(sql`
       UPDATE event_payout_recoveries SET last_error = ${msg},
@@ -450,8 +451,40 @@ export async function processRecovery(recoveryId: string, s?: RecoveryStripe): P
       RETURNING ${OWNER_TAG} AS tag`).catch(() => [] as any[]);
     if (!still) return "not_due";
     tag = String(still.tag);
-    if (Number(r.attempts) >= RECOVERY_MAX_ATTEMPTS) return owe(r, `the reversal failed ${r.attempts} times, last error: ${msg}`, tag);
+    // An unrecognised error (a different Stripe code for a low host balance included) ends here too: backoff, then
+    // after 5 tries the same look on the transfer before owing.
+    if (Number(r.attempts) >= RECOVERY_MAX_ATTEMPTS) return oweUnlessReversed(`the reversal failed ${r.attempts} times, last error: ${msg}`);
     return "retry";
+  }
+
+  /**
+   * The only way to 'owed' after a Stripe call: an earlier try (or this one) may have reversed with its reply lost,
+   * or reversed and then failed to save. One bounded lookup on the transfer, under this claim's ownership:
+   * found -> 'reversed' with that id; lookup fails -> stays pending with backoff (never owed blind); none -> 'owed'.
+   */
+  async function oweUnlessReversed(why: string): Promise<RecoveryResult> {
+    let found: { id: string; amount: number } | null;
+    try {
+      found = await st.findEventPayoutReversal(p.transfer_id, r.ticket_id, STRIPE_CALL_BOUND);
+    } catch (lookErr) {
+      const lm = String((lookErr as Error)?.message ?? lookErr);
+      console.error(`[Events] recovery ${r.id}: lookup before owing failed, stays pending: ${lm}`);
+      const [b] = await rows<any>(sql`
+        UPDATE event_payout_recoveries SET last_error = ${`${why}; reversal lookup before owing failed: ${lm}`.slice(0, 300)},
+               next_attempt_at = now() + make_interval(mins => LEAST(60, ${PAYOUT_LOCK_MINUTES}::int * power(2, LEAST(attempts - 1, 6)))::int),
+               updated_at = now()
+        WHERE id = ${r.id} AND status = 'pending' AND ${OWNER_TAG} = ${tag}
+        RETURNING id`).catch(() => [] as any[]);
+      return b ? "retry" : "not_due";
+    }
+    if (found) {
+      const [done] = await rows<any>(sql`
+        UPDATE event_payout_recoveries SET status = 'reversed', reversal_id = ${found.id}, next_attempt_at = NULL, last_error = NULL, updated_at = now()
+        WHERE id = ${r.id} AND status = 'pending' AND ${OWNER_TAG} = ${tag}
+        RETURNING id`);
+      return done ? "reversed" : "not_due";
+    }
+    return owe(r, why, tag);
   }
 }
 

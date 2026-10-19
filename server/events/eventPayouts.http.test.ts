@@ -118,7 +118,7 @@ async function getNoFollow(path: string): Promise<{ status: number; location: st
     return out;
   };
   // Reversals (task 7): own switches, same replay-per-key rule, a list per transfer.
-  const rsw = { insufficient: false, failRev: false, failOnce: 0, loseResponse: 0 };
+  const rsw = { insufficient: false, failRev: false, failOnce: 0, loseResponse: 0, failLookup: 0 };
   const reversalPosts: Array<{ key: string | null; ticketId: string | null; ok: boolean; replayed: boolean }> = [];
   const doReversal = (transferId: string, params: Record<string, string>, key: string | null): { code: number; body: any } => {
     const metadata: Record<string, string> = {};
@@ -616,6 +616,7 @@ async function getNoFollow(path: string): Promise<{ status: number; location: st
       // Task 7: reversals, sharing the HTTP stub's state. Gates hold one call open (a slow Stripe).
       findEventPayoutReversal: async (transferId: string, ticketId: string, _o?: { timeoutMs?: number; maxNetworkRetries?: number }) => {
         fakeLog.push({ fn: "findReversal", id: ticketId });
+        if (rsw.failLookup > 0) { rsw.failLookup--; throw Object.assign(new Error("stub reversal list failure"), { type: "api_error" }); }
         if (revLookupGate) { const g = revLookupGate; revLookupGate = null; revLookupStarted?.(); await g; }
         const rv = reversals.find((x) => x.transfer === transferId && x.metadata?.ticketId === ticketId);
         return rv ? { id: rv.id as string, amount: rv.amount as number } : null;
@@ -1292,6 +1293,81 @@ async function getNoFollow(path: string): Promise<{ status: number; location: st
       "backoff 10, 20, 40, 60 minutes", rWaits);
     assert(rc[0].status === "owed" && rc[0].attempts === 5 && /stub reversal failure/.test(rc[0].last_error ?? ""), "owed after 5 tries with the last error", rc);
     assert(postsR5.length === 5 && new Set(postsR5.map((x) => x.key)).size === 5 && postsR5.every((x) => !x.replayed), "a new key on every try (no replayed 500)", postsR5);
+
+    assert(fakeLog.filter((l) => l.fn === "findReversal" && l.id === tR5).length === 6, "5th try looked on the transfer again before owing (5 lookups + 1 before owed)",
+      fakeLog.filter((l) => l.fn === "findReversal" && l.id === tR5).length);
+
+    console.log("fix 1: last try's reversal lands but its response is lost -> reversed, not owed");
+    const hF1 = await mkReadyHost("f1");
+    const pF1 = await paidOut(hF1, "Last Try Lost Night");
+    await refundOrder(pF1.ev.id, hF1.u, pF1.orders[0]);
+    const tF1 = await ticketOf(pF1.orders[0]);
+    await openRecoveries();
+    const idF1 = (await recOf(tF1))[0].id as string;
+    rsw.failOnce = 4; rsw.loseResponse = 1; // tries 1-4: 500; try 5: reversal made, reply lost
+    const fRes: string[] = [];
+    for (let i = 0; i < 5; i++) { fRes.push(await processRecovery(idF1, payoutFake)); await advanceRec(idF1); }
+    rsw.failOnce = 0; rsw.loseResponse = 0;
+    rc = await recOf(tF1);
+    const rvF1 = reversals.filter((x) => x.metadata?.ticketId === tF1);
+    assert(fRes.slice(0, 4).every((x) => x === "retry") && fRes[4] === "reversed" && rc[0].status === "reversed" && rc[0].reversal_id === rvF1[0]?.id && rvF1.length === 1,
+      "5th try: lookup before owing finds the reversal and records it", { fRes, rc, rvF1 });
+    const eF1b = await jobEvent(hF1.u, "Last Try Lost Night Two");
+    await buy(eF1b.id, buyers[2], eF1b.typeId, 2); // gross 3920: an owed 1960 would be deducted
+    await endedHoursAgo(eF1b.id, 80);
+    await createDuePayouts();
+    pr = await payoutOf(eF1b.id);
+    assert(pr.length === 1 && pr[0].deducted_cents === 0 && pr[0].amount_cents === 3920, "next payout deducts nothing (no double recovery)", pr);
+
+    console.log("fix 1: reversal lost on try 1, lookups fail after -> never owed, then reversed");
+    const hF2 = await mkReadyHost("f2");
+    const pF2 = await paidOut(hF2, "Lookup Down Night");
+    await refundOrder(pF2.ev.id, hF2.u, pF2.orders[0]);
+    const tF2 = await ticketOf(pF2.orders[0]);
+    await openRecoveries();
+    const idF2 = (await recOf(tF2))[0].id as string;
+    rsw.loseResponse = 1;
+    const g1 = await processRecovery(idF2, payoutFake); // reversal made, reply lost
+    await advanceRec(idF2);
+    rsw.failLookup = 5; // tries 2-5 lookups fail, and the 5th try's lookup before owing fails too
+    const gRes: string[] = [];
+    for (let i = 0; i < 4; i++) { gRes.push(await processRecovery(idF2, payoutFake)); await advanceRec(idF2); }
+    rc = await recOf(tF2);
+    assert(g1 === "retry" && gRes.every((x) => x === "retry") && rc[0].status === "pending" && rc[0].attempts === 5 && rsw.failLookup === 0
+      && /lookup/.test(rc[0].last_error ?? ""), "lookup errors on the 5th try: stays pending (not owed), error saved", { g1, gRes, rc, left: rsw.failLookup });
+    await advanceRec(idF2);
+    const g6 = await processRecovery(idF2, payoutFake);
+    rc = await recOf(tF2);
+    assert(g6 === "reversed" && rc[0].status === "reversed" && reversals.filter((x) => x.metadata?.ticketId === tF2).length === 1
+      && reversalPosts.filter((x) => x.ticketId === tF2).length === 1, "lookup back: the lost reversal is recorded, exactly 1 reversal", { g6, rc });
+    const eF2b = await jobEvent(hF2.u, "Lookup Down Night Two");
+    await buy(eF2b.id, buyers[3], eF2b.typeId, 2);
+    await endedHoursAgo(eF2b.id, 80);
+    await createDuePayouts();
+    pr = await payoutOf(eF2b.id);
+    assert(pr.length === 1 && pr[0].deducted_cents === 0, "next payout deducts nothing", pr);
+
+    console.log("fix 1: insufficient with a lookup failure before owing stays pending");
+    const hF3 = await mkReadyHost("f3");
+    const pF3 = await paidOut(hF3, "Insufficient Lookup Night");
+    await refundOrder(pF3.ev.id, hF3.u, pF3.orders[0]);
+    const tF3 = await ticketOf(pF3.orders[0]);
+    await openRecoveries();
+    const idF3 = (await recOf(tF3))[0].id as string;
+    rsw.failLookup = 0;
+    rsw.insufficient = true;
+    // First lookup (before the create) works; the one before owing fails.
+    const origFind = payoutFake.findEventPayoutReversal;
+    let findN = 0;
+    payoutFake.findEventPayoutReversal = async (a: string, b: string, o?: any) => { if (b === tF3 && ++findN === 2) rsw.failLookup = 1; return origFind(a, b, o); };
+    const i1 = await processRecovery(idF3, payoutFake);
+    payoutFake.findEventPayoutReversal = origFind;
+    rc = await recOf(tF3);
+    assert(i1 === "retry" && rc[0].status === "pending" && rc[0].due_in > 590, "insufficient but can't confirm no reversal: pending with backoff", { i1, rc });
+    await advanceRec(idF3);
+    const i2 = await processRecovery(idF3, payoutFake);
+    rsw.insufficient = false;
+    assert(i2 === "owed" && (await recOf(tF3))[0].status === "owed", "insufficient and lookup confirms none: owed", i2);
 
     console.log("a transient 500 once, then reversed with a new key");
     const hR6 = await mkReadyHost("r6");
