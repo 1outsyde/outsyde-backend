@@ -84,25 +84,38 @@ async function getNoFollow(path: string): Promise<{ status: number; location: st
   const accountLinkCalls: Array<Record<string, string>> = [];
   const failLinksFor = new Set<string>();
 
-  // Section: /v1/transfers (+ reversals). Switches: failTransfer, insufficient. (Used by later tasks.)
-  const sw = { failTransfer: false, insufficient: false };
-  const transfersByKey: Record<string, any> = {};
+  // Section: /v1/transfers (+ reversals). Switches: failTransfer, insufficient (until turned off), failOnce, loseResponse (counts).
+  const sw = { failTransfer: false, insufficient: false, failOnce: 0, loseResponse: 0 };
   const transfers: any[] = [];
   const reversals: any[] = [];
-  const transferPosts: Array<{ key: string | null; payoutId: string | null; ok: boolean }> = []; // every POST, failed ones too
+  const transferPosts: Array<{ key: string | null; payoutId: string | null; ok: boolean; replayed: boolean }> = []; // every POST, failed ones too
+  // Stripe saves the first response for an Idempotency-Key and replays it for 24h, errors (500s, balance_insufficient) included.
+  const savedByKey: Record<string, { code: number; body: any }> = {};
   /** Stripe's rules for POST /v1/transfers, shared by the HTTP stub and the in-process fake. */
   const doTransfer = (params: Record<string, string>, key: string | null): { code: number; body: any } => {
     const metadata: Record<string, string> = {};
     for (const [k, v] of Object.entries(params)) { const m = k.match(/^metadata\[(.+)\]$/); if (m) metadata[m[1]] = v; }
-    const log = (ok: boolean) => transferPosts.push({ key, payoutId: metadata.payoutId ?? null, ok });
-    if (sw.insufficient) { log(false); return { code: 400, body: { error: { type: "invalid_request_error", code: "balance_insufficient", message: "Insufficient funds in Stripe account." } } }; }
-    if (sw.failTransfer) { log(false); return { code: 500, body: { error: { type: "api_error", message: "stub transfer failure" } } }; }
-    log(true);
-    if (key && transfersByKey[key]) return { code: 200, body: transfersByKey[key] };
-    const t = { id: `tr_stub_${transfers.length + 1}`, object: "transfer", amount: Number(params.amount), currency: params.currency, destination: params.destination, transfer_group: params.transfer_group ?? null, metadata, reversed: false, amount_reversed: 0 };
-    transfers.push(t);
-    if (key) transfersByKey[key] = t;
-    return { code: 200, body: t };
+    const log = (ok: boolean, replayed = false) => transferPosts.push({ key, payoutId: metadata.payoutId ?? null, ok, replayed });
+    if (key && savedByKey[key]) { log(savedByKey[key].code === 200, true); return savedByKey[key]; }
+    let out: { code: number; body: any };
+    if (sw.insufficient) out = { code: 400, body: { error: { type: "invalid_request_error", code: "balance_insufficient", message: "Insufficient funds in Stripe account." } } };
+    else if (sw.failTransfer || sw.failOnce > 0) {
+      if (sw.failOnce > 0) sw.failOnce--;
+      out = { code: 500, body: { error: { type: "api_error", message: "stub transfer failure" } } };
+    } else {
+      const t = { id: `tr_stub_${transfers.length + 1}`, object: "transfer", amount: Number(params.amount), currency: params.currency, destination: params.destination, transfer_group: params.transfer_group ?? null, metadata, reversed: false, amount_reversed: 0 };
+      transfers.push(t);
+      out = { code: 200, body: t };
+    }
+    if (key) savedByKey[key] = out;
+    if (out.code === 200 && sw.loseResponse > 0) {
+      // Created and saved on Stripe's side, but the caller never hears back.
+      sw.loseResponse--;
+      log(false);
+      return { code: 500, body: { error: { type: "api_connection_error", message: "stub: response lost" } } };
+    }
+    log(out.code === 200);
+    return out;
   };
 
   // Section: /v1/customers, /v1/payment_intents, /v1/refunds (checkout and host refunds, task 6). Same rules as ticketRefunds.http.test.ts.
@@ -551,12 +564,12 @@ async function getNoFollow(path: string): Promise<{ status: number; location: st
         const t = transfers.find((x) => x.transfer_group === `event_${eventId}` && x.metadata.payoutId === payoutId);
         return t ? { id: t.id as string, amount: t.amount as number } : null;
       },
-      createEventPayoutTransfer: async (p: { eventId: string; payoutId: string; destination: string; amountCents: number }) => {
+      createEventPayoutTransfer: async (p: { eventId: string; payoutId: string; destination: string; amountCents: number; idempotencyKey?: string }) => {
         fakeLog.push({ fn: "create", id: p.eventId });
         const res = doTransfer({
           amount: String(p.amountCents), currency: "usd", destination: p.destination, transfer_group: `event_${p.eventId}`,
           "metadata[type]": "event_payout", "metadata[eventId]": p.eventId, "metadata[payoutId]": p.payoutId,
-        }, `event_payout_${p.payoutId}`);
+        }, p.idempotencyKey ?? `event_payout_${p.payoutId}`); // same default as stripeService
         if (res.code !== 200) throw Object.assign(new Error(res.body.error.message), { code: res.body.error.code, type: res.body.error.type });
         return { id: res.body.id as string };
       },
@@ -708,7 +721,7 @@ async function getNoFollow(path: string): Promise<{ status: number; location: st
     assert(pr.length === 1 && pr[0].status === "paid" && pr[0].transfer_id === g7[0]?.id && pr[0].paid_at && pr[0].attempts === 1, "payout paid once", { pr, ra, rb });
     assert(g7.length === 1 && transferPosts.filter((t) => t.payoutId === pr[0]?.id).length === 1, "stub saw exactly 1 transfer POST", { g7, posts: transferPosts.filter((t) => t.payoutId === pr[0]?.id) });
     assert(g7[0]?.amount === 3920 && g7[0]?.destination === h7.a && g7[0]?.metadata.type === "event_payout" && g7[0]?.metadata.eventId === e7.id
-      && transferPosts.find((t) => t.payoutId === pr[0]?.id)?.key === `event_payout_${pr[0]?.id}`, "transfer amount, destination, metadata and key", g7[0]);
+      && new RegExp(`^event_payout_${pr[0]?.id}_\\d+$`).test(transferPosts.find((t) => t.payoutId === pr[0]?.id)?.key ?? ""), "transfer amount, destination, metadata and key event_payout_<id>_<n>", { g7: g7[0], posts: transferPosts.filter((t) => t.payoutId === pr[0]?.id) });
     assert(ra.created + rb.created === 1 && ra.paid + rb.paid >= 1, "job counts: one created", { ra, rb });
     await waitFor(() => pushes.some((p) => p.data?.payoutId === pr[0]?.id));
     const myPush = pushes.filter((p) => p.data?.payoutId === pr[0]?.id);
@@ -782,6 +795,9 @@ async function getNoFollow(path: string): Promise<{ status: number; location: st
     await advance(id10);
     sres = await sendPayout(id10, payoutFake);
     assert(sres === "paid" && (await payoutOf(e10.id))[0].status === "paid", "balance back: paid", sres);
+    const posts10 = transferPosts.filter((t) => t.payoutId === id10);
+    assert(posts10.length === 4 && new Set(posts10.map((t) => t.key)).size === 4 && posts10[3].ok && !posts10[3].replayed && posts10.slice(0, 3).every((t) => !t.ok),
+      "each try used a new key, so the saved insufficient reply wasn't replayed after the balance came back", posts10);
 
     console.log("other errors back off, then review");
     const h11 = await mkReadyHost("j11");
@@ -810,6 +826,42 @@ async function getNoFollow(path: string): Promise<{ status: number; location: st
     await runEventPayoutJob(payoutFake);
     assert(sres === "not_due" && adminEmails.length === emailsBefore + 1 && transferPosts.filter((t) => t.payoutId === id11).length === 5, "review is left alone (no more tries or emails)", { sres, n: adminEmails.length - emailsBefore });
     sw.failTransfer = false;
+
+    console.log("a transient 500 once, then OK");
+    const h13 = await mkReadyHost("j13");
+    const e13 = await jobEvent(h13.u, "Blip Night");
+    await buy(e13.id, buyers[0], e13.typeId, 1);
+    await endedHoursAgo(e13.id, 80);
+    await createDuePayouts();
+    const id13 = (await payoutOf(e13.id))[0].id as string;
+    emailsBefore = adminEmails.length;
+    sw.failOnce = 1;
+    const r13a = await sendPayout(id13, payoutFake);
+    await advance(id13);
+    const r13b = await sendPayout(id13, payoutFake);
+    pr = await payoutOf(e13.id);
+    const posts13 = transferPosts.filter((t) => t.payoutId === id13);
+    assert(r13a === "retry" && r13b === "paid" && pr[0].status === "paid" && pr[0].attempts === 2 && adminEmails.length === emailsBefore,
+      "500 once then OK: paid on the next try, no review, no email", { r13a, r13b, pr });
+    assert(posts13.length === 2 && posts13[0].key !== posts13[1].key && !posts13[1].replayed && transfers.filter((t) => t.transfer_group === `event_${e13.id}`).length === 1,
+      "second try used a new key (the saved 500 wasn't replayed), one transfer", posts13);
+
+    console.log("transfer created but its response lost");
+    const h14 = await mkReadyHost("j14");
+    const e14 = await jobEvent(h14.u, "Lost Response Night");
+    await buy(e14.id, buyers[1], e14.typeId, 1);
+    await endedHoursAgo(e14.id, 80);
+    await createDuePayouts();
+    const id14 = (await payoutOf(e14.id))[0].id as string;
+    sw.loseResponse = 1;
+    const r14a = await sendPayout(id14, payoutFake);
+    const g14 = transfers.filter((t) => t.transfer_group === `event_${e14.id}`);
+    assert(r14a === "retry" && g14.length === 1 && (await payoutOf(e14.id))[0].status === "pending", "lost response: Stripe has the transfer, row still pending", { r14a, g14 });
+    await advance(id14);
+    const r14b = await sendPayout(id14, payoutFake);
+    pr = await payoutOf(e14.id);
+    assert(r14b === "paid" && pr[0].status === "paid" && pr[0].transfer_id === g14[0]?.id && transfers.filter((t) => t.transfer_group === `event_${e14.id}`).length === 1
+      && transferPosts.filter((t) => t.payoutId === id14).length === 1, "next try finds it by group lookup and records it, no second POST or transfer", { r14b, pr });
 
     console.log("race: host refund vs payout create");
     const h12 = await mkReadyHost("j12");

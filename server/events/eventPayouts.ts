@@ -12,11 +12,12 @@
  *      call Stripe. There is no 'sending' status: the claim plays that role, like processTicketRefund. Then:
  *        event paused, or host can't be paid yet -> 'held' with hold_reason, rechecked hourly, admin emailed once.
  *        a transfer already in Stripe for this payout (sent but not saved) -> recorded as 'paid', not sent again.
- *        otherwise transfer with the fixed key event_payout_<payoutId> -> 'paid' + host push.
+ *        otherwise transfer with key event_payout_<payoutId>_<claim time in microseconds>, new on every claim
+ *        (Stripe replays a saved error for 24 hours) -> 'paid' + host push.
  *        not enough platform balance -> stays 'pending', not counted as a try, retried hourly, admin email at most
  *        once every 24 hours. Other errors -> backoff 1, 2, 4, 8 minutes up to 60; after 5 tries 'review' + one email.
  *   Leaving 'review' is manual for now (vault runbook: set status 'pending', attempts 0).
- * The amount is fixed when the row is created (the transfer's idempotency key depends on it). A ticket refunded
+ * The amount is fixed when the row is created (a resent transfer must match the one Stripe may already have). A ticket refunded
  * after it was stamped is paid out, then recovered (Task 7, event_payout_recoveries).
  */
 import { sql } from "drizzle-orm";
@@ -172,7 +173,7 @@ export async function sendPayout(payoutId: string, s?: PayoutStripe): Promise<Se
     UPDATE event_payouts SET attempts = attempts + 1,
            next_attempt_at = now() + make_interval(mins => LEAST(60, power(2, LEAST(attempts, 6)))::int), updated_at = now()
     WHERE id = ${payoutId} AND status IN ('pending', 'held') AND (next_attempt_at IS NULL OR next_attempt_at <= now())
-    RETURNING id, event_id, status, amount_cents, attempts`);
+    RETURNING id, event_id, status, amount_cents, attempts, (extract(epoch from updated_at) * 1000000)::bigint::text AS claim_tag`);
   if (!p) return "not_due";
   const amount = Number(p.amount_cents);
   const [e] = await rows<any>(sql`
@@ -199,7 +200,13 @@ export async function sendPayout(payoutId: string, s?: PayoutStripe): Promise<Se
       }
       transferId = existing.id;
     } else {
-      transferId = (await st.createEventPayoutTransfer({ eventId: e.id, payoutId: p.id, destination: dest.accountId, amountCents: amount })).id;
+      // One key per claim (the claim's own timestamp in microseconds, so it only grows): Stripe replays a saved
+      // response for 24 hours, errors included, so a fixed key would repeat an insufficient-balance or 500 reply
+      // on every retry. Double payment is still impossible: the group lookup above runs before every create.
+      transferId = (await st.createEventPayoutTransfer({
+        eventId: e.id, payoutId: p.id, destination: dest.accountId, amountCents: amount,
+        idempotencyKey: `event_payout_${p.id}_${p.claim_tag}`,
+      })).id;
     }
     const [done] = await rows<any>(sql`
       UPDATE event_payouts SET status = 'paid', transfer_id = ${transferId}, paid_at = now(),
