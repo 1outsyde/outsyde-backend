@@ -1,10 +1,11 @@
 import { storage } from './storage';
 import { sendPushNotification, isPushConfigured } from './pushService';
-import { isEmailConfigured, sendNewConsumerSignupEmail, sendNewVendorApplicationEmail, sendNewPhotographerApplicationEmail, sendVendorApprovalEmail, sendVendorRejectionEmail, sendCancellationAdminEmail } from './emailService';
+import { isEmailConfigured, sendNewConsumerSignupEmail, sendNewVendorApplicationEmail, sendNewPhotographerApplicationEmail, sendNewInfluencerApplicationEmail, sendVendorApprovalEmail, sendVendorRejectionEmail, sendCancellationAdminEmail } from './emailService';
 import { sendExpoPush } from './expoPushService';
 import type { InsertNotification } from '@shared/schema';
 
 export type NotificationType =
+  | 'new_influencer_application'
   | 'booking_confirmed'
   | 'payment_succeeded'
   | 'payment_failed'
@@ -627,6 +628,64 @@ export const NotificationTriggers = {
     }
 
     console.log(`[Admin Notification] Notified ${adminUsers.length} admin(s) about new vendor: ${params.businessName}`);
+  },
+
+  /**
+   * New influencer application (2026-10-18): in-app + push to every admin, and ONE email with
+   * every answer (to ADMIN_NOTIFICATION_EMAIL). Never throws: an alert must not block applying.
+   */
+  async newInfluencerApplication(params: { applicationId: string; userId: string }): Promise<void> {
+    let application: Awaited<ReturnType<typeof storage.getInfluencerApplication>> | null = null;
+    let applicant: Awaited<ReturnType<typeof storage.getUser>> | null = null;
+    try {
+      application = (await storage.getInfluencerApplication(params.applicationId)) ?? null;
+      applicant = (await storage.getUser(params.userId)) ?? null;
+    } catch (err) {
+      console.error(`[AdminSignupNotify] Could not load influencer application ${params.applicationId}:`, err);
+    }
+    const who = applicant?.name || (applicant?.username ? `@${applicant.username}` : 'Someone');
+    const title = 'New Influencer Application';
+    const message = `${who} applied to the Outsyde influencer program.${application?.followerCount ? ` Followers: ${application.followerCount.toLocaleString('en-US')}.` : ''}`;
+
+    let adminUsers: Awaited<ReturnType<typeof storage.getAdminUsers>> = [];
+    try {
+      adminUsers = await storage.getAdminUsers();
+    } catch (err) {
+      console.error('[AdminSignupNotify] Could not load admins:', err);
+    }
+    for (const admin of adminUsers) {
+      try {
+        await sendNotification({
+          userId: admin.id,
+          type: 'new_influencer_application',
+          title,
+          message,
+          referenceType: 'influencer_application',
+          referenceId: params.applicationId,
+          metadata: { applicationId: params.applicationId, userId: params.userId },
+        });
+      } catch (err) {
+        console.error(`[AdminSignupNotify] In-app failed for admin ${admin.id}:`, err);
+      }
+      try {
+        await sendExpoPush({
+          userId: admin.id,
+          title,
+          body: message,
+          data: { type: 'new_influencer_application', referenceId: params.applicationId },
+        });
+      } catch (err) {
+        console.error(`[AdminSignupNotify] Expo push failed for admin ${admin.id}:`, err);
+      }
+    }
+
+    try {
+      if (application && (await isEmailConfigured())) {
+        await sendNewInfluencerApplicationEmail({ application, applicant });
+      }
+    } catch (err) {
+      console.error('[AdminSignupNotify] Influencer email failed:', err);
+    }
   },
 
   async newPhotographerApplication(params: {

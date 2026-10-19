@@ -125,6 +125,8 @@ import { adminOverrideBusinessId } from "./adminBusinessOverride";
 import { authorizeAndProvisionGoLive, GoLiveError } from "./services/goLiveGate";
 import { ObjectStorageService, ObjectNotFoundError } from "./objectStorage";
 import { ObjectPermission } from "./objectAcl";
+import { buildInfluencerSignupDetailsPayload } from "./influencerApplicationDetails";
+import { parseInfluencerApplication, contentCategoryLabels, makeInfluencerPromoCode } from "@shared/influencerApplication";
 import { NotificationTriggers } from "./notificationService";
 import { 
   getStaffAvailabilitySlots, 
@@ -19030,11 +19032,34 @@ export async function registerRoutes(
     }
   });
 
+  // Gives an approved influencer's profile a promo code if it has none (2026-10-18). Unique by
+  // checking the table; a race on the unique index is retried once. Returns the code.
+  const ensureInfluencerPromoCode = async (userId: string): Promise<string | null> => {
+    const profile = await storage.getInfluencerProfileByUserId(userId);
+    if (!profile) return null;
+    if (profile.promoCode) return profile.promoCode;
+    const user = await storage.getUser(userId);
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const code = await makeInfluencerPromoCode(user?.username || user?.name, async (c) => !!(await storage.getInfluencerProfileByPromoCode(c)));
+      try {
+        const updated = await db.update(influencerProfiles)
+          .set({ promoCode: code, updatedAt: new Date() })
+          .where(and(eq(influencerProfiles.id, profile.id), isNull(influencerProfiles.promoCode)))
+          .returning({ promoCode: influencerProfiles.promoCode });
+        if (updated[0]?.promoCode) return updated[0].promoCode;
+        return (await storage.getInfluencerProfileByUserId(userId))?.promoCode ?? null;
+      } catch (err) {
+        if (attempt === 1) { console.error("[influencer] promo code failed:", err); return null; }
+      }
+    }
+    return null;
+  };
+
   // ==================== INFLUENCER ROUTES ====================
 
   // User: Submit influencer application
   app.post("/api/influencer/apply", requireAuth, async (req, res) => {
-    const userId = (req as any).userId || req.session?.userId;
+    const userId = (req as any).user?.userId || (req as any).userId || req.session?.userId;
 
     try {
       const user = await storage.getUser(userId);
@@ -19058,28 +19083,18 @@ export async function registerRoutes(
         return res.status(400).json({ error: "Application already exists" });
       }
 
-      // Accept both camelCase (frontend) and snake_case field names
-      const body = req.body;
-      const instagramUrl = body.instagramUrl || body.instagram_url || null;
-      const tiktokUrl = body.tiktokUrl || body.tiktok_url || null;
-      const youtubeUrl = body.youtubeUrl || body.youtube_url || null;
-      const twitterUrl = body.twitterUrl || body.twitter_url || null;
-      const rawFollowerCount = body.followerCount || body.follower_count;
-      const followerCount = rawFollowerCount ? parseInt(String(rawFollowerCount).replace(/,/g, '')) : null;
-      // Accept both field name variants from the frontend form
-      const contentNiche = body.contentNiche || body.content_niche || body.niche || null;
-      const whyInfluencer = body.whyInfluencer || body.why_influencer || body.whyJoin || null;
+      // Every answer (2026-10-18), camelCase or snake_case; older app builds send `bio` for the
+      // why box. Bad input → 400 with the field, nothing saved.
+      const parsed = parseInfluencerApplication(req.body ?? {});
+      if (!parsed.ok) {
+        return res.status(400).json({ error: parsed.error, field: parsed.field });
+      }
 
-      const application = await storage.createInfluencerApplication({
-        userId,
-        instagramUrl,
-        tiktokUrl,
-        youtubeUrl,
-        twitterUrl,
-        followerCount,
-        contentNiche,
-        whyInfluencer,
-      });
+      const application = await storage.createInfluencerApplication({ userId, ...parsed.value });
+
+      // Admin alert (in-app, push, email with every answer). Never blocks applying.
+      NotificationTriggers.newInfluencerApplication({ applicationId: application.id, userId })
+        .catch((err) => console.error('[influencer] admin notification failed:', err));
 
       res.status(201).json({ success: true, application });
     } catch (error) {
@@ -19089,8 +19104,9 @@ export async function registerRoutes(
   });
 
   // User: Get own influencer application status
-  app.get("/api/influencer/application", async (req, res) => {
-    const userId = req.session?.userId;
+  app.get("/api/influencer/application", optionalAuthMiddleware, async (req, res) => {
+    // Bearer (app) or session (web), 2026-10-18. Was session only.
+    const userId = (req as AuthenticatedRequest).user?.userId || req.session?.userId;
     if (!userId) {
       return res.status(401).json({ error: "Not authenticated" });
     }
@@ -19120,6 +19136,12 @@ export async function registerRoutes(
           followerCount: influencerApplications.followerCount,
           contentNiche: influencerApplications.contentNiche,
           whyInfluencer: influencerApplications.whyInfluencer,
+          instagramFollowers: influencerApplications.instagramFollowers,
+          tiktokFollowers: influencerApplications.tiktokFollowers,
+          youtubeFollowers: influencerApplications.youtubeFollowers,
+          twitterFollowers: influencerApplications.twitterFollowers,
+          contentCategories: influencerApplications.contentCategories,
+          contentOther: influencerApplications.contentOther,
           status: influencerApplications.status,
           adminNotes: influencerApplications.adminNotes,
           reviewedBy: influencerApplications.reviewedBy,
@@ -19130,6 +19152,9 @@ export async function registerRoutes(
           userUsername: users.username,
           userProfileImageUrl: users.profileImageUrl,
           userIsInfluencer: users.isInfluencer,
+          userPhone: users.phone,
+          userCity: users.city,
+          userState: users.state,
         })
         .from(influencerApplications)
         .innerJoin(users, eq(users.id, influencerApplications.userId))
@@ -19146,6 +19171,14 @@ export async function registerRoutes(
         followerCount: row.followerCount,
         contentNiche: row.contentNiche,
         whyInfluencer: row.whyInfluencer,
+        // Additive (2026-10-18)
+        instagramFollowers: row.instagramFollowers,
+        tiktokFollowers: row.tiktokFollowers,
+        youtubeFollowers: row.youtubeFollowers,
+        twitterFollowers: row.twitterFollowers,
+        contentCategories: row.contentCategories ?? [],
+        contentCategoryLabels: contentCategoryLabels(row.contentCategories),
+        contentOther: row.contentOther,
         status: row.status,
         adminNotes: row.adminNotes,
         reviewedBy: row.reviewedBy,
@@ -19158,6 +19191,9 @@ export async function registerRoutes(
           username: row.userUsername,
           profileImageUrl: row.userProfileImageUrl,
           isInfluencer: row.userIsInfluencer ?? false,
+          phone: row.userPhone ?? null,
+          city: row.userCity ?? null,
+          state: row.userState ?? null,
         },
       }));
 
@@ -19171,6 +19207,32 @@ export async function registerRoutes(
   app.get("/api/admin/influencers", requireAdmin, handleGetInfluencerApplications);
   // Legacy alias kept for backward compatibility
   app.get("/api/admin/influencer-applications", requireAdmin, handleGetInfluencerApplications);
+
+  // Admin: one application with every answer (2026-10-18). No password, tokens or Stripe ids.
+  app.get("/api/admin/influencers/:id", requireAdmin, async (req, res) => {
+    try {
+      const application = await storage.getInfluencerApplication(req.params.id);
+      if (!application) return res.status(404).json({ error: "Application not found" });
+      const applicant = await storage.getUser(application.userId);
+      const profile = await storage.getInfluencerProfileByUserId(application.userId);
+      res.json({
+        application: {
+          ...application,
+          user: applicant ? {
+            id: applicant.id, name: applicant.name, email: applicant.email, username: applicant.username,
+            phone: applicant.phone ?? null, city: applicant.city ?? null, state: applicant.state ?? null,
+            profileImageUrl: applicant.profileImageUrl ?? null, isInfluencer: applicant.isInfluencer ?? false,
+            isActive: applicant.isActive, createdAt: applicant.createdAt,
+          } : null,
+          promoCode: profile?.promoCode ?? null,
+        },
+        signupDetails: buildInfluencerSignupDetailsPayload(application, applicant ?? null, { promoCode: profile?.promoCode ?? null }),
+      });
+    } catch (error) {
+      console.error("Get influencer application detail error:", error);
+      res.status(500).json({ error: "Failed to get application" });
+    }
+  });
 
   // Admin: Approve or reject an influencer application (unified PATCH endpoint)
   app.patch("/api/admin/influencers/:id", requireAdmin, async (req, res) => {
@@ -19225,8 +19287,9 @@ export async function registerRoutes(
             followerCount: application.followerCount ?? 0,
           })
           .onConflictDoNothing();
+        const promoCode = await ensureInfluencerPromoCode(application.userId);
 
-        res.json({ success: true });
+        res.json({ success: true, promoCode });
       } else {
         // Rejection: update application with status and notes
         await db
@@ -19278,7 +19341,8 @@ export async function registerRoutes(
           followerCount: application.followerCount ?? 0,
         })
         .onConflictDoNothing();
-      res.json({ success: true });
+      const promoCode = await ensureInfluencerPromoCode(application.userId);
+      res.json({ success: true, promoCode });
     } catch (error) {
       console.error("Approve influencer application error:", error);
       res.status(500).json({ error: "Failed to approve application" });
@@ -20053,6 +20117,17 @@ export async function registerRoutes(
       const { refCode, utm_source, utm_medium, utm_campaign } = req.body;
       if (!refCode) {
         return res.status(400).json({ error: "refCode is required" });
+      }
+
+      // Money guard (2026-10-18): approved influencers now get promo codes, and an attribution
+      // makes the vendor pay the influencer commission on this customer's products. Off until
+      // the tracking step ships (no client calls this route). Never attribute to yourself.
+      if (process.env.INFLUENCER_ATTRIBUTION_ENABLED !== "true") {
+        return res.status(503).json({ error: "Influencer attribution is not live yet" });
+      }
+      const refProfile = await storage.getInfluencerProfileByPromoCode(refCode);
+      if (refProfile && refProfile.userId === userId) {
+        return res.status(400).json({ error: "You can't use your own code" });
       }
 
       const attribution = await recordAttribution(userId, refCode, {

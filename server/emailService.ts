@@ -1,6 +1,6 @@
 import { Resend } from 'resend';
 import type { EmailLogTag } from './emailHistory';
-import type { Business, Photographer, User } from '@shared/schema';
+import type { Business, InfluencerApplication, Photographer, User } from '@shared/schema';
 import {
   buildVendorApplicationSections,
   renderSectionsHtml,
@@ -10,6 +10,7 @@ import {
   type DetailSection,
 } from './adminApplicationDetails';
 import { buildPhotographerApplicationSections } from './photographerApplicationDetails';
+import { buildInfluencerApplicationSections, type ApplicantLike } from './influencerApplicationDetails';
 
 // History logging for emails to customers, vendors and photographers (PR C2). emailHistory is loaded
 // lazily so importing this file still never loads the database module (server/accountSetup tests and
@@ -276,6 +277,60 @@ export async function sendNewPhotographerApplicationEmail(params: {
   const text = `New Photographer: ${params.displayName}
 
 A new photographer joined Outsyde. Their profile is public right away. Here is everything they entered.
+
+${renderSectionsText(sections)}
+
+Review: ${reviewUrl}
+`;
+
+  return sendAdminEmail({
+    to: ADMIN_NOTIFICATION_EMAIL,
+    subject,
+    html,
+    text,
+  });
+}
+
+/**
+ * New influencer application alert (2026-10-18): every answer the applicant gave, escaped,
+ * and a Review button to goutsyde.com/admin/influencers/:id. Internal alert: no history tag.
+ */
+export async function sendNewInfluencerApplicationEmail(params: {
+  application: InfluencerApplication;
+  applicant: ApplicantLike | null;
+}): Promise<boolean> {
+  const who = params.applicant?.name || (params.applicant?.username ? `@${params.applicant.username}` : 'Someone');
+  const subject = `New Influencer Application: ${who}`;
+  const reviewBase = (process.env.FRONTEND_URL || getAppBaseUrl() || 'https://www.goutsyde.com').replace(/\/+$/, '');
+  const reviewUrl = `${reviewBase}/admin/influencers/${encodeURIComponent(params.application.id)}`;
+  const sections = buildInfluencerApplicationSections(params.application, params.applicant);
+
+  const html = `
+    <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+      <div style="background: linear-gradient(135deg, #f5a623, #f7b84b); padding: 20px; text-align: center;">
+        <h1 style="color: white; margin: 0;">New Influencer Application</h1>
+      </div>
+
+      <div style="padding: 30px; background: #ffffff;">
+        <p style="font-size: 16px; color: #333; margin-top: 0;">Someone applied to the Outsyde influencer program. Here is everything they entered. Approve or reject from the admin dashboard.</p>
+        ${renderSectionsHtml(sections)}
+        <div style="text-align: center; margin-top: 30px;">
+          <a href="${escapeHtml(reviewUrl)}"
+             style="background: #f5a623; color: white; padding: 12px 30px; text-decoration: none; border-radius: 6px; font-weight: bold;">
+            Review Application
+          </a>
+        </div>
+      </div>
+
+      <div style="background: #f5f5f5; padding: 15px; text-align: center; color: #666; font-size: 12px;">
+        <p>This is an automated notification from Outsyde.</p>
+      </div>
+    </div>
+  `;
+
+  const text = `New Influencer Application: ${who}
+
+Someone applied to the Outsyde influencer program. Here is everything they entered. Approve or reject from the admin dashboard.
 
 ${renderSectionsText(sections)}
 
