@@ -538,6 +538,92 @@ export class StripeService {
     }, { idempotencyKey: params.idempotencyKey });
   }
 
+  // =========================
+  // EVENT HOST PAYOUTS
+  // =========================
+
+  /**
+   * Create a Stripe Express account for an event host. Same shape as the staff helper
+   * (card_payments + transfers, since transfers-only is rejected in live mode).
+   */
+  async createHostConnectAccount(email: string, userId: string) {
+    const stripe = await getUncachableStripeClient();
+
+    return stripe.accounts.create({
+      type: "express",
+      email,
+      business_type: "individual",
+      capabilities: {
+        card_payments: { requested: true },
+        transfers: { requested: true },
+      },
+      business_profile: {
+        mcc: "7922", // Theatrical producers (except motion pictures) and ticket agencies
+        product_description: "Event hosting and ticketed events",
+      },
+      metadata: {
+        role: "host",
+        userId,
+      },
+    });
+  }
+
+  /** Whether a host's Connect account can take payouts: ready = charges and payouts both enabled. */
+  async getPayoutReadiness(accountId: string): Promise<{ ready: boolean; chargesEnabled: boolean; payoutsEnabled: boolean; detailsSubmitted: boolean }> {
+    const stripe = await getUncachableStripeClient();
+    const account = await stripe.accounts.retrieve(accountId);
+    const chargesEnabled = !!account.charges_enabled;
+    const payoutsEnabled = !!account.payouts_enabled;
+    return {
+      ready: chargesEnabled && payoutsEnabled,
+      chargesEnabled,
+      payoutsEnabled,
+      detailsSubmitted: !!account.details_submitted,
+    };
+  }
+
+  /**
+   * An event payout transfer already sent for this payout, if any. Looks in the event's
+   * transfer_group for the one whose metadata.payoutId matches. A single page of 100 is enough
+   * (one transfer per payout plus rare recoveries per event), so no paging is done.
+   */
+  async findEventPayoutTransfer(eventId: string, payoutId: string): Promise<{ id: string; amount: number } | null> {
+    const stripe = await getUncachableStripeClient();
+    const existing = await stripe.transfers.list({ transfer_group: `event_${eventId}`, limit: 100 });
+    const prior = existing.data.find(t => t.metadata?.payoutId === payoutId);
+    return prior ? { id: prior.id, amount: prior.amount } : null;
+  }
+
+  /** Send an event payout to the host's Connect account. Idempotent on event_payout_<payoutId>. */
+  async createEventPayoutTransfer(p: { eventId: string; payoutId: string; destination: string; amountCents: number }): Promise<{ id: string }> {
+    const stripe = await getUncachableStripeClient();
+    const transfer = await stripe.transfers.create({
+      amount: p.amountCents,
+      currency: 'usd',
+      destination: p.destination,
+      transfer_group: `event_${p.eventId}`,
+      metadata: { type: 'event_payout', eventId: p.eventId, payoutId: p.payoutId },
+    }, { idempotencyKey: `event_payout_${p.payoutId}` });
+    return { id: transfer.id };
+  }
+
+  /** Pull back part of an event payout after a ticket refund. Idempotent on event_recovery_<ticketId>. */
+  async reverseEventPayoutTransfer(p: { transferId: string; ticketId: string; amountCents: number }): Promise<{ id: string }> {
+    const stripe = await getUncachableStripeClient();
+    const reversal = await stripe.transfers.createReversal(p.transferId, {
+      amount: p.amountCents,
+      metadata: { type: 'event_payout_recovery', ticketId: p.ticketId },
+    }, { idempotencyKey: `event_recovery_${p.ticketId}` });
+    return { id: reversal.id };
+  }
+
+  /** True when Stripe or the platform balance says there are not enough funds (same match as payouts.ts). */
+  isInsufficientFundsError(err: unknown): boolean {
+    const e = err as { code?: string; raw?: { code?: string }; message?: string } | null;
+    const code = e?.code ?? e?.raw?.code;
+    return code === 'balance_insufficient' || /insufficient (available )?funds/i.test(e?.message ?? '');
+  }
+
   /** The charge behind a PaymentIntent: id, amount received and amount already refunded. */
   async getPaymentIntentCharge(paymentIntentId: string): Promise<{ chargeId: string | null; amountReceived: number; amountRefunded: number }> {
     const stripe = await getUncachableStripeClient();
