@@ -117,6 +117,35 @@ async function getNoFollow(path: string): Promise<{ status: number; location: st
     log(out.code === 200);
     return out;
   };
+  // Reversals (task 7): own switches, same replay-per-key rule, a list per transfer.
+  const rsw = { insufficient: false, failRev: false, failOnce: 0, loseResponse: 0 };
+  const reversalPosts: Array<{ key: string | null; ticketId: string | null; ok: boolean; replayed: boolean }> = [];
+  const doReversal = (transferId: string, params: Record<string, string>, key: string | null): { code: number; body: any } => {
+    const metadata: Record<string, string> = {};
+    for (const [k, v] of Object.entries(params)) { const m = k.match(/^metadata\[(.+)\]$/); if (m) metadata[m[1]] = v; }
+    const log = (ok: boolean, replayed = false) => reversalPosts.push({ key, ticketId: metadata.ticketId ?? null, ok, replayed });
+    if (key && savedByKey[key]) { log(savedByKey[key].code === 200, true); return savedByKey[key]; }
+    const t = transfers.find((x) => x.id === transferId);
+    let out: { code: number; body: any };
+    if (!t) out = { code: 404, body: { error: { type: "invalid_request_error", message: "No such transfer" } } };
+    else if (rsw.insufficient) out = { code: 400, body: { error: { type: "invalid_request_error", code: "balance_insufficient", message: "Insufficient funds in the connected account." } } };
+    else if (rsw.failRev || rsw.failOnce > 0) {
+      if (rsw.failOnce > 0) rsw.failOnce--;
+      out = { code: 500, body: { error: { type: "api_error", message: "stub reversal failure" } } };
+    } else {
+      const rv = { id: `trr_stub_${reversals.length + 1}`, object: "transfer_reversal", transfer: t.id, amount: Number(params.amount), metadata };
+      reversals.push(rv); t.amount_reversed += rv.amount;
+      out = { code: 200, body: rv };
+    }
+    if (key) savedByKey[key] = out;
+    if (out.code === 200 && rsw.loseResponse > 0) {
+      rsw.loseResponse--;
+      log(false);
+      return { code: 500, body: { error: { type: "api_connection_error", message: "stub: response lost" } } };
+    }
+    log(out.code === 200);
+    return out;
+  };
 
   // Section: /v1/customers, /v1/payment_intents, /v1/refunds (checkout and host refunds, task 6). Same rules as ticketRefunds.http.test.ts.
   const piStore: Record<string, any> = {};
@@ -177,13 +206,11 @@ async function getNoFollow(path: string): Promise<{ status: number; location: st
       }
       const revM = path.match(/^\/v1\/transfers\/([^/]+)\/reversals$/);
       if (req.method === "POST" && revM) {
-        if (sw.insufficient) return send(400, { error: { type: "invalid_request_error", code: "balance_insufficient", message: "Insufficient funds in the connected account." } });
-        const t = transfers.find((x) => x.id === revM[1]);
-        if (!t) return send(404, { error: { message: "No such transfer" } });
-        const params = formParams(form);
-        const rv = { id: `trr_stub_${reversals.length + 1}`, object: "transfer_reversal", transfer: t.id, amount: Number(params.amount) };
-        reversals.push(rv); t.amount_reversed += rv.amount;
-        return send(200, rv);
+        const r = doReversal(revM[1], formParams(form), key);
+        return send(r.code, r.body);
+      }
+      if (req.method === "GET" && revM) {
+        return send(200, { object: "list", has_more: false, data: reversals.filter((x) => x.transfer === revM[1]) });
       }
 
       // /v1/customers, /v1/payment_intents, /v1/refunds
@@ -557,6 +584,11 @@ async function getNoFollow(path: string): Promise<{ status: number; location: st
     let createStarted: (() => void) | null = null;
     let readinessGate: Promise<void> | null = null;
     let readinessStarted: (() => void) | null = null;
+    let revLookupGate: Promise<void> | null = null;
+    let revLookupStarted: (() => void) | null = null;
+    let revHoldGate: Promise<void> | null = null;
+    let revCreateStarted: (() => void) | null = null;
+    const revBounds: Array<{ timeoutMs?: number; maxNetworkRetries?: number }> = [];
     const payoutFake = {
       getPayoutReadiness: async (id: string, _o?: { timeoutMs?: number; maxNetworkRetries?: number }) => {
         fakeLog.push({ fn: "readiness", id });
@@ -578,6 +610,22 @@ async function getNoFollow(path: string): Promise<{ status: number; location: st
           amount: String(p.amountCents), currency: "usd", destination: p.destination, transfer_group: `event_${p.eventId}`,
           "metadata[type]": "event_payout", "metadata[eventId]": p.eventId, "metadata[payoutId]": p.payoutId,
         }, p.idempotencyKey ?? `event_payout_${p.payoutId}`); // same default as stripeService
+        if (res.code !== 200) throw Object.assign(new Error(res.body.error.message), { code: res.body.error.code, type: res.body.error.type });
+        return { id: res.body.id as string };
+      },
+      // Task 7: reversals, sharing the HTTP stub's state. Gates hold one call open (a slow Stripe).
+      findEventPayoutReversal: async (transferId: string, ticketId: string, _o?: { timeoutMs?: number; maxNetworkRetries?: number }) => {
+        fakeLog.push({ fn: "findReversal", id: ticketId });
+        if (revLookupGate) { const g = revLookupGate; revLookupGate = null; revLookupStarted?.(); await g; }
+        const rv = reversals.find((x) => x.transfer === transferId && x.metadata?.ticketId === ticketId);
+        return rv ? { id: rv.id as string, amount: rv.amount as number } : null;
+      },
+      reverseEventPayoutTransfer: async (p: { transferId: string; ticketId: string; amountCents: number; idempotencyKey?: string; timeoutMs?: number; maxNetworkRetries?: number }) => {
+        fakeLog.push({ fn: "reverse", id: p.ticketId });
+        revBounds.push({ timeoutMs: p.timeoutMs, maxNetworkRetries: p.maxNetworkRetries });
+        if (revHoldGate) { const g = revHoldGate; revHoldGate = null; revCreateStarted?.(); await g; }
+        const res = doReversal(p.transferId, { amount: String(p.amountCents), "metadata[type]": "event_payout_recovery", "metadata[ticketId]": p.ticketId },
+          p.idempotencyKey ?? `event_recovery_${p.ticketId}`); // same default as stripeService
         if (res.code !== 200) throw Object.assign(new Error(res.body.error.message), { code: res.body.error.code, type: res.body.error.type });
         return { id: res.body.id as string };
       },
@@ -1049,6 +1097,355 @@ async function getNoFollow(path: string): Promise<{ status: number; location: st
       assert(rx.status === 200 && px.length === 1 && px[0].gross_cents === sum && rt.every((t) => t.status === "refunded")
         && ((bx === "refund first" && sum === 1960) || (bx === "payout first" && sum === 5880)), `race +${delay}ms: invariant holds`, { bx, px, tx });
     }
+
+    // ── Task 7: recoveries (refund after the host was paid) and the deduction from the next event payout ──
+    console.log("recoveries (task 7)");
+    const { openRecoveries, processRecovery, alertOldOwed } = await import("./eventPayouts");
+    const recOf = async (ticketId: string) => q(`SELECT *, extract(epoch from (next_attempt_at - now()))::int AS due_in FROM event_payout_recoveries WHERE ticket_id = $1`, [ticketId]);
+    const advanceRec = (id: string) => q(`UPDATE event_payout_recoveries SET next_attempt_at = now() - interval '1 second' WHERE id = $1`, [id]);
+    const ticketOf = async (orderId: string) => (await q(`SELECT id FROM tickets WHERE order_id = $1 ORDER BY item_index LIMIT 1`, [orderId]))[0].id as string;
+    const refundOrder = async (eventId: string, host: string, orderId: string) => {
+      const x = await call("POST", `/api/events/${eventId}/orders/${orderId}/refund`, { token: tok(host) });
+      if (x.status !== 200 || x.body?.order?.status !== "refunded") throw new Error("refund failed " + JSON.stringify(x));
+    };
+    /** An ended event with `n` one-ticket orders (1960 host net each), already paid out to the host. */
+    const paidOut = async (h: { u: string; a: string }, title: string, n = 2) => {
+      const ev = await jobEvent(h.u, title);
+      const orders: string[] = [];
+      for (let i = 0; i < n; i++) orders.push(await buy(ev.id, buyers[i], ev.typeId, 1));
+      await endedHoursAgo(ev.id, 80);
+      await createDuePayouts();
+      const [p] = await payoutOf(ev.id);
+      const res = await sendPayout(p.id, payoutFake);
+      const [paid] = await payoutOf(ev.id);
+      if (res !== "paid" || !paid.transfer_id) throw new Error("payout not paid " + JSON.stringify({ res, paid }));
+      return { ev, orders, payoutId: p.id as string, transferId: paid.transfer_id as string };
+    };
+
+    console.log("refund before payout: no recovery");
+    const o3bTickets = await q(`SELECT id FROM tickets WHERE order_id = $1`, [o3b]);
+    await openRecoveries();
+    assert((await q(`SELECT 1 FROM event_payout_recoveries WHERE ticket_id = ANY($1)`, [o3bTickets.map((t) => t.id)])).length === 0,
+      "ticket refunded before its event was paid out: no recovery row", o3bTickets);
+
+    console.log("refund after payout opens one recovery");
+    const hR1 = await mkReadyHost("r1");
+    const pR1 = await paidOut(hR1, "Recovery Night");
+    await refundOrder(pR1.ev.id, hR1.u, pR1.orders[0]);
+    const tR1 = await ticketOf(pR1.orders[0]);
+    const n1 = await openRecoveries();
+    let rc = await recOf(tR1);
+    assert(n1 >= 1 && rc.length === 1 && rc[0].status === "pending" && rc[0].amount_cents === 1960 && rc[0].payout_id === pR1.payoutId
+      && rc[0].connected_account_id === hR1.a && rc[0].attempts === 0, "one pending recovery: host net 1960, the payout and the host's account", { n1, rc });
+    const n1b = await openRecoveries();
+    assert(n1b === 0 && (await recOf(tR1)).length === 1, "second open: nothing new", n1b);
+    assert((await recOf(await ticketOf(pR1.orders[1]))).length === 0, "the ticket that wasn't refunded has no recovery");
+
+    console.log("reversal success -> reversed");
+    sres = await processRecovery(rc[0].id, payoutFake) as any;
+    rc = await recOf(tR1);
+    const rvR1 = reversals.filter((x) => x.metadata?.ticketId === tR1);
+    const postsR1 = reversalPosts.filter((x) => x.ticketId === tR1);
+    assert(sres === "reversed" && rc[0].status === "reversed" && rc[0].reversal_id === rvR1[0]?.id && rc[0].next_attempt_at === null && rc[0].attempts === 1,
+      "status reversed with the reversal id", { sres, rc });
+    assert(rvR1.length === 1 && rvR1[0].transfer === pR1.transferId && rvR1[0].amount === 1960 && rvR1[0].metadata.type === "event_payout_recovery",
+      "stub saw one reversal of 1960 on the payout's transfer", rvR1);
+    assert(postsR1.length === 1 && new RegExp(`^event_recovery_${tR1}_\\d+$`).test(postsR1[0].key ?? ""), "reversal key event_recovery_<ticketId>_<claim>", postsR1);
+    assert(revBounds.length > 0 && revBounds.every((b) => b.timeoutMs === 30000 && b.maxNetworkRetries === 1), "reversal call bounded (30 s, 1 retry)", revBounds);
+    sres = await processRecovery(rc[0].id, payoutFake) as any;
+    assert(sres === "not_due" && reversals.filter((x) => x.metadata?.ticketId === tR1).length === 1, "reversed is final: not due, still one reversal", sres);
+
+    console.log("insufficient host balance -> owed");
+    const hR2 = await mkReadyHost("r2");
+    const pR2 = await paidOut(hR2, "Owed Night");
+    await refundOrder(pR2.ev.id, hR2.u, pR2.orders[0]);
+    const tR2 = await ticketOf(pR2.orders[0]);
+    await openRecoveries();
+    rc = await recOf(tR2);
+    rsw.insufficient = true;
+    sres = await processRecovery(rc[0].id, payoutFake) as any;
+    rsw.insufficient = false;
+    rc = await recOf(tR2);
+    assert(sres === "owed" && rc[0].status === "owed" && rc[0].reversal_id === null && /Insufficient/.test(rc[0].last_error ?? "") && rc[0].next_attempt_at === null,
+      "insufficient: owed at once with the error", { sres, rc });
+    sres = await processRecovery(rc[0].id, payoutFake) as any;
+    assert(sres === "not_due" && reversals.filter((x) => x.metadata?.ticketId === tR2).length === 0, "owed is not retried by the reversal step", sres);
+
+    console.log("owed deducted from the next event payout");
+    const eR2b = await jobEvent(hR2.u, "Owed Night Two");
+    await buy(eR2b.id, buyers[2], eR2b.typeId, 2);
+    await endedHoursAgo(eR2b.id, 80);
+    await createDuePayouts();
+    pr = await payoutOf(eR2b.id);
+    rc = await recOf(tR2);
+    assert(pr.length === 1 && pr[0].gross_cents === 3920 && pr[0].deducted_cents === 1960 && pr[0].amount_cents === 1960,
+      "next payout: gross 3920, deducted 1960, amount 1960", pr);
+    assert(rc[0].status === "recovered" && rc[0].recovered_from_payout_id === pr[0]?.id, "recovery recovered from the new payout", rc);
+    sres = await sendPayout(pr[0].id, payoutFake);
+    const gR2b = transfers.filter((t) => t.transfer_group === `event_${eR2b.id}`);
+    assert(sres === "paid" && gR2b.length === 1 && gR2b[0].amount === 1960, "transfer sent for the reduced amount", { sres, gR2b });
+
+    console.log("owed bigger than the payout: the rest stays owed");
+    const hR3 = await mkReadyHost("r3");
+    const pR3 = await paidOut(hR3, "Big Owed Night");
+    const [tR3a, tR3b] = [await ticketOf(pR3.orders[0]), await ticketOf(pR3.orders[1])];
+    // Written by SQL to get amounts a real ticket can't: 5000 (older) and 1000 (newer).
+    const [big] = await q(`INSERT INTO event_payout_recoveries (ticket_id, payout_id, connected_account_id, amount_cents, status, created_at)
+      VALUES ($1, $2, $3, 5000, 'owed', now() - interval '2 days') RETURNING id`, [tR3a, pR3.payoutId, hR3.a]);
+    const [small] = await q(`INSERT INTO event_payout_recoveries (ticket_id, payout_id, connected_account_id, amount_cents, status, created_at)
+      VALUES ($1, $2, $3, 1000, 'owed', now() - interval '1 day') RETURNING id`, [tR3b, pR3.payoutId, hR3.a]);
+    const eR3b = await jobEvent(hR3.u, "Big Owed Night Two");
+    await buy(eR3b.id, buyers[3], eR3b.typeId, 2);
+    await endedHoursAgo(eR3b.id, 80);
+    await createDuePayouts();
+    pr = await payoutOf(eR3b.id);
+    const bigRow = (await q(`SELECT * FROM event_payout_recoveries WHERE id = $1`, [big.id]))[0];
+    const smallRow = (await q(`SELECT * FROM event_payout_recoveries WHERE id = $1`, [small.id]))[0];
+    assert(pr.length === 1 && pr[0].gross_cents === 3920 && pr[0].deducted_cents === 1000 && pr[0].amount_cents === 2920,
+      "only 1000 deducted (5000 would not leave a payout), amount 2920", pr);
+    assert(bigRow.status === "owed" && bigRow.recovered_from_payout_id === null && smallRow.status === "recovered" && smallRow.recovered_from_payout_id === pr[0]?.id,
+      "5000 stays owed, 1000 recovered from this payout", { bigRow, smallRow });
+
+    console.log("no deduction for another account or with no account");
+    const hR3o = await mkReadyHost("r3o");
+    const eR3o = await jobEvent(hR3o.u, "Other Host Night");
+    await buy(eR3o.id, buyers[4], eR3o.typeId, 1);
+    const hR3n = await mkUser("r3n"); // no payout account at all
+    const eR3n = await jobEvent(hR3n, "No Account Night");
+    await buy(eR3n.id, buyers[5], eR3n.typeId, 1);
+    await endedHoursAgo(eR3o.id, 80);
+    await endedHoursAgo(eR3n.id, 80);
+    await createDuePayouts();
+    const pO = (await payoutOf(eR3o.id))[0];
+    const pN = (await payoutOf(eR3n.id))[0];
+    assert(pO?.deducted_cents === 0 && pO?.amount_cents === 1960 && pN?.deducted_cents === 0 && pN?.amount_cents === 1960 && pN?.connected_account_id === null,
+      "other host and host with no account: nothing deducted", { pO, pN });
+    assert((await q(`SELECT status FROM event_payout_recoveries WHERE id = $1`, [big.id]))[0].status === "owed", "another host's owed untouched");
+
+    console.log("owed older than 30 days -> one admin email");
+    await q(`UPDATE event_payout_recoveries SET created_at = now() - interval '31 days' WHERE id = $1`, [big.id]);
+    const hR3y = await mkReadyHost("r3y");
+    const pR3y = await paidOut(hR3y, "Young Owed Night", 1);
+    const [young] = await q(`INSERT INTO event_payout_recoveries (ticket_id, payout_id, connected_account_id, amount_cents, status, created_at)
+      VALUES ($1, $2, $3, 700, 'owed', now() - interval '29 days') RETURNING id`, [await ticketOf(pR3y.orders[0]), pR3y.payoutId, hR3y.a]);
+    emailsBefore = adminEmails.length;
+    const nOld = await alertOldOwed();
+    const oldMails = adminEmails.slice(emailsBefore);
+    assert(nOld >= 1 && oldMails.length === 1 && oldMails[0].detail.includes(big.id) && oldMails[0].detail.includes("5000") && !oldMails[0].detail.includes(young.id),
+      "one admin email listing the 31 day old owed recovery, not the 29 day one", { nOld, oldMails });
+    const bigAfter = (await q(`SELECT alerted_at, status FROM event_payout_recoveries WHERE id = $1`, [big.id]))[0];
+    assert(bigAfter.alerted_at && bigAfter.status === "owed", "alerted_at set, still owed", bigAfter);
+    emailsBefore = adminEmails.length;
+    const nOld2 = await alertOldOwed();
+    assert(nOld2 === 0 && adminEmails.length === emailsBefore, "second run: no email", { nOld2 });
+
+    console.log("refund on a stamped payout not yet paid: recovered after it is paid");
+    const hR4 = await mkReadyHost("r4");
+    const eR4 = await jobEvent(hR4.u, "Stamped Night");
+    const oR4 = await buy(eR4.id, buyers[0], eR4.typeId, 1);
+    await buy(eR4.id, buyers[1], eR4.typeId, 1);
+    await endedHoursAgo(eR4.id, 80);
+    await createDuePayouts();
+    const pR4 = (await payoutOf(eR4.id))[0];
+    await refundOrder(eR4.id, hR4.u, oR4);
+    const tR4 = await ticketOf(oR4);
+    await openRecoveries();
+    assert((await recOf(tR4)).length === 0, "payout not paid yet: no recovery");
+    assert((await sendPayout(pR4.id, payoutFake)) === "paid", "payout pays the stamped amount");
+    await openRecoveries();
+    rc = await recOf(tR4);
+    assert(rc.length === 1 && rc[0].status === "pending" && rc[0].amount_cents === 1960, "after it is paid: one pending recovery", rc);
+
+    console.log("reversal created but its response lost");
+    rsw.loseResponse = 1;
+    sres = await processRecovery(rc[0].id, payoutFake) as any;
+    let rcl = (await recOf(tR4))[0];
+    assert(sres === "retry" && rcl.status === "pending" && rcl.due_in > 590 && rcl.due_in <= 600 && reversals.filter((x) => x.metadata?.ticketId === tR4).length === 1,
+      "lost response: Stripe has it, row pending, due again in 10 minutes", { sres, rcl });
+    await advanceRec(rc[0].id);
+    sres = await processRecovery(rc[0].id, payoutFake) as any;
+    rcl = (await recOf(tR4))[0];
+    const rvR4 = reversals.filter((x) => x.metadata?.ticketId === tR4);
+    assert(sres === "reversed" && rcl.status === "reversed" && rcl.reversal_id === rvR4[0]?.id && rvR4.length === 1 && reversalPosts.filter((x) => x.ticketId === tR4).length === 1,
+      "next try finds it on the transfer and records it: exactly 1 reversal, no second POST", { sres, rcl, rvR4 });
+
+    console.log("other errors back off, after 5 -> owed");
+    const hR5 = await mkReadyHost("r5");
+    const pR5 = await paidOut(hR5, "Broken Reversal Night");
+    await refundOrder(pR5.ev.id, hR5.u, pR5.orders[0]);
+    const tR5 = await ticketOf(pR5.orders[0]);
+    await openRecoveries();
+    const idR5 = (await recOf(tR5))[0].id as string;
+    rsw.failRev = true;
+    const rWaits: number[] = [];
+    const rResults: string[] = [];
+    for (let i = 0; i < 5; i++) {
+      rResults.push(await processRecovery(idR5, payoutFake));
+      rWaits.push((await recOf(tR5))[0].due_in);
+      await advanceRec(idR5);
+    }
+    rsw.failRev = false;
+    rc = await recOf(tR5);
+    const postsR5 = reversalPosts.filter((x) => x.ticketId === tR5);
+    assert(rResults.slice(0, 4).every((x) => x === "retry") && rResults[4] === "owed", "4 retries then owed", rResults);
+    assert(rWaits[0] > 590 && rWaits[0] <= 600 && rWaits[1] > 1190 && rWaits[1] <= 1200 && rWaits[2] > 2390 && rWaits[2] <= 2400 && rWaits[3] > 3590 && rWaits[3] <= 3600,
+      "backoff 10, 20, 40, 60 minutes", rWaits);
+    assert(rc[0].status === "owed" && rc[0].attempts === 5 && /stub reversal failure/.test(rc[0].last_error ?? ""), "owed after 5 tries with the last error", rc);
+    assert(postsR5.length === 5 && new Set(postsR5.map((x) => x.key)).size === 5 && postsR5.every((x) => !x.replayed), "a new key on every try (no replayed 500)", postsR5);
+
+    console.log("a transient 500 once, then reversed with a new key");
+    const hR6 = await mkReadyHost("r6");
+    const pR6 = await paidOut(hR6, "Blip Reversal Night");
+    await refundOrder(pR6.ev.id, hR6.u, pR6.orders[0]);
+    const tR6 = await ticketOf(pR6.orders[0]);
+    await openRecoveries();
+    const idR6 = (await recOf(tR6))[0].id as string;
+    rsw.failOnce = 1;
+    const r6a = await processRecovery(idR6, payoutFake);
+    const r6early = await processRecovery(idR6, payoutFake);
+    await advanceRec(idR6);
+    const r6b = await processRecovery(idR6, payoutFake);
+    const postsR6 = reversalPosts.filter((x) => x.ticketId === tR6);
+    assert(r6a === "retry" && r6early === "not_due" && r6b === "reversed" && postsR6.length === 2 && postsR6[0].key !== postsR6[1].key && !postsR6[1].replayed
+      && reversals.filter((x) => x.metadata?.ticketId === tR6).length === 1, "500 then OK: reversed on the next try, new key, 1 reversal", { r6a, r6early, r6b, postsR6 });
+
+    console.log("two overlapping runs: a reversal in flight is never claimed again");
+    const hR7 = await mkReadyHost("r7");
+    const pR7 = await paidOut(hR7, "Slow Reversal Night");
+    await refundOrder(pR7.ev.id, hR7.u, pR7.orders[0]);
+    const tR7 = await ticketOf(pR7.orders[0]);
+    await openRecoveries();
+    const idR7 = (await recOf(tR7))[0].id as string;
+    let relR7!: () => void;
+    revHoldGate = new Promise<void>((r) => { relR7 = r; });
+    const startedR7 = new Promise<void>((r) => { revCreateStarted = r; });
+    const firstR7 = processRecovery(idR7, payoutFake);
+    await startedR7;
+    const lockR7 = (await recOf(tR7))[0].due_in;
+    assert(lockR7 > 590 && lockR7 <= 600, "claim locks the recovery for 10 minutes while the reversal is in flight", lockR7);
+    await q(`UPDATE event_payout_recoveries SET next_attempt_at = next_attempt_at - interval '61 seconds' WHERE id = $1`, [idR7]);
+    const secondR7 = await processRecovery(idR7, payoutFake);
+    await runEventPayoutJob(payoutFake);
+    assert(secondR7 === "not_due" && reversalPosts.filter((x) => x.ticketId === tR7).length === 0, "second run while in flight: not due, nothing sent", secondR7);
+    relR7();
+    const firstR7Res = await firstR7;
+    assert(firstR7Res === "reversed" && (await recOf(tR7))[0].status === "reversed" && reversals.filter((x) => x.metadata?.ticketId === tR7).length === 1
+      && reversalPosts.filter((x) => x.ticketId === tR7).length === 1, "exactly 1 reversal at the end", { firstR7Res });
+
+    console.log("two overlapping runs: a slow lookup outlasts the lock, that run sends nothing");
+    const hR8 = await mkReadyHost("r8");
+    const pR8 = await paidOut(hR8, "Slow Lookup Night");
+    await refundOrder(pR8.ev.id, hR8.u, pR8.orders[0]);
+    const tR8 = await ticketOf(pR8.orders[0]);
+    await openRecoveries();
+    const idR8 = (await recOf(tR8))[0].id as string;
+    // Run 1 claims, then is stuck in a slow DB read (hook) past its lock; run 2 claims and gets to its create.
+    let relR8!: () => void;
+    const gateR8 = new Promise<void>((r) => { relR8 = r; });
+    let claimedR8!: () => void;
+    const atClaimR8 = new Promise<void>((r) => { claimedR8 = r; });
+    let onceR8 = true;
+    setPayoutHooksForTest({ afterRecoveryClaim: async (id: string) => { if (id === idR8 && onceR8) { onceR8 = false; claimedR8(); await gateR8; } } });
+    const run1R8 = processRecovery(idR8, payoutFake);
+    await atClaimR8;
+    await q(`UPDATE event_payout_recoveries SET next_attempt_at = now() - interval '1 second' WHERE id = $1`, [idR8]);
+    let relR8b!: () => void;
+    revHoldGate = new Promise<void>((r) => { relR8b = r; });
+    const createR8 = new Promise<void>((r) => { revCreateStarted = r; });
+    const run2R8 = processRecovery(idR8, payoutFake);
+    await createR8;
+    relR8();
+    const r8a = await run1R8;
+    relR8b();
+    const r8b = await run2R8;
+    setPayoutHooksForTest(null);
+    rc = await recOf(tR8);
+    assert(r8a === "not_due" && r8b === "reversed" && rc[0].status === "reversed", "stale run can't re-take the lock; the owner reverses", { r8a, r8b, rc });
+    assert(reversals.filter((x) => x.metadata?.ticketId === tR8).length === 1 && reversalPosts.filter((x) => x.ticketId === tR8).length === 1, "exactly 1 reversal overall");
+    // A slow lookup: run 1's lookup answers after its lock ran out and run 2 claimed. Run 1 must not create.
+    const hR8c = await mkReadyHost("r8c");
+    const pR8c = await paidOut(hR8c, "Slow Lookup Night Two");
+    await refundOrder(pR8c.ev.id, hR8c.u, pR8c.orders[0]);
+    const tR8c = await ticketOf(pR8c.orders[0]);
+    await openRecoveries();
+    const idR8c = (await recOf(tR8c))[0].id as string;
+    let relL!: () => void;
+    revLookupGate = new Promise<void>((r) => { relL = r; });
+    const lookStarted = new Promise<void>((r) => { revLookupStarted = r; });
+    const run1c = processRecovery(idR8c, payoutFake);
+    await lookStarted;
+    await q(`UPDATE event_payout_recoveries SET next_attempt_at = now() - interval '1 second' WHERE id = $1`, [idR8c]);
+    let relC!: () => void;
+    revHoldGate = new Promise<void>((r) => { relC = r; });
+    const createC = new Promise<void>((r) => { revCreateStarted = r; });
+    const run2c = processRecovery(idR8c, payoutFake);
+    await createC;
+    relL();
+    const r8ca = await run1c;
+    relC();
+    const r8cb = await run2c;
+    const nRevC = reversals.filter((x) => x.metadata?.ticketId === tR8c).length;
+    const nPostC = reversalPosts.filter((x) => x.ticketId === tR8c).length;
+    assert(r8ca === "not_due" && r8cb === "reversed" && nRevC === 1 && nPostC === 1 && (await recOf(tR8c))[0].status === "reversed",
+      "slow lookup: run 1 checks it still owns the row before creating, sends nothing; exactly 1 reversal", { r8ca, r8cb, nRevC, nPostC });
+
+    console.log("the job opens, reverses and alerts");
+    const hR9 = await mkReadyHost("r9");
+    const pR9 = await paidOut(hR9, "Job Recovery Night");
+    await refundOrder(pR9.ev.id, hR9.u, pR9.orders[1]);
+    const tR9 = await ticketOf(pR9.orders[1]);
+    await q(`UPDATE event_payout_recoveries SET alerted_at = NULL, created_at = now() - interval '40 days' WHERE id = $1`, [young.id]);
+    emailsBefore = adminEmails.length;
+    await runEventPayoutJob(payoutFake);
+    rc = await recOf(tR9);
+    assert(rc.length === 1 && rc[0].status === "reversed" && reversals.filter((x) => x.metadata?.ticketId === tR9).length === 1, "one job run: recovery opened and reversed", rc);
+    assert(adminEmails.slice(emailsBefore).filter((m) => m.detail.includes(young.id)).length === 1, "one job run: old owed alerted", adminEmails.slice(emailsBefore));
+
+    console.log("two payout creates at once take an owed recovery once");
+    const hR10 = await mkReadyHost("r10");
+    const pR10 = await paidOut(hR10, "Shared Owed Night", 1);
+    const [owed10] = await q(`INSERT INTO event_payout_recoveries (ticket_id, payout_id, connected_account_id, amount_cents, status)
+      VALUES ($1, $2, $3, 1000, 'owed') RETURNING id`, [await ticketOf(pR10.orders[0]), pR10.payoutId, hR10.a]);
+    const eR10a = await jobEvent(hR10.u, "Shared Owed A");
+    await buy(eR10a.id, buyers[0], eR10a.typeId, 1);
+    const eR10b = await jobEvent(hR10.u, "Shared Owed B");
+    await buy(eR10b.id, buyers[1], eR10b.typeId, 1);
+    await endedHoursAgo(eR10a.id, 80);
+    await endedHoursAgo(eR10b.id, 80);
+    await Promise.all([createDuePayouts(), createDuePayouts()]);
+    await createDuePayouts(); // a guarded statement leaves its event for the next run
+    const pa = (await payoutOf(eR10a.id))[0], pb = (await payoutOf(eR10b.id))[0];
+    const o10 = (await q(`SELECT * FROM event_payout_recoveries WHERE id = $1`, [owed10.id]))[0];
+    assert(pa && pb && pa.deducted_cents + pb.deducted_cents === 1000 && o10.status === "recovered" && [pa.id, pb.id].includes(o10.recovered_from_payout_id)
+      && (o10.recovered_from_payout_id === pa.id ? pa.deducted_cents : pb.deducted_cents) === 1000, "deducted exactly once, from the payout it names", { pa, pb, o10 });
+
+    console.log("guard: an owed recovery taken by someone else mid-statement undoes the whole create");
+    const hR11 = await mkReadyHost("r11");
+    const pR11 = await paidOut(hR11, "Guard Owed Night", 1);
+    const [owed11] = await q(`INSERT INTO event_payout_recoveries (ticket_id, payout_id, connected_account_id, amount_cents, status)
+      VALUES ($1, $2, $3, 900, 'owed') RETURNING id`, [await ticketOf(pR11.orders[0]), pR11.payoutId, hR11.a]);
+    const eR11 = await jobEvent(hR11.u, "Guard Owed Two");
+    await buy(eR11.id, buyers[2], eR11.typeId, 1);
+    await endedHoursAgo(eR11.id, 80);
+    const other = new pg.Client({ connectionString: PG_URL });
+    await other.connect();
+    await other.query("BEGIN");
+    await other.query(`UPDATE event_payout_recoveries SET status = 'recovered', recovered_from_payout_id = $2 WHERE id = $1`, [owed11.id, pR11.payoutId]);
+    const errs: string[] = [];
+    const origErr = console.error;
+    console.error = (...a: any[]) => { errs.push(a.map(String).join(" ")); origErr(...a); };
+    const creating = createDuePayouts(); // reads the row as owed, then waits on its lock
+    await sleep(800);
+    await other.query("COMMIT");
+    await creating;
+    console.error = origErr;
+    await other.end();
+    assert((await payoutOf(eR11.id)).length === 0 && (await tix(eR11.id)).every((t) => t.payout_id === null), "guarded: no payout row and no ticket stamped", await tix(eR11.id));
+    assert(errs.some((m) => m.includes(eR11.id) && m.includes("GUARD_PAYOUT_DEDUCT")), "stopped by GUARD_PAYOUT_DEDUCT", errs.filter((m) => m.includes(eR11.id)));
+    await createDuePayouts();
+    pr = await payoutOf(eR11.id);
+    assert(pr.length === 1 && pr[0].deducted_cents === 0 && pr[0].amount_cents === 1960 && (await tix(eR11.id)).every((t) => t.payout_id === pr[0].id),
+      "next run creates it with nothing deducted (the recovery is already taken)", pr);
   } finally {
     stub.close();
     try {
@@ -1059,7 +1456,9 @@ async function getNoFollow(path: string): Promise<{ status: number; location: st
     const evIds = (await q(`SELECT id FROM events WHERE host_user_id IN (SELECT id FROM users WHERE email LIKE $1)`, [`${P}-%`])).map((x) => x.id);
     if (evIds.length) {
       await q(`UPDATE tickets SET payout_id = NULL WHERE event_id = ANY($1)`, [evIds]);
-      await q(`DELETE FROM event_payout_recoveries WHERE payout_id IN (SELECT id FROM event_payouts WHERE event_id = ANY($1))`, [evIds]);
+      await q(`DELETE FROM event_payout_recoveries WHERE payout_id IN (SELECT id FROM event_payouts WHERE event_id = ANY($1))
+                 OR recovered_from_payout_id IN (SELECT id FROM event_payouts WHERE event_id = ANY($1))
+                 OR ticket_id IN (SELECT id FROM tickets WHERE event_id = ANY($1))`, [evIds]);
       await q(`DELETE FROM event_payouts WHERE event_id = ANY($1)`, [evIds]);
       await q(`DELETE FROM tickets WHERE event_id = ANY($1)`, [evIds]);
       await q(`DELETE FROM ticket_order_items WHERE event_id = ANY($1)`, [evIds]);

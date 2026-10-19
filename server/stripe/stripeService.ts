@@ -628,14 +628,40 @@ export class StripeService {
     return { id: transfer.id };
   }
 
-  /** Pull back part of an event payout after a ticket refund. Idempotent on event_recovery_<ticketId>. */
-  async reverseEventPayoutTransfer(p: { transferId: string; ticketId: string; amountCents: number }): Promise<{ id: string }> {
+  /**
+   * Pull back part of an event payout after a ticket refund. Idempotent on event_recovery_<ticketId> unless the
+   * caller passes its own key (the recovery job uses one key per try, since Stripe replays a saved error for 24
+   * hours). timeoutMs / maxNetworkRetries bound the call when given; without them the client defaults apply.
+   */
+  async reverseEventPayoutTransfer(p: {
+    transferId: string; ticketId: string; amountCents: number; idempotencyKey?: string;
+    timeoutMs?: number; maxNetworkRetries?: number;
+  }): Promise<{ id: string }> {
     const stripe = await getUncachableStripeClient();
     const reversal = await stripe.transfers.createReversal(p.transferId, {
       amount: p.amountCents,
       metadata: { type: 'event_payout_recovery', ticketId: p.ticketId },
-    }, { idempotencyKey: `event_recovery_${p.ticketId}` });
+    }, { idempotencyKey: p.idempotencyKey ?? `event_recovery_${p.ticketId}`, ...eventPayoutRequestOptions(p) });
     return { id: reversal.id };
+  }
+
+  /**
+   * A reversal already made on this transfer for this ticket, if any (metadata.ticketId). One reversal per
+   * refunded ticket of one event payout, so up to 10 pages of 100 are read (an event cancelled after its payout
+   * can have hundreds). Each page call is bounded by opts when given.
+   */
+  async findEventPayoutReversal(transferId: string, ticketId: string, opts?: { timeoutMs?: number; maxNetworkRetries?: number }): Promise<{ id: string; amount: number } | null> {
+    const stripe = await getUncachableStripeClient();
+    let startingAfter: string | undefined;
+    for (let page = 0; page < 10; page++) {
+      const params = { limit: 100, ...(startingAfter ? { starting_after: startingAfter } : {}) };
+      const list = opts ? await stripe.transfers.listReversals(transferId, params, eventPayoutRequestOptions(opts)) : await stripe.transfers.listReversals(transferId, params);
+      const prior = list.data.find(r => r.metadata?.ticketId === ticketId);
+      if (prior) return { id: prior.id, amount: prior.amount };
+      if (!list.has_more || list.data.length === 0) return null;
+      startingAfter = list.data[list.data.length - 1].id;
+    }
+    throw new Error(`more than 1000 reversals on transfer ${transferId}: can't tell if ticket ${ticketId} was reversed`);
   }
 
   /** True when Stripe or the platform balance says there are not enough funds (same match as payouts.ts). */
