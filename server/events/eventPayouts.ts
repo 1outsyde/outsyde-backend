@@ -10,7 +10,8 @@
  *      their tickets are never valid on a completed order, so they are never stamped). Free events never get a row.
  *   2. sendPayout: claim first (attempts + 1, next_attempt_at = now + 10 minutes, the in-flight lock), so two runs
  *      can't both call Stripe. Every Stripe call is bounded (30 s, 1 retry), and the owner re-takes the lock right
- *      before the lookup + create, so a run whose checks were slow enough to lose the row sends nothing. There is no 'sending' status: the claim plays that role, like processTicketRefund. Then:
+ *      before the lookup + create, so a run whose checks were slow enough to lose the row sends nothing. Every status
+ *      write matches this claim's ownership tag too, so a run that lost the row writes nothing and sends no email or push. There is no 'sending' status: the claim plays that role, like processTicketRefund. Then:
  *        event paused, or host can't be paid yet -> 'held' with hold_reason, rechecked hourly, admin emailed once.
  *        a transfer already in Stripe for this payout (sent but not saved) -> recorded as 'paid', not sent again.
  *        otherwise transfer with key event_payout_<payoutId>_<claim time in microseconds>, new on every claim
@@ -38,6 +39,12 @@ export const PAYOUT_JOB_LIMIT = 20;
 export const PAYOUT_LOCK_MINUTES = 10;
 /** Every Stripe call in a payout attempt is bounded, so the attempt ends well inside the lock. */
 const STRIPE_CALL_BOUND = { timeoutMs: 30000, maxNetworkRetries: 1 };
+
+/** Test seam only: lets a test hold a run right after its claim (a slow DB read in real life). Never set in production. */
+let afterClaimHook: ((payoutId: string) => Promise<void>) | null = null;
+export function setPayoutHooksForTest(h: { afterClaim?: (payoutId: string) => Promise<void> } | null): void {
+  afterClaimHook = h?.afterClaim ?? null;
+}
 
 async function realStripe(): Promise<PayoutStripe> {
   const { stripeService } = await import("../stripe/stripeService");
@@ -140,35 +147,42 @@ const HOLD_TEXT: Record<string, string> = {
   stripe_not_ready: "Stripe says the host's account can't take payouts yet",
 };
 
+/**
+ * Ownership tag: updated_at in microseconds. Every write sets updated_at, so a run owns the row only while the tag
+ * still equals the one its own last write returned. Each status write below matches on it, so a run that lost the
+ * row (its lock ran out and another run claimed) writes nothing and sends no email or push.
+ */
+const OWNER_TAG = sql`(extract(epoch from updated_at) * 1000000)::bigint::text`;
+
 /** Hold a claimed payout: not counted as a try, rechecked in an hour. Admin emailed once per hold. */
-async function hold(p: any, e: any, reason: string): Promise<SendResult> {
+async function hold(p: any, e: any, reason: string, tag: string): Promise<SendResult> {
   const [h] = await rows<any>(sql`
     UPDATE event_payouts SET status = 'held', hold_reason = ${reason}, attempts = GREATEST(0, attempts - 1),
            next_attempt_at = now() + interval '1 hour', alerted_at = now(), updated_at = now()
-    WHERE id = ${p.id} AND status IN ('pending', 'held')
+    WHERE id = ${p.id} AND status IN ('pending', 'held') AND ${OWNER_TAG} = ${tag}
       AND (status <> 'held' OR alerted_at IS NULL OR hold_reason IS DISTINCT FROM ${reason})
     RETURNING id`);
   if (!h) {
     // Same hold as before (already emailed): only push the next check out and give the try back.
-    await rows(sql`
+    const [same] = await rows<any>(sql`
       UPDATE event_payouts SET attempts = GREATEST(0, attempts - 1), next_attempt_at = now() + interval '1 hour', updated_at = now()
-      WHERE id = ${p.id} AND status = 'held'`);
-    return "held";
+      WHERE id = ${p.id} AND status = 'held' AND ${OWNER_TAG} = ${tag}
+      RETURNING id`);
+    return same ? "held" : "not_due"; // not ours any more: another run has it
   }
   await alertAdmin("Event payout on hold",
     `Event payout ${p.id} of ${p.amount_cents} cents for "${e?.title ?? "?"}" (event ${p.event_id}) is on hold: ${HOLD_TEXT[reason] ?? reason}. It is checked again every hour and sent once this is fixed.`);
   return "held";
 }
 
-async function toReview(p: any, e: any, why: string): Promise<SendResult> {
+async function toReview(p: any, e: any, why: string, tag: string): Promise<SendResult> {
   const [r] = await rows<any>(sql`
     UPDATE event_payouts SET status = 'review', last_error = ${why.slice(0, 300)}, next_attempt_at = NULL, updated_at = now()
-    WHERE id = ${p.id} AND status IN ('pending', 'held')
+    WHERE id = ${p.id} AND status IN ('pending', 'held') AND ${OWNER_TAG} = ${tag}
     RETURNING id`);
-  if (r) {
-    await alertAdmin("Event payout needs a look",
-      `Event payout ${p.id} of ${p.amount_cents} cents for "${e?.title ?? "?"}" (event ${p.event_id}): ${why}. Check Stripe, then set it back to pending with attempts 0 to retry.`);
-  }
+  if (!r) return "not_due"; // not ours any more: another run has it (and may be sending it right now)
+  await alertAdmin("Event payout needs a look",
+    `Event payout ${p.id} of ${p.amount_cents} cents for "${e?.title ?? "?"}" (event ${p.event_id}): ${why}. Check Stripe, then set it back to pending with attempts 0 to retry.`);
   return "review";
 }
 
@@ -177,23 +191,27 @@ export async function sendPayout(payoutId: string, s?: PayoutStripe): Promise<Se
   const [p] = await rows<any>(sql`
     UPDATE event_payouts SET attempts = attempts + 1,
            -- In-flight lock. Re-taken right before the lookup + create (see below), so it only has to outlast those two
-           -- bounded calls: 30 s timeout and 1 network retry each, about 2 minutes with a Retry-After wait, well
-           -- inside 10 minutes. No other run can claim the row while a transfer may still land. The attempt's end sets
+           -- bounded calls: 30 s timeout and 1 network retry each, so about 1 minute per call, or about 2 minutes
+           -- with a Retry-After wait of up to 60 s; about 4 minutes for both in the worst case, still well inside
+           -- 10 minutes. No other run can claim the row while a transfer may still land. The attempt's end sets
            -- the real next time.
            next_attempt_at = now() + make_interval(mins => ${PAYOUT_LOCK_MINUTES}::int), updated_at = now()
     WHERE id = ${payoutId} AND status IN ('pending', 'held') AND (next_attempt_at IS NULL OR next_attempt_at <= now())
-    RETURNING id, event_id, status, amount_cents, attempts, (extract(epoch from updated_at) * 1000000)::bigint::text AS claim_tag`);
+    RETURNING id, event_id, status, amount_cents, attempts, ${OWNER_TAG} AS claim_tag`);
   if (!p) return "not_due";
+  // This run's ownership tag: the claim's, then whatever each of its own writes returns.
+  let tag = String(p.claim_tag);
+  if (afterClaimHook) await afterClaimHook(p.id);
   const amount = Number(p.amount_cents);
   const [e] = await rows<any>(sql`
     SELECT id, title, status, host_type, host_user_id, host_business_id, host_photographer_id FROM events WHERE id = ${p.event_id}`);
-  if (!e || e.status === "cancelled") return toReview(p, e, "the event was cancelled after its payout was created, so it was not sent");
-  if (e.status !== "published") return hold(p, e, "event_paused");
+  if (!e || e.status === "cancelled") return toReview(p, e, "the event was cancelled after its payout was created, so it was not sent", tag);
+  if (e.status !== "published") return hold(p, e, "event_paused", tag);
 
   const st = s ?? (await realStripe());
   const dest = await hostPayoutDestination(e as HostEventRef);
   const ready = await isHostReady(e as HostEventRef, st, STRIPE_CALL_BOUND);
-  if (!ready.ready || !dest.accountId) return hold(p, e, ready.reason ?? "no_account");
+  if (!ready.ready || !dest.accountId) return hold(p, e, ready.reason ?? "no_account", tag);
 
   // Re-take the lock, only if this claim still owns the row: the checks above may have been slow enough for the
   // lock to run out and another run to claim (its claim changes updated_at). Ready again from a hold -> pending,
@@ -202,10 +220,10 @@ export async function sendPayout(payoutId: string, s?: PayoutStripe): Promise<Se
     UPDATE event_payouts SET next_attempt_at = now() + make_interval(mins => ${PAYOUT_LOCK_MINUTES}::int),
            status = 'pending', hold_reason = NULL,
            alerted_at = CASE WHEN status = 'held' THEN NULL ELSE alerted_at END, updated_at = now()
-    WHERE id = ${p.id} AND status IN ('pending', 'held')
-      AND (extract(epoch from updated_at) * 1000000)::bigint::text = ${p.claim_tag}
-    RETURNING id`);
+    WHERE id = ${p.id} AND status IN ('pending', 'held') AND ${OWNER_TAG} = ${tag}
+    RETURNING ${OWNER_TAG} AS tag`);
   if (!mine) return "not_due";
+  tag = String(mine.tag);
 
   try {
     const existing = await st.findEventPayoutTransfer(e.id, p.id, STRIPE_CALL_BOUND);
@@ -213,7 +231,7 @@ export async function sendPayout(payoutId: string, s?: PayoutStripe): Promise<Se
     if (existing) {
       // Sent before but not saved: record it, never send again.
       if (existing.amount !== amount) {
-        return toReview(p, e, `Stripe already has transfer ${existing.id} of ${existing.amount} cents for this payout, but the payout is ${amount} cents`);
+        return toReview(p, e, `Stripe already has transfer ${existing.id} of ${existing.amount} cents for this payout, but the payout is ${amount} cents`, tag);
       }
       transferId = existing.id;
     } else {
@@ -227,13 +245,18 @@ export async function sendPayout(payoutId: string, s?: PayoutStripe): Promise<Se
         idempotencyKey: `event_payout_${p.id}_${p.claim_tag}`, ...STRIPE_CALL_BOUND,
       })).id;
     }
+    // Recorded while this run still owns the row, or while nobody does (the lock ran out and no other run has
+    // claimed since). The transfer is real either way. If another run has the row now, nothing is written here and
+    // no push goes out: that run's lookup before its create finds this transfer and records it.
     const [done] = await rows<any>(sql`
       UPDATE event_payouts SET status = 'paid', transfer_id = ${transferId}, paid_at = now(),
              destination_type = ${dest.destinationType}, connected_account_id = ${dest.accountId},
              hold_reason = NULL, next_attempt_at = NULL, last_error = NULL, updated_at = now()
       WHERE id = ${p.id} AND status IN ('pending', 'held')
+        AND (${OWNER_TAG} = ${tag} OR next_attempt_at IS NULL OR next_attempt_at <= now())
       RETURNING id`);
-    if (done) void notifyPayoutSent(p.id);
+    if (!done) return "not_due";
+    void notifyPayoutSent(p.id);
     return "paid";
   } catch (err) {
     const msg = String((err as Error)?.message ?? err).slice(0, 300);
@@ -244,9 +267,10 @@ export async function sendPayout(payoutId: string, s?: PayoutStripe): Promise<Se
                next_attempt_at = now() + interval '1 hour', last_error = ${msg},
                alerted_at = CASE WHEN alerted_at IS NULL OR alerted_at < now() - interval '24 hours' THEN now() ELSE alerted_at END,
                updated_at = now()
-        WHERE id = ${p.id} AND status IN ('pending', 'held')
+        WHERE id = ${p.id} AND status IN ('pending', 'held') AND ${OWNER_TAG} = ${tag}
         RETURNING (alerted_at = now()) AS emailed`);
-      if (w?.emailed) {
+      if (!w) return "not_due"; // not ours any more
+      if (w.emailed) {
         const [owed] = await rows<any>(sql`SELECT COALESCE(sum(amount_cents), 0)::int AS c, count(*)::int AS n FROM event_payouts WHERE status IN ('pending', 'held')`);
         await alertAdmin("Event payout waiting for balance",
           `Event payout ${p.id} of ${amount} cents for "${e.title}" (event ${e.id}) can't be sent: not enough available balance on Stripe. ` +
@@ -261,10 +285,11 @@ export async function sendPayout(payoutId: string, s?: PayoutStripe): Promise<Se
              -- Backoff 10, 20, 40, then 60 minutes: never shorter than the in-flight lock.
              next_attempt_at = now() + make_interval(mins => LEAST(60, ${PAYOUT_LOCK_MINUTES}::int * power(2, LEAST(attempts - 1, 6)))::int),
              updated_at = now()
-      WHERE id = ${p.id} AND status IN ('pending', 'held')
-      RETURNING id`).catch(() => [] as any[]);
-    if (!still) return "not_due"; // finished by someone else meanwhile
-    if (Number(p.attempts) >= PAYOUT_MAX_ATTEMPTS) return toReview(p, e, `the transfer failed ${p.attempts} times, last error: ${msg}`);
+      WHERE id = ${p.id} AND status IN ('pending', 'held') AND ${OWNER_TAG} = ${tag}
+      RETURNING ${OWNER_TAG} AS tag`).catch(() => [] as any[]);
+    if (!still) return "not_due"; // not ours any more, or finished by someone else meanwhile
+    tag = String(still.tag);
+    if (Number(p.attempts) >= PAYOUT_MAX_ATTEMPTS) return toReview(p, e, `the transfer failed ${p.attempts} times, last error: ${msg}`, tag);
     return "retry";
   }
 }

@@ -928,6 +928,84 @@ async function getNoFollow(path: string): Promise<{ status: number; location: st
     assert(transfers.filter((t) => t.transfer_group === `event_${e16.id}`).length === 1 && transferPosts.filter((t) => t.payoutId === id16).length === 1,
       "exactly 1 transfer overall", transferPosts.filter((t) => t.payoutId === id16));
 
+    console.log("a run that lost the row writes nothing: stale review on a cancelled event");
+    const { setPayoutHooksForTest } = await import("./eventPayouts");
+    const h17 = await mkReadyHost("j17");
+    const e17 = await jobEvent(h17.u, "Stale Review Night");
+    await buy(e17.id, buyers[4], e17.typeId, 1);
+    await endedHoursAgo(e17.id, 80);
+    await createDuePayouts();
+    const id17 = (await payoutOf(e17.id))[0].id as string;
+    let rel17!: () => void;
+    const gate17 = new Promise<void>((r) => { rel17 = r; });
+    let claimed17!: () => void;
+    const atClaim17 = new Promise<void>((r) => { claimed17 = r; });
+    let once17 = true;
+    setPayoutHooksForTest({ afterClaim: async (id) => { if (id === id17 && once17) { once17 = false; claimed17(); await gate17; } } });
+    const stale17 = sendPayout(id17, payoutFake); // claims, then is stuck before reading the event
+    await atClaim17;
+    // More than 10 minutes pass: its lock runs out and run 2 claims and gets as far as its create.
+    await q(`UPDATE event_payouts SET next_attempt_at = now() - interval '1 second' WHERE id = $1`, [id17]);
+    let rel17b!: () => void;
+    holdGate = new Promise<void>((r) => { rel17b = r; });
+    const create17 = new Promise<void>((r) => { createStarted = r; });
+    const owner17 = sendPayout(id17, payoutFake);
+    await create17;
+    // The event is cancelled now, so the stale run sees it cancelled.
+    await q(`UPDATE events SET status = 'cancelled', cancelled_at = now() WHERE id = $1`, [e17.id]);
+    const emailsBefore17 = adminEmails.length;
+    rel17();
+    const r17a = await stale17;
+    const mid17 = (await payoutOf(e17.id))[0];
+    assert(r17a === "not_due" && mid17.status === "pending" && adminEmails.length === emailsBefore17,
+      "stale run on a cancelled event: not due, row untouched, no email", { r17a, mid17, emails: adminEmails.slice(emailsBefore17) });
+    rel17b();
+    const r17b = await owner17;
+    setPayoutHooksForTest(null);
+    pr = await payoutOf(e17.id);
+    const g17 = transfers.filter((t) => t.transfer_group === `event_${e17.id}`);
+    assert(r17b === "paid" && pr[0].status === "paid" && g17.length === 1 && pr[0].transfer_id === g17[0]?.id,
+      "owner pays: row paid with the transfer id, exactly 1 transfer", { r17b, pr, g17 });
+    assert(!adminEmails.slice(emailsBefore17).some((m) => /not sent/.test(m.detail)) && adminEmails.length === emailsBefore17,
+      "no 'not sent' admin email", adminEmails.slice(emailsBefore17));
+    await waitFor(() => pushes.some((x) => x.data?.payoutId === id17), 2000);
+    await sleep(200);
+    assert(pushes.filter((x) => x.data?.payoutId === id17).length === 1, "host push sent once, by the owner", pushes.filter((x) => x.data?.payoutId === id17));
+
+    console.log("a run that lost the row writes nothing: stale hold while the owner pays");
+    const h18 = await mkReadyHost("j18");
+    const e18 = await jobEvent(h18.u, "Stale Hold Night");
+    await buy(e18.id, buyers[5], e18.typeId, 1);
+    await endedHoursAgo(e18.id, 80);
+    await createDuePayouts();
+    const id18 = (await payoutOf(e18.id))[0].id as string;
+    let rel18!: () => void;
+    readinessGate = new Promise<void>((r) => { rel18 = r; });
+    const check18 = new Promise<void>((r) => { readinessStarted = r; });
+    const stale18 = sendPayout(id18, payoutFake); // claim 1 (attempts 1), stuck on the readiness check
+    await check18;
+    await q(`UPDATE event_payouts SET next_attempt_at = now() - interval '1 second' WHERE id = $1`, [id18]);
+    let rel18b!: () => void;
+    holdGate = new Promise<void>((r) => { rel18b = r; });
+    const create18 = new Promise<void>((r) => { createStarted = r; });
+    const owner18 = sendPayout(id18, payoutFake); // claim 2 (attempts 2), create in flight
+    await create18;
+    const emailsBefore18 = adminEmails.length;
+    setReady(h18.a, false); // the stale run's late answer says not ready
+    rel18();
+    const r18a = await stale18;
+    const mid18 = (await payoutOf(e18.id))[0];
+    assert(r18a === "not_due" && mid18.status === "pending" && mid18.attempts === 2 && adminEmails.length === emailsBefore18,
+      "stale hold: not due, row untouched, attempts unchanged, no email", { r18a, mid18, emails: adminEmails.slice(emailsBefore18) });
+    setReady(h18.a, true);
+    rel18b();
+    const r18b = await owner18;
+    pr = await payoutOf(e18.id);
+    assert(r18b === "paid" && pr[0].status === "paid" && pr[0].attempts === 2 && pr[0].hold_reason === null
+      && transfers.filter((t) => t.transfer_group === `event_${e18.id}`).length === 1,
+      "row stays paid, attempts not changed by the stale run, 1 transfer", { r18b, pr });
+    assert(adminEmails.length === emailsBefore18, "no hold email", adminEmails.slice(emailsBefore18));
+
     console.log("race: host refund vs payout create");
     const h12 = await mkReadyHost("j12");
     const e12 = await jobEvent(h12.u, "Race Night");
@@ -976,6 +1054,7 @@ async function getNoFollow(path: string): Promise<{ status: number; location: st
     try {
       (await import("./ticketNotices")).setNoticeDepsForTest(null);
       (await import("./ticketCheckout")).setAdminAlertForTest(null);
+      (await import("./eventPayouts")).setPayoutHooksForTest(null);
     } catch { /* not loaded */ }
     const evIds = (await q(`SELECT id FROM events WHERE host_user_id IN (SELECT id FROM users WHERE email LIKE $1)`, [`${P}-%`])).map((x) => x.id);
     if (evIds.length) {
