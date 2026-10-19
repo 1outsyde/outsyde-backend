@@ -25,7 +25,11 @@
  *   4. processRecovery: same claim, lock, ownership and bounded calls as sendPayout. Looks for a reversal already made
  *      on the transfer for this ticket (sent but not saved) and records it; otherwise reverses with key
  *      event_recovery_<ticketId>_<claim time in microseconds>, new on every claim. Reversed -> 'reversed'. Not enough
- *      on the host's Stripe balance -> 'owed' at once. Other errors -> backoff 10, 20, 40, 60 minutes; after 5 -> 'owed'.
+ *      on the host's Stripe balance -> 'owed' at once (after one more look on the transfer). Other errors -> backoff
+ *      10, 20, 40, 60 minutes. A claim whose own reversal call just failed never owes (a timed-out call may still
+ *      land at Stripe): after the 5th failure it backs off (60 minutes, more than the lock), and the next claim only
+ *      looks on the transfer, never sends a reversal: found -> 'reversed'; none -> 'owed'; lookup fails -> pending.
+ *      Pending at max tries for over 24 hours (lookups keep failing) -> one admin email (alertStuckRecoveries).
  *   Owed recoveries come back from the same account's next EVENT payout (createDuePayouts, same statement), oldest
  *   first while the payout stays above 0; the rest stays owed. Booking payouts are never touched.
  *   5. alertOldOwed: still owed 30 days after the refund -> one admin email (Legend collects or writes it off by hand).
@@ -49,6 +53,8 @@ export const RECOVERY_MAX_ATTEMPTS = 5;
 export const RECOVERY_JOB_LIMIT = 20;
 /** Owed this long after the refund: one admin email. */
 export const OWED_ALERT_DAYS = 30;
+/** Pending at max tries and opened this long ago (its lookups keep failing): one admin email. */
+export const STUCK_RECOVERY_ALERT_HOURS = 24;
 /** A claim keeps the row for this long, so a transfer still in flight is never sent again under a new key. */
 export const PAYOUT_LOCK_MINUTES = 10;
 /** Every Stripe call in a payout attempt is bounded, so the attempt ends well inside the lock. */
@@ -376,10 +382,13 @@ export async function openRecoveries(limit = 50): Promise<number> {
   return made.length;
 }
 
-/** Owed: the host's Stripe balance can't cover it, or it kept failing. Taken from their next event payout. */
+/**
+ * Owed: the host's Stripe balance can't cover it, or it kept failing. Taken from their next event payout.
+ * alerted_at is cleared: a stuck-pending email may have set it, and the 30 day owed email must still go out.
+ */
 async function owe(r: any, why: string, tag: string): Promise<RecoveryResult> {
   const [o] = await rows<any>(sql`
-    UPDATE event_payout_recoveries SET status = 'owed', last_error = ${why.slice(0, 300)}, next_attempt_at = NULL, updated_at = now()
+    UPDATE event_payout_recoveries SET status = 'owed', last_error = ${why.slice(0, 300)}, next_attempt_at = NULL, alerted_at = NULL, updated_at = now()
     WHERE id = ${r.id} AND status = 'pending' AND ${OWNER_TAG} = ${tag}
     RETURNING id`);
   if (!o) return "not_due"; // not ours any more
@@ -394,9 +403,13 @@ export async function processRecovery(recoveryId: string, s?: RecoveryStripe): P
     UPDATE event_payout_recoveries SET attempts = attempts + 1,
            next_attempt_at = now() + make_interval(mins => ${PAYOUT_LOCK_MINUTES}::int), updated_at = now()
     WHERE id = ${recoveryId} AND status = 'pending' AND (next_attempt_at IS NULL OR next_attempt_at <= now())
-    RETURNING id, ticket_id, payout_id, amount_cents, attempts, ${OWNER_TAG} AS claim_tag`);
+    RETURNING id, ticket_id, payout_id, amount_cents, attempts, last_error, ${OWNER_TAG} AS claim_tag`);
   if (!r) return "not_due";
   let tag = String(r.claim_tag);
+  // Past the last try: this claim only looks on the transfer and never sends a reversal. The try that failed last
+  // ended at least one lock period ago (its backoff is longer than the lock), so a reversal it timed out on has
+  // landed by now if it ever will.
+  const lookupOnly = Number(r.attempts) > RECOVERY_MAX_ATTEMPTS;
   if (afterRecoveryClaimHook) await afterRecoveryClaimHook(r.id);
   const [p] = await rows<any>(sql`SELECT transfer_id FROM event_payouts WHERE id = ${r.payout_id}`);
   // Opened only for paid payouts, so this can't happen; owed (not lost) if it ever does.
@@ -419,8 +432,11 @@ export async function processRecovery(recoveryId: string, s?: RecoveryStripe): P
     const existing = await st.findEventPayoutReversal(p.transfer_id, r.ticket_id, STRIPE_CALL_BOUND);
     let reversalId: string;
     if (existing) {
-      // Made before but not saved (lost response): record it, never reverse again.
+      // Made before but not saved (lost response, or a timed-out call that landed later): record it, never reverse again.
       reversalId = existing.id;
+    } else if (lookupOnly) {
+      // Every try failed and no reversal ever landed: owed, taken from the host's next event payout.
+      return owe(r, `the reversal failed ${RECOVERY_MAX_ATTEMPTS} times and none is on the transfer, last error: ${r.last_error ?? "none"}`, tag);
     } else {
       // Still ours right before the create (the lookup may have been slow): otherwise send nothing.
       if (!(await retake())) return "not_due";
@@ -441,6 +457,10 @@ export async function processRecovery(recoveryId: string, s?: RecoveryStripe): P
     const msg = String((err as Error)?.message ?? err).slice(0, 300);
     // Not enough on the host's Stripe balance: owed now, taken from their next event payout (after one more look
     // on the transfer: owed feeds an automatic deduction, so it must never be set while a reversal exists).
+    // Owing in this same claim is safe here, unlike after any other error: this claim made exactly one reversal
+    // request (one key; the SDK's own retry reuses it, and Stripe answers a retry of a request still running with
+    // an idempotency error, never balance_insufficient), and Stripe answered that request with a definite no. Every
+    // earlier claim's call ended at least one lock period ago, and the look below finds any of those that landed.
     if (await isInsufficientFunds(err)) return oweUnlessReversed(msg);
     console.error(`[Events] recovery try ${r.attempts} failed for ${r.id}: ${msg}`);
     const [still] = await rows<any>(sql`
@@ -451,15 +471,16 @@ export async function processRecovery(recoveryId: string, s?: RecoveryStripe): P
       RETURNING ${OWNER_TAG} AS tag`).catch(() => [] as any[]);
     if (!still) return "not_due";
     tag = String(still.tag);
-    // An unrecognised error (a different Stripe code for a low host balance included) ends here too: backoff, then
-    // after 5 tries the same look on the transfer before owing.
-    if (Number(r.attempts) >= RECOVERY_MAX_ATTEMPTS) return oweUnlessReversed(`the reversal failed ${r.attempts} times, last error: ${msg}`);
+    // An unrecognised error (a different Stripe code for a low host balance included) ends here too, and so does a
+    // failed lookup on a lookup-only claim. Never owed in this claim: a timed-out reversal may still land at Stripe,
+    // and a lookup now could miss it (then owed + reversed = the host charged twice). Backoff (60 minutes from the
+    // 5th try on, always at least the lock), and the next claim past the 5th looks only.
     return "retry";
   }
 
   /**
-   * The only way to 'owed' after a Stripe call: an earlier try (or this one) may have reversed with its reply lost,
-   * or reversed and then failed to save. One bounded lookup on the transfer, under this claim's ownership:
+   * Owed after insufficient funds: an earlier try may have reversed with its reply lost, or reversed and then
+   * failed to save. One bounded lookup on the transfer, under this claim's ownership:
    * found -> 'reversed' with that id; lookup fails -> stays pending with backoff (never owed blind); none -> 'owed'.
    */
   async function oweUnlessReversed(why: string): Promise<RecoveryResult> {
@@ -515,13 +536,37 @@ export async function alertOldOwed(): Promise<number> {
 }
 
 /**
+ * Pending at max tries and opened over 24 hours ago (so its lookups have kept failing for about a day): one admin
+ * email listing them, each once (alerted_at). updated_at is left alone on purpose: it is the ownership tag, and a run
+ * holding the row must not lose it to this email. owe() clears alerted_at, so the 30 day owed email still fires.
+ */
+export async function alertStuckRecoveries(): Promise<number> {
+  const stuck = await rows<any>(sql`
+    UPDATE event_payout_recoveries SET alerted_at = now()
+    WHERE id IN (
+      SELECT id FROM event_payout_recoveries
+      WHERE status = 'pending' AND attempts >= ${RECOVERY_MAX_ATTEMPTS} AND alerted_at IS NULL
+        AND created_at <= now() - make_interval(hours => ${STUCK_RECOVERY_ALERT_HOURS}::int)
+      ORDER BY created_at LIMIT 100)
+      AND status = 'pending' AND alerted_at IS NULL
+    RETURNING id, ticket_id, payout_id, connected_account_id, amount_cents, attempts, last_error`);
+  if (!stuck.length) return 0;
+  const lines = stuck.map((o) =>
+    `Recovery ${o.id}: ${o.amount_cents} cents for ticket ${o.ticket_id} (payout ${o.payout_id}, Stripe account ${o.connected_account_id}), ${o.attempts} tries, last error: ${String(o.last_error ?? "none").slice(0, 200)}.`);
+  await alertAdmin("Event payout refunds stuck",
+    `${stuck.length} refunds made after an event payout could not be taken back from the host for over ${STUCK_RECOVERY_ALERT_HOURS} hours. ` +
+    `Stripe can't be checked for an existing reversal, so they are not marked owed yet and are tried again every hour. Check Stripe. ${lines.join(" ")}`);
+  return stuck.length;
+}
+
+/**
  * Every minute: create due payouts, send up to 20 that are due (least recently tried first), then open recoveries,
- * reverse up to 20 due ones and report old owed ones. Each step has its own try/catch, so one can't starve the others.
+ * reverse up to 20 due ones and report old owed and stuck ones. Each step has its own try/catch, so one can't starve the others.
  */
 export async function runEventPayoutJob(s?: PayoutStripe & RecoveryStripe): Promise<{
-  created: number; paid: number; held: number; review: number; opened: number; reversed: number; owed: number; alerted: number;
+  created: number; paid: number; held: number; review: number; opened: number; reversed: number; owed: number; alerted: number; stuck: number;
 }> {
-  const out = { created: 0, paid: 0, held: 0, review: 0, opened: 0, reversed: 0, owed: 0, alerted: 0 };
+  const out = { created: 0, paid: 0, held: 0, review: 0, opened: 0, reversed: 0, owed: 0, alerted: 0, stuck: 0 };
   try {
     const ids = await createDuePayouts();
     out.created = ids ? ids.split(",").length : 0;
@@ -575,9 +620,14 @@ export async function runEventPayoutJob(s?: PayoutStripe & RecoveryStripe): Prom
   } catch (err) {
     console.error("[Events] owed alert step failed:", (err as Error)?.message ?? err);
   }
+  try {
+    out.stuck = await alertStuckRecoveries();
+  } catch (err) {
+    console.error("[Events] stuck recovery alert step failed:", (err as Error)?.message ?? err);
+  }
   if (Object.values(out).some((n) => n > 0)) {
     console.log(`[Events] payout job: created ${out.created}, paid ${out.paid}, held ${out.held}, review ${out.review}, ` +
-      `recoveries opened ${out.opened}, reversed ${out.reversed}, owed ${out.owed}, owed alerts ${out.alerted}`);
+      `recoveries opened ${out.opened}, reversed ${out.reversed}, owed ${out.owed}, owed alerts ${out.alerted}, stuck alerts ${out.stuck}`);
   }
   return out;
 }

@@ -147,11 +147,13 @@ const MAX_START_AHEAD_MS = 2 * 365 * 24 * 60 * 60 * 1000;
 
 /**
  * Event time rules. `savedEndsAt` and `started` are passed on edits: once an event has started its end time can
- * only move later, so a host can't pull the payout date earlier.
+ * only move later, so a host can't pull the payout date earlier. Its start time can't change at all then: moving a
+ * started event's start into the future would make it "not started" again, and a second edit could pull the end in.
  */
 export function checkTimes(
   startsAt: Date, endsAt: Date, now: Date, startChanged: boolean, savedEndsAt?: Date, started?: boolean,
 ): string | null {
+  if (started && startChanged) return "Once the event has started, its start time can't change.";
   if (startChanged && startsAt <= now) return "The event can't start in the past.";
   if (endsAt <= startsAt) return "The event has to end after it starts.";
   if (endsAt.getTime() - startsAt.getTime() > MAX_EVENT_LENGTH_MS) return "An event can last 30 days at most.";

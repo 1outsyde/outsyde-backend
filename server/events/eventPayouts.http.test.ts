@@ -118,7 +118,10 @@ async function getNoFollow(path: string): Promise<{ status: number; location: st
     return out;
   };
   // Reversals (task 7): own switches, same replay-per-key rule, a list per transfer.
-  const rsw = { insufficient: false, failRev: false, failOnce: 0, loseResponse: 0, failLookup: 0 };
+  const rsw = { insufficient: false, failRev: false, failOnce: 0, loseResponse: 0, failLookup: 0, timeoutLandLater: 0 };
+  /** Reversals Stripe is still working on after the client timed out: landLater() makes them land. */
+  const inFlightReversals: Array<() => void> = [];
+  const landLater = () => { while (inFlightReversals.length) inFlightReversals.shift()!(); };
   const reversalPosts: Array<{ key: string | null; ticketId: string | null; ok: boolean; replayed: boolean }> = [];
   const doReversal = (transferId: string, params: Record<string, string>, key: string | null): { code: number; body: any } => {
     const metadata: Record<string, string> = {};
@@ -126,6 +129,17 @@ async function getNoFollow(path: string): Promise<{ status: number; location: st
     const log = (ok: boolean, replayed = false) => reversalPosts.push({ key, ticketId: metadata.ticketId ?? null, ok, replayed });
     if (key && savedByKey[key]) { log(savedByKey[key].code === 200, true); return savedByKey[key]; }
     const t = transfers.find((x) => x.id === transferId);
+    if (t && rsw.timeoutLandLater > 0) {
+      // The client gives up (timeout) while Stripe is still working: nothing exists yet, it lands later.
+      rsw.timeoutLandLater--;
+      inFlightReversals.push(() => {
+        const rv = { id: `trr_stub_${reversals.length + 1}`, object: "transfer_reversal", transfer: t.id, amount: Number(params.amount), metadata };
+        reversals.push(rv); t.amount_reversed += rv.amount;
+        if (key) savedByKey[key] = { code: 200, body: rv };
+      });
+      log(false);
+      return { code: 500, body: { error: { type: "api_connection_error", message: "stub: request timed out" } } };
+    }
     let out: { code: number; body: any };
     if (!t) out = { code: 404, body: { error: { type: "invalid_request_error", message: "No such transfer" } } };
     else if (rsw.insufficient) out = { code: 400, body: { error: { type: "invalid_request_error", code: "balance_insufficient", message: "Insufficient funds in the connected account." } } };
@@ -439,6 +453,14 @@ async function getNoFollow(path: string): Promise<{ status: number; location: st
     await handleHostAccountUpdated({ id: acctX, charges_enabled: true, details_submitted: true }, T + 5);
     w = await row();
     assert(Number(w.t) === T + 10, "webhook older event ignored (last_event_at unchanged)", w);
+    // Final review fix: Stripe often sends several account.updated in one second; a complete one after an incomplete one counts.
+    const hostSame = await mkUser("ws");
+    const acctSame = `acct_wh_same_${P}`;
+    await q(`INSERT INTO user_payout_accounts (user_id, stripe_account_id) VALUES ($1, $2)`, [hostSame, acctSame]);
+    await handleHostAccountUpdated({ id: acctSame, charges_enabled: false, details_submitted: true }, T);
+    await handleHostAccountUpdated({ id: acctSame, charges_enabled: true, details_submitted: true }, T);
+    const wSame = (await q(`SELECT onboarding_complete AS c, extract(epoch from last_event_at)::bigint AS t FROM user_payout_accounts WHERE stripe_account_id = $1`, [acctSame]))[0];
+    assert(wSame.c === true && Number(wSame.t) === T, "two events in the same second, the second complete: flag true", wSame);
     const hostY = await mkUser("y");
     const acctY = `acct_wh2_${P}`;
     await q(`INSERT INTO user_payout_accounts (user_id, stripe_account_id, last_event_at) VALUES ($1, $2, to_timestamp($3))`, [hostY, acctY, T]);
@@ -562,6 +584,19 @@ async function getNoFollow(path: string): Promise<{ status: number; location: st
     assert(r.status === 200 && new Date(r.body.event.endsAt).toISOString() === laterEnd, "started event: later end ok", r);
     r = await call("PATCH", `/api/events/${ev}`, { token: tok(hostT), body: { title: "Renamed while live" } });
     assert(r.status === 200, "started event: other edits unchanged", r);
+    // Final review fix: the two-step bypass (move the start into the future, then pull the end in) is refused.
+    const START_MSG = "Once the event has started, its start time can't change.";
+    // Millisecond start, as a client writes it (the SQL setup above used now(), which has microseconds).
+    await q(`UPDATE events SET starts_at = date_trunc('milliseconds', starts_at) WHERE id = $1`, [ev]);
+    const savedStart = new Date((await q(`SELECT starts_at FROM events WHERE id = $1`, [ev]))[0].starts_at).toISOString();
+    r = await call("PATCH", `/api/events/${ev}`, { token: tok(hostT), body: { startsAt: new Date(Date.now() + 5 * 60000).toISOString() } });
+    assert(r.status === 400 && r.body.error.code === "INVALID_EVENT_TIMES" && r.body.error.message === START_MSG, "started event: start moved into the future refused", r);
+    assert(new Date((await q(`SELECT starts_at FROM events WHERE id = $1`, [ev]))[0].starts_at).toISOString() === savedStart, "start time unchanged after refusal");
+    r = await call("PATCH", `/api/events/${ev}`, { token: tok(hostT), body: { endsAt: new Date(Date.now() + 3600000).toISOString() } });
+    assert(r.status === 400 && r.body.error.message === MSG, "second step (earlier end) still refused: the event is still started", r);
+    assert(new Date((await q(`SELECT ends_at FROM events WHERE id = $1`, [ev]))[0].ends_at).toISOString() === laterEnd, "end time unchanged after the two-step try");
+    r = await call("PATCH", `/api/events/${ev}`, { token: tok(hostT), body: { startsAt: savedStart, title: "Same start sent back" } });
+    assert(r.status === 200 && r.body.event.title === "Same start sent back", "started event: the saved start sent back unchanged is fine", r);
     ev = await mkEvent(hostT);
     r = await call("PATCH", `/api/events/${ev}`, { token: tok(hostT), body: { endsAt: inDays(10, 2) } });
     assert(r.status === 200, "event not started: earlier end ok", r);
@@ -1285,16 +1320,18 @@ async function getNoFollow(path: string): Promise<{ status: number; location: st
       rWaits.push((await recOf(tR5))[0].due_in);
       await advanceRec(idR5);
     }
+    rc = await recOf(tR5);
+    // Final review fix: the claim whose own call just failed never owes; it backs off at least one lock period.
+    assert(rResults.every((x) => x === "retry") && rc[0].status === "pending" && rc[0].attempts === 5, "5 failures: all retry, still pending (never owed in the failing claim)", { rResults, rc });
+    assert(rWaits[0] > 590 && rWaits[0] <= 600 && rWaits[1] > 1190 && rWaits[1] <= 1200 && rWaits[2] > 2390 && rWaits[2] <= 2400 && rWaits[3] > 3590 && rWaits[3] <= 3600
+      && rWaits[4] >= 600, "backoff 10, 20, 40, 60 minutes, and at least the lock after the 5th", rWaits);
+    const r5six = await processRecovery(idR5, payoutFake); // failRev still on: a POST here would fail, and must not happen
     rsw.failRev = false;
     rc = await recOf(tR5);
     const postsR5 = reversalPosts.filter((x) => x.ticketId === tR5);
-    assert(rResults.slice(0, 4).every((x) => x === "retry") && rResults[4] === "owed", "4 retries then owed", rResults);
-    assert(rWaits[0] > 590 && rWaits[0] <= 600 && rWaits[1] > 1190 && rWaits[1] <= 1200 && rWaits[2] > 2390 && rWaits[2] <= 2400 && rWaits[3] > 3590 && rWaits[3] <= 3600,
-      "backoff 10, 20, 40, 60 minutes", rWaits);
-    assert(rc[0].status === "owed" && rc[0].attempts === 5 && /stub reversal failure/.test(rc[0].last_error ?? ""), "owed after 5 tries with the last error", rc);
-    assert(postsR5.length === 5 && new Set(postsR5.map((x) => x.key)).size === 5 && postsR5.every((x) => !x.replayed), "a new key on every try (no replayed 500)", postsR5);
-
-    assert(fakeLog.filter((l) => l.fn === "findReversal" && l.id === tR5).length === 6, "5th try looked on the transfer again before owing (5 lookups + 1 before owed)",
+    assert(r5six === "owed" && rc[0].status === "owed" && rc[0].attempts === 6 && /stub reversal failure/.test(rc[0].last_error ?? ""), "next claim: lookup only, nothing there -> owed with the last error", { r5six, rc });
+    assert(postsR5.length === 5 && new Set(postsR5.map((x) => x.key)).size === 5 && postsR5.every((x) => !x.replayed), "no new reversal POST on the lookup-only claim; a new key on every try", postsR5);
+    assert(fakeLog.filter((l) => l.fn === "findReversal" && l.id === tR5).length === 6, "5 lookups before creates + 1 on the lookup-only claim",
       fakeLog.filter((l) => l.fn === "findReversal" && l.id === tR5).length);
 
     console.log("fix 1: last try's reversal lands but its response is lost -> reversed, not owed");
@@ -1306,18 +1343,47 @@ async function getNoFollow(path: string): Promise<{ status: number; location: st
     const idF1 = (await recOf(tF1))[0].id as string;
     rsw.failOnce = 4; rsw.loseResponse = 1; // tries 1-4: 500; try 5: reversal made, reply lost
     const fRes: string[] = [];
-    for (let i = 0; i < 5; i++) { fRes.push(await processRecovery(idF1, payoutFake)); await advanceRec(idF1); }
+    for (let i = 0; i < 6; i++) { fRes.push(await processRecovery(idF1, payoutFake)); await advanceRec(idF1); }
     rsw.failOnce = 0; rsw.loseResponse = 0;
     rc = await recOf(tF1);
     const rvF1 = reversals.filter((x) => x.metadata?.ticketId === tF1);
-    assert(fRes.slice(0, 4).every((x) => x === "retry") && fRes[4] === "reversed" && rc[0].status === "reversed" && rc[0].reversal_id === rvF1[0]?.id && rvF1.length === 1,
-      "5th try: lookup before owing finds the reversal and records it", { fRes, rc, rvF1 });
+    assert(fRes.slice(0, 5).every((x) => x === "retry") && fRes[5] === "reversed" && rc[0].status === "reversed" && rc[0].reversal_id === rvF1[0]?.id && rvF1.length === 1
+      && reversalPosts.filter((x) => x.ticketId === tF1).length === 5, "5th try lost: next claim's lookup finds the reversal and records it, no 6th POST", { fRes, rc, rvF1 });
     const eF1b = await jobEvent(hF1.u, "Last Try Lost Night Two");
     await buy(eF1b.id, buyers[2], eF1b.typeId, 2); // gross 3920: an owed 1960 would be deducted
     await endedHoursAgo(eF1b.id, 80);
     await createDuePayouts();
     pr = await payoutOf(eF1b.id);
     assert(pr.length === 1 && pr[0].deducted_cents === 0 && pr[0].amount_cents === 3920, "next payout deducts nothing (no double recovery)", pr);
+
+    console.log("final fix: 5th try times out, its reversal lands later -> next claim finds it, reversed, nothing deducted");
+    const hT1 = await mkReadyHost("t1");
+    const pT1 = await paidOut(hT1, "Late Landing Night");
+    await refundOrder(pT1.ev.id, hT1.u, pT1.orders[0]);
+    const tT1 = await ticketOf(pT1.orders[0]);
+    await openRecoveries();
+    const idT1 = (await recOf(tT1))[0].id as string;
+    rsw.failOnce = 4; // tries 1-4: 500
+    const tRes: string[] = [];
+    for (let i = 0; i < 4; i++) { tRes.push(await processRecovery(idT1, payoutFake)); await advanceRec(idT1); }
+    rsw.timeoutLandLater = 1; // try 5: the client times out, Stripe is still working on it
+    tRes.push(await processRecovery(idT1, payoutFake));
+    rc = await recOf(tT1);
+    assert(tRes.every((x) => x === "retry") && rc[0].status === "pending" && rc[0].due_in >= 600 && reversals.filter((x) => x.metadata?.ticketId === tT1).length === 0,
+      "5th try timed out: pending (not owed), backed off at least the lock, nothing on Stripe yet", { tRes, rc });
+    landLater(); // the reversal lands at Stripe after the claim gave up
+    await advanceRec(idT1);
+    const t6 = await processRecovery(idT1, payoutFake);
+    rc = await recOf(tT1);
+    const rvT1 = reversals.filter((x) => x.metadata?.ticketId === tT1);
+    assert(t6 === "reversed" && rc[0].status === "reversed" && rc[0].reversal_id === rvT1[0]?.id && rvT1.length === 1 && reversalPosts.filter((x) => x.ticketId === tT1).length === 5,
+      "next claim: lookup finds the late reversal, records it, no new POST", { t6, rc, rvT1 });
+    const eT1b = await jobEvent(hT1.u, "Late Landing Night Two");
+    await buy(eT1b.id, buyers[4], eT1b.typeId, 2);
+    await endedHoursAgo(eT1b.id, 80);
+    await createDuePayouts();
+    pr = await payoutOf(eT1b.id);
+    assert(pr.length === 1 && pr[0].deducted_cents === 0 && pr[0].amount_cents === 3920, "next payout deducts 0 (host charged once)", pr);
 
     console.log("fix 1: reversal lost on try 1, lookups fail after -> never owed, then reversed");
     const hF2 = await mkReadyHost("f2");
@@ -1329,12 +1395,12 @@ async function getNoFollow(path: string): Promise<{ status: number; location: st
     rsw.loseResponse = 1;
     const g1 = await processRecovery(idF2, payoutFake); // reversal made, reply lost
     await advanceRec(idF2);
-    rsw.failLookup = 5; // tries 2-5 lookups fail, and the 5th try's lookup before owing fails too
+    rsw.failLookup = 5; // tries 2-5 lookups fail, and the lookup-only claim (try 6) fails too
     const gRes: string[] = [];
-    for (let i = 0; i < 4; i++) { gRes.push(await processRecovery(idF2, payoutFake)); await advanceRec(idF2); }
+    for (let i = 0; i < 5; i++) { gRes.push(await processRecovery(idF2, payoutFake)); await advanceRec(idF2); }
     rc = await recOf(tF2);
-    assert(g1 === "retry" && gRes.every((x) => x === "retry") && rc[0].status === "pending" && rc[0].attempts === 5 && rsw.failLookup === 0
-      && /lookup/.test(rc[0].last_error ?? ""), "lookup errors on the 5th try: stays pending (not owed), error saved", { g1, gRes, rc, left: rsw.failLookup });
+    assert(g1 === "retry" && gRes.every((x) => x === "retry") && rc[0].status === "pending" && rc[0].attempts === 6 && rsw.failLookup === 0
+      && /list failure/.test(rc[0].last_error ?? ""), "lookup errors on the lookup-only claim: stays pending (not owed), error saved", { g1, gRes, rc, left: rsw.failLookup });
     await advanceRec(idF2);
     const g6 = await processRecovery(idF2, payoutFake);
     rc = await recOf(tF2);
@@ -1368,6 +1434,34 @@ async function getNoFollow(path: string): Promise<{ status: number; location: st
     const i2 = await processRecovery(idF3, payoutFake);
     rsw.insufficient = false;
     assert(i2 === "owed" && (await recOf(tF3))[0].status === "owed", "insufficient and lookup confirms none: owed", i2);
+
+    console.log("final fix: a recovery stuck pending at max tries for over 24 hours -> one admin email");
+    const alertStuckRecoveries: () => Promise<number> = ((await import("./eventPayouts")) as any).alertStuckRecoveries ?? (async () => 0);
+    const hS1 = await mkReadyHost("s1");
+    const pS1 = await paidOut(hS1, "Stuck Lookup Night", 3);
+    const [tS1, tS2, tS3] = [await ticketOf(pS1.orders[0]), await ticketOf(pS1.orders[1]), await ticketOf(pS1.orders[2])];
+    const stuckIns = (t: string, attempts: number, hoursAgo: number) => q(`INSERT INTO event_payout_recoveries (ticket_id, payout_id, connected_account_id, amount_cents, status, attempts, next_attempt_at, last_error, created_at)
+      VALUES ($1, $2, $3, 1960, 'pending', $4, now() + interval '1 hour', 'stub reversal list failure', now() - make_interval(hours => $5::int)) RETURNING id`, [t, pS1.payoutId, hS1.a, attempts, hoursAgo]);
+    const [stuck] = await stuckIns(tS1, 9, 30);
+    const [young24] = await stuckIns(tS2, 9, 20);
+    const [fewTries] = await stuckIns(tS3, 3, 30);
+    const tagBefore = (await q(`SELECT updated_at FROM event_payout_recoveries WHERE id = $1`, [stuck.id]))[0].updated_at;
+    emailsBefore = adminEmails.length;
+    const nStuck = await alertStuckRecoveries();
+    const stuckMails = adminEmails.slice(emailsBefore);
+    assert(nStuck === 1 && stuckMails.length === 1 && stuckMails[0].detail.includes(stuck.id) && !stuckMails[0].detail.includes(young24.id) && !stuckMails[0].detail.includes(fewTries.id),
+      "one admin email for the recovery stuck at max tries over 24 hours, not the younger or fewer-tries ones", { nStuck, stuckMails });
+    const stuckAfter = (await q(`SELECT alerted_at, status, updated_at FROM event_payout_recoveries WHERE id = $1`, [stuck.id]))[0];
+    assert(stuckAfter.alerted_at && stuckAfter.status === "pending" && String(stuckAfter.updated_at) === String(tagBefore),
+      "alerted_at set, still pending, ownership tag (updated_at) untouched", { stuckAfter, tagBefore });
+    emailsBefore = adminEmails.length;
+    assert((await alertStuckRecoveries()) === 0 && adminEmails.length === emailsBefore, "second run: no second email");
+    await advanceRec(stuck.id);
+    const sOwed = await processRecovery(stuck.id, payoutFake); // lookup works now and finds nothing -> owed
+    const sRow = (await q(`SELECT status, alerted_at FROM event_payout_recoveries WHERE id = $1`, [stuck.id]))[0];
+    assert(sOwed === "owed" && sRow.status === "owed" && sRow.alerted_at === null && reversalPosts.filter((x) => x.ticketId === tS1).length === 0,
+      "later owed: alerted_at cleared so the 30 day owed email still fires, no reversal POST", { sOwed, sRow });
+    await q(`DELETE FROM event_payout_recoveries WHERE id = ANY($1)`, [[stuck.id, young24.id, fewTries.id]]);
 
     console.log("a transient 500 once, then reversed with a new key");
     const hR6 = await mkReadyHost("r6");

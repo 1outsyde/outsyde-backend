@@ -160,7 +160,8 @@ router.get("/payouts/status", hybridAuthMiddleware, async (req: Request, res: Re
 });
 
 /**
- * account.updated for a host payout account. One statement: skips events not newer than last_event_at,
+ * account.updated for a host payout account. One statement: skips events older than last_event_at (same second
+ * counts: Stripe often sends several in one second, and this only ever moves the flag false to true),
  * sets onboarding_complete only when charges_enabled and details_submitted (never writes false),
  * always records last_event_at. eventCreatedAt is Stripe unix seconds.
  */
@@ -174,7 +175,7 @@ export async function handleHostAccountUpdated(account: any, eventCreatedAt: num
         last_event_at = to_timestamp(${eventCreatedAt}),
         updated_at = now()
     WHERE stripe_account_id = ${accountId}
-      AND (last_event_at IS NULL OR last_event_at < to_timestamp(${eventCreatedAt}))`);
+      AND (last_event_at IS NULL OR last_event_at <= to_timestamp(${eventCreatedAt}))`);
 }
 
 /** Return from Stripe onboarding: mark complete only when Stripe says so. Never writes false, never throws. */

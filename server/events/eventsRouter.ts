@@ -440,8 +440,10 @@ router.patch("/:id", hybridAuthMiddleware, async (req: Request, res: Response) =
     if (b.startsAt) b.startsAt = startsAt.toISOString();
     if (b.endsAt) b.endsAt = endsAt.toISOString();
 
-    // Guard for the end-time rule: an event that started after the check above can't take an earlier end.
+    // Guards for the started-event rules: an event that started after the check above can't take an earlier end,
+    // and its start can't move (sent back unchanged is fine). No row -> EVENT_CHANGED.
     const newEndsAt: string | null = b.endsAt ?? null;
+    const newStartsAt: string | null = b.startsAt ?? null;
     const sets: SQL[] = Object.keys(b)
       .filter((k) => COLUMNS[k])
       .map((k) => sql`${sql.raw(COLUMNS[k])} = ${b[k] ?? null}`);
@@ -454,6 +456,7 @@ router.patch("/:id", hybridAuthMiddleware, async (req: Request, res: Response) =
           AND refund_policy = ${e.refund_policy}
           AND refund_cutoff_hours IS NOT DISTINCT FROM ${e.refund_cutoff_hours == null ? null : Number(e.refund_cutoff_hours)}::int
           AND (starts_at > now() OR ${b.endsAt === undefined} OR ${newEndsAt}::timestamptz >= date_trunc('milliseconds', ends_at))
+          AND (starts_at > now() OR ${b.startsAt === undefined} OR ${newStartsAt}::timestamptz = date_trunc('milliseconds', starts_at))
         RETURNING *`);
       if (!updated) return fail(res, 409, "EVENT_CHANGED", "This event just changed. Reload and try again.");
       const types = await loadTicketTypes(e.id);
