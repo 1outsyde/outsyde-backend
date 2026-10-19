@@ -195,6 +195,7 @@ import {
 import { randomUUID, createHash } from "crypto";
 import { quoteDeposit } from "./fees";
 import { isExpiredUnbilledActiveRow } from "./complimentary";
+import { SUBSCRIPTION_GRACE_DAYS } from "./subscriptions/policy";
 import { realName, publicDisplayName } from "./personName";
 
 const pendingRecomputes = new Map<string, NodeJS.Timeout>();
@@ -596,6 +597,7 @@ export interface IStorage {
   // Subscription enforcement - pause/unpause items
   pauseBusinessLiveItems(businessId: string): Promise<{ pausedProducts: number; pausedServices: number }>;
   unpauseBusinessPausedItems(businessId: string): Promise<{ unpausedProducts: number; unpausedServices: number }>;
+  isSystemPausedItem(itemType: 'product' | 'service', itemId: string): Promise<boolean>;
 
   // Business Availability Calendar
   getBusinessAvailability(businessId: string, startDate?: string, endDate?: string): Promise<BusinessAvailability[]>;
@@ -4041,7 +4043,7 @@ export class DatabaseStorage implements IStorage {
     return subscription;
   }
 
-  async isBusinessSubscriptionActive(businessId: string, gracePeriodDays: number = 3): Promise<{ active: boolean; status?: string; reason?: string }> {
+  async isBusinessSubscriptionActive(businessId: string, gracePeriodDays: number = SUBSCRIPTION_GRACE_DAYS): Promise<{ active: boolean; status?: string; reason?: string }> {
     const subscription = await this.getVendorSubscriptionByBusinessId(businessId);
     
     if (!subscription) {
@@ -4051,7 +4053,7 @@ export class DatabaseStorage implements IStorage {
     return this.checkSubscriptionActiveStatus(subscription, gracePeriodDays);
   }
 
-  async isVendorSubscriptionActive(vendorId: string, gracePeriodDays: number = 3): Promise<{ active: boolean; status?: string; reason?: string }> {
+  async isVendorSubscriptionActive(vendorId: string, gracePeriodDays: number = SUBSCRIPTION_GRACE_DAYS): Promise<{ active: boolean; status?: string; reason?: string }> {
     const subscription = await this.getVendorSubscription(vendorId);
     
     if (!subscription) {
@@ -4083,10 +4085,11 @@ export class DatabaseStorage implements IStorage {
       return { active: true, status };
     }
 
-    // Past due - allow grace period from when status changed (updatedAt)
+    // Past due: active for the grace period, counted from when the run of failed payments began
+    // (past_due_since, migration 060). updated_at is only a fallback for a row written before 060:
+    // every write resets it, so on its own it would keep extending the grace period.
     if (status === 'past_due') {
-      // Use updatedAt as the timestamp when subscription became past_due
-      const statusChangeDate = subscription.updatedAt;
+      const statusChangeDate = subscription.pastDueSince ?? subscription.updatedAt;
       if (statusChangeDate) {
         const gracePeriodEnd = new Date(statusChangeDate);
         gracePeriodEnd.setDate(gracePeriodEnd.getDate() + gracePeriodDays);
@@ -4466,7 +4469,8 @@ export class DatabaseStorage implements IStorage {
     let tier: SubscriptionTier | null = null;
     let discountPercent = 0;
 
-    if (subscription) {
+    // Step 1.0b: the à la carte discount is a plan benefit, paused once the plan is past its grace period.
+    if (subscription && this.checkSubscriptionActiveStatus(subscription, SUBSCRIPTION_GRACE_DAYS).active) {
       const [tierRow] = await db.select()
         .from(subscriptionTiers)
         .where(eq(subscriptionTiers.id, subscription.tierId));
@@ -4755,54 +4759,67 @@ export class DatabaseStorage implements IStorage {
   // SUBSCRIPTION ENFORCEMENT - PAUSE/UNPAUSE ITEMS
   // =========================
 
+  // Each statement pauses the live items AND records them in subscription_paused_items (migration 060)
+  // in one go, so unpause can bring back exactly what the system paused and nothing the vendor paused.
   async pauseBusinessLiveItems(businessId: string): Promise<{ pausedProducts: number; pausedServices: number }> {
-    // Pause all live products for this business
-    const productResult = await db.update(vendorProducts)
-      .set({ status: 'paused' })
-      .where(and(
-        eq(vendorProducts.businessId, businessId),
-        eq(vendorProducts.status, 'live')
-      ))
-      .returning();
-
-    // Pause all live services for this business
-    const serviceResult = await db.update(vendorServices)
-      .set({ status: 'paused' })
-      .where(and(
-        eq(vendorServices.businessId, businessId),
-        eq(vendorServices.status, 'live')
-      ))
-      .returning();
-
+    const products = await db.execute(sql`
+      WITH paused AS (
+        UPDATE vendor_products SET status = 'paused'
+        WHERE business_id = ${businessId} AND status = 'live'
+        RETURNING id
+      )
+      INSERT INTO subscription_paused_items (item_type, item_id, business_id)
+      SELECT 'product', id, ${businessId} FROM paused
+      ON CONFLICT (item_type, item_id) DO NOTHING
+      RETURNING item_id`);
+    const services = await db.execute(sql`
+      WITH paused AS (
+        UPDATE vendor_services SET status = 'paused'
+        WHERE business_id = ${businessId} AND status = 'live'
+        RETURNING id
+      )
+      INSERT INTO subscription_paused_items (item_type, item_id, business_id)
+      SELECT 'service', id, ${businessId} FROM paused
+      ON CONFLICT (item_type, item_id) DO NOTHING
+      RETURNING item_id`);
     return {
-      pausedProducts: productResult.length,
-      pausedServices: serviceResult.length,
+      pausedProducts: products.rows.length,
+      pausedServices: services.rows.length,
     };
   }
 
+  // Brings back only items the system paused (subscription_paused_items) that are still paused. The
+  // marker rows are removed either way, so an item the vendor archived meanwhile stays archived.
   async unpauseBusinessPausedItems(businessId: string): Promise<{ unpausedProducts: number; unpausedServices: number }> {
-    // Unpause all paused products for this business (restore to live)
-    const productResult = await db.update(vendorProducts)
-      .set({ status: 'live' })
-      .where(and(
-        eq(vendorProducts.businessId, businessId),
-        eq(vendorProducts.status, 'paused')
-      ))
-      .returning();
-
-    // Unpause all paused services for this business (restore to live)
-    const serviceResult = await db.update(vendorServices)
-      .set({ status: 'live' })
-      .where(and(
-        eq(vendorServices.businessId, businessId),
-        eq(vendorServices.status, 'paused')
-      ))
-      .returning();
-
+    const products = await db.execute(sql`
+      WITH marked AS (
+        DELETE FROM subscription_paused_items
+        WHERE business_id = ${businessId} AND item_type = 'product'
+        RETURNING item_id
+      )
+      UPDATE vendor_products SET status = 'live'
+      WHERE id IN (SELECT item_id FROM marked) AND status = 'paused'
+      RETURNING id`);
+    const services = await db.execute(sql`
+      WITH marked AS (
+        DELETE FROM subscription_paused_items
+        WHERE business_id = ${businessId} AND item_type = 'service'
+        RETURNING item_id
+      )
+      UPDATE vendor_services SET status = 'live'
+      WHERE id IN (SELECT item_id FROM marked) AND status = 'paused'
+      RETURNING id`);
     return {
-      unpausedProducts: productResult.length,
-      unpausedServices: serviceResult.length,
+      unpausedProducts: products.rows.length,
+      unpausedServices: services.rows.length,
     };
+  }
+
+  /** True when the system (not the vendor) paused this product or service for a lapsed plan. */
+  async isSystemPausedItem(itemType: 'product' | 'service', itemId: string): Promise<boolean> {
+    const r = await db.execute(sql`
+      SELECT 1 FROM subscription_paused_items WHERE item_type = ${itemType} AND item_id = ${itemId} LIMIT 1`);
+    return r.rows.length > 0;
   }
 
   // =========================

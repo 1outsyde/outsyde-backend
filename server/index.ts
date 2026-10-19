@@ -19,6 +19,7 @@ import ticketCheckoutRouter from "./events/ticketCheckout";
 import ticketRefundsRouter from "./events/ticketRefunds";
 // stripe-replit-sync removed — no longer on Replit
 import { WebhookHandlers } from "./stripe/webhookHandlers";
+import { startSubscriptionGraceJob } from "./subscriptions/lifecycle";
 import { stripeService } from "./stripe/stripeService";
 import { setupWebSocket } from "./websocket";
 import { setupAuth, getSession } from "./replitAuth";
@@ -246,7 +247,9 @@ async function initStripe() {
 // Production Environment Validation
 // =======================
 if (process.env.NODE_ENV === 'production') {
-  const required = ['DATABASE_URL', 'STRIPE_SECRET_KEY', 'STRIPE_WEBHOOK_SECRET', 'JWT_SECRET'];
+  // STRIPE_PUBLISHABLE_KEY: stripeClient.getCredentials throws without it, so every Stripe call (the
+  // webhook signature check included) would fail; refuse to boot instead (step 1.0b).
+  const required = ['DATABASE_URL', 'STRIPE_SECRET_KEY', 'STRIPE_PUBLISHABLE_KEY', 'STRIPE_WEBHOOK_SECRET', 'JWT_SECRET'];
   const missing = required.filter(key => !process.env[key]);
   if (missing.length > 0) {
     console.error(`[FATAL] Missing required environment variables for production: ${missing.join(', ')}`);
@@ -361,6 +364,9 @@ if (process.env.NODE_ENV === 'production') {
   setInterval(() => {
     expireComplimentarySubscriptions().catch(err => console.error("[Complimentary] Scheduled expiry run failed:", err));
   }, 24 * 60 * 60 * 1000);
+
+  // Paid plans: hourly grace job (reminder on day 5, pause on day 7, bring back what it paused once paid).
+  startSubscriptionGraceJob();
 
   await registerRoutes(httpServer, app);
   app.use('/api/vendor/subscription', authMiddleware, vendorSubscriptionRouter);

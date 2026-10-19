@@ -1,5 +1,5 @@
 import {
-  pgTable, text, varchar, boolean, integer, serial, jsonb, timestamp, index, doublePrecision, unique, uuid, uniqueIndex
+  pgTable, text, varchar, boolean, integer, serial, jsonb, timestamp, index, doublePrecision, unique, uuid, uniqueIndex, primaryKey
 } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
@@ -1683,6 +1683,10 @@ export const vendorSubscriptions = pgTable("vendor_subscriptions", {
   currentQuarterStart: timestamp("current_quarter_start"),
   currentQuarterEnd: timestamp("current_quarter_end"),
 
+  // When the current run of failed payments began (migration 060). The grace period counts from here.
+  // NULL when paid up. Never derived from updated_at, which every write resets.
+  pastDueSince: timestamp("past_due_since"),
+
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 }, (table) => ({
@@ -1690,6 +1694,30 @@ export const vendorSubscriptions = pgTable("vendor_subscriptions", {
   // migrations/037_vendor_subscriptions_business_unique.sql (never drizzle-kit push).
   // The complimentary-tier admin upsert relies on ON CONFLICT (business_id).
   businessUnique: uniqueIndex("uq_vendor_subscriptions_business").on(table.businessId),
+}));
+
+/* =====================================================
+   SUBSCRIPTION LIFECYCLE (migration 060, hand-run in Neon; never drizzle-kit push)
+   subscription_paused_items: products/services the system paused for a lapsed plan (unpause restores
+   only these). subscription_notices: one row per notice sent, so nothing is ever sent twice.
+===================================================== */
+export const subscriptionPausedItems = pgTable("subscription_paused_items", {
+  itemType: text("item_type").notNull(),
+  itemId: varchar("item_id", { length: 36 }).notNull(),
+  businessId: varchar("business_id", { length: 36 }).notNull(),
+  pausedAt: timestamp("paused_at").defaultNow().notNull(),
+}, (table) => ({
+  pk: primaryKey({ columns: [table.itemType, table.itemId] }),
+}));
+
+export const subscriptionNotices = pgTable("subscription_notices", {
+  id: varchar("id", { length: 36 }).primaryKey().default(sql`gen_random_uuid()`),
+  vendorSubscriptionId: varchar("vendor_subscription_id", { length: 36 }).notNull(),
+  kind: text("kind").notNull(),
+  ref: text("ref").notNull(),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+}, (table) => ({
+  uniq: uniqueIndex("subscription_notices_vendor_subscription_id_kind_ref_key").on(table.vendorSubscriptionId, table.kind, table.ref),
 }));
 
 /* =====================================================
