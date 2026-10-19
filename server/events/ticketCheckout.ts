@@ -111,7 +111,8 @@ export type SettleResult = "settled" | "already" | "mismatch" | "not_found";
  */
 export async function settleTicketOrder(orderId: string, paymentIntentId: string, amountReceivedCents: number): Promise<SettleResult> {
   const [o] = await rows<any>(sql`
-    SELECT o.status, o.stripe_payment_intent_id, o.total_cents, o.ticket_count, i.unit_price_cents
+    SELECT o.status, o.stripe_payment_intent_id, o.total_cents, o.ticket_count, o.subtotal_cents, o.service_fee_cents,
+           o.per_ticket_fee_cents, o.platform_fee_cents, o.host_net_cents, i.unit_price_cents
     FROM ticket_orders o JOIN ticket_order_items i ON i.order_id = o.id
     WHERE o.id = ${orderId}`);
   if (!o) return "not_found";
@@ -119,8 +120,16 @@ export async function settleTicketOrder(orderId: string, paymentIntentId: string
   if (o.stripe_payment_intent_id !== paymentIntentId || Number(o.total_cents) !== amountReceivedCents || o.status !== "pending") {
     return "mismatch";
   }
-  const fees = calculateTicketFees(Number(o.unit_price_cents), Number(o.ticket_count));
-  const codes = Array.from({ length: fees.quantity }, () => makeTicketCode());
+  // Per-ticket money comes from what the order saved at checkout (order = unit x quantity), so a fee
+  // change deployed while the order was pending can't make the tickets disagree with the charge.
+  const n = Number(o.ticket_count);
+  const per = (col: string) => Number(o[col]) / n;
+  const unit = {
+    price: per("subtotal_cents"), service: per("service_fee_cents"), perTicket: per("per_ticket_fee_cents"),
+    platform: per("platform_fee_cents"), hostNet: per("host_net_cents"),
+  };
+  if (!Object.values(unit).every(Number.isInteger) || unit.price !== Number(o.unit_price_cents)) return "mismatch";
+  const codes = Array.from({ length: n }, () => makeTicketCode());
   const codesLiteral = `{${codes.join(",")}}`; // A-Z and 2-9 only
   try {
     const [r] = await rows<any>(sql`
@@ -139,8 +148,7 @@ export async function settleTicketOrder(orderId: string, paymentIntentId: string
         INSERT INTO tickets (order_id, order_item_id, event_id, ticket_type_id, holder_user_id, item_index, code,
                              price_cents, service_fee_cents, per_ticket_fee_cents, platform_fee_cents, host_net_cents)
         SELECT it.order_id, it.id, o.event_id, it.ticket_type_id, o.buyer_user_id, c.ord, c.code,
-               ${fees.unitPriceCents}, ${fees.unitServiceFeeCents}, ${fees.unitPerTicketFeeCents},
-               ${fees.unitPlatformFeeCents}, ${fees.unitHostNetCents}
+               ${unit.price}, ${unit.service}, ${unit.perTicket}, ${unit.platform}, ${unit.hostNet}
         FROM it, o, unnest(${codesLiteral}::text[]) WITH ORDINALITY AS c(code, ord)
         RETURNING id
       )
@@ -173,22 +181,33 @@ async function alertAdmin(subject: string, detail: string) {
   }
 }
 
+/**
+ * A paid order that can't be settled automatically: flag it once (the job then skips it) and email
+ * the admin once. A repeat call for an order already flagged does nothing.
+ */
+export async function flagForReview(orderId: string, reason: string) {
+  const [flagged] = await rows<any>(sql`
+    UPDATE ticket_orders SET needs_review_at = now(), review_reason = ${reason.slice(0, 300)}, updated_at = now()
+    WHERE id = ${orderId} AND needs_review_at IS NULL
+    RETURNING id`);
+  if (flagged) await alertAdmin("Paid order needs a look", `Ticket order ${orderId}: ${reason}. Check the order and refund if needed.`);
+}
+
 /** Called by the Stripe webhook (payment_intent.succeeded, metadata.type = 'event_ticket'). */
 export async function handleTicketPaymentSucceeded(pi: { id: string; amount_received?: number | null; amount?: number; metadata?: Record<string, string> }) {
   const orderId = pi.metadata?.ticketOrderId;
   if (!orderId) return;
   const result = await settleTicketOrder(orderId, pi.id, Number(pi.amount_received ?? pi.amount ?? 0));
   console.log(`[Tickets] payment ${pi.id} for order ${orderId}: ${result}`);
-  if (result === "mismatch" || result === "not_found") {
-    await alertAdmin("Paid order needs a look", `PaymentIntent ${pi.id} succeeded but ticket order ${orderId} could not be settled (${result}). Check the order and refund if needed.`);
-  }
+  if (result === "mismatch") await flagForReview(orderId, `PaymentIntent ${pi.id} succeeded but the order could not be settled`);
+  if (result === "not_found") await alertAdmin("Paid order needs a look", `PaymentIntent ${pi.id} succeeded for unknown ticket order ${orderId}. Refund it in Stripe.`);
 }
 
 /** Called by the Stripe webhook (payment_intent.canceled, metadata.type = 'event_ticket'). */
 export async function handleTicketPaymentCanceled(pi: { id: string; metadata?: Record<string, string> }) {
   const orderId = pi.metadata?.ticketOrderId;
   if (!orderId) return;
-  const released = await releasePendingTicketOrder(orderId, "expired", pi.id);
+  const released = await releasePendingTicketOrder(orderId, "cancelled", pi.id);
   console.log(`[Tickets] payment ${pi.id} cancelled; order ${orderId} ${released ? "released" : "unchanged"}`);
 }
 
@@ -197,10 +216,14 @@ export async function handleTicketPaymentCanceled(pi: { id: string; metadata?: R
 export async function runTicketOrderJob(now = new Date(), deps?: Pick<StripeLike, "getPaymentIntent" | "cancelPaymentIntent">): Promise<{ settled: number; expired: number; skipped: number }> {
   const s = deps ?? (await stripe());
   const reconcileBefore = new Date(now.getTime() - TICKET_RECONCILE_AFTER_MS).toISOString();
+  // Least recently checked first, so a few orders Stripe keeps erroring on can't block newer ones.
   const pending = await rows<any>(sql`
-    SELECT id, stripe_payment_intent_id, created_at FROM ticket_orders
-    WHERE status = 'pending' AND created_at < ${reconcileBefore}
-    ORDER BY created_at LIMIT 50`);
+    UPDATE ticket_orders SET last_checked_at = ${now.toISOString()}
+    WHERE id IN (
+      SELECT id FROM ticket_orders
+      WHERE status = 'pending' AND needs_review_at IS NULL AND created_at < ${reconcileBefore}
+      ORDER BY last_checked_at NULLS FIRST, created_at LIMIT 50)
+    RETURNING id, stripe_payment_intent_id, created_at`);
   const out = { settled: 0, expired: 0, skipped: 0 };
   for (const o of pending) {
     try {
@@ -216,7 +239,7 @@ export async function runTicketOrderJob(now = new Date(), deps?: Pick<StripeLike
         if (r === "settled") out.settled++;
         else {
           out.skipped++;
-          if (r === "mismatch") await alertAdmin("Paid order needs a look", `PaymentIntent ${pi.id} succeeded but ticket order ${o.id} could not be settled.`);
+          if (r === "mismatch") await flagForReview(o.id, `PaymentIntent ${pi.id} succeeded but the order could not be settled`);
         }
         continue;
       }
@@ -277,10 +300,16 @@ router.post("/:id/checkout", hybridAuthMiddleware, async (req: Request, res: Res
           return fail(res, 409, "IDEMPOTENCY_KEY_REUSED", "This request key was already used for a different order. Send a new key.");
         }
         if (prev.status === "completed") return res.json({ success: true, order: await orderWithTickets(prev.id, userId), repeated: true });
-        if (prev.status !== "pending" || !prev.stripe_payment_intent_id) {
-          return fail(res, 409, "CHECKOUT_CLOSED", "That checkout has closed. Start a new one.");
-        }
+        if (prev.status !== "pending") return fail(res, 409, "CHECKOUT_CLOSED", "That checkout has closed. Start a new one.");
+        if (!prev.stripe_payment_intent_id) return fail(res, 409, "TRY_AGAIN", "This checkout is already being set up. Try again in a moment.");
         const pi = await s.getPaymentIntent(prev.stripe_payment_intent_id);
+        if (pi.status === "succeeded") {
+          // Paid already (its webhook may not have arrived yet): issue the tickets now.
+          const r = await settleTicketOrder(prev.id, pi.id, Number(pi.amount_received ?? 0));
+          if (r === "mismatch") await flagForReview(prev.id, `PaymentIntent ${pi.id} succeeded but the order could not be settled`);
+          return res.json({ success: true, order: await orderWithTickets(prev.id, userId), repeated: true });
+        }
+        if (pi.status === "canceled") return fail(res, 409, "CHECKOUT_CLOSED", "That checkout has closed. Start a new one.");
         return res.json({
           success: true, repeated: true, orderId: prev.id, paymentIntentId: pi.id, clientSecret: pi.client_secret ?? null,
           holdExpiresAt: iso(prev.expires_at), ...moneyJson(prev),
@@ -389,6 +418,8 @@ router.post("/:id/checkout", hybridAuthMiddleware, async (req: Request, res: Res
     } catch (err) {
       console.error(`[Tickets] PaymentIntent failed for order ${orderId}:`, err);
       await releasePendingTicketOrder(orderId, "cancelled").catch((e) => console.error("[Tickets] release after Stripe failure failed:", e));
+      // Free the request key so the buyer's retry (the message says "Try again") isn't refused.
+      await rows(sql`UPDATE ticket_orders SET idempotency_key = NULL WHERE id = ${orderId} AND status = 'cancelled'`).catch(() => {});
       return fail(res, 502, "PAYMENT_SETUP_FAILED", "Couldn't start the payment. Your seats were released. Try again.");
     }
 

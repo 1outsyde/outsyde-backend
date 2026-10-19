@@ -173,6 +173,9 @@ async function call(method: string, path: string, o: { token?: string; body?: un
     let [after] = await q(`SELECT status FROM ticket_orders WHERE id = $1`, [o1.orderId]);
     let [tk] = await q(`SELECT count(*)::int AS n FROM tickets WHERE order_id = $1`, [o1.orderId]);
     assert(after.status === "pending" && tk.n === 0, "wrong amount issues nothing", { after, tk });
+    await WebhookHandlers.handlePaymentIntentSucceeded(pay(o1.paymentIntentId, 4000));
+    const [flag] = await q(`SELECT needs_review_at, review_reason FROM ticket_orders WHERE id = $1`, [o1.orderId]);
+    assert(!!flag.needs_review_at && /could not be settled/.test(flag.review_reason), "mismatch flags the order for review (once)", flag);
     await WebhookHandlers.handlePaymentIntentSucceeded(pay(o1.paymentIntentId));
     [after] = await q(`SELECT status, paid_at FROM ticket_orders WHERE id = $1`, [o1.orderId]);
     const tix = await q(`SELECT * FROM tickets WHERE order_id = $1 ORDER BY item_index`, [o1.orderId]);
@@ -200,7 +203,7 @@ async function call(method: string, path: string, o: { token?: string; body?: un
     await WebhookHandlers.handlePaymentIntentCanceled({ ...piStore[o2.paymentIntentId], status: "canceled" });
     [after] = await q(`SELECT status FROM ticket_orders WHERE id = $1`, [o2.orderId]);
     c = await counts(ga.id, ev.id);
-    assert(after.status === "expired" && c.type === 2 && c.event === 2, "cancelled payment gives the seat back", { after, c });
+    assert(after.status === "cancelled" && c.type === 2 && c.event === 2, "cancelled payment gives the seat back", { after, c });
 
     console.log("Everyone at once");
     const { ev: ev2, types: [vip] } = await paidEvent([{ name: "VIP", priceCents: 5000, quantity: 5, maxPerOrder: 1, perAccountLimit: 1 }]);
@@ -218,8 +221,21 @@ async function call(method: string, path: string, o: { token?: string; body?: un
     c = await counts(t3.id, ev3.id);
     const [fo] = await q(`SELECT status FROM ticket_orders WHERE event_id = $1`, [ev3.id]);
     assert(r.status === 502 && r.body.error.code === "PAYMENT_SETUP_FAILED" && c.type === 0 && c.event === 0 && fo.status === "cancelled", "Stripe failure gives the seats back", { r, c, fo });
-    r = await checkout(ev3.id, b2, { ticketTypeId: t3.id });
+    failPaymentIntents = true;
+    r = await checkout(ev3.id, b3, { ticketTypeId: t3.id, idempotencyKey: `${P}-retry` });
+    failPaymentIntents = false;
+    const r2 = await checkout(ev3.id, b3, { ticketTypeId: t3.id, idempotencyKey: `${P}-retry` });
+    assert(r.status === 502 && r2.status === 201, "retry with the same key after a Stripe failure works", { r: r.body, r2: r2.body });
+    r = await checkout(ev3.id, b2, { ticketTypeId: t3.id, idempotencyKey: `${P}-k2` });
     assert(r.status === 201, "buyer can try again right away", r);
+    const k2 = r.body;
+    await q(`UPDATE ticket_orders SET stripe_payment_intent_id = NULL WHERE id = $1`, [k2.orderId]);
+    r = await checkout(ev3.id, b2, { ticketTypeId: t3.id, idempotencyKey: `${P}-k2` });
+    assert(r.status === 409 && r.body.error.code === "TRY_AGAIN", "repeat while the first is still setting up: try again, not a new hold", r);
+    await q(`UPDATE ticket_orders SET stripe_payment_intent_id = $2 WHERE id = $1`, [k2.orderId, k2.paymentIntentId]);
+    pay(k2.paymentIntentId);
+    r = await checkout(ev3.id, b2, { ticketTypeId: t3.id, idempotencyKey: `${P}-k2` });
+    assert(r.status === 200 && r.body.order?.status === "completed" && r.body.order.tickets.length === 1, "repeat after paying (webhook not here yet) issues the ticket", r);
 
     console.log("Every-minute job");
     const { ev: ev4, types: [t4] } = await paidEvent([{ name: "Job", priceCents: 1200, quantity: 10, maxPerOrder: 1 }]);
@@ -253,6 +269,12 @@ async function call(method: string, path: string, o: { token?: string; body?: un
     assert(out.settled === 1 && out.expired === 2, "job counts", out);
     const again = await runTicketOrderJob(new Date(), jobDeps as any);
     assert(again.settled === 0 && again.expired === 0, "second run changes nothing", again);
+    const [checked] = await q(`SELECT last_checked_at FROM ticket_orders WHERE id = $1`, [down.orderId]);
+    assert(!!checked.last_checked_at, "Stripe-error order is marked checked, so it goes to the back of the queue", checked);
+    await q(`UPDATE ticket_orders SET needs_review_at = now() WHERE id = $1`, [proc.orderId]);
+    piStore[proc.paymentIntentId].status = "requires_payment_method";
+    await runTicketOrderJob(new Date(), jobDeps as any);
+    assert(await st(proc.orderId) === "pending", "flagged order is left for the admin");
     r = await checkout(ev4.id, b1, { ticketTypeId: t4.id });
     assert(r.status === 201, "buyer whose hold expired can check out again", r);
   } finally {
