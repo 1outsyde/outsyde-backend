@@ -26,6 +26,7 @@ import { qualifyReferral, releaseAfterForBooking, type PromoRef } from "../loyal
 import { releasePromoForCanceledPaymentIntent } from "../promoCheckout";
 import { isComplimentaryTier, isTerminalStripeStatus } from "../complimentary";
 import { realName } from "../personName";
+import { getSubscriptionPeriod, getInvoiceSubscriptionId } from "./subscriptionFields";
 
 // XO Beauty & Lashes' own deposit-email sender (the legacy
 // create-deposit-intent flow's pre-existing behavior).
@@ -2132,12 +2133,15 @@ export class WebhookHandlers {
       }
     }
 
-    // Update subscription with new status and potentially new tier
-    const updateData: any = {
-      status: newStatus,
-      currentPeriodStart: new Date(subscription.current_period_start * 1000),
-      currentPeriodEnd: new Date(subscription.current_period_end * 1000),
-    };
+    // Update subscription with new status and potentially new tier. The period lives on the items
+    // from API basil on (subscription.current_period_* is gone); a payload without a usable period
+    // keeps the stored one instead of writing an Invalid Date (which threw and lost the event).
+    const period = getSubscriptionPeriod(subscription);
+    const updateData: any = { status: newStatus };
+    if (period) {
+      updateData.currentPeriodStart = period.start;
+      updateData.currentPeriodEnd = period.end;
+    }
 
     if (tierChanged) {
       updateData.tierId = newTierId;
@@ -2267,7 +2271,7 @@ export class WebhookHandlers {
     if (previousStatus === 'active' && (newStatus === 'canceled' || newStatus === 'past_due')) {
       const [tier] = await db.select().from(subscriptionTiers).where(eq(subscriptionTiers.id, vendorSub.tierId));
       const tierName = tier?.displayName || tier?.name || 'subscription';
-      const effectiveDate = new Date(subscription.current_period_end * 1000).toLocaleDateString();
+      const effectiveDate = (period?.end ?? vendorSub.currentPeriodEnd ?? new Date()).toLocaleDateString();
 
       // Audit log for subscription status change
       await storage.createAuditLog({
@@ -2315,20 +2319,21 @@ export class WebhookHandlers {
      INVOICE PAID (RENEW BENEFITS)
   ===================================================== */
   static async handleInvoicePaid(invoice: any) {
-    if (!invoice.subscription) return;
+    // basil on: invoice.parent.subscription_details.subscription; older: invoice.subscription.
+    const stripeSubscriptionId = getInvoiceSubscriptionId(invoice);
+    if (!stripeSubscriptionId) return;
 
     try {
-      const vendorSub = await storage.getVendorSubscriptionByStripeId(invoice.subscription);
+      const vendorSub = await storage.getVendorSubscriptionByStripeId(stripeSubscriptionId);
       if (!vendorSub) return;
 
       const stripe = await getUncachableStripeClient();
-      const subResponse = await stripe.subscriptions.retrieve(invoice.subscription);
-      const sub = subResponse as unknown as { current_period_start: number; current_period_end: number; status: string };
+      const sub: any = await stripe.subscriptions.retrieve(stripeSubscriptionId);
+      const period = getSubscriptionPeriod(sub);
 
       await storage.updateVendorSubscription(vendorSub.id, {
         status: sub.status || 'active',
-        currentPeriodStart: new Date(sub.current_period_start * 1000),
-        currentPeriodEnd: new Date(sub.current_period_end * 1000),
+        ...(period ? { currentPeriodStart: period.start, currentPeriodEnd: period.end } : {}),
       });
 
       if (vendorSub.businessId) {
@@ -2339,7 +2344,7 @@ export class WebhookHandlers {
 
       await storage.createBenefitAllowances(vendorSub.id);
 
-      console.log(`[Webhook] invoice.paid: subscription ${invoice.subscription} status=${sub.status}`);
+      console.log(`[Webhook] invoice.paid: subscription ${stripeSubscriptionId} status=${sub.status}`);
     } catch (error) {
       console.error('[Webhook] invoice.paid handler failed:', error);
     }

@@ -128,6 +128,7 @@ import { isClaimable, issueClaimCode, firstNameOf } from "./accountSetup/claim";
 import { namesForNewAccount, realName, publicDisplayName } from "./personName";
 import { sendAppointmentReceipts, sendShootBookingReceipts } from "./stripe/webhookHandlers";
 import { getStripePublishableKey, getUncachableStripeClient } from "./stripe/stripeClient";
+import { getSubscriptionPeriod } from "./stripe/subscriptionFields";
 import { isAllowedClientOrigin, normalizeClientOrigin } from "./clientOrigins";
 import { adminOverrideBusinessId } from "./adminBusinessOverride";
 import { authorizeAndProvisionGoLive, GoLiveError } from "./services/goLiveGate";
@@ -11305,13 +11306,14 @@ export async function registerRoutes(
           const stripeSub = await stripe.subscriptions.retrieve(sub.stripeSubscriptionId);
           const s = stripeSub as unknown as {
             status: string;
-            current_period_end: number;
             cancel_at_period_end: boolean;
             items: { data: Array<{ price: { id: string } }> };
           };
 
           liveStatus = s.status;
-          liveCurrentPeriodEnd = new Date(s.current_period_end * 1000);
+          // Period lives on the items from API basil on; fall back to the DB value when absent
+          // (an Invalid Date here serialized as null and hid the renewal date on every client).
+          liveCurrentPeriodEnd = getSubscriptionPeriod(stripeSub)?.end;
           cancelAtPeriodEnd = s.cancel_at_period_end;
 
           const stripePriceId = s.items.data[0]?.price?.id;
