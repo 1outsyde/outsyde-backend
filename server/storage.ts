@@ -241,6 +241,9 @@ export type StaffInvitePreview = {
   isExpired: boolean;
 };
 
+// Ranking points added to posts by accounts the viewer follows (getAlgorithmicFeed).
+export const FOLLOWED_AUTHOR_BOOST = 35;
+
 export interface IStorage {
   getUser(id: string): Promise<User | undefined>;
   getUserByEmail(email: string): Promise<User | undefined>;
@@ -867,7 +870,9 @@ export interface IStorage {
   seedInitialData(): Promise<void>;
 
   // Follows (Private)
-  createFollow(data: InsertFollow): Promise<Follow>;
+  createFollow(data: InsertFollow): Promise<Follow | undefined>;
+  getFollowedUserIds(followerUserId: string): Promise<Set<string>>;
+  getFollowingFeed(userId: string, limit?: number, offset?: number): Promise<FeedPost[]>;
   getFollow(followerUserId: string, targetUserId: string): Promise<Follow | undefined>;
   deleteFollow(followerUserId: string, targetUserId: string): Promise<void>;
   getUserFollowing(userId: string, limit?: number, offset?: number): Promise<User[]>;
@@ -5623,6 +5628,9 @@ export class DatabaseStorage implements IStorage {
       for (const b of blockedMe) excludedAuthorIds.add(b.blockerId);
     }
 
+    // Accounts the viewer follows rank higher (2026-10-19). Empty for logged-out viewers.
+    const followedAuthorIds = userId ? await this.getFollowedUserIds(userId) : new Set<string>();
+
     // Fetch more posts than needed for ranking to ensure we don't miss high-scoring older posts
     // Also fetch posts from last 7 days to balance recency with discovery
     const fetchLimit = Math.max(limit * 5, 500);
@@ -5682,6 +5690,11 @@ export class DatabaseStorage implements IStorage {
       // Vendor posts (product/service) get a boost
       if (post.postType === 'product' || post.postType === 'service') {
         score += 15;
+      }
+
+      // Followed accounts get a boost (about the same weight as a matching interest or a nearby post)
+      if (followedAuthorIds.has(post.authorId)) {
+        score += FOLLOWED_AUTHOR_BOOST;
       }
 
       // Category/industry preference matching
@@ -7265,14 +7278,50 @@ export class DatabaseStorage implements IStorage {
   // FOLLOWS (Private)
   // =========================
 
-  async createFollow(data: InsertFollow): Promise<Follow> {
+  // One statement: a second follow of the same account (double tap, retry, two requests at once)
+  // hits follows_unique and is ignored. Returns undefined when the follow already existed.
+  async createFollow(data: InsertFollow): Promise<Follow | undefined> {
     const id = randomUUID();
     const result = await db.insert(follows).values({
       id,
       followerUserId: data.followerUserId,
       targetUserId: data.targetUserId,
-    }).returning();
+    })
+      .onConflictDoNothing({ target: [follows.followerUserId, follows.targetUserId] })
+      .returning();
     return result[0];
+  }
+
+  async getFollowedUserIds(followerUserId: string): Promise<Set<string>> {
+    const rows = await db.select({ targetUserId: follows.targetUserId })
+      .from(follows)
+      .where(eq(follows.followerUserId, followerUserId));
+    return new Set(rows.map((r) => r.targetUserId));
+  }
+
+  // Following feed: active posts by accounts the user follows, newest first.
+  // Same block rule as getAlgorithmicFeed (hidden both ways). Empty when following nobody.
+  async getFollowingFeed(userId: string, limit = 50, offset = 0): Promise<FeedPost[]> {
+    const followed = await this.getFollowedUserIds(userId);
+    if (followed.size === 0) return [];
+
+    const blockedByMe = await this.getBlockedUsers(userId);
+    const blockedMe = await db.select({ blockerId: userBlocks.blockerId })
+      .from(userBlocks)
+      .where(eq(userBlocks.blockedId, userId));
+    for (const b of blockedByMe) followed.delete(b.blockedId);
+    for (const b of blockedMe) followed.delete(b.blockerId);
+    if (followed.size === 0) return [];
+
+    return db.select()
+      .from(feedPosts)
+      .where(and(
+        eq(feedPosts.isActive, true),
+        inArray(feedPosts.authorId, Array.from(followed)),
+      ))
+      .orderBy(sql`${feedPosts.createdAt} DESC`)
+      .limit(limit)
+      .offset(offset);
   }
 
   async getFollow(followerUserId: string, targetUserId: string): Promise<Follow | undefined> {
