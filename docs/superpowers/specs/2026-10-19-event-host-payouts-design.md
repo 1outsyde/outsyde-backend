@@ -33,6 +33,8 @@ Paid tickets can't be published today (eventsRouter.ts:473, :489; ticketsRouter.
 - Chargebacks: same rule, but built later with dispute webhooks.
 - Two PRs, paid stays off: 5a (this) and 5b (daily bank job). $100 buffer for 5b.
 - Before paid launch, Stripe goes to manual payouts (Legend flips it himself).
+- Owed recoveries come back only from the host's next EVENT payout (booking payouts untouched). Still owed after 30 days: one admin email, Legend collects or writes it off by hand (Legend 2026-10-19, after builder check).
+- Once an event has started, its end time can only move later, never earlier (Legend 2026-10-19, after builder check). Before start, edits work as today.
 
 ## Design (Claude's calls marked "call")
 
@@ -56,11 +58,12 @@ Paid tickets can't be published today (eventsRouter.ts:473, :489; ticketsRouter.
 - `tickets.payout_id` (nullable, new column) marks which tickets a payout covered (call).
 - Runs as a new step in the every-minute job (bookingStateMachine.ts), own try/catch, small LIMIT, least recently tried first.
 - Due: event `status = 'published'` (call: `paused` holds, `cancelled` never pays) and `ends_at + 3 days <= now()`.
-- Waits (no row change) while any order on the event is `pending`, `refunding`, or has `needs_review_at`.
+- Waits (no row change) while any order on the event is `pending` or `refunding` and NOT flagged. Flagged orders (`needs_review_at`) don't block (call, builder check): their tickets are never `valid` on a `completed` order, so they are never stamped, and the admin was already emailed about them.
 - Creating the payout is ONE SQL statement: insert the `event_payouts` row, stamp `payout_id` on every `valid` ticket of `completed` orders that has none, amount = sum of their `host_net_cents` minus owed recoveries for that destination (D below, capped so amount stays > 0; remainder stays owed). Guard pattern as in ticketsRouter (runtime-value guard). An event whose stamped total is 0 gets no row (call: free events never touch Stripe).
 - Sending: claim row (`attempts + 1`, `next_attempt_at` pushed out) like processTicketRefund; live readiness check; transfer from available balance with fixed key `event_payout_<payoutId>`, `transfer_group: event_<eventId>`, metadata `{ type: "event_payout", eventId, payoutId }`; before sending, look up an existing transfer in the group (same as createBookingTransfer) so a sent-but-unsaved transfer is recorded, not resent.
 - Host not ready: `held` with reason; admin email once; rechecked hourly (call); goes back to `pending` when ready.
-- Stripe errors: backoff 1, 2, 4, 8 minutes up to 60; after 5 tries `review` + one admin email. Insufficient balance counts as an error (no source_transaction fallback: one event spans many charges).
+- Insufficient platform balance (call, builder check): not an error count. Status stays `pending`, retried hourly, admin email at most once every 24 hours with what's owed and the available balance (same idea as booking payouts). No source_transaction fallback (one event spans many charges).
+- Other Stripe errors: backoff 1, 2, 4, 8 minutes up to 60; after 5 tries `review` + one admin email. Leaving `review` is manual for now: a documented SQL runbook in the vault (set back to `pending`, `attempts = 0`) until the Phase 3 admin view.
 - Host gets an app push when paid (new NotificationType; no email, Resend quota).
 
 ### E. Refunds after a payout (recoveries)
@@ -76,6 +79,12 @@ Paid tickets can't be published today (eventsRouter.ts:473, :489; ticketsRouter.
 - Migration 061 is idempotent, run in Neon by Claude before merge, verified read-only. Never db:migrate/drizzle push on production.
 - Tests on localhost Postgres with the Stripe stub (extend `.dev/stripe-stub-preload.mjs` for accounts, transfers, reversals).
 - Customer-facing copy: real punctuation, no dashes, no fee percentage.
+
+### F. End time after start
+Event update (eventsRouter PATCH): once `starts_at <= now()`, a new `ends_at` earlier than the saved one is refused (new error code, plain copy). Everything else about edits is unchanged.
+
+### G. Hosting as yourself while owning a business or photographer profile (call)
+`host_type = 'user'` always uses `user_payout_accounts`, even if the person also has a business, photographer, staff or influencer account. They can host as their business or photographer profile to use that account instead.
 
 ## Left to the builder
 File layout inside `server/events/`, exact column types and index names, stub extensions, test structure, notification text wording (within the copy rules), MCC value.
