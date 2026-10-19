@@ -130,6 +130,7 @@ import { sendAppointmentReceipts, sendShootBookingReceipts } from "./stripe/webh
 import { getStripePublishableKey, getUncachableStripeClient } from "./stripe/stripeClient";
 import { getSubscriptionPeriod } from "./stripe/subscriptionFields";
 import { switchPaidPlan, applySwitchedPlan, SWITCH_DECLINED_MESSAGE } from "./subscriptions/planSwitch";
+import { graceEndsAt } from "./subscriptions/policy";
 import { isAllowedClientOrigin, normalizeClientOrigin } from "./clientOrigins";
 import { adminOverrideBusinessId } from "./adminBusinessOverride";
 import { authorizeAndProvisionGoLive, GoLiveError } from "./services/goLiveGate";
@@ -11262,6 +11263,7 @@ export async function registerRoutes(
           stripeCustomerId: vendorSubscriptions.stripeCustomerId,
           currentPeriodStart: vendorSubscriptions.currentPeriodStart,
           currentPeriodEnd: vendorSubscriptions.currentPeriodEnd,
+          pastDueSince: vendorSubscriptions.pastDueSince,
           createdAt: vendorSubscriptions.createdAt,
           tierName: subscriptionTiers.name,
           tierDisplayName: subscriptionTiers.displayName,
@@ -11338,10 +11340,19 @@ export async function registerRoutes(
         connectReady = await computeConnectReady(business);
       }
 
+      // Additive (step 1.0b clients): when the plan is late, the day listings pause (7 day grace from
+      // past_due_since), and whether the system has paused this business's listings for a lapsed plan.
+      const effectiveStatus = liveStatus ?? sub.status;
+      const pastDueSince = effectiveStatus === 'past_due' && sub.pastDueSince ? new Date(sub.pastDueSince) : null;
+      const pausedCheck = await db.execute(sql`SELECT 1 FROM subscription_paused_items WHERE business_id = ${business.id} LIMIT 1`);
+
       res.json({
         subscription: {
           ...sub,
-          status: liveStatus ?? sub.status,
+          status: effectiveStatus,
+          pastDueSince,
+          graceEndsAt: pastDueSince ? graceEndsAt(pastDueSince) : null,
+          listingsPaused: pausedCheck.rows.length > 0,
           currentPeriodEnd: liveCurrentPeriodEnd ?? (sub.currentPeriodEnd ?? null),
           tierId: liveTierId ?? sub.tierId,
           tierName: liveTierName ?? sub.tierName,
