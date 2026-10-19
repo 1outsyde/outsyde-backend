@@ -28,7 +28,7 @@ const router = Router();
 const MAX_PER_ORDER = 20;
 
 /** Error text the guards raise; Postgres reports it as `invalid input syntax for type integer: "GUARD_<CODE>:n"`. */
-function guardCode(err: unknown): string | null {
+export function guardCode(err: unknown): string | null {
   const pe = pgError(err);
   if (pe.code !== "22P02") return null;
   const m = /"GUARD_([A-Z_]+):\d+"/.exec(pe.message ?? "");
@@ -36,7 +36,7 @@ function guardCode(err: unknown): string | null {
 }
 
 /** Two statements that lock the same rows in a different order can deadlock; Postgres aborts one (fully rolled back). Retry it. */
-async function withDeadlockRetry<T>(fn: () => Promise<T>): Promise<T> {
+export async function withDeadlockRetry<T>(fn: () => Promise<T>): Promise<T> {
   for (let attempt = 1; ; attempt++) {
     try {
       return await fn();
@@ -259,7 +259,7 @@ async function repeatedOrder(res: Response, userId: string, key: string, eventId
   return true;
 }
 
-async function orderWithTickets(orderId: string, userId: string) {
+export async function orderWithTickets(orderId: string, userId: string) {
   const [o] = await rows<any>(sql`
     SELECT o.*, e.slug, e.title FROM ticket_orders o JOIN events e ON e.id = o.event_id
     WHERE o.id = ${orderId} AND o.buyer_user_id = ${userId}`);
@@ -277,14 +277,15 @@ async function orderWithTickets(orderId: string, userId: string) {
 }
 
 /** Why a claim matched nothing (read after the fact; the claim itself is the source of truth). */
-async function whyNotClaimable(eventId: string, typeId: string, quantity: number): Promise<{ status: number; code: string; message: string }> {
+export async function whyNotClaimable(eventId: string, typeId: string, quantity: number, mode: "free" | "paid" = "free"): Promise<{ status: number; code: string; message: string }> {
   const [e] = await rows<any>(sql`SELECT status, starts_at FROM events WHERE id = ${eventId}`);
   if (!e || e.status === "draft" || e.status === "paused") return { status: 404, code: "EVENT_NOT_FOUND", message: "Event not found." };
   if (e.status === "cancelled") return { status: 409, code: "EVENT_CANCELLED", message: "This event was cancelled." };
   if (new Date(e.starts_at) <= new Date()) return { status: 409, code: "EVENT_STARTED", message: "This event has already started." };
   const [t] = await rows<any>(sql`SELECT * FROM ticket_types WHERE id = ${typeId} AND event_id = ${eventId}`);
   if (!t || t.status !== "active" || t.hidden) return { status: 404, code: "TICKET_TYPE_NOT_FOUND", message: "That ticket isn't available." };
-  if (Number(t.price_cents) > 0) return { status: 409, code: "PAID_TICKETS_NOT_AVAILABLE", message: "Paid tickets aren't available yet." };
+  if (mode === "free" && Number(t.price_cents) > 0) return { status: 409, code: "PAID_TICKET", message: "This ticket isn't free. Check out to buy it." };
+  if (mode === "paid" && Number(t.price_cents) === 0) return { status: 409, code: "FREE_TICKET", message: "This ticket is free. RSVP instead." };
   if (quantity < Number(t.min_per_order) || quantity > Number(t.max_per_order)) {
     return { status: 400, code: "INVALID_QUANTITY", message: `Choose between ${t.min_per_order} and ${t.max_per_order}.` };
   }

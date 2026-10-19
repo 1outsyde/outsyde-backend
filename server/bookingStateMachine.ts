@@ -486,6 +486,14 @@ export function startBookingCleanupJob(intervalMs: number = 60000): NodeJS.Timeo
     } catch (error) {
       console.error("[BookingCleanup] Error during abandoned-checkout cleanup:", error);
     }
+    // Event tickets: settle paid orders whose webhook was lost, expire abandoned holds.
+    // Own try/catch so it can never starve the steps above.
+    try {
+      const { runTicketOrderJob } = await import("./events/ticketCheckout");
+      await runTicketOrderJob();
+    } catch (error) {
+      console.error("[BookingCleanup] Error during ticket order job:", error);
+    }
   };
 
   cleanup();

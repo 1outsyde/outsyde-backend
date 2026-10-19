@@ -232,3 +232,57 @@ export function calculateRefundAdjustments(params: {
     isFullRefund,
   };
 }
+
+// =====================================================
+// EVENT TICKETS (decided 2026-10-18)
+// =====================================================
+// Buyer pays the ticket price + the consumer service fee (8%) + a flat $0.99 per paid ticket.
+// Host pays the 2% platform fee. Worked out PER TICKET and saved on each ticket at sale; the host is
+// paid once per event. Free tickets carry no fees.
+
+export const TICKET_PER_TICKET_FEE_CENTS = 99;
+export const TICKET_PLATFORM_FEE_RATE = 0.02;
+export const TICKET_FEE_MODEL_VERSION = 'tickets-v1';
+
+export interface TicketFeeBreakdown {
+  /** One ticket */
+  unitPriceCents: number;
+  unitServiceFeeCents: number;
+  unitPerTicketFeeCents: number;
+  unitPlatformFeeCents: number;
+  unitHostNetCents: number;
+  unitBuyerTotalCents: number;
+  /** Whole order (unit x quantity, so the order always equals the sum of its tickets) */
+  quantity: number;
+  subtotalCents: number;
+  serviceFeeCents: number;
+  perTicketFeeCents: number;
+  platformFeeCents: number;
+  hostNetCents: number;
+  totalCents: number;
+  outsydeGrossRevenueCents: number;
+  feeModelVersion: string;
+}
+
+export function calculateTicketFees(unitPriceCents: number, quantity: number): TicketFeeBreakdown {
+  if (!Number.isInteger(unitPriceCents) || unitPriceCents < 0) throw new Error('unitPriceCents must be a non-negative integer');
+  if (!Number.isInteger(quantity) || quantity < 1) throw new Error('quantity must be a positive integer');
+  const free = unitPriceCents === 0;
+  const unitServiceFeeCents = free ? 0 : Math.round(unitPriceCents * CONSUMER_SERVICE_FEE_RATE);
+  const unitPerTicketFeeCents = free ? 0 : TICKET_PER_TICKET_FEE_CENTS;
+  const unitPlatformFeeCents = free ? 0 : Math.round(unitPriceCents * TICKET_PLATFORM_FEE_RATE);
+  const unitHostNetCents = unitPriceCents - unitPlatformFeeCents;
+  const unitBuyerTotalCents = unitPriceCents + unitServiceFeeCents + unitPerTicketFeeCents;
+  return {
+    unitPriceCents, unitServiceFeeCents, unitPerTicketFeeCents, unitPlatformFeeCents, unitHostNetCents, unitBuyerTotalCents,
+    quantity,
+    subtotalCents: unitPriceCents * quantity,
+    serviceFeeCents: unitServiceFeeCents * quantity,
+    perTicketFeeCents: unitPerTicketFeeCents * quantity,
+    platformFeeCents: unitPlatformFeeCents * quantity,
+    hostNetCents: unitHostNetCents * quantity,
+    totalCents: unitBuyerTotalCents * quantity,
+    outsydeGrossRevenueCents: (unitServiceFeeCents + unitPerTicketFeeCents + unitPlatformFeeCents) * quantity,
+    feeModelVersion: TICKET_FEE_MODEL_VERSION,
+  };
+}
