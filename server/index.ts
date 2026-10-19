@@ -14,6 +14,7 @@ import { emailAdminRouter, broadcastPublicRouter } from "./routes/emailAdmin";
 import { resumeBroadcasts } from "./broadcasts/broadcasts";
 import vendorAnalyticsRouter from "./routes/vendorAnalytics";
 import eventsRouter from "./events/eventsRouter";
+import ticketsRouter from "./events/ticketsRouter";
 // stripe-replit-sync removed — no longer on Replit
 import { WebhookHandlers } from "./stripe/webhookHandlers";
 import { stripeService } from "./stripe/stripeService";
@@ -373,6 +374,8 @@ if (process.env.NODE_ENV === 'production') {
   app.use('/api/vendor/analytics', authMiddleware, vendorAnalyticsRouter);
   // Events & Ticketing (Phase 1): host create/edit/publish/cancel + public event page data
   app.use('/api/events', eventsRouter);
+  // Events & Ticketing (Phase 1 PR 2): ticket types, free RSVP + cancel, my tickets
+  app.use('/api/events', ticketsRouter);
   setupWebSocket(httpServer);
 
   app.use((err: any, _req: Request, res: Response, _next: NextFunction) => {

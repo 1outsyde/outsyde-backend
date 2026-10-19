@@ -35,28 +35,32 @@ const router = Router();
 const MAX_EVENT_LENGTH_MS = 30 * 24 * 60 * 60 * 1000;
 const MAX_START_AHEAD_MS = 2 * 365 * 24 * 60 * 60 * 1000;
 
-async function rows<T = Record<string, any>>(query: SQL): Promise<T[]> {
+export async function rows<T = Record<string, any>>(query: SQL): Promise<T[]> {
   const result: any = await db.execute(query);
   return (result?.rows ?? result ?? []) as T[];
 }
 
-function pgError(err: unknown): { code?: string; constraint?: string } {
-  const e = err as { code?: string; constraint?: string; cause?: { code?: string; constraint?: string } } | null;
-  return { code: e?.code ?? e?.cause?.code, constraint: e?.constraint ?? e?.cause?.constraint };
+export function pgError(err: unknown): { code?: string; constraint?: string; message?: string } {
+  const e = err as { code?: string; constraint?: string; message?: string; cause?: { code?: string; constraint?: string; message?: string } } | null;
+  return {
+    code: e?.code ?? e?.cause?.code,
+    constraint: e?.constraint ?? e?.cause?.constraint,
+    message: e?.message ?? e?.cause?.message,
+  };
 }
 
-const iso = (v: unknown): string | null => (v == null ? null : new Date(v as string).toISOString());
+export const iso = (v: unknown): string | null => (v == null ? null : new Date(v as string).toISOString());
 const dateOrNull = (v: unknown): Date | null => (v == null ? null : new Date(v as string));
 
-function fail(res: Response, status: number, code: string, message: string) {
+export function fail(res: Response, status: number, code: string, message: string) {
   return res.status(status).json({ success: false, error: { code, message } });
 }
 
 // ─── Validation ─────────────────────────────────────────────────────────────
 
 const text = (max: number) => z.string().trim().max(max);
-const optionalText = (max: number) => text(max).nullable().optional().transform((v) => (v === "" ? null : v));
-const httpsUrl = z
+export const optionalText = (max: number) => text(max).nullable().optional().transform((v) => (v === "" ? null : v));
+export const httpsUrl = z
   .string()
   .trim()
   .max(2048)
@@ -109,7 +113,7 @@ const COLUMNS: Record<string, string> = {
   refundPolicy: "refund_policy", refundCutoffHours: "refund_cutoff_hours",
 };
 
-function zodError(res: Response, error: z.ZodError) {
+export function zodError(res: Response, error: z.ZodError) {
   const first = error.issues[0];
   return fail(res, 400, "INVALID_EVENT", `${first?.path.join(".") || "body"}: ${first?.message ?? "invalid"}`);
 }
@@ -134,7 +138,7 @@ interface ActiveUser {
   profile_image_url: string | null; is_vendor: boolean; is_photographer: boolean;
 }
 
-async function loadActiveUser(userId: string): Promise<ActiveUser | null> {
+export async function loadActiveUser(userId: string): Promise<ActiveUser | null> {
   const [u] = await rows<ActiveUser & { is_active: boolean; deletion_status: string }>(sql`
     SELECT id, name, first_name, username, profile_image_url, is_vendor, is_photographer, is_active, deletion_status
     FROM users WHERE id = ${userId}`);
@@ -142,12 +146,12 @@ async function loadActiveUser(userId: string): Promise<ActiveUser | null> {
   return u;
 }
 
-async function loadEventForHost(eventId: string, userId: string): Promise<any | null> {
+export async function loadEventForHost(eventId: string, userId: string): Promise<any | null> {
   const [e] = await rows(sql`SELECT * FROM events WHERE id = ${eventId} AND host_user_id = ${userId}`);
   return e ?? null;
 }
 
-async function loadTicketTypes(eventId: string): Promise<any[]> {
+export async function loadTicketTypes(eventId: string): Promise<any[]> {
   return rows(sql`SELECT * FROM ticket_types WHERE event_id = ${eventId} ORDER BY sort_order, created_at`);
 }
 
@@ -192,7 +196,7 @@ function eventRemaining(e: any): number | null {
   return e.capacity == null ? null : Math.max(0, Number(e.capacity) - Number(e.reserved_count));
 }
 
-function hostTicketTypeJson(t: any) {
+export function hostTicketTypeJson(t: any) {
   return {
     id: t.id, name: t.name, description: t.description ?? null, priceCents: Number(t.price_cents),
     quantity: Number(t.quantity), takenCount: Number(t.reserved_count),
