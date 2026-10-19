@@ -4,7 +4,7 @@
  * Run with: npx tsx server/customerInterests.http.test.ts
  *
  * SCRATCH ONLY. Needs a backend booted on localhost against a LOCAL scratch Postgres that has
- * migration 056 applied.
+ * migration 058 (customer interests) applied.
  *   PS_TEST_BASE_URL   e.g. http://localhost:5062   (must be localhost)
  *   PS_TEST_PG_URL     the SAME scratch database    (localhost only; seeds + cleans up)
  *   JWT_SECRET         identical to the server's
