@@ -29,8 +29,22 @@ const MAX_PER_ORDER = 20;
 
 /** Error text the guards raise; Postgres reports it as `invalid input syntax for type integer: "GUARD_<CODE>:n"`. */
 function guardCode(err: unknown): string | null {
-  const m = /GUARD_([A-Z_]+):/.exec(pgError(err).message ?? "");
+  const pe = pgError(err);
+  if (pe.code !== "22P02") return null;
+  const m = /"GUARD_([A-Z_]+):\d+"/.exec(pe.message ?? "");
   return m ? m[1] : null;
+}
+
+/** Two statements that lock the same rows in a different order can deadlock; Postgres aborts one (fully rolled back). Retry it. */
+async function withDeadlockRetry<T>(fn: () => Promise<T>): Promise<T> {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await fn();
+    } catch (err) {
+      if (pgError(err).code === "40P01" && attempt < 3) continue;
+      throw err;
+    }
+  }
 }
 
 // ─── Ticket types (host) ────────────────────────────────────────────────────
@@ -118,6 +132,9 @@ router.post("/:id/ticket-types", hybridAuthMiddleware, async (req: Request, res:
     const minPer = b.minPerOrder ?? 1;
     const maxPer = b.maxPerOrder ?? (free ? 1 : 10);
     const perAccount = b.perAccountLimit !== undefined ? b.perAccountLimit : free ? 1 : null;
+    if (perAccount != null && maxPer > perAccount) {
+      return fail(res, 400, "INVALID_ORDER_LIMITS", "The most per order can't be more than the limit per person.");
+    }
     try {
       const [created] = await rows(sql`
         INSERT INTO ticket_types (
@@ -128,6 +145,7 @@ router.post("/:id/ticket-types", hybridAuthMiddleware, async (req: Request, res:
                ${b.salesEndAt ?? null}, ${b.unlockAfterTicketTypeId ?? null}, ${minPer}, ${maxPer}, ${perAccount},
                ${b.hidden ?? false}, ${b.sortOrder ?? 0}
         FROM events WHERE id = ${e.id} AND host_user_id = ${userId} AND status IN ('draft', 'published')
+          AND (${b.priceCents} = 0 OR status = 'draft')
         RETURNING *`);
       if (!created) return fail(res, 409, "EVENT_CHANGED", "This event just changed. Reload and try again.");
       return res.status(201).json({ success: true, ticketType: hostTicketTypeJson(created) });
@@ -160,6 +178,11 @@ router.patch("/:id/ticket-types/:typeId", hybridAuthMiddleware, async (req: Requ
       }
     }
     if (b.unlockAfterTicketTypeId !== undefined && !(await checkUnlock(res, e.id, t.id, b.unlockAfterTicketTypeId))) return;
+    const nextMax = b.maxPerOrder ?? Number(t.max_per_order);
+    const nextLimit = b.perAccountLimit !== undefined ? b.perAccountLimit : t.per_account_limit == null ? null : Number(t.per_account_limit);
+    if (nextLimit != null && nextMax > nextLimit) {
+      return fail(res, 400, "INVALID_ORDER_LIMITS", "The most per order can't be more than the limit per person.");
+    }
 
     const sets: SQL[] = Object.keys(b)
       .filter((k) => TYPE_COLUMNS[k])
@@ -171,7 +194,8 @@ router.patch("/:id/ticket-types/:typeId", hybridAuthMiddleware, async (req: Requ
         UPDATE ticket_types SET ${sql.join(sets, sql`, `)}
         WHERE id = ${t.id} AND event_id = ${e.id} AND status = 'active'
           AND (${b.priceCents === undefined} OR reserved_count = 0 OR price_cents = ${b.priceCents ?? 0})
-          AND EXISTS (SELECT 1 FROM events ev WHERE ev.id = ${e.id} AND ev.status IN ('draft', 'published'))
+          AND EXISTS (SELECT 1 FROM events ev WHERE ev.id = ${e.id} AND ev.status IN ('draft', 'published')
+                      AND (ev.status = 'draft' OR ${b.priceCents === undefined ? Number(t.price_cents) : b.priceCents} = 0))
         RETURNING *`);
       if (!updated) return fail(res, 409, "TICKET_TYPE_CHANGED", "This ticket type just changed. Reload and try again.");
       return res.json({ success: true, ticketType: hostTicketTypeJson(updated) });
@@ -219,6 +243,21 @@ const rsvpSchema = z.object({
   quantity: z.number().int().min(1).max(MAX_PER_ORDER).optional(),
   idempotencyKey: z.string().trim().min(8).max(100).optional(),
 }).strict();
+
+/** A repeated key returns the earlier RSVP only when it was for the same thing and is still active. */
+async function repeatedOrder(res: Response, userId: string, key: string, eventId: string, typeId: string, quantity: number) {
+  const [prev] = await rows<any>(sql`
+    SELECT o.id, o.event_id, o.status, o.ticket_count, i.ticket_type_id
+    FROM ticket_orders o LEFT JOIN ticket_order_items i ON i.order_id = o.id
+    WHERE o.buyer_user_id = ${userId} AND o.idempotency_key = ${key} LIMIT 1`);
+  if (!prev) return false;
+  if (prev.event_id !== eventId || prev.ticket_type_id !== typeId || Number(prev.ticket_count) !== quantity || prev.status !== "completed") {
+    fail(res, 409, "IDEMPOTENCY_KEY_REUSED", "This request key was already used for a different RSVP. Send a new key.");
+    return true;
+  }
+  res.json({ success: true, order: await orderWithTickets(prev.id, userId), repeated: true });
+  return true;
+}
 
 async function orderWithTickets(orderId: string, userId: string) {
   const [o] = await rows<any>(sql`
@@ -274,10 +313,7 @@ router.post("/:id/rsvp", hybridAuthMiddleware, async (req: Request, res: Respons
 
   try {
     if (!(await loadActiveUser(userId))) return fail(res, 403, "ACCOUNT_INACTIVE", "This account can't RSVP.");
-    if (idempotencyKey) {
-      const [prev] = await rows<any>(sql`SELECT id FROM ticket_orders WHERE buyer_user_id = ${userId} AND idempotency_key = ${idempotencyKey}`);
-      if (prev) return res.json({ success: true, order: await orderWithTickets(prev.id, userId), repeated: true });
-    }
+    if (idempotencyKey && (await repeatedOrder(res, userId, idempotencyKey, eventId, ticketTypeId, quantity))) return;
 
     const codes = Array.from({ length: quantity }, () => makeTicketCode());
     const codesLiteral = `{${codes.join(",")}}`; // A-Z and 2-9 only: safe as a Postgres array literal
@@ -285,8 +321,14 @@ router.post("/:id/rsvp", hybridAuthMiddleware, async (req: Request, res: Respons
       // One statement: bump the ticket type, then the event, then the per-account count (each guarded by
       // a CHECK), then write the order, its line and one ticket per guest. Ends with a guard: if the type
       // was bumped but anything after it didn't happen, raise so the whole statement rolls back.
-      const [r] = await rows<any>(sql`
-        WITH tt AS (
+      const [r] = await withDeadlockRetry(() => rows<any>(sql`
+        WITH par AS (
+          -- The tier this one opens after, locked: read at its latest version, not the statement snapshot.
+          SELECT p.id, p.status, p.reserved_count, p.quantity FROM ticket_types p
+          WHERE p.id = (SELECT x.unlock_after_ticket_type_id FROM ticket_types x WHERE x.id = ${ticketTypeId})
+          FOR UPDATE
+        ),
+        tt AS (
           UPDATE ticket_types t SET reserved_count = t.reserved_count + ${quantity}, updated_at = now()
           WHERE t.id = ${ticketTypeId} AND t.event_id = ${eventId} AND t.status = 'active' AND t.hidden = false
             AND t.price_cents = 0
@@ -294,8 +336,8 @@ router.post("/:id/rsvp", hybridAuthMiddleware, async (req: Request, res: Respons
             AND (t.sales_start_at IS NULL OR t.sales_start_at <= now())
             AND (t.sales_end_at IS NULL OR t.sales_end_at > now())
             AND (t.unlock_after_ticket_type_id IS NULL OR EXISTS (
-              SELECT 1 FROM ticket_types s WHERE s.id = t.unlock_after_ticket_type_id
-                AND (s.status <> 'active' OR s.reserved_count >= s.quantity)))
+              SELECT 1 FROM par WHERE par.id = t.unlock_after_ticket_type_id
+                AND (par.status <> 'active' OR par.reserved_count >= par.quantity)))
           RETURNING t.id, t.per_account_limit
         ),
         ev AS (
@@ -328,7 +370,7 @@ router.post("/:id/rsvp", hybridAuthMiddleware, async (req: Request, res: Respons
         )
         SELECT (SELECT id FROM o) AS order_id,
                CASE WHEN EXISTS (SELECT 1 FROM tt) AND (SELECT count(*) FROM tk) <> ${quantity}
-                 THEN ('GUARD_NOT_OPEN:' || (SELECT count(*) FROM tk))::int END AS guard`);
+                 THEN ('GUARD_NOT_OPEN:' || (SELECT count(*) FROM tk))::int END AS guard`));
       if (r?.order_id) {
         return res.status(201).json({ success: true, order: await orderWithTickets(r.order_id, userId) });
       }
@@ -342,8 +384,7 @@ router.post("/:id/rsvp", hybridAuthMiddleware, async (req: Request, res: Respons
         if (pe.constraint === "ticket_account_counts_limit") return fail(res, 409, "LIMIT_REACHED", "You already have the most tickets allowed for this.");
       }
       if (pe.code === "23505" && pe.constraint === "uq_ticket_orders_idempotency" && idempotencyKey) {
-        const [prev] = await rows<any>(sql`SELECT id FROM ticket_orders WHERE buyer_user_id = ${userId} AND idempotency_key = ${idempotencyKey}`);
-        if (prev) return res.json({ success: true, order: await orderWithTickets(prev.id, userId), repeated: true });
+        if (await repeatedOrder(res, userId, idempotencyKey, eventId, ticketTypeId, quantity)) return;
       }
       if (guardCode(err)) {
         const why = await whyNotClaimable(eventId, ticketTypeId, quantity);
@@ -362,9 +403,11 @@ router.post("/orders/:orderId/cancel", hybridAuthMiddleware, async (req: Request
   if (!userId) return fail(res, 401, "NO_AUTH", "Sign in to cancel.");
   const orderId = String(req.params.orderId);
   try {
+    if (!(await loadActiveUser(userId))) return fail(res, 403, "ACCOUNT_INACTIVE", "This account can't change RSVPs.");
     // One statement. The guest's spot always goes back to the event's capacity. The ticket type's own
-    // spot reopens only until a tier that opens after it has sold (decision 2026-10-18).
-    const [r] = await rows<any>(sql`
+    // spot reopens only until a tier that opens after it has sold (decision 2026-10-18). When it stays
+    // closed, ticket_types.reserved_count keeps that spot on purpose: never rebuild it from issued items.
+    const [r] = await withDeadlockRetry(() => rows<any>(sql`
       WITH o AS (
         UPDATE ticket_orders SET status = 'cancelled', cancelled_at = now(), updated_at = now()
         WHERE id = ${orderId} AND buyer_user_id = ${userId} AND status = 'completed' AND total_cents = 0
@@ -381,10 +424,16 @@ router.post("/orders/:orderId/cancel", hybridAuthMiddleware, async (req: Request
         FROM o WHERE i.order_id = o.id AND i.status = 'issued'
         RETURNING i.ticket_type_id, i.quantity
       ),
+      kids AS (
+        -- Tiers that open after the cancelled one, locked: read at their latest version.
+        SELECT n.unlock_after_ticket_type_id AS parent_id, n.reserved_count FROM ticket_types n
+        WHERE n.unlock_after_ticket_type_id IN (SELECT ticket_type_id FROM it)
+        FOR UPDATE
+      ),
       tt AS (
         UPDATE ticket_types t SET reserved_count = t.reserved_count - it.quantity, updated_at = now()
         FROM it WHERE t.id = it.ticket_type_id
-          AND NOT EXISTS (SELECT 1 FROM ticket_types n WHERE n.unlock_after_ticket_type_id = t.id AND n.reserved_count > 0)
+          AND NOT EXISTS (SELECT 1 FROM kids WHERE kids.parent_id = t.id AND kids.reserved_count > 0)
         RETURNING t.id
       ),
       ac AS (
@@ -401,7 +450,11 @@ router.post("/orders/:orderId/cancel", hybridAuthMiddleware, async (req: Request
              CASE WHEN EXISTS (SELECT 1 FROM o) AND NOT EXISTS (SELECT 1 FROM ev)
                THEN ('GUARD_EVENT_CLOSED:' || (SELECT count(*) FROM o))::int END AS guard_event,
              CASE WHEN EXISTS (SELECT 1 FROM o) AND (SELECT count(*) FROM ac) <> (SELECT count(*) FROM it)
-               THEN ('GUARD_COUNTS:' || (SELECT count(*) FROM ac))::int END AS guard_counts`);
+               THEN ('GUARD_COUNTS:' || (SELECT count(*) FROM ac))::int END AS guard_counts,
+             CASE WHEN EXISTS (SELECT 1 FROM o) AND (
+                    (SELECT count(*) FROM tk) <> (SELECT ticket_count FROM o)
+                 OR (SELECT COALESCE(sum(quantity), 0) FROM it) <> (SELECT ticket_count FROM o))
+               THEN ('GUARD_TICKETS:' || (SELECT count(*) FROM tk))::int END AS guard_tickets`));
     if (r?.order_id) {
       return res.json({ success: true, spotReopened: Number(r.reopened) > 0, order: await orderWithTickets(r.order_id, userId) });
     }
@@ -416,8 +469,8 @@ router.post("/orders/:orderId/cancel", hybridAuthMiddleware, async (req: Request
     if (o.checked_in) return fail(res, 409, "CHECKED_IN", "You've already checked in.");
     return fail(res, 409, "ORDER_NOT_CANCELLABLE", "This RSVP can't be cancelled.");
   } catch (err) {
-    if (guardCode(err) === "COUNTS") return fail(res, 409, "TRY_AGAIN", "Something changed. Try again.");
-    if (guardCode(err) === "EVENT_CLOSED") return fail(res, 409, "EVENT_CLOSED", "This event has started, ended or been cancelled, so RSVPs can't change.");
+    if (guardCode(err) === "COUNTS" || guardCode(err) === "TICKETS") return fail(res, 409, "TRY_AGAIN", "Something changed. Try again.");
+    if (guardCode(err) === "EVENT_CLOSED") return fail(res, 409, "EVENT_CLOSED", "This event has started, ended, been paused or been cancelled, so RSVPs can't change.");
     console.error("[Events] rsvp cancel failed:", err);
     return fail(res, 500, "SERVER_ERROR", "Couldn't cancel your RSVP.");
   }

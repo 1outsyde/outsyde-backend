@@ -98,6 +98,10 @@ async function call(method: string, path: string, o: { token?: string; body?: un
     r = await addType(ev.id, { name: "Free RSVP", priceCents: 0, quantity: 10 });
     assert(r.status === 201 && r.body.ticketType.maxPerOrder === 1 && r.body.ticketType.perAccountLimit === 1, "free type defaults to 1 per order and 1 per account", r);
     const free = r.body.ticketType;
+    r = await addType(ev.id, { name: "Group", priceCents: 0, quantity: 10, maxPerOrder: 4, perAccountLimit: 2 });
+    assert(r.status === 400 && r.body.error.code === "INVALID_ORDER_LIMITS", "most per order can't exceed the per-person limit", r);
+    r = await call("PATCH", `/api/events/${ev.id}/ticket-types/${free.id}`, { token: tok(host), body: { maxPerOrder: 3 } });
+    assert(r.status === 400 && r.body.error.code === "INVALID_ORDER_LIMITS", "edit can't push most per order above the limit", r);
     r = await addType(ev.id, { name: "Cheap", priceCents: 50, quantity: 10 });
     assert(r.status === 400, "50 cent ticket refused ($1 lowest)", r);
     r = await addType(ev.id, { name: "VIP", priceCents: 5000, quantity: 10 });
@@ -153,6 +157,8 @@ async function call(method: string, path: string, o: { token?: string; body?: un
     const r3 = await rsvp(ev.id, g2, { ticketTypeId: free.id }, { "Idempotency-Key": `${P}-header-key` });
     const r4 = await rsvp(ev.id, g2, { ticketTypeId: free.id }, { "Idempotency-Key": `${P}-header-key` });
     assert(r3.status === 201 && r4.body?.order?.id === r3.body.order.id, "Idempotency-Key header works too", { r3, r4 });
+    const r5 = await rsvp(ev.id, g1, { ticketTypeId: wave.id, idempotencyKey: key });
+    assert(r5.status === 409 && r5.body.error.code === "IDEMPOTENCY_KEY_REUSED", "same key for a different ticket refused", r5);
 
     console.log("Everyone at once");
     let c = await counts(free.id, ev.id);
@@ -224,7 +230,7 @@ async function call(method: string, path: string, o: { token?: string; body?: un
     r = await rsvp(ev3.id, g2, { ticketTypeId: t3.id });
     assert(r.status === 409 && r.body.error.code === "EVENT_FULL", "event full", r);
     await call("PATCH", `/api/events/${ev3.id}`, { token: tok(host), body: { capacity: 10 } });
-    r = await call("PATCH", `/api/events/${ev3.id}/ticket-types/${t3.id}`, { token: tok(host), body: { perAccountLimit: 2 } });
+    r = await call("PATCH", `/api/events/${ev3.id}/ticket-types/${t3.id}`, { token: tok(host), body: { perAccountLimit: 2, maxPerOrder: 2 } });
     assert(r.status === 200, "host lowers the per-account limit to 2", r);
     r = await rsvp(ev3.id, g1, { ticketTypeId: t3.id });
     assert(r.status === 409 && r.body.error.code === "LIMIT_REACHED", "lowered limit applies to the next claim", r);
