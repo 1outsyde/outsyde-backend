@@ -2154,7 +2154,10 @@ export const postLikes = pgTable("post_likes", {
   userId: varchar("user_id", { length: 36 }).notNull().references(() => users.id),
 
   createdAt: timestamp("created_at").defaultNow().notNull(),
-});
+}, (table) => ({
+  // Migration 061. One like per user per post, so a fast double tap can't count twice.
+  postLikesUserPostUnique: unique("post_likes_user_post_unique").on(table.userId, table.postId),
+}));
 
 export const postComments = pgTable("post_comments", {
   id: varchar("id", { length: 36 }).primaryKey().default(sql`gen_random_uuid()`),

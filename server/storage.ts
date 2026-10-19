@@ -5803,22 +5803,20 @@ export class DatabaseStorage implements IStorage {
   }
 
   async likePost(postId: string, userId: string): Promise<boolean> {
-    const existing = await db.select()
-      .from(postLikes)
-      .where(and(
-        eq(postLikes.postId, postId),
-        eq(postLikes.userId, userId)
-      ));
-    
-    if (existing.length > 0) return false;
-
-    await db.insert(postLikes)
+    // One statement: a second like of the same post (double tap, retry, two requests at once)
+    // hits the unique (user_id, post_id) constraint and is ignored, so the count only goes up
+    // when a row was really added. Returns false when the post was already liked, as before.
+    const inserted = await db.insert(postLikes)
       .values({
         id: randomUUID(),
         postId,
         userId,
-      });
-    
+      })
+      .onConflictDoNothing({ target: [postLikes.userId, postLikes.postId] })
+      .returning({ id: postLikes.id });
+
+    if (inserted.length === 0) return false;
+
     await db.update(feedPosts)
       .set({ likesCount: sql`${feedPosts.likesCount} + 1` })
       .where(eq(feedPosts.id, postId));

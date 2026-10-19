@@ -4223,7 +4223,14 @@ export async function registerRoutes(
         .orderBy(desc(feedPosts.createdAt))
         .limit(limit);
 
-      res.json({ posts });
+      // Additive: whether the signed-in viewer liked each post (false when logged out),
+      // so the post screen shows the right heart. Bearer (app) or session (web).
+      const viewerId = (req as AuthenticatedRequest).user?.userId || req.session?.userId;
+      const likedSet = viewerId && posts.length > 0
+        ? await storage.getLikedPostIds(viewerId, posts.map((p) => p.id))
+        : new Set<string>();
+
+      res.json({ posts: posts.map((p) => ({ ...p, isLiked: likedSet.has(p.id) })) });
     } catch (error) {
       console.error("Get profile posts error:", error);
       res.status(500).json({ error: "Failed to get profile posts" });
@@ -22695,7 +22702,9 @@ export async function registerRoutes(
 
   // Like a post
   app.post("/api/feed/:postId/like", async (req, res) => {
-    const userId = req.session?.userId;
+    // Session (web) or Bearer token (app). The app's session cookie expires after
+    // 7 days while its token keeps refreshing, so session-only auth would 401.
+    const userId = req.session?.userId || getUserIdFromRequest(req);
     if (!userId) {
       return res.status(401).json({ error: "Not authenticated" });
     }
@@ -22712,7 +22721,8 @@ export async function registerRoutes(
 
   // Unlike a post
   app.delete("/api/feed/:postId/like", async (req, res) => {
-    const userId = req.session?.userId;
+    // Session or Bearer, same as like/save.
+    const userId = req.session?.userId || getUserIdFromRequest(req);
     if (!userId) {
       return res.status(401).json({ error: "Not authenticated" });
     }
