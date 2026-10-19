@@ -235,6 +235,11 @@ export const users = pgTable("users", {
   selectedIndustries: jsonb("selected_industries").$type<string[]>().default([]),
   industryNiches: jsonb("industry_niches").$type<Record<string, string[]>>().default({}),
   industryValues: jsonb("industry_values").$type<Record<string, string[]>>().default({}),
+  // 2026-10-18 (migration 056): customer interests on the shared business list.
+  // interest_other = their own words when they pick Other; interests_original = the answers
+  // exactly as first sent whenever older words had to be mapped to shared codes.
+  interestOther: text("interest_other"),
+  interestsOriginal: jsonb("interests_original").$type<{ selectedIndustries: unknown; industryNiches: unknown; industryValues: unknown } | null>(),
 
   loyaltyPoints: integer("loyalty_points").default(0).notNull(),
 
@@ -2597,6 +2602,8 @@ export const customerSignupSchema = z.object({
   selectedIndustries: z.array(z.string()).default([]),
   industryNiches: z.record(z.string(), z.array(z.string())).default({}),
   industryValues: z.record(z.string(), z.array(z.string())).default({}),
+  // Their own words when they pick Other (2026-10-18). Longer text is cut to 500.
+  interestOther: z.string().optional(),
   // Optional: auto-accept a staff invite at signup time
   inviteCode: z.string().optional(),
   // Optional: tag the signup source (e.g. 'xo-beauty-web') for analytics

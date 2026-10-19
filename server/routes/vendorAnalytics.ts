@@ -1,4 +1,5 @@
 import { Router } from "express";
+import { interestMatchProfile, interestIndustryNames } from "@shared/customerInterests";
 import { sql } from "drizzle-orm";
 import { db } from "../db";
 import type { AuthenticatedRequest } from "../auth";
@@ -197,8 +198,8 @@ router.get("/audience", async (req, res) => {
       const freq = p.shopping_frequency ? toSnake(p.shopping_frequency) : null;
       if (freq && freq in freqCounts) freqCounts[freq]++;
 
-      const industries = Array.isArray(p.selected_industries) ? p.selected_industries : [];
-      for (const ind of industries) {
+      // Readable shared list names (older words mapped, 2026-10-18).
+      for (const ind of interestIndustryNames(p.selected_industries)) {
         industryCounts[ind] = (industryCounts[ind] ?? 0) + 1;
       }
     }
@@ -259,8 +260,8 @@ router.get("/photographer-match", async (req, res) => {
 
     const industryCounts: Record<string, number> = {};
     for (const row of industryResult.rows) {
-      const industries = Array.isArray(row.selected_industries) ? row.selected_industries : [];
-      for (const ind of industries) {
+      // Compared by shared list industry code (older words mapped, 2026-10-18).
+      for (const ind of interestMatchProfile({ selectedIndustries: row.selected_industries }).categoryCodes) {
         industryCounts[ind] = (industryCounts[ind] ?? 0) + 1;
       }
     }
@@ -291,7 +292,7 @@ router.get("/photographer-match", async (req, res) => {
 
     const scored = photographerResult.rows
       .map((p) => {
-        const theirIndustries = Array.isArray(p.selected_industries) ? p.selected_industries : [];
+        const theirIndustries = interestMatchProfile({ selectedIndustries: p.selected_industries }).categoryCodes;
         const overlap = theirIndustries.filter((ind) => vendorTopIndustries.includes(ind));
         const match_score = overlap.length / vendorTopIndustries.length;
         const match_percent = Math.round(match_score * 100);

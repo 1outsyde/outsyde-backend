@@ -173,6 +173,7 @@ import {
   isValidBookingTransition,
   promoCodes,
 } from "@shared/schema";
+import { interestMatchProfile } from "@shared/customerInterests";
 import { db } from "./db";
 import { coverPosterUrl, coverStillImage, nonEmpty } from "./coverMedia";
 import { eq, ilike, or, and, sql, isNull, isNotNull, desc, asc, gte, lte, ne, inArray, notInArray } from "drizzle-orm";
@@ -1042,7 +1043,24 @@ export class DatabaseStorage implements IStorage {
       selectedIndustries: (insertUser.selectedIndustries as string[]) || [],
       industryNiches: (insertUser.industryNiches as Record<string, string[]>) || {},
       industryValues: (insertUser.industryValues as Record<string, string[]>) || {},
+      interestOther: insertUser.interestOther || null,
+      interestsOriginal: (insertUser.interestsOriginal as User["interestsOriginal"]) ?? null,
       source: insertUser.source ?? null,
+
+      // 2026-10-18: signup answers callers already pass but were never saved (Legend: know
+      // every answer). Undefined keeps the column default (country, billing same as home).
+      firstName: insertUser.firstName || null,
+      lastName: insertUser.lastName || null,
+      profileImageUrl: insertUser.profileImageUrl || null,
+      aptUnit: insertUser.aptUnit || null,
+      country: insertUser.country || undefined,
+      billingSameAsHome: insertUser.billingSameAsHome ?? undefined,
+      billingStreet: insertUser.billingStreet || null,
+      billingAptUnit: insertUser.billingAptUnit || null,
+      billingCity: insertUser.billingCity || null,
+      billingState: insertUser.billingState || null,
+      billingZip: insertUser.billingZip || null,
+      billingCountry: insertUser.billingCountry || undefined,
     }).returning();
     return result[0];
   }
@@ -3339,15 +3357,10 @@ export class DatabaseStorage implements IStorage {
 
     // Apply preference-based ranking in JavaScript (safe from SQL injection)
     if (userPreferences && results.length > 0) {
-      const allNiches: string[] = [];
-      const allIndustries = (userPreferences.selectedIndustries || []).map(i => i.toLowerCase());
-      
-      // Flatten all niches from industryNiches map
-      if (userPreferences.industryNiches) {
-        for (const niches of Object.values(userPreferences.industryNiches)) {
-          allNiches.push(...niches.map(n => n.toLowerCase()));
-        }
-      }
+      // Readable industry + specialty names (shared list codes or older words, 2026-10-18).
+      const matchProfile = interestMatchProfile(userPreferences);
+      const allNiches: string[] = matchProfile.nicheTerms;
+      const allIndustries = matchProfile.industryTerms;
       
       if (allNiches.length > 0 || allIndustries.length > 0) {
         // Calculate preference score for each result
@@ -5579,6 +5592,8 @@ export class DatabaseStorage implements IStorage {
         };
       }
     }
+    // Shared list industry codes for the feed boost (older words mapped, 2026-10-18).
+    const feedInterestCodes = interestMatchProfile(userPreferences).categoryCodes;
 
     // Build bidirectional block exclusion list for the authenticated user
     let excludedAuthorIds = new Set<string>();
@@ -5600,6 +5615,7 @@ export class DatabaseStorage implements IStorage {
       business: {
         id: businesses.id,
         category: businesses.category,
+        categoryCode: businesses.categoryCode,
         city: businesses.city,
         state: businesses.state,
         latitude: businesses.latitude,
@@ -5653,7 +5669,9 @@ export class DatabaseStorage implements IStorage {
 
       // Category/industry preference matching
       if (userId && userPreferences.selectedIndustries?.length) {
-        if (business?.category && userPreferences.selectedIndustries.includes(business.category)) {
+        // Shared list code match (2026-10-18), plus the old exact name match.
+        const codeMatch = !!business?.categoryCode && feedInterestCodes.includes(business.categoryCode);
+        if (codeMatch || (business?.category && userPreferences.selectedIndustries.includes(business.category))) {
           score += 30; // Strong boost for matching industry
         }
       }
@@ -6091,10 +6109,16 @@ export class DatabaseStorage implements IStorage {
 
     let viewerIndustries: string[] = [];
     let viewerNiches: Record<string, string[]> = {};
+    let viewerCategoryCodes: string[] = [];
+    let viewerSpecialtyCodes: string[] = [];
     if (personalized && viewerUserId) {
       const viewer = await this.getUser(viewerUserId);
-      viewerIndustries = viewer?.selectedIndustries || [];
-      viewerNiches = viewer?.industryNiches || {};
+      // Readable names for text matching + shared codes for exact matching (2026-10-18).
+      const profile = interestMatchProfile(viewer ?? {});
+      viewerIndustries = profile.industryTerms;
+      viewerNiches = { all: profile.nicheTerms };
+      viewerCategoryCodes = profile.categoryCodes;
+      viewerSpecialtyCodes = profile.specialtyCodes;
     }
 
     const results: UnifiedSearchResult[] = [];
@@ -6281,16 +6305,17 @@ export class DatabaseStorage implements IStorage {
 
         let personalizationScore = baseScore;
         if (personalized) {
-          const catMatch = viewerIndustries.some(ind =>
-            (b.category || '').toLowerCase().includes(ind.toLowerCase())
-          );
+          const catMatch = (!!b.categoryCode && viewerCategoryCodes.includes(b.categoryCode)) ||
+            viewerIndustries.some(ind => (b.category || '').toLowerCase().includes(ind.toLowerCase()));
           if (catMatch) personalizationScore += 30;
 
           const nicheValues = Object.values(viewerNiches).flat();
-          const nicheMatch = nicheValues.some(n =>
-            (b.category || '').toLowerCase().includes(n.toLowerCase()) ||
-            (b.description || '').toLowerCase().includes(n.toLowerCase())
-          );
+          const bSpecialties: string[] = Array.isArray(b.specialties) ? (b.specialties as string[]) : [];
+          const nicheMatch = bSpecialties.some((code) => viewerSpecialtyCodes.includes(code)) ||
+            nicheValues.some(n =>
+              (b.category || '').toLowerCase().includes(n.toLowerCase()) ||
+              (b.description || '').toLowerCase().includes(n.toLowerCase())
+            );
           if (nicheMatch) personalizationScore += 15;
         }
 
