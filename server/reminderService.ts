@@ -3,6 +3,7 @@ import { appointments } from "../shared/schema";
 import { eq, and, gte, lte, sql } from "drizzle-orm";
 import { storage } from "./storage";
 import { sendAppointmentReminderEmail } from "./emailService";
+import { realName } from "./personName";
 
 async function sendDueReminders(windowMinutes: number, field: '24h' | '2h'): Promise<void> {
   const sentColumn = field === '24h' ? 'reminder_24h_sent' : 'reminder_2h_sent';
@@ -43,7 +44,7 @@ async function sendDueReminders(windowMinutes: number, field: '24h' | '2h'): Pro
 
       await sendAppointmentReminderEmail({
         toEmail: client.email,
-        customerName: client.name ?? client.email,
+        customerName: realName(client) ?? client.email,
         serviceName: row.service_name ?? 'your service',
         businessName: business?.name ?? 'your provider',
         appointmentDate: row.appointment_date,

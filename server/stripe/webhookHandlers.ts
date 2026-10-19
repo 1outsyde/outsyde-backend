@@ -25,6 +25,7 @@ import { settleAppointmentBooking, settleShootBooking } from "../bookingSettleme
 import { qualifyReferral, releaseAfterForBooking, type PromoRef } from "../loyaltyLedger";
 import { releasePromoForCanceledPaymentIntent } from "../promoCheckout";
 import { isComplimentaryTier, isTerminalStripeStatus } from "../complimentary";
+import { realName } from "../personName";
 
 // XO Beauty & Lashes' own deposit-email sender (the legacy
 // create-deposit-intent flow's pre-existing behavior).
@@ -177,7 +178,7 @@ export async function sendAppointmentReceipts(
       email: customer?.email,
       send: () => sendAppointmentConfirmationToConsumer({
         toEmail: customer!.email!,
-        consumerName: customer!.name || customer!.email!,
+        consumerName: realName(customer) || customer!.email!,
         vendorName: business?.name || 'Business',
         vendorContactEmail: business?.contactEmail ?? undefined,
         serviceName: appointment.serviceName || 'Appointment',
@@ -197,7 +198,7 @@ export async function sendAppointmentReceipts(
       send: () => sendAppointmentNotificationToVendor({
         toEmail: owner!.email!,
         vendorName: business?.name || 'Business',
-        consumerName: customer?.name || 'Customer',
+        consumerName: realName(customer) || 'Customer',
         consumerUsername: customer?.username ?? undefined,
         serviceName: appointment.serviceName || 'Appointment',
         bookingId: appointmentId,
@@ -215,7 +216,7 @@ export async function sendAppointmentReceipts(
     admin: () => sendInternalEventAlert({
       eventType: 'appointment_booking',
       bookingOrOrderId: appointmentId,
-      consumerName: customer?.name || 'Customer',
+      consumerName: realName(customer) || 'Customer',
       consumerEmail: customer?.email || '',
       vendorName: business?.name || 'Business',
       vendorEmail: owner?.email || '',
@@ -263,7 +264,7 @@ export async function sendShootBookingReceipts(
       email: customer?.email,
       send: () => sendShootBookingConfirmationToConsumer({
         toEmail: customer!.email!,
-        consumerName: customer!.name || customer!.email!,
+        consumerName: realName(customer) || customer!.email!,
         photographerName: photographer?.displayName || 'Photographer',
         photographerContactEmail: photographerUser?.email ?? undefined,
         shootType: booking.shootType || 'session',
@@ -284,7 +285,7 @@ export async function sendShootBookingReceipts(
       send: () => sendShootBookingNotificationToPhotographer({
         toEmail: photographerUser!.email!,
         photographerName: photographer?.displayName || 'Photographer',
-        consumerName: customer?.name || 'Customer',
+        consumerName: realName(customer) || 'Customer',
         consumerUsername: customer?.username ?? undefined,
         shootType: booking.shootType || 'session',
         bookingId,
@@ -302,7 +303,7 @@ export async function sendShootBookingReceipts(
     admin: () => sendInternalEventAlert({
       eventType: 'shoot_booking',
       bookingOrOrderId: bookingId,
-      consumerName: customer?.name || 'Customer',
+      consumerName: realName(customer) || 'Customer',
       consumerEmail: customer?.email || '',
       vendorName: photographer?.displayName || 'Photographer',
       vendorEmail: photographerUser?.email || '',
@@ -532,7 +533,7 @@ export class WebhookHandlers {
             email: user?.email,
             send: () => sendAppointmentConfirmationToConsumer({
               toEmail: user!.email!,
-              consumerName: user!.name || user!.email!,
+              consumerName: realName(user) || user!.email!,
               vendorName: ab_business?.name || 'Business',
               vendorContactEmail: ab_business?.contactEmail ?? undefined,
               serviceName: appointment.serviceName || 'Appointment',
@@ -549,7 +550,7 @@ export class WebhookHandlers {
             send: () => sendAppointmentNotificationToVendor({
               toEmail: ab_owner!.email!,
               vendorName: ab_business?.name || 'Business',
-              consumerName: user?.name || 'Customer',
+              consumerName: realName(user) || 'Customer',
               consumerUsername: user?.username ?? undefined,
               serviceName: appointment.serviceName || 'Appointment',
               bookingId,
@@ -564,7 +565,7 @@ export class WebhookHandlers {
           admin: () => sendInternalEventAlert({
             eventType: 'appointment_booking',
             bookingOrOrderId: bookingId,
-            consumerName: user?.name || 'Customer',
+            consumerName: realName(user) || 'Customer',
             consumerEmail: user?.email || '',
             vendorName: ab_business?.name || 'Business',
             vendorEmail: ab_owner?.email || '',
@@ -623,7 +624,7 @@ export class WebhookHandlers {
               amount: appointment.totalPrice,
               referenceType: 'appointment',
               referenceId: bookingId,
-              description: `New booking from ${user?.name || 'customer'}`,
+              description: `New booking from ${realName(user) || 'customer'}`,
               triggeredByUserId: user?.id ?? null,
             });
             console.log(`[Notify:appointment_booking] Business owner ${ab_owner.id} notified`);
@@ -634,7 +635,7 @@ export class WebhookHandlers {
               date: appointment.appointmentDate,
               time: appointment.appointmentTime,
               businessOwnerId: ab_owner.id,
-              customerName: user?.name || undefined,
+              customerName: realName(user) || undefined,
             }).catch(err => console.error(`[Notify:appointment_booking] Push failed for appointment ${bookingId}:`, err));
           }
         } catch (err) {
@@ -745,7 +746,7 @@ export class WebhookHandlers {
             date: sb_booking?.date || '',
             time: sb_booking?.startTime || '',
             businessOwnerId: sb_photographer?.userId,
-            customerName: user?.name || undefined,
+            customerName: realName(user) || undefined,
           }).catch(err => console.error(`[Notify:shoot_booking] Push failed for shoot booking ${bookingId}:`, err));
         } catch (err) {
           console.error(`[Notify:shoot_booking] Notifications failed for shoot booking ${bookingId}:`, err);
@@ -860,7 +861,7 @@ export class WebhookHandlers {
                 amount: appointment.totalPrice,
                 referenceType: 'appointment',
                 referenceId: appointmentId,
-                description: `New booking from ${apptCustomer?.name || 'customer'}`,
+                description: `New booking from ${realName(apptCustomer) || 'customer'}`,
                 triggeredByUserId: apptCustomer?.id ?? null,
               });
               console.log(`[Notify:appointment] Business owner ${apptOwner.id} notified`);
@@ -902,7 +903,7 @@ export class WebhookHandlers {
             time: appointment.appointmentTime,
             businessOwnerId: apptOwnerId,
             staffMemberUserId: apptStaffMemberUserId,
-            customerName: apptCustomer?.name || undefined,
+            customerName: realName(apptCustomer) || undefined,
           }).catch(err => console.error(`[Notify:appointment] Push failed for appointment ${appointmentId}:`, err));
 
         }
@@ -967,7 +968,7 @@ export class WebhookHandlers {
             email: depositCustomer?.email,
             send: () => sendBookingConfirmationToCustomer({
               toEmail: depositCustomer!.email!,
-              customerName: depositCustomer!.name || depositCustomer!.firstName || 'there',
+              customerName: realName(depositCustomer) || 'there',
               serviceName: appt.serviceName || 'Appointment',
               date: appt.appointmentDate,
               time: appt.appointmentTime,
@@ -980,7 +981,7 @@ export class WebhookHandlers {
           vendor: {
             email: depositVendorOwner?.email,
             send: () => sendNewBookingAlertToVendor({
-              customerName: depositCustomer?.name || depositCustomer?.firstName || 'Customer',
+              customerName: realName(depositCustomer) || 'Customer',
               customerEmail: depositCustomer?.email || '',
               serviceName: appt.serviceName || 'Appointment',
               date: appt.appointmentDate,
@@ -995,7 +996,7 @@ export class WebhookHandlers {
           admin: () => sendInternalEventAlert({
             eventType: 'appointment_booking',
             bookingOrOrderId: appointmentId,
-            consumerName: depositCustomer?.name || depositCustomer?.firstName || 'Customer',
+            consumerName: realName(depositCustomer) || 'Customer',
             consumerEmail: depositCustomer?.email || '',
             vendorName: depositBusiness?.name || 'Business',
             vendorEmail: depositVendorOwner?.email || '',
@@ -1068,7 +1069,7 @@ export class WebhookHandlers {
               toEmail: customer!.email!,
               consumerName: customer!.firstName
                 ? `${customer!.firstName} ${customer!.lastName ?? ''}`.trim()
-                : customer!.name || customer!.email!.split('@')[0],
+                : realName(customer) || customer!.email!.split('@')[0],
               orderId,
               orderNumber: order.orderNumber,
               items: piOrderItems,
@@ -1082,7 +1083,7 @@ export class WebhookHandlers {
             send: () => sendOrderNotificationToVendor({
               toEmail: vendor!.email!,
               vendorName: orderBusiness?.name || vendor!.name || 'Business',
-              consumerName: customer?.name || 'Customer',
+              consumerName: realName(customer) || 'Customer',
               consumerUsername: customer?.username ?? undefined,
               orderId,
               orderNumber: order.orderNumber,
@@ -1094,7 +1095,7 @@ export class WebhookHandlers {
           admin: () => sendInternalEventAlert({
             eventType: 'product_order',
             bookingOrOrderId: orderId,
-            consumerName: customer?.name || 'Customer',
+            consumerName: realName(customer) || 'Customer',
             consumerEmail: customer?.email || '',
             vendorName: orderBusiness?.name || vendor?.name || 'Business',
             vendorEmail: vendor?.email || '',
@@ -1157,7 +1158,7 @@ export class WebhookHandlers {
           await bestEffort(`newOrderReceived for order ${orderId}`, () => NotificationTriggers.newOrderReceived({
             vendorUserId: vendor.id,
             orderId,
-            customerName: customer?.name || customer?.email || 'Customer',
+            customerName: realName(customer) || customer?.email || 'Customer',
             orderTotal: order.totalAmount,
             itemCount,
             triggeredByUserId: customer?.id ?? null,
@@ -1212,7 +1213,7 @@ export class WebhookHandlers {
               send: () => sendOrderNotificationToVendor({
                 toEmail: vendorUser!.email!,
                 vendorName: piVendorBusiness?.name || vendorUser!.name || 'Business',
-                consumerName: customer?.name || 'Customer',
+                consumerName: realName(customer) || 'Customer',
                 consumerUsername: customer?.username ?? undefined,
                 orderId: vendorOrder.orderId,
                 orderNumber: order.orderNumber,
@@ -1267,7 +1268,7 @@ export class WebhookHandlers {
             await bestEffort(`newOrderReceived for order ${vendorOrder.orderId}`, () => NotificationTriggers.newOrderReceived({
               vendorUserId: vendorUser.id,
               orderId: vendorOrder.orderId,
-              customerName: customer?.name || customer?.email || 'Customer',
+              customerName: realName(customer) || customer?.email || 'Customer',
               orderTotal: order.totalAmount,
               itemCount: order.items?.length || 1,
               triggeredByUserId: customer?.id ?? null,
@@ -1312,7 +1313,7 @@ export class WebhookHandlers {
             email: purchaser?.email,
             send: () => sendOrderConfirmationToConsumer({
               toEmail: purchaser!.email!,
-              consumerName: purchaser!.name || purchaser!.email!,
+              consumerName: realName(purchaser) || purchaser!.email!,
               orderId: vendorOrders[0]?.orderId || metadata.orderGroupId || '',
               orderNumber: firstMvPiOrderNumber,
               items: allMvPiItems,
@@ -1322,7 +1323,7 @@ export class WebhookHandlers {
           admin: () => sendInternalEventAlert({
             eventType: 'product_order',
             bookingOrOrderId: orderGroupTxnId,
-            consumerName: purchaser?.name || 'Customer',
+            consumerName: realName(purchaser) || 'Customer',
             consumerEmail: purchaser?.email || '',
             vendorName: `${vendorOrders.length} vendors`,
             vendorEmail: '',
@@ -1789,7 +1790,7 @@ export class WebhookHandlers {
         email: customer?.email,
         send: () => sendOrderConfirmationToConsumer({
           toEmail: customer!.email!,
-          consumerName: customer!.name || customer!.email!,
+          consumerName: realName(customer) || customer!.email!,
           orderId,
           orderNumber: order.orderNumber,
           items: cartItems,
@@ -1802,7 +1803,7 @@ export class WebhookHandlers {
         send: () => sendOrderNotificationToVendor({
           toEmail: vendor!.email!,
           vendorName: business?.name || vendor!.name || 'Business',
-          consumerName: customer?.name || 'Customer',
+          consumerName: realName(customer) || 'Customer',
           consumerUsername: customer?.username ?? undefined,
           orderId,
           orderNumber: order.orderNumber,
@@ -1813,7 +1814,7 @@ export class WebhookHandlers {
       admin: () => sendInternalEventAlert({
         eventType: 'product_order',
         bookingOrOrderId: orderId,
-        consumerName: customer?.name || 'Customer',
+        consumerName: realName(customer) || 'Customer',
         consumerEmail: customer?.email || '',
         vendorName: business?.name || vendor?.name || 'Business',
         vendorEmail: vendor?.email || '',
@@ -1868,7 +1869,7 @@ export class WebhookHandlers {
       await bestEffort(`newOrderReceived for order ${orderId}`, () => NotificationTriggers.newOrderReceived({
         vendorUserId: vendor.id,
         orderId,
-        customerName: customer?.name || customer?.email || 'Customer',
+        customerName: realName(customer) || customer?.email || 'Customer',
         orderTotal: order.totalAmount,
         itemCount,
         triggeredByUserId: customer?.id ?? null,
@@ -1934,7 +1935,7 @@ export class WebhookHandlers {
           send: () => sendOrderNotificationToVendor({
             toEmail: vendorUser!.email!,
             vendorName: business?.name || vendorUser!.name || 'Business',
-            consumerName: customer?.name || 'Customer',
+            consumerName: realName(customer) || 'Customer',
             consumerUsername: customer?.username ?? undefined,
             orderId,
             orderNumber: order.orderNumber,
@@ -1992,7 +1993,7 @@ export class WebhookHandlers {
         await bestEffort(`newOrderReceived for order ${orderId}`, () => NotificationTriggers.newOrderReceived({
           vendorUserId: vendorUser.id,
           orderId,
-          customerName: customer?.name || customer?.email || 'Customer',
+          customerName: realName(customer) || customer?.email || 'Customer',
           orderTotal: order.totalAmount,
           itemCount: order.items?.length || 1,
           triggeredByUserId: customer?.id ?? null,
@@ -2028,7 +2029,7 @@ export class WebhookHandlers {
         email: receiptUser?.email,
         send: () => sendOrderConfirmationToConsumer({
           toEmail: receiptUser!.email!,
-          consumerName: receiptUser!.name || receiptUser!.email!,
+          consumerName: realName(receiptUser) || receiptUser!.email!,
           orderId: vendorOrders[0]?.orderId || orderGroupId,
           orderNumber: firstWcMvOrderNumber,
           items: wcAllItems,
@@ -2037,7 +2038,7 @@ export class WebhookHandlers {
       admin: () => sendInternalEventAlert({
         eventType: 'product_order',
         bookingOrOrderId: orderGroupId,
-        consumerName: receiptUser?.name || 'Customer',
+        consumerName: realName(receiptUser) || 'Customer',
         consumerEmail: receiptUser?.email || '',
         vendorName: `${vendorOrders.length} vendors`,
         vendorEmail: '',
@@ -2588,7 +2589,7 @@ export class WebhookHandlers {
           email: customer?.email,
           send: () => sendAppointmentConfirmationToConsumer({
             toEmail: customer!.email!,
-            consumerName: customer!.name || customer!.email!,
+            consumerName: realName(customer) || customer!.email!,
             vendorName: business?.name || 'Business',
             vendorContactEmail: business?.contactEmail ?? undefined,
             serviceName: appointment.serviceName || 'Appointment',
@@ -2605,7 +2606,7 @@ export class WebhookHandlers {
           send: () => sendAppointmentNotificationToVendor({
             toEmail: owner!.email!,
             vendorName: business?.name || 'Business',
-            consumerName: customer?.name || 'Customer',
+            consumerName: realName(customer) || 'Customer',
             consumerUsername: customer?.username ?? undefined,
             serviceName: appointment.serviceName || 'Appointment',
             bookingId: appointmentId,
@@ -2620,7 +2621,7 @@ export class WebhookHandlers {
         admin: () => sendInternalEventAlert({
           eventType: 'appointment_booking',
           bookingOrOrderId: appointmentId,
-          consumerName: customer?.name || 'Customer',
+          consumerName: realName(customer) || 'Customer',
           consumerEmail: customer?.email || '',
           vendorName: business?.name || 'Business',
           vendorEmail: owner?.email || '',
@@ -2660,7 +2661,7 @@ export class WebhookHandlers {
             amount: appointment.totalPrice,
             referenceType: 'appointment',
             referenceId: appointmentId,
-            description: `New booking from ${customer?.name || 'customer'}`,
+            description: `New booking from ${realName(customer) || 'customer'}`,
             triggeredByUserId: customer?.id ?? null,
           }).catch(err => console.error("[Stripe] Failed to send business notification:", err));
 
@@ -2671,7 +2672,7 @@ export class WebhookHandlers {
             date: appointment.appointmentDate,
             time: appointment.appointmentTime,
             businessOwnerId: owner.id,
-            customerName: customer?.name || undefined,
+            customerName: realName(customer) || undefined,
           }).catch(err => console.error("[ExpoPush] Appointment push error:", err));
         }
 
@@ -2754,7 +2755,7 @@ export class WebhookHandlers {
           email: sbCustomer?.email,
           send: () => sendShootBookingConfirmationToConsumer({
             toEmail: sbCustomer!.email!,
-            consumerName: sbCustomer!.name || sbCustomer!.email!,
+            consumerName: realName(sbCustomer) || sbCustomer!.email!,
             photographerName: photographer?.displayName || 'Photographer',
             photographerContactEmail: photographerUser?.email ?? undefined,
             shootType: booking.shootType,
@@ -2770,7 +2771,7 @@ export class WebhookHandlers {
           send: () => sendShootBookingNotificationToPhotographer({
             toEmail: photographerUser!.email!,
             photographerName: photographer?.displayName || 'Photographer',
-            consumerName: sbCustomer?.name || 'Customer',
+            consumerName: realName(sbCustomer) || 'Customer',
             consumerUsername: sbCustomer?.username ?? undefined,
             shootType: booking.shootType,
             bookingId: shootBookingId,
@@ -2783,7 +2784,7 @@ export class WebhookHandlers {
         admin: () => sendInternalEventAlert({
           eventType: 'shoot_booking',
           bookingOrOrderId: shootBookingId,
-          consumerName: sbCustomer?.name || 'Customer',
+          consumerName: realName(sbCustomer) || 'Customer',
           consumerEmail: sbCustomer?.email || '',
           vendorName: photographer?.displayName || 'Photographer',
           vendorEmail: photographerUser?.email || '',

@@ -4,11 +4,11 @@
  * Same rule as the Home feed author (GET /api/feed, routes.ts "authorProName" / "authorLogoImage"):
  *   - business owner  -> business name (trimmed) + business logo, else the user's photo
  *   - photographer    -> photographer display name (trimmed) + photographer logo, else the user's photo
- *   - everyone else   -> users.name, then first name, then @username
+ *   - everyone else   -> users.name (display name), then @username
  *
  * Used by messaging (conversation list, new conversation, websocket sender, push titles).
  * The feed keeps its own inline copy on purpose so this change cannot alter feed output.
- * Never returns email, phone or last name.
+ * Never returns email, phone, first name or last name.
  */
 import type { User, Business, Photographer } from "@shared/schema";
 
@@ -32,7 +32,8 @@ const clean = (v: string | null | undefined): string | null => {
 };
 
 function personalName(user: UserLike): string {
-  const name = clean(user.name) || clean(user.firstName);
+  // Display name only (users.name). Never the real first/last name (personName.ts).
+  const name = clean(user.name);
   if (name) return name;
   const username = clean(user.username);
   return username ? `@${username}` : "Outsyde member";

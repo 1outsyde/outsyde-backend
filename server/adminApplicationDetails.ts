@@ -5,6 +5,7 @@
  * Rules (Legend 2026-10-17): show ALL answers; empty → "Not provided"; never show
  * password, tokens or Stripe ids. Values here are plain text; escape before putting in HTML.
  */
+import { realName } from "./personName";
 import type { Business, User } from "@shared/schema";
 import { describeIndustry } from "@shared/businessTaxonomy";
 
@@ -86,6 +87,9 @@ export function isHttpUrl(v: string | null | undefined): v is string {
 
 export type OwnerLike = Pick<User, "name" | "email" | "phone" | "username" | "address" | "city" | "state" | "zipCode" | "createdAt"> & {
   source?: string | null;
+  /** Real name (shown to admins). Optional so older callers keep working. */
+  firstName?: string | null;
+  lastName?: string | null;
   /** Account state (photographer admin Status section, 2026-10-18). Optional so older callers keep working. */
   isActive?: boolean | null;
   deletionStatus?: string | null;
@@ -144,7 +148,7 @@ export function buildVendorApplicationSections(business: Business, owner: OwnerL
     {
       title: "Owner",
       rows: [
-        { label: "Name", value: text(owner?.name) },
+        { label: "Name", value: text(realName(owner)) },
         { label: "Email", value: text(owner?.email) },
         { label: "Phone", value: text(owner?.phone) },
         { label: "Username", value: owner?.username ? `@${owner.username}` : NOT_PROVIDED },
