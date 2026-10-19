@@ -57,6 +57,9 @@ async function call(method: string, path: string, o: { token?: string; body?: un
   // Section: /v1/accounts (create, retrieve). accountState is per account; default all false.
   let accountSeq = 0;
   const accountCreates: Array<Record<string, string>> = [];
+  const accountsByKey: Record<string, any> = {};
+  const accountKeys: string[] = [];
+  const failRetrieveFor = new Set<string>(); // GET /v1/accounts/:id answers account_invalid
   const accountState: Record<string, { charges_enabled: boolean; payouts_enabled: boolean; details_submitted: boolean }> = {};
   const stateOf = (id: string) => (accountState[id] ??= { charges_enabled: false, payouts_enabled: false, details_submitted: false });
   const setReady = (id: string, ready = true) => { Object.assign(stateOf(id), { charges_enabled: ready, payouts_enabled: ready, details_submitted: ready }); };
@@ -83,12 +86,17 @@ async function call(method: string, path: string, o: { token?: string; body?: un
       // /v1/accounts
       if (req.method === "POST" && path === "/v1/accounts") {
         const params = formParams(form);
+        if (key) accountKeys.push(key);
+        if (key && accountsByKey[key]) return send(200, accountsByKey[key]); // same key = same account, as Stripe does
         const id = `acct_stub_${++accountSeq}`;
         accountCreates.push(params);
         stateOf(id);
-        return send(200, { id, object: "account", email: params.email ?? null, ...accountState[id] });
+        const acct = { id, object: "account", email: params.email ?? null, ...accountState[id] };
+        if (key) accountsByKey[key] = acct;
+        return send(200, acct);
       }
       const acctM = path.match(/^\/v1\/accounts\/([^/]+)$/);
+      if (req.method === "GET" && acctM && failRetrieveFor.has(acctM[1])) return send(400, { error: { type: "invalid_request_error", code: "account_invalid", message: "The provided key does not have access to account." } });
       if (req.method === "GET" && acctM) return send(200, { id: acctM[1], object: "account", ...stateOf(acctM[1]) });
 
       // /v1/account_links
@@ -142,6 +150,7 @@ async function call(method: string, path: string, o: { token?: string; body?: un
   const hostB = await mkUser("b");   // business owner
   const hostC = await mkUser("c");   // photographer
   const hostD = await mkUser("d");   // customer whose saved account is gone from Stripe
+  const hostE = await mkUser("e");   // two simultaneous first calls
   const nobody = await mkUser("n");  // no profiles
 
   try {
@@ -184,6 +193,18 @@ async function call(method: string, path: string, o: { token?: string; body?: un
     r = await call("POST", "/api/events/payouts/setup-link", { token: tok(hostD), body: {} });
     assert(r.status === 200 && accountCreates.length === createsBefore + 1, "next call reuses the replacement", { status: r.status, extra: accountCreates.length - createsBefore });
 
+    console.log("two simultaneous first calls share one Stripe account");
+    const [c1, c2] = await Promise.all([
+      call("POST", "/api/events/payouts/setup-link", { token: tok(hostE), body: {} }),
+      call("POST", "/api/events/payouts/setup-link", { token: tok(hostE), body: {} }),
+    ]);
+    const eRows = await q(`SELECT stripe_account_id FROM user_payout_accounts WHERE user_id = $1`, [hostE]);
+    const eCreates = accountCreates.filter((a) => a.email === `${P}-e@test.local`);
+    assert(c1.status === 200 && c2.status === 200 && c1.body.url === c2.body.url && eRows.length === 1 && c1.body.url.endsWith(eRows[0].stripe_account_id), "both calls return the link for the one saved account", { c1, c2, eRows });
+    assert(eCreates.length === 1, "stub created one account for the pair", eCreates.length);
+    assert(accountKeys.includes(`host_account_${hostE}`), "account created with key host_account_<userId>", accountKeys);
+    assert(accountKeys.some((k) => k.startsWith(`host_account_${hostD}_replace_`)), "replacement uses host_account_<userId>_replace_<old id>", accountKeys);
+
     console.log("status for a user host");
     r = await call("GET", "/api/events/payouts/status?hostType=user", { token: tok(nobody) });
     assert(r.status === 200 && r.body.success && r.body.hostType === "user" && r.body.hasAccount === false && r.body.ready === false && r.body.needsSetup === true, "before setup: no account, not ready, needs setup", r);
@@ -197,6 +218,12 @@ async function call(method: string, path: string, o: { token?: string; body?: un
     assert(r.status === 200 && r.body.hasAccount === true && r.body.ready === true && r.body.needsSetup === false, "flag true and Stripe ready: ready", r);
     r = await call("GET", "/api/events/payouts/status?hostType=nonsense", { token: tok(hostA) });
     assert(r.status === 400 && r.body.error.code === "INVALID_HOST_TYPE", "unknown hostType: 400", r);
+
+    console.log("status when the saved account is unreachable");
+    failRetrieveFor.add(acctA);
+    r = await call("GET", "/api/events/payouts/status?hostType=user", { token: tok(hostA) });
+    assert(r.status === 200 && r.body.hasAccount === true && r.body.ready === false && r.body.needsSetup === true, "unreachable account: 200, not ready, needs setup (no 500)", r);
+    failRetrieveFor.delete(acctA);
 
     console.log("status for a business host uses the business account");
     r = await call("GET", "/api/events/payouts/status?hostType=business", { token: tok(hostB) });
@@ -245,6 +272,9 @@ async function call(method: string, path: string, o: { token?: string; body?: un
     liveReady = true;
     ready = await isHostReady(uEv(nobody), fake);
     assert(ready.ready === true && ready.reason === null, "everything yes: ready", ready);
+    const boom = { getPayoutReadiness: async (_id: string) => { throw Object.assign(new Error("stripe down"), { type: "StripeConnectionError" }); } };
+    ready = await isHostReady(uEv(nobody), boom);
+    assert(ready.ready === false && ready.reason === "stripe_not_ready", "Stripe error: stripe_not_ready, never throws", ready);
     const dBiz = await hostPayoutDestination({ host_type: "business", host_user_id: hostB, host_business_id: bizId, host_photographer_id: null });
     assert(dBiz.destinationType === "business" && dBiz.accountId === "acct_biz_ep" && dBiz.localReady === false, "destination: business", dBiz);
     const dUser = await hostPayoutDestination(uEv(hostA));

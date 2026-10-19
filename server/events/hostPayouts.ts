@@ -12,7 +12,7 @@
 import { Router, type Request, type Response } from "express";
 import { sql } from "drizzle-orm";
 import { getUserIdFromRequest, hybridAuthMiddleware } from "../auth";
-import { rows, fail, loadActiveUser } from "./eventsRouter";
+import { rows, fail, loadActiveUser, resolveOwnedHostProfile } from "./eventsRouter";
 
 const router = Router();
 
@@ -56,24 +56,22 @@ export async function isHostReady(event: HostEventRef, s?: ReadinessStripe): Pro
   const d = await hostPayoutDestination(event);
   if (!d.accountId) return { ready: false, reason: "no_account" };
   if (!d.localReady) return { ready: false, reason: "not_complete" };
-  const live = await (s ?? (await realStripe())).getPayoutReadiness(d.accountId);
-  if (!live.ready) return { ready: false, reason: "stripe_not_ready" };
+  try {
+    const live = await (s ?? (await realStripe())).getPayoutReadiness(d.accountId);
+    if (!live.ready) return { ready: false, reason: "stripe_not_ready" };
+  } catch (err) {
+    // Unreachable account or Stripe down: not ready (callers rely on this never throwing).
+    console.error(`[Events] payout readiness check failed for ${d.accountId}:`, (err as Error)?.message ?? err);
+    return { ready: false, reason: "stripe_not_ready" };
+  }
   return { ready: true, reason: null };
 }
 
-/** Business host = the caller's approved business, photographer host = the caller's profile (same rule as event create). */
+/** Business host = the caller's approved business, photographer host = the caller's profile (shared with event create). */
 async function resolveOwnedHost(res: Response, userId: string, hostType: "business" | "photographer"): Promise<HostEventRef | null> {
-  if (hostType === "business") {
-    const [biz] = await rows<any>(sql`
-      SELECT id, approval_status FROM businesses WHERE owner_id = ${userId}
-      ORDER BY (approval_status = 'approved') DESC, created_at ASC LIMIT 1`);
-    if (!biz) { fail(res, 403, "NOT_A_BUSINESS_OWNER", "You don't own a business on Outsyde."); return null; }
-    if (biz.approval_status !== "approved") { fail(res, 403, "BUSINESS_NOT_APPROVED", "Your business has to be approved before it can host events."); return null; }
-    return { host_type: "business", host_user_id: userId, host_business_id: biz.id, host_photographer_id: null };
-  }
-  const [p] = await rows<any>(sql`SELECT id FROM photographers WHERE user_id = ${userId} ORDER BY created_at ASC LIMIT 1`);
-  if (!p) { fail(res, 403, "NOT_A_PHOTOGRAPHER", "You don't have a photographer profile."); return null; }
-  return { host_type: "photographer", host_user_id: userId, host_business_id: null, host_photographer_id: p.id };
+  const o = await resolveOwnedHostProfile(userId, hostType);
+  if (!o.ok) { fail(res, 403, o.code, o.message); return null; }
+  return { host_type: hostType, host_user_id: userId, host_business_id: o.businessId, host_photographer_id: o.photographerId };
 }
 
 router.post("/payouts/setup-link", hybridAuthMiddleware, async (req: Request, res: Response) => {
@@ -90,7 +88,10 @@ router.post("/payouts/setup-link", hybridAuthMiddleware, async (req: Request, re
 
     const createAccount = async (replacing: string | null): Promise<string> => {
       const [u] = await rows<any>(sql`SELECT email FROM users WHERE id = ${userId}`);
-      const account = await stripeService.createHostConnectAccount(u?.email || `host-${userId}@outsyde.app`, userId);
+      const account = await stripeService.createHostConnectAccount(
+        u?.email || `host-${userId}@outsyde.app`, userId,
+        replacing ? `host_account_${userId}_replace_${replacing}` : `host_account_${userId}`,
+      );
       if (replacing) {
         // Only swap the exact account we found unreachable; a new account starts unfinished.
         await rows(sql`

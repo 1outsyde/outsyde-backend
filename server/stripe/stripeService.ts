@@ -546,7 +546,7 @@ export class StripeService {
    * Create a Stripe Express account for an event host. Same shape as the staff helper
    * (card_payments + transfers, since transfers-only is rejected in live mode).
    */
-  async createHostConnectAccount(email: string, userId: string) {
+  async createHostConnectAccount(email: string, userId: string, idempotencyKey?: string) {
     const stripe = await getUncachableStripeClient();
 
     return stripe.accounts.create({
@@ -565,7 +565,7 @@ export class StripeService {
         role: "host",
         userId,
       },
-    });
+    }, idempotencyKey ? { idempotencyKey } : undefined);
   }
 
   /** Whether a host's Connect account can take payouts: ready = charges and payouts both enabled. */

@@ -225,6 +225,29 @@ function hostEventJson(e: any) {
   };
 }
 
+/**
+ * Host profile for hostAs = business | photographer, from the signed-in user only: business = the caller's
+ * business (approved first, must be approved), photographer = the caller's profile. Shared by event create and
+ * the payout routes so both always pick the same profile.
+ */
+export async function resolveOwnedHostProfile(userId: string, hostAs: string):
+  Promise<{ ok: true; businessId: string | null; photographerId: string | null } | { ok: false; code: string; message: string }> {
+  if (hostAs === "business") {
+    const [biz] = await rows<any>(sql`
+      SELECT id, approval_status FROM businesses WHERE owner_id = ${userId}
+      ORDER BY (approval_status = 'approved') DESC, created_at ASC LIMIT 1`);
+    if (!biz) return { ok: false, code: "NOT_A_BUSINESS_OWNER", message: "You don't own a business on Outsyde." };
+    if (biz.approval_status !== "approved") return { ok: false, code: "BUSINESS_NOT_APPROVED", message: "Your business has to be approved before it can host events." };
+    return { ok: true, businessId: biz.id, photographerId: null };
+  }
+  if (hostAs === "photographer") {
+    const [p] = await rows<any>(sql`SELECT id FROM photographers WHERE user_id = ${userId} ORDER BY created_at ASC LIMIT 1`);
+    if (!p) return { ok: false, code: "NOT_A_PHOTOGRAPHER", message: "You don't have a photographer profile." };
+    return { ok: true, businessId: null, photographerId: p.id };
+  }
+  return { ok: true, businessId: null, photographerId: null };
+}
+
 // ─── Routes ─────────────────────────────────────────────────────────────────
 
 router.post("/", hybridAuthMiddleware, async (req: Request, res: Response) => {
@@ -249,20 +272,10 @@ router.post("/", hybridAuthMiddleware, async (req: Request, res: Response) => {
 
     // Host profile comes from the signed-in user only.
     const hostAs = b.hostAs ?? "user";
-    let hostBusinessId: string | null = null;
-    let hostPhotographerId: string | null = null;
-    if (hostAs === "business") {
-      const [biz] = await rows<any>(sql`
-        SELECT id, approval_status FROM businesses WHERE owner_id = ${userId}
-        ORDER BY (approval_status = 'approved') DESC, created_at ASC LIMIT 1`);
-      if (!biz) return fail(res, 403, "NOT_A_BUSINESS_OWNER", "You don't own a business on Outsyde.");
-      if (biz.approval_status !== "approved") return fail(res, 403, "BUSINESS_NOT_APPROVED", "Your business has to be approved before it can host events.");
-      hostBusinessId = biz.id;
-    } else if (hostAs === "photographer") {
-      const [p] = await rows<any>(sql`SELECT id FROM photographers WHERE user_id = ${userId} ORDER BY created_at ASC LIMIT 1`);
-      if (!p) return fail(res, 403, "NOT_A_PHOTOGRAPHER", "You don't have a photographer profile.");
-      hostPhotographerId = p.id;
-    }
+    const owned = await resolveOwnedHostProfile(userId, hostAs);
+    if (!owned.ok) return fail(res, 403, owned.code, owned.message);
+    const hostBusinessId = owned.businessId;
+    const hostPhotographerId = owned.photographerId;
 
     for (let attempt = 0; attempt < 3; attempt++) {
       const slug = makeEventSlug(b.title);
