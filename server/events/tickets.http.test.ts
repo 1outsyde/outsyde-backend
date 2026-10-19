@@ -255,8 +255,11 @@ async function call(method: string, path: string, o: { token?: string; body?: un
     assert(r.status === 409 && r.body.error.code === "EVENT_STARTED", "claim after start refused", r);
     assert(c.type === 0 && c.event === 0 && o5.n === 0 && a5.n === 0, "claim after start rolls back (nothing kept)", { c, o5, a5 });
 
+    // Phase 2 PR 4: cancelling with guests cancels every free RSVP (paid refunds: ticketRefunds.http.test.ts).
     r = await call("POST", `/api/events/${ev.id}/cancel`, { token: tok(host), body: {} });
-    assert(r.status === 409 && r.body.error.code === "EVENT_HAS_GUESTS", "host still can't cancel an event with guests", r);
+    const [validLeft] = await q(`SELECT count(*)::int AS n FROM tickets WHERE event_id = $1 AND status = 'valid'`, [ev.id]);
+    const [openOrders] = await q(`SELECT count(*)::int AS n FROM ticket_orders WHERE event_id = $1 AND status = 'completed'`, [ev.id]);
+    assert(r.status === 200 && r.body.guests.freeCancelled > 0 && validLeft.n === 0 && openOrders.n === 0, "host cancels an event with guests: every RSVP and ticket cancelled", { r: r.body?.guests, validLeft, openOrders });
   } finally {
     const ids = (await q(`SELECT id FROM events WHERE host_user_id IN (SELECT id FROM users WHERE email LIKE $1)`, [`${P}-%`])).map((x) => x.id);
     if (ids.length) {

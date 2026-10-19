@@ -17,7 +17,7 @@ export type SendKind = "broadcast" | "broadcast_test" | "setup";
  * Internal alerts to ADMIN_NOTIFICATION_EMAIL and password or claim code emails are never logged
  * (decided by Legend 2026-10-16): only senders that pass an EmailLogTag are logged.
  */
-export type TransactionalKind = "booking" | "shoot" | "order" | "staff" | "account";
+export type TransactionalKind = "booking" | "shoot" | "order" | "staff" | "account" | "ticket";
 export type LogKind = "broadcast" | "broadcast_test" | "setup_claim" | "setup_steps_left" | TransactionalKind;
 export type LogStatus = "pending" | "sending" | "sent" | "failed" | "unknown";
 

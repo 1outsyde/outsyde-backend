@@ -494,6 +494,15 @@ export function startBookingCleanupJob(intervalMs: number = 60000): NodeJS.Timeo
     } catch (error) {
       console.error("[BookingCleanup] Error during ticket order job:", error);
     }
+
+    // Event tickets: send recorded refunds (retries with backoff) and refund guests of cancelled events.
+    // Own try/catch, after the order job, so neither can starve the other.
+    try {
+      const { runTicketRefundJob } = await import("./events/ticketRefunds");
+      await runTicketRefundJob();
+    } catch (error) {
+      console.error("[BookingCleanup] Error during ticket refund job:", error);
+    }
   };
 
   cleanup();

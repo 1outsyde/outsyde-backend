@@ -116,7 +116,8 @@ export async function settleTicketOrder(orderId: string, paymentIntentId: string
     FROM ticket_orders o JOIN ticket_order_items i ON i.order_id = o.id
     WHERE o.id = ${orderId}`);
   if (!o) return "not_found";
-  if (o.status === "completed" && o.stripe_payment_intent_id === paymentIntentId) return "already";
+  // Already settled (and maybe refunded since): a late or repeated webhook changes nothing and flags nothing.
+  if (["completed", "refunding", "refunded"].includes(o.status) && o.stripe_payment_intent_id === paymentIntentId) return "already";
   if (o.stripe_payment_intent_id !== paymentIntentId || Number(o.total_cents) !== amountReceivedCents || o.status !== "pending") {
     return "mismatch";
   }
@@ -157,7 +158,10 @@ export async function settleTicketOrder(orderId: string, paymentIntentId: string
                     (SELECT count(*) FROM tk) <> (SELECT ticket_count FROM o)
                  OR (SELECT COALESCE(sum(quantity), 0) FROM it) <> (SELECT ticket_count FROM o))
                THEN ('GUARD_SETTLE:' || (SELECT count(*) FROM tk))::int END AS guard`);
-    return r?.order_id ? "settled" : "already";
+    if (!r?.order_id) return "already";
+    // First settle only: receipt to the buyer, push to the host. Never throws, never blocks the settle.
+    void import("./ticketNotices").then((m) => m.notifyOrderSettled(orderId)).catch(() => {});
+    return "settled";
   } catch (err) {
     if (guardCode(err) === "SETTLE") {
       console.error(`[Tickets] settle guard fired for order ${orderId}; nothing written`);
@@ -299,7 +303,9 @@ router.post("/:id/checkout", hybridAuthMiddleware, async (req: Request, res: Res
         if (prev.event_id !== eventId || prev.ticket_type_id !== ticketTypeId || Number(prev.ticket_count) !== quantity) {
           return fail(res, 409, "IDEMPOTENCY_KEY_REUSED", "This request key was already used for a different order. Send a new key.");
         }
-        if (prev.status === "completed") return res.json({ success: true, order: await orderWithTickets(prev.id, userId), repeated: true });
+        if (prev.status === "completed" || prev.status === "refunding" || prev.status === "refunded") {
+          return res.json({ success: true, order: await orderWithTickets(prev.id, userId), repeated: true });
+        }
         if (prev.status !== "pending") return fail(res, 409, "CHECKOUT_CLOSED", "That checkout has closed. Start a new one.");
         if (!prev.stripe_payment_intent_id) return fail(res, 409, "TRY_AGAIN", "This checkout is already being set up. Try again in a moment.");
         const pi = await s.getPaymentIntent(prev.stripe_payment_intent_id);

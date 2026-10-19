@@ -7,7 +7,7 @@
  *   GET   /:id/manage        (auth, host)  full event + ticket types
  *   PATCH /:id               (auth, host)  edit (refund policy can only become more flexible once published)
  *   POST  /:id/publish       (auth, host)  draft -> published (needs a future start + at least one visible free ticket type)
- *   POST  /:id/cancel        (auth, host)  only while nobody holds a spot (cancelling with guests = refunds, Phase 2)
+ *   POST  /:id/cancel        (auth, host)  cancel; free RSVPs cancelled, paid orders refunded in full (ticketRefunds.ts)
  *
  * Tables: migrations/056_events_tickets.sql (raw SQL, not in shared/schema.ts, like booking_payout_issues).
  * The database enforces capacity, quantities and money lines; neon-http has no transactions, so every
@@ -503,20 +503,51 @@ router.post("/:id/cancel", hybridAuthMiddleware, async (req: Request, res: Respo
   const parsed = cancelSchema.safeParse(req.body ?? {});
   if (!parsed.success) return zodError(res, parsed.error);
   try {
+    // Cancelling with guests (Phase 2 PR 4): free RSVPs are cancelled and every paid order is refunded in
+    // full, fees included. Closing the event comes first, so nothing new can be claimed or bought; the
+    // guests are handled right after, and the every-minute refund job repeats that step as a backstop.
     const [cancelled] = await rows(sql`
       UPDATE events SET status = 'cancelled', cancelled_at = now(), cancel_reason = ${parsed.data.reason ?? null}, updated_at = now()
       WHERE id = ${req.params.id} AND host_user_id = ${userId} AND status IN ('draft', 'published')
-        AND reserved_count = 0
-        AND NOT EXISTS (SELECT 1 FROM tickets t WHERE t.event_id = events.id AND t.status = 'valid')
-        AND NOT EXISTS (SELECT 1 FROM ticket_order_items i WHERE i.event_id = events.id AND i.status = 'held')
+        -- Once it has started, an event with paid orders can't be cancelled by the host (that would refund
+        -- every fee for an event that happened). Single orders can still be refunded; anything else is support.
+        AND (starts_at > now() OR NOT EXISTS (
+          SELECT 1 FROM ticket_orders o WHERE o.event_id = events.id AND o.total_cents > 0
+            AND o.status IN ('pending', 'completed', 'refunding', 'refunded')))
       RETURNING *`);
-    if (cancelled) return res.json({ success: true, event: hostEventJson(cancelled) });
+    if (cancelled) {
+      const guests = { freeCancelled: 0, refunding: 0 };
+      try {
+        const { queueCancelledEventOrders, processTicketRefund } = await import("./ticketRefunds");
+        const { notifyFreeOrdersCancelled } = await import("./ticketNotices");
+        const q = await queueCancelledEventOrders(String((cancelled as any).id));
+        guests.freeCancelled = q.freeCancelled.length;
+        guests.refunding = q.refunding.length;
+        void notifyFreeOrdersCancelled(q.freeCancelled);
+        // Refunds talk to Stripe: run after the answer; the job retries what fails.
+        setImmediate(async () => {
+          for (const id of q.refunding) await processTicketRefund(id, undefined, true).catch((err) => console.error(`[Events] refund ${id} failed:`, err));
+        });
+      } catch (err) {
+        console.error("[Events] cancel guests step failed (the refund job will repeat it):", err);
+      }
+      // Open checkouts: stopped even when the step above failed (the job repeats this too).
+      setImmediate(() => {
+        import("./ticketRefunds")
+          .then((m) => m.closePendingCheckouts(String((cancelled as any).id)))
+          .catch((err) => console.error("[Events] closing checkouts failed:", err));
+      });
+      return res.json({ success: true, event: hostEventJson(cancelled), guests });
+    }
 
     const e = await loadEventForHost(req.params.id, userId);
     if (!e) return fail(res, 404, "EVENT_NOT_FOUND", "Event not found.");
     if (e.status === "cancelled") return fail(res, 409, "ALREADY_CANCELLED", "This event is already cancelled.");
     if (e.status === "paused") return fail(res, 409, "EVENT_PAUSED", "This event is paused by Outsyde. Contact support.");
-    return fail(res, 409, "EVENT_HAS_GUESTS", "People already have spots. Cancelling with guests isn't available yet.");
+    if (new Date(e.starts_at) <= new Date()) {
+      return fail(res, 409, "EVENT_STARTED", "This event has already started, so it can't be cancelled here. You can still refund single orders, or contact Outsyde support.");
+    }
+    return fail(res, 409, "EVENT_NOT_CANCELLABLE", "This event can't be cancelled.");
   } catch (err) {
     console.error("[Events] cancel failed:", err);
     return fail(res, 500, "SERVER_ERROR", "Couldn't cancel the event.");

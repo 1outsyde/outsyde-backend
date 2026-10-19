@@ -16,7 +16,7 @@
  *  - drop the price_cents > 0 NOT EXISTS in publish → "paid tickets refused at publish" fails.
  *  - drop `host_user_id = ${userId}` in the publish UPDATE → "stranger can't publish a ready event" fails.
  *  - drop the draft check in GET /slug → "stranger can't see a draft" fails.
- *  - drop `reserved_count = 0` in cancel → "cancel with guests refused" fails.
+ *  - drop `host_user_id = ${userId}` in the cancel UPDATE → "someone else can't cancel my event" fails.
  */
 import http from "http";
 
@@ -230,8 +230,9 @@ async function call(method: string, path: string, o: { token?: string; body?: un
     assert(r.status === 200 && r.body.event.title === "Rooftop Party Two" && r.body.event.city === null && r.body.event.slug === ev.slug, "edit title keeps the link; blank city clears", r.body?.event);
 
     console.log("Cancel");
-    r = await call("POST", `/api/events/${ev.id}/cancel`, { token: tok(host), body: {} });
-    assert(r.status === 409 && r.body.error.code === "EVENT_HAS_GUESTS", "cancel with guests refused (Phase 2)", r);
+    // Cancelling with guests is allowed since Phase 2 PR 4 (tested in ticketRefunds.http.test.ts); this event stays live for the checks below.
+    r = await call("POST", `/api/events/${ev.id}/cancel`, { token: tok(owner), body: {} });
+    assert(r.status === 404 && r.body.error.code === "EVENT_NOT_FOUND", "someone else can't cancel my event", r);
     r = await call("POST", `/api/events/${bizEvent.id}/cancel`, { token: tok(owner), body: { reason: "Rain" } });
     assert(r.status === 200 && r.body.event.status === "cancelled", "draft with no guests cancels", r);
     r = await call("PATCH", `/api/events/${bizEvent.id}`, { token: tok(owner), body: { title: "Back" } });
