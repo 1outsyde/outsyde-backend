@@ -459,6 +459,17 @@ export class WebhookHandlers {
    */
   static async handlePaymentIntentSucceeded(paymentIntent: any) {
     const metadata = paymentIntent.metadata || {};
+    // Event tickets (server/events/ticketCheckout.ts) carry their own keys (ticketOrderId), never
+    // bookingId/orderId, and are handled here before any other branch sees them.
+    if (metadata.type === 'event_ticket') {
+      try {
+        const { handleTicketPaymentSucceeded } = await import('../events/ticketCheckout');
+        await handleTicketPaymentSucceeded(paymentIntent);
+      } catch (error) {
+        console.error(`[Stripe] Error handling event_ticket payment ${paymentIntent.id}:`, error);
+      }
+      return;
+    }
     const { type, bookingId, clientId } = metadata;
     // The hold-based 'appointment' type (see routes.ts POST
     // /api/booking/:holdId/create-payment-intent) uses appointmentId, not
@@ -1418,6 +1429,15 @@ export class WebhookHandlers {
    */
   static async handlePaymentIntentCanceled(paymentIntent: any) {
     const metadata = paymentIntent.metadata || {};
+    if (metadata.type === 'event_ticket') {
+      try {
+        const { handleTicketPaymentCanceled } = await import('../events/ticketCheckout');
+        await handleTicketPaymentCanceled(paymentIntent);
+      } catch (error) {
+        console.error(`[Stripe] Error handling event_ticket cancel ${paymentIntent.id}:`, error);
+      }
+      return;
+    }
     const { type, bookingId } = metadata;
 
     // A cancelled payment never used its points code: give the hold back. Only a hold by this
