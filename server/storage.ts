@@ -1054,8 +1054,7 @@ export class DatabaseStorage implements IStorage {
 
       // 2026-10-18: signup answers callers already pass but were never saved (Legend: know
       // every answer). Undefined keeps the column default (country, billing same as home).
-      firstName: insertUser.firstName || null,
-      lastName: insertUser.lastName || null,
+      // firstName / lastName / appleId are saved above (#332).
       profileImageUrl: insertUser.profileImageUrl || null,
       aptUnit: insertUser.aptUnit || null,
       country: insertUser.country || undefined,

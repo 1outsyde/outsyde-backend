@@ -235,7 +235,7 @@ export const users = pgTable("users", {
   selectedIndustries: jsonb("selected_industries").$type<string[]>().default([]),
   industryNiches: jsonb("industry_niches").$type<Record<string, string[]>>().default({}),
   industryValues: jsonb("industry_values").$type<Record<string, string[]>>().default({}),
-  // 2026-10-18 (migration 056): customer interests on the shared business list.
+  // 2026-10-18 (migration 058, run in Neon): customer interests on the shared business list.
   // interest_other = their own words when they pick Other; interests_original = the answers
   // exactly as first sent whenever older words had to be mapped to shared codes.
   interestOther: text("interest_other"),
