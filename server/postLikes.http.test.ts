@@ -130,6 +130,12 @@ const isLocal = (u: string) => ['localhost', '127.0.0.1', '::1', '[::1]'].includ
     assert(r.status === 200 && r.body?.liked === true, 'like with session cookie only → liked', { status: r.status, body: r.body, hadCookie: !!other.cookie });
     assert(await likesCount(photo) === 2, 'likes_count 2 with two users');
 
+    console.log('\ntoken wins over a leftover cookie from another account');
+    r = await call('POST', `/api/feed/${second}/like`, { bearer: viewer.token, cookie: other.cookie });
+    assert(r.status === 200 && r.body?.liked === false && await likeRows('other', second) === 0 && await likesCount(second) === 1,
+      "viewer's token + other's cookie → treated as viewer (already liked), nothing added for other",
+      { body: r.body, otherRows: await likeRows('other', second) });
+
     console.log('\nisLiked on profile posts');
     r = await call('GET', `/api/profiles/${id('author')}/posts`, bearer);
     let pp = profilePost(r, photo);

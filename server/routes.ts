@@ -22702,9 +22702,10 @@ export async function registerRoutes(
 
   // Like a post
   app.post("/api/feed/:postId/like", async (req, res) => {
-    // Session (web) or Bearer token (app). The app's session cookie expires after
-    // 7 days while its token keeps refreshing, so session-only auth would 401.
-    const userId = req.session?.userId || getUserIdFromRequest(req);
+    // Bearer token (app) first, then session (web). The app's session cookie expires after
+    // 7 days while its token keeps refreshing, so session-only auth would 401. Token first so a
+    // leftover cookie from another account can never take the like.
+    const userId = getUserIdFromRequest(req);
     if (!userId) {
       return res.status(401).json({ error: "Not authenticated" });
     }
@@ -22721,8 +22722,8 @@ export async function registerRoutes(
 
   // Unlike a post
   app.delete("/api/feed/:postId/like", async (req, res) => {
-    // Session or Bearer, same as like/save.
-    const userId = req.session?.userId || getUserIdFromRequest(req);
+    // Bearer first, then session, same as like.
+    const userId = getUserIdFromRequest(req);
     if (!userId) {
       return res.status(401).json({ error: "Not authenticated" });
     }
