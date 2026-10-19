@@ -16,6 +16,7 @@ import vendorAnalyticsRouter from "./routes/vendorAnalytics";
 import eventsRouter from "./events/eventsRouter";
 import ticketsRouter from "./events/ticketsRouter";
 import ticketCheckoutRouter from "./events/ticketCheckout";
+import ticketRefundsRouter from "./events/ticketRefunds";
 // stripe-replit-sync removed — no longer on Replit
 import { WebhookHandlers } from "./stripe/webhookHandlers";
 import { stripeService } from "./stripe/stripeService";
@@ -379,6 +380,8 @@ if (process.env.NODE_ENV === 'production') {
   app.use('/api/events', ticketsRouter);
   // Events & Ticketing (Phase 2 PR 3): paid ticket checkout + order status
   app.use('/api/events', ticketCheckoutRouter);
+  // Events & Ticketing (Phase 2 PR 4): refunds (buyer, host), host order list
+  app.use('/api/events', ticketRefundsRouter);
   setupWebSocket(httpServer);
 
   app.use((err: any, _req: Request, res: Response, _next: NextFunction) => {

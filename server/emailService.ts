@@ -2175,3 +2175,134 @@ export async function sendPayoutAlertToAdmin(params: {
   `);
   await sendBrandedEmail(ADMIN_NOTIFICATION_EMAIL, `[Outsyde] ${params.items.length} business payout${params.items.length === 1 ? '' : 's'} waiting (${cents(params.totalCents)})`, html);
 }
+
+// ─── Event tickets (Events & Ticketing Phase 2 PR 4) ─────────────────────────
+// Copy rules: real punctuation, no dashes, and the service fee is named but never given as a percentage.
+// Every value from the database is escaped. These throw on a send failure; callers catch.
+
+export interface TicketEmailEvent {
+  title: string;
+  /** Already formatted in the event's own time zone, e.g. "Saturday, October 24 at 8:00 PM EDT". */
+  whenText: string;
+  /** Venue and address, or null when the event has none. */
+  whereText: string | null;
+}
+
+function ticketEventRows(ev: TicketEmailEvent): string {
+  return `
+    ${detailRow('Event', escapeHtml(ev.title), true)}
+    ${detailRow('When', escapeHtml(ev.whenText), false)}
+    ${ev.whereText ? detailRow('Where', escapeHtml(ev.whereText), true) : ''}`;
+}
+
+export type TicketReceiptParams = {
+  toEmail: string;
+  firstName: string | null;
+  event: TicketEmailEvent;
+  ticketTypeName: string;
+  quantity: number;
+  ticketPriceCents: number;
+  serviceFeeCents: number;
+  totalCents: number;
+  codes: string[];
+};
+
+export function renderTicketReceipt(params: TicketReceiptParams): { subject: string; html: string } {
+  const free = params.totalCents === 0;
+  const hello = params.firstName ? `Hi ${escapeHtml(params.firstName)}, you're going.` : `You're going.`;
+  const codeRows = params.codes
+    .map((c, i) => detailRow(`Ticket ${i + 1}`, `<span style="font-family:monospace;letter-spacing:2px;">${escapeHtml(c)}</span>`, i % 2 === 0))
+    .join('');
+  const moneyRows = free ? '' : `
+    ${detailRow('Tickets', `${params.quantity} x ${escapeHtml(params.ticketTypeName)}, ${cents(params.ticketPriceCents)}`, true)}
+    ${detailRow('Service fee', cents(params.serviceFeeCents), false)}
+    ${detailRow('Total charged', cents(params.totalCents), true)}`;
+  const html = wrapEmail(`
+    ${emailHeader(free ? 'Your RSVP is confirmed' : 'Your tickets are confirmed', hello)}
+    <tr><td style="background:#1A1A1A;padding:0 32px 8px;">
+      <table width="100%" cellpadding="0" cellspacing="0" style="border-radius:6px;overflow:hidden;border:1px solid #2A2A2A;">
+        ${ticketEventRows(params.event)}
+        ${free ? detailRow('Tickets', `${params.quantity} x ${escapeHtml(params.ticketTypeName)}`, false) : ''}
+      </table>
+      ${moneyRows ? `<table width="100%" cellpadding="0" cellspacing="0" style="margin-top:8px;">${moneyRows}</table>` : ''}
+      <p style="color:#888888;font-size:13px;margin:16px 0 8px 0;">Show a ticket code at the door. Each code lets one person in.</p>
+      <table width="100%" cellpadding="0" cellspacing="0" style="border-radius:6px;overflow:hidden;border:1px solid #2A2A2A;">${codeRows}</table>
+    </td></tr>
+    ${emailFooter('Keep this email. Your ticket codes are also in your Outsyde account.')}
+  `);
+  return { subject: `${free ? 'RSVP confirmed' : 'Your tickets'}: ${params.event.title}`, html };
+}
+
+export async function sendTicketReceiptToBuyer(params: TicketReceiptParams): Promise<void> {
+  const { subject, html } = renderTicketReceipt(params);
+  await sendBrandedEmail(params.toEmail, subject, html, { kind: 'ticket', label: params.totalCents === 0 ? 'RSVP confirmation' : 'Ticket receipt' });
+}
+
+export type TicketRefundParams = {
+  toEmail: string;
+  firstName: string | null;
+  event: TicketEmailEvent;
+  reason: 'buyer' | 'host' | 'event_cancelled';
+  refundCents: number;
+  /** Service fee Outsyde kept on this refund (0 when everything came back). */
+  keptFeeCents: number;
+  cancelReason?: string | null;
+};
+
+export function renderTicketRefund(params: TicketRefundParams): { subject: string; html: string } {
+  const name = params.firstName ? `Hi ${escapeHtml(params.firstName)}, ` : '';
+  const heading = params.reason === 'event_cancelled' ? 'This event was cancelled' : 'Your refund is on its way';
+  const lead = params.reason === 'event_cancelled'
+    ? `${name}the host cancelled this event, so your full payment is coming back to you.`
+    : params.reason === 'host'
+      ? `${name}the host refunded your tickets.`
+      : `${name}your tickets were cancelled and refunded.`;
+  const rows = `
+    ${ticketEventRows(params.event)}
+    ${params.cancelReason ? detailRow('Message from the host', escapeHtml(params.cancelReason), false) : ''}
+    ${detailRow('Refund', cents(params.refundCents), true)}
+    ${params.keptFeeCents > 0 ? detailRow('Service fee', `${cents(params.keptFeeCents)}, not refunded`, false) : ''}`;
+  const html = wrapEmail(`
+    ${emailHeader(heading, lead)}
+    <tr><td style="background:#1A1A1A;padding:0 32px 8px;">
+      <table width="100%" cellpadding="0" cellspacing="0" style="border-radius:6px;overflow:hidden;border:1px solid #2A2A2A;">${rows}</table>
+      <p style="color:#888888;font-size:13px;margin:16px 0 8px 0;">The money goes back to the card you paid with. Banks usually show it within 5 to 10 business days. Your ticket codes no longer work.</p>
+    </td></tr>
+    ${emailFooter()}
+  `);
+  return { subject: `${params.reason === 'event_cancelled' ? 'Event cancelled' : 'Refund'}: ${params.event.title}`, html };
+}
+
+export async function sendTicketRefundToBuyer(params: TicketRefundParams): Promise<void> {
+  const { subject, html } = renderTicketRefund(params);
+  await sendBrandedEmail(params.toEmail, subject, html,
+    { kind: 'ticket', label: params.reason === 'event_cancelled' ? 'Event cancelled, refund' : 'Ticket refund' });
+}
+
+export type EventCancelledParams = {
+  toEmail: string;
+  firstName: string | null;
+  event: TicketEmailEvent;
+  cancelReason?: string | null;
+};
+
+export function renderEventCancelled(params: EventCancelledParams): { subject: string; html: string } {
+  const name = params.firstName ? `Hi ${escapeHtml(params.firstName)}, ` : '';
+  const html = wrapEmail(`
+    ${emailHeader('This event was cancelled', `${name}the host cancelled this event, so your RSVP is cancelled too.`)}
+    <tr><td style="background:#1A1A1A;padding:0 32px 8px;">
+      <table width="100%" cellpadding="0" cellspacing="0" style="border-radius:6px;overflow:hidden;border:1px solid #2A2A2A;">
+        ${ticketEventRows(params.event)}
+        ${params.cancelReason ? detailRow('Message from the host', escapeHtml(params.cancelReason), false) : ''}
+      </table>
+      <p style="color:#888888;font-size:13px;margin:16px 0 8px 0;">This was a free RSVP, so nothing was charged.</p>
+    </td></tr>
+    ${emailFooter()}
+  `);
+  return { subject: `Event cancelled: ${params.event.title}`, html };
+}
+
+export async function sendEventCancelledToGuest(params: EventCancelledParams): Promise<void> {
+  const { subject, html } = renderEventCancelled(params);
+  await sendBrandedEmail(params.toEmail, subject, html, { kind: 'ticket', label: 'Event cancelled' });
+}
