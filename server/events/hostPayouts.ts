@@ -157,4 +157,29 @@ router.get("/payouts/status", hybridAuthMiddleware, async (req: Request, res: Re
   }
 });
 
+/**
+ * account.updated for a host payout account. One statement: skips events not newer than last_event_at,
+ * sets onboarding_complete only when charges_enabled and details_submitted (never writes false),
+ * always records last_event_at. eventCreatedAt is Stripe unix seconds.
+ */
+export async function handleHostAccountUpdated(account: any, eventCreatedAt: number): Promise<void> {
+  const accountId = account?.id;
+  if (typeof accountId !== "string" || !accountId || !Number.isFinite(eventCreatedAt)) return;
+  const complete = account.charges_enabled === true && account.details_submitted === true;
+  await rows(sql`
+    UPDATE user_payout_accounts
+    SET onboarding_complete = onboarding_complete OR ${complete},
+        last_event_at = to_timestamp(${eventCreatedAt}),
+        updated_at = now()
+    WHERE stripe_account_id = ${accountId}
+      AND (last_event_at IS NULL OR last_event_at < to_timestamp(${eventCreatedAt}))`);
+}
+
+/** Return from Stripe onboarding: mark complete only when Stripe says so. Never writes false, never throws. */
+export async function markHostReturnComplete(accountId: string, stripeAccount: { details_submitted?: boolean; charges_enabled?: boolean }): Promise<void> {
+  if (stripeAccount.details_submitted === true && stripeAccount.charges_enabled === true) {
+    await rows(sql`UPDATE user_payout_accounts SET onboarding_complete = true, updated_at = now() WHERE stripe_account_id = ${accountId} AND onboarding_complete = false`);
+  }
+}
+
 export default router;

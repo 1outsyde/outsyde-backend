@@ -39,6 +39,18 @@ async function call(method: string, path: string, o: { token?: string; body?: un
   });
 }
 
+async function getNoFollow(path: string): Promise<{ status: number; location: string | null }> {
+  return new Promise((resolve, reject) => {
+    const u = new URL(path, BASE!);
+    const req = http.request({ hostname: u.hostname, port: u.port || 80, path: u.pathname + u.search, method: "GET", agent: false }, (res) => {
+      res.resume();
+      res.on("end", () => resolve({ status: res.statusCode || 0, location: (res.headers.location as string) ?? null }));
+    });
+    req.on("error", reject);
+    req.end();
+  });
+}
+
 (async () => {
   if (!BASE) { console.log("⏭  skipped: set EV_TEST_BASE_URL + EV_TEST_PG_URL + EV_TEST_STRIPE_PORT to run"); process.exit(0); }
   if (!PG_URL || !isLocal(BASE) || !isLocal(PG_URL) || !STUB_PORT) throw new Error("refusing to run: BASE and PG_URL must be localhost and EV_TEST_STRIPE_PORT set");
@@ -279,6 +291,76 @@ async function call(method: string, path: string, o: { token?: string; body?: un
     assert(dBiz.destinationType === "business" && dBiz.accountId === "acct_biz_ep" && dBiz.localReady === false, "destination: business", dBiz);
     const dUser = await hostPayoutDestination(uEv(hostA));
     assert(dUser.destinationType === "user" && dUser.accountId === acctA && dUser.localReady === true, "destination: user", dUser);
+
+    console.log("connect-return and connect-refresh for hosts");
+    const hostR = await mkUser("r");
+    const hostW = await mkUser("w");
+    const hostI = await mkUser("i");
+    const acctR = `acct_ret_${P}`, acctW = `acct_retw_${P}`, acctI = `acct_reti_${P}`;
+    for (const [u, a] of [[hostR, acctR], [hostW, acctW], [hostI, acctI]] as const) await q(`INSERT INTO user_payout_accounts (user_id, stripe_account_id) VALUES ($1, $2)`, [u, a]);
+    const flag = async (a: string) => (await q(`SELECT onboarding_complete FROM user_payout_accounts WHERE stripe_account_id = $1`, [a]))[0]?.onboarding_complete;
+    setReady(acctR);
+    let g = await getNoFollow(`/api/stripe/connect-return?account=${acctR}&type=host`);
+    assert(g.status === 302 && g.location === "outsyde://stripe-return?status=complete&type=host", "return host: 302 to the deep link", g);
+    assert((await flag(acctR)) === true, "return host marks complete when charges and details are in");
+    g = await getNoFollow(`/api/stripe/connect-return?account=${acctI}&type=host`);
+    assert(g.status === 302 && g.location === "outsyde://stripe-return?status=complete&type=host" && (await flag(acctI)) === false, "return host incomplete leaves false", g);
+    setReady(acctR, false);
+    g = await getNoFollow(`/api/stripe/connect-return?account=${acctR}&type=host`);
+    assert((await flag(acctR)) === true, "return host never writes false");
+    setReady(acctW);
+    g = await getNoFollow(`/api/stripe/connect-return?account=${acctW}&type=host-web`);
+    assert(g.status === 302 && g.location === "https://goutsyde.test/events/payouts?stripe=done", "return host-web redirects to /events/payouts?stripe=done", g);
+    assert((await flag(acctW)) === true, "return host-web marks complete");
+    failRetrieveFor.add(acctI);
+    g = await getNoFollow(`/api/stripe/connect-return?account=${acctI}&type=host`);
+    assert(g.status === 302 && g.location === "outsyde://stripe-return?status=complete&type=host" && (await flag(acctI)) === false, "return host with a failed Stripe retrieve still redirects", g);
+    failRetrieveFor.delete(acctI);
+    g = await getNoFollow(`/api/stripe/connect-refresh?account=${acctR}&type=host`);
+    assert(g.status === 302 && g.location === "outsyde://stripe-return?status=refresh&type=host", "refresh host deep link", g);
+    g = await getNoFollow(`/api/stripe/connect-refresh?account=${acctR}&type=host-web`);
+    assert(g.status === 302 && g.location === "https://goutsyde.test/events/payouts?stripe=refresh", "refresh host-web", g);
+
+    console.log("vendor return unchanged");
+    const hostV = await mkUser("v");
+    const acctV = `acct_vend_${P}`;
+    await q(`INSERT INTO businesses (owner_id, name, category, approval_status, stripe_account_id, stripe_onboarding_complete) VALUES ($1, $2, 'beauty', 'pending', $3, false)`, [hostV, `${P} Vendor`, acctV]);
+    setReady(acctV);
+    g = await getNoFollow(`/api/stripe/connect-return?account=${acctV}&type=vendor`);
+    assert(g.status === 302 && g.location === "outsyde://stripe-return?status=complete&type=vendor", "vendor return still redirects to its deep link", g);
+    assert((await q(`SELECT stripe_onboarding_complete AS c FROM businesses WHERE stripe_account_id = $1`, [acctV]))[0].c === true, "vendor return still marks the business complete");
+
+    console.log("account.updated for hosts (in process)");
+    const { handleHostAccountUpdated } = await import("./hostPayouts");
+    const { WebhookHandlers } = await import("../stripe/webhookHandlers");
+    const hostX = await mkUser("x");
+    const acctX = `acct_wh_${P}`;
+    await q(`INSERT INTO user_payout_accounts (user_id, stripe_account_id) VALUES ($1, $2)`, [hostX, acctX]);
+    const row = async () => (await q(`SELECT onboarding_complete AS c, extract(epoch from last_event_at)::bigint AS t FROM user_payout_accounts WHERE stripe_account_id = $1`, [acctX]))[0];
+    const T = 1_900_000_000;
+    await handleHostAccountUpdated({ id: acctX, charges_enabled: true, details_submitted: true }, T);
+    let w = await row();
+    assert(w.c === true && Number(w.t) === T, "webhook host true sets complete and last_event_at", w);
+    await handleHostAccountUpdated({ id: acctX, charges_enabled: false, details_submitted: true }, T + 10);
+    w = await row();
+    assert(w.c === true && Number(w.t) === T + 10, "webhook host true then later false keeps true, writes last_event_at", w);
+    await handleHostAccountUpdated({ id: acctX, charges_enabled: true, details_submitted: true }, T + 5);
+    w = await row();
+    assert(Number(w.t) === T + 10, "webhook older event ignored (last_event_at unchanged)", w);
+    const hostY = await mkUser("y");
+    const acctY = `acct_wh2_${P}`;
+    await q(`INSERT INTO user_payout_accounts (user_id, stripe_account_id, last_event_at) VALUES ($1, $2, to_timestamp($3))`, [hostY, acctY, T]);
+    await handleHostAccountUpdated({ id: acctY, charges_enabled: true, details_submitted: true }, T - 100);
+    assert((await q(`SELECT onboarding_complete AS c FROM user_payout_accounts WHERE stripe_account_id = $1`, [acctY]))[0].c === false, "older event does not complete the account");
+    await handleHostAccountUpdated({ id: `acct_unknown_${P}`, charges_enabled: true, details_submitted: true }, T);
+    assert(true, "unknown account id is a no-op, no throw");
+    await WebhookHandlers.handleConnectAccountUpdated({ id: acctY, metadata: { role: "host", userId: hostY }, charges_enabled: true, details_submitted: true }, T + 1);
+    assert((await q(`SELECT onboarding_complete AS c FROM user_payout_accounts WHERE stripe_account_id = $1`, [acctY]))[0].c === true, "handleConnectAccountUpdated routes role=host to the host handler");
+    const hostZ = await mkUser("z");
+    const acctZ = `acct_wh3_${P}`;
+    await q(`INSERT INTO user_payout_accounts (user_id, stripe_account_id) VALUES ($1, $2)`, [hostZ, acctZ]);
+    await WebhookHandlers.handleConnectAccountUpdated({ id: acctZ, metadata: {}, charges_enabled: true, details_submitted: true }, T);
+    assert((await q(`SELECT onboarding_complete AS c FROM user_payout_accounts WHERE stripe_account_id = $1`, [acctZ]))[0].c === true, "no metadata: falls back to user_payout_accounts lookup by account id");
   } finally {
     stub.close();
     await q(`DELETE FROM user_payout_accounts WHERE user_id IN (SELECT id FROM users WHERE email LIKE $1)`, [`${P}-%`]);

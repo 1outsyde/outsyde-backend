@@ -2367,6 +2367,12 @@ export class WebhookHandlers {
   static async handleConnectAccountUpdated(account: any, eventCreatedAt: number) {
     const metadata = account.metadata || {};
     const accountId = account.id;
+
+    // Customer hosting paid events: their own payout account, handled separately.
+    if (metadata.role === 'host') {
+      const { handleHostAccountUpdated } = await import("../events/hostPayouts");
+      return handleHostAccountUpdated(account, eventCreatedAt);
+    }
     
     // Onboarding is complete when charges are enabled and details are submitted.
     // payouts_enabled may lag behind in sandbox — don't gate on it.
@@ -2544,6 +2550,12 @@ export class WebhookHandlers {
     }
 
     if (!business && !photographer && !staffMember) {
+      // Last resort: a host payout account whose event carried no metadata.
+      const hostRes: any = await db.execute(sql`SELECT 1 AS found FROM user_payout_accounts WHERE stripe_account_id = ${accountId} LIMIT 1`);
+      if ((hostRes.rows ?? hostRes)?.length) {
+        const { handleHostAccountUpdated } = await import("../events/hostPayouts");
+        return handleHostAccountUpdated(account, eventCreatedAt);
+      }
       console.log(`[Stripe] No business, photographer, or staff member found for account ${accountId}`);
     }
   }
