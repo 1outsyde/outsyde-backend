@@ -27,6 +27,9 @@ import { releasePromoForCanceledPaymentIntent } from "../promoCheckout";
 import { isComplimentaryTier, isTerminalStripeStatus } from "../complimentary";
 import { realName } from "../personName";
 import { getSubscriptionPeriod, getInvoiceSubscriptionId } from "./subscriptionFields";
+import { enforceSubscriptionAccess, lateRunRef, pastDueSinceOf } from "../subscriptions/lifecycle";
+import { loadNoticeContext, sendSubscriptionNotice } from "../subscriptions/notices";
+import { planSwitchRef } from "../subscriptions/planSwitch";
 
 // XO Beauty & Lashes' own deposit-email sender (the legacy
 // create-deposit-intent flow's pre-existing behavior).
@@ -424,6 +427,14 @@ export class WebhookHandlers {
 
       case "invoice.paid":
         await this.handleInvoicePaid(event.data.object);
+        break;
+
+      case "invoice.payment_failed":
+        await this.handleInvoicePaymentFailed(event.data.object);
+        break;
+
+      case "invoice.payment_action_required":
+        await this.handleInvoicePaymentActionRequired(event.data.object);
         break;
 
       case "account.updated":
@@ -1685,7 +1696,8 @@ export class WebhookHandlers {
           status: 'active',
           stripeSubscriptionId: newStripeSubId,
           stripeCustomerId: session.customer,
-        });
+          pastDueSince: null,
+        } as any);
         subscriptionId = existing.id;
 
         // If a different Stripe subscription existed, cancel it to prevent duplicate billing.
@@ -1715,7 +1727,30 @@ export class WebhookHandlers {
         subscriptionActive: true,
       });
 
+      // Save the real billing period (best effort; renewals keep it current).
+      let period: ReturnType<typeof getSubscriptionPeriod> = null;
+      if (session.subscription) {
+        try {
+          const stripe = await getUncachableStripeClient();
+          period = getSubscriptionPeriod(await stripe.subscriptions.retrieve(session.subscription));
+          if (period) await storage.updateVendorSubscription(subscriptionId, { currentPeriodStart: period.start, currentPeriodEnd: period.end });
+        } catch (periodErr) {
+          console.error(`[Webhook] Could not read period for ${session.subscription}:`, periodErr instanceof Error ? periodErr.message : 'unknown error');
+        }
+      }
+
+      // Resubscribing brings back whatever the system paused for a lapsed plan (decided 2026-10-19).
+      const restored = (await enforceSubscriptionAccess(businessId, 'checkout_completed')).unpaused;
+
       console.log(`[Webhook] Subscription activated: vendor=${vendorId} business=${businessId} tier=${tierId} stripeSubId=${session.subscription}`);
+
+      const row = await storage.getVendorSubscriptionByBusinessId(businessId);
+      if (row) {
+        const ctx = await loadNoticeContext(row);
+        const ref = `checkout:${session.id ?? session.subscription}`;
+        await sendSubscriptionNotice('activated', ref, ctx, { amountCents: session.amount_total ?? null, periodEnd: period?.end ?? null, restoredItems: restored });
+        if (restored > 0) await sendSubscriptionNotice('restored', ref, ctx, { restoredItems: restored, periodEnd: period?.end ?? null });
+      }
 
       const [tier] = await db.select().from(subscriptionTiers).where(eq(subscriptionTiers.id, tierId));
       const tierName = tier?.displayName || tier?.name || 'subscription';
@@ -2107,6 +2142,9 @@ export class WebhookHandlers {
 
   /* =====================================================
      SUBSCRIPTION STATUS CHANGES
+     Step 1.0b: state based. Every handler saves what Stripe says, keeps past_due_since (the start of a
+     run of failed payments; the 7 day grace counts from it), then calls enforceSubscriptionAccess, which
+     pauses or brings back listings to match the plan. Safe to replay. Notices go out once (notices.ts).
   ===================================================== */
   static async handleSubscriptionChange(subscription: any) {
     const vendorSub = await storage.getVendorSubscriptionByStripeId(subscription.id);
@@ -2115,6 +2153,7 @@ export class WebhookHandlers {
     const previousStatus = vendorSub.status;
     const newStatus = subscription.status;
     const previousTierId = vendorSub.tierId;
+    const previousPastDueSince = pastDueSinceOf(vendorSub);
 
     // Detect tier change by checking the Stripe subscription's price
     const stripePriceId = subscription.items?.data?.[0]?.price?.id;
@@ -2142,6 +2181,14 @@ export class WebhookHandlers {
       updateData.currentPeriodStart = period.start;
       updateData.currentPeriodEnd = period.end;
     }
+    // past_due_since: set once when a run of failed payments starts, cleared when paid up.
+    let lateStarted: Date | null = null;
+    if (newStatus === 'past_due' && !previousPastDueSince) {
+      lateStarted = new Date();
+      updateData.pastDueSince = lateStarted;
+    } else if ((newStatus === 'active' || newStatus === 'trialing') && previousPastDueSince) {
+      updateData.pastDueSince = null;
+    }
 
     if (tierChanged) {
       updateData.tierId = newTierId;
@@ -2149,79 +2196,26 @@ export class WebhookHandlers {
 
     await storage.updateVendorSubscription(vendorSub.id, updateData);
 
+    let enforcement: { active: boolean; paused: number; unpaused: number } | null = null;
     if (vendorSub.businessId) {
       await storage.updateBusiness(vendorSub.businessId, {
         subscriptionActive: newStatus === "active",
       });
+      enforcement = await enforceSubscriptionAccess(vendorSub.businessId, `subscription_${newStatus}`);
+    }
 
-      // Auto-pause/unpause logic respects the 3-day grace period for past_due subscriptions
-      // Use the same logic as isBusinessSubscriptionActive to ensure policy consistency
-      const subActiveStatus = await storage.isBusinessSubscriptionActive(vendorSub.businessId);
-      
-      // Determine previous subscription active status for transition detection
-      // (previous status is what it was before this webhook, now check actual enforcement status)
-      const wasActiveStatus = previousStatus === 'active' || previousStatus === 'trialing';
-      const isNowActiveByPolicy = subActiveStatus.active;
-      
-      // Auto-pause: Only when subscription enforcement status goes from active to inactive
-      // This respects grace periods - past_due within 3 days is still considered "active"
-      if (wasActiveStatus && !isNowActiveByPolicy) {
-        const pauseResult = await storage.pauseBusinessLiveItems(vendorSub.businessId);
-        if (pauseResult.pausedProducts > 0 || pauseResult.pausedServices > 0) {
-          console.log(`[Subscription Enforcement] Paused ${pauseResult.pausedProducts} products and ${pauseResult.pausedServices} services for business ${vendorSub.businessId} due to subscription status: ${newStatus} (${subActiveStatus.reason})`);
-          
-          // Audit log for auto-pause
-          await storage.createAuditLog({
-            actorId: 'system',
-            actorType: 'system',
-            action: 'items_auto_paused',
-            targetType: 'business',
-            targetId: vendorSub.businessId,
-            beforeState: { subscriptionStatus: previousStatus },
-            afterState: { 
-              subscriptionStatus: newStatus,
-              pausedProducts: pauseResult.pausedProducts,
-              pausedServices: pauseResult.pausedServices,
-              reason: subActiveStatus.reason,
-            },
-            metadata: {
-              vendorId: vendorSub.vendorId,
-              stripeSubscriptionId: vendorSub.stripeSubscriptionId,
-              reason: 'subscription_inactive_after_grace_period',
-            }
-          });
-        }
-      }
+    const ctx = await loadNoticeContext({ ...vendorSub, tierId: newTierId });
+    const latestInvoiceId = typeof subscription.latest_invoice === 'string' ? subscription.latest_invoice : subscription.latest_invoice?.id ?? null;
 
-      // Auto-unpause: When subscription becomes active again (from any inactive state)
-      const wasInactiveStatus = previousStatus !== 'active' && previousStatus !== 'trialing';
-      
-      if (wasInactiveStatus && isNowActiveByPolicy) {
-        const unpauseResult = await storage.unpauseBusinessPausedItems(vendorSub.businessId);
-        if (unpauseResult.unpausedProducts > 0 || unpauseResult.unpausedServices > 0) {
-          console.log(`[Subscription Enforcement] Unpaused ${unpauseResult.unpausedProducts} products and ${unpauseResult.unpausedServices} services for business ${vendorSub.businessId} due to subscription status: ${newStatus}`);
-          
-          // Audit log for auto-unpause
-          await storage.createAuditLog({
-            actorId: 'system',
-            actorType: 'system',
-            action: 'items_auto_unpaused',
-            targetType: 'business',
-            targetId: vendorSub.businessId,
-            beforeState: { subscriptionStatus: previousStatus },
-            afterState: { 
-              subscriptionStatus: newStatus,
-              unpausedProducts: unpauseResult.unpausedProducts,
-              unpausedServices: unpauseResult.unpausedServices,
-            },
-            metadata: {
-              vendorId: vendorSub.vendorId,
-              stripeSubscriptionId: vendorSub.stripeSubscriptionId,
-              reason: 'subscription_reactivated',
-            }
-          });
-        }
-      }
+    // Late: normally announced by invoice.payment_failed; this covers a past_due that arrives without
+    // it (for example a Send invoice plan that went unpaid). Same ref, so it is sent once either way.
+    if (newStatus === 'past_due') {
+      const since = previousPastDueSince ?? lateStarted ?? new Date();
+      await sendSubscriptionNotice('payment_failed', latestInvoiceId ? `invoice:${latestInvoiceId}` : `late:${lateRunRef(since)}`, ctx, { pastDueSince: since, invoiceId: latestInvoiceId });
+    }
+    // Paid up after being late
+    if ((newStatus === 'active' || newStatus === 'trialing') && previousPastDueSince) {
+      await sendSubscriptionNotice('restored', `restored:${lateRunRef(previousPastDueSince)}`, ctx, { restoredItems: enforcement?.unpaused ?? 0, periodEnd: period?.end ?? null });
     }
 
     // Handle tier change notifications and benefit migration
@@ -2265,9 +2259,11 @@ export class WebhookHandlers {
         subscriptionId: vendorSub.id,
         effectiveDate: new Date().toLocaleDateString(),
       });
+
+      await sendSubscriptionNotice('plan_switched', planSwitchRef(newTierId, period?.start), ctx, { previousPlanName: previousTierName, amountCents: newPrice, periodEnd: period?.end ?? null });
     }
 
-    // Handle cancellation notifications and audit logging
+    // Cancellation audit (a failed payment is no longer reported as "canceled"; see the late notice above)
     if (previousStatus === 'active' && (newStatus === 'canceled' || newStatus === 'past_due')) {
       const [tier] = await db.select().from(subscriptionTiers).where(eq(subscriptionTiers.id, vendorSub.tierId));
       const tierName = tier?.displayName || tier?.name || 'subscription';
@@ -2290,29 +2286,45 @@ export class WebhookHandlers {
         }
       });
 
-      await NotificationTriggers.subscriptionCanceled({
-        userId: vendorSub.vendorId,
-        tierName,
-        subscriptionId: vendorSub.id,
-        effectiveDate,
-      });
+      if (newStatus === 'canceled') {
+        await NotificationTriggers.subscriptionCanceled({
+          userId: vendorSub.vendorId,
+          tierName,
+          subscriptionId: vendorSub.id,
+          effectiveDate,
+        });
+      }
     }
   }
 
   /* =====================================================
      SUBSCRIPTION DELETED (HARD CANCEL)
+     Stripe ended the subscription (every retry failed, or it was canceled). Access ends now: the period
+     end becomes the moment it ended, listings pause, and the vendor and Outsyde are told once.
+     A replaced subscription (new checkout cancels the old one) no longer matches any row, so it is ignored.
   ===================================================== */
   static async handleSubscriptionDeleted(subscription: any) {
     const vendorSub = await storage.getVendorSubscriptionByStripeId(subscription.id);
     if (!vendorSub) return;
 
-    await storage.updateVendorSubscription(vendorSub.id, { status: 'canceled' });
+    const endedAt = typeof subscription.ended_at === 'number' && subscription.ended_at > 0
+      ? new Date(subscription.ended_at * 1000)
+      : new Date();
+    const storedEnd = vendorSub.currentPeriodEnd ? new Date(vendorSub.currentPeriodEnd) : null;
+    const accessEnds = storedEnd && storedEnd < endedAt ? storedEnd : endedAt;
 
+    await storage.updateVendorSubscription(vendorSub.id, { status: 'canceled', currentPeriodEnd: accessEnds, pastDueSince: null } as any);
+
+    let paused = 0;
     if (vendorSub.businessId) {
       await storage.updateBusiness(vendorSub.businessId, { subscriptionActive: false });
+      paused = (await enforceSubscriptionAccess(vendorSub.businessId, 'subscription_deleted')).paused;
     }
 
-    console.log(`[Webhook] customer.subscription.deleted: stripeId=${subscription.id} vendor=${vendorSub.vendorId} marked canceled`);
+    const ctx = await loadNoticeContext(vendorSub);
+    await sendSubscriptionNotice('ended', `ended:${subscription.id}`, ctx, { pausedItems: paused, periodEnd: accessEnds });
+
+    console.log(`[Webhook] customer.subscription.deleted: stripeId=${subscription.id} vendor=${vendorSub.vendorId} marked canceled, paused ${paused}`);
   }
 
   /* =====================================================
@@ -2326,27 +2338,113 @@ export class WebhookHandlers {
     try {
       const vendorSub = await storage.getVendorSubscriptionByStripeId(stripeSubscriptionId);
       if (!vendorSub) return;
+      const previousPastDueSince = pastDueSinceOf(vendorSub);
 
       const stripe = await getUncachableStripeClient();
       const sub: any = await stripe.subscriptions.retrieve(stripeSubscriptionId);
       const period = getSubscriptionPeriod(sub);
+      const paidUp = sub.status === 'active' || sub.status === 'trialing';
 
       await storage.updateVendorSubscription(vendorSub.id, {
         status: sub.status || 'active',
         ...(period ? { currentPeriodStart: period.start, currentPeriodEnd: period.end } : {}),
-      });
+        ...(paidUp ? { pastDueSince: null } : {}),
+      } as any);
 
+      let unpaused = 0;
       if (vendorSub.businessId) {
         await storage.updateBusiness(vendorSub.businessId, {
-          subscriptionActive: sub.status === 'active' || sub.status === 'trialing',
+          subscriptionActive: paidUp,
         });
+        unpaused = (await enforceSubscriptionAccess(vendorSub.businessId, 'invoice_paid')).unpaused;
       }
 
       await storage.createBenefitAllowances(vendorSub.id);
 
+      const ctx = await loadNoticeContext(vendorSub);
+      const amountCents = typeof invoice.amount_paid === 'number' ? invoice.amount_paid : null;
+      if (paidUp && previousPastDueSince) {
+        await sendSubscriptionNotice('restored', `restored:${lateRunRef(previousPastDueSince)}`, ctx, { restoredItems: unpaused, amountCents, invoiceId: invoice.id ?? null, periodEnd: period?.end ?? null });
+      }
+      // Renewals only (the first invoice of a new plan is reported as "activated" by checkout).
+      if (invoice.billing_reason !== 'subscription_create' && invoice.id) {
+        await sendSubscriptionNotice('renewed', `invoice:${invoice.id}`, ctx, { amountCents, invoiceId: invoice.id, periodEnd: period?.end ?? null });
+      }
+
       console.log(`[Webhook] invoice.paid: subscription ${stripeSubscriptionId} status=${sub.status}`);
     } catch (error) {
       console.error('[Webhook] invoice.paid handler failed:', error);
+    }
+  }
+
+  /* =====================================================
+     INVOICE PAYMENT FAILED (PLAN IS LATE)
+     The plan is marked late at once (past_due, past_due_since kept from the first failure), the vendor
+     is emailed and Outsyde gets a copy, once per invoice. Listings stay up through the grace period.
+  ===================================================== */
+  static async handleInvoicePaymentFailed(invoice: any) {
+    const stripeSubscriptionId = getInvoiceSubscriptionId(invoice);
+    if (!stripeSubscriptionId) return;
+    try {
+      const vendorSub = await storage.getVendorSubscriptionByStripeId(stripeSubscriptionId);
+      if (!vendorSub) return;
+
+      let status = 'past_due';
+      let period: ReturnType<typeof getSubscriptionPeriod> = null;
+      try {
+        const stripe = await getUncachableStripeClient();
+        const sub: any = await stripe.subscriptions.retrieve(stripeSubscriptionId);
+        if (typeof sub?.status === 'string') status = sub.status;
+        period = getSubscriptionPeriod(sub);
+      } catch (err) {
+        console.error(`[Webhook] invoice.payment_failed: could not read ${stripeSubscriptionId} from Stripe:`, err instanceof Error ? err.message : err);
+      }
+      // A failed first payment of a brand new subscription leaves it 'incomplete'; only a renewal is "late".
+      const late = status === 'past_due' || status === 'unpaid' || (status === 'active' && invoice.billing_reason !== 'subscription_create');
+      const since = pastDueSinceOf(vendorSub) ?? new Date();
+
+      await storage.updateVendorSubscription(vendorSub.id, {
+        status: late ? 'past_due' : status,
+        ...(late ? { pastDueSince: since } : {}),
+        ...(period ? { currentPeriodStart: period.start, currentPeriodEnd: period.end } : {}),
+      } as any);
+      if (vendorSub.businessId) {
+        await enforceSubscriptionAccess(vendorSub.businessId, 'invoice_payment_failed');
+      }
+
+      if (late) {
+        const ctx = await loadNoticeContext(vendorSub);
+        await sendSubscriptionNotice('payment_failed', `invoice:${invoice.id ?? lateRunRef(since)}`, ctx, {
+          pastDueSince: since,
+          amountCents: typeof invoice.amount_due === 'number' ? invoice.amount_due : null,
+          invoiceId: invoice.id ?? null,
+          invoiceUrl: invoice.hosted_invoice_url ?? null,
+        });
+      }
+      console.log(`[Webhook] invoice.payment_failed: subscription ${stripeSubscriptionId} status=${status} late=${late}`);
+    } catch (error) {
+      console.error('[Webhook] invoice.payment_failed handler failed:', error);
+    }
+  }
+
+  /* =====================================================
+     INVOICE PAYMENT ACTION REQUIRED (BANK WANTS CONFIRMATION)
+  ===================================================== */
+  static async handleInvoicePaymentActionRequired(invoice: any) {
+    const stripeSubscriptionId = getInvoiceSubscriptionId(invoice);
+    if (!stripeSubscriptionId) return;
+    try {
+      const vendorSub = await storage.getVendorSubscriptionByStripeId(stripeSubscriptionId);
+      if (!vendorSub) return;
+      const ctx = await loadNoticeContext(vendorSub);
+      await sendSubscriptionNotice('action_required', `invoice:${invoice.id}`, ctx, {
+        amountCents: typeof invoice.amount_due === 'number' ? invoice.amount_due : null,
+        invoiceId: invoice.id ?? null,
+        invoiceUrl: invoice.hosted_invoice_url ?? null,
+        pastDueSince: pastDueSinceOf(vendorSub),
+      });
+    } catch (error) {
+      console.error('[Webhook] invoice.payment_action_required handler failed:', error);
     }
   }
 

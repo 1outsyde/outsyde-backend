@@ -129,6 +129,7 @@ import { namesForNewAccount, realName, publicDisplayName } from "./personName";
 import { sendAppointmentReceipts, sendShootBookingReceipts } from "./stripe/webhookHandlers";
 import { getStripePublishableKey, getUncachableStripeClient } from "./stripe/stripeClient";
 import { getSubscriptionPeriod } from "./stripe/subscriptionFields";
+import { switchPaidPlan, applySwitchedPlan, SWITCH_DECLINED_MESSAGE } from "./subscriptions/planSwitch";
 import { isAllowedClientOrigin, normalizeClientOrigin } from "./clientOrigins";
 import { adminOverrideBusinessId } from "./adminBusinessOverride";
 import { authorizeAndProvisionGoLive, GoLiveError } from "./services/goLiveGate";
@@ -10338,14 +10339,6 @@ export async function registerRoutes(
 
       // Check if business already has an active subscription — use update instead of create
       if (existingSub?.stripeSubscriptionId && (existingSub.status === 'active' || existingSub.status === 'trialing')) {
-        const stripe = await getUncachableStripeClient();
-        const stripeSub = await stripe.subscriptions.retrieve(existingSub.stripeSubscriptionId);
-        const itemId = stripeSub.items.data[0]?.id;
-
-        if (!itemId) {
-          return res.status(400).json({ success: false, error: { code: 'NO_ITEMS', message: 'Existing subscription has no items' } });
-        }
-
         const [newTier] = await db.select().from(subscriptionTiers).where(eq(subscriptionTiers.id, tierId));
         if (!newTier?.stripePriceId) {
           return res.status(404).json({ success: false, error: { code: 'TIER_NOT_FOUND', message: 'Tier not found or not configured' } });
@@ -10355,17 +10348,23 @@ export async function registerRoutes(
           return res.status(400).json({ success: false, error: { code: 'SAME_TIER', message: 'Already on this tier' } });
         }
 
-        await stripe.subscriptions.update(existingSub.stripeSubscriptionId, {
-          items: [{ id: itemId, price: newTier.stripePriceId }],
-          proration_behavior: 'none',
-        });
-
-        await storage.updateVendorSubscription(existingSub.id, {
-          tierId: newTier.id,
-          status: 'active',
-          updatedAt: new Date(),
-        });
-        console.log(`[Subscription] tier_id updated immediately for vendor ${userId}: ${existingSub.tierId} → ${newTier.id}`);
+        // Step 1.0b: switch now, full new price charged now, billing date restarts, no credit.
+        // The tier and benefits change only once that payment succeeded (server/subscriptions/planSwitch.ts).
+        const stripe = await getUncachableStripeClient();
+        const outcome = await switchPaidPlan(stripe, existingSub.stripeSubscriptionId, newTier.stripePriceId);
+        if (outcome.kind === 'not_switchable') {
+          return res.status(400).json({ success: false, error: { code: 'NOT_SWITCHABLE', message: outcome.message } });
+        }
+        if (outcome.kind === 'pending') {
+          // Declined or the bank wants a confirmation: the old plan stays. The hosted invoice page lets
+          // the vendor pay or confirm; once paid Stripe applies the switch and the webhook saves it.
+          if (outcome.url) {
+            return res.json({ success: true, pendingPayment: true, url: outcome.url });
+          }
+          return res.status(402).json({ success: false, error: { code: 'PAYMENT_FAILED', message: SWITCH_DECLINED_MESSAGE } });
+        }
+        await applySwitchedPlan(existingSub, newTier, outcome);
+        console.log(`[Subscription] plan switched and paid for vendor ${userId}: ${existingSub.tierId} → ${newTier.id}`);
 
         return res.json({
           success: true,
@@ -10478,26 +10477,18 @@ export async function registerRoutes(
       const [currentTier] = await db.select().from(subscriptionTiers).where(eq(subscriptionTiers.id, subscription.tierId));
       const isUpgrade = (newTier.priceInCents || 0) > (currentTier?.priceInCents || 0);
 
-      // Update the Stripe subscription with the new price
+      // Step 1.0b: same rule as every paid switch (full new price now, billing date restarts, no credit).
+      // The client's prorationBehavior is accepted for compatibility but no longer changes anything.
+      void prorationBehavior;
       const stripe = await getUncachableStripeClient();
-      const stripeSub = await stripe.subscriptions.retrieve(subscription.stripeSubscriptionId);
-      const itemId = stripeSub.items.data[0]?.id;
-
-      if (!itemId) {
-        return res.status(400).json({ error: "No subscription items found" });
+      const outcome = await switchPaidPlan(stripe, subscription.stripeSubscriptionId, newTier.stripePriceId);
+      if (outcome.kind === 'not_switchable') {
+        return res.status(400).json({ error: outcome.message });
       }
-
-      // Update the subscription - Stripe will handle proration
-      const updatedStripeSub = await stripe.subscriptions.update(subscription.stripeSubscriptionId, {
-        items: [{
-          id: itemId,
-          price: newTier.stripePriceId,
-        }],
-        proration_behavior: prorationBehavior,
-      });
-
-      // The tier change will be detected and processed by the webhook handler
-      // when Stripe sends the customer.subscription.updated event
+      if (outcome.kind === 'pending') {
+        return res.status(402).json({ error: SWITCH_DECLINED_MESSAGE, code: 'PAYMENT_FAILED', url: outcome.url });
+      }
+      await applySwitchedPlan(subscription, newTier, outcome);
 
       res.json({ 
         success: true, 
@@ -10583,8 +10574,10 @@ export async function registerRoutes(
             id: itemId,
             price: newTier.stripePriceId,
           }],
-          proration_behavior: 'create_prorations',
-        },
+          // Step 1.0b: preview what a switch really charges (full new price now, no credit).
+          proration_behavior: 'none',
+          billing_cycle_anchor: 'now',
+        } as any,
       });
 
       res.json({
@@ -13014,6 +13007,15 @@ export async function registerRoutes(
       });
 
       const validated = updateSchema.parse(req.body);
+
+      // Step 1.0b: an item the SYSTEM paused for a lapsed plan can't be set live again by hand until the
+      // plan is paid (paying brings it back on its own). Same 409 shape as the go-live gate.
+      if (validated.status === 'live' && product.status === 'paused' && await storage.isSystemPausedItem('product', product.id)) {
+        const subStatus = await storage.isBusinessSubscriptionActive(business.id);
+        if (!subStatus.active) {
+          return res.status(409).json({ code: 'subscription_inactive', message: 'This product was paused because your plan payment is late. Pay your plan and it goes live again on its own.' });
+        }
+      }
       
       // Handle Stripe catalog updates for live products.
       let stripeUpdates: any = {};
@@ -13668,6 +13670,15 @@ export async function registerRoutes(
       });
 
       const validated = updateSchema.parse(req.body);
+
+      // Step 1.0b: an item the SYSTEM paused for a lapsed plan can't be set live again by hand until the
+      // plan is paid (paying brings it back on its own). Same 409 shape as the go-live gate.
+      if (validated.status === 'live' && service.status === 'paused' && await storage.isSystemPausedItem('service', service.id)) {
+        const subStatus = await storage.isBusinessSubscriptionActive(business.id);
+        if (!subStatus.active) {
+          return res.status(409).json({ code: 'subscription_inactive', message: 'This service was paused because your plan payment is late. Pay your plan and it goes live again on its own.' });
+        }
+      }
 
       // Re-check the deposit whenever the price or the deposit changes, so a
       // price lowered below an existing deposit is rejected too. Edits that
@@ -15062,6 +15073,18 @@ export async function registerRoutes(
       }
 
       // Hard seat-limit block for capped tiers: count active + pending invites.
+      // Step 1.0b: a plan that is past its grace period (or ended) pauses benefits, staff seats included.
+      // A business with no subscription row keeps today's behaviour.
+      const seatRow = await storage.getVendorSubscriptionByBusinessId(business.id);
+      if (seatRow && seatRow.stripeSubscriptionId) {
+        const seatPolicy = await storage.isBusinessSubscriptionActive(business.id);
+        if (!seatPolicy.active) {
+          return res.status(403).json({
+            error: "Your plan payment is late, so adding team members is paused. Pay your plan to add staff again.",
+          });
+        }
+      }
+
       // Pending invites claim a seat even before the invitee signs up, so a vendor
       // at cap should not be able to send additional invites.
       const tier = await getSubscriptionTierForBusiness(business.id);

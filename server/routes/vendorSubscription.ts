@@ -1,6 +1,7 @@
 import { Router } from "express";
 import { sql } from "drizzle-orm";
 import { db } from "../db";
+import { storage } from "../storage";
 import type { AuthenticatedRequest } from "../auth";
 
 const router = Router();
@@ -28,6 +29,12 @@ router.get("/features", async (req, res) => {
   }
 
   try {
+    // Step 1.0b: benefits follow the plan policy (paid, late within the 7 day grace, or canceled before
+    // its period end), not only status 'active'. Same 404 as before when the plan isn't active.
+    const policy = await storage.isBusinessSubscriptionActive(businessId);
+    if (!policy.active) {
+      return res.status(404).json({ error: "no_active_subscription" });
+    }
     const result = await db.execute<SubscriptionRow>(sql`
       SELECT
         st.id, st.name, st.display_name, st.price_in_cents, st.max_staff, st.features,
@@ -35,7 +42,7 @@ router.get("/features", async (req, res) => {
       FROM vendor_subscriptions vs
       JOIN subscription_tiers st ON st.id = vs.tier_id
       LEFT JOIN tier_benefits tb ON tb.tier_id = st.id
-      WHERE vs.business_id = ${businessId} AND vs.status = 'active'
+      WHERE vs.business_id = ${businessId}
     `);
 
     const rows = result.rows;
