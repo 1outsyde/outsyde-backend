@@ -36,6 +36,21 @@ async function deps(): Promise<NoticeDeps> {
   };
 }
 
+/**
+ * Emails go out one at a time with a short gap: Resend allows 10 requests a second, and cancelling a big
+ * event sends one email per guest. (The daily cap on the Resend plan is separate: see the launch checklist.)
+ */
+export const EMAIL_GAP_MS = 150;
+let emailChain: Promise<unknown> = Promise.resolve();
+function paced<T>(send: () => Promise<T>): Promise<T> {
+  const run = emailChain.then(send);
+  emailChain = run.then(
+    () => new Promise((r) => setTimeout(r, EMAIL_GAP_MS)),
+    () => new Promise((r) => setTimeout(r, EMAIL_GAP_MS)),
+  );
+  return run;
+}
+
 /** "Saturday, October 24 at 8:00 PM EDT", in the event's own time zone. */
 export function formatEventWhen(startsAt: Date | string, timeZone: string): string {
   const d = new Date(startsAt);
@@ -80,13 +95,13 @@ export async function notifyOrderSettled(orderId: string): Promise<void> {
     const codes = (await rows<any>(sql`SELECT code FROM tickets WHERE order_id = ${orderId} ORDER BY item_index`)).map((t) => String(t.code));
     const n = Number(o.ticket_count);
     if (o.buyer_email) {
-      await d.sendReceipt({
+      await paced(() => d.sendReceipt({
         toEmail: o.buyer_email, firstName: o.buyer_first_name ?? null, event: emailEvent(o),
         ticketTypeName: String(o.ticket_type_name ?? "Ticket"), quantity: n,
         ticketPriceCents: Number(o.subtotal_cents) + Number(o.tax_cents) - Number(o.discount_cents),
         serviceFeeCents: Number(o.service_fee_cents) + Number(o.per_ticket_fee_cents),
         totalCents: Number(o.total_cents), codes,
-      }).catch((err) => console.error(`[Tickets] receipt email failed for order ${orderId}:`, (err as Error)?.message ?? err));
+      })).catch((err) => console.error(`[Tickets] receipt email failed for order ${orderId}:`, (err as Error)?.message ?? err));
     }
     const who = o.buyer_first_name ? String(o.buyer_first_name) : "Someone";
     await d.sendPush({
@@ -106,10 +121,10 @@ export async function notifyOrderRefunded(orderId: string, reason: "buyer" | "ho
     const o = await loadOrder(orderId);
     if (!o || !o.buyer_email) return;
     const kept = Math.max(0, Number(o.total_cents) - Number(o.refunded_cents));
-    await d.sendRefund({
+    await paced(() => d.sendRefund({
       toEmail: o.buyer_email, firstName: o.buyer_first_name ?? null, event: emailEvent(o), reason, refundCents,
       keptFeeCents: kept, cancelReason: reason === "event_cancelled" ? o.cancel_reason ?? null : null,
-    });
+    }));
   } catch (err) {
     console.error(`[Tickets] refund email failed for order ${orderId}:`, (err as Error)?.message ?? err);
   }
@@ -124,7 +139,7 @@ export async function notifyFreeOrdersCancelled(orderIds: string[]): Promise<voi
     try {
       const o = await loadOrder(id);
       if (!o || !o.buyer_email) continue;
-      await d.sendCancelled({ toEmail: o.buyer_email, firstName: o.buyer_first_name ?? null, event: emailEvent(o), cancelReason: o.cancel_reason ?? null });
+      await paced(() => d.sendCancelled({ toEmail: o.buyer_email, firstName: o.buyer_first_name ?? null, event: emailEvent(o), cancelReason: o.cancel_reason ?? null }));
     } catch (err) {
       console.error(`[Tickets] cancel email failed for order ${id}:`, (err as Error)?.message ?? err);
     }

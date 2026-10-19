@@ -509,24 +509,34 @@ router.post("/:id/cancel", hybridAuthMiddleware, async (req: Request, res: Respo
     const [cancelled] = await rows(sql`
       UPDATE events SET status = 'cancelled', cancelled_at = now(), cancel_reason = ${parsed.data.reason ?? null}, updated_at = now()
       WHERE id = ${req.params.id} AND host_user_id = ${userId} AND status IN ('draft', 'published')
+        -- Once it has started, an event with paid orders can't be cancelled by the host (that would refund
+        -- every fee for an event that happened). Single orders can still be refunded; anything else is support.
+        AND (starts_at > now() OR NOT EXISTS (
+          SELECT 1 FROM ticket_orders o WHERE o.event_id = events.id AND o.total_cents > 0
+            AND o.status IN ('pending', 'completed', 'refunding', 'refunded')))
       RETURNING *`);
     if (cancelled) {
       const guests = { freeCancelled: 0, refunding: 0 };
       try {
-        const { queueCancelledEventOrders, closePendingCheckouts, processTicketRefund } = await import("./ticketRefunds");
+        const { queueCancelledEventOrders, processTicketRefund } = await import("./ticketRefunds");
         const { notifyFreeOrdersCancelled } = await import("./ticketNotices");
         const q = await queueCancelledEventOrders(String((cancelled as any).id));
         guests.freeCancelled = q.freeCancelled.length;
         guests.refunding = q.refunding.length;
         void notifyFreeOrdersCancelled(q.freeCancelled);
-        // Refunds and closing open checkouts talk to Stripe: run after the answer, the job retries what fails.
+        // Refunds talk to Stripe: run after the answer; the job retries what fails.
         setImmediate(async () => {
-          await closePendingCheckouts(String((cancelled as any).id)).catch((err) => console.error("[Events] closing checkouts failed:", err));
           for (const id of q.refunding) await processTicketRefund(id, undefined, true).catch((err) => console.error(`[Events] refund ${id} failed:`, err));
         });
       } catch (err) {
         console.error("[Events] cancel guests step failed (the refund job will repeat it):", err);
       }
+      // Open checkouts: stopped even when the step above failed (the job repeats this too).
+      setImmediate(() => {
+        import("./ticketRefunds")
+          .then((m) => m.closePendingCheckouts(String((cancelled as any).id)))
+          .catch((err) => console.error("[Events] closing checkouts failed:", err));
+      });
       return res.json({ success: true, event: hostEventJson(cancelled), guests });
     }
 
@@ -534,6 +544,9 @@ router.post("/:id/cancel", hybridAuthMiddleware, async (req: Request, res: Respo
     if (!e) return fail(res, 404, "EVENT_NOT_FOUND", "Event not found.");
     if (e.status === "cancelled") return fail(res, 409, "ALREADY_CANCELLED", "This event is already cancelled.");
     if (e.status === "paused") return fail(res, 409, "EVENT_PAUSED", "This event is paused by Outsyde. Contact support.");
+    if (new Date(e.starts_at) <= new Date()) {
+      return fail(res, 409, "EVENT_STARTED", "This event has already started, so it can't be cancelled here. You can still refund single orders, or contact Outsyde support.");
+    }
     return fail(res, 409, "EVENT_NOT_CANCELLABLE", "This event can't be cancelled.");
   } catch (err) {
     console.error("[Events] cancel failed:", err);

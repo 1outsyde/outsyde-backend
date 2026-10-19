@@ -73,7 +73,7 @@ export async function requestOrderRefund(orderId: string, actorUserId: string, b
       UPDATE ticket_orders o SET status = 'refunding', refund_reason = ${by},
              refund_amount_cents = LEAST(o.total_cents - o.refunded_cents, GREATEST(0, o.subtotal_cents + o.tax_cents - o.discount_cents)),
              refund_requested_at = now(), refund_requested_by = ${actorUserId}, refund_attempts = 0,
-             refund_next_attempt_at = now(), refund_last_error = NULL, updated_at = now()
+             refund_next_attempt_at = now() + interval '2 minutes', refund_last_error = NULL, updated_at = now()
       FROM events e
       WHERE o.id = ${orderId} AND e.id = o.event_id AND o.status = 'completed' AND o.total_cents > 0
         AND o.subtotal_cents + o.tax_cents - o.discount_cents > 0 AND ${who}
@@ -130,7 +130,7 @@ export async function requestOrderRefund(orderId: string, actorUserId: string, b
  * left alone until they finish, then the next run tops them up. Seat counts aren't touched: the event is closed.
  */
 export async function queueCancelledEventOrders(eventId: string | null): Promise<{ freeCancelled: string[]; refunding: string[] }> {
-  const [r] = await rows<any>(sql`
+  const [r] = await withDeadlockRetry(() => rows<any>(sql`
     WITH ce AS (
       SELECT id FROM events WHERE status = 'cancelled' AND (${eventId}::text IS NULL OR id = ${eventId}::text)
     ),
@@ -147,7 +147,10 @@ export async function queueCancelledEventOrders(eventId: string | null): Promise
     po AS (
       UPDATE ticket_orders o SET status = 'refunding', refund_reason = 'event_cancelled',
              refund_amount_cents = o.total_cents - o.refunded_cents, refund_requested_at = now(),
-             refund_requested_by = NULL, refund_attempts = 0, refund_next_attempt_at = now(),
+             refund_requested_by = NULL, refund_attempts = 0,
+             -- From the cancel request: that request sends these right away, so the job waits 2 minutes.
+             -- From the job's own sweep: nobody else will, so they're due now.
+             refund_next_attempt_at = CASE WHEN ${eventId}::text IS NULL THEN now() ELSE now() + interval '2 minutes' END,
              refund_last_error = NULL, updated_at = now()
       FROM ce WHERE o.event_id = ce.id AND o.total_cents > o.refunded_cents AND o.needs_review_at IS NULL
         AND (o.status = 'completed' OR (o.status = 'refunded' AND o.refund_reason IS DISTINCT FROM 'event_cancelled'))
@@ -159,7 +162,7 @@ export async function queueCancelledEventOrders(eventId: string | null): Promise
       RETURNING 1
     )
     SELECT (SELECT string_agg(id, ',') FROM fo) AS free_ids, (SELECT string_agg(id, ',') FROM po) AS paid_ids,
-           (SELECT count(*) FROM ftk) AS free_tickets, (SELECT count(*) FROM ptk) AS paid_tickets`);
+           (SELECT count(*) FROM ftk) AS free_tickets, (SELECT count(*) FROM ptk) AS paid_tickets`));
   // Plain text, not a Postgres array: array results don't come back reliably through every driver.
   const ids = (v: unknown) => (typeof v === "string" && v ? v.split(",") : []);
   return { freeCancelled: ids(r?.free_ids), refunding: ids(r?.paid_ids) };
@@ -192,9 +195,9 @@ export type ProcessResult = "refunded" | "not_due" | "retry" | "review";
 export async function processTicketRefund(orderId: string, s?: RefundStripe, force = false): Promise<ProcessResult> {
   const [o] = await rows<any>(sql`
     UPDATE ticket_orders SET refund_attempts = refund_attempts + 1,
-           refund_next_attempt_at = now() + make_interval(mins => LEAST(60, power(2, refund_attempts)::int)), updated_at = now()
+           refund_next_attempt_at = now() + make_interval(mins => LEAST(60, power(2, LEAST(refund_attempts, 6)))::int), updated_at = now()
     WHERE id = ${orderId} AND status = 'refunding' AND needs_review_at IS NULL
-      AND (${force} OR refund_next_attempt_at IS NULL OR refund_next_attempt_at <= now())
+      AND ((${force} AND refund_attempts = 0) OR refund_next_attempt_at IS NULL OR refund_next_attempt_at <= now())
     RETURNING id, stripe_payment_intent_id, refund_reason, refund_amount_cents, refunded_cents, total_cents, refund_attempts`);
   if (!o) return "not_due";
   const amount = Number(o.refund_amount_cents);
@@ -208,9 +211,10 @@ export async function processTicketRefund(orderId: string, s?: RefundStripe, for
     const st = s ?? (await realStripe());
     const state = await st.getPaymentIntentForRefund(o.stripe_payment_intent_id);
     let refundId: string | null = null;
-    if (state.amountRefunded >= already + amount) {
+    if (state.amountRefunded === already + amount) {
       // Stripe already refunded this (an earlier try went through but wasn't saved): just record it.
     } else if (state.amountRefunded !== already) {
+      // Includes Stripe showing MORE refunded than expected: never record or send blind.
       await flagForReview(orderId, `Stripe shows ${state.amountRefunded} cents refunded but the order shows ${already} (refunded outside Outsyde?)`);
       return "review";
     } else if (state.status !== "succeeded" || state.amountReceived < already + amount) {
@@ -229,13 +233,18 @@ export async function processTicketRefund(orderId: string, s?: RefundStripe, for
              stripe_refund_id = COALESCE(${refundId}, stripe_refund_id), refunded_at = now(),
              refund_next_attempt_at = NULL, refund_last_error = NULL, updated_at = now()
       WHERE id = ${orderId} AND status = 'refunding' AND refund_amount_cents = ${amount}
-      RETURNING id`);
-    if (done) void notifyOrderRefunded(orderId, reason, amount);
+        AND refund_reason = ${reason} AND refunded_cents = ${already}
+      RETURNING id, refunded_cents`);
+    // A top-up after an earlier refund shows the total now refunded, so "your full payment" reads right.
+    if (done) void notifyOrderRefunded(orderId, reason, reason === "event_cancelled" ? Number(done.refunded_cents) : amount);
     return "refunded";
   } catch (err) {
     const msg = String((err as Error)?.message ?? err).slice(0, 300);
-    await rows(sql`UPDATE ticket_orders SET refund_last_error = ${msg} WHERE id = ${orderId}`).catch(() => {});
+    const [still] = await rows<any>(sql`
+      UPDATE ticket_orders SET refund_last_error = ${msg} WHERE id = ${orderId} AND status = 'refunding' AND refund_reason = ${reason}
+      RETURNING id`).catch(() => [] as any[]);
     console.error(`[Tickets] refund try ${o.refund_attempts} failed for order ${orderId}: ${msg}`);
+    if (!still) return "not_due"; // finished by someone else meanwhile
     if (Number(o.refund_attempts) >= REFUND_MAX_ATTEMPTS) {
       await flagForReview(orderId, `refund failed ${o.refund_attempts} times, last error: ${msg}`);
       return "review";
@@ -252,6 +261,15 @@ export async function runTicketRefundJob(s?: RefundStripe): Promise<{ refunded: 
     if (q.freeCancelled.length) void notifyFreeOrdersCancelled(q.freeCancelled);
   } catch (err) {
     console.error("[Tickets] cancelled event sweep failed:", (err as Error)?.message ?? err);
+  }
+  try {
+    // Open checkouts on cancelled events (the cancel request closes them; this repeats it if that failed).
+    const open = await rows<any>(sql`
+      SELECT DISTINCT o.event_id FROM ticket_orders o JOIN events e ON e.id = o.event_id
+      WHERE o.status = 'pending' AND e.status = 'cancelled' LIMIT 10`);
+    for (const e of open) await closePendingCheckouts(e.event_id, s);
+  } catch (err) {
+    console.error("[Tickets] closing checkouts on cancelled events failed:", (err as Error)?.message ?? err);
   }
   const due = await rows<any>(sql`
     SELECT id FROM ticket_orders
@@ -290,11 +308,13 @@ router.post("/orders/:orderId/refund", hybridAuthMiddleware, async (req: Request
     if (!(await loadActiveUser(userId))) return fail(res, 403, "ACCOUNT_INACTIVE", "This account can't change orders.");
     const r = await requestOrderRefund(orderId, userId, "buyer");
     if (r.ok) {
-      await processTicketRefund(orderId, undefined, true);
+      // Recorded: whatever happens next, the job finishes it, so answer with the saved state.
+      await processTicketRefund(orderId, undefined, true).catch((err) => console.error(`[Tickets] refund ${orderId} left for the job:`, err));
       return res.json({ success: true, order: await orderForResponse(orderId, userId) });
     }
     const [o] = await rows<any>(sql`
-      SELECT o.status, o.total_cents, e.status AS event_status, e.starts_at, e.refund_policy, e.refund_cutoff_hours,
+      SELECT o.status, o.total_cents, o.subtotal_cents + o.tax_cents - o.discount_cents AS price_paid,
+             e.status AS event_status, e.starts_at, e.refund_policy, e.refund_cutoff_hours,
              EXISTS (SELECT 1 FROM tickets t WHERE t.order_id = o.id AND t.checked_in_at IS NOT NULL) AS checked_in
       FROM ticket_orders o JOIN events e ON e.id = o.event_id WHERE o.id = ${orderId} AND o.buyer_user_id = ${userId}`);
     if (!o) return fail(res, 404, "ORDER_NOT_FOUND", "Order not found.");
@@ -302,6 +322,8 @@ router.post("/orders/:orderId/refund", hybridAuthMiddleware, async (req: Request
     if (Number(o.total_cents) === 0) return fail(res, 409, "FREE_ORDER", "This is a free RSVP. Cancel it instead.");
     if (o.status !== "completed") return fail(res, 409, "ORDER_NOT_REFUNDABLE", "This order can't be refunded.");
     if (o.event_status === "cancelled") return fail(res, 409, "EVENT_CANCELLED", "This event was cancelled, so your full refund is already on its way.");
+    if (o.event_status !== "published") return fail(res, 409, "EVENT_PAUSED", "This event is paused. Contact Outsyde support.");
+    if (Number(o.price_paid) <= 0) return fail(res, 409, "NOTHING_TO_REFUND", "Only the service fee was paid on this order, and it isn't refundable.");
     if (o.checked_in) return fail(res, 409, "CHECKED_IN", "You've already checked in.");
     if (o.refund_policy !== "until_cutoff") return fail(res, 409, "NO_REFUNDS", "The host doesn't offer refunds for this event. You can contact the host.");
     return fail(res, 409, "REFUND_WINDOW_CLOSED", `Refunds closed ${o.refund_cutoff_hours} hours before the event. You can contact the host.`);
@@ -353,7 +375,7 @@ router.post("/:id/orders/:orderId/refund", hybridAuthMiddleware, async (req: Req
     if (!belongs) return fail(res, 404, "ORDER_NOT_FOUND", "Order not found.");
     const r = await requestOrderRefund(orderId, userId, "host");
     if (r.ok) {
-      await processTicketRefund(orderId, undefined, true);
+      await processTicketRefund(orderId, undefined, true).catch((err) => console.error(`[Tickets] refund ${orderId} left for the job:`, err));
       const [o] = await rows<any>(sql`SELECT status, refunded_cents, refund_amount_cents FROM ticket_orders WHERE id = ${orderId}`);
       return res.json({ success: true, order: { id: orderId, status: o.status, refundedCents: Number(o.refunded_cents), refundPendingCents: Number(o.refund_amount_cents) } });
     }
@@ -361,6 +383,7 @@ router.post("/:id/orders/:orderId/refund", hybridAuthMiddleware, async (req: Req
     if (Number(belongs.total_cents) === 0) return fail(res, 409, "FREE_ORDER", "This is a free RSVP, so there's nothing to refund.");
     if (e.status === "cancelled") return fail(res, 409, "EVENT_CANCELLED", "This event is cancelled. Everyone is refunded automatically.");
     if (e.status === "paused") return fail(res, 409, "EVENT_PAUSED", "This event is paused by Outsyde. Contact support.");
+    if (e.status !== "published") return fail(res, 409, "EVENT_NOT_PUBLISHED", "This event isn't live.");
     return fail(res, 409, "ORDER_NOT_REFUNDABLE", "This order can't be refunded.");
   } catch (err) {
     if (refundGuardMessage(res, err)) return;

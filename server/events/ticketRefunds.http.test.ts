@@ -40,6 +40,8 @@ async function call(method: string, path: string, o: { token?: string; body?: un
   });
 }
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+/** Emails are paced (one at a time with a gap), so wait for a notice instead of a fixed pause. */
+async function waitFor(check: () => boolean, ms = 5000) { const end = Date.now() + ms; while (!check() && Date.now() < end) await sleep(50); }
 
 (async () => {
   if (!BASE) { console.log("⏭  skipped: set EV_TEST_BASE_URL + EV_TEST_PG_URL + EV_TEST_STRIPE_PORT to run"); process.exit(0); }
@@ -185,7 +187,7 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
       { refundPolicy: "until_cutoff", refundCutoffHours: 24 });
     notices.length = 0;
     const o1 = await buy(e1.id, g[0], t1.id, 2);
-    await sleep(300);
+    await waitFor(() => notices.some((n) => n.kind === "receipt") && notices.some((n) => n.kind === "push"));
     const receipts = notices.filter((n) => n.kind === "receipt");
     const pushes = notices.filter((n) => n.kind === "push");
     assert(o1.status === "completed" && Number(o1.total_cents) === 4518, "paid order completed ($45.18 for 2 x $20)", o1);
@@ -316,19 +318,25 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
     // Keep the server's own job away from it while we drive the retries here.
     await q(`UPDATE ticket_orders SET refund_next_attempt_at = now() + interval '1 day' WHERE id = $1`, [o6.id]);
     assert(await processTicketRefund(o6.id, direct as any) === "not_due", "not retried before its time");
-    for (let i = 2; i < REFUND_MAX_ATTEMPTS; i++) assert(await processTicketRefund(o6.id, direct as any, true) === "retry", `try ${i} fails and waits`);
+    assert(await processTicketRefund(o6.id, direct as any, true) === "not_due", "forcing only works on the first try; retries follow the schedule");
+    const due6 = () => q(`UPDATE ticket_orders SET refund_next_attempt_at = now() - interval '1 second' WHERE id = $1`, [o6.id]);
+    for (let i = 2; i < REFUND_MAX_ATTEMPTS; i++) { await due6(); assert(await processTicketRefund(o6.id, direct as any) === "retry", `try ${i} fails and waits`); }
+    const [wait6] = await q(`SELECT refund_next_attempt_at > now() + interval '7 minutes' AS later FROM ticket_orders WHERE id = $1`, [o6.id]);
+    assert(wait6.later === true, "waits longer after each failed try", wait6);
     notices.length = 0;
-    assert(await processTicketRefund(o6.id, direct as any, true) === "review", `try ${REFUND_MAX_ATTEMPTS} flags it for review`);
+    await due6();
+    assert(await processTicketRefund(o6.id, direct as any) === "review", `try ${REFUND_MAX_ATTEMPTS} flags it for review`);
     row = await order(o6.id);
     assert(row.needs_review_at && row.status === "refunding" && Number(row.refund_attempts) === REFUND_MAX_ATTEMPTS, "flagged once, left for the admin", row);
-    assert(await processTicketRefund(o6.id, direct as any, true) === "not_due", "flagged order isn't retried");
+    await due6();
+    assert(await processTicketRefund(o6.id, direct as any) === "not_due", "flagged order isn't retried");
     // Admin clears the flag after Stripe recovers: one more try finishes it.
     failRefundsFor.delete(o6.stripe_payment_intent_id);
     await q(`UPDATE ticket_orders SET needs_review_at = NULL, refund_next_attempt_at = now() - interval '1 second' WHERE id = $1`, [o6.id]);
     const job = await runTicketRefundJob(direct as any);
     row = await order(o6.id);
     assert(job.refunded >= 1 && row.status === "refunded" && Number(row.refunded_cents) === 3000, "job finishes it", { job, row });
-    await sleep(200);
+    await waitFor(() => notices.some((n) => n.kind === "refund" && n.p.toEmail === `${P}-g8@test.local`));
     const rn = notices.filter((n) => n.kind === "refund" && n.p.toEmail === `${P}-g8@test.local`);
     assert(rn.length === 1 && rn[0].p.refundCents === 3000 && rn[0].p.keptFeeCents === Number(o6.total_cents) - 3000 && rn[0].p.reason === "buyer", "buyer gets one refund email showing the kept service fee", rn);
 
@@ -342,6 +350,17 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
     await q(`UPDATE ticket_orders SET status = 'refunding', refund_reason = 'host', refund_amount_cents = 3000, refund_next_attempt_at = now() + interval '1 day' WHERE id = $1`, [o8.id]);
     piStore[o8.stripe_payment_intent_id].amount_refunded = 500; // someone refunded part in the Stripe dashboard
     assert(await processTicketRefund(o8.id, direct as any, true) === "review" && refundCalls.length === callsBefore, "Stripe disagrees with the order: flagged, nothing sent");
+    const o8b = await buy(e6.id, g[10], t6.id);
+    await q(`UPDATE ticket_orders SET status = 'refunding', refund_reason = 'host', refund_amount_cents = 3000, refund_next_attempt_at = now() + interval '1 day' WHERE id = $1`, [o8b.id]);
+    piStore[o8b.stripe_payment_intent_id].amount_refunded = Number(o8b.total_cents); // more refunded at Stripe than this refund
+    assert(await processTicketRefund(o8b.id, direct as any, true) === "review" && (await order(o8b.id)).status === "refunding", "Stripe shows more refunded than expected: flagged, not recorded");
+
+    console.log("Late or repeated payment webhook after a refund");
+    const o12 = await buy(e1.id, g[1], t1.id, 1);
+    r = await call("POST", `/api/events/orders/${o12.id}/refund`, { token: tok(g[1]) });
+    await WebhookHandlers.handlePaymentIntentSucceeded(piStore[o12.stripe_payment_intent_id]);
+    row = await order(o12.id);
+    assert(r.status === 200 && row.status === "refunded" && !row.needs_review_at, "a late webhook on a refunded order changes nothing and flags nothing", row);
 
     console.log("Host cancels an event with guests");
     const { ev: e9, types: [t9, f9] } = await paidEvent([
@@ -368,6 +387,8 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
     assert(piStore[pend.body.paymentIntentId].status === "canceled" && (await order(pend.body.orderId)).status === "cancelled", "open checkout closed and its payment stopped", piStore[pend.body.paymentIntentId]);
     r = await call("POST", `/api/events/${e9.id}/cancel`, { token: tok(host), body: {} });
     assert(r.status === 409 && r.body.error.code === "ALREADY_CANCELLED", "cancel twice refused", r);
+    r = await call("POST", `/api/events/orders/${pa.id}/refund`, { token: tok(g[11]) });
+    assert(r.status === 409 && r.body.error.code === "ALREADY_REFUNDED", "buyer can't refund again after the cancel", r);
     r = await call("POST", `/api/events/${e9.id}/checkout`, { token: tok(g[1]), body: { ticketTypeId: t9.id } });
     assert(r.status === 409 && r.body.error.code === "EVENT_CANCELLED", "no new checkouts", r);
     const callsAfterCancel = refundCalls.length;
@@ -383,11 +404,48 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
     notices.length = 0;
     const pi10 = piStore[late10.body.paymentIntentId]; pi10.status = "succeeded"; pi10.amount_received = pi10.amount;
     await WebhookHandlers.handlePaymentIntentSucceeded(pi10);
-    await sleep(300);
+    await sleep(1000);
     assert(!notices.some((n) => n.kind === "receipt"), "no receipt for a cancelled event", notices);
     await runTicketRefundJob(direct as any);
     const r10 = await order(late10.body.orderId);
     assert(r10.status === "refunded" && Number(r10.refunded_cents) === Number(r10.total_cents) && pi10.amount_refunded === pi10.amount, "job refunds it in full", r10);
+
+    console.log("Cancel while an earlier refund is still going");
+    const { ev: e13, types: [t13] } = await paidEvent([{ name: "GA", priceCents: 2000, quantity: 5 }], { refundPolicy: "until_cutoff", refundCutoffHours: 1 });
+    const o13 = await buy(e13.id, g[4], t13.id);
+    failRefundsFor.add(o13.stripe_payment_intent_id);
+    await call("POST", `/api/events/orders/${o13.id}/refund`, { token: tok(g[4]) });
+    assert((await order(o13.id)).status === "refunding", "buyer refund waiting on Stripe");
+    r = await call("POST", `/api/events/${e13.id}/cancel`, { token: tok(host), body: {} });
+    assert(r.status === 200 && r.body.guests.refunding === 0, "cancel leaves the in-flight refund alone", r.body?.guests);
+    failRefundsFor.delete(o13.stripe_payment_intent_id);
+    await q(`UPDATE ticket_orders SET refund_next_attempt_at = now() - interval '1 second' WHERE id = $1`, [o13.id]);
+    await runTicketRefundJob(direct as any); // finishes the buyer refund (price only)
+    const mid = await order(o13.id);
+    assert(mid.status === "refunded" && Number(mid.refunded_cents) === 2000, "buyer refund finished", mid);
+    await runTicketRefundJob(direct as any); // sweep queues the top-up (waits 2 minutes for the cancel step)
+    await q(`UPDATE ticket_orders SET refund_next_attempt_at = now() - interval '1 second' WHERE id = $1`, [o13.id]);
+    await runTicketRefundJob(direct as any);
+    const fin = await order(o13.id);
+    assert(fin.status === "refunded" && Number(fin.refunded_cents) === Number(fin.total_cents) && piStore[o13.stripe_payment_intent_id].amount_refunded === Number(fin.total_cents), "then topped up to everything", fin);
+
+    console.log("Cancel after the event started");
+    const { ev: e14, types: [t14] } = await paidEvent([{ name: "GA", priceCents: 2000, quantity: 5 }]);
+    const o14 = await buy(e14.id, g[5], t14.id);
+    await q(`UPDATE events SET starts_at = now() - interval '2 hours', ends_at = now() - interval '1 hour' WHERE id = $1`, [e14.id]);
+    r = await call("POST", `/api/events/${e14.id}/cancel`, { token: tok(host), body: {} });
+    assert(r.status === 409 && r.body.error.code === "EVENT_STARTED" && (await order(o14.id)).status === "completed", "host can't cancel a paid event that already happened", r);
+    r = await call("POST", `/api/events/${e14.id}/orders/${o14.id}/refund`, { token: tok(host) });
+    assert(r.status === 200 && Number((await order(o14.id)).refunded_cents) === 2000, "but can still refund a single order (ticket price)", r);
+
+    console.log("Paused event");
+    const { ev: e15, types: [t15] } = await paidEvent([{ name: "GA", priceCents: 2000, quantity: 5 }], { refundPolicy: "until_cutoff", refundCutoffHours: 1 });
+    const o15 = await buy(e15.id, g[6], t15.id);
+    await q(`UPDATE events SET status = 'paused' WHERE id = $1`, [e15.id]);
+    r = await call("POST", `/api/events/orders/${o15.id}/refund`, { token: tok(g[6]) });
+    assert(r.status === 409 && r.body.error.code === "EVENT_PAUSED", "buyer refund on a paused event says paused", r);
+    r = await call("POST", `/api/events/${e15.id}/orders/${o15.id}/refund`, { token: tok(host) });
+    assert(r.status === 409 && r.body.error.code === "EVENT_PAUSED", "host refund on a paused event refused", r);
 
     console.log("Repeat checkout key on a refunded order");
     const { ev: e11, types: [t11] } = await paidEvent([{ name: "GA", priceCents: 1000, quantity: 5 }], { refundPolicy: "until_cutoff", refundCutoffHours: 1 });

@@ -116,7 +116,8 @@ export async function settleTicketOrder(orderId: string, paymentIntentId: string
     FROM ticket_orders o JOIN ticket_order_items i ON i.order_id = o.id
     WHERE o.id = ${orderId}`);
   if (!o) return "not_found";
-  if (o.status === "completed" && o.stripe_payment_intent_id === paymentIntentId) return "already";
+  // Already settled (and maybe refunded since): a late or repeated webhook changes nothing and flags nothing.
+  if (["completed", "refunding", "refunded"].includes(o.status) && o.stripe_payment_intent_id === paymentIntentId) return "already";
   if (o.stripe_payment_intent_id !== paymentIntentId || Number(o.total_cents) !== amountReceivedCents || o.status !== "pending") {
     return "mismatch";
   }
