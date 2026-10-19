@@ -5,10 +5,11 @@
  *  - drop the eventRemaining min in ticketSalesStatus → "event capacity caps every type" fails.
  *  - drop the locked check → "paid tier locked while free remains" fails.
  *  - return `show = true` in visibleAddress → "street hidden from strangers" fails.
+ *  - drop `if (cur === typeId) return true` in wouldCreateUnlockLoop → the loop checks fail.
  */
 import {
-  isRefundPolicyChangeAllowed, isValidTimeZone, makeEventSlug, ticketSalesStatus, visibleAddress,
-  type TicketTypeForSale,
+  isRefundPolicyChangeAllowed, isValidTimeZone, makeEventSlug, makeTicketCode, ticketSalesStatus, visibleAddress,
+  wouldCreateUnlockLoop, type TicketTypeForSale,
 } from "./eventRules";
 
 let passed = 0;
@@ -71,6 +72,18 @@ a = visibleAddress(addr, { addressVisibility: "ticket_holders", viewerIsHost: tr
 assert(!a.addressHidden && a.postalCode === "11520", "host sees the street");
 a = visibleAddress(addr, { addressVisibility: "public", viewerIsHost: false, viewerHasTicket: false });
 assert(!a.addressHidden && a.venueName === "The Loft", "public address shown to everyone");
+
+// Ticket codes
+const codes = new Set(Array.from({ length: 2000 }, () => makeTicketCode()));
+assert(codes.size === 2000, "2000 ticket codes all different");
+assert([...codes].every((c) => /^[A-HJ-NP-Z2-9]{16}$/.test(c)), "codes are 16 characters with no look-alikes (no 0, O, 1, I)");
+
+// Unlock loops
+const parents = new Map<string, string | null>([["a", null], ["b", "a"], ["c", "b"]]);
+assert(!wouldCreateUnlockLoop("d", "c", parents), "new type after the last one is fine");
+assert(wouldCreateUnlockLoop("a", "c", parents), "a after c (c after b after a) is a loop");
+assert(wouldCreateUnlockLoop("b", "b", parents), "a type can't open after itself");
+assert(!wouldCreateUnlockLoop("c", null, parents), "clearing the unlock is fine");
 
 console.log(`\n${passed} passed, ${failed} failed`);
 process.exit(failed ? 1 : 0);

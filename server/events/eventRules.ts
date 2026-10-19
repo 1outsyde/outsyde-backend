@@ -111,3 +111,28 @@ export function visibleAddress(
     city: a.city, state: a.state, addressHidden: true,
   };
 }
+
+/** Ticket code for the QR: 16 characters from an alphabet without look-alikes (~80 bits). */
+export function makeTicketCode(): string {
+  const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+  const bytes = randomBytes(16);
+  let out = "";
+  for (let i = 0; i < bytes.length; i++) out += alphabet[bytes[i] % alphabet.length];
+  return out;
+}
+
+/**
+ * True when pointing `typeId` at `unlockAfterId` would make a loop
+ * (A opens after B, B opens after A). `parentOf` maps each type to the one it opens after.
+ */
+export function wouldCreateUnlockLoop(typeId: string, unlockAfterId: string | null, parentOf: Map<string, string | null>): boolean {
+  let cur: string | null = unlockAfterId;
+  const seen = new Set<string>();
+  while (cur) {
+    if (cur === typeId) return true;
+    if (seen.has(cur)) return true;
+    seen.add(cur);
+    cur = parentOf.get(cur) ?? null;
+  }
+  return false;
+}
