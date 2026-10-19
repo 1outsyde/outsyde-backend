@@ -553,6 +553,8 @@ async function getNoFollow(path: string): Promise<{ status: number; location: st
     const { createDuePayouts, sendPayout, runEventPayoutJob } = await import("./eventPayouts");
 
     const fakeLog: Array<{ fn: string; id: string }> = []; // readiness: account id; find/create: event id
+    let holdGate: Promise<void> | null = null;
+    let createStarted: (() => void) | null = null;
     const payoutFake = {
       getPayoutReadiness: async (id: string) => {
         fakeLog.push({ fn: "readiness", id });
@@ -566,6 +568,8 @@ async function getNoFollow(path: string): Promise<{ status: number; location: st
       },
       createEventPayoutTransfer: async (p: { eventId: string; payoutId: string; destination: string; amountCents: number; idempotencyKey?: string }) => {
         fakeLog.push({ fn: "create", id: p.eventId });
+        // Held open: the request is in flight and Stripe hasn't processed it yet (one call only).
+        if (holdGate) { const g = holdGate; holdGate = null; createStarted?.(); await g; }
         const res = doTransfer({
           amount: String(p.amountCents), currency: "usd", destination: p.destination, transfer_group: `event_${p.eventId}`,
           "metadata[type]": "event_payout", "metadata[eventId]": p.eventId, "metadata[payoutId]": p.payoutId,
@@ -819,7 +823,7 @@ async function getNoFollow(path: string): Promise<{ status: number; location: st
     }
     pr = await payoutOf(e11.id);
     assert(results.slice(0, 4).every((x) => x === "retry") && results[4] === "review", "4 retries then review", results);
-    assert(waits[0] > 50 && waits[0] <= 60 && waits[1] > 110 && waits[1] <= 120 && waits[2] > 230 && waits[2] <= 240 && waits[3] > 470 && waits[3] <= 480, "backoff 1, 2, 4, 8 minutes", waits);
+    assert(waits[0] > 590 && waits[0] <= 600 && waits[1] > 1190 && waits[1] <= 1200 && waits[2] > 2390 && waits[2] <= 2400 && waits[3] > 3590 && waits[3] <= 3600, "backoff 10, 20, 40, 60 minutes (never shorter than the 10 minute in-flight lock)", waits);
     assert(pr[0].status === "review" && pr[0].attempts === 5 && /stub transfer failure/.test(pr[0].last_error ?? ""), "row in review with the last error", pr);
     assert(adminEmails.length === emailsBefore + 1 && adminEmails[adminEmails.length - 1].detail.includes(id11), "one admin email for review", adminEmails.slice(emailsBefore));
     sres = await sendPayout(id11, payoutFake);
@@ -837,6 +841,9 @@ async function getNoFollow(path: string): Promise<{ status: number; location: st
     emailsBefore = adminEmails.length;
     sw.failOnce = 1;
     const r13a = await sendPayout(id13, payoutFake);
+    const due13 = (await payoutOf(e13.id))[0].due_in;
+    const r13early = await sendPayout(id13, payoutFake);
+    assert(r13a === "retry" && due13 > 590 && due13 <= 600 && r13early === "not_due", "after an error the row is due again at the backoff time (10 minutes), not before", { r13a, due13, r13early });
     await advance(id13);
     const r13b = await sendPayout(id13, payoutFake);
     pr = await payoutOf(e13.id);
@@ -862,6 +869,32 @@ async function getNoFollow(path: string): Promise<{ status: number; location: st
     pr = await payoutOf(e14.id);
     assert(r14b === "paid" && pr[0].status === "paid" && pr[0].transfer_id === g14[0]?.id && transfers.filter((t) => t.transfer_group === `event_${e14.id}`).length === 1
       && transferPosts.filter((t) => t.payoutId === id14).length === 1, "next try finds it by group lookup and records it, no second POST or transfer", { r14b, pr });
+
+    console.log("a transfer still in flight is never claimed again");
+    const h15 = await mkReadyHost("j15");
+    const e15 = await jobEvent(h15.u, "Slow Stripe Night");
+    await buy(e15.id, buyers[2], e15.typeId, 1);
+    await endedHoursAgo(e15.id, 80);
+    await createDuePayouts();
+    const id15 = (await payoutOf(e15.id))[0].id as string;
+    let release!: () => void;
+    holdGate = new Promise<void>((r) => { release = r; });
+    const started = new Promise<void>((r) => { createStarted = r; });
+    const first = sendPayout(id15, payoutFake);
+    await started;
+    const lock15 = (await payoutOf(e15.id))[0].due_in;
+    assert(lock15 > 590 && lock15 <= 600, "claim locks the row for 10 minutes while the transfer is in flight", lock15);
+    // 61 seconds pass (longer than the old 1 minute lease), then another run tries.
+    await q(`UPDATE event_payouts SET next_attempt_at = next_attempt_at - interval '61 seconds' WHERE id = $1`, [id15]);
+    const second = await sendPayout(id15, payoutFake);
+    const jobAgain = await runEventPayoutJob(payoutFake);
+    assert(second === "not_due" && transferPosts.filter((t) => t.payoutId === id15).length === 0, "second claim while in flight: not due, nothing sent", { second, jobAgain });
+    release();
+    const firstRes = await first;
+    pr = await payoutOf(e15.id);
+    assert(firstRes === "paid" && pr[0].status === "paid" && pr[0].next_attempt_at === null
+      && transfers.filter((t) => t.transfer_group === `event_${e15.id}`).length === 1 && transferPosts.filter((t) => t.payoutId === id15).length === 1,
+      "exactly 1 transfer at the end", { firstRes, pr });
 
     console.log("race: host refund vs payout create");
     const h12 = await mkReadyHost("j12");

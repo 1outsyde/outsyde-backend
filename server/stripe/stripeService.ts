@@ -598,7 +598,11 @@ export class StripeService {
    * Send an event payout to the host's Connect account. Idempotent on event_payout_<payoutId> unless the caller
    * passes its own key (the payout job uses one key per try, since Stripe replays a saved error for 24 hours).
    */
-  async createEventPayoutTransfer(p: { eventId: string; payoutId: string; destination: string; amountCents: number; idempotencyKey?: string }): Promise<{ id: string }> {
+  async createEventPayoutTransfer(p: {
+    eventId: string; payoutId: string; destination: string; amountCents: number; idempotencyKey?: string;
+    /** Bounded so the whole call ends well inside the payout job's 10 minute claim (default 30 s, 1 network retry). */
+    timeoutMs?: number; maxNetworkRetries?: number;
+  }): Promise<{ id: string }> {
     const stripe = await getUncachableStripeClient();
     const transfer = await stripe.transfers.create({
       amount: p.amountCents,
@@ -606,7 +610,11 @@ export class StripeService {
       destination: p.destination,
       transfer_group: `event_${p.eventId}`,
       metadata: { type: 'event_payout', eventId: p.eventId, payoutId: p.payoutId },
-    }, { idempotencyKey: p.idempotencyKey ?? `event_payout_${p.payoutId}` });
+    }, {
+      idempotencyKey: p.idempotencyKey ?? `event_payout_${p.payoutId}`,
+      timeout: p.timeoutMs ?? 30000,
+      maxNetworkRetries: p.maxNetworkRetries ?? 1,
+    });
     return { id: transfer.id };
   }
 
