@@ -23,7 +23,9 @@ import { pickPublicIdentity } from "../publicIdentity";
 import {
   isRefundPolicyChangeAllowed,
   isValidTimeZone,
+  checkTimes,
   makeEventSlug,
+  paidEventsEnabled,
   ticketSalesStatus,
   visibleAddress,
   type RefundPolicy,
@@ -32,8 +34,6 @@ import {
 
 const router = Router();
 
-const MAX_EVENT_LENGTH_MS = 30 * 24 * 60 * 60 * 1000;
-const MAX_START_AHEAD_MS = 2 * 365 * 24 * 60 * 60 * 1000;
 
 export async function rows<T = Record<string, any>>(query: SQL): Promise<T[]> {
   const result: any = await db.execute(query);
@@ -116,14 +116,6 @@ const COLUMNS: Record<string, string> = {
 export function zodError(res: Response, error: z.ZodError) {
   const first = error.issues[0];
   return fail(res, 400, "INVALID_EVENT", `${first?.path.join(".") || "body"}: ${first?.message ?? "invalid"}`);
-}
-
-function checkTimes(startsAt: Date, endsAt: Date, now: Date, startChanged: boolean): string | null {
-  if (startChanged && startsAt <= now) return "The event can't start in the past.";
-  if (endsAt <= startsAt) return "The event has to end after it starts.";
-  if (endsAt.getTime() - startsAt.getTime() > MAX_EVENT_LENGTH_MS) return "An event can last 30 days at most.";
-  if (startsAt.getTime() - now.getTime() > MAX_START_AHEAD_MS) return "An event can start at most 2 years from now.";
-  return null;
 }
 
 function checkRefund(policy: RefundPolicy, cutoffHours: number | null | undefined): string | null {
@@ -423,7 +415,9 @@ router.patch("/:id", hybridAuthMiddleware, async (req: Request, res: Response) =
     const endsAt = b.endsAt ? new Date(b.endsAt) : new Date(e.ends_at);
     if (b.startsAt || b.endsAt) {
       const startChanged = !!b.startsAt && startsAt.getTime() !== new Date(e.starts_at).getTime();
-      const timeError = checkTimes(startsAt, endsAt, new Date(), startChanged);
+      const now = new Date();
+      const started = new Date(e.starts_at) <= now;
+      const timeError = checkTimes(startsAt, endsAt, now, startChanged, new Date(e.ends_at), started);
       if (timeError) return fail(res, 400, "INVALID_EVENT_TIMES", timeError);
     }
 
@@ -446,6 +440,8 @@ router.patch("/:id", hybridAuthMiddleware, async (req: Request, res: Response) =
     if (b.startsAt) b.startsAt = startsAt.toISOString();
     if (b.endsAt) b.endsAt = endsAt.toISOString();
 
+    // Guard for the end-time rule: an event that started after the check above can't take an earlier end.
+    const newEndsAt: string | null = b.endsAt ?? null;
     const sets: SQL[] = Object.keys(b)
       .filter((k) => COLUMNS[k])
       .map((k) => sql`${sql.raw(COLUMNS[k])} = ${b[k] ?? null}`);
@@ -457,6 +453,7 @@ router.patch("/:id", hybridAuthMiddleware, async (req: Request, res: Response) =
         WHERE id = ${e.id} AND host_user_id = ${userId} AND status = ${e.status}
           AND refund_policy = ${e.refund_policy}
           AND refund_cutoff_hours IS NOT DISTINCT FROM ${e.refund_cutoff_hours == null ? null : Number(e.refund_cutoff_hours)}::int
+          AND (starts_at > now() OR ${b.endsAt === undefined} OR ${newEndsAt}::timestamptz >= ends_at)
         RETURNING *`);
       if (!updated) return fail(res, 409, "EVENT_CHANGED", "This event just changed. Reload and try again.");
       const types = await loadTicketTypes(e.id);
@@ -479,11 +476,24 @@ router.post("/:id/publish", hybridAuthMiddleware, async (req: Request, res: Resp
   if (!userId) return fail(res, 401, "NO_AUTH", "Sign in to publish this event.");
   try {
     if (!(await loadActiveUser(userId))) return fail(res, 403, "ACCOUNT_INACTIVE", "This account can't host events.");
+    // Paid tickets need the switch on AND a host who can be paid. Checked before the single UPDATE below.
+    let paidAllowed = false;
+    if (paidEventsEnabled()) {
+      const ev = await loadEventForHost(req.params.id, userId);
+      if (ev && ev.status === "draft") {
+        const paid = await rows(sql`SELECT 1 FROM ticket_types WHERE event_id = ${ev.id} AND status = 'active' AND price_cents > 0 LIMIT 1`);
+        if (paid.length > 0) {
+          const { isHostReady } = await import("./hostPayouts");
+          paidAllowed = (await isHostReady(ev)).ready;
+        }
+      }
+    }
     const [published] = await rows(sql`
       UPDATE events SET status = 'published', published_at = now(), updated_at = now()
       WHERE id = ${req.params.id} AND host_user_id = ${userId} AND status = 'draft' AND starts_at > now()
         AND EXISTS (SELECT 1 FROM ticket_types t WHERE t.event_id = events.id AND t.status = 'active' AND t.hidden = false)
-        AND NOT EXISTS (SELECT 1 FROM ticket_types t WHERE t.event_id = events.id AND t.status = 'active' AND t.price_cents > 0)
+        AND (NOT EXISTS (SELECT 1 FROM ticket_types t WHERE t.event_id = events.id AND t.status = 'active' AND t.price_cents > 0)
+             OR ${paidAllowed})
       RETURNING *`);
     if (published) {
       const types = await loadTicketTypes(published.id);
@@ -498,8 +508,9 @@ router.post("/:id/publish", hybridAuthMiddleware, async (req: Request, res: Resp
     const types = (await loadTicketTypes(e.id)).filter((t) => t.status === "active");
     if (types.length === 0) return fail(res, 409, "NO_TICKET_TYPES", "Add at least one ticket type first.");
     if (!types.some((t) => !t.hidden)) return fail(res, 409, "NO_VISIBLE_TICKET_TYPES", "At least one ticket type has to be visible to guests.");
-    if (types.some((t) => Number(t.price_cents) > 0)) {
-      return fail(res, 409, "PAID_TICKETS_NOT_AVAILABLE", "Paid tickets aren't available yet. Use free tickets for now.");
+    if (types.some((t) => Number(t.price_cents) > 0) && !paidAllowed) {
+      if (!paidEventsEnabled()) return fail(res, 409, "PAID_TICKETS_NOT_AVAILABLE", "Paid tickets aren't available yet. Use free tickets for now.");
+      return fail(res, 409, "PAYOUTS_NOT_SET_UP", "Set up payouts before selling paid tickets.");
     }
     return fail(res, 409, "EVENT_CHANGED", "This event just changed. Reload and try again.");
   } catch (err) {

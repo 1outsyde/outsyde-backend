@@ -8,7 +8,7 @@
  *  - drop `if (cur === typeId) return true` in wouldCreateUnlockLoop → the loop checks fail.
  */
 import {
-  isRefundPolicyChangeAllowed, isValidTimeZone, makeEventSlug, makeTicketCode, ticketSalesStatus, visibleAddress,
+  checkTimes, isRefundPolicyChangeAllowed, isValidTimeZone, paidEventsEnabled, makeEventSlug, makeTicketCode, ticketSalesStatus, visibleAddress,
   wouldCreateUnlockLoop, type TicketTypeForSale,
 } from "./eventRules";
 
@@ -84,6 +84,32 @@ assert(!wouldCreateUnlockLoop("d", "c", parents), "new type after the last one i
 assert(wouldCreateUnlockLoop("a", "c", parents), "a after c (c after b after a) is a loop");
 assert(wouldCreateUnlockLoop("b", "b", parents), "a type can't open after itself");
 assert(!wouldCreateUnlockLoop("c", null, parents), "clearing the unlock is fine");
+
+// End time after the event has started
+{
+  const now = new Date("2026-11-01T12:00:00Z");
+  const starts = new Date("2026-11-01T10:00:00Z");
+  const saved = new Date("2026-11-01T14:00:00Z");
+  const MSG = "Once the event has started, the end time can only move later.";
+  assert(checkTimes(starts, new Date("2026-11-01T13:00:00Z"), now, false, saved, true) === MSG, "end earlier after start refused");
+  assert(checkTimes(starts, new Date("2026-11-01T15:00:00Z"), now, false, saved, true) === null, "end later after start ok");
+  assert(checkTimes(starts, saved, now, false, saved, true) === null, "end unchanged after start ok");
+  const future = new Date("2026-11-02T10:00:00Z");
+  assert(checkTimes(future, new Date("2026-11-02T11:00:00Z"), now, false, new Date("2026-11-02T14:00:00Z"), false) === null, "end earlier before start ok");
+  assert(checkTimes(starts, new Date("2026-11-01T13:00:00Z"), now, false) === null, "no saved end given: rule not applied");
+}
+
+// Paid events switch
+{
+  const prev = process.env.PAID_EVENTS_ENABLED;
+  delete process.env.PAID_EVENTS_ENABLED;
+  assert(paidEventsEnabled() === false, "switch unset: off");
+  process.env.PAID_EVENTS_ENABLED = "true";
+  assert(paidEventsEnabled() === true, "switch 'true': on (read at call time)");
+  process.env.PAID_EVENTS_ENABLED = "1";
+  assert(paidEventsEnabled() === false, "anything but 'true': off");
+  if (prev === undefined) delete process.env.PAID_EVENTS_ENABLED; else process.env.PAID_EVENTS_ENABLED = prev;
+}
 
 console.log(`\n${passed} passed, ${failed} failed`);
 process.exit(failed ? 1 : 0);

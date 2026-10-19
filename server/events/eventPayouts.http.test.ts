@@ -11,6 +11,7 @@
 import http from "http";
 
 const BASE = process.env.EV_TEST_BASE_URL;
+const BASE_PAID = process.env.EV_TEST_BASE_URL_PAID; // second server, PAID_EVENTS_ENABLED=true
 const PG_URL = process.env.EV_TEST_PG_URL;
 const STUB_PORT = Number(process.env.EV_TEST_STRIPE_PORT || "0");
 
@@ -22,9 +23,9 @@ function assert(cond: boolean, name: string, detail?: unknown) {
 }
 const isLocal = (u: string) => ["localhost", "127.0.0.1", "::1", "[::1]"].includes(new URL(u).hostname);
 
-async function call(method: string, path: string, o: { token?: string; body?: unknown } = {}): Promise<{ status: number; body: any }> {
+async function call(method: string, path: string, o: { token?: string; body?: unknown; base?: string } = {}): Promise<{ status: number; body: any }> {
   return new Promise((resolve, reject) => {
-    const u = new URL(path, BASE!);
+    const u = new URL(path, o.base ?? BASE!);
     const data = o.body !== undefined ? JSON.stringify(o.body) : undefined;
     const headers: Record<string, string> = {};
     if (data) { headers["Content-Type"] = "application/json"; headers["Content-Length"] = String(Buffer.byteLength(data)); }
@@ -53,6 +54,7 @@ async function getNoFollow(path: string): Promise<{ status: number; location: st
 
 (async () => {
   if (!BASE) { console.log("⏭  skipped: set EV_TEST_BASE_URL + EV_TEST_PG_URL + EV_TEST_STRIPE_PORT to run"); process.exit(0); }
+  if (!BASE_PAID || !isLocal(BASE_PAID)) throw new Error("refusing to run: EV_TEST_BASE_URL_PAID must be set and localhost");
   if (!PG_URL || !isLocal(BASE) || !isLocal(PG_URL) || !STUB_PORT) throw new Error("refusing to run: BASE and PG_URL must be localhost and EV_TEST_STRIPE_PORT set");
   process.env.JWT_SECRET = process.env.JWT_SECRET || "ev-test-jwt";
   const { generateAccessToken } = await import("../auth");
@@ -361,8 +363,110 @@ async function getNoFollow(path: string): Promise<{ status: number; location: st
     await q(`INSERT INTO user_payout_accounts (user_id, stripe_account_id) VALUES ($1, $2)`, [hostZ, acctZ]);
     await WebhookHandlers.handleConnectAccountUpdated({ id: acctZ, metadata: {}, charges_enabled: true, details_submitted: true }, T);
     assert((await q(`SELECT onboarding_complete AS c FROM user_payout_accounts WHERE stripe_account_id = $1`, [acctZ]))[0].c === true, "no metadata: falls back to user_payout_accounts lookup by account id");
+
+    console.log("paid publish and end time rules (task 5)");
+    const PAID = { base: BASE_PAID };
+    const inDays = (d: number, h = 0) => new Date(Date.now() + d * 86400000 + h * 3600000).toISOString();
+    const evBody = () => ({ title: "Payout rules", startsAt: inDays(10), endsAt: inDays(10, 5), timezone: "America/New_York", capacity: 100 });
+    const hostReadyU = await mkUser("pr");
+    const hostNotReadyU = await mkUser("pn");
+    const acctPR = `acct_pr_${P}`;
+    await q(`INSERT INTO user_payout_accounts (user_id, stripe_account_id, onboarding_complete) VALUES ($1, $2, true)`, [hostReadyU, acctPR]);
+    setReady(acctPR);
+    const mkEvent = async (host: string, o: { base?: string } = {}) => {
+      const c = await call("POST", "/api/events", { token: tok(host), body: evBody(), ...o });
+      if (c.status !== 201 && c.status !== 200) throw new Error("event create failed " + JSON.stringify(c));
+      return c.body.event.id as string;
+    };
+    const addType = (ev: string, host: string, priceCents: number, o: { base?: string } = {}) =>
+      call("POST", `/api/events/${ev}/ticket-types`, { token: tok(host), body: { name: priceCents ? "Paid" : "Free", priceCents, quantity: 50 }, ...o });
+    const publish = (ev: string, host: string, o: { base?: string } = {}) => call("POST", `/api/events/${ev}/publish`, { token: tok(host), ...o });
+
+    // switch off (5071): unchanged behaviour, even for a ready host
+    let ev = await mkEvent(hostReadyU);
+    await addType(ev, hostReadyU, 2000);
+    r = await publish(ev, hostReadyU);
+    assert(r.status === 409 && r.body.error.code === "PAID_TICKETS_NOT_AVAILABLE", "switch off: publish paid, ready host -> PAID_TICKETS_NOT_AVAILABLE", r);
+
+    // switch on (5072)
+    ev = await mkEvent(hostNotReadyU);
+    await addType(ev, hostNotReadyU, 2000);
+    r = await publish(ev, hostNotReadyU, PAID);
+    assert(r.status === 409 && r.body.error.code === "PAYOUTS_NOT_SET_UP" && r.body.error.message === "Set up payouts before selling paid tickets.", "switch on: publish paid, host not set up -> PAYOUTS_NOT_SET_UP", r);
+    assert((await q(`SELECT status FROM events WHERE id = $1`, [ev]))[0].status === "draft", "event stays a draft");
+    ev = await mkEvent(hostNotReadyU);
+    await addType(ev, hostNotReadyU, 0);
+    r = await publish(ev, hostNotReadyU, PAID);
+    assert(r.status === 200 && r.body.event.status === "published", "switch on: publish free-only, host not set up -> 200", r);
+    const evFreePub = ev;
+
+    ev = await mkEvent(hostReadyU);
+    await addType(ev, hostReadyU, 2000);
+    r = await publish(ev, hostReadyU, PAID);
+    assert(r.status === 200 && r.body.event.status === "published", "switch on: publish paid, host ready -> 200", r);
+    const evPaidPub = ev;
+
+    // paid type on a published event
+    r = await addType(evFreePub, hostNotReadyU, 1500);
+    assert(r.status === 409 && r.body.error.code === "PAID_TICKETS_NOT_AVAILABLE", "switch off: add paid type to published event -> PAID_TICKETS_NOT_AVAILABLE", r);
+    r = await addType(evFreePub, hostNotReadyU, 1500, PAID);
+    assert(r.status === 409 && r.body.error.code === "PAYOUTS_NOT_SET_UP", "switch on: add paid type to published event, not ready -> PAYOUTS_NOT_SET_UP", r);
+    r = await addType(evPaidPub, hostReadyU, 1500, PAID);
+    assert(r.status === 201 && r.body.ticketType.priceCents === 1500, "switch on: add paid type to published event, ready -> 201", r);
+    r = await addType(evPaidPub, hostReadyU, 1500);
+    assert(r.status === 409 && r.body.error.code === "PAID_TICKETS_NOT_AVAILABLE", "switch off: ready host adding paid type to published event -> PAID_TICKETS_NOT_AVAILABLE", r);
+    r = await addType(evFreePub, hostNotReadyU, 0, PAID);
+    assert(r.status === 201, "switch on: add free type to published event, not ready -> 201", r);
+
+    // repricing on a published event
+    const freeTypeId = r.body.ticketType.id as string;
+    r = await call("PATCH", `/api/events/${evFreePub}/ticket-types/${freeTypeId}`, { token: tok(hostNotReadyU), body: { priceCents: 900 }, ...PAID });
+    assert(r.status === 409 && r.body.error.code === "PAYOUTS_NOT_SET_UP", "switch on: reprice free->paid on published, not ready -> PAYOUTS_NOT_SET_UP", r);
+    const readyFree = await addType(evPaidPub, hostReadyU, 0, PAID);
+    r = await call("PATCH", `/api/events/${evPaidPub}/ticket-types/${readyFree.body.ticketType.id}`, { token: tok(hostReadyU), body: { priceCents: 900 }, ...PAID });
+    assert(r.status === 200 && r.body.ticketType.priceCents === 900, "switch on: reprice free->paid on published, ready -> 200", r);
+    r = await call("PATCH", `/api/events/${evPaidPub}/ticket-types/${readyFree.body.ticketType.id}`, { token: tok(hostReadyU), body: { priceCents: 800 } });
+    assert(r.status === 409 && r.body.error.code === "PAID_TICKETS_NOT_AVAILABLE", "switch off: reprice on published -> PAID_TICKETS_NOT_AVAILABLE", r);
+
+    // draft events keep allowing paid types on both servers
+    ev = await mkEvent(hostNotReadyU);
+    r = await addType(ev, hostNotReadyU, 700, PAID);
+    assert(r.status === 201, "draft: paid type allowed (switch on, not ready)", r);
+    r = await addType(ev, hostNotReadyU, 700);
+    assert(r.status === 201, "draft: paid type allowed (switch off)", r);
+
+    // local flag true but Stripe says no: same code
+    const hostLost = await mkUser("pl");
+    const acctPL = `acct_pl_${P}`;
+    await q(`INSERT INTO user_payout_accounts (user_id, stripe_account_id, onboarding_complete) VALUES ($1, $2, true)`, [hostLost, acctPL]);
+    ev = await mkEvent(hostLost);
+    await addType(ev, hostLost, 2000);
+    r = await publish(ev, hostLost, PAID);
+    assert(r.status === 409 && r.body.error.code === "PAYOUTS_NOT_SET_UP", "local flag true but Stripe not ready: PAYOUTS_NOT_SET_UP", r);
+
+    // end time can only move later once the event has started
+    const hostT = await mkUser("pt");
+    ev = await mkEvent(hostT);
+    await addType(ev, hostT, 0);
+    await publish(ev, hostT);
+    const origEnd = new Date(Date.now() + 2 * 3600000).toISOString();
+    await q(`UPDATE events SET starts_at = now() - interval '1 hour', ends_at = $2 WHERE id = $1`, [ev, origEnd]);
+    const MSG = "Once the event has started, the end time can only move later.";
+    r = await call("PATCH", `/api/events/${ev}`, { token: tok(hostT), body: { endsAt: new Date(Date.now() + 3600000).toISOString() } });
+    assert(r.status === 400 && r.body.error.code === "INVALID_EVENT_TIMES" && r.body.error.message === MSG, "started event: earlier end refused", r);
+    assert(new Date((await q(`SELECT ends_at FROM events WHERE id = $1`, [ev]))[0].ends_at).toISOString() === origEnd, "end time unchanged after refusal");
+    const laterEnd = new Date(Date.now() + 5 * 3600000).toISOString();
+    r = await call("PATCH", `/api/events/${ev}`, { token: tok(hostT), body: { endsAt: laterEnd } });
+    assert(r.status === 200 && new Date(r.body.event.endsAt).toISOString() === laterEnd, "started event: later end ok", r);
+    r = await call("PATCH", `/api/events/${ev}`, { token: tok(hostT), body: { title: "Renamed while live" } });
+    assert(r.status === 200, "started event: other edits unchanged", r);
+    ev = await mkEvent(hostT);
+    r = await call("PATCH", `/api/events/${ev}`, { token: tok(hostT), body: { endsAt: inDays(10, 2) } });
+    assert(r.status === 200, "event not started: earlier end ok", r);
   } finally {
     stub.close();
+    await q(`DELETE FROM ticket_types WHERE event_id IN (SELECT id FROM events WHERE host_user_id IN (SELECT id FROM users WHERE email LIKE $1))`, [`${P}-%`]);
+    await q(`DELETE FROM events WHERE host_user_id IN (SELECT id FROM users WHERE email LIKE $1)`, [`${P}-%`]);
     await q(`DELETE FROM user_payout_accounts WHERE user_id IN (SELECT id FROM users WHERE email LIKE $1)`, [`${P}-%`]);
     await q(`DELETE FROM businesses WHERE owner_id IN (SELECT id FROM users WHERE email LIKE $1)`, [`${P}-%`]);
     await q(`DELETE FROM photographers WHERE user_id IN (SELECT id FROM users WHERE email LIKE $1)`, [`${P}-%`]);

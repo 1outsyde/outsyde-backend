@@ -136,3 +136,26 @@ export function wouldCreateUnlockLoop(typeId: string, unlockAfterId: string | nu
   }
   return false;
 }
+
+/** Paid tickets switch. Read at call time so tests (and a restart-free env change in tests) see the current value. */
+export function paidEventsEnabled(): boolean {
+  return process.env.PAID_EVENTS_ENABLED === "true";
+}
+
+const MAX_EVENT_LENGTH_MS = 30 * 24 * 60 * 60 * 1000;
+const MAX_START_AHEAD_MS = 2 * 365 * 24 * 60 * 60 * 1000;
+
+/**
+ * Event time rules. `savedEndsAt` and `started` are passed on edits: once an event has started its end time can
+ * only move later, so a host can't pull the payout date earlier.
+ */
+export function checkTimes(
+  startsAt: Date, endsAt: Date, now: Date, startChanged: boolean, savedEndsAt?: Date, started?: boolean,
+): string | null {
+  if (startChanged && startsAt <= now) return "The event can't start in the past.";
+  if (endsAt <= startsAt) return "The event has to end after it starts.";
+  if (endsAt.getTime() - startsAt.getTime() > MAX_EVENT_LENGTH_MS) return "An event can last 30 days at most.";
+  if (startsAt.getTime() - now.getTime() > MAX_START_AHEAD_MS) return "An event can start at most 2 years from now.";
+  if (started && savedEndsAt && endsAt < savedEndsAt) return "Once the event has started, the end time can only move later.";
+  return null;
+}
