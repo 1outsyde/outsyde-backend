@@ -223,9 +223,447 @@ const ymd = (iso: string) => iso.slice(0, 10);
       await baseParents();
       await ins("booking_payout_issues", issueBase({ topup_requested_at: ago(8) }));
     }, { openIssueRows: 1 });
+
+    await jobTests();
   } finally {
     await cleanup();
+    await q(`DELETE FROM bank_payouts WHERE payout_date >= '2090-01-01'`).catch(() => {});
     await db.end();
+  }
+
+  // ═════════════════════════ Task 4: the daily job ═════════════════════════
+  // Rows use New York dates in 2099 (deleted before and after every test). A fake BankStripe records every call.
+  async function jobTests() {
+    const bp: any = await import("./bankPayout");
+    const BOUND = { timeoutMs: 30000, maxNetworkRetries: 1 };
+    const isBound = (o: any) => o && o.timeoutMs === 30000 && o.maxNetworkRetries === 1;
+    // 2099-01-15 is EST (UTC-5): 12:00Z = 07:00 New York, 10:59Z = 05:59 New York.
+    const DATE = "2099-01-15";
+    const NOW = new Date("2099-01-15T12:00:00Z");
+    const BEFORE_SIX = new Date("2099-01-15T10:59:00Z");
+    const DAY_START = Date.UTC(2099, 0, 15, 5) / 1000;
+    const clearRows = () => q(`DELETE FROM bank_payouts WHERE payout_date >= '2090-01-01'`);
+    const rowOf = async (d = DATE) => (await q(`SELECT *, payout_date::text AS pd, round(extract(epoch from (next_attempt_at - now())) / 60)::int AS mins_left FROM bank_payouts WHERE payout_date = $1`, [d]))[0];
+    const countRows = async () => Number((await q(`SELECT count(*)::int AS n FROM bank_payouts WHERE payout_date >= '2090-01-01'`))[0].n);
+    const makeDue = (d = DATE) => q(`UPDATE bank_payouts SET next_attempt_at = now() - interval '1 second' WHERE payout_date = $1`, [d]);
+
+    let emails: { subject: string; detail: string }[] = [];
+    bp.setBankAlertForTest?.(async (subject: string, detail: string) => { emails.push({ subject, detail }); });
+
+    type Mode = "ok" | "throwOnce" | "alwaysThrow" | "landsButThrows" | "insufficient";
+    function fake(init: Partial<{ interval: string | null; usd: number; other: string[]; payouts: any[]; mode: Mode; delayMs: number; listThrows: boolean; retrieve: Record<string, { status: string; failureCode?: string | null } | "throw"> }> = {}) {
+      const st = { interval: "manual" as string | null, usd: 0, other: [] as string[], payouts: [] as any[], mode: "ok" as Mode, delayMs: 0, listThrows: false, retrieve: {} as Record<string, any>, ...init };
+      const calls: string[] = [];
+      const opts: any[] = [];
+      const creates: any[] = [];
+      const listSince: number[] = [];
+      let n = 0;
+      const land = (p: any) => {
+        const id = `po_bp_test_${++n}`;
+        st.payouts.push({ id, amount: p.amountCents, status: "pending", created: Math.floor(Date.now() / 1000), metadata: { type: "outsyde_bank_payout", payoutDate: p.payoutDate, rowId: p.rowId } });
+        return id;
+      };
+      const s = {
+        async getPlatformPayoutInterval(o: any) { calls.push("interval"); opts.push(o); return st.interval; },
+        async getAvailableUsdBalance(o: any) { calls.push("balance"); opts.push(o); return { usdCents: st.usd, otherCurrencies: st.other }; },
+        async listPlatformPayoutsCreatedSince(since: number, o: any) {
+          calls.push("list"); opts.push(o); listSince.push(since);
+          if (st.listThrows) throw new Error("Stripe list timed out");
+          return st.payouts.map((p) => ({ ...p }));
+        },
+        async createPlatformPayout(p: any) {
+          calls.push("create"); creates.push(p); opts.push({ timeoutMs: p.timeoutMs, maxNetworkRetries: p.maxNetworkRetries });
+          if (st.delayMs) await new Promise((r) => setTimeout(r, st.delayMs));
+          if (st.mode === "throwOnce") { st.mode = "ok"; throw new Error("Stripe API error (500)"); }
+          if (st.mode === "alwaysThrow") throw new Error("Stripe API error (500)");
+          if (st.mode === "insufficient") throw Object.assign(new Error("Insufficient funds in Stripe account"), { code: "balance_insufficient" });
+          if (st.mode === "landsButThrows") { st.mode = "ok"; land(p); throw new Error("Request timed out"); }
+          const id = land(p);
+          return { id, status: "pending" };
+        },
+        async retrievePlatformPayout(id: string, o: any) {
+          calls.push("retrieve"); opts.push(o);
+          const r = st.retrieve[id];
+          if (!r || r === "throw") throw new Error("Stripe retrieve timed out");
+          return { id, status: r.status, failureCode: r.failureCode ?? null };
+        },
+        isInsufficientFundsError(err: unknown) {
+          const e = err as any;
+          const code = e?.code ?? e?.raw?.code;
+          return code === "balance_insufficient" || /insufficient (available )?funds/i.test(e?.message ?? "");
+        },
+      };
+      return { s, st, calls, opts, creates, listSince };
+    }
+
+    const heldNow = async () => (await computeHeld()).total;
+    async function jobTest(name: string, fn: () => Promise<void>) {
+      console.log(name);
+      await clearRows();
+      emails = [];
+      process.env.DAILY_BANK_PAYOUT_ENABLED = "true";
+      bp.setBankHooksForTest?.(null);
+      try {
+        await fn();
+      } catch (err) {
+        assert(false, `${name}: threw`, String((err as Error)?.stack ?? err));
+      } finally {
+        bp.setBankHooksForTest?.(null);
+        await clearRows();
+        await cleanup();
+      }
+    }
+
+    // Preconditions: the job tests read the real held total, so nothing may gate them on this local DB.
+    const g0 = (await computeHeld()).gates;
+    if (g0.recentTopups || g0.openIssueRows || g0.eventPayoutsWaitingBalance) throw new Error(`local DB has gate rows (${JSON.stringify(g0)}): clean them first`);
+    if (Number((await q(`SELECT count(*)::int AS n FROM bank_payouts WHERE status IN ('pending','sent') AND payout_date < '2090-01-01'`))[0].n)) throw new Error("local DB has open bank_payouts rows outside the test range");
+
+    // ── nyDayAndHour ──
+    await jobTest("nyDayAndHour: clock edges, New York date and midnight", async () => {
+      const f = bp.nyDayAndHour;
+      const a = f(new Date("2026-10-21T09:59:00Z"));
+      assert(a.hour === 5 && a.date === "2026-10-21", "09:59Z (EDT) is 05 New York", a);
+      const b = f(new Date("2026-10-21T10:00:00Z"));
+      assert(b.hour === 6 && b.date === "2026-10-21", "10:00Z (EDT) is 06 New York", b);
+      const c = f(new Date("2026-10-22T01:30:00Z"));
+      assert(c.date === "2026-10-21" && c.hour === 21, "2026-10-22T01:30Z is still 2026-10-21 in New York", c);
+      assert(c.dayStartUnix === Date.UTC(2026, 9, 21, 4) / 1000, "dayStartUnix is New York midnight (EDT)", c);
+      const d = f(new Date("2026-12-01T11:00:00Z"));
+      assert(d.hour === 6 && d.date === "2026-12-01", "11:00Z (EST) is 06 New York", d);
+      assert(d.dayStartUnix === Date.UTC(2026, 11, 1, 5) / 1000, "dayStartUnix is New York midnight (EST)", d);
+      const e = f(new Date("2026-12-01T00:00:00Z"));
+      assert(e.hour === 19 && e.date === "2026-11-30", "00:00Z (EST) is 19 the day before", e);
+      const sp = f(new Date("2026-03-08T12:00:00Z"));
+      assert(sp.date === "2026-03-08" && sp.hour === 8 && sp.dayStartUnix === Date.UTC(2026, 2, 8, 5) / 1000, "spring forward day: midnight was still EST", sp);
+      const fb = f(new Date("2026-11-01T12:00:00Z"));
+      assert(fb.date === "2026-11-01" && fb.hour === 7 && fb.dayStartUnix === Date.UTC(2026, 10, 1, 4) / 1000, "fall back day: midnight was still EDT", fb);
+      const mid = f(new Date("2026-10-21T04:00:00Z"));
+      assert(mid.hour === 0 && mid.date === "2026-10-21", "exactly midnight is hour 0 of the new day", mid);
+    });
+
+    // ── 1. switch off ──
+    await jobTest("1. switch off: off, no Stripe call, no row", async () => {
+      delete process.env.DAILY_BANK_PAYOUT_ENABLED;
+      const f = fake({ usd: 10_000_000 });
+      await q(`INSERT INTO bank_payouts (payout_date, status, stripe_payout_id, sent_at) VALUES ('2099-01-01','sent','po_off',now() - interval '11 days')`);
+      const r = await bp.runBankPayoutJob(NOW, f.s);
+      assert(r?.action === "off", "action off", r);
+      assert(f.calls.length === 0, "no Stripe call (not even the sent check)", f.calls);
+      assert((await countRows()) === 1 && (await rowOf("2099-01-01")).status === "sent", "no row written or changed");
+      process.env.DAILY_BANK_PAYOUT_ENABLED = "false";
+      const r2 = await bp.runBankPayoutJob(NOW, f.s);
+      assert(r2?.action === "off" && f.calls.length === 0, "'false' is off too", r2);
+      assert(emails.length === 0, "no email");
+    });
+
+    // ── 2. checkSentPayouts ──
+    await jobTest("2a. sent check: paid -> paid + paid_at, no email; runs first even before 6:00", async () => {
+      await q(`INSERT INTO bank_payouts (payout_date, status, stripe_payout_id, amount_cents, sent_at) VALUES ('2099-01-10','sent','po_a',5000,now() - interval '2 days')`);
+      const f = fake({ retrieve: { po_a: { status: "paid" } } });
+      const r = await bp.runBankPayoutJob(BEFORE_SIX, f.s);
+      assert(r?.action === "not_yet", "still not_yet for today", r);
+      const row = await rowOf("2099-01-10");
+      assert(row.status === "paid" && row.paid_at !== null && row.stripe_status === "paid", "row paid with paid_at", row);
+      assert(f.calls.join(",") === "retrieve" && isBound(f.opts[0]), "one bounded retrieve", { calls: f.calls, opts: f.opts });
+      assert(emails.length === 0, "no email for paid");
+      const n = await bp.checkSentPayouts(f.s);
+      assert(n === 0 && f.calls.length === 1, "a paid row is not checked again", { n, calls: f.calls });
+    });
+    await jobTest("2b. sent check: failed -> failed + one email", async () => {
+      await q(`INSERT INTO bank_payouts (payout_date, status, stripe_payout_id, amount_cents, sent_at) VALUES ('2099-01-10','sent','po_f',5000,now() - interval '2 days')`);
+      const f = fake({ retrieve: { po_f: { status: "failed", failureCode: "account_closed" } } });
+      await bp.runBankPayoutJob(BEFORE_SIX, f.s);
+      const row = await rowOf("2099-01-10");
+      assert(row.status === "failed" && row.failed_at !== null && row.stripe_status === "failed", "row failed with failed_at", row);
+      assert(emails.length === 1 && emails[0].subject.startsWith("[Payouts] ") && /account_closed/.test(emails[0].detail) && /po_f/.test(emails[0].detail), "one [Payouts] email with id and code", emails);
+      await bp.runBankPayoutJob(BEFORE_SIX, f.s);
+      assert(emails.length === 1 && f.calls.filter((c) => c === "retrieve").length === 1, "no second email or retrieve", { emails, calls: f.calls });
+    });
+    await jobTest("2c. sent check: canceled -> failed + one email", async () => {
+      await q(`INSERT INTO bank_payouts (payout_date, status, stripe_payout_id, amount_cents, sent_at) VALUES ('2099-01-10','sent','po_c',5000,now() - interval '1 day')`);
+      const f = fake({ retrieve: { po_c: { status: "canceled" } } });
+      await bp.checkSentPayouts(f.s);
+      const row = await rowOf("2099-01-10");
+      assert(row.status === "failed" && row.stripe_status === "canceled", "canceled is failed", row);
+      assert(emails.length === 1, "one email", emails);
+    });
+    await jobTest("2d. sent check: in transit after 10 days -> one email (alerted_at); 3 days -> none", async () => {
+      await q(`INSERT INTO bank_payouts (payout_date, status, stripe_payout_id, amount_cents, sent_at) VALUES ('2099-01-01','sent','po_old',5000,now() - interval '11 days'), ('2099-01-09','sent','po_new',5000,now() - interval '3 days')`);
+      const f = fake({ retrieve: { po_old: { status: "in_transit" }, po_new: { status: "in_transit" } } });
+      await bp.runBankPayoutJob(BEFORE_SIX, f.s);
+      const old = await rowOf("2099-01-01");
+      const nw = await rowOf("2099-01-09");
+      assert(old.status === "sent" && old.alerted_at !== null && old.stripe_status === "in_transit", "old row still sent, alerted", old);
+      assert(nw.status === "sent" && nw.alerted_at === null, "new row not alerted", nw);
+      assert(emails.length === 1 && /po_old/.test(emails[0].detail) && emails[0].subject.startsWith("[Payouts] "), "one email about the old row", emails);
+      await bp.runBankPayoutJob(BEFORE_SIX, f.s);
+      assert(emails.length === 1, "no second email on the next run", emails);
+      assert(f.opts.every(isBound), "every retrieve bounded", f.opts);
+    });
+    await jobTest("2e. sent check: retrieve keeps failing for 10 days -> still one email; a failed retrieve changes nothing else", async () => {
+      await q(`INSERT INTO bank_payouts (payout_date, status, stripe_payout_id, amount_cents, sent_at) VALUES ('2099-01-01','sent','po_x',5000,now() - interval '11 days'), ('2099-01-09','sent','po_y',5000,now() - interval '1 day')`);
+      const f = fake({ retrieve: { po_x: "throw", po_y: "throw" } });
+      await bp.checkSentPayouts(f.s);
+      assert((await rowOf("2099-01-01")).status === "sent" && (await rowOf("2099-01-09")).status === "sent", "both still sent");
+      assert(emails.length === 1 && /po_x/.test(emails[0].detail), "one email for the old one", emails);
+    });
+    await jobTest("2f. sent check: alerted before the send (other currency email) still gets the 10 day email", async () => {
+      await q(`INSERT INTO bank_payouts (payout_date, status, stripe_payout_id, amount_cents, sent_at, alerted_at) VALUES ('2099-01-01','sent','po_z',5000,now() - interval '11 days', now() - interval '11 days 1 minute')`);
+      const f = fake({ retrieve: { po_z: { status: "in_transit" } } });
+      await bp.checkSentPayouts(f.s);
+      assert(emails.length === 1, "one email", emails);
+      await bp.checkSentPayouts(f.s);
+      assert(emails.length === 1, "only one", emails);
+    });
+
+    // ── 3. not yet / done today ──
+    await jobTest("3a. before 06:00 New York: not_yet, nothing read, no row", async () => {
+      const held = await heldNow();
+      const f = fake({ usd: held + 100_000 });
+      const r = await bp.runBankPayoutJob(BEFORE_SIX, f.s);
+      assert(r?.action === "not_yet", "not_yet at 05:59", r);
+      assert(f.calls.length === 0 && (await countRows()) === 0, "no Stripe call, no row", f.calls);
+      const r6 = await bp.runBankPayoutJob(new Date("2099-01-15T11:00:00Z"), f.s);
+      assert(r6?.action === "sent", "06:00 sharp runs", r6);
+    });
+    await jobTest("3b. today's row already final: done_today, no interval/list/create", async () => {
+      for (const status of ["paid", "sent", "skipped", "failed", "review"]) {
+        await clearRows();
+        await q(`INSERT INTO bank_payouts (payout_date, status, stripe_payout_id, sent_at) VALUES ($1,$2,'po_t',now())`, [DATE, status]);
+        const f = fake({ usd: 10_000_000, retrieve: { po_t: { status: "in_transit" } } });
+        const r = await bp.runBankPayoutJob(NOW, f.s);
+        assert(r?.action === "done_today", `${status}: done_today`, r);
+        assert(!f.calls.some((c) => c !== "retrieve"), `${status}: only the sent check touched Stripe`, f.calls);
+      }
+    });
+
+    // ── 4. not manual ──
+    await jobTest("4. Stripe interval not manual: skipped stripe_not_manual, no row, no email", async () => {
+      for (const interval of ["daily", null]) {
+        const f = fake({ interval, usd: 10_000_000 });
+        const r = await bp.runBankPayoutJob(NOW, f.s);
+        assert(r?.action === "skipped" && r?.reason === "stripe_not_manual", `${interval}: skipped stripe_not_manual`, r);
+        assert(f.calls.join(",") === "interval" && isBound(f.opts[0]), `${interval}: only a bounded interval read`, { calls: f.calls, opts: f.opts });
+      }
+      assert((await countRows()) === 0, "no row written");
+      assert(emails.length === 0, "no email");
+      const held = await heldNow();
+      const f2 = fake({ usd: held + 15_000 });
+      const r2 = await bp.runBankPayoutJob(NOW, f2.s);
+      assert(r2?.action === "sent", "once flipped to manual the same day still runs", r2);
+    });
+    await jobTest("4b. interval read fails: no row, no create", async () => {
+      const f = fake({ usd: 10_000_000 });
+      (f.s as any).getPlatformPayoutInterval = async () => { f.calls.push("interval"); throw new Error("Stripe down"); };
+      const r = await bp.runBankPayoutJob(NOW, f.s);
+      assert(r?.action === "retry", "retry", r);
+      assert((await countRows()) === 0 && !f.calls.includes("create"), "no row, no create", f.calls);
+    });
+
+    // ── 5. claim ──
+    await jobTest("5a. claim: new pending row with attempts 1 and a 10 minute lock (held at create time)", async () => {
+      const held = await heldNow();
+      const f = fake({ usd: held + 15_000 });
+      let seen: any = null;
+      bp.setBankHooksForTest({ beforeCreate: async () => { seen = await rowOf(); } });
+      await bp.runBankPayoutJob(NOW, f.s);
+      assert(seen?.status === "pending" && Number(seen?.attempts) === 1 && seen?.mins_left === 10, "pending, attempts 1, lock 10 minutes", seen);
+    });
+    await jobTest("5b. re-claim a due pending row: attempts + 1; a locked one: done_today, no Stripe", async () => {
+      const held = await heldNow();
+      await q(`INSERT INTO bank_payouts (payout_date, status, attempts, next_attempt_at) VALUES ($1,'pending',2,now() + interval '5 minutes')`, [DATE]);
+      const f = fake({ usd: held + 15_000 });
+      const r = await bp.runBankPayoutJob(NOW, f.s);
+      assert(r?.action === "done_today", "locked pending: done_today", r);
+      assert(f.calls.length === 0, "no Stripe call while locked", f.calls);
+      await makeDue();
+      const r2 = await bp.runBankPayoutJob(NOW, f.s);
+      const row = await rowOf();
+      assert(r2?.action === "sent" && Number(row.attempts) === 3, "due pending re-claimed (attempts 3) and sent", { r2, row });
+    });
+
+    // ── 6. gates and other currency ──
+    const gateCases: [string, string, () => Promise<void>][] = [
+      ["recent top-up", "recent_topup", async () => { await baseParents(); await ins("appointments", apptBase({ status: "completed" })); await ins("booking_payout_issues", issueBase({ status: "paid", topup_requested_at: ago(2) })); }],
+      ["open booking payout issue", "open_booking_payout_issues", async () => { await baseParents(); await ins("appointments", apptBase({ status: "completed" })); await ins("booking_payout_issues", issueBase({})); }],
+      ["event payout waiting for balance", "event_payout_waiting_balance", async () => {
+        await seedEvent({ status: "paused", starts: ago(10), ends: ago(9) });
+        await ins("event_payouts", { id: "bp-test-payout", event_id: "bp-test-event", gross_cents: 600, amount_cents: 600, status: "pending", last_error: "Insufficient funds in Stripe account" });
+      }],
+    ];
+    for (const [label, reason, seed] of gateCases) {
+      await jobTest(`6. gate ${label}: skipped ${reason}, no create, no email`, async () => {
+        await seed();
+        const f = fake({ usd: 100_000_000 });
+        const r = await bp.runBankPayoutJob(NOW, f.s);
+        const row = await rowOf();
+        assert(r?.action === "skipped" && r?.reason === reason, `skipped ${reason}`, r);
+        assert(row?.status === "skipped" && row?.skip_reason === reason && row?.next_attempt_at === null, "row skipped with reason", row);
+        assert(!f.calls.includes("create") && emails.length === 0, "no create, no email", { calls: f.calls, emails });
+      });
+    }
+    await jobTest("6b. other currency in balance: pays USD, one email per day", async () => {
+      const held = await heldNow();
+      const f = fake({ usd: held + 15_000, other: ["eur", "gbp"], mode: "throwOnce" });
+      const r1 = await bp.runBankPayoutJob(NOW, f.s);
+      assert(r1?.action === "retry", "first try fails", r1);
+      assert(emails.length === 1 && /eur/i.test(emails[0].detail) && emails[0].subject.startsWith("[Payouts] "), "one email naming the currency", emails);
+      await makeDue();
+      const r2 = await bp.runBankPayoutJob(NOW, f.s);
+      assert(r2?.action === "sent" && f.creates.at(-1)?.amountCents === 5_000, "second try pays the USD amount", { r2, c: f.creates });
+      assert(emails.length === 1, "still one email that day", emails);
+      assert(!/8%|8 %/.test(emails[0].detail) && !/ - | — | – /.test(emails[0].detail), "copy: no 8%, no dash separators", emails[0]);
+    });
+
+    // ── 7. lookup ──
+    await jobTest("7a. ours already at Stripe today: recorded as sent, never created", async () => {
+      const held = await heldNow();
+      const f = fake({ usd: held + 15_000, payouts: [{ id: "po_ours", amount: 4321, status: "in_transit", created: DAY_START + 60, metadata: { type: "outsyde_bank_payout", payoutDate: DATE, rowId: "x" } }] });
+      const r = await bp.runBankPayoutJob(NOW, f.s);
+      const row = await rowOf();
+      assert(r?.action === "sent", "sent", r);
+      assert(row.status === "sent" && row.stripe_payout_id === "po_ours" && Number(row.amount_cents) === 4321 && row.sent_at !== null, "row records that payout", row);
+      assert(!f.calls.includes("create"), "no create", f.calls);
+      assert(f.listSince[0] === DAY_START && isBound(f.opts[f.calls.indexOf("list")]), "list since New York midnight, bounded", { since: f.listSince, DAY_START });
+    });
+    for (const [label, p] of [
+      ["a hand payout", { id: "po_hand", amount: 9999, status: "pending", created: DAY_START + 10, metadata: {} }],
+      ["ours for another date", { id: "po_y", amount: 9999, status: "pending", created: DAY_START + 10, metadata: { type: "outsyde_bank_payout", payoutDate: "2099-01-14", rowId: "y" } }],
+    ] as [string, any][]) {
+      await jobTest(`7b. other payout today (${label}): skipped other_payout_today, no create, no email`, async () => {
+        const f = fake({ usd: 100_000_000, payouts: [p] });
+        const r = await bp.runBankPayoutJob(NOW, f.s);
+        const row = await rowOf();
+        assert(r?.action === "skipped" && r?.reason === "other_payout_today" && row?.skip_reason === "other_payout_today" && row?.status === "skipped", "skipped other_payout_today", { r, row });
+        assert(!f.calls.includes("create") && emails.length === 0, "no create, no email", f.calls);
+      });
+    }
+    await jobTest("7c. 500 payouts listed (page cap): can't tell, failed try with backoff, no create", async () => {
+      const many = Array.from({ length: 500 }, (_, i) => ({ id: `po_m${i}`, amount: 1, status: "paid", created: DAY_START + i, metadata: {} }));
+      const f = fake({ usd: 100_000_000, payouts: many });
+      const r = await bp.runBankPayoutJob(NOW, f.s);
+      const row = await rowOf();
+      assert(r?.action === "retry", "retry", r);
+      assert(row.status === "pending" && row.mins_left === 10 && row.last_error, "pending, backoff 10, error saved", row);
+      assert(!f.calls.includes("create"), "no create", f.calls);
+    });
+    await jobTest("7d. lookup fails: failed try, no create", async () => {
+      const f = fake({ usd: 100_000_000, listThrows: true });
+      const r = await bp.runBankPayoutJob(NOW, f.s);
+      assert(r?.action === "retry" && !f.calls.includes("create") && (await rowOf()).status === "pending", "retry, no create", { r, calls: f.calls });
+    });
+
+    // ── 8. below minimum ──
+    await jobTest("8. amount below 2500: skipped below_minimum with available, held, breakdown saved; 2500 sends", async () => {
+      const h = await computeHeld();
+      const f = fake({ usd: h.total + 10_000 + 2_499 });
+      const r = await bp.runBankPayoutJob(NOW, f.s);
+      const row = await rowOf();
+      assert(r?.action === "skipped" && r?.reason === "below_minimum", "skipped below_minimum", r);
+      assert(row.status === "skipped" && row.skip_reason === "below_minimum" && Number(row.available_cents) === h.total + 12_499 && Number(row.held_cents) === h.total && Number(row.buffer_cents) === 10_000, "available, held, buffer saved", row);
+      assert(row.held_breakdown && typeof row.held_breakdown === "object" && "bookingRefundCover" in row.held_breakdown, "breakdown saved", row.held_breakdown);
+      assert(!f.calls.includes("create") && emails.length === 0, "no create, no email");
+      await clearRows();
+      const f2 = fake({ usd: h.total + 10_000 + 2_500 });
+      const r2 = await bp.runBankPayoutJob(NOW, f2.s);
+      assert(r2?.action === "sent" && f2.creates[0]?.amountCents === 2_500, "exactly 2500 is sent", { r2, c: f2.creates });
+      await clearRows();
+      const f3 = fake({ usd: Math.max(0, h.total - 50_000) });
+      const r3 = await bp.runBankPayoutJob(NOW, f3.s);
+      const row3 = await rowOf();
+      assert(r3?.reason === "below_minimum" && (row3.amount_cents === null || Number(row3.amount_cents) >= 0), "balance below held: below_minimum, never negative", row3);
+    });
+
+    // ── 9. send ──
+    await jobTest("9. send: lock re-taken, create with per-try key -> sent with id, amount, breakdown", async () => {
+      const h = await computeHeld();
+      const f = fake({ usd: h.total + 10_000 + 5_000 });
+      const r = await bp.runBankPayoutJob(NOW, f.s);
+      const row = await rowOf();
+      assert(r?.action === "sent", "sent", r);
+      assert(f.creates.length === 1, "one create");
+      const c = f.creates[0];
+      assert(c.amountCents === 5_000 && c.payoutDate === DATE && c.rowId === row.id, "amount, date, row id", c);
+      assert(new RegExp(`^bank_payout_${DATE}_\\d{16}$`).test(c.idempotencyKey), "key bank_payout_<date>_<claim microseconds>", c.idempotencyKey);
+      assert(isBound(c), "create bounded", c);
+      assert(f.calls.indexOf("list") < f.calls.indexOf("create"), "lookup before create", f.calls);
+      assert(f.opts.every(isBound), "every call bounded", f.opts);
+      assert(row.status === "sent" && row.stripe_payout_id === "po_bp_test_1" && Number(row.amount_cents) === 5_000 && row.sent_at !== null && row.next_attempt_at === null, "row sent", row);
+      assert(Number(row.held_cents) === h.total && Number(row.available_cents) === h.total + 15_000 && row.held_breakdown && Number(row.held_breakdown.bookingRefundCover) === h.breakdown.bookingRefundCover, "held and breakdown saved", row);
+      assert(emails.length === 0, "no email when sent");
+      const again = await bp.runBankPayoutJob(new Date("2099-01-15T20:00:00Z"), f.s);
+      assert(again?.action === "done_today" && f.creates.length === 1, "later the same day: done_today, no second create", again);
+    });
+    await jobTest("9b. a run that lost its claim before sending sends nothing and writes nothing", async () => {
+      const held = await heldNow();
+      const f = fake({ usd: held + 15_000 });
+      bp.setBankHooksForTest({ afterClaim: async () => { await q(`UPDATE bank_payouts SET updated_at = now() + interval '1 second', next_attempt_at = now() + interval '10 minutes' WHERE payout_date = $1`, [DATE]); } });
+      const r = await bp.runBankPayoutJob(NOW, f.s);
+      const row = await rowOf();
+      assert(r?.action !== "sent" && !f.calls.includes("create"), "no create", { r, calls: f.calls });
+      assert(row.status === "pending" && Number(row.attempts) === 1 && row.last_error === null, "row untouched by the run that lost it", row);
+    });
+
+    // ── 10. errors ──
+    await jobTest("10a. insufficient funds on create: skipped insufficient_funds, no email, no retry", async () => {
+      const held = await heldNow();
+      const f = fake({ usd: held + 15_000, mode: "insufficient" });
+      const r = await bp.runBankPayoutJob(NOW, f.s);
+      const row = await rowOf();
+      assert(r?.action === "skipped" && r?.reason === "insufficient_funds", "skipped insufficient_funds", r);
+      assert(row.status === "skipped" && row.skip_reason === "insufficient_funds" && row.next_attempt_at === null && /nsufficient/.test(row.last_error ?? ""), "row skipped, error saved", row);
+      assert(emails.length === 0, "no email");
+      await bp.runBankPayoutJob(NOW, f.s);
+      assert(f.creates.length === 1, "no second try that day", f.creates.length);
+    });
+    await jobTest("10b. other errors: backoff 10, 20, 40, 60; after 5 tries review + one email", async () => {
+      const held = await heldNow();
+      const f = fake({ usd: held + 15_000, mode: "alwaysThrow" });
+      const want = [10, 20, 40, 60];
+      for (let i = 0; i < 4; i++) {
+        const r = await bp.runBankPayoutJob(NOW, f.s);
+        const row = await rowOf();
+        assert(r?.action === "retry" && row.status === "pending" && Number(row.attempts) === i + 1 && row.mins_left === want[i] && /500/.test(row.last_error ?? ""), `try ${i + 1}: retry, backoff ${want[i]}`, { r, row });
+        await makeDue();
+      }
+      assert(emails.length === 0, "no email before review");
+      const r5 = await bp.runBankPayoutJob(NOW, f.s);
+      const row5 = await rowOf();
+      assert(r5?.action === "review" && row5.status === "review" && row5.next_attempt_at === null, "5th failure: review", { r5, row5 });
+      assert(emails.length === 1 && emails[0].subject.startsWith("[Payouts] ") && emails[0].detail.includes(DATE), "one review email", emails);
+      assert(f.creates.length === 5 && new Set(f.creates.map((c: any) => c.idempotencyKey)).size === 5, "a new key on every try", f.creates.map((c: any) => c.idempotencyKey));
+      await bp.runBankPayoutJob(NOW, f.s);
+      assert(emails.length === 1 && f.creates.length === 5, "review: nothing more that day", { e: emails.length, c: f.creates.length });
+    });
+    await jobTest("lost response is recorded, not resent", async () => {
+      const held = await heldNow();
+      const f = fake({ usd: held + 15_000, mode: "landsButThrows" });
+      const r1 = await bp.runBankPayoutJob(NOW, f.s);
+      const row1 = await rowOf();
+      assert(r1?.action === "retry" && row1.status === "pending" && row1.stripe_payout_id === null, "first try: retry, not concluded either way", { r1, row1 });
+      assert(f.creates.length === 1 && f.st.payouts.length === 1, "the payout landed at Stripe");
+      await makeDue(); // 11 minutes later
+      const r2 = await bp.runBankPayoutJob(NOW, f.s);
+      const row2 = await rowOf();
+      assert(r2?.action === "sent", "second run: sent", r2);
+      assert(f.creates.length === 1, "0 new creates", f.creates.length);
+      assert(row2.status === "sent" && row2.stripe_payout_id === f.st.payouts[0].id && Number(row2.amount_cents) === 5_000, "row sent with that id", row2);
+    });
+    await jobTest("two runs at once send one payout", async () => {
+      const held = await heldNow();
+      const f = fake({ usd: held + 15_000, delayMs: 300 });
+      const [a, b] = await Promise.all([bp.runBankPayoutJob(NOW, f.s), bp.runBankPayoutJob(NOW, f.s)]);
+      const actions = [a?.action, b?.action].sort().join(",");
+      assert(f.creates.length === 1, "1 create", f.creates.length);
+      assert(actions === "done_today,sent", "one sent, one done_today", { a, b });
+      assert((await countRows()) === 1 && (await rowOf()).status === "sent", "one row, sent");
+      const [c, d] = await Promise.all([bp.runBankPayoutJob(NOW, f.s), bp.runBankPayoutJob(NOW, f.s)]);
+      assert(c?.action === "done_today" && d?.action === "done_today" && f.creates.length === 1, "more runs: still 1 create", { c, d });
+    });
+
+    bp.setBankAlertForTest?.(null);
+    delete process.env.DAILY_BANK_PAYOUT_ENABLED;
   }
 
   console.log(`\n${passed} passed, ${failed} failed`);

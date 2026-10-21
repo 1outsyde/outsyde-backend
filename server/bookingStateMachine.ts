@@ -512,6 +512,15 @@ export function startBookingCleanupJob(intervalMs: number = 60000): NodeJS.Timeo
     } catch (error) {
       console.error("[BookingCleanup] Error during event payout job:", error);
     }
+
+    // Daily bank payout: at most one Stripe payout a New York day (first run at or after 6:00) to Outsyde's bank, only money not held for anyone (off unless DAILY_BANK_PAYOUT_ENABLED is "true"; day claim + 10 minute lock, one key per try, lookup first: safe to run twice).
+    // Own try/catch, after the event payout job, so neither can starve the other.
+    try {
+      const { runBankPayoutJob } = await import("./bankPayout");
+      await runBankPayoutJob();
+    } catch (error) {
+      console.error("[BookingCleanup] Error during bank payout job:", error);
+    }
   };
 
   cleanup();
