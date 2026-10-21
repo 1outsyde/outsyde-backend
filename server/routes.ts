@@ -1,4 +1,4 @@
-import type { Express, RequestHandler } from "express";
+import type { Express, RequestHandler, Request as ExpressRequest, Response as ExpressResponse } from "express";
 import type { Server } from "http";
 import { randomUUID } from "crypto";
 import multer from "multer";
@@ -6,6 +6,8 @@ import { storage, appointmentChargeFields } from "./storage";
 import { db } from "./db";
 import { coverPosterUrl, isMuxUploadId, resolveCoverVideoValue } from "./coverMedia";
 import { verifyMuxSignature } from "./muxWebhookSignature";
+import { resolvePublicIdentity } from "./publicIdentity";
+import { buildFollowRows, parseFollowPaging } from "./follows/followLists";
 import {
   customerSignupSchema,
   vendorSignupSchema,
@@ -217,6 +219,7 @@ import {
   storyViews,
   storyHighlights,
   follows,
+  notifications,
   staffMembers,
   pointTransactions,
   serviceAddons,
@@ -3807,25 +3810,47 @@ export async function registerRoutes(
         return res.status(400).json({ success: false, error: "Cannot follow yourself" });
       }
 
-      // Check if already following
-      const existingFollow = await storage.getFollow(followerUserId, resolvedTargetUserId);
-      if (existingFollow) {
-        return res.status(409).json({ success: false, error: "Already following this user" });
+      // Blocked either way: no follow (and no notification to the person who blocked).
+      if (await storage.isUserBlockedEitherWay(followerUserId, resolvedTargetUserId)) {
+        return res.status(403).json({ success: false, error: "You can't follow this account" });
       }
 
-      // Create follow relationship
+      // Idempotent: following an account you already follow is a success (was 409), so a stale
+      // button or a double tap never shows an error. goutsyde.com already treats 409 as success.
+      const existingFollow = await storage.getFollow(followerUserId, resolvedTargetUserId);
+      if (existingFollow) {
+        return res.status(200).json({ success: true, alreadyFollowing: true, follow: existingFollow });
+      }
+
+      // One statement; a follow created by a parallel request in between is ignored, not a 500.
       const follow = await storage.createFollow({ followerUserId, targetUserId: resolvedTargetUserId });
+      if (!follow) {
+        const raced = await storage.getFollow(followerUserId, resolvedTargetUserId);
+        return res.status(200).json({ success: true, alreadyFollowing: true, follow: raced });
+      }
 
-      // Get follower info for notification
-      const followerUser = await storage.getUser(followerUserId);
-      const followerName = publicDisplayName(followerUser) || "Someone";
+      // Notify once per follower: follow, unfollow, follow again doesn't notify again.
+      const [alreadyNotified] = await db
+        .select({ id: notifications.id })
+        .from(notifications)
+        .where(and(
+          eq(notifications.userId, resolvedTargetUserId),
+          eq(notifications.type, "new_follower"),
+          eq(notifications.triggeredByUserId, followerUserId),
+        ))
+        .limit(1);
+      if (!alreadyNotified) {
+        const followerUser = await storage.getUser(followerUserId);
+        // Same public name rule as everywhere else: business / photographer name, else display name.
+        const followerIdentity = followerUser ? await resolvePublicIdentity(followerUser) : null;
+        const followerName = followerIdentity?.publicName || publicDisplayName(followerUser) || "Someone";
 
-      // Send notification to target user
-      await NotificationTriggers.newFollower({
-        targetUserId: resolvedTargetUserId,
-        followerUserId,
-        followerName,
-      });
+        await NotificationTriggers.newFollower({
+          targetUserId: resolvedTargetUserId,
+          followerUserId,
+          followerName,
+        });
+      }
 
       res.status(201).json({ success: true, follow });
     } catch (error) {
@@ -3870,10 +3895,11 @@ export async function registerRoutes(
 
       const resolvedTargetUserId = await resolveFollowTargetUserId(targetUserId) || targetUserId;
 
-      // Check if follow exists
+      // Idempotent: unfollowing an account you don't follow is a success (was 404), so a stale
+      // button never shows an error.
       const existingFollow = await storage.getFollow(followerUserId, resolvedTargetUserId);
       if (!existingFollow) {
-        return res.status(404).json({ success: false, error: "Not following this user" });
+        return res.json({ success: true, message: "Not following" });
       }
 
       // Delete follow relationship
@@ -3914,6 +3940,28 @@ export async function registerRoutes(
     }
   });
 
+  // Followers / Following lists (2026-10-19). Rows: public name + logo/photo, role, business /
+  // photographer id, isFollowing for the viewer. Banned/deleted and blocked accounts are hidden.
+  // limit 1..100 (default 50). total stays the raw count, same number the profile shows.
+  async function sendFollowList(
+    req: ExpressRequest,
+    res: ExpressResponse,
+    kind: "followers" | "following",
+    ownerUserId: string,
+  ) {
+    const viewerId = (req as AuthenticatedRequest).user?.userId || req.session?.userId || null;
+    const { limit, offset } = parseFollowPaging(req.query as Record<string, unknown>);
+    const listUsers = kind === "following"
+      ? await storage.getUserFollowing(ownerUserId, limit, offset)
+      : await storage.getUserFollowers(ownerUserId, limit, offset);
+    const totalCount = kind === "following"
+      ? await storage.getFollowingCount(ownerUserId)
+      : await storage.getFollowerCount(ownerUserId);
+    const rows = await buildFollowRows(listUsers, viewerId);
+    // Pagination is over the raw rows, so hasMore uses the raw page size.
+    res.json({ success: true, [kind]: rows, total: totalCount, limit, offset, hasMore: listUsers.length === limit });
+  }
+
   // Get current user's following list
   app.get("/api/users/me/following", optionalAuthMiddleware, async (req, res) => {
     const authReq = req as AuthenticatedRequest;
@@ -3922,28 +3970,7 @@ export async function registerRoutes(
       if (!userId) {
         return res.status(401).json({ success: false, error: "Authentication required" });
       }
-
-      const limit = parseInt(req.query.limit as string) || 50;
-      const offset = parseInt(req.query.offset as string) || 0;
-
-      const followingUsers = await storage.getUserFollowing(userId, limit, offset);
-      const totalCount = await storage.getFollowingCount(userId);
-
-      // Return canonical user objects (safe public data only)
-      const following = followingUsers.map(user => ({
-        userId: user.id,
-        username: user.username || null,
-        displayName: publicDisplayName(user) || 'Anonymous',
-        profilePhotoUrl: user.profileImageUrl || null,
-      }));
-
-      res.json({ 
-        success: true, 
-        following, 
-        total: totalCount,
-        limit,
-        offset 
-      });
+      await sendFollowList(req, res, "following", userId);
     } catch (error) {
       console.error("Get following error:", error);
       res.status(500).json({ success: false, error: "Failed to get following list" });
@@ -3958,104 +3985,35 @@ export async function registerRoutes(
       if (!userId) {
         return res.status(401).json({ success: false, error: "Authentication required" });
       }
-
-      const limit = parseInt(req.query.limit as string) || 50;
-      const offset = parseInt(req.query.offset as string) || 0;
-
-      const followerUsers = await storage.getUserFollowers(userId, limit, offset);
-      const totalCount = await storage.getFollowerCount(userId);
-
-      // Return canonical user objects (safe public data only)
-      const followers = followerUsers.map(user => ({
-        userId: user.id,
-        username: user.username || null,
-        displayName: publicDisplayName(user) || 'Anonymous',
-        profilePhotoUrl: user.profileImageUrl || null,
-      }));
-
-      res.json({ 
-        success: true, 
-        followers, 
-        total: totalCount,
-        limit,
-        offset 
-      });
+      await sendFollowList(req, res, "followers", userId);
     } catch (error) {
       console.error("Get followers error:", error);
       res.status(500).json({ success: false, error: "Failed to get followers list" });
     }
   });
 
-  // Get any user's following list (public profile)
-  app.get("/api/users/:userId/following", async (req, res) => {
+  // Any account's lists (public, like Instagram). :userId may be a user id, a business id or a
+  // photographer id (same resolution as follow/unfollow), so a business profile can pass its own id.
+  app.get("/api/users/:userId/following", optionalAuthMiddleware, async (req, res) => {
     try {
-      const { userId } = req.params;
-      
-      // Verify user exists
-      const targetUser = await storage.getUser(userId);
-      if (!targetUser) {
+      const ownerUserId = await resolveFollowTargetUserId(req.params.userId);
+      if (!ownerUserId) {
         return res.status(404).json({ success: false, error: "User not found" });
       }
-
-      const limit = parseInt(req.query.limit as string) || 50;
-      const offset = parseInt(req.query.offset as string) || 0;
-
-      const followingUsers = await storage.getUserFollowing(userId, limit, offset);
-      const totalCount = await storage.getFollowingCount(userId);
-
-      // Return canonical user objects (safe public data only)
-      const following = followingUsers.map(user => ({
-        userId: user.id,
-        username: user.username || null,
-        displayName: publicDisplayName(user) || 'Anonymous',
-        profilePhotoUrl: user.profileImageUrl || null,
-      }));
-
-      res.json({ 
-        success: true, 
-        following, 
-        total: totalCount,
-        limit,
-        offset 
-      });
+      await sendFollowList(req, res, "following", ownerUserId);
     } catch (error) {
       console.error("Get user following error:", error);
       res.status(500).json({ success: false, error: "Failed to get following list" });
     }
   });
 
-  // Get any user's followers list (public profile)
-  app.get("/api/users/:userId/followers", async (req, res) => {
+  app.get("/api/users/:userId/followers", optionalAuthMiddleware, async (req, res) => {
     try {
-      const { userId } = req.params;
-      
-      // Verify user exists
-      const targetUser = await storage.getUser(userId);
-      if (!targetUser) {
+      const ownerUserId = await resolveFollowTargetUserId(req.params.userId);
+      if (!ownerUserId) {
         return res.status(404).json({ success: false, error: "User not found" });
       }
-
-      const limit = parseInt(req.query.limit as string) || 50;
-      const offset = parseInt(req.query.offset as string) || 0;
-
-      const followerUsers = await storage.getUserFollowers(userId, limit, offset);
-      const totalCount = await storage.getFollowerCount(userId);
-
-      // Return canonical user objects (safe public data only)
-      const followers = followerUsers.map(user => ({
-        userId: user.id,
-        username: user.username || null,
-        displayName: publicDisplayName(user) || 'Anonymous',
-        profilePhotoUrl: user.profileImageUrl || null,
-      }));
-
-      res.json({ 
-        success: true, 
-        followers, 
-        total: totalCount,
-        limit,
-        offset 
-      });
+      await sendFollowList(req, res, "followers", ownerUserId);
     } catch (error) {
       console.error("Get user followers error:", error);
       res.status(500).json({ success: false, error: "Failed to get followers list" });
@@ -16520,14 +16478,19 @@ export async function registerRoutes(
       return res.status(401).json({ error: "Not authenticated" });
     }
 
-    const blockedId = req.params.userId;
-    if (blockerId === blockedId) {
-      return res.status(400).json({ error: "You cannot block yourself" });
-    }
-
     try {
+      // A business or photographer id resolves to the account behind it (same rule as follows),
+      // so the block and the follow cleanup below always use user ids.
+      const blockedId = (await resolveFollowTargetUserId(req.params.userId)) || req.params.userId;
+      if (blockerId === blockedId) {
+        return res.status(400).json({ error: "You cannot block yourself" });
+      }
+
       const { reason } = req.body || {};
       const block = await storage.blockUser(blockerId, blockedId, reason);
+      // Blocking ends following both ways (Instagram rule); unblocking does not restore it.
+      await storage.deleteFollow(blockerId, blockedId);
+      await storage.deleteFollow(blockedId, blockerId);
       res.json({ success: true, block });
     } catch (error) {
       console.error("Block user error:", error);
@@ -22228,7 +22191,20 @@ export async function registerRoutes(
         } catch (_) { /* non-fatal */ }
       }
 
-      const posts = await storage.getAlgorithmicFeed(userId || null, limit, offset, city);
+      // ?scope=following (2026-10-19): newest posts from accounts the viewer follows, instead of
+      // the ranked feed. Logged out = empty list (the app asks them to sign in). Default unchanged.
+      const followingScope = req.query.scope === 'following';
+      if (followingScope && !userId) {
+        return res.json({
+          success: true,
+          requiresAuth: true,
+          data: { posts: [], nextCursor: null, hasMore: false, nextOffset: offset },
+          posts: [],
+        });
+      }
+      const posts = followingScope
+        ? await storage.getFollowingFeed(userId!, limit, offset)
+        : await storage.getAlgorithmicFeed(userId || null, limit, offset, city);
       
       // Filter out posts from vendors with inactive subscriptions
       const activePosts = [];
@@ -22245,7 +22221,8 @@ export async function registerRoutes(
       // Always show the authenticated user's own posts at the top of their feed,
       // bypassing city filters, subscription checks, and scoring thresholds.
       // This ensures a user sees their own freshly-posted content immediately.
-      if (userId) {
+      // (Not in the Following feed: that one is only accounts you follow.)
+      if (userId && !followingScope) {
         const ownPosts = (await storage.getUserFeedPosts(userId)).slice(0, limit);
 
         // Strip any own-post entries already in the list before re-inserting.
@@ -22266,6 +22243,10 @@ export async function registerRoutes(
         : new Set<string>();
       const savedSet = userId
         ? await storage.getSavedPostIds(userId, activePostIds)
+        : new Set<string>();
+      // Accounts the viewer follows (additive authorIsFollowed; the app lists them first).
+      const followedSet = userId
+        ? await storage.getFollowedUserIds(userId)
         : new Set<string>();
       // TODO: remove before final merge
       console.log('[isLiked]', 'feed=main', 'viewer=', userId, 'likedCount=', likedSet.size);
@@ -22356,6 +22337,8 @@ export async function registerRoutes(
           isLiked: likedSet.has(post.id),
           // Per-viewer save status — false for logged-out viewers
           isSaved: savedSet.has(post.id),
+          // Viewer follows the author — false for logged-out viewers and own posts
+          authorIsFollowed: followedSet.has(post.authorId),
           // Legacy identity fields for backwards compatibility
           userId: post.authorId,
           username: author.username || null,
@@ -22390,8 +22373,11 @@ export async function registerRoutes(
         });
       }
       
-      const nextOffset = offset + enrichedPosts.length;
-      const hasMore = enrichedPosts.length === limit;
+      // Following feed pages over the raw rows (posts dropped above, e.g. inactive vendors, must not
+      // end paging early or make the next page repeat rows). Main feed keeps its existing rule.
+      const pageCount = followingScope ? posts.length : enrichedPosts.length;
+      const nextOffset = offset + pageCount;
+      const hasMore = pageCount === limit;
       const nextCursor = hasMore ? Buffer.from(String(nextOffset)).toString('base64') : null;
 
       res.json({
