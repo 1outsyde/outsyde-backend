@@ -27,6 +27,8 @@ Ticket money (and some booking and order money) sits on Outsyde's Stripe platfor
 - Buffer $100 (2026-10-19). Run 6:00 AM New York. Minimum bank payout $25; below it, skip that day. (2026-10-21)
 - Until the booking refund fix ships, hold back 30 days of confirmed booking payments as refund cover. (2026-10-21)
 - Legend flips Stripe to manual payouts himself after this is live. Paid tickets turn on after that.
+- Ticket refund exposure for a past event stops being held **30 days after the event ends** (hosts can refund any time while published; after 30 days a late host refund is still pulled back from the host by the PR 5a recovery). (2026-10-21, after the builder check)
+- Booking refund cover = bookings **paid in the last 30 days plus every confirmed booking whose appointment/shoot date has not passed yet**, appointments and shoot bookings both. (2026-10-21, after the builder check)
 
 ## Design ("call" = Claude's call)
 ### A. Switches and safety gates
@@ -50,6 +52,17 @@ Ticket money (and some booking and order money) sits on Outsyde's Stripe platfor
 - Errors: retry with backoff; after 5 tries `review` + one admin email. Insufficient balance (balance moved since the read) → skip the day, no email.
 - Next day's run checks yesterday's payout status in Stripe; `failed`/`canceled` → status `failed` + one admin email (the money returns to the balance and is picked up by the next run).
 - Admin email only on review or failed (Resend quota).
+
+### D. Builder check answers (2026-10-21; "call" = Claude's call)
+- Migration number is **064** (063 is `plan_offers`, already in Neon). Call.
+- Held parts are **summed**, even where they overlap (a recent confirmed booking in parts 2 and 6, a ticket's host net inside its refund exposure, a booking refund request inside part 6). Overstating only lowers or skips a payout; the money rolls to the next day. Held is subtracted from **available** only, never from pending. Call (conservative, per the audit's "summing both is conservative").
+- "Paid" date for bookings = `created_at` (no paid-at column; checkout happens at creation). Call.
+- Exact SQL per part: the vault note `Handoffs/Bank Payout (PR 5b) — Audit` (sections 2 and 3), adjusted for the two decisions above; every query is re-run read-only in Neon during the build.
+- Any bank payout already created at Stripe today (New York day) that is not ours, for example one Legend sends by hand: skip the day with reason `other_payout_today`, no email. Call (keeps "never two bank payouts in one day").
+- Statuses: `pending` (claimed, being sent), `sent` (Stripe accepted the create), `paid` (Stripe reports it arrived), `failed` (failed or canceled at Stripe, one admin email; the money returns to the balance), `review`, `skipped`. Each run also checks every `sent` row (not only yesterday's) until Stripe reports paid, failed or canceled; a row still not final after 10 days gets one admin email. Call.
+- An event payout waiting for balance = `event_payouts.status='pending'` with an insufficient-funds `last_error`; no event payout code changes. Call.
+- While the switch is off, nothing is written (no row per day). Call.
+- The amount is computed on each try right before sending (fresh balance and held), and saved with its breakdown on the row. Call.
 
 ## Constraints
 Same as PR 5a: one SQL statement per multi-row change with runtime guards; claim before every money step; per-try idempotency keys + lookup before create; tests on localhost with the Stripe stub; migration idempotent and run in Neon by Claude before merge.
