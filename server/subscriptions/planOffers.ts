@@ -2,7 +2,7 @@
  * Hidden plan offers (Plan Offers board 1.3 to 1.6, decided by Legend 2026-10-19 and 2026-10-21).
  *
  * An admin offers one business a plan nobody else can pick: Grandfathered ($40.99 a month) or the Free plan
- * (an end date, or permanent). The offer is saved in plan_offers (one pending per business, migration 062).
+ * (an end date, or permanent). The offer is saved in plan_offers (one pending per business, migration 063).
  * The owner is emailed, pushed (when the app has a token) and gets an in-app notification; the app and
  * goutsyde.com show it from GET /api/vendor/plan-offer until it is accepted or withdrawn.
  *

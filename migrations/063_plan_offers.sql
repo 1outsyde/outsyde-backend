@@ -1,4 +1,4 @@
--- Migration 062: hidden plan offers (Plan Offers board 1.3)
+-- Migration 063: hidden plan offers (Plan Offers board 1.3)
 -- Run manually in the Neon SQL editor BEFORE Render deploys the PR that uses it. Never via drizzle-kit push.
 -- Idempotent: safe to re-run. Additive only: one new table, nothing existing changes.
 --

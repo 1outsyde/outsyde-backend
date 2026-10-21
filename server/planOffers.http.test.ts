@@ -1,7 +1,7 @@
 /**
  * Hidden plan offers, HTTP: auth and wiring of the new routes. Run with: npx tsx server/planOffers.http.test.ts
  *
- * SCRATCH ONLY. Needs a backend booted on localhost against a LOCAL scratch Postgres (full schema + 060 + 062)
+ * SCRATCH ONLY. Needs a backend booted on localhost against a LOCAL scratch Postgres (full schema + 060 + 063)
  * and the same JWT_SECRET in this process:
  *   OFFERS_TEST_BASE_URL  e.g. http://localhost:5071   (must be localhost)
  *   OFFERS_TEST_PG_URL    the SAME scratch database (localhost only; seeds + cleans up)

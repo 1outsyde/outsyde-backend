@@ -6,7 +6,7 @@
  *   STRIPE_SECRET_KEY=sk_test_stub STRIPE_PUBLISHABLE_KEY=pk_test_stub STRIPE_STUB_PORT=5097 \
  *   NODE_OPTIONS="--import ./.dev/neon-preload.mjs --import ./.dev/stripe-stub-preload.mjs" \
  *   npx tsx server/planOffers.test.ts
- * with `node .dev/neon-local-proxy.mjs` running and migrations 060 + 062 applied to the same LOCAL database.
+ * with `node .dev/neon-local-proxy.mjs` running and migrations 060 + 063 applied to the same LOCAL database.
  *
  * SCRATCH ONLY: local Postgres + the in-process Stripe stub below; nothing reaches Neon, Stripe, Resend or
  * Expo (notice senders are replaced). Skips when OFFERS_LOCAL_PG is unset; refuses non-local hosts.
