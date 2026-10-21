@@ -2176,6 +2176,27 @@ export async function sendPayoutAlertToAdmin(params: {
   await sendBrandedEmail(ADMIN_NOTIFICATION_EMAIL, `[Outsyde] ${params.items.length} business payout${params.items.length === 1 ? '' : 's'} waiting (${cents(params.totalCents)})`, html);
 }
 
+/**
+ * Seller notice: part of a refund is owed back because the seller's Stripe balance didn't cover it
+ * (server/bookingRecoveries.ts). Copy comes from the caller: real punctuation, no dashes, no fee percentage.
+ * Logged in email history with a plain label (no personal data). Throws on a send failure; the caller catches.
+ */
+export async function sendRefundOwedEmail(params: {
+  to: string;
+  kind: 'booking' | 'shoot' | 'staff' | 'ticket';
+  subject: string;
+  text: string;
+}): Promise<void> {
+  const html = wrapEmail(`
+    ${emailHeader(escapeHtml(params.subject), 'About a recent refund')}
+    <tr><td style="background:#1A1A1A;padding:8px 32px 24px;">
+      <p style="color:#FFFFFF;font-size:15px;line-height:1.6;margin:0;">${escapeHtml(params.text)}</p>
+    </td></tr>
+    ${emailFooter()}
+  `);
+  await sendBrandedEmail(params.to, params.subject, html, { kind: params.kind, label: 'Refund owed notice' });
+}
+
 // ─── Event tickets (Events & Ticketing Phase 2 PR 4) ─────────────────────────
 // Copy rules: real punctuation, no dashes, and the service fee is named but never given as a percentage.
 // Every value from the database is escaped. These throw on a send failure; callers catch.
