@@ -34,7 +34,7 @@ function assert(cond: boolean, name: string, detail?: unknown) {
 }
 const isLocal = (u: string) => ['localhost', '127.0.0.1', '::1', '[::1]'].includes(new URL(u).hostname);
 
-async function call(method: string, path: string, o: { token?: string; body?: unknown } = {}): Promise<{ status: number; body: any }> {
+async function call(method: string, path: string, o: { token?: string; body?: unknown } = {}): Promise<{ status: number; body: any; contentType: string }> {
   return new Promise((resolve, reject) => {
     const u = new URL(path, BASE!);
     const data = o.body !== undefined ? JSON.stringify(o.body) : undefined;
@@ -42,7 +42,7 @@ async function call(method: string, path: string, o: { token?: string; body?: un
     if (data) { headers['Content-Type'] = 'application/json'; headers['Content-Length'] = String(Buffer.byteLength(data)); }
     if (o.token) headers['Authorization'] = `Bearer ${o.token}`;
     const req = http.request({ hostname: u.hostname, port: u.port || 80, path: u.pathname + u.search, method, headers }, (res) => {
-      let b = ''; res.on('data', (c) => (b += c)); res.on('end', () => { let json: any = null; try { json = JSON.parse(b); } catch {} resolve({ status: res.statusCode || 0, body: json }); });
+      let b = ''; res.on('data', (c) => (b += c)); res.on('end', () => { let json: any = null; try { json = JSON.parse(b); } catch {} resolve({ status: res.statusCode || 0, body: json, contentType: String(res.headers['content-type'] || '') }); });
     });
     req.on('error', reject);
     if (data) req.write(data);
@@ -199,6 +199,13 @@ async function call(method: string, path: string, o: { token?: string; body?: un
   const staffA = await mkStaff('sta', bizA);
   const stLive = await mkStaffSvc('st-live', bizA, staffA);
   const stDraft = await mkStaffSvc('st-draft', bizA, staffA, { status: 'draft' });
+  const stLivePay = await mkStaffSvc('st-livepay', bizA, staffA);
+
+  // Business D: plan active at hold time, lapses before payment.
+  const vendorD = await mkUser('vd', { isVendor: true });
+  const bizD = await mkBiz('bd', vendorD);
+  await mkSub('d', bizD, vendorD, { stripeSubId: 'sub_hb_d' });
+  const sDuring = await mkSvc('s-during', bizD);
 
   // Business B: another business with a live service (R20: never bookable through A).
   const vendorB = await mkUser('vb', { isVendor: true });
@@ -281,7 +288,7 @@ async function call(method: string, path: string, o: { token?: string; body?: un
     r = await hold({ providerType: 'business', providerId: bizA, staffMemberId: staffA, serviceId: sOther });
     assert(refused(r), "another business's service with a staff member chosen → refused", r);
     r = await hold({ providerType: 'business', providerId: bizA, staffMemberId: staffA, serviceId: stOther });
-    assert(r.status === 400, "another business's staff service → refused", r);
+    assert(refused(r), "another business's staff service → refused", r);
 
     console.log('\n── 4. paid plan lapsed past grace (Legend 2026-10-21: staff too) ──');
     r = await hold({ providerType: 'business', providerId: bizL, serviceId: sLapsed });
@@ -325,6 +332,9 @@ async function call(method: string, path: string, o: { token?: string; body?: un
     let before = piCreates;
     r = await call('POST', `/api/booking/${hid}/create-payment-intent`, { token, body: {} });
     assert(refused(r), 'create-payment-intent after the service was paused → refused', r);
+    assert(r.body?.message === MSG, 'payment refusal also carries `message` (vendor sites read body.message at payment)', r.body);
+    let holdRow = await q(`SELECT status FROM booking_holds WHERE id = $1`, [hid]);
+    assert(holdRow[0]?.status === 'released', 'payment refusal releases the hold (the slot frees at once)', holdRow);
     let appts = await q(`SELECT id FROM appointments WHERE hold_id = $1`, [hid]);
     assert(appts.length === 0, 'no appointment row created', appts);
     assert(piCreates === before, 'no Stripe PaymentIntent created', { before, after: piCreates });
@@ -335,6 +345,8 @@ async function call(method: string, path: string, o: { token?: string; body?: un
     before = piCreates;
     r = await call('POST', `/api/booking/${hid}/create-deposit-intent`, { token, body: {} });
     assert(refused(r), 'legacy create-deposit-intent after the service was archived → refused', r);
+    holdRow = await q(`SELECT status FROM booking_holds WHERE id = $1`, [hid]);
+    assert(holdRow[0]?.status === 'released', 'legacy route: hold released', holdRow);
     appts = await q(`SELECT id FROM appointments WHERE hold_id = $1`, [hid]);
     assert(appts.length === 0 && piCreates === before, 'legacy route: no appointment, no PaymentIntent', { appts, before, after: piCreates });
 
@@ -344,8 +356,32 @@ async function call(method: string, path: string, o: { token?: string; body?: un
     before = piCreates;
     r = await call('POST', `/api/booking/${hid}/create-payment-intent`, { token, body: {} });
     assert(refused(r), 'photographer create-payment-intent after the service was archived → refused', r);
+    holdRow = await q(`SELECT status FROM booking_holds WHERE id = $1`, [hid]);
+    assert(holdRow[0]?.status === 'released', 'photographer: hold released', holdRow);
     const shoots = await q(`SELECT id FROM shoot_bookings WHERE photographer_id = $1`, [ph]);
     assert(shoots.length === 0 && piCreates === before, 'photographer: no shoot booking, no PaymentIntent', { shoots, before, after: piCreates });
+
+    // Staff booking: service paused during the hold.
+    r = await hold({ providerType: 'business', providerId: bizA, staffMemberId: staffA, serviceId: stLivePay });
+    assert(ok(r), 'staff hold on a live staff service', r);
+    hid = holdIdOf(r);
+    await q(`UPDATE staff_services SET status = 'archived' WHERE id = $1`, [stLivePay]);
+    before = piCreates;
+    r = await call('POST', `/api/booking/${hid}/create-payment-intent`, { token, body: {} });
+    assert(refused(r), 'staff create-payment-intent after the staff service was archived → refused', r);
+    appts = await q(`SELECT id FROM appointments WHERE hold_id = $1`, [hid]);
+    assert(appts.length === 0 && piCreates === before, 'staff: no appointment, no PaymentIntent', { appts, before, after: piCreates });
+
+    // Paid plan lapses past grace during the hold (the pause job hasn't run, the service is still live).
+    r = await hold({ providerType: 'business', providerId: bizD, serviceId: sDuring });
+    assert(ok(r), 'hold while the plan is active', r);
+    hid = holdIdOf(r);
+    await q(`UPDATE vendor_subscriptions SET status = 'past_due', past_due_since = now() - interval '10 days' WHERE business_id = $1`, [bizD]);
+    before = piCreates;
+    r = await call('POST', `/api/booking/${hid}/create-payment-intent`, { token, body: {} });
+    assert(refused(r), 'create-payment-intent after the plan lapsed during the hold → refused', r);
+    appts = await q(`SELECT id FROM appointments WHERE hold_id = $1`, [hid]);
+    assert(appts.length === 0 && piCreates === before, 'lapsed during hold: no appointment, no PaymentIntent', { appts, before, after: piCreates });
 
     console.log('\n── 8. a booking already created keeps working (resume is untouched) ──');
     r = await hold({ providerType: 'business', providerId: bizA, serviceId: sLiveResume });
@@ -363,7 +399,7 @@ async function call(method: string, path: string, o: { token?: string; body?: un
     for (const p of ['/api/dev/test-booking', '/api/dev/test-appointment', '/api/dev/test-payment-intent']) {
       before = piCreates;
       r = await call('POST', p, { body: { amount: 100 } });
-      assert(r.body === null, `POST ${p} → old handler gone (no JSON reply)`, { status: r.status, body: r.body });
+      assert(r.status === 200 && r.contentType.includes('text/html') && r.body === null, `POST ${p} → old handler gone (web app page, no JSON)`, { status: r.status, contentType: r.contentType, body: r.body });
       assert(piCreates === before, `POST ${p} → no PaymentIntent`, { before, after: piCreates });
     }
     const draftsAfter = (await q(`SELECT (SELECT count(*) FROM appointments)::int + (SELECT count(*) FROM shoot_bookings)::int AS n`))[0].n;

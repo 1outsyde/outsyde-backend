@@ -5,10 +5,11 @@
  * lapsed), draft, archived or inactive service could still be booked, and a service from another business
  * or photographer could be booked under the wrong provider (vault R20).
  *
- * The rule matches the public service lists exactly:
+ * The rule is live AND active, the same as the public lists for businesses and photographers:
  *   · business services: GET /api/businesses/:id/services keeps `isActive && status === 'live'`
- *   · staff services: getLiveStaffServicesByStaffMember (status 'live')
  *   · photographer services: storage.getPhotographerServices (isActive = true AND status = 'live')
+ *   · staff services: the public list (getLiveStaffServicesByStaffMember) checks status 'live' only; this
+ *     rule also needs is_active, which nothing writes today (column default true, not in the staff zod).
  * plus: the service belongs to the provider being booked, and (businesses only) a paid plan that has lapsed
  * past its grace period blocks every booking, staff included (Legend 2026-10-21). Same lapsed rule as the
  * staff seat block on POST /api/vendor/staff/invites: a business with no Stripe plan keeps today's behaviour.
@@ -113,9 +114,11 @@ export async function isHoldStillBookable(hold: {
   return r.ok;
 }
 
-/** Response body when the payment step refuses (same shape as the hold route's AvailabilityError). */
+/** Response body when the payment step refuses: the hold route's shape, plus `message`, which the vendor
+ *  sites' payment step reads (nail-sniper / BWL / Lana `app/book/page.tsx`: `body.message ?? fallback`). */
 export const SERVICE_UNAVAILABLE_BODY = {
   success: false,
   errorCode: "SERVICE_UNAVAILABLE",
   error: SERVICE_UNAVAILABLE_MESSAGE,
+  message: SERVICE_UNAVAILABLE_MESSAGE,
 } as const;

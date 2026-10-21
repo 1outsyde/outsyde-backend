@@ -5581,6 +5581,8 @@ export async function registerRoutes(
       // The service must still be bookable before a new booking is made (paused, archived or the plan lapsed
       // during the hold). Existing bookings above resume as before.
       if (!(await isHoldStillBookable(hold))) {
+        // No booking was made from this hold, so free the slot now instead of in up to 10 minutes.
+        await releaseBookingHold(hold.id).catch((e) => console.error('[Booking] release after refusal failed:', e));
         return res.status(400).json(SERVICE_UNAVAILABLE_BODY);
       }
 
@@ -6171,6 +6173,8 @@ export async function registerRoutes(
         // The service must still be bookable before a new booking is made (paused, archived or the plan lapsed
         // during the hold). Existing bookings above resume as before.
         if (!(await isHoldStillBookable(hold))) {
+          // No booking was made from this hold, so free the slot now instead of in up to 10 minutes.
+          await releaseBookingHold(hold.id).catch((e) => console.error('[Booking] release after refusal failed:', e));
           return res.status(400).json(SERVICE_UNAVAILABLE_BODY);
         }
 
@@ -6461,6 +6465,8 @@ export async function registerRoutes(
       // The service must still be bookable before a new booking is made (paused, archived or the plan lapsed
       // during the hold). Existing bookings above resume as before.
       if (!(await isHoldStillBookable(hold))) {
+        // No booking was made from this hold, so free the slot now instead of in up to 10 minutes.
+        await releaseBookingHold(hold.id).catch((e) => console.error('[Booking] release after refusal failed:', e));
         return res.status(400).json(SERVICE_UNAVAILABLE_BODY);
       }
 
