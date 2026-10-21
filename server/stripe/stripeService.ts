@@ -694,7 +694,7 @@ export class StripeService {
 
   /**
    * Reversals already made on a transfer for one refund (metadata.refundId). Up to 10 pages of 100 are read; each
-   * page call is bounded by opts.
+   * page call is bounded by opts. More than that throws (never a partial list), like findEventPayoutReversal.
    */
   async findRecoveryReversals(transferId: string, refundId: string, opts: { timeoutMs?: number; maxNetworkRetries?: number } = {}): Promise<Array<{ id: string; amount: number }>> {
     const stripe = await getUncachableStripeClient();
@@ -707,7 +707,7 @@ export class StripeService {
       if (!list.has_more || list.data.length === 0) return found;
       startingAfter = list.data[list.data.length - 1].id;
     }
-    return found;
+    throw new Error(`more than 1000 reversals on transfer ${transferId}: can't tell what was reversed for refund ${refundId}`);
   }
 
   /** Take back part of a seller's transfer after a booking refund. The caller passes its own idempotency key (one per try). */

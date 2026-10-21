@@ -9,6 +9,9 @@ import { calculateBookingFees } from "./fees";
 
 /** 2026-10-21 00:00 UTC. Refunds Stripe created before this are never recorded. */
 export const RECOVERY_START_UNIX = 1792540800;
+/** The backfill runs every 15 minutes and looks at up to this many refunded bookings (the whole 30 day window). */
+export const BACKFILL_LIMIT = 500;
+export const BACKFILL_EVERY_MINUTES = 15;
 
 /** Record one Stripe refund as a pending recovery. Same refund twice is a no-op; older refunds are skipped. */
 export async function recordBookingRefund(p: { refundId: string; paymentIntentId: string; refundCents: number; createdUnix: number }): Promise<void> {
@@ -75,30 +78,31 @@ async function realStripe(): Promise<RecoveryBackfillStripe> {
 }
 
 /**
- * Record Stripe refunds the hook missed. Looks at bookings with a PaymentIntent that were refunded, or went to
- * refunded/canceled, in the last 30 days (up to limit PaymentIntents, newest first), lists each one's Stripe
- * refunds and records every succeeded or pending one (start date and duplicates are handled by
- * recordBookingRefund). Computes and reverses nothing. A Stripe failure on one PaymentIntent is skipped.
- * Returns how many refunds were passed to recordBookingRefund.
+ * Record Stripe refunds the hook missed. Looks at bookings with a PaymentIntent that were refunded (refunded_at
+ * set, or status refunded) in the last 30 days, oldest first so older bookings are reached too (up to limit
+ * PaymentIntents), lists each one's Stripe refunds and records every succeeded or pending one (start date and
+ * duplicates are handled by recordBookingRefund). A booking that was only canceled is not looked at. Computes and
+ * reverses nothing. A Stripe failure on one PaymentIntent is skipped. Returns how many refunds were passed to
+ * recordBookingRefund.
  */
 export async function backfillRefunds(limit = 50, s?: RecoveryBackfillStripe): Promise<number> {
-  const lim = Math.max(1, Math.min(500, Math.floor(Number(limit) || 50)));
+  const lim = Math.max(1, Math.min(BACKFILL_LIMIT, Math.floor(Number(limit) || 50)));
   const pis = await rows<{ pi: string }>(sql`
     SELECT pi FROM (
-      SELECT stripe_payment_intent_id AS pi, updated_at AS ts FROM appointments
+      SELECT stripe_payment_intent_id AS pi, COALESCE(refunded_at, updated_at) AS ts FROM appointments
       WHERE stripe_payment_intent_id IS NOT NULL
-        AND (refunded_at >= now() - interval '30 days' OR (status IN ('refunded', 'canceled') AND updated_at >= now() - interval '30 days'))
+        AND (refunded_at >= now() - interval '30 days' OR (status = 'refunded' AND updated_at >= now() - interval '30 days'))
       UNION ALL
-      SELECT stripe_payment_intent_id AS pi, updated_at AS ts FROM shoot_bookings
+      SELECT stripe_payment_intent_id AS pi, COALESCE(refunded_at, updated_at) AS ts FROM shoot_bookings
       WHERE stripe_payment_intent_id IS NOT NULL
-        AND (refunded_at >= now() - interval '30 days' OR (status IN ('refunded', 'canceled') AND updated_at >= now() - interval '30 days'))
-    ) b GROUP BY pi ORDER BY max(ts) DESC LIMIT ${lim}`);
+        AND (refunded_at >= now() - interval '30 days' OR (status = 'refunded' AND updated_at >= now() - interval '30 days'))
+    ) b GROUP BY pi ORDER BY max(ts) ASC, pi LIMIT ${lim}`);
   if (!pis.length) return 0;
   const st = s ?? (await realStripe());
   let recorded = 0;
   for (const { pi } of pis) {
     try {
-      const refunds = await st.listPaymentIntentRefunds(pi);
+      const refunds = await st.listPaymentIntentRefunds(pi, STRIPE_CALL_BOUND);
       for (const r of refunds) {
         if (r.status === "failed" || r.status === "canceled") continue;
         await recordBookingRefund({ refundId: r.id, paymentIntentId: pi, refundCents: r.amount, createdUnix: r.created });
@@ -128,6 +132,11 @@ export const RECOVERY_JOB_LIMIT = 20;
 export const RECOVERY_OWED_ALERT_DAYS = 30;
 /** Owed rows are tried again this often even when no new payout is seen. */
 const OWED_RETRY_MINUTES = 60;
+/** A refund with no transfer in its group closes nothing_sent only once it is this old (a payout retry may be in flight). */
+export const NO_TRANSFER_WAIT_MINUTES = 15;
+/** Pending this long with RECOVERY_MAX_TRIES or more tries: one admin alert. */
+export const RECOVERY_STUCK_ALERT_HOURS = 24;
+const NOTHING_LEFT = "the booking's transfers have nothing left to reverse (already reversed outside this recovery)";
 /** Every Stripe call is bounded, so a try ends well inside the lock. */
 const STRIPE_CALL_BOUND = { timeoutMs: 30000, maxNetworkRetries: 1 };
 
@@ -164,9 +173,14 @@ async function deliver(m: RecoveryNotice): Promise<void> {
   }
 }
 
+/** One [Payouts] admin email. Never throws. */
 async function alertAdmin(subject: string, detail: string): Promise<void> {
-  const { alertPayouts } = await import("./bankPayout");
-  await alertPayouts(subject, detail);
+  try {
+    const { alertPayouts } = await import("./bankPayout");
+    await alertPayouts(subject, detail);
+  } catch (err) {
+    console.error("[bookingRecoveries] admin alert failed:", errText(err));
+  }
 }
 
 const errText = (err: unknown) => String((err as Error)?.message ?? err).slice(0, 300);
@@ -188,7 +202,9 @@ export async function processBookingRecovery(id: string, s?: RecoveryStripe): Pr
         WHERE o.payment_intent_id = r.payment_intent_id AND o.id <> r.id AND o.status = 'pending' AND o.reference_id IS NULL
           AND o.next_attempt_at > now() AND o.updated_at > now() - make_interval(mins => ${RECOVERY_LOCK_MINUTES}::int)))
     RETURNING id, refund_id, payment_intent_id, refund_cents, reference_type, reference_id, connected_account_id,
-              amount_cents, status, attempts, last_error, ${OWNER_TAG} AS claim_tag`);
+              amount_cents, status, attempts, last_error, alerted_at,
+              (refund_created_at IS NULL OR refund_created_at <= now() - make_interval(mins => ${NO_TRANSFER_WAIT_MINUTES}::int)) AS refund_settled,
+              ${OWNER_TAG} AS claim_tag`);
   if (!r) return "not_due";
   let tag = String(r.claim_tag);
   const wasOwed = r.status === "owed";
@@ -196,10 +212,14 @@ export async function processBookingRecovery(id: string, s?: RecoveryStripe): Pr
   if (r.reference_id == null) {
     // Two claims at the same moment can each miss the other in the check above. Both are committed before either
     // looks here, so at least one sees the other and steps back (try given back, due again now).
+    // Also wait while another row of this booking has its amount fixed but not all of it recorded as reversed: a
+    // reversal of that row may have landed at Stripe with its reply lost, so what is left on the transfers can't be
+    // read yet (this row's share would come out too small, even 0).
     const [other] = await rows<any>(sql`
       SELECT 1 AS x FROM booking_refund_recoveries o
-      WHERE o.payment_intent_id = ${r.payment_intent_id} AND o.id <> ${r.id} AND o.status = 'pending' AND o.reference_id IS NULL
-        AND o.next_attempt_at > now() AND o.updated_at > now() - make_interval(mins => ${RECOVERY_LOCK_MINUTES}::int)
+      WHERE o.payment_intent_id = ${r.payment_intent_id} AND o.id <> ${r.id} AND o.status = 'pending'
+        AND ((o.reference_id IS NULL AND o.next_attempt_at > now() AND o.updated_at > now() - make_interval(mins => ${RECOVERY_LOCK_MINUTES}::int))
+          OR (o.reference_id IS NOT NULL AND o.reversed_cents < o.amount_cents))
       LIMIT 1`);
     if (other) {
       await rows(sql`
@@ -260,7 +280,16 @@ export async function processBookingRecovery(id: string, s?: RecoveryStripe): Pr
       const ref = { type: b.type, id: b.id, recipient: b.recipient };
       const group = b.type === "appointment" ? `appointment_${b.id}` : `shoot_booking_${b.id}`;
       transfers = (await st.listBookingTransfers(group, STRIPE_CALL_BOUND)).filter((t) => t.amount > 0);
-      if (!transfers.length) return close("nothing_sent", "no transfer was sent for this booking", ref);
+      if (!transfers.length) {
+        if (r.refund_settled) return close("nothing_sent", "no transfer was sent for this booking", ref);
+        // A refund under 15 minutes old: a payout retry may still be sending a transfer. Wait (try given back).
+        const [w] = await rows<any>(sql`
+          UPDATE booking_refund_recoveries SET attempts = GREATEST(0, attempts - 1), next_attempt_at = ${BACKOFF},
+                 last_error = ${`no transfer yet, refund under ${NO_TRANSFER_WAIT_MINUTES} minutes old`}, updated_at = now()
+          WHERE id = ${r.id} AND status = 'pending' AND reference_id IS NULL AND ${OWNER_TAG} = ${tag}
+          RETURNING id`);
+        return w ? "retry" : "not_due";
+      }
       const account = [...transfers].sort((a, c) => c.amount - a.amount)[0].destination;
       const amountReceived = await st.getPaymentIntentAmountReceived(r.payment_intent_id, STRIPE_CALL_BOUND);
       // Other rows of this booking: their fixed amounts are already taken (or owed); what they reversed on Stripe is
@@ -276,14 +305,15 @@ export async function processBookingRecovery(id: string, s?: RecoveryStripe): Pr
       // Fixed once, never changed. This claim counts as the first reversal try.
       const [f] = await rows<any>(sql`
         UPDATE booking_refund_recoveries SET reference_type = ${b.type}, reference_id = ${b.id}, recipient = ${b.recipient},
-               connected_account_id = ${account}, amount_cents = ${share}, attempts = 1, last_error = NULL,
-               status = CASE WHEN ${share}::int = 0 THEN 'reversed' ELSE status END,
+               connected_account_id = ${account}, amount_cents = ${share}, attempts = 1,
+               last_error = CASE WHEN ${share}::int = 0 THEN ${`share is 0: earlier refunds of this booking already took back all that was sent (${sentNet} cents)`} ELSE NULL END,
+               status = CASE WHEN ${share}::int = 0 THEN 'nothing_sent' ELSE status END,
                next_attempt_at = CASE WHEN ${share}::int = 0 THEN NULL ELSE next_attempt_at END, updated_at = now()
         WHERE id = ${r.id} AND status = 'pending' AND reference_id IS NULL AND ${OWNER_TAG} = ${tag}
         RETURNING ${OWNER_TAG} AS tag`);
       if (!f) return "not_due";
       tag = String(f.tag);
-      if (share === 0) return "reversed";
+      if (share === 0) return "nothing_sent";
       amount = share;
       justFixed = true;
       r.reference_type = b.type;
@@ -320,8 +350,9 @@ export async function processBookingRecovery(id: string, s?: RecoveryStripe): Pr
       have.set(rev.id, take);
       need -= take;
     }
-    // Nothing left on the transfers to cover the rest (reversed some other way): owed, the admin sees it at 30 days.
-    if (need > 0) return owe("the booking's transfers have nothing left to reverse");
+    // Nothing left on the transfers to cover the rest (reversed some other way): owed, but a later payout can never
+    // cover it through this recovery, so the seller is not told "next payout"; the admin is told right away instead.
+    if (need > 0) return owe(NOTHING_LEFT, true);
     return finish();
   } catch (err) {
     const msg = errText(err);
@@ -354,16 +385,28 @@ export async function processBookingRecovery(id: string, s?: RecoveryStripe): Pr
    * Owed: the seller's balance can't cover the rest. What is on Stripe stays recorded. Tries start again from 0 and
    * the row is tried again within the hour (sooner once a new payout to the account is seen). owed_at keeps the first time.
    */
-  async function owe(why: string): Promise<BookingRecoveryResult> {
+  async function owe(why: string, nothingLeft = false): Promise<BookingRecoveryResult> {
+    // nothingLeft: seller_notified_at is set in this same write (no seller notice goes out) and alerted_at too (the
+    // admin alert below is sent once; the 30 day alert then skips it). Otherwise alerted_at restarts on a new debt.
     const [o] = await rows<any>(sql`
       UPDATE booking_refund_recoveries SET status = 'owed', reversed_cents = ${haveTotal()}, reversal_ids = ${ids()},
-             owed_at = COALESCE(owed_at, now()), alerted_at = CASE WHEN status = 'owed' THEN alerted_at ELSE NULL END,
+             owed_at = COALESCE(owed_at, now()),
+             seller_notified_at = CASE WHEN ${nothingLeft} THEN COALESCE(seller_notified_at, now()) ELSE seller_notified_at END,
+             alerted_at = CASE WHEN ${nothingLeft} THEN (CASE WHEN status = 'owed' THEN COALESCE(alerted_at, now()) ELSE now() END)
+                               WHEN status = 'owed' THEN alerted_at ELSE NULL END,
              attempts = 0, next_attempt_at = now() + make_interval(mins => ${OWED_RETRY_MINUTES}::int),
              last_error = ${why.slice(0, 300)}, updated_at = now()
       WHERE id = ${r.id} AND status IN ('pending', 'owed') AND ${OWNER_TAG} = ${tag}
-      RETURNING id`);
+      RETURNING id, reference_type, reference_id, recipient, connected_account_id`);
     if (!o) return "not_due";
     console.warn(`[bookingRecoveries] recovery ${r.id} owes ${amount - haveTotal()} cents: ${why}`);
+    // Alert once: when this write moved the row from pending, or the owed row had no admin alert yet.
+    if (nothingLeft && (!wasOwed || r.alerted_at == null)) {
+      await alertAdmin("Booking refund can't be taken back",
+        `Recovery ${r.id}: ${amount - haveTotal()} cents for refund ${r.refund_id} on ${o.reference_type} ${o.reference_id} (${o.recipient}), ` +
+        `Stripe account ${o.connected_account_id}. The booking's transfers were already reversed elsewhere, so nothing is left on them to take back. ` +
+        `The seller was not told. Check the transfers in Stripe and collect or write it off by hand.`);
+    }
     return "owed";
   }
 
@@ -414,8 +457,12 @@ export async function retryOwed(_s?: RecoveryStripe): Promise<number> {
 
 const money = (c: number) => `$${(Number(c) / 100).toFixed(2)}`;
 const OWED_SUBJECT = "Money owed for a refund";
+const OWED_TAIL = (owedCents: number) => `Your Stripe balance didn't cover your share of ${money(owedCents)}, so it will be taken from your next payout.`;
 function owedText(refundCents: number, owedCents: number, what: string): string {
-  return `A customer was refunded ${money(refundCents)} for your ${what}. Your Stripe balance didn't cover your share of ${money(owedCents)}, so it will be taken from your next payout.`;
+  return `A customer was refunded ${money(refundCents)} for your ${what}. ${OWED_TAIL(owedCents)}`;
+}
+function eventOwedText(title: string, owedCents: number): string {
+  return `A ticket for your event ${title} was refunded. ${OWED_TAIL(owedCents)}`;
 }
 function dateText(d: unknown): string {
   const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(d ?? ""));
@@ -475,11 +522,11 @@ export async function notifyOwedSellers(): Promise<number> {
   for (const r of ev) {
     try {
       const [x] = await rows<any>(sql`
-        SELECT e.title, e.host_user_id, u.email, t.price_cents FROM event_payouts p JOIN events e ON e.id = p.event_id
-        LEFT JOIN users u ON u.id = e.host_user_id LEFT JOIN tickets t ON t.id = ${r.ticket_id}
+        SELECT e.title, e.host_user_id, u.email FROM event_payouts p JOIN events e ON e.id = p.event_id
+        LEFT JOIN users u ON u.id = e.host_user_id
         WHERE p.id = ${r.payout_id}`);
       if (!x) continue;
-      await tell(x.email, x.host_user_id, "ticket", owedText(Number(x.price_cents ?? 0), Number(r.amount_cents), `event ${x.title}`));
+      await tell(x.email, x.host_user_id, "ticket", eventOwedText(String(x.title ?? ""), Number(r.amount_cents)));
     } catch (err) {
       console.error(`[bookingRecoveries] host notice for event recovery ${r.id} failed:`, errText(err));
     }
@@ -507,15 +554,43 @@ export async function alertOldOwed(): Promise<number> {
 }
 
 /**
- * Every minute: record refunds the hook missed, take back up to 20 due recoveries (least recently tried first), make
- * owed ones due after a new payout, tell sellers, report old owed ones. Each step has its own try/catch.
+ * Pending rows with RECOVERY_MAX_TRIES or more tries, created over 24 hours ago and not reported: one admin email
+ * per row, once (claimed by setting alerted_at). A row written in the last lock period may be in flight and is left
+ * for a later run, so its claim keeps its ownership tag. Returns how many rows were reported.
  */
-export async function runBookingRecoveryJob(s?: RecoveryStripe): Promise<{ recorded: number; reversed: number; owed: number; retried: number; notified: number; alerted: number }> {
-  const out = { recorded: 0, reversed: 0, owed: 0, retried: 0, notified: 0, alerted: 0 };
-  try {
-    out.recorded = await backfillRefunds(50, s);
-  } catch (err) {
-    console.error("[bookingRecoveries] backfill step failed:", errText(err));
+export async function alertStuckPending(): Promise<number> {
+  const stuck = await rows<any>(sql`
+    UPDATE booking_refund_recoveries SET alerted_at = now(), updated_at = now()
+    WHERE id IN (SELECT id FROM booking_refund_recoveries
+                 WHERE status = 'pending' AND alerted_at IS NULL AND attempts >= ${RECOVERY_MAX_TRIES}::int
+                   AND created_at <= now() - make_interval(hours => ${RECOVERY_STUCK_ALERT_HOURS}::int)
+                   AND updated_at <= now() - make_interval(mins => ${RECOVERY_LOCK_MINUTES}::int)
+                 ORDER BY created_at LIMIT 100)
+      AND status = 'pending' AND alerted_at IS NULL AND attempts >= ${RECOVERY_MAX_TRIES}::int
+      AND updated_at <= now() - make_interval(mins => ${RECOVERY_LOCK_MINUTES}::int)
+    RETURNING id, refund_id, payment_intent_id, reference_type, reference_id, attempts, last_error`);
+  for (const o of stuck) {
+    await alertAdmin("Booking refund recovery stuck",
+      `Recovery ${o.id} for refund ${o.refund_id} (payment ${o.payment_intent_id}${o.reference_id ? `, ${o.reference_type} ${o.reference_id}` : ""}) ` +
+      `is still pending after ${o.attempts} tries and more than ${RECOVERY_STUCK_ALERT_HOURS} hours. Last error: ${o.last_error ?? "none"}. ` +
+      `It keeps being tried; check it in Stripe.`);
+  }
+  return stuck.length;
+}
+
+/**
+ * Every minute: record refunds the hook missed (on minutes 0, 15, 30 and 45 only), take back up to 20 due recoveries
+ * (least recently tried first), make owed ones due after a new payout, tell sellers, report old owed ones and stuck
+ * pending ones. Each step has its own try/catch. now is injectable for tests.
+ */
+export async function runBookingRecoveryJob(s?: RecoveryStripe, now: Date = new Date()): Promise<{ recorded: number; reversed: number; owed: number; retried: number; notified: number; alerted: number; stuck: number }> {
+  const out = { recorded: 0, reversed: 0, owed: 0, retried: 0, notified: 0, alerted: 0, stuck: 0 };
+  if (now.getUTCMinutes() % BACKFILL_EVERY_MINUTES === 0) {
+    try {
+      out.recorded = await backfillRefunds(BACKFILL_LIMIT, s);
+    } catch (err) {
+      console.error("[bookingRecoveries] backfill step failed:", errText(err));
+    }
   }
   try {
     const dueRows = await rows<any>(sql`
@@ -548,6 +623,11 @@ export async function runBookingRecoveryJob(s?: RecoveryStripe): Promise<{ recor
     out.alerted = await alertOldOwed();
   } catch (err) {
     console.error("[bookingRecoveries] old owed alert step failed:", errText(err));
+  }
+  try {
+    out.stuck = await alertStuckPending();
+  } catch (err) {
+    console.error("[bookingRecoveries] stuck pending alert step failed:", errText(err));
   }
   return out;
 }

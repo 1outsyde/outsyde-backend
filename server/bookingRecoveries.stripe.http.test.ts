@@ -158,8 +158,13 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
     const rg2 = recs.filter((r) => /reversals$/.test(r.path));
     assert(rg2.length === 2 && rg2[0].query.get("limit") === "100" && rg2[1].query.get("starting_after") === "trr_b", "pages with starting_after", rg2.map((r) => [...r.query.entries()]));
     reversalPages = Array.from({ length: 14 }, (_, i) => [rev(`trr_p${i}`, "re_9", 1)]); reversalPageIdx = 0; recs.length = 0;
-    const capped = await svc.findRecoveryReversals("tr_1", "re_9", opts);
-    assert(recs.filter((r) => /reversals$/.test(r.path)).length === 10 && capped.length === 10, "stops after 10 pages", { calls: recs.length, n: capped.length });
+    let capErr: any = null; let capped: any = null;
+    try { capped = await svc.findRecoveryReversals("tr_1", "re_9", opts); } catch (e) { capErr = e; }
+    assert(recs.filter((r) => /reversals$/.test(r.path)).length === 10 && capErr instanceof Error && capped === null, "throws after 10 pages (never a partial list)", { calls: recs.length, capped, err: String(capErr) });
+    assert(/tr_1/.test(String(capErr?.message)) && /re_9/.test(String(capErr?.message)), "error names the transfer and the refund", String(capErr?.message));
+    reversalPages = Array.from({ length: 10 }, (_, i) => [rev(`trr_q${i}`, "re_8", 1)]); reversalPageIdx = 0; recs.length = 0;
+    const ten = await svc.findRecoveryReversals("tr_1", "re_8", opts);
+    assert(recs.filter((r) => /reversals$/.test(r.path)).length === 10 && ten.length === 10, "exactly 10 pages: full list returned", { calls: recs.length, n: ten.length });
 
     console.log("reverseForRecovery");
     recs.length = 0;

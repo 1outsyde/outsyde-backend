@@ -125,10 +125,17 @@ function assert(cond: boolean, name: string, detail?: unknown) {
     let threw = false;
     try { await backfillRefunds(50, failing as any); } catch { threw = true; }
     assert(!threw, "a Stripe failure on one booking does not throw out of the backfill");
+    // Final review I2: a booking that was only canceled (no refund recorded on it) is never asked about.
+    await appt("br-test-bc1", { status: "canceled" });
+    asked.length = 0;
+    await backfillRefunds(500, fake as any);
+    assert(!asked.includes("pi_br-test-bc1") && asked.includes("pi_br-test-b1"), "backfill ignores canceled-only bookings", asked);
 
     // ─── Task 3: the recovery job, seller alerts, every-minute step ───────────
     await q(`DELETE FROM booking_refund_recoveries WHERE refund_id LIKE 'br-test-%'`);
-    const { processBookingRecovery, retryOwed, notifyOwedSellers, alertOldOwed, runBookingRecoveryJob, setRecoveryNotifyForTest } = await import("./bookingRecoveries");
+    const brMod: any = await import("./bookingRecoveries");
+    const { processBookingRecovery, retryOwed, notifyOwedSellers, alertOldOwed, runBookingRecoveryJob, setRecoveryNotifyForTest } = brMod;
+    const alertStuckPending: (() => Promise<number>) | undefined = brMod.alertStuckPending;
     const { setBankAlertForTest } = await import("./bankPayout");
     const sent: any[] = [];
     setRecoveryNotifyForTest(async (m: any) => { sent.push(m); });
@@ -365,6 +372,44 @@ function assert(cond: boolean, name: string, detail?: unknown) {
       const r = await row(b.refundId);
       assert(r.status === "reversed" && r.reversed_cents === 9800, "a landed reversal is found by the lookup, never owed", r);
     }
+    {
+      // Final review I1: the share is fixed, then the transfer is reversed some other way, so nothing is left on it.
+      admin.length = 0;
+      const five = await row("br-test-re-five");
+      assert(five.status === "owed" && five.seller_notified_at === null && !admin.some((a) => a.detail.includes(five.id)), "lookup-only owed keeps the normal seller alert (not marked told, no admin alert)", five);
+      const b = await booking("drained", { refund: 10000 });
+      const id = await idOf(b.refundId);
+      fs.failReverse = 1;
+      const first = await processBookingRecovery(id, fk);
+      fs.transfers.find((t) => t.group === b.group)!.amountReversed = 9800;
+      await due(b.refundId);
+      resetCalls();
+      const res = await processBookingRecovery(id, fk);
+      const r = await row(b.refundId);
+      const mine = () => admin.filter((a) => a.detail.includes(r.id));
+      assert(first === "retry" && res === "owed" && r.status === "owed" && r.amount_cents === 9800 && r.reversed_cents === 0 && reverses().length === 0, "nothing left on the transfers: owed, nothing reversed", { first, res, r });
+      assert(r.seller_notified_at !== null, "nothing left on the transfers: no seller notice (seller_notified_at set in the same write)", r);
+      assert(mine().length === 1 && mine()[0].subject.startsWith("[Payouts] ") && /already reversed/.test(mine()[0].detail), "nothing left on the transfers: one admin alert right away", admin);
+      // Hourly owed retry hits the same wall: still one admin alert. No seller message for it either.
+      await due(b.refundId);
+      const again = await processBookingRecovery(id, fk);
+      await q(`UPDATE booking_refund_recoveries SET seller_notified_at = now() WHERE status = 'owed' AND seller_notified_at IS NULL AND refund_id <> $1`, [b.refundId]);
+      sent.length = 0;
+      await notifyOwedSellers();
+      const toBiz = sent.filter((m) => m.to === "br-test-biz@example.test" || m.userId === "br-test-u-owner");
+      assert(again === "owed" && mine().length === 1 && toBiz.length === 0, "nothing left on the transfers: owed, no seller notice, one admin alert", { again, n: mine().length, toBiz });
+    }
+    {
+      // Final review minor 10: a reversal lookup that gives up (over 10 pages) is a failed try, nothing reversed.
+      const b = await booking("manypages", { refund: 10000 });
+      const tooMany = { ...fk, findRecoveryReversals: async () => { throw new Error("more than 1000 reversals on transfer"); } };
+      resetCalls();
+      const res = await processBookingRecovery(await idOf(b.refundId), tooMany);
+      const r = await row(b.refundId);
+      assert(res === "retry" && r.status === "pending" && r.attempts === 1 && /more than 1000/.test(r.last_error) && reverses().length === 0, "reversal lookup over 10 pages: failed try, nothing reversed", r);
+      await due(b.refundId);
+      assert((await processBookingRecovery(r.id, fk)) === "reversed", "next try with a working lookup reverses");
+    }
 
     console.log("rulings");
     {
@@ -397,6 +442,18 @@ function assert(cond: boolean, name: string, detail?: unknown) {
       assert(res === "nothing_sent" && r.status === "nothing_sent" && r.amount_cents === 0, "no transfers in the group: nothing_sent, amount 0", r);
     }
     {
+      // Final review minor 9: a refund under 15 minutes old with no transfers yet waits (a payout retry may be in flight).
+      const b = await booking("notransfer-new", { refund: 10000, transfers: [] });
+      await q(`UPDATE booking_refund_recoveries SET refund_created_at = now() - interval '2 minutes' WHERE refund_id = $1`, [b.refundId]);
+      const res = await processBookingRecovery(await idOf(b.refundId), fk);
+      const r = await row(b.refundId);
+      assert(res === "retry" && r.status === "pending" && r.attempts === 0 && r.reference_id === null && new Date(r.next_attempt_at).getTime() > Date.now(), "no transfers, refund under 15 minutes old: waits, try given back", { res, r });
+      await q(`UPDATE booking_refund_recoveries SET refund_created_at = now() - interval '16 minutes' WHERE refund_id = $1`, [b.refundId]);
+      await due(b.refundId);
+      const res2 = await processBookingRecovery(r.id, fk);
+      assert(res2 === "nothing_sent" && (await row(b.refundId)).status === "nothing_sent", "no transfers, refund 15 minutes old or more: nothing_sent", res2);
+    }
+    {
       // Two refunds on one booking: the second is capped by what the first fixed.
       const b = await booking("tworef", { refund: 6000 });
       await processBookingRecovery(await idOf(b.refundId), fk);
@@ -414,6 +471,41 @@ function assert(cond: boolean, name: string, detail?: unknown) {
       await recordBookingRefund({ refundId: "br-test-re-sib2", paymentIntentId: b.pi, refundCents: 3000, createdUnix: RECOVERY_START_UNIX + 200 });
       await q(`UPDATE booking_refund_recoveries SET next_attempt_at = now() + interval '10 minutes', updated_at = now() WHERE refund_id = $1`, [b.refundId]);
       assert((await processBookingRecovery(await idOf("br-test-re-sib2"), fk)) === "not_due" && (await row("br-test-re-sib2")).amount_cents === 0, "sibling skipped while another row of the booking is claimed unfixed");
+    }
+    {
+      // Final review I3: the first row is fixed at 58.80 and its reversal landed at Stripe, but the reply was lost
+      // (reversed_cents still 0). The second refund must wait, not work out a share of 0.
+      const b = await booking("i3", { refund: 6000 });
+      const id1 = await idOf(b.refundId);
+      fs.landsButThrows = 1;
+      const first = await processBookingRecovery(id1, fk);
+      const r1a = await row(b.refundId);
+      fs.refunds.get(b.pi)!.push({ id: "br-test-re-i3b", amount: 6000, created: RECOVERY_START_UNIX + 200, status: "succeeded" });
+      await recordBookingRefund({ refundId: "br-test-re-i3b", paymentIntentId: b.pi, refundCents: 6000, createdUnix: RECOVERY_START_UNIX + 200 });
+      const id2 = await idOf("br-test-re-i3b");
+      resetCalls();
+      const w = await processBookingRecovery(id2, fk);
+      const r2a = await row("br-test-re-i3b");
+      assert(first === "retry" && r1a.amount_cents === 5880 && r1a.reversed_cents === 0 && r1a.status === "pending", "first row fixed 58.80, reply lost", r1a);
+      assert(w === "not_due" && r2a.status === "pending" && r2a.amount_cents === 0 && r2a.reference_id === null && r2a.attempts === 0 && reverses().length === 0, "second refund waits while the first is unconfirmed (try given back, nothing worked out)", { w, r2a });
+      await due(b.refundId);
+      assert((await processBookingRecovery(id1, fk)) === "reversed" && (await row(b.refundId)).reversed_cents === 5880, "first row recorded by the lookup");
+      await due("br-test-re-i3b");
+      const second = await processBookingRecovery(id2, fk);
+      const r1 = await row(b.refundId);
+      const r2 = await row("br-test-re-i3b");
+      const t = fs.transfers.find((x) => x.group === b.group)!;
+      assert(second === "reversed" && r2.amount_cents === 3920 && r2.reversed_cents === 3920 && r1.reversed_cents + r2.reversed_cents === 9800 && t.amountReversed === 9800, "second refund waits while the first is unconfirmed, then takes its correct share (total = all sent)", { second, r1: r1.reversed_cents, r2, tr: t.amountReversed });
+    }
+    {
+      // Final review I3: a share that works out to 0 (all already taken) closes nothing_sent with a note, not reversed.
+      const pi = "pi_br-test-tworef";
+      fs.refunds.get(pi)!.push({ id: "br-test-re-tworef3", amount: 1000, created: RECOVERY_START_UNIX + 300, status: "succeeded" });
+      await recordBookingRefund({ refundId: "br-test-re-tworef3", paymentIntentId: pi, refundCents: 1000, createdUnix: RECOVERY_START_UNIX + 300 });
+      resetCalls();
+      const res = await processBookingRecovery(await idOf("br-test-re-tworef3"), fk);
+      const r = await row("br-test-re-tworef3");
+      assert(res === "nothing_sent" && r.status === "nothing_sent" && r.amount_cents === 0 && r.reference_id === "br-test-tworef" && /share is 0/.test(String(r.last_error)) && reverses().length === 0, "share 0: nothing_sent with a last_error note", r);
     }
 
     console.log("notifyOwedSellers");
@@ -460,7 +552,7 @@ function assert(cond: boolean, name: string, detail?: unknown) {
       await notifyOwedSellers();
       const host = sent.filter((m) => m.to === "br-test-host@example.test" || m.userId === "br-test-u-host");
       assert(host.filter((m) => m.channel === "email").length === 1 && host.filter((m) => m.channel === "push").length === 1, "event owed recovery: host notified once (email + push)", host);
-      assert(host.find((m) => m.channel === "email")?.text === "A customer was refunded $25.00 for your event Night Market. Your Stripe balance didn't cover your share of $24.50, so it will be taken from your next payout." && host[0].kind === "ticket", "event copy exact, kind ticket", host);
+      assert(host.find((m) => m.channel === "email")?.text === "A ticket for your event Night Market was refunded. Your Stripe balance didn't cover your share of $24.50, so it will be taken from your next payout." && host[0].kind === "ticket", "event copy exact, kind ticket", host);
       const old = (await q(`SELECT seller_notified_at FROM event_payout_recoveries WHERE id = 'br-test-epr0'`))[0];
       assert(old.seller_notified_at === null, "old event recovery (owed before the start date) never notified", old);
 
@@ -486,6 +578,39 @@ function assert(cond: boolean, name: string, detail?: unknown) {
       assert(n1 === 1 && n2 === 0 && admin.length === 1 && admin[0].subject.startsWith("[Payouts] ") && (await row("br-test-re-nbiz")).alerted_at !== null, "admin email after 30 days, once, [Payouts] prefix", { n1, n2, admin });
     }
 
+    console.log("alertStuckPending");
+    {
+      // Final review minor 8: pending with 5 or more tries for over 24 hours: one admin alert per row, once.
+      admin.length = 0;
+      const stuck = await booking("stuck", { refund: 10000 });
+      const young = await booking("stuck-young", { refund: 10000 });
+      const few = await booking("stuck-few", { refund: 10000 });
+      const inflight = await booking("stuck-inflight", { refund: 10000 });
+      const set = (refundId: string, attempts: number, age: string, upd: string) => q(
+        `UPDATE booking_refund_recoveries SET attempts = $2, created_at = now() - $3::interval, next_attempt_at = now() + interval '30 minutes', updated_at = now() - $4::interval WHERE refund_id = $1`,
+        [refundId, attempts, age, upd]);
+      await set(stuck.refundId, 5, "25 hours", "20 minutes");
+      await set(young.refundId, 6, "2 hours", "20 minutes");
+      await set(few.refundId, 4, "25 hours", "20 minutes");
+      await set(inflight.refundId, 6, "25 hours", "1 minute");
+      const ids = { stuck: await idOf(stuck.refundId), young: await idOf(young.refundId), few: await idOf(few.refundId), inflight: await idOf(inflight.refundId) };
+      const about = (id: string) => admin.filter((a) => a.detail.includes(id));
+      assert(typeof alertStuckPending === "function", "alertStuckPending exported");
+      if (typeof alertStuckPending === "function") {
+        await alertStuckPending();
+        await alertStuckPending();
+        const s = await row(stuck.refundId);
+        assert(about(ids.stuck).length === 1 && about(ids.stuck)[0].subject.startsWith("[Payouts] ") && s.alerted_at !== null && s.status === "pending", "stuck pending (5 tries, over 24 hours): one admin alert, once", { admin, s });
+        assert(about(ids.young).length === 0 && about(ids.few).length === 0 && about(ids.inflight).length === 0, "not alerted: under 24 hours, under 5 tries, or in flight", admin);
+      }
+      // The every-minute job sends it too.
+      admin.length = 0;
+      await q(`UPDATE booking_refund_recoveries SET updated_at = now() - interval '20 minutes' WHERE refund_id = $1`, [inflight.refundId]);
+      await runBookingRecoveryJob(fk, new Date(Date.UTC(2026, 9, 21, 12, 7)));
+      assert(about(ids.inflight).length === 1, "runBookingRecoveryJob calls alertStuckPending", admin);
+      await q(`UPDATE booking_refund_recoveries SET status = 'nothing_sent', next_attempt_at = NULL WHERE refund_id IN ($1, $2, $3, $4)`, [stuck.refundId, young.refundId, few.refundId, inflight.refundId]);
+    }
+
     console.log("runBookingRecoveryJob");
     {
       const b = await booking("job", { refund: 10000 });
@@ -496,6 +621,23 @@ function assert(cond: boolean, name: string, detail?: unknown) {
       let threw = false;
       try { await runBookingRecoveryJob(throwing); } catch { threw = true; }
       assert(!threw, "a failing step never throws out of the job");
+    }
+    {
+      // Final review I2: the backfill runs on minutes 0, 15, 30 and 45 only, and reaches older bookings too.
+      const askedJ: string[] = [];
+      const fkAsk = { ...fk, listPaymentIntentRefunds: async (pi: string, opts: any) => { askedJ.push(pi); return fk.listPaymentIntentRefunds(pi, opts); } };
+      const at = (min: number) => new Date(Date.UTC(2026, 9, 21, 12, min, 5));
+      await appt("br-test-bfgate", { appointment_date: "2026-12-01", refunded_at: new Date().toISOString(), refund_amount: 1000 });
+      const ran: Record<number, boolean> = {};
+      for (const m of [7, 44, 0, 15, 30, 45]) { askedJ.length = 0; await runBookingRecoveryJob(fkAsk, at(m)); ran[m] = askedJ.includes("pi_br-test-bfgate"); }
+      assert(!ran[7] && !ran[44] && ran[0] && ran[15] && ran[30] && ran[45], "backfill runs on minute 0/15/30/45 only", ran);
+      const tenDaysAgo = new Date(Date.now() - 10 * 86400000).toISOString();
+      await appt("br-test-bfold", { appointment_date: "2026-12-02", refunded_at: tenDaysAgo, updated_at: tenDaysAgo, refund_amount: 1000 });
+      for (let i = 0; i < 55; i++) await appt(`br-test-bfn-${i}`, { appointment_date: "2026-12-03", appointment_time: `09:${String(i).padStart(2, "0")}`, refunded_at: new Date().toISOString(), refund_amount: 1000 });
+      askedJ.length = 0;
+      await runBookingRecoveryJob(fkAsk, at(30));
+      assert(askedJ.includes("pi_br-test-bfold") && askedJ.filter((p) => p.startsWith("pi_br-test-bfn-")).length === 55, "backfill reaches a booking older than the newest 50", { old: askedJ.includes("pi_br-test-bfold"), n: askedJ.length });
+      await q(`DELETE FROM appointments WHERE id LIKE 'br-test-bf%'`);
     }
     const { readFileSync } = await import("fs");
     const bsm = readFileSync(new URL("./bookingStateMachine.ts", import.meta.url), "utf8");
