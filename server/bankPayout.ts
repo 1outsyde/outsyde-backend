@@ -5,6 +5,12 @@
  * influencers, buyers) plus refund cover. The daily job (below, runBankPayoutJob) pays the Outsyde bank only
  * available balance - held - buffer. One read-only statement; every part is in cents. Owed event recoveries are
  * never counted (money the platform is owed, not money it holds).
+ *
+ * A pending refund request counts at most what the admin approval (routes.ts PATCH /api/admin/refund-requests/:id)
+ * would really refund: it refunds the request amount on the target's Stripe payment intent (order, appointment or
+ * shoot_booking), so each request is LEAST(amount, what was paid on that target less refunds); a target that is
+ * missing, has no payment intent, or a target type the approval does not refund counts 0. The amount is set by the
+ * requester, so it is never trusted on its own. Ticket exposure includes 'paused' events (still refundable).
  */
 import { sql } from "drizzle-orm";
 import { rows } from "./events/eventsRouter";
@@ -41,12 +47,16 @@ SELECT
  ((SELECT COALESCE(SUM(vendor_net),0) FROM appointments WHERE status='confirmed' AND settled_at IS NULL AND hold_id IS NOT NULL AND platform_fee > 0)
  +(SELECT COALESCE(SUM(vendor_net),0) FROM shoot_bookings WHERE status='confirmed' AND settled_at IS NULL AND payment_method='payment_intent'))::bigint AS unsettled_confirmed,
  (SELECT COALESCE(SUM(vendor_net),0) FROM orders WHERE status='transfer_failed')::bigint AS orders_transfer_failed,
- (SELECT COALESCE(SUM(amount),0) FROM refund_requests WHERE status='pending')::bigint AS pending_refund_requests,
+ (SELECT COALESCE(SUM(LEAST(r.amount::bigint, COALESCE(CASE r.target_type
+    WHEN 'order' THEN (SELECT GREATEST(o.total_amount, COALESCE(o.gross_charge_amount,0))::bigint FROM orders o WHERE o.id=r.target_id AND o.stripe_payment_intent_id IS NOT NULL)
+    WHEN 'appointment' THEN (SELECT GREATEST(c + ROUND(c*0.08) - COALESCE(discount_amount_cents,0) - COALESCE(refund_amount,0),0)::bigint FROM (SELECT COALESCE(deposit_amount_cents,total_price) c, discount_amount_cents, refund_amount FROM appointments WHERE id=r.target_id AND stripe_payment_intent_id IS NOT NULL) a)
+    WHEN 'shoot_booking' THEN (SELECT GREATEST(c + ROUND(c*0.08) - COALESCE(discount_amount_cents,0) - COALESCE(refund_amount,0),0)::bigint FROM (SELECT COALESCE(deposit_amount_cents,total_price) c, discount_amount_cents, refund_amount FROM shoot_bookings WHERE id=r.target_id AND stripe_payment_intent_id IS NOT NULL) s)
+  END, 0))),0) FROM refund_requests r WHERE r.status='pending')::bigint AS pending_refund_requests,
  (SELECT COALESCE(SUM(t.host_net_cents),0) FROM tickets t JOIN ticket_orders o ON o.id=t.order_id WHERE t.status='valid' AND o.status='completed' AND t.payout_id IS NULL)::bigint AS ticket_host_net_unpaid,
  (SELECT COALESCE(SUM(amount_cents),0) FROM event_payouts WHERE status IN ('pending','held','review'))::bigint AS event_payouts_open,
  (SELECT COALESCE(SUM(refund_amount_cents),0) FROM ticket_orders WHERE status='refunding')::bigint AS ticket_refunds_sending,
- (SELECT COALESCE(SUM(o.total_cents-o.refunded_cents),0) FROM ticket_orders o JOIN events e ON e.id=o.event_id WHERE e.status IN ('published','draft') AND e.starts_at > now() AND (o.status='completed' OR (o.status='refunded' AND o.refund_reason IS DISTINCT FROM 'event_cancelled')) AND o.needs_review_at IS NULL)::bigint AS ticket_exposure_unstarted,
- (SELECT COALESCE(SUM(LEAST(o.total_cents-o.refunded_cents, GREATEST(0,o.subtotal_cents+o.tax_cents-o.discount_cents))),0) FROM ticket_orders o JOIN events e ON e.id=o.event_id WHERE e.status='published' AND e.starts_at <= now() AND e.ends_at > now() - interval '30 days' AND o.status='completed')::bigint AS ticket_exposure_started_30d,
+ (SELECT COALESCE(SUM(o.total_cents-o.refunded_cents),0) FROM ticket_orders o JOIN events e ON e.id=o.event_id WHERE e.status IN ('published','draft','paused') AND e.starts_at > now() AND (o.status='completed' OR (o.status='refunded' AND o.refund_reason IS DISTINCT FROM 'event_cancelled')) AND o.needs_review_at IS NULL)::bigint AS ticket_exposure_unstarted,
+ (SELECT COALESCE(SUM(LEAST(o.total_cents-o.refunded_cents, GREATEST(0,o.subtotal_cents+o.tax_cents-o.discount_cents))),0) FROM ticket_orders o JOIN events e ON e.id=o.event_id WHERE e.status IN ('published','paused') AND e.starts_at <= now() AND e.ends_at > now() - interval '30 days' AND o.status='completed')::bigint AS ticket_exposure_started_30d,
  (SELECT COALESCE(SUM(amount_cents),0) FROM influencer_earning_ledger WHERE status IN ('pending','ready_for_payout') AND amount_cents > 0)::bigint AS influencer_owed,
  ((SELECT COALESCE(SUM(GREATEST(c + ROUND(c*0.08) - COALESCE(discount_amount_cents,0) - COALESCE(refund_amount,0),0)),0) FROM (SELECT COALESCE(deposit_amount_cents,total_price) c, discount_amount_cents, refund_amount FROM appointments, nyd WHERE status IN ('confirmed','completed','no_show') AND stripe_payment_intent_id IS NOT NULL AND (created_at > (now() AT TIME ZONE 'UTC') - interval '30 days' OR (status='confirmed' AND appointment_date >= nyd.d))) a)
  +(SELECT COALESCE(SUM(GREATEST(c + ROUND(c*0.08) - COALESCE(discount_amount_cents,0) - COALESCE(refund_amount,0),0)),0) FROM (SELECT COALESCE(deposit_amount_cents,total_price) c, discount_amount_cents, refund_amount FROM shoot_bookings, nyd WHERE status IN ('confirmed','completed','no_show') AND stripe_payment_intent_id IS NOT NULL AND (created_at > (now() AT TIME ZONE 'UTC') - interval '30 days' OR (status='confirmed' AND date >= nyd.d))) s))::bigint AS booking_refund_cover,
@@ -82,9 +92,11 @@ SELECT
 // The daily job (spec sections A, C, D). Runs every minute as the last step in bookingStateMachine.ts.
 //
 //   Off unless DAILY_BANK_PAYOUT_ENABLED === "true" (read on every run): off reads nothing from Stripe, writes nothing.
-//   1. checkSentPayouts: each 'sent' row is checked at Stripe (bounded): paid -> 'paid'; failed or canceled -> 'failed'
-//      + one email (the money goes back to the balance and the next day's payout picks it up); still not final 10 days
-//      after it was sent -> one email.
+//   1. checkSentPayouts: each 'sent' row is checked at Stripe (bounded, at most hourly): paid -> 'paid'; failed or
+//      canceled -> 'failed' + one email (the money goes back to the balance and the next day's payout picks it up);
+//      still not final 10 days after it was sent -> one email. A 'paid' row is re-checked hourly for 7 days after
+//      paid_at; failed or canceled then -> 'failed' + the same email.
+//      alertStalePending: a 'pending' row from an earlier New York date whose last try never finished -> one email.
 //   2. The New York day's first run at or after 06:00. A final row for the day (paid, sent, skipped, failed, review)
 //      ends it. Stripe not on manual payouts -> skipped 'stripe_not_manual' with NO row (the day still runs once the
 //      schedule is flipped), no email.
@@ -120,6 +132,10 @@ export const BANK_LOCK_MINUTES = 10;
 export const SENT_ALERT_DAYS = 10;
 const BANK_RUN_HOUR = 6;
 const SENT_CHECK_LIMIT = 20;
+/** A sent (or recently paid) row is checked at Stripe at most this often. */
+const SENT_CHECK_EVERY_MINUTES = 60;
+/** A paid row keeps being checked this long after paid_at (a paid payout can still fail at the bank). */
+const PAID_RECHECK_DAYS = 7;
 /** listPlatformPayoutsCreatedSince stops at 5 pages of 100: at that count the list may be cut short. */
 const LIST_CAP = 500;
 const STRIPE_CALL_BOUND = { timeoutMs: 30000, maxNetworkRetries: 1 };
@@ -134,10 +150,19 @@ export function setBankAlertForTest(fn: ((subject: string, detail: string) => Pr
 
 let afterClaimHook: (() => Promise<void>) | null = null;
 let beforeCreateHook: (() => Promise<void>) | null = null;
-/** Test seam only: hold a run right after its claim, or right before its create. Never set in production. */
-export function setBankHooksForTest(h: { afterClaim?: () => Promise<void>; beforeCreate?: () => Promise<void> } | null): void {
+let beforeHelperWriteHook: ((helper: "skip" | "record" | "toReview") => Promise<void>) | null = null;
+/**
+ * Test seam only: hold a run right after its claim, or right before its create, or fail a helper's write (skip,
+ * record, toReview) as a DB error would. Never set in production.
+ */
+export function setBankHooksForTest(h: {
+  afterClaim?: () => Promise<void>;
+  beforeCreate?: () => Promise<void>;
+  beforeHelperWrite?: (helper: "skip" | "record" | "toReview") => Promise<void>;
+} | null): void {
   afterClaimHook = h?.afterClaim ?? null;
   beforeCreateHook = h?.beforeCreate ?? null;
+  beforeHelperWriteHook = h?.beforeHelperWrite ?? null;
 }
 
 /** Admin email with the [Payouts] prefix (copy of alertAdmin in events/ticketCheckout.ts). Never throws. */
@@ -192,52 +217,68 @@ export function nyDayAndHour(now: Date): { date: string; hour: number; dayStartU
 // ─── Step 1: follow up on sent payouts ──────────────────────────────────────
 
 /**
- * Checks up to 20 'sent' rows at Stripe (one bounded retrieve each; a failed retrieve changes nothing).
- * Writes are guarded by status = 'sent' (no claim here: nothing is sent, and each change happens once).
+ * Checks up to 20 due rows at Stripe (one bounded retrieve each): 'sent' rows, and 'paid' rows for 7 days after
+ * paid_at (a payout Stripe called paid can still fail at the bank). A row is checked at most hourly: next_attempt_at
+ * is the next check time, set to now() + 1 hour after every check that is not final (a failed retrieve too).
+ * Writes are guarded by the status the row was read with (no claim here: nothing is sent, and each change happens once).
  * Returns how many rows became paid or failed.
  */
 export async function checkSentPayouts(s?: BankStripe): Promise<number> {
-  const sent = await rows<any>(sql`
-    SELECT id, payout_date::text AS payout_date, stripe_payout_id, amount_cents
-    FROM bank_payouts WHERE status = 'sent' AND stripe_payout_id IS NOT NULL
-    ORDER BY sent_at NULLS FIRST, id LIMIT ${SENT_CHECK_LIMIT}`);
-  if (!sent.length) return 0;
+  const due = await rows<any>(sql`
+    SELECT id, status, payout_date::text AS payout_date, stripe_payout_id, amount_cents
+    FROM bank_payouts
+    WHERE stripe_payout_id IS NOT NULL AND (next_attempt_at IS NULL OR next_attempt_at <= now())
+      AND (status = 'sent' OR (status = 'paid' AND paid_at > now() - make_interval(days => ${PAID_RECHECK_DAYS}::int)))
+    ORDER BY next_attempt_at NULLS FIRST, sent_at NULLS FIRST, id LIMIT ${SENT_CHECK_LIMIT}`);
+  if (!due.length) return 0;
   const st = s ?? (await realStripe());
   let done = 0;
-  for (const r of sent) {
+  for (const r of due) {
     let status: string | null = null;
+    let final = false;
     try {
       const p = await st.retrievePlatformPayout(r.stripe_payout_id, STRIPE_CALL_BOUND);
       status = p.status;
-      if (p.status === "paid") {
+      if (p.status === "paid" && r.status === "sent") {
+        final = true;
         const [u] = await rows<any>(sql`
-          UPDATE bank_payouts SET status = 'paid', stripe_status = 'paid', paid_at = now(), updated_at = now()
+          UPDATE bank_payouts SET status = 'paid', stripe_status = 'paid', paid_at = now(),
+                 next_attempt_at = now() + make_interval(mins => ${SENT_CHECK_EVERY_MINUTES}::int), updated_at = now()
           WHERE id = ${r.id} AND status = 'sent' RETURNING id`);
         if (u) done++;
         continue;
       }
       if (p.status === "failed" || p.status === "canceled") {
+        final = true;
         const [u] = await rows<any>(sql`
-          UPDATE bank_payouts SET status = 'failed', stripe_status = ${p.status}, failed_at = now(),
+          UPDATE bank_payouts SET status = 'failed', stripe_status = ${p.status}, failed_at = now(), next_attempt_at = NULL,
                  last_error = ${p.failureCode ? `Stripe failure code ${p.failureCode}` : `Stripe status ${p.status}`}, updated_at = now()
-          WHERE id = ${r.id} AND status = 'sent' RETURNING id`);
+          WHERE id = ${r.id} AND status = ${r.status} RETURNING id`);
         if (u) {
           done++;
           await alertPayouts("Bank payout failed",
-            `The bank payout ${r.stripe_payout_id} of ${dollars(r.amount_cents)} for ${r.payout_date} was ${p.status} at Stripe` +
+            `The bank payout ${r.stripe_payout_id} of ${dollars(r.amount_cents)} for ${r.payout_date} ${p.status === "failed" ? "failed" : "was canceled"} at Stripe` +
             `${p.failureCode ? `, failure code ${p.failureCode}` : ""}. The money goes back to the Stripe balance and is picked up by the next daily payout. ` +
             `Check the bank account in Stripe.`);
         }
         continue;
       }
-      await rows<any>(sql`
-        UPDATE bank_payouts SET stripe_status = ${p.status}, updated_at = now()
-        WHERE id = ${r.id} AND status = 'sent' AND stripe_status IS DISTINCT FROM ${p.status} RETURNING id`);
     } catch (err) {
       console.error(`[Payouts] bank payout ${r.stripe_payout_id} status check failed: ${errText(err)}`);
+    } finally {
+      if (!final) {
+        // Not final (or Stripe could not be asked): the next check in an hour.
+        await rows<any>(sql`
+          UPDATE bank_payouts SET stripe_status = COALESCE(${status}::text, stripe_status),
+                 next_attempt_at = now() + make_interval(mins => ${SENT_CHECK_EVERY_MINUTES}::int), updated_at = now()
+          WHERE id = ${r.id} AND status = ${r.status} RETURNING id`).catch((err) => {
+          console.error(`[Payouts] bank payout ${r.stripe_payout_id} next check time not saved: ${errText(err)}`);
+        });
+      }
     }
-    // Not final yet (or Stripe could not be asked): one email once it is 10 days past the send. An alerted_at from
-    // before the send (the other currency email that day) does not count.
+    if (r.status !== "sent") continue;
+    // Still sent: one email once it is 10 days past the send. An alerted_at from before the send (the other
+    // currency email that day) does not count.
     try {
       const [old] = await rows<any>(sql`
         UPDATE bank_payouts SET alerted_at = now(), updated_at = now()
@@ -245,7 +286,7 @@ export async function checkSentPayouts(s?: BankStripe): Promise<number> {
           AND (alerted_at IS NULL OR alerted_at < sent_at)
         RETURNING id`);
       if (old) {
-        await alertPayouts("Bank payout not arrived",
+        await alertPayouts("Bank payout has not arrived",
           `The bank payout ${r.stripe_payout_id} of ${dollars(r.amount_cents)} for ${r.payout_date} was sent over ${SENT_ALERT_DAYS} days ago ` +
           `and Stripe still reports it as ${status ?? "unknown (the status check failed)"}. Check it in Stripe.`);
       }
@@ -254,6 +295,27 @@ export async function checkSentPayouts(s?: BankStripe): Promise<number> {
     }
   }
   return done;
+}
+
+/**
+ * A 'pending' row from an earlier New York date whose last try never finished (its lock or backoff has run out and
+ * it is never claimed again): one admin email, alerted_at set, status unchanged. An alerted_at set during that day's
+ * own tries (the other currency email) is older than the row's last next_attempt_at, so it does not stop this one;
+ * the alerted_at this sets is newer, so it is never sent again.
+ */
+export async function alertStalePending(today: string): Promise<number> {
+  const stale = await rows<any>(sql`
+    UPDATE bank_payouts SET alerted_at = now(), updated_at = now()
+    WHERE status = 'pending' AND payout_date < ${today}::date
+      AND (next_attempt_at IS NULL OR next_attempt_at <= now())
+      AND (alerted_at IS NULL OR alerted_at < next_attempt_at)
+    RETURNING payout_date::text AS payout_date, attempts`);
+  for (const r of stale) {
+    await alertPayouts("Bank payout did not finish",
+      `A bank payout try for ${r.payout_date} did not finish, so a payout may have reached Stripe. ` +
+      `Check the payouts for that day in Stripe. Nothing more is tried for that day.`);
+  }
+  return stale.length;
 }
 
 // ─── Steps 2 to 6: today's payout ───────────────────────────────────────────
@@ -270,6 +332,11 @@ export async function runBankPayoutJob(now: Date = new Date(), s?: BankStripe): 
   }
 
   const { date, hour, dayStartUnix } = nyDayAndHour(now);
+  try {
+    await alertStalePending(date);
+  } catch (err) {
+    console.error(`[Payouts] unfinished payout check failed: ${errText(err)}`);
+  }
   if (hour < BANK_RUN_HOUR) return { action: "not_yet" };
 
   const [today] = await rows<any>(sql`
@@ -308,6 +375,7 @@ export async function runBankPayoutJob(now: Date = new Date(), s?: BankStripe): 
 
   /** Skip the day, only while this claim owns the row. */
   const skip = async (reason: string, nums?: { available?: number; held?: number; breakdown?: HeldBreakdown }, error?: string): Promise<BankJobResult> => {
+    if (beforeHelperWriteHook) await beforeHelperWriteHook("skip");
     const [u] = await rows<any>(sql`
       UPDATE bank_payouts SET status = 'skipped', skip_reason = ${reason}, next_attempt_at = NULL,
              available_cents = COALESCE(${nums?.available ?? null}::int, available_cents),
@@ -323,6 +391,7 @@ export async function runBankPayoutJob(now: Date = new Date(), s?: BankStripe): 
 
   /** Record a payout that exists at Stripe (made by this try, or an earlier one whose reply was lost). */
   const record = async (payoutId: string, status: string, amount: number, mineOnly: boolean): Promise<BankJobResult> => {
+    if (beforeHelperWriteHook) await beforeHelperWriteHook("record");
     // A payout this try just made is recorded while this run owns the row or while nobody does (as eventPayouts.ts).
     const [u] = await rows<any>(sql`
       UPDATE bank_payouts SET status = 'sent', stripe_payout_id = ${payoutId}, stripe_status = ${status}, amount_cents = ${amount},
@@ -337,17 +406,18 @@ export async function runBankPayoutJob(now: Date = new Date(), s?: BankStripe): 
 
   try {
     // Lookup first: anything created since New York midnight.
-    const today = await st.listPlatformPayoutsCreatedSince(dayStartUnix, STRIPE_CALL_BOUND);
-    if (today.length >= LIST_CAP) throw new Error(`Stripe listed ${today.length} payouts today (the lookup limit), can't tell if one is ours`);
-    const ours = today.filter((x) => x.metadata?.type === "outsyde_bank_payout" && x.metadata?.payoutDate === date);
-    if (ours.length > 1) return toReview(`Stripe has ${ours.length} bank payouts for ${date} (${ours.map((x) => x.id).join(", ")})`);
-    if (ours.length === 1) return record(ours[0].id, ours[0].status, ours[0].amount, true);
-    if (today.length) return skip("other_payout_today");
+    // Every helper below is `return await`ed so its rejection (a DB error) reaches the catch: backoff, 5 try limit, review.
+    const todaysPayouts = await st.listPlatformPayoutsCreatedSince(dayStartUnix, STRIPE_CALL_BOUND);
+    if (todaysPayouts.length >= LIST_CAP) throw new Error(`Stripe listed ${todaysPayouts.length} payouts today (the lookup limit), can't tell if one is ours`);
+    const ours = todaysPayouts.filter((x) => x.metadata?.type === "outsyde_bank_payout" && x.metadata?.payoutDate === date);
+    if (ours.length > 1) return await toReview(`Stripe has ${ours.length} bank payouts for ${date} (${ours.map((x) => x.id).join(", ")})`);
+    if (ours.length === 1) return await record(ours[0].id, ours[0].status, ours[0].amount, true);
+    if (todaysPayouts.length) return await skip("other_payout_today");
 
     const held = await computeHeld();
-    if (held.gates.recentTopups > 0) return skip("recent_topup", { held: held.total, breakdown: held.breakdown });
-    if (held.gates.openIssueRows > 0) return skip("open_booking_payout_issues", { held: held.total, breakdown: held.breakdown });
-    if (held.gates.eventPayoutsWaitingBalance > 0) return skip("event_payout_waiting_balance", { held: held.total, breakdown: held.breakdown });
+    if (held.gates.recentTopups > 0) return await skip("recent_topup", { held: held.total, breakdown: held.breakdown });
+    if (held.gates.openIssueRows > 0) return await skip("open_booking_payout_issues", { held: held.total, breakdown: held.breakdown });
+    if (held.gates.eventPayoutsWaitingBalance > 0) return await skip("event_payout_waiting_balance", { held: held.total, breakdown: held.breakdown });
 
     const bal = await st.getAvailableUsdBalance(STRIPE_CALL_BOUND);
     const available = Number(bal.usdCents);
@@ -366,7 +436,7 @@ export async function runBankPayoutJob(now: Date = new Date(), s?: BankStripe): 
     }
     const amount = Math.max(0, available - held.total - BANK_BUFFER_CENTS);
     const nums = { available, held: held.total, breakdown: held.breakdown };
-    if (amount < BANK_MIN_CENTS) return skip("below_minimum", nums);
+    if (amount < BANK_MIN_CENTS) return await skip("below_minimum", nums);
 
     // Re-take the lock, only while this claim still owns the row (the reads above may have been slow), saving the numbers.
     const [mine] = await rows<any>(sql`
@@ -384,7 +454,7 @@ export async function runBankPayoutJob(now: Date = new Date(), s?: BankStripe): 
       amountCents: amount, payoutDate: date, rowId: p.id,
       idempotencyKey: `bank_payout_${date}_${claimTag}`, ...STRIPE_CALL_BOUND,
     });
-    return record(made.id, made.status, amount, false);
+    return await record(made.id, made.status, amount, false);
   } catch (err) {
     const msg = errText(err);
     if (st.isInsufficientFundsError(err)) {
@@ -399,7 +469,10 @@ export async function runBankPayoutJob(now: Date = new Date(), s?: BankStripe): 
              next_attempt_at = now() + make_interval(mins => LEAST(60, ${BANK_LOCK_MINUTES}::int * power(2, LEAST(attempts - 1, 6)))::int),
              updated_at = now()
       WHERE id = ${p.id} AND status = 'pending' AND ${OWNER_TAG} = ${tag}
-      RETURNING ${OWNER_TAG} AS tag`).catch(() => [] as any[]);
+      RETURNING ${OWNER_TAG} AS tag`).catch((dbErr) => {
+        console.error(`[Payouts] bank payout ${date} backoff not saved: ${errText(dbErr)}`);
+        return [] as any[];
+      });
     if (!still) return { action: "retry", reason: "lost_claim" };
     tag = String(still.tag);
     if (attempts >= BANK_MAX_ATTEMPTS) {
@@ -409,6 +482,7 @@ export async function runBankPayoutJob(now: Date = new Date(), s?: BankStripe): 
   }
 
   async function toReview(why: string): Promise<BankJobResult> {
+    if (beforeHelperWriteHook) await beforeHelperWriteHook("toReview");
     const [u] = await rows<any>(sql`
       UPDATE bank_payouts SET status = 'review', last_error = ${why.slice(0, 300)}, next_attempt_at = NULL, updated_at = now()
       WHERE id = ${p.id} AND status = 'pending' AND ${OWNER_TAG} = ${tag}

@@ -140,14 +140,49 @@ const ymd = (iso: string) => iso.slice(0, 10);
       await baseParents();
       await ins("orders", { id: "bp-test-order-o", business_id: "bp-test-biz", customer_id: "bp-test-user", items: "[]", total_amount: 1000, status: "transfer_failed", vendor_net: 700 });
     });
-    await expectPart("pending refund request", "pendingRefundRequests", 400, async () => {
+    // A pending refund request counts at most what the admin approval would really refund for its target.
+    const refReq = (o: Record<string, unknown>) => ins("refund_requests", { id: "bp-test-refreq", requester_id: "bp-test-user", requester_type: "customer", target_type: "order", target_id: "bp-test-order-o", reason: "test", amount: 400, status: "pending", ...o });
+    const paidOrder = () => ins("orders", { id: "bp-test-order-o", business_id: "bp-test-biz", customer_id: "bp-test-user", items: "[]", total_amount: 1000, status: "paid", stripe_payment_intent_id: "pi_bp_test_o" });
+    await expectPart("pending refund request below the paid amount counts its amount", "pendingRefundRequests", 400, async () => {
       await baseParents();
-      await ins("refund_requests", { id: "bp-test-refreq", requester_id: "bp-test-user", requester_type: "customer", target_type: "order", target_id: "bp-test-order-o", reason: "test", amount: 400, status: "pending" });
+      await paidOrder();
+      await refReq({});
+    });
+    await expectPart("pending refund request of 2,147,483,647 on a 1000 cent order counts 1000", "pendingRefundRequests", 1000, async () => {
+      await baseParents();
+      await paidOrder();
+      await refReq({ amount: 2147483647 });
+    });
+    await expectPart("pending refund request on a missing target counts 0", null, 0, async () => {
+      await baseParents();
+      await refReq({ amount: 2147483647, target_id: "bp-test-nope" });
+    });
+    await expectPart("pending refund request on an unknown target type counts 0", null, 0, async () => {
+      await baseParents();
+      await paidOrder();
+      await refReq({ amount: 500, target_type: "gift_card" });
+    });
+    await expectPart("pending refund request on an order with no Stripe payment counts 0", null, 0, async () => {
+      await baseParents();
+      await ins("orders", { id: "bp-test-order-o", business_id: "bp-test-biz", customer_id: "bp-test-user", items: "[]", total_amount: 1000, status: "paid" });
+      await refReq({ amount: 500 });
+    });
+    await expectPart("pending refund request on an appointment counts at most its paid deposit plus fee less refunds", "pendingRefundRequests", 980, async () => {
+      await baseParents();
+      // Old and past, so booking refund cover does not count it.
+      await ins("appointments", apptBase({ status: "completed", stripe_payment_intent_id: "pi_bp_test_a", deposit_amount_cents: 1000, refund_amount: 100, created_at: ago(45), appointment_date: ymd(ago(40)) }));
+      await refReq({ target_type: "appointment", target_id: "bp-test-appt", amount: 2147483647 });
+    });
+    await expectPart("pending refund request on a shoot booking counts at most its paid amount", "pendingRefundRequests", 1080, async () => {
+      await baseParents();
+      await ins("shoot_bookings", shootBase({ status: "completed", stripe_payment_intent_id: "pi_bp_test_s", deposit_amount_cents: 1000, created_at: ago(45), date: ymd(ago(40)) }));
+      await refReq({ target_type: "shoot_booking", target_id: "bp-test-shoot", amount: 5000 });
     });
 
     // ── tickets and event payouts ──
     await expectPart("valid ticket on a completed order with no payout", "ticketHostNetUnpaid", 900, async () => {
-      await seedEvent({ status: "paused", starts: ahead(10), ends: ahead(11) });
+      // cancelled: a paused (or published) unstarted event would also count the order in ticket exposure.
+      await seedEvent({ status: "cancelled", starts: ahead(10), ends: ahead(11) });
       await seedOrder({ status: "completed", subtotal_cents: 1000, platform_fee_cents: 100, host_net_cents: 900, total_cents: 1000 });
       await seedTicket({});
     });
@@ -169,6 +204,14 @@ const ymd = (iso: string) => iso.slice(0, 10);
     });
     await expectPart("started event that ended 10 days ago is counted", "ticketExposureStarted30d", 5000, async () => {
       await seedEvent({ status: "published", starts: ago(11), ends: ago(10) });
+      await seedOrder({ status: "completed", subtotal_cents: 5000, service_fee_cents: 400, total_cents: 5400 });
+    });
+    await expectPart("paused unstarted event exposure is total minus refunded", "ticketExposureUnstarted", 4400, async () => {
+      await seedEvent({ status: "paused", starts: ahead(10), ends: ahead(11) });
+      await seedOrder({ status: "completed", subtotal_cents: 5000, service_fee_cents: 400, total_cents: 5400, refunded_cents: 1000 });
+    });
+    await expectPart("paused started event that ended 10 days ago is counted", "ticketExposureStarted30d", 5000, async () => {
+      await seedEvent({ status: "paused", starts: ago(11), ends: ago(10) });
       await seedOrder({ status: "completed", subtotal_cents: 5000, service_fee_cents: 400, total_cents: 5400 });
     });
     await expectPart("started event that ended 40 days ago is not counted", null, 0, async () => {
@@ -367,8 +410,57 @@ const ymd = (iso: string) => iso.slice(0, 10);
       assert(row.status === "paid" && row.paid_at !== null && row.stripe_status === "paid", "row paid with paid_at", row);
       assert(f.calls.join(",") === "retrieve" && isBound(f.opts[0]), "one bounded retrieve", { calls: f.calls, opts: f.opts });
       assert(emails.length === 0, "no email for paid");
+      assert(row.mins_left === 60, "a paid row's next check is in an hour", row);
       const n = await bp.checkSentPayouts(f.s);
-      assert(n === 0 && f.calls.length === 1, "a paid row is not checked again", { n, calls: f.calls });
+      assert(n === 0 && f.calls.length === 1, "a paid row is not checked again within the hour", { n, calls: f.calls });
+    });
+    await jobTest("2g. sent check: a sent row not final is checked at most hourly", async () => {
+      await q(`INSERT INTO bank_payouts (payout_date, status, stripe_payout_id, amount_cents, sent_at) VALUES ('2099-01-10','sent','po_h',5000,now() - interval '1 day')`);
+      const f = fake({ retrieve: { po_h: { status: "in_transit" } } });
+      await bp.checkSentPayouts(f.s);
+      const row = await rowOf("2099-01-10");
+      assert(row.status === "sent" && row.stripe_status === "in_transit" && row.mins_left === 60, "still sent, next check in an hour", row);
+      await bp.checkSentPayouts(f.s);
+      await bp.runBankPayoutJob(BEFORE_SIX, f.s);
+      assert(f.calls.filter((c) => c === "retrieve").length === 1, "not checked again within the hour", f.calls);
+      await makeDue("2099-01-10");
+      await bp.checkSentPayouts(f.s);
+      assert(f.calls.filter((c) => c === "retrieve").length === 2 && (await rowOf("2099-01-10")).mins_left === 60, "checked again once the hour is up", f.calls);
+    });
+    await jobTest("2g2. sent check: a failed retrieve also waits an hour before the next check", async () => {
+      await q(`INSERT INTO bank_payouts (payout_date, status, stripe_payout_id, amount_cents, sent_at) VALUES ('2099-01-10','sent','po_t2',5000,now() - interval '1 day')`);
+      const f = fake({ retrieve: { po_t2: "throw" } });
+      await bp.checkSentPayouts(f.s);
+      await bp.checkSentPayouts(f.s);
+      const row = await rowOf("2099-01-10");
+      assert(row.status === "sent" && row.mins_left === 60 && f.calls.filter((c) => c === "retrieve").length === 1, "one retrieve, next check in an hour", { row, calls: f.calls });
+    });
+    await jobTest("2h. paid row re-checked within 7 days: failed at Stripe -> failed + one email (same copy)", async () => {
+      await q(`INSERT INTO bank_payouts (payout_date, status, stripe_payout_id, stripe_status, amount_cents, sent_at, paid_at) VALUES ('2099-01-10','paid','po_p','paid',5000,now() - interval '3 days', now() - interval '2 days')`);
+      const f = fake({ retrieve: { po_p: { status: "failed", failureCode: "account_closed" } } });
+      const n = await bp.checkSentPayouts(f.s);
+      const row = await rowOf("2099-01-10");
+      assert(n === 1 && row.status === "failed" && row.failed_at !== null && row.stripe_status === "failed" && /account_closed/.test(row.last_error ?? ""), "paid row now failed with failed_at", row);
+      assert(emails.length === 1 && emails[0].subject === "[Payouts] Bank payout failed" && /po_p/.test(emails[0].detail) && /failed at Stripe/.test(emails[0].detail) && !/was failed/.test(emails[0].detail), "one email, same copy", emails);
+      await makeDue("2099-01-10");
+      await bp.checkSentPayouts(f.s);
+      assert(emails.length === 1 && f.calls.filter((c) => c === "retrieve").length === 1, "a failed row is not checked again", { emails, calls: f.calls });
+    });
+    await jobTest("2h2. paid row re-checked: canceled -> failed; still paid -> next check in an hour, no email", async () => {
+      await q(`INSERT INTO bank_payouts (payout_date, status, stripe_payout_id, stripe_status, amount_cents, sent_at, paid_at) VALUES ('2099-01-10','paid','po_pc','paid',5000,now() - interval '3 days', now() - interval '2 days'), ('2099-01-11','paid','po_pp','paid',5000,now() - interval '2 days', now() - interval '1 day')`);
+      const f = fake({ retrieve: { po_pc: { status: "canceled" }, po_pp: { status: "paid" } } });
+      await bp.checkSentPayouts(f.s);
+      const c = await rowOf("2099-01-10");
+      const p = await rowOf("2099-01-11");
+      assert(c.status === "failed" && c.stripe_status === "canceled", "canceled paid row is failed", c);
+      assert(p.status === "paid" && p.mins_left === 60, "still paid: next check in an hour", p);
+      assert(emails.length === 1 && /po_pc/.test(emails[0].detail) && /was canceled at Stripe/.test(emails[0].detail), "one email for the canceled one", emails);
+    });
+    await jobTest("2i. paid row paid more than 7 days ago is not checked", async () => {
+      await q(`INSERT INTO bank_payouts (payout_date, status, stripe_payout_id, stripe_status, amount_cents, sent_at, paid_at) VALUES ('2099-01-01','paid','po_o','paid',5000,now() - interval '9 days', now() - interval '8 days')`);
+      const f = fake({ retrieve: { po_o: { status: "failed" } } });
+      await bp.checkSentPayouts(f.s);
+      assert(f.calls.length === 0 && (await rowOf("2099-01-01")).status === "paid" && emails.length === 0, "no retrieve, still paid, no email", f.calls);
     });
     await jobTest("2b. sent check: failed -> failed + one email", async () => {
       await q(`INSERT INTO bank_payouts (payout_date, status, stripe_payout_id, amount_cents, sent_at) VALUES ('2099-01-10','sent','po_f',5000,now() - interval '2 days')`);
@@ -377,6 +469,7 @@ const ymd = (iso: string) => iso.slice(0, 10);
       const row = await rowOf("2099-01-10");
       assert(row.status === "failed" && row.failed_at !== null && row.stripe_status === "failed", "row failed with failed_at", row);
       assert(emails.length === 1 && emails[0].subject.startsWith("[Payouts] ") && /account_closed/.test(emails[0].detail) && /po_f/.test(emails[0].detail), "one [Payouts] email with id and code", emails);
+      assert(/failed at Stripe/.test(emails[0]?.detail ?? "") && !/was failed/.test(emails[0]?.detail ?? ""), "copy: failed at Stripe, not was failed", emails);
       await bp.runBankPayoutJob(BEFORE_SIX, f.s);
       assert(emails.length === 1 && f.calls.filter((c) => c === "retrieve").length === 1, "no second email or retrieve", { emails, calls: f.calls });
     });
@@ -397,6 +490,9 @@ const ymd = (iso: string) => iso.slice(0, 10);
       assert(old.status === "sent" && old.alerted_at !== null && old.stripe_status === "in_transit", "old row still sent, alerted", old);
       assert(nw.status === "sent" && nw.alerted_at === null, "new row not alerted", nw);
       assert(emails.length === 1 && /po_old/.test(emails[0].detail) && emails[0].subject.startsWith("[Payouts] "), "one email about the old row", emails);
+      assert(emails[0]?.subject === "[Payouts] Bank payout has not arrived", "subject: Bank payout has not arrived", emails[0]);
+      await bp.runBankPayoutJob(BEFORE_SIX, f.s);
+      await makeDue("2099-01-01");
       await bp.runBankPayoutJob(BEFORE_SIX, f.s);
       assert(emails.length === 1, "no second email on the next run", emails);
       assert(f.opts.every(isBound), "every retrieve bounded", f.opts);
@@ -413,8 +509,37 @@ const ymd = (iso: string) => iso.slice(0, 10);
       const f = fake({ retrieve: { po_z: { status: "in_transit" } } });
       await bp.checkSentPayouts(f.s);
       assert(emails.length === 1, "one email", emails);
+      await makeDue("2099-01-01");
       await bp.checkSentPayouts(f.s);
-      assert(emails.length === 1, "only one", emails);
+      assert(emails.length === 1 && f.calls.filter((c) => c === "retrieve").length === 2, "only one, even when checked again", { emails, calls: f.calls });
+    });
+
+    // ── 2s. pending row from an earlier New York date ──
+    await jobTest("2s. pending row from an earlier date: one email (alerted_at), status unchanged, never again", async () => {
+      await q(`INSERT INTO bank_payouts (payout_date, status, attempts, next_attempt_at) VALUES ('2099-01-14','pending',2,now() - interval '5 minutes')`);
+      const f = fake();
+      const r = await bp.runBankPayoutJob(BEFORE_SIX, f.s);
+      assert(r?.action === "not_yet", "today still not_yet", r);
+      const row = await rowOf("2099-01-14");
+      assert(row.status === "pending" && Number(row.attempts) === 2 && row.alerted_at !== null, "still pending, attempts unchanged, alerted", row);
+      assert(emails.length === 1 && emails[0].subject.startsWith("[Payouts] ") && emails[0].detail.includes("2099-01-14") && /did not finish/.test(emails[0].detail) && /may have reached Stripe/.test(emails[0].detail), "one email naming the date", emails);
+      assert(!/8%|8 %/.test(emails[0]?.detail ?? "") && !/ - | — | – /.test(emails[0]?.detail ?? ""), "copy: no 8%, no dash separators", emails[0]);
+      assert(f.calls.length === 0, "no Stripe call", f.calls);
+      await bp.runBankPayoutJob(BEFORE_SIX, f.s);
+      await bp.runBankPayoutJob(NOW, fake({ usd: 0 }).s);
+      assert(emails.length === 1, "never again", emails);
+    });
+    await jobTest("2s2. earlier pending row: other currency email that day does not stop it; a lock still in flight waits; today's pending row is not alerted", async () => {
+      await q(`INSERT INTO bank_payouts (payout_date, status, attempts, next_attempt_at, alerted_at) VALUES
+        ('2099-01-13','pending',1,now() - interval '1 hour', now() - interval '2 hours'),
+        ('2099-01-14','pending',1,now() + interval '5 minutes', NULL),
+        ($1,'pending',1,now() + interval '5 minutes', NULL)`, [DATE]);
+      await bp.runBankPayoutJob(NOW, fake().s);
+      assert(emails.length === 1 && emails[0].detail.includes("2099-01-13"), "one email, for the 13th only", emails);
+      assert((await rowOf("2099-01-14")).alerted_at === null && (await rowOf()).alerted_at === null, "in-flight and today's rows not alerted", null);
+      await makeDue("2099-01-14");
+      await bp.runBankPayoutJob(NOW, fake().s);
+      assert(emails.length === 2 && emails[1].detail.includes("2099-01-14"), "the 14th once its lock ran out", emails);
     });
 
     // ── 3. not yet / done today ──
@@ -572,7 +697,8 @@ const ymd = (iso: string) => iso.slice(0, 10);
       const f3 = fake({ usd: Math.max(0, h.total - 50_000) });
       const r3 = await bp.runBankPayoutJob(NOW, f3.s);
       const row3 = await rowOf();
-      assert(r3?.reason === "below_minimum" && (row3.amount_cents === null || Number(row3.amount_cents) >= 0), "balance below held: below_minimum, never negative", row3);
+      assert(r3?.reason === "below_minimum" && row3.status === "skipped", "balance below held: below_minimum", { r3, row3 });
+      assert(!f3.calls.includes("create") && Number(row3.available_cents) === Math.max(0, h.total - 50_000) && row3.amount_cents === null, "no create, available saved, no amount", { calls: f3.calls, row3 });
     });
 
     // ── 9. send ──
@@ -636,6 +762,34 @@ const ymd = (iso: string) => iso.slice(0, 10);
       await bp.runBankPayoutJob(NOW, f.s);
       assert(emails.length === 1 && f.creates.length === 5, "review: nothing more that day", { e: emails.length, c: f.creates.length });
     });
+    await jobTest("10c. a DB error inside skip() reaches the catch: backoff with attempts counted", async () => {
+      const f = fake({ usd: 100_000_000, payouts: [{ id: "po_hand", amount: 9999, status: "pending", created: DAY_START + 10, metadata: {} }] });
+      bp.setBankHooksForTest({ beforeHelperWrite: async (h: string) => { if (h === "skip") throw new Error("DB connection lost in skip"); } });
+      const r = await bp.runBankPayoutJob(NOW, f.s);
+      const row = await rowOf();
+      assert(r?.action === "retry" && r?.reason === "error", "retry (error)", r);
+      assert(row.status === "pending" && Number(row.attempts) === 1 && row.mins_left === 10 && /DB connection lost in skip/.test(row.last_error ?? ""), "pending, attempts 1, backoff 10, error saved", row);
+      assert(!f.calls.includes("create"), "no create", f.calls);
+    });
+    await jobTest("10d. a DB error inside toReview() (two of ours listed) reaches the catch, not the caller", async () => {
+      const f = fake({ usd: 100_000_000, payouts: [
+        { id: "po_d1", amount: 1, status: "pending", created: DAY_START + 1, metadata: { type: "outsyde_bank_payout", payoutDate: DATE, rowId: "a" } },
+        { id: "po_d2", amount: 1, status: "pending", created: DAY_START + 2, metadata: { type: "outsyde_bank_payout", payoutDate: DATE, rowId: "b" } }] });
+      bp.setBankHooksForTest({ beforeHelperWrite: async (h: string) => { if (h === "toReview") throw new Error("DB connection lost in review"); } });
+      const r = await bp.runBankPayoutJob(NOW, f.s);
+      const row = await rowOf();
+      assert(r?.action === "retry" && row.status === "pending" && row.mins_left === 10 && /lost in review/.test(row.last_error ?? ""), "retry with backoff", { r, row });
+    });
+
+    await jobTest("10e. a DB error inside record() (ours already listed) reaches the catch, not the caller", async () => {
+      const f = fake({ usd: 100_000_000, payouts: [{ id: "po_r1", amount: 4321, status: "pending", created: DAY_START + 1, metadata: { type: "outsyde_bank_payout", payoutDate: DATE, rowId: "a" } }] });
+      bp.setBankHooksForTest({ beforeHelperWrite: async (h: string) => { if (h === "record") throw new Error("DB connection lost in record"); } });
+      const r = await bp.runBankPayoutJob(NOW, f.s);
+      const row = await rowOf();
+      assert(r?.action === "retry" && row.status === "pending" && Number(row.attempts) === 1 && row.mins_left === 10 && /lost in record/.test(row.last_error ?? ""), "retry with backoff", { r, row });
+      assert(!f.calls.includes("create"), "no create", f.calls);
+    });
+
     await jobTest("lost response is recorded, not resent", async () => {
       const held = await heldNow();
       const f = fake({ usd: held + 15_000, mode: "landsButThrows" });
