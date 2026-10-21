@@ -30,6 +30,7 @@ import { getSubscriptionPeriod, getInvoiceSubscriptionId } from "./subscriptionF
 import { enforceSubscriptionAccess, lateRunRef, pastDueSinceOf } from "../subscriptions/lifecycle";
 import { loadNoticeContext, sendSubscriptionNotice } from "../subscriptions/notices";
 import { planSwitchRef } from "../subscriptions/planSwitch";
+import { activatePaidSubscription, markPlanOffersAccepted } from "../subscriptions/activation";
 
 // XO Beauty & Lashes' own deposit-email sender (the legacy
 // create-deposit-intent flow's pre-existing behavior).
@@ -1645,7 +1646,7 @@ export class WebhookHandlers {
   /* =====================================================
      VENDOR SUBSCRIPTION
   ===================================================== */
-  static async handleVendorSubscriptionCheckoutCompleted(session: any) {
+  static async handleVendorSubscriptionCheckoutCompleted(session: any, opts: { strict?: boolean } = {}) {
     const { vendorId, businessId, tierId } = session.metadata || {};
     if (!vendorId || !businessId || !tierId) {
       console.error('[Webhook] checkout.session.completed missing metadata:', { vendorId, businessId, tierId });
@@ -1686,87 +1687,21 @@ export class WebhookHandlers {
         }
       }
 
-      let subscriptionId: string;
-      if (existing) {
-        const oldStripeSubId = existing.stripeSubscriptionId;
-        const newStripeSubId: string = session.subscription;
-
-        await storage.updateVendorSubscription(existing.id, {
-          tierId,
-          status: 'active',
-          stripeSubscriptionId: newStripeSubId,
-          stripeCustomerId: session.customer,
-          pastDueSince: null,
-        } as any);
-        subscriptionId = existing.id;
-
-        // If a different Stripe subscription existed, cancel it to prevent duplicate billing.
-        if (oldStripeSubId && oldStripeSubId !== newStripeSubId) {
-          try {
-            const stripe = await getUncachableStripeClient();
-            await stripe.subscriptions.cancel(oldStripeSubId);
-            console.log(`[Webhook] Cancelled old Stripe subscription ${oldStripeSubId} — replaced by ${newStripeSubId} for vendor ${vendorId}`);
-          } catch (cancelErr) {
-            console.error(`[Webhook] Failed to cancel old Stripe subscription ${oldStripeSubId}:`, cancelErr);
-          }
-        }
-      } else {
-        const newSub = await storage.createVendorSubscription({
-          vendorId,
-          businessId,
-          tierId,
-          stripeCustomerId: session.customer,
-          stripeSubscriptionId: session.subscription,
-        });
-        subscriptionId = newSub.id;
-        await storage.updateVendorSubscription(newSub.id, { status: 'active' });
+      // Write the row, cancel a replaced Stripe subscription, unpause, mark a plan offer accepted and announce,
+      // all in one shared, repeat-safe step (the success page reconcile and the one tap offer use it too).
+      if (!session.subscription) {
+        console.error(`[Webhook] checkout.session.completed for business ${businessId} has no subscription`);
+        return;
       }
-
-      // Activate the business subscription flag
-      await storage.updateBusiness(businessId, {
-        subscriptionActive: true,
-      });
-
-      // Save the real billing period (best effort; renewals keep it current).
-      let period: ReturnType<typeof getSubscriptionPeriod> = null;
-      if (session.subscription) {
-        try {
-          const stripe = await getUncachableStripeClient();
-          period = getSubscriptionPeriod(await stripe.subscriptions.retrieve(session.subscription));
-          if (period) await storage.updateVendorSubscription(subscriptionId, { currentPeriodStart: period.start, currentPeriodEnd: period.end });
-        } catch (periodErr) {
-          console.error(`[Webhook] Could not read period for ${session.subscription}:`, periodErr instanceof Error ? periodErr.message : 'unknown error');
-        }
-      }
-
-      // Resubscribing brings back whatever the system paused for a lapsed plan (decided 2026-10-19).
-      const restored = (await enforceSubscriptionAccess(businessId, 'checkout_completed')).unpaused;
-
-      console.log(`[Webhook] Subscription activated: vendor=${vendorId} business=${businessId} tier=${tierId} stripeSubId=${session.subscription}`);
-
-      const row = await storage.getVendorSubscriptionByBusinessId(businessId);
-      if (row) {
-        const ctx = await loadNoticeContext(row);
-        const ref = `checkout:${session.id ?? session.subscription}`;
-        await sendSubscriptionNotice('activated', ref, ctx, { amountCents: session.amount_total ?? null, periodEnd: period?.end ?? null, restoredItems: restored });
-        if (restored > 0) await sendSubscriptionNotice('restored', ref, ctx, { restoredItems: restored, periodEnd: period?.end ?? null });
-      }
-
-      const [tier] = await db.select().from(subscriptionTiers).where(eq(subscriptionTiers.id, tierId));
-      const tierName = tier?.displayName || tier?.name || 'subscription';
-
-      await NotificationTriggers.subscriptionActivated({
-        userId: vendorId,
-        tierName,
-        subscriptionId,
-      });
-
-      await NotificationTriggers.paymentSucceeded({
-        userId: vendorId,
-        amount: session.amount_total || 0,
-        referenceType: 'vendor_subscription',
-        referenceId: subscriptionId,
-        description: `Your ${tierName} subscription payment was successful.`,
+      await activatePaidSubscription({
+        vendorId,
+        businessId,
+        tierId,
+        stripeSubscriptionId: session.subscription,
+        stripeCustomerId: session.customer ?? null,
+        ref: `checkout:${session.id ?? session.subscription}`,
+        amountCents: session.amount_total ?? null,
+        strict: opts.strict === true,
       });
 
     } catch (error) {
@@ -2148,7 +2083,26 @@ export class WebhookHandlers {
   ===================================================== */
   static async handleSubscriptionChange(subscription: any) {
     const vendorSub = await storage.getVendorSubscriptionByStripeId(subscription.id);
-    if (!vendorSub) return;
+    if (!vendorSub) {
+      // Backstop for a plan offer accepted with one tap: if the route was charged but never saved the row
+      // (lost response, crash), Stripe's own event activates it. Same notice ref as the route, so once only.
+      const md = subscription.metadata || {};
+      if (md.type === 'vendor_subscription' && md.source === 'plan_offer_one_tap' && md.vendorId && md.businessId && md.tierId
+          && (subscription.status === 'active' || subscription.status === 'trialing')) {
+        try {
+          await activatePaidSubscription({
+            vendorId: md.vendorId, businessId: md.businessId, tierId: md.tierId,
+            stripeSubscriptionId: subscription.id,
+            stripeCustomerId: typeof subscription.customer === 'string' ? subscription.customer : subscription.customer?.id ?? null,
+            ref: `subscription:${subscription.id}`,
+            stripeSubscription: subscription,
+          });
+        } catch (err) {
+          console.error('[Webhook] one tap backstop activation failed:', err);
+        }
+      }
+      return;
+    }
 
     const previousStatus = vendorSub.status;
     const newStatus = subscription.status;
@@ -2199,7 +2153,7 @@ export class WebhookHandlers {
     let enforcement: { active: boolean; paused: number; unpaused: number } | null = null;
     if (vendorSub.businessId) {
       await storage.updateBusiness(vendorSub.businessId, {
-        subscriptionActive: newStatus === "active",
+        subscriptionActive: newStatus === "active" || newStatus === "trialing",
       });
       enforcement = await enforceSubscriptionAccess(vendorSub.businessId, `subscription_${newStatus}`);
     }
@@ -2250,6 +2204,12 @@ export class WebhookHandlers {
       // Migrate benefits to the new tier
       await storage.migrateBenefitsForTierChange(vendorSub.id, previousTierId, newTierId);
 
+      // A paid switch onto an offered plan (Grandfathered offer to a business already paying) completes the offer.
+      if (vendorSub.businessId) {
+        await markPlanOffersAccepted(vendorSub.businessId, newTierId).catch((err) =>
+          console.error('[Webhook] could not mark plan offer accepted:', err instanceof Error ? err.message : err));
+      }
+
       // Send notification about the plan change
       await NotificationTriggers.subscriptionTierChanged({
         userId: vendorSub.vendorId,
@@ -2261,6 +2221,12 @@ export class WebhookHandlers {
       });
 
       await sendSubscriptionNotice('plan_switched', planSwitchRef(newTierId, period?.start), ctx, { previousPlanName: previousTierName, amountCents: newPrice, periodEnd: period?.end ?? null });
+    }
+
+    // A trialing subscription switched onto an offered plan also completes the offer.
+    if (tierChanged && newStatus === 'trialing' && vendorSub.businessId) {
+      await markPlanOffersAccepted(vendorSub.businessId, newTierId).catch((err) =>
+        console.error('[Webhook] could not mark plan offer accepted:', err instanceof Error ? err.message : err));
     }
 
     // Cancellation audit (a failed payment is no longer reported as "canceled"; see the late notice above)
