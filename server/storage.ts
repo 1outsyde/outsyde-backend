@@ -7319,7 +7319,8 @@ export class DatabaseStorage implements IStorage {
         eq(feedPosts.isActive, true),
         inArray(feedPosts.authorId, Array.from(followed)),
       ))
-      .orderBy(sql`${feedPosts.createdAt} DESC`)
+      // id breaks ties so offset paging never repeats or skips posts with the same timestamp
+      .orderBy(sql`${feedPosts.createdAt} DESC`, desc(feedPosts.id))
       .limit(limit)
       .offset(offset);
   }
@@ -7348,7 +7349,7 @@ export class DatabaseStorage implements IStorage {
       .from(follows)
       .innerJoin(users, eq(follows.targetUserId, users.id))
       .where(eq(follows.followerUserId, userId))
-      .orderBy(desc(follows.createdAt))
+      .orderBy(desc(follows.createdAt), desc(follows.id))
       .limit(limit)
       .offset(offset);
     return result.map(r => r.user);
@@ -7361,7 +7362,7 @@ export class DatabaseStorage implements IStorage {
       .from(follows)
       .innerJoin(users, eq(follows.followerUserId, users.id))
       .where(eq(follows.targetUserId, userId))
-      .orderBy(desc(follows.createdAt))
+      .orderBy(desc(follows.createdAt), desc(follows.id))
       .limit(limit)
       .offset(offset);
     return result.map(r => r.user);

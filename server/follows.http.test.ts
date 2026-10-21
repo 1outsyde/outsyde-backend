@@ -213,6 +213,38 @@ const isLocal = (u: string) => ['localhost', '127.0.0.1', '::1', '[::1]'].includ
     r = await call('GET', '/api/feed?scope=following&limit=50', { bearer: other.token });
     assert(r.status === 200 && feedIds(r).length === 0, 'someone following nobody → empty');
 
+    console.log('\nFollowing feed paging (posts dropped after the query)');
+    // owner (followed) posts as a vendor with no active plan → the route drops it; paging must still move on.
+    const vendorPost = id('vendor-post');
+    await q(`INSERT INTO feed_posts (id, author_id, author_type, post_type, content, media_url, image_url, feed_surface, display_layout, is_active, created_at)
+             VALUES ($1, $2, 'vendor', 'image', 'vendor', 'https://r2.test.example/v.jpg', 'https://r2.test.example/v.jpg', 'pro', 'pro', true, now() - interval '30 seconds')`,
+      [vendorPost, id('owner')]);
+    r = await call('GET', '/api/feed?scope=following&limit=1', V);
+    assert(r.status === 200 && feedIds(r).length === 0 && r.body?.data?.hasMore === true && r.body?.data?.nextOffset === 1,
+      'page 1 had only the dropped vendor post → empty but hasMore true, nextOffset 1', r.body?.data && { hasMore: r.body.data.hasMore, nextOffset: r.body.data.nextOffset });
+    r = await call('GET', '/api/feed?scope=following&limit=1&offset=1', V);
+    assert(feedIds(r)[0] === alicePost, 'page 2 continues with the next post (alice)', feedIds(r));
+    r = await call('GET', '/api/feed?scope=following&limit=1&offset=2', V);
+    assert(feedIds(r)[0] === bobPost, 'page 3 → bob, no repeats', feedIds(r));
+    // Same timestamp for two followed posts: order is stable across calls (id tiebreak).
+    await q(`UPDATE feed_posts SET created_at = (SELECT created_at FROM feed_posts WHERE id = $1) WHERE id = $2`, [alicePost, bobPost]);
+    const o1 = feedIds(await call('GET', '/api/feed?scope=following&limit=50', V));
+    const o2 = feedIds(await call('GET', '/api/feed?scope=following&limit=50', V));
+    assert(JSON.stringify(o1) === JSON.stringify(o2) && o1.includes(alicePost) && o1.includes(bobPost), 'tied timestamps → same order every time');
+    await q(`UPDATE feed_posts SET created_at = now() - interval '70 seconds' WHERE id = $1`, [bobPost]);
+    await q(`DELETE FROM feed_posts WHERE id = $1`, [vendorPost]);
+
+    console.log('\nblock by business id');
+    await call('POST', '/api/follows', { bearer: owner.token, body: { targetUserId: id('alice') } });
+    const alice = await login('alice');
+    await call('POST', '/api/follows', { bearer: alice.token, body: { targetUserId: id('owner') } });
+    assert(await followRows('owner', 'alice') === 1 && await followRows('alice', 'owner') === 1, 'setup: owner and alice follow each other');
+    r = await call('POST', `/api/users/${bizId}/block`, { bearer: alice.token });
+    const blk = await q(`SELECT blocked_id FROM user_blocks WHERE blocker_id = $1`, [id('alice')]);
+    assert(r.status === 200 && blk[0]?.blocked_id === id('owner'), 'block with a business id stores the owner user id', blk);
+    assert(await followRows('owner', 'alice') === 0 && await followRows('alice', 'owner') === 0, 'and removes follows both ways');
+    await q(`DELETE FROM user_blocks WHERE blocker_id = $1`, [id('alice')]);
+
     console.log('\nmain feed boost');
     // unfollow alice so only bob is followed; bob's post is older with the same stats.
     await call('DELETE', `/api/follows/${id('alice')}`, V);

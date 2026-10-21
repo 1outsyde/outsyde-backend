@@ -16478,12 +16478,14 @@ export async function registerRoutes(
       return res.status(401).json({ error: "Not authenticated" });
     }
 
-    const blockedId = req.params.userId;
-    if (blockerId === blockedId) {
-      return res.status(400).json({ error: "You cannot block yourself" });
-    }
-
     try {
+      // A business or photographer id resolves to the account behind it (same rule as follows),
+      // so the block and the follow cleanup below always use user ids.
+      const blockedId = (await resolveFollowTargetUserId(req.params.userId)) || req.params.userId;
+      if (blockerId === blockedId) {
+        return res.status(400).json({ error: "You cannot block yourself" });
+      }
+
       const { reason } = req.body || {};
       const block = await storage.blockUser(blockerId, blockedId, reason);
       // Blocking ends following both ways (Instagram rule); unblocking does not restore it.
@@ -22371,8 +22373,11 @@ export async function registerRoutes(
         });
       }
       
-      const nextOffset = offset + enrichedPosts.length;
-      const hasMore = enrichedPosts.length === limit;
+      // Following feed pages over the raw rows (posts dropped above, e.g. inactive vendors, must not
+      // end paging early or make the next page repeat rows). Main feed keeps its existing rule.
+      const pageCount = followingScope ? posts.length : enrichedPosts.length;
+      const nextOffset = offset + pageCount;
+      const hasMore = pageCount === limit;
       const nextCursor = hasMore ? Buffer.from(String(nextOffset)).toString('base64') : null;
 
       res.json({
