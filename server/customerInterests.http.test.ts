@@ -137,7 +137,8 @@ async function call(method: string, path: string, o: { token?: string; body?: un
       [`${P} Braid Spot`, "Beauty & Personal Care", "beauty", ["beauty.service.braids_locs"]],
       [`${P} Gym Spot`, "Health & Fitness", "health_fitness", ["health_fitness.service.personal_training"]],
     ] as const) {
-      const [b] = await q(`INSERT INTO businesses (id, owner_id, name, category, category_code, specialties, approval_status) VALUES (gen_random_uuid(), $1, $2, $3, $4, $5::jsonb, 'approved') RETURNING id`, [owner, name, cat, code, JSON.stringify(specs)]);
+      // Search only shows complete businesses (approved + active plan + working payouts, 2026-10-21).
+      const [b] = await q(`INSERT INTO businesses (id, owner_id, name, category, category_code, specialties, approval_status, stripe_onboarding_complete, stripe_account_id) VALUES (gen_random_uuid(), $1, $2, $3, $4, $5::jsonb, 'approved', true, 'acct_test_ps') RETURNING id`, [owner, name, cat, code, JSON.stringify(specs)]);
       bizIds.push(b.id);
       await q(`INSERT INTO vendor_subscriptions (vendor_id, business_id, tier_id, status) VALUES ($1, $2, $3, 'active')`, [owner, b.id, tierId]);
     }

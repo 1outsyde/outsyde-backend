@@ -177,6 +177,7 @@ import { interestMatchProfile } from "@shared/customerInterests";
 import { db } from "./db";
 import { coverPosterUrl, coverStillImage, nonEmpty } from "./coverMedia";
 import { eq, ilike, or, and, sql, isNull, isNotNull, desc, asc, gte, lte, ne, inArray, notInArray } from "drizzle-orm";
+import { makeSearchReadyChecker } from "./search/searchReady";
 import {
   creditPoints,
   createPending,
@@ -6151,19 +6152,43 @@ export class DatabaseStorage implements IStorage {
 
     const results: UnifiedSearchResult[] = [];
 
+    // A business, and its products, services and staff, only show once it is approved, has an
+    // active plan and working Stripe payouts (search/searchReady.ts). Admins see everything.
+    const isSearchReady = makeSearchReadyChecker(
+      async (businessId) => (await this.isBusinessSubscriptionActive(businessId)).active,
+      { isAdmin: !!isAdmin },
+    );
+    // The plain part of that rule in SQL, so pages aren't cut short by rows dropped afterwards and
+    // fewer plan lookups are needed. The plan itself is still checked by isSearchReady (grace etc.).
+    const searchReadySql = isAdmin
+      ? undefined
+      : and(
+          eq(businesses.approvalStatus, 'approved'),
+          eq(businesses.stripeOnboardingComplete, true),
+          isNotNull(businesses.stripeAccountId),
+          ne(businesses.stripeAccountId, ''),
+          sql`coalesce(${businesses.ownerId}, '') NOT ILIKE '%demo%'`,
+        );
+    // Plan lookups for one block run in parallel (cached per business); order is kept.
+    const readyFlags = (rows: Parameters<typeof isSearchReady>[0][]) => Promise.all(rows.map((r) => isSearchReady(r)));
+
     // ==================== CONSUMERS ====================
     if (scope === 'all' || scope === 'consumers') {
       // Exclude users who are active, fully-onboarded staff members elsewhere
       // in the app (mirrors the STAFF block's own gating below) so the same
       // person doesn't surface as both "consumer" and "staff" in results.
+      // Only staff of businesses search can show (approved + payouts, 2026-10-21); staff of a
+      // hidden business stay findable as people instead of disappearing from search.
       const activeStaffUserIds = db
         .select({ userId: staffMembers.userId })
         .from(staffMembers)
+        .innerJoin(businesses, eq(staffMembers.businessId, businesses.id))
         .where(
           and(
             isNotNull(staffMembers.userId),
             eq(staffMembers.status, 'active'),
-            eq(staffMembers.stripeOnboardingComplete, true)
+            eq(staffMembers.stripeOnboardingComplete, true),
+            searchReadySql
           )
         );
 
@@ -6303,19 +6328,18 @@ export class DatabaseStorage implements IStorage {
               ilike(businesses.tagline, likePattern)
             ),
             city ? ilike(businesses.city, `%${city}%`) : undefined,
-            isAdmin ? undefined : eq(businesses.approvalStatus, 'approved')
+            isAdmin ? undefined : eq(businesses.approvalStatus, 'approved'),
+            searchReadySql
           )
         )
         .limit(scope === 'all' ? 15 : limit)
         .offset(scope === 'businesses' ? offset : 0);
 
-      for (const b of businessRows) {
-        if (!isAdmin && b.ownerId?.toLowerCase().includes('demo')) continue;
-
-        if (!isAdmin) {
-          const subStatus = await this.isBusinessSubscriptionActive(b.id);
-          if (!subStatus.active) continue;
-        }
+      const businessReady = await readyFlags(businessRows);
+      for (let bi = 0; bi < businessRows.length; bi++) {
+        const b = businessRows[bi];
+        // approved + not demo + active plan (as before) + working payouts (new)
+        if (!businessReady[bi]) continue;
 
         const lower = searchTerm.toLowerCase();
         const nameLower = b.name.toLowerCase();
@@ -6377,6 +6401,11 @@ export class DatabaseStorage implements IStorage {
           bName: businesses.name,
           bCity: businesses.city,
           bState: businesses.state,
+          bId: businesses.id,
+          bApproval: businesses.approvalStatus,
+          bOwnerId: businesses.ownerId,
+          bStripe: businesses.stripeOnboardingComplete,
+          bStripeAccount: businesses.stripeAccountId,
           linkedUsername: users.username,
         })
         .from(staffMembers)
@@ -6390,13 +6419,18 @@ export class DatabaseStorage implements IStorage {
               ilike(staffMembers.displayName, likePattern),
               sql`${staffMembers.specialties}::text ILIKE ${likePattern}`
             ),
-            city ? ilike(businesses.city, `%${city}%`) : undefined
+            city ? ilike(businesses.city, `%${city}%`) : undefined,
+            searchReadySql
           )
         )
         .limit(scope === 'all' ? 15 : limit)
         .offset(scope === 'staff' ? offset : 0);
 
-      for (const row of staffRows) {
+      const staffReady = await readyFlags(staffRows.map((row) => ({ id: row.bId, approvalStatus: row.bApproval, ownerId: row.bOwnerId, stripeOnboardingComplete: row.bStripe, stripeAccountId: row.bStripeAccount })));
+      for (let si = 0; si < staffRows.length; si++) {
+        const row = staffRows[si];
+        // Staff of a business that isn't search-ready don't show either.
+        if (!staffReady[si]) continue;
         const lower = searchTerm.toLowerCase();
         const nameLower = (row.st.displayName || '').toLowerCase();
 
@@ -6452,6 +6486,7 @@ export class DatabaseStorage implements IStorage {
           bState: businesses.state,
           bOwnerId: businesses.ownerId,
           bStripe: businesses.stripeOnboardingComplete,
+          bStripeAccount: businesses.stripeAccountId,
           bApproval: businesses.approvalStatus,
           isFeatured: vendorProducts.isFeatured,
         })
@@ -6468,14 +6503,18 @@ export class DatabaseStorage implements IStorage {
             ),
             city ? ilike(businesses.city, `%${city}%`) : undefined,
             isAdmin ? undefined : eq(businesses.approvalStatus, 'approved'),
-            isAdmin ? undefined : eq(businesses.stripeOnboardingComplete, true)
+            isAdmin ? undefined : eq(businesses.stripeOnboardingComplete, true),
+            searchReadySql
           )
         )
         .limit(scope === 'all' ? 10 : limit)
         .offset(scope === 'products' ? offset : 0);
 
-      for (const row of productRows) {
-        if (!isAdmin && row.bOwnerId?.toLowerCase().includes('demo')) continue;
+      const productReady = await readyFlags(productRows.map((row) => ({ id: row.p.businessId, approvalStatus: row.bApproval, ownerId: row.bOwnerId, stripeOnboardingComplete: row.bStripe, stripeAccountId: row.bStripeAccount })));
+      for (let pi = 0; pi < productRows.length; pi++) {
+        const row = productRows[pi];
+        // Same rule as the business itself: approved + active plan + working payouts.
+        if (!productReady[pi]) continue;
 
         const lower = searchTerm.toLowerCase();
         const nameLower = row.p.name.toLowerCase();
@@ -6532,6 +6571,7 @@ export class DatabaseStorage implements IStorage {
           bState: businesses.state,
           bOwnerId: businesses.ownerId,
           bStripe: businesses.stripeOnboardingComplete,
+          bStripeAccount: businesses.stripeAccountId,
           bApproval: businesses.approvalStatus,
           isFeatured: vendorServices.isFeatured,
         })
@@ -6548,14 +6588,18 @@ export class DatabaseStorage implements IStorage {
             ),
             city ? ilike(businesses.city, `%${city}%`) : undefined,
             isAdmin ? undefined : eq(businesses.approvalStatus, 'approved'),
-            isAdmin ? undefined : eq(businesses.stripeOnboardingComplete, true)
+            isAdmin ? undefined : eq(businesses.stripeOnboardingComplete, true),
+            searchReadySql
           )
         )
         .limit(scope === 'all' ? 10 : limit)
         .offset(scope === 'services' ? offset : 0);
 
-      for (const row of vendorServiceRows) {
-        if (!isAdmin && row.bOwnerId?.toLowerCase().includes('demo')) continue;
+      const serviceReady = await readyFlags(vendorServiceRows.map((row) => ({ id: row.s.businessId, approvalStatus: row.bApproval, ownerId: row.bOwnerId, stripeOnboardingComplete: row.bStripe, stripeAccountId: row.bStripeAccount })));
+      for (let vi = 0; vi < vendorServiceRows.length; vi++) {
+        const row = vendorServiceRows[vi];
+        // Same rule as the business itself: approved + active plan + working payouts.
+        if (!serviceReady[vi]) continue;
 
         const lower = searchTerm.toLowerCase();
         const nameLower = row.s.name.toLowerCase();

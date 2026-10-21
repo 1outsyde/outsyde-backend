@@ -12,6 +12,8 @@
 import { storage } from "../storage";
 import { stripeService } from "../stripe/stripeService";
 import { isSubscriptionProvisioned, type SubscriptionRowFields, type TierPriceFields } from "../complimentary";
+// One rule for "payouts work", shared with search (search/searchReady.ts).
+import { payoutsReady as payoutsReadyRule } from "../search/searchReady";
 
 export type StepKey = "password" | "username" | "approval" | "plan" | "payouts";
 export type StepState = "done" | "todo" | "waiting";
@@ -63,7 +65,7 @@ function step(key: StepKey, state: StepState): SetupStep {
  * account (e.g. Braids by Lana, Oct 2026) means payouts can't actually work, so it stays a todo.
  */
 export function payoutsReady(flag: boolean | null | undefined, stripeAccountId: string | null | undefined): boolean {
-  return flag === true && typeof stripeAccountId === "string" && stripeAccountId.length > 0;
+  return payoutsReadyRule(flag, stripeAccountId);
 }
 
 /** Pure: turns facts about an account into the ordered checklist. */
