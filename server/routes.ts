@@ -161,6 +161,7 @@ import {
   syncHoursOfOperationToWeeklyAvailability,
   syncWeeklyAvailabilityToHoursOfOperation
 } from "./availabilityService";
+import { isHoldStillBookable, SERVICE_UNAVAILABLE_BODY } from "./bookableService";
 import {
   transitionAppointmentState,
   transitionShootBookingState,
@@ -5577,6 +5578,14 @@ export async function registerRoutes(
         return res.status(409).json({ error: "A payment attempt for this hold already exists." });
       }
 
+      // The service must still be bookable before a new booking is made (paused, archived or the plan lapsed
+      // during the hold). Existing bookings above resume as before.
+      if (!(await isHoldStillBookable(hold))) {
+        // No booking was made from this hold, so free the slot now instead of in up to 10 minutes.
+        await releaseBookingHold(hold.id).catch((e) => console.error('[Booking] release after refusal failed:', e));
+        return res.status(400).json(SERVICE_UNAVAILABLE_BODY);
+      }
+
       const appointment = await storage.createAppointment({
         businessId: hold.providerId,
         clientId: hold.userId,
@@ -6161,6 +6170,14 @@ export async function registerRoutes(
           return res.status(400).json({ error: "Photographer has not completed Stripe onboarding" });
         }
 
+        // The service must still be bookable before a new booking is made (paused, archived or the plan lapsed
+        // during the hold). Existing bookings above resume as before.
+        if (!(await isHoldStillBookable(hold))) {
+          // No booking was made from this hold, so free the slot now instead of in up to 10 minutes.
+          await releaseBookingHold(hold.id).catch((e) => console.error('[Booking] release after refusal failed:', e));
+          return res.status(400).json(SERVICE_UNAVAILABLE_BODY);
+        }
+
         // Total service price = base + add-ons. Deposit validity is checked
         // against B only (photographerBookingDepositCents); the charge uses B+A.
         const holdAddonsTotalCents = hold.addonsTotalCents ?? 0;
@@ -6443,6 +6460,14 @@ export async function registerRoutes(
       }
       if (!business.stripeAccountId) {
         return res.status(400).json({ error: "Business has not completed Stripe onboarding" });
+      }
+
+      // The service must still be bookable before a new booking is made (paused, archived or the plan lapsed
+      // during the hold). Existing bookings above resume as before.
+      if (!(await isHoldStillBookable(hold))) {
+        // No booking was made from this hold, so free the slot now instead of in up to 10 minutes.
+        await releaseBookingHold(hold.id).catch((e) => console.error('[Booking] release after refusal failed:', e));
+        return res.status(400).json(SERVICE_UNAVAILABLE_BODY);
       }
 
       let staffMember: Awaited<ReturnType<typeof storage.getStaffMember>> | undefined;
@@ -23677,271 +23702,9 @@ export async function registerRoutes(
     }
   });
 
-  /* =====================================================
-     TEMP / TEST ONLY - Development Test Endpoints
-     Remove before production deployment
-  ===================================================== */
-
-  /**
-   * TEMP / TEST ONLY: Create or retrieve a draft photographer booking for payment testing
-   * This endpoint bypasses normal booking flow for Postman/API testing purposes
-   * 
-   * Usage: POST /api/dev/test-booking
-   * Optional body: { photographerId?: string, clientId?: string, totalPrice?: number }
-   * 
-   * DO NOT USE IN PRODUCTION - Remove before deployment
-   */
-  app.post("/api/dev/test-booking", async (req, res) => {
-    // TEMP / TEST ONLY - This endpoint is for development testing
-    console.log("[DEV] Test booking endpoint called - FOR TESTING ONLY");
-
-    try {
-      const { photographerId, clientId, totalPrice } = req.body;
-
-      // Try to find an existing draft booking first
-      const existingDraft = await db.select()
-        .from(shootBookings)
-        .where(eq(shootBookings.status, BOOKING_STATES.DRAFT))
-        .orderBy(desc(shootBookings.createdAt))
-        .limit(1);
-
-      if (existingDraft.length > 0) {
-        console.log(`[DEV] Returning existing draft booking: ${existingDraft[0].id}`);
-        return res.json({
-          bookingId: existingDraft[0].id,
-          status: existingDraft[0].status,
-          total: existingDraft[0].totalPrice,
-          photographerId: existingDraft[0].photographerId,
-          clientId: existingDraft[0].clientId,
-          message: "Existing draft booking found"
-        });
-      }
-
-      // No existing draft - create a new one with placeholder data
-      // First, find a photographer and user to use
-      const allPhotographers = await storage.getAllPhotographers();
-      const allUsers = await storage.getAllUsers();
-
-      if (allPhotographers.length === 0) {
-        return res.status(400).json({ 
-          error: "No photographers exist in the database. Create a photographer first." 
-        });
-      }
-
-      if (allUsers.length === 0) {
-        return res.status(400).json({ 
-          error: "No users exist in the database. Create a user first." 
-        });
-      }
-
-      const testPhotographerId = photographerId || allPhotographers[0].id;
-      const testClientId = clientId || allUsers[0].id;
-      const testTotalPrice = totalPrice || 7500; // $75.00 default
-
-      // Create the draft booking
-      const newBookingId = crypto.randomUUID();
-      const now = new Date();
-      const scheduledDate = new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000); // 1 week from now
-
-      await db.insert(shootBookings).values({
-        id: newBookingId,
-        photographerId: testPhotographerId,
-        clientId: testClientId,
-        status: BOOKING_STATES.DRAFT,
-        totalPrice: testTotalPrice,
-        shootType: "portrait", // Required field
-        date: scheduledDate.toISOString().split('T')[0], // YYYY-MM-DD format
-        startTime: "10:00",
-        endTime: "11:00",
-        durationHours: 1,
-        locationType: "studio",
-        locationDetails: "Test Location - 123 Main St",
-        specialRequests: "TEST BOOKING - Created via /api/dev/test-booking endpoint",
-        createdAt: now,
-        updatedAt: now,
-        draftExpiresAt: new Date(now.getTime() + 10 * 60 * 1000) // 10 minutes from now
-      });
-
-      console.log(`[DEV] Created new test draft booking: ${newBookingId}`);
-
-      res.json({
-        bookingId: newBookingId,
-        status: BOOKING_STATES.DRAFT,
-        total: testTotalPrice,
-        photographerId: testPhotographerId,
-        clientId: testClientId,
-        scheduledDate: scheduledDate.toISOString(),
-        message: "New draft booking created for testing"
-      });
-    } catch (error: any) {
-      console.error("[DEV] Test booking error:", error);
-      res.status(500).json({ error: "Failed to create test booking", details: error.message });
-    }
-  });
-
-  /**
-   * TEMP / TEST ONLY: Get a test booking for an appointment (business service)
-   * POST /api/dev/test-appointment
-   */
-  app.post("/api/dev/test-appointment", async (req, res) => {
-    console.log("[DEV] Test appointment endpoint called - FOR TESTING ONLY");
-
-    try {
-      const { businessId, clientId, totalPrice } = req.body;
-
-      // Try to find an existing draft appointment first
-      const existingDraft = await db.select()
-        .from(appointments)
-        .where(eq(appointments.status, BOOKING_STATES.DRAFT))
-        .orderBy(desc(appointments.createdAt))
-        .limit(1);
-
-      if (existingDraft.length > 0) {
-        console.log(`[DEV] Returning existing draft appointment: ${existingDraft[0].id}`);
-        return res.json({
-          bookingId: existingDraft[0].id,
-          status: existingDraft[0].status,
-          total: existingDraft[0].totalPrice,
-          businessId: existingDraft[0].businessId,
-          clientId: existingDraft[0].clientId,
-          message: "Existing draft appointment found"
-        });
-      }
-
-      // No existing draft - create a new one
-      const allBusinesses = await storage.getAllBusinesses();
-      const allUsers = await storage.getAllUsers();
-      const allServices = await storage.getServices();
-
-      if (allBusinesses.length === 0) {
-        return res.status(400).json({ 
-          error: "No businesses exist in the database. Create a business first." 
-        });
-      }
-
-      if (allUsers.length === 0) {
-        return res.status(400).json({ 
-          error: "No users exist in the database. Create a user first." 
-        });
-      }
-
-      const testBusinessId = businessId || allBusinesses[0].id;
-      const testClientId = clientId || allUsers[0].id;
-      const testTotalPrice = totalPrice || 5000; // $50.00 default
-      const testServiceId = allServices.length > 0 ? allServices[0].id : null;
-
-      const newAppointmentId = crypto.randomUUID();
-      const now = new Date();
-      const scheduledDate = new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000);
-
-      await db.insert(appointments).values({
-        id: newAppointmentId,
-        businessId: testBusinessId,
-        clientId: testClientId,
-        serviceId: testServiceId || '',
-        status: BOOKING_STATES.DRAFT,
-        totalPrice: testTotalPrice,
-        appointmentDate: scheduledDate.toISOString().split('T')[0],
-        appointmentTime: '10:00',
-        durationMinutes: 30,
-        createdAt: now,
-        updatedAt: now,
-        draftExpiresAt: new Date(now.getTime() + 10 * 60 * 1000)
-      });
-
-      console.log(`[DEV] Created new test draft appointment: ${newAppointmentId}`);
-
-      res.json({
-        bookingId: newAppointmentId,
-        status: BOOKING_STATES.DRAFT,
-        total: testTotalPrice,
-        businessId: testBusinessId,
-        clientId: testClientId,
-        scheduledDate: scheduledDate.toISOString(),
-        message: "New draft appointment created for testing"
-      });
-    } catch (error: any) {
-      console.error("[DEV] Test appointment error:", error);
-      res.status(500).json({ error: "Failed to create test appointment", details: error.message });
-    }
-  });
-
-  /**
-   * TEMP / TEST ONLY: Create a Stripe PaymentIntent for testing
-   * POST /api/dev/test-payment-intent
-   * 
-   * Body: { bookingId: string, amount?: number (cents, default 7500) }
-   * 
-   * This endpoint:
-   * - Creates a PaymentIntent in Stripe test mode
-   * - Attaches bookingId in metadata
-   * - Does NOT confirm or capture payment
-   * - Does NOT require authentication
-   * 
-   * Returns: { paymentIntentId, clientSecret, status }
-   */
-  app.post("/api/dev/test-payment-intent", async (req, res) => {
-    console.log("[DEV] ===== TEST PAYMENT INTENT ENDPOINT - FOR TESTING ONLY =====");
-
-    try {
-      const { bookingId, amount } = req.body;
-
-      if (!bookingId) {
-        return res.status(400).json({ 
-          error: "bookingId is required" 
-        });
-      }
-
-      const testAmount = amount || 7500; // Default $75.00
-
-      console.log(`[DEV] Creating PaymentIntent for bookingId: ${bookingId}, amount: ${testAmount} cents`);
-
-      // Get Stripe client
-      const stripe = await getUncachableStripeClient();
-      
-      // Create PaymentIntent directly via Stripe SDK (no connected account, platform only)
-      const paymentIntent = await stripe.paymentIntents.create({
-        amount: testAmount,
-        currency: 'usd',
-        capture_method: 'manual', // Don't capture automatically
-        metadata: {
-          test_mode: 'true',
-          bookingId: bookingId,
-          created_via: '/api/dev/test-payment-intent',
-          created_at: new Date().toISOString()
-        },
-        description: `TEST PaymentIntent for booking ${bookingId}`,
-      });
-
-      console.log(`[DEV] ✓ PaymentIntent created successfully!`);
-      console.log(`[DEV]   - PaymentIntent ID: ${paymentIntent.id}`);
-      console.log(`[DEV]   - Status: ${paymentIntent.status}`);
-      console.log(`[DEV]   - Amount: ${paymentIntent.amount} ${paymentIntent.currency}`);
-      console.log(`[DEV]   - Capture Method: ${paymentIntent.capture_method}`);
-      console.log(`[DEV]   - Metadata: ${JSON.stringify(paymentIntent.metadata)}`);
-      console.log(`[DEV] ===== END TEST PAYMENT INTENT =====`);
-
-      res.json({
-        paymentIntentId: paymentIntent.id,
-        clientSecret: paymentIntent.client_secret,
-        status: paymentIntent.status,
-        amount: paymentIntent.amount,
-        currency: paymentIntent.currency,
-        captureMethod: paymentIntent.capture_method,
-        metadata: paymentIntent.metadata,
-        message: "TEST PaymentIntent created - check Stripe Dashboard"
-      });
-    } catch (error: any) {
-      console.error("[DEV] Test PaymentIntent error:", error);
-      res.status(500).json({ 
-        error: "Failed to create test PaymentIntent", 
-        details: error.message,
-        type: error.type || 'unknown'
-      });
-    }
-  });
-
-  /* END TEMP / TEST ONLY */
+  // Removed 2026-10-21 (vault R3): POST /api/dev/test-booking, /api/dev/test-appointment and
+  // /api/dev/test-payment-intent had no sign in check and could create bookings and live Stripe
+  // PaymentIntents. No client called them.
 
   // ==================== PHASE 3 ROUTES ====================
   const { registerPhase3Routes } = await import("./phase3Routes");

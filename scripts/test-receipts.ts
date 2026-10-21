@@ -498,8 +498,8 @@ async function main() {
     const [staff] = await db.insert(schema.staffMembers).values({ businessId: business.id, userId: staffUser.id, displayName: "Test Staff", status: "active", stripeOnboardingComplete: true, stripeAccountId: `acct_staff_${dtag}` } as any).returning();
     const [staffSvc] = await db.insert(schema.staffServices).values({ staffMemberId: staff.id, businessId: business.id, name: "Staff braids", priceCents: 12500, durationMinutes: 60, status: "live" } as any).returning();
     const [photoSvc] = await db.insert(schema.photographerServices).values({ photographerId: photographer.id, name: "Portrait", priceCents: 15000, estimatedDurationMinutes: 60, status: "live" } as any).returning();
-    const [bizDep] = await db.insert(schema.vendorServices).values({ businessId: business.id, name: "Knotless (deposit)", price: 27500, durationMinutes: 60, depositAmountCents: 3000 } as any).returning();
-    const [bizFull] = await db.insert(schema.vendorServices).values({ businessId: business.id, name: "Knotless (full)", price: 27500, durationMinutes: 60 } as any).returning();
+    const [bizDep] = await db.insert(schema.vendorServices).values({ businessId: business.id, name: "Knotless (deposit)", price: 27500, durationMinutes: 60, depositAmountCents: 3000, status: "live" } as any).returning();
+    const [bizFull] = await db.insert(schema.vendorServices).values({ businessId: business.id, name: "Knotless (full)", price: 27500, durationMinutes: 60, status: "live" } as any).returning();
     for (let day = 0; day < 7; day++) {
       await db.insert(schema.weeklyAvailability).values([
         { providerType: "business", providerId: business.id, dayOfWeek: day, startTime: "00:00", endTime: "23:59", isActive: true },

@@ -20,6 +20,7 @@ import {
   type BookingHold
 } from "@shared/schema";
 import { eq, and, or, gte, lte, inArray, ne, sql, isNull, lt } from "drizzle-orm";
+import { lookupBookableService, lookupFailureMessage } from "./bookableService";
 
 // ============================================
 // ERROR CODES
@@ -34,6 +35,9 @@ export const AVAILABILITY_ERRORS = {
   INVALID_DATE: 'INVALID_DATE',
   OUTSIDE_HOURS: 'OUTSIDE_HOURS',
   STAFF_NOT_BOOKABLE: 'STAFF_NOT_BOOKABLE',
+  // The service exists but can't be booked now: not live, not active, another provider's, or the business's
+  // paid plan has lapsed (server/bookableService.ts).
+  SERVICE_UNAVAILABLE: 'SERVICE_UNAVAILABLE',
 } as const;
 
 export class AvailabilityError extends Error {
@@ -1200,6 +1204,12 @@ export async function validateBookingSlot(
   staffMemberId?: string,
   excludeHoldId?: string
 ): Promise<ValidationResult> {
+  // 0. The service must be bookable now, for this provider (same rule as the hold).
+  const bookable = await lookupBookableService(providerType, providerId, serviceId, staffMemberId);
+  if (!bookable.ok) {
+    return { valid: false, errorCode: AVAILABILITY_ERRORS[bookable.code], errorMessage: lookupFailureMessage(bookable.code) };
+  }
+
   // 1. Fetch service details
   let serviceDurationMinutes: number;
   let servicePriceCents: number;
@@ -1557,6 +1567,12 @@ export async function createBookingHold(params: CreateHoldParams): Promise<HoldR
         'This staff member is not currently available for booking'
       );
     }
+  }
+
+  // The service must be live, active, this provider's, and (businesses) the paid plan not lapsed.
+  const bookable = await lookupBookableService(params.providerType, params.providerId, params.serviceId, params.staffMemberId);
+  if (!bookable.ok) {
+    throw new AvailabilityError(AVAILABILITY_ERRORS[bookable.code], lookupFailureMessage(bookable.code));
   }
 
   const service = await resolveServiceForHold(params.providerType, params.serviceId, params.staffMemberId);
