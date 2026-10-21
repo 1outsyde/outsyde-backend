@@ -3847,8 +3847,13 @@ export async function registerRoutes(
 
   // Resolve a follow / list / block target to the user id behind it: a user id as-is, a business
   // id → its owner, a photographer id → its user, an active staff member id → its linked user
-  // (2026-10-21: staff profiles can be followed). undefined when nothing matches.
-  async function resolveFollowTargetUserId(targetUserId: string): Promise<string | undefined> {
+  // (2026-10-21: staff profiles can be followed; following a staff member follows their own
+  // account). undefined when nothing matches. anyStaffStatus: undo paths (unfollow, unblock) also
+  // resolve removed staff, so a follow or block made earlier can always be undone.
+  async function resolveFollowTargetUserId(
+    targetUserId: string,
+    opts: { anyStaffStatus?: boolean } = {},
+  ): Promise<string | undefined> {
     const targetUser = await storage.getUser(targetUserId);
     if (targetUser) {
       return targetUserId;
@@ -3862,7 +3867,7 @@ export async function registerRoutes(
       return targetPhotographer.userId;
     }
     const targetStaff = await storage.getStaffMember(targetUserId);
-    if (targetStaff && targetStaff.status === "active" && targetStaff.userId) {
+    if (targetStaff && targetStaff.userId && (opts.anyStaffStatus || targetStaff.status === "active")) {
       return targetStaff.userId;
     }
     return undefined;
@@ -3883,7 +3888,8 @@ export async function registerRoutes(
         return res.status(400).json({ success: false, error: "targetUserId is required" });
       }
 
-      const resolvedTargetUserId = await resolveFollowTargetUserId(targetUserId) || targetUserId;
+      const resolvedTargetUserId =
+        await resolveFollowTargetUserId(targetUserId, { anyStaffStatus: true }) || targetUserId;
 
       // Idempotent: unfollowing an account you don't follow is a success (was 404), so a stale
       // button never shows an error.
@@ -15360,7 +15366,7 @@ export async function registerRoutes(
       const activeStaff = activeBase.filter((_: unknown, i: number) => liveServiceFlags[i]);
 
       // Social counts for the staff profile (2026-10-21), keyed on the staff member's linked user.
-      // The user id itself is NOT returned: follow / lists take the staff id and resolve it.
+      // Follow / lists take the staff id and resolve it, so the app doesn't need the user id here.
       const staffCounts = await Promise.all(
         activeStaff.map(async (s: StaffMember & { username: string | null }) =>
           s.userId
@@ -16510,7 +16516,14 @@ export async function registerRoutes(
     }
 
     try {
-      const success = await storage.unblockUser(blockerId, req.params.userId);
+      // Same id rule as block (business / photographer / staff id → the account behind it). A block
+      // saved under the raw id before that rule existed is still removed by the raw id.
+      const resolvedId =
+        (await resolveFollowTargetUserId(req.params.userId, { anyStaffStatus: true })) || req.params.userId;
+      let success = await storage.unblockUser(blockerId, resolvedId);
+      if (!success && resolvedId !== req.params.userId) {
+        success = await storage.unblockUser(blockerId, req.params.userId);
+      }
       res.json({ success });
     } catch (error) {
       console.error("Unblock user error:", error);

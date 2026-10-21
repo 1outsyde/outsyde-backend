@@ -136,6 +136,23 @@ const isLocal = (u: string) => ['localhost', '127.0.0.1', '::1', '[::1]'].includ
     r = await call('POST', '/api/follows', { ...V, body: { targetUserId: oldStaffId } });
     assert(r.status === 404 && await followRows('viewer', id('oldstaffuser')) === 0, 'removed staff id → 404, nothing followed', r.status);
 
+    console.log('\nundo paths work after a staff member is removed');
+    await call('POST', '/api/follows', { ...V, body: { targetUserId: staffId } });
+    await q(`UPDATE staff_members SET status = 'removed' WHERE id = $1`, [staffId]);
+    r = await call('DELETE', `/api/follows/${staffId}`, V);
+    assert(r.status === 200 && await followRows('viewer', id('staffuser')) === 0, 'unfollow by staff id after removal → follow row deleted', r.status);
+    await q(`UPDATE staff_members SET status = 'active' WHERE id = $1`, [staffId]);
+    r = await call('POST', `/api/users/${biz.ok}/block`, V);
+    const blk = await q(`SELECT blocked_id FROM user_blocks WHERE blocker_id = $1`, [id('viewer')]);
+    assert(r.status === 200 && blk.length === 1 && blk[0].blocked_id === id('own-ok'), 'block by business id stores the owner');
+    r = await call('DELETE', `/api/users/${biz.ok}/block`, V);
+    assert(r.status === 200 && r.body?.success === true && (await q(`SELECT 1 FROM user_blocks WHERE blocker_id = $1`, [id('viewer')])).length === 0,
+      'unblock by business id removes it', r.body);
+    await q(`INSERT INTO user_blocks (blocker_id, blocked_id) VALUES ($1, $2)`, [id('viewer'), biz.ok]); // legacy raw-id block
+    r = await call('DELETE', `/api/users/${biz.ok}/block`, V);
+    assert(r.body?.success === true && (await q(`SELECT 1 FROM user_blocks WHERE blocker_id = $1`, [id('viewer')])).length === 0,
+      'an old block saved under the raw business id is still removed');
+
     console.log('\nfollow a photographer by photographer id');
     r = await call('POST', '/api/follows', { ...V, body: { targetUserId: photogId, targetType: 'photographer' } });
     assert(r.status === 201 && await followRows('viewer', id('photog')) === 1, 'photographer id → follows the photographer user');
@@ -177,6 +194,17 @@ const isLocal = (u: string) => ['localhost', '127.0.0.1', '::1', '[::1]'].includ
     assert(got.includes(biz.ok) && !got.includes(biz.noacct) && !got.includes(id('prod-nosub')), 'scope=all follows the same rule', got);
     r = await call('GET', `/api/search?q=${TERM}&scope=businesses&limit=50`);
     assert(ids(r.body).includes(biz.ok) && !ids(r.body).includes(biz.noacct), 'logged out: same rule');
+
+    // People: staff of a hidden business stay findable as people; staff of a shown business are
+    // listed as staff only (no duplicate). Search by their account's display name.
+    await q(`UPDATE users SET name = $2 WHERE id = $1`, [id('oldstaffuser'), `${TERM} Person Hidden`]);
+    await q(`UPDATE staff_members SET status = 'active', stripe_onboarding_complete = true, business_id = $2 WHERE id = $1`, [oldStaffId, biz.noacct]);
+    await q(`UPDATE users SET name = $2 WHERE id = $1`, [id('staffuser'), `${TERM} Person Shown`]);
+    r = await call('GET', `/api/search?q=${TERM}&scope=consumers&limit=50`, V);
+    got = ids(r.body);
+    assert(got.includes(id('oldstaffuser')), 'staff of a hidden business → still found as a person', got);
+    assert(!got.includes(id('staffuser')), 'staff of a shown business → not duplicated as a person (unchanged)', got);
+    await q(`UPDATE staff_members SET status = 'removed', business_id = $2 WHERE id = $1`, [oldStaffId, biz.ok]);
 
     r = await call('GET', `/api/search?q=${TERM}&scope=businesses&limit=50`, { bearer: admin });
     got = ids(r.body);
