@@ -18,7 +18,8 @@ import { escapeHtml } from "../adminApplicationDetails";
 import { SUBSCRIPTION_GRACE_DAYS, graceEndsAt } from "./policy";
 
 export type SubscriptionEvent =
-  | "activated"        // new plan paid through checkout
+  | "activated"        // new paid plan started (checkout, one tap, or an accepted plan offer)
+  | "free_started"     // the Free plan started from an accepted plan offer
   | "renewed"          // renewal invoice paid
   | "plan_switched"    // vendor moved to another paid plan
   | "payment_failed"   // a payment did not go through: plan is late, grace starts
@@ -52,6 +53,11 @@ export interface NoticeDetails {
   previousPlanName?: string | null;
   pausedItems?: number;
   restoredItems?: number;
+  /** Set when a paid plan starts on a free trial (Grandfathered over a dated Free plan): first charge date. */
+  billingStartsAt?: Date | null;
+  /** Free plan end; null with `permanent` true. */
+  freeEndsAt?: Date | null;
+  permanent?: boolean;
 }
 
 export interface NoticeDeps {
@@ -65,7 +71,8 @@ let testDeps: NoticeDeps | null = null;
 /** Tests only: route every notice to these senders (null restores the real ones). */
 export function setSubscriptionNoticeDepsForTest(d: NoticeDeps | null) { testDeps = d; }
 
-async function deps(): Promise<NoticeDeps> {
+/** The senders every notice uses (the test overrides included). Plan offer notices share them. */
+export async function noticeDeps(): Promise<NoticeDeps> {
   if (testDeps) return testDeps;
   const email = await import("../emailService");
   const push = await import("../expoPushService");
@@ -127,8 +134,11 @@ interface VendorCopy {
   body: string;
   cta: { label: string; url: string } | null;
   push: { title: string; body: string };
-  inApp: { type: string; title: string; message: string };
+  /** null when the caller already writes the in-app notification (checkout activation). */
+  inApp: { type: string; title: string; message: string } | null;
 }
+
+export const VENDOR_DASHBOARD_URL = "https://www.goutsyde.com/vendor-dashboard";
 
 /** What the vendor receives, or null when the event is for Outsyde only. Pure, for tests. */
 export function vendorCopy(event: SubscriptionEvent, ctx: NoticeContext, d: NoticeDetails = {}): VendorCopy | null {
@@ -198,13 +208,38 @@ export function vendorCopy(event: SubscriptionEvent, ctx: NoticeContext, d: Noti
         push: { title: "You're back live", body: `Your ${plan} plan is paid.` },
         inApp: { type: "subscription_activated", title: "You're back live", message: `Your ${plan} plan is paid and your listings are live again.` },
       };
+    case "activated":
+      return {
+        subject: "You're live on Outsyde",
+        heading: `Your ${plan} plan is active`,
+        lead: `${hi} thanks, your ${plan} plan for ${biz} is active.`,
+        body: d.billingStartsAt
+          ? `Your free plan covers you until then, and billing starts on ${day(d.billingStartsAt)}. If you haven't set up payouts yet, do it from your dashboard so customers' payments reach you.`
+          : `${amount ? `We charged ${amount}. ` : ""}${d.periodEnd ? `Your plan renews on ${day(d.periodEnd)}. ` : ""}If you haven't set up payouts yet, do it from your dashboard so customers' payments reach you.`,
+        cta: { label: "Open dashboard", url: VENDOR_DASHBOARD_URL },
+        push: { title: "You're live on Outsyde", body: `Your ${plan} plan is active.` },
+        inApp: null, // NotificationTriggers.subscriptionActivated already writes it
+      };
+    case "free_started": {
+      const until = d.permanent || !d.freeEndsAt ? "with no end date" : `until ${day(d.freeEndsAt)}`;
+      return {
+        subject: "Your free Outsyde plan is active",
+        heading: "Your free plan is active",
+        lead: `${hi} your plan for ${biz} is on us.`,
+        body: `Outsyde is covering ${biz}'s plan ${until}. There's nothing to pay for the plan. If you haven't set up payouts yet, do it from your dashboard so customers' payments reach you.`,
+        cta: { label: "Open dashboard", url: VENDOR_DASHBOARD_URL },
+        push: { title: "Your free plan is active", body: `Outsyde is covering ${biz}'s plan.` },
+        inApp: { type: "subscription_activated", title: "Your free plan is active", message: `Outsyde is covering your plan ${until}.` },
+      };
+    }
     default:
-      return null; // activated, renewed, plan_switched: in-app already exists; Outsyde gets the copy
+      return null; // renewed, plan_switched: in-app already exists; Outsyde gets the copy
   }
 }
 
 const ADMIN_TITLE: Record<SubscriptionEvent, string> = {
   activated: "New plan started",
+  free_started: "Free plan started",
   renewed: "Renewal paid",
   plan_switched: "Plan switched",
   payment_failed: "Payment failed, plan is late",
@@ -225,6 +260,8 @@ export function adminCopy(event: SubscriptionEvent, ctx: NoticeContext, d: Notic
     ["Late since", day(d.pastDueSince)],
     ["Listings pause on", event === "payment_failed" || event === "grace_reminder" ? day(d.pastDueSince ? graceEndsAt(d.pastDueSince) : null) : null],
     ["Paid until", day(d.periodEnd)],
+    ["Billing starts", day(d.billingStartsAt)],
+    ["Free until", event === "free_started" ? (d.permanent || !d.freeEndsAt ? "No end date" : day(d.freeEndsAt)) : null],
     ["Listings paused", d.pausedItems ? String(d.pausedItems) : null],
     ["Listings restored", d.restoredItems ? String(d.restoredItems) : null],
     ["Stripe subscription", ctx.stripeSubscriptionId],
@@ -276,7 +313,7 @@ export async function sendSubscriptionNotice(
     console.error(`[SubscriptionNotice] could not claim ${event} for ${ctx.vendorSubscriptionId}:`, err instanceof Error ? err.message : err);
     return false;
   }
-  const d = await deps();
+  const d = await noticeDeps();
   const copy = vendorCopy(event, ctx, details);
   if (copy) {
     if (ctx.ownerEmail) {
@@ -286,8 +323,10 @@ export async function sendSubscriptionNotice(
     }
     try { await d.sendPush({ userId: ctx.vendorId, title: copy.push.title, body: copy.push.body, data: { type: `subscription_${event}`, screen: "subscription" } }); }
     catch (err) { console.error(`[SubscriptionNotice] push ${event} failed:`, err); }
-    try { await d.createInApp({ userId: ctx.vendorId, type: copy.inApp.type, title: copy.inApp.title, message: copy.inApp.message, referenceId: ctx.vendorSubscriptionId, metadata: { event } }); }
-    catch (err) { console.error(`[SubscriptionNotice] in-app ${event} failed:`, err); }
+    if (copy.inApp) {
+      try { await d.createInApp({ userId: ctx.vendorId, type: copy.inApp.type, title: copy.inApp.title, message: copy.inApp.message, referenceId: ctx.vendorSubscriptionId, metadata: { event } }); }
+      catch (err) { console.error(`[SubscriptionNotice] in-app ${event} failed:`, err); }
+    }
   }
   try {
     const a = adminCopy(event, ctx, details, copy?.subject ?? null);

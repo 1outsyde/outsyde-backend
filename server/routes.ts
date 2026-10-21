@@ -133,6 +133,7 @@ import { getStripePublishableKey, getUncachableStripeClient } from "./stripe/str
 import { getSubscriptionPeriod } from "./stripe/subscriptionFields";
 import { switchPaidPlan, applySwitchedPlan, SWITCH_DECLINED_MESSAGE } from "./subscriptions/planSwitch";
 import { graceEndsAt } from "./subscriptions/policy";
+import { createPlanOffer, withdrawPlanOffer, getOwnerPlanOffer, acceptPlanOffer, reconcileCheckoutSession, getLatestOfferSummaries } from "./subscriptions/planOffers";
 import { isAllowedClientOrigin, normalizeClientOrigin } from "./clientOrigins";
 import { adminOverrideBusinessId } from "./adminBusinessOverride";
 import { authorizeAndProvisionGoLive, GoLiveError } from "./services/goLiveGate";
@@ -10365,7 +10366,7 @@ export async function registerRoutes(
         const session = await stripeService.createTierSubscriptionCheckout(
           stripeCustomerId,
           tierId,
-          `${baseUrl}/subscription/success`,
+          `${baseUrl}/subscription/success?session_id={CHECKOUT_SESSION_ID}`,
           // NOTE: this cancel URL does not carry the `grant` token. A grant-link user who backs out of
           // Stripe lands on the dashboard and must reopen the original link (valid 48h) to retry.
           `${baseUrl}/vendor-dashboard?subscription=cancelled`,
@@ -21346,6 +21347,11 @@ export async function registerRoutes(
 
       // ONE batched query for this page's subscriptions (additive `subscription` field).
       const subscriptionSummaries = await getAdminSubscriptionSummaries(paginatedBusinesses.map((b) => b.id));
+      // Latest hidden plan offer per business (additive `planOffer`, one query). A missing table never breaks the list.
+      const offerSummaries = await getLatestOfferSummaries(paginatedBusinesses.map((b) => b.id)).catch((err) => {
+        console.error('[Admin] plan offer summaries failed:', err instanceof Error ? err.message : err);
+        return new Map();
+      });
 
       // Get owner info for each business
       const enrichedBusinesses = await Promise.all(paginatedBusinesses.map(async (b) => {
@@ -21355,6 +21361,8 @@ export async function registerRoutes(
           ownerEmail: owner?.email,
           ownerName: realName(owner) || '',
           subscription: subscriptionSummaries.get(b.id) ?? null,
+          planOffer: offerSummaries.get(b.id) ?? null,
+          ownerUsername: owner?.username ?? null,
           hasConnectAccount: !!b.stripeAccountId,
         };
       }));
@@ -25052,6 +25060,70 @@ export async function registerRoutes(
     } catch (err) {
       console.error("[GRANT_LINK_REDEEM]", err);
       return res.status(500).json({ error: "Redemption failed" });
+    }
+  });
+
+  // ==================== HIDDEN PLAN OFFERS (Plan Offers board 1.3 to 1.6) ====================
+  // See server/subscriptions/planOffers.ts. Admin offers Grandfathered or the Free plan to one business; only
+  // that business's owner can read or accept it.
+
+  // POST /api/admin/businesses/:id/plan-offer  { plan: 'grandfathered' } | { plan: 'free', expiresAt | permanent: true }
+  app.post("/api/admin/businesses/:id/plan-offer", requireAdmin, async (req, res) => {
+    try {
+      const out = await createPlanOffer({ businessId: req.params.id, adminId: (req as any).adminUser.id, body: req.body });
+      res.status(out.status).json(out.body);
+    } catch (error) {
+      console.error("[PlanOffer] create failed:", error);
+      res.status(500).json({ success: false, error: { code: "SERVER_ERROR", message: "Could not send the offer." } });
+    }
+  });
+
+  // DELETE /api/admin/businesses/:id/plan-offer  (withdraw the pending offer, close its open checkout)
+  app.delete("/api/admin/businesses/:id/plan-offer", requireAdmin, async (req, res) => {
+    try {
+      const out = await withdrawPlanOffer({ businessId: req.params.id, adminId: (req as any).adminUser.id });
+      res.status(out.status).json(out.body);
+    } catch (error) {
+      console.error("[PlanOffer] withdraw failed:", error);
+      res.status(500).json({ success: false, error: { code: "SERVER_ERROR", message: "Could not withdraw the offer." } });
+    }
+  });
+
+  // GET /api/vendor/plan-offer  (the signed-in owner's pending offer, or { offer: null })
+  app.get("/api/vendor/plan-offer", authMiddleware, async (req, res) => {
+    try {
+      const out = await getOwnerPlanOffer((req as AuthenticatedRequest).user!.userId);
+      res.status(out.status).json(out.body);
+    } catch (error) {
+      console.error("[PlanOffer] read failed:", error);
+      res.status(500).json({ success: false, error: { code: "SERVER_ERROR", message: "Could not load your offer." } });
+    }
+  });
+
+  // POST /api/vendor/plan-offer/accept  { offerId, useCheckout? }
+  app.post("/api/vendor/plan-offer/accept", authMiddleware, complimentaryRedeemRateLimiter, async (req, res) => {
+    try {
+      const out = await acceptPlanOffer({
+        userId: (req as AuthenticatedRequest).user!.userId,
+        body: req.body,
+        ip: req.ip ?? null,
+        userAgent: req.get("user-agent") ?? null,
+      });
+      res.status(out.status).json(out.body);
+    } catch (error) {
+      console.error("[PlanOffer] accept failed:", error);
+      res.status(500).json({ success: false, error: { code: "SERVER_ERROR", message: "Something went wrong. Please try again in a moment." } });
+    }
+  });
+
+  // POST /api/vendor/subscription/reconcile  { sessionId }  (success page: activate now if the webhook is late)
+  app.post("/api/vendor/subscription/reconcile", authMiddleware, async (req, res) => {
+    try {
+      const out = await reconcileCheckoutSession({ userId: (req as AuthenticatedRequest).user!.userId, body: req.body });
+      res.status(out.status).json(out.body);
+    } catch (error) {
+      console.error("[Subscription] reconcile failed:", error);
+      res.status(500).json({ success: false, error: { code: "SERVER_ERROR", message: "Could not check your plan." } });
     }
   });
 

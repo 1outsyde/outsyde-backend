@@ -27,7 +27,7 @@ const DAY = 24 * 60 * 60 * 1000;
 function copyTests() {
   console.log('\nCopy (no dashes, no fee percentage)');
   const ctx: NoticeContext = { vendorSubscriptionId: 'v', vendorId: 'u', businessId: 'b', businessName: 'Test Biz', ownerEmail: 'o@x.test', ownerFirstName: 'Dana', planName: 'Grandfathered', stripeSubscriptionId: 'sub_1' };
-  const events: SubscriptionEvent[] = ['activated', 'renewed', 'plan_switched', 'payment_failed', 'action_required', 'grace_reminder', 'paused', 'restored', 'ended'];
+  const events: SubscriptionEvent[] = ['activated', 'renewed', 'plan_switched', 'payment_failed', 'action_required', 'grace_reminder', 'paused', 'restored', 'ended', 'free_started'];
   const d = { amountCents: 4099, pastDueSince: new Date('2026-10-01T12:00:00Z'), periodEnd: new Date('2026-11-01T12:00:00Z'), previousPlanName: 'Growth', pausedItems: 3, restoredItems: 3, invoiceId: 'in_1', invoiceUrl: 'https://invoice.stripe.com/i/x' };
   for (const e of events) {
     const v = vendorCopy(e, ctx, d);
@@ -37,7 +37,10 @@ function copyTests() {
     assert(!/8\s?%|percent/i.test(text), `${e}: no fee percentage`);
     assert(a.subject.startsWith('[Subscription] Test Biz: '), `${e}: Outsyde copy subject names the business`, a.subject);
   }
-  assert(vendorCopy('activated', ctx) === null && vendorCopy('renewed', ctx) === null && vendorCopy('plan_switched', ctx) === null, 'activated / renewed / switched: Outsyde copy only (vendor already gets in-app)');
+  assert(vendorCopy('renewed', ctx) === null && vendorCopy('plan_switched', ctx) === null, 'renewed / switched: Outsyde copy only (vendor already gets in-app)');
+  // Legend 2026-10-21: every new paid plan sends the vendor a "You're live" email and push; the in-app row
+  // still comes from NotificationTriggers.subscriptionActivated, so the notice adds none.
+  assert(vendorCopy('activated', ctx)?.subject === "You're live on Outsyde" && vendorCopy('activated', ctx)?.inApp === null, 'activated: vendor gets "You\'re live" email + push, no second in-app');
   assert(vendorCopy('payment_failed', ctx, d)!.body.includes('Thursday, October 8'), 'late email names the day listings pause (7 days after the first failure)', vendorCopy('payment_failed', ctx, d)!.body);
   assert(vendorCopy('action_required', ctx, d)!.cta!.url === d.invoiceUrl, 'confirm email links to the Stripe payment page');
 }
