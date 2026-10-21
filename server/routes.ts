@@ -190,6 +190,7 @@ import {
 } from "./loyaltyLedger";
 import { claimPromoForCheckout, confirmPromoStillHeld, PROMO_TAKEN_RESPONSE } from "./promoCheckout";
 import { calculateProductFee, calculateBookingFee, calculateConsumerServiceFee, calculateBookingFees, quoteDeposit } from "./fees";
+import { resolveProviderRefund } from "./providerRefund";
 import { validateDeposit, invalidDepositBody, validatePhotographerDeposit, photographerBookingDepositCents } from "./deposits";
 import {
   trackLinkClick,
@@ -8811,7 +8812,7 @@ export async function registerRoutes(
 
     try {
       const { appointmentId } = req.params;
-      const { reason, amount } = req.body;
+      const { reason } = req.body; // the amount is read by resolveProviderRefund
       const appointment = await storage.getAppointment(appointmentId);
       
       if (!appointment) {
@@ -8870,8 +8871,13 @@ export async function registerRoutes(
         return res.status(400).json({ error: "No payment found for this booking" });
       }
 
-      // Create refund
-      const refundAmount = amount || appointment.totalPrice; // Full refund if no amount specified
+      // Amount: amountCents (cents) or legacy amount (dollars, from the app); none = full refund,
+      // which is the deposit on deposit bookings, otherwise the service price. Fee kept.
+      const resolved = resolveProviderRefund(req.body, appointment);
+      if (!resolved.ok) {
+        return res.status(400).json({ error: resolved.error, code: resolved.code, maxRefundCents: resolved.maxRefundCents });
+      }
+      const refundAmount = resolved.refundCents;
       const refund = await stripeService.createBookingRefund({
         paymentIntentId: appointment.stripePaymentIntentId,
         amountCents: refundAmount,
@@ -8904,10 +8910,10 @@ export async function registerRoutes(
         cancellationReason: reason || 'Refunded by provider'
       }).where(eq(appointments.id, appointmentId));
 
-      // Reverse points proportionally (partial refund = partial clawback; full = full clawback)
+      // Reverse points proportionally (partial refund = partial clawback; full = full clawback).
+      // Measured against the full refund (deposit or service price): points were earned on that charge.
       try {
-        const totalPrice = appointment.totalPrice || refundAmount;
-        const refundFraction = totalPrice > 0 ? Math.min(1, refundAmount / totalPrice) : 1;
+        const refundFraction = resolved.fullRefundCents > 0 ? Math.min(1, refundAmount / resolved.fullRefundCents) : 1;
         await storage.reversePointsForRefund(appointment.clientId, 'appointment', appointmentId, {
           refundFraction,
           description: 'Points reversed from refund',
@@ -8917,7 +8923,7 @@ export async function registerRoutes(
       }
 
       // No amount = the provider refunded it in full; with an amount, when it covered the whole charge.
-      if (!amount) await giveBackPromoCode({ type: 'appointment', id: appointmentId }, 'provider full refund');
+      if (resolved.isFullRefund) await giveBackPromoCode({ type: 'appointment', id: appointmentId }, 'provider full refund');
       else await giveBackPromoCodeIfFullyRefunded({ type: 'appointment', id: appointmentId }, appointment.stripePaymentIntentId!, 'provider refund');
 
       console.log(`[Booking] Refunded appointment ${appointmentId}: ${refundAmount} cents (refund ID: ${refund.id})`);
@@ -8943,6 +8949,8 @@ export async function registerRoutes(
         success: true,
         refundId: refund.id,
         amount: refundAmount,
+        // Additive (2026-10-21): what Stripe actually refunded, in cents.
+        refundedAmountCents: refund.amount ?? refundAmount,
         status: refund.status
       });
     } catch (error: any) {
@@ -9849,7 +9857,7 @@ export async function registerRoutes(
 
     try {
       const { bookingId } = req.params;
-      const { reason, amount } = req.body;
+      const { reason } = req.body; // the amount is read by resolveProviderRefund
       const booking = await storage.getShootBooking(bookingId);
       
       if (!booking) {
@@ -9907,9 +9915,14 @@ export async function registerRoutes(
         return res.status(400).json({ error: "No payment found for this booking" });
       }
 
-      // Create refund. Default: what was charged before the consumer fee (the
-      // deposit on deposit bookings, otherwise the service price).
-      const refundAmount = amount || (hasDeposit(booking) ? booking.depositAmountCents! : booking.totalPrice);
+      // Amount: amountCents (cents) or legacy amount (dollars, from the app); none = full refund,
+      // what was charged before the consumer fee (the deposit on deposit bookings, otherwise the
+      // service price). Fee kept.
+      const resolved = resolveProviderRefund(req.body, booking);
+      if (!resolved.ok) {
+        return res.status(400).json({ error: resolved.error, code: resolved.code, maxRefundCents: resolved.maxRefundCents });
+      }
+      const refundAmount = resolved.refundCents;
       const refund = await stripeService.createBookingRefund({
         paymentIntentId: booking.stripePaymentIntentId,
         amountCents: refundAmount,
@@ -9942,10 +9955,10 @@ export async function registerRoutes(
         cancellationReason: reason || 'Refunded by provider'
       }).where(eq(shootBookings.id, bookingId));
 
-      // Reverse points proportionally (partial refund = partial clawback; full = full clawback)
+      // Reverse points proportionally (partial refund = partial clawback; full = full clawback).
+      // Measured against the full refund (deposit or service price): points were earned on that charge.
       try {
-        const totalPrice = booking.totalPrice || refundAmount;
-        const refundFraction = totalPrice > 0 ? Math.min(1, refundAmount / totalPrice) : 1;
+        const refundFraction = resolved.fullRefundCents > 0 ? Math.min(1, refundAmount / resolved.fullRefundCents) : 1;
         await storage.reversePointsForRefund(booking.clientId, 'shoot_booking', bookingId, {
           refundFraction,
           description: 'Points reversed from refund',
@@ -9955,7 +9968,7 @@ export async function registerRoutes(
       }
 
       // No amount = the provider refunded it in full; with an amount, when it covered the whole charge.
-      if (!amount) await giveBackPromoCode({ type: 'shoot_booking', id: bookingId }, 'provider full refund');
+      if (resolved.isFullRefund) await giveBackPromoCode({ type: 'shoot_booking', id: bookingId }, 'provider full refund');
       else await giveBackPromoCodeIfFullyRefunded({ type: 'shoot_booking', id: bookingId }, booking.stripePaymentIntentId!, 'provider refund');
 
       console.log(`[Booking] Refunded shoot booking ${bookingId}: ${refundAmount} cents (refund ID: ${refund.id})`);
@@ -9981,6 +9994,8 @@ export async function registerRoutes(
         success: true,
         refundId: refund.id,
         amount: refundAmount,
+        // Additive (2026-10-21): what Stripe actually refunded, in cents.
+        refundedAmountCents: refund.amount ?? refundAmount,
         status: refund.status
       });
     } catch (error: any) {
