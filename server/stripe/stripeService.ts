@@ -11,6 +11,14 @@ function idempotencyKey(prefix: string): string {
   return `${prefix}_${randomUUID()}`;
 }
 
+/** Per-request bound for the event payout job's Stripe calls (only the fields given are set). */
+function eventPayoutRequestOptions(o: { timeoutMs?: number; maxNetworkRetries?: number }): { timeout?: number; maxNetworkRetries?: number } {
+  return {
+    ...(o.timeoutMs !== undefined ? { timeout: o.timeoutMs } : {}),
+    ...(o.maxNetworkRetries !== undefined ? { maxNetworkRetries: o.maxNetworkRetries } : {}),
+  };
+}
+
 export class StripeService {
   // =========================
   // CUSTOMERS
@@ -536,6 +544,131 @@ export class StripeService {
       metadata,
       ...(params.sourceTransaction ? { source_transaction: params.sourceTransaction } : {}),
     }, { idempotencyKey: params.idempotencyKey });
+  }
+
+  // =========================
+  // EVENT HOST PAYOUTS
+  // =========================
+
+  /**
+   * Create a Stripe Express account for an event host. Same shape as the staff helper
+   * (card_payments + transfers, since transfers-only is rejected in live mode).
+   */
+  async createHostConnectAccount(email: string, userId: string, idempotencyKey?: string) {
+    const stripe = await getUncachableStripeClient();
+
+    return stripe.accounts.create({
+      type: "express",
+      email,
+      business_type: "individual",
+      capabilities: {
+        card_payments: { requested: true },
+        transfers: { requested: true },
+      },
+      business_profile: {
+        mcc: "7922", // Theatrical producers (except motion pictures) and ticket agencies
+        product_description: "Event hosting and ticketed events",
+      },
+      metadata: {
+        role: "host",
+        userId,
+      },
+    }, idempotencyKey ? { idempotencyKey } : undefined);
+  }
+
+  /** Whether a host's Connect account can take payouts: ready = charges and payouts both enabled. */
+  async getPayoutReadiness(accountId: string, opts?: { timeoutMs?: number; maxNetworkRetries?: number }): Promise<{ ready: boolean; chargesEnabled: boolean; payoutsEnabled: boolean; detailsSubmitted: boolean }> {
+    const stripe = await getUncachableStripeClient();
+    // Optional bound per request (the payout job passes one); without it the client defaults apply as before.
+    const account = opts ? await stripe.accounts.retrieve(accountId, {}, eventPayoutRequestOptions(opts)) : await stripe.accounts.retrieve(accountId);
+    const chargesEnabled = !!account.charges_enabled;
+    const payoutsEnabled = !!account.payouts_enabled;
+    return {
+      ready: chargesEnabled && payoutsEnabled,
+      chargesEnabled,
+      payoutsEnabled,
+      detailsSubmitted: !!account.details_submitted,
+    };
+  }
+
+  /**
+   * An event payout transfer already sent for this payout, if any. Looks in the event's
+   * transfer_group for the one whose metadata.payoutId matches. A single page of 100 is enough
+   * (one transfer per payout plus rare recoveries per event), so no paging is done.
+   */
+  async findEventPayoutTransfer(eventId: string, payoutId: string, opts?: { timeoutMs?: number; maxNetworkRetries?: number }): Promise<{ id: string; amount: number } | null> {
+    const stripe = await getUncachableStripeClient();
+    const params = { transfer_group: `event_${eventId}`, limit: 100 };
+    const existing = opts ? await stripe.transfers.list(params, eventPayoutRequestOptions(opts)) : await stripe.transfers.list(params);
+    const prior = existing.data.find(t => t.metadata?.payoutId === payoutId);
+    return prior ? { id: prior.id, amount: prior.amount } : null;
+  }
+
+  /**
+   * Send an event payout to the host's Connect account. Idempotent on event_payout_<payoutId> unless the caller
+   * passes its own key (the payout job uses one key per try, since Stripe replays a saved error for 24 hours).
+   */
+  async createEventPayoutTransfer(p: {
+    eventId: string; payoutId: string; destination: string; amountCents: number; idempotencyKey?: string;
+    /** Bounded so the whole call ends well inside the payout job's 10 minute claim (default 30 s, 1 network retry). */
+    timeoutMs?: number; maxNetworkRetries?: number;
+  }): Promise<{ id: string }> {
+    const stripe = await getUncachableStripeClient();
+    const transfer = await stripe.transfers.create({
+      amount: p.amountCents,
+      currency: 'usd',
+      destination: p.destination,
+      transfer_group: `event_${p.eventId}`,
+      metadata: { type: 'event_payout', eventId: p.eventId, payoutId: p.payoutId },
+    }, {
+      idempotencyKey: p.idempotencyKey ?? `event_payout_${p.payoutId}`,
+      timeout: p.timeoutMs ?? 30000,
+      maxNetworkRetries: p.maxNetworkRetries ?? 1,
+    });
+    return { id: transfer.id };
+  }
+
+  /**
+   * Pull back part of an event payout after a ticket refund. Idempotent on event_recovery_<ticketId> unless the
+   * caller passes its own key (the recovery job uses one key per try, since Stripe replays a saved error for 24
+   * hours). timeoutMs / maxNetworkRetries bound the call when given; without them the client defaults apply.
+   */
+  async reverseEventPayoutTransfer(p: {
+    transferId: string; ticketId: string; amountCents: number; idempotencyKey?: string;
+    timeoutMs?: number; maxNetworkRetries?: number;
+  }): Promise<{ id: string }> {
+    const stripe = await getUncachableStripeClient();
+    const reversal = await stripe.transfers.createReversal(p.transferId, {
+      amount: p.amountCents,
+      metadata: { type: 'event_payout_recovery', ticketId: p.ticketId },
+    }, { idempotencyKey: p.idempotencyKey ?? `event_recovery_${p.ticketId}`, ...eventPayoutRequestOptions(p) });
+    return { id: reversal.id };
+  }
+
+  /**
+   * A reversal already made on this transfer for this ticket, if any (metadata.ticketId). One reversal per
+   * refunded ticket of one event payout, so up to 10 pages of 100 are read (an event cancelled after its payout
+   * can have hundreds). Each page call is bounded by opts when given.
+   */
+  async findEventPayoutReversal(transferId: string, ticketId: string, opts?: { timeoutMs?: number; maxNetworkRetries?: number }): Promise<{ id: string; amount: number } | null> {
+    const stripe = await getUncachableStripeClient();
+    let startingAfter: string | undefined;
+    for (let page = 0; page < 10; page++) {
+      const params = { limit: 100, ...(startingAfter ? { starting_after: startingAfter } : {}) };
+      const list = opts ? await stripe.transfers.listReversals(transferId, params, eventPayoutRequestOptions(opts)) : await stripe.transfers.listReversals(transferId, params);
+      const prior = list.data.find(r => r.metadata?.ticketId === ticketId);
+      if (prior) return { id: prior.id, amount: prior.amount };
+      if (!list.has_more || list.data.length === 0) return null;
+      startingAfter = list.data[list.data.length - 1].id;
+    }
+    throw new Error(`more than 1000 reversals on transfer ${transferId}: can't tell if ticket ${ticketId} was reversed`);
+  }
+
+  /** True when Stripe or the platform balance says there are not enough funds (same match as payouts.ts). */
+  isInsufficientFundsError(err: unknown): boolean {
+    const e = err as { code?: string; raw?: { code?: string }; message?: string } | null;
+    const code = e?.code ?? e?.raw?.code;
+    return code === 'balance_insufficient' || /insufficient (available )?funds/i.test(e?.message ?? '');
   }
 
   /** The charge behind a PaymentIntent: id, amount received and amount already refunded. */

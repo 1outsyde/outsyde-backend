@@ -145,3 +145,21 @@ export async function notifyFreeOrdersCancelled(orderIds: string[]): Promise<voi
     }
   }
 }
+
+/** After an event payout was sent (or found already sent) to the host's Stripe account: one push to the host. */
+export async function notifyPayoutSent(payoutId: string): Promise<void> {
+  try {
+    const d = await deps();
+    const [p] = await rows<any>(sql`
+      SELECT p.id, p.status, p.event_id, e.title, e.host_user_id
+      FROM event_payouts p JOIN events e ON e.id = p.event_id WHERE p.id = ${payoutId}`);
+    if (!p || p.status !== "paid") return;
+    await d.sendPush({
+      userId: p.host_user_id, title: "Payout sent",
+      body: `Your payout for ${p.title} is on its way to your bank.`,
+      data: { type: "event_payout_sent", eventId: p.event_id, payoutId },
+    });
+  } catch (err) {
+    console.error(`[Tickets] payout push failed for payout ${payoutId}:`, (err as Error)?.message ?? err);
+  }
+}

@@ -171,8 +171,14 @@ export async function settleTicketOrder(orderId: string, paymentIntentId: string
   }
 }
 
-async function alertAdmin(subject: string, detail: string) {
+let adminAlertForTest: ((subject: string, detail: string) => Promise<void>) | null = null;
+/** Tests only: record admin alerts instead of emailing them (null restores the real sender). */
+export function setAdminAlertForTest(fn: ((subject: string, detail: string) => Promise<void>) | null) { adminAlertForTest = fn; }
+
+/** Emails the admin. Never throws. */
+export async function alertAdmin(subject: string, detail: string) {
   try {
+    if (adminAlertForTest) return await adminAlertForTest(subject, detail);
     const { sendAdminEmail, ADMIN_NOTIFICATION_EMAIL } = await import("../emailService");
     // Internal alert: no log tag, so it stays out of the customer email History (same as other admin alerts).
     await sendAdminEmail({

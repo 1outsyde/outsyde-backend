@@ -11054,6 +11054,26 @@ export async function registerRoutes(
       return res.redirect(`${process.env.FRONTEND_URL}/vendor-dashboard/stripe/return?status=complete`);
     }
 
+    // host: a customer hosting paid events came back from payout onboarding. Handled here and returns
+    // before any existing branch runs.
+    if (req.query.type === 'host' || req.query.type === 'host-web') {
+      const hostAccount = req.query.account;
+      if (typeof hostAccount === 'string' && hostAccount) {
+        try {
+          const stripe = await getUncachableStripeClient();
+          const stripeAccount = await stripe.accounts.retrieve(hostAccount);
+          const { markHostReturnComplete } = await import("./events/hostPayouts");
+          await markHostReturnComplete(hostAccount, stripeAccount);
+        } catch (e) {
+          console.error("[Stripe Connect] Failed to retrieve account on host return:", e);
+        }
+      }
+      if (req.query.type === 'host-web') {
+        return res.redirect(`${process.env.FRONTEND_URL}/events/payouts?stripe=done`);
+      }
+      return res.redirect('outsyde://stripe-return?status=complete&type=host');
+    }
+
     const { account, type, staffId } = req.query;
     if (account) {
       try {
@@ -11114,6 +11134,13 @@ export async function registerRoutes(
       }
       console.warn(`[Stripe Connect] vendor-site refresh with a non-allowlisted origin (${JSON.stringify(siteOrigin)?.slice(0, 200)}); using the vendor-web refresh page`);
       return res.redirect(`${process.env.FRONTEND_URL}/vendor-dashboard/stripe/refresh`);
+    }
+
+    if (req.query.type === 'host-web') {
+      return res.redirect(`${process.env.FRONTEND_URL}/events/payouts?stripe=refresh`);
+    }
+    if (req.query.type === 'host') {
+      return res.redirect('outsyde://stripe-return?status=refresh&type=host');
     }
 
     const { type, staffId } = req.query;
