@@ -177,6 +177,7 @@ import { interestMatchProfile } from "@shared/customerInterests";
 import { db } from "./db";
 import { coverPosterUrl, coverStillImage, nonEmpty } from "./coverMedia";
 import { eq, ilike, or, and, sql, isNull, isNotNull, desc, asc, gte, lte, ne, inArray, notInArray } from "drizzle-orm";
+import { makeSearchReadyChecker } from "./search/searchReady";
 import {
   creditPoints,
   createPending,
@@ -6151,6 +6152,13 @@ export class DatabaseStorage implements IStorage {
 
     const results: UnifiedSearchResult[] = [];
 
+    // A business, and its products, services and staff, only show once it is approved, has an
+    // active plan and working Stripe payouts (search/searchReady.ts). Admins see everything.
+    const isSearchReady = makeSearchReadyChecker(
+      async (businessId) => (await this.isBusinessSubscriptionActive(businessId)).active,
+      { isAdmin: !!isAdmin },
+    );
+
     // ==================== CONSUMERS ====================
     if (scope === 'all' || scope === 'consumers') {
       // Exclude users who are active, fully-onboarded staff members elsewhere
@@ -6310,12 +6318,8 @@ export class DatabaseStorage implements IStorage {
         .offset(scope === 'businesses' ? offset : 0);
 
       for (const b of businessRows) {
-        if (!isAdmin && b.ownerId?.toLowerCase().includes('demo')) continue;
-
-        if (!isAdmin) {
-          const subStatus = await this.isBusinessSubscriptionActive(b.id);
-          if (!subStatus.active) continue;
-        }
+        // approved + not demo + active plan (as before) + working payouts (new)
+        if (!(await isSearchReady(b))) continue;
 
         const lower = searchTerm.toLowerCase();
         const nameLower = b.name.toLowerCase();
@@ -6377,6 +6381,11 @@ export class DatabaseStorage implements IStorage {
           bName: businesses.name,
           bCity: businesses.city,
           bState: businesses.state,
+          bId: businesses.id,
+          bApproval: businesses.approvalStatus,
+          bOwnerId: businesses.ownerId,
+          bStripe: businesses.stripeOnboardingComplete,
+          bStripeAccount: businesses.stripeAccountId,
           linkedUsername: users.username,
         })
         .from(staffMembers)
@@ -6397,6 +6406,8 @@ export class DatabaseStorage implements IStorage {
         .offset(scope === 'staff' ? offset : 0);
 
       for (const row of staffRows) {
+        // Staff of a business that isn't search-ready don't show either.
+        if (!(await isSearchReady({ id: row.bId, approvalStatus: row.bApproval, ownerId: row.bOwnerId, stripeOnboardingComplete: row.bStripe, stripeAccountId: row.bStripeAccount }))) continue;
         const lower = searchTerm.toLowerCase();
         const nameLower = (row.st.displayName || '').toLowerCase();
 
@@ -6452,6 +6463,7 @@ export class DatabaseStorage implements IStorage {
           bState: businesses.state,
           bOwnerId: businesses.ownerId,
           bStripe: businesses.stripeOnboardingComplete,
+          bStripeAccount: businesses.stripeAccountId,
           bApproval: businesses.approvalStatus,
           isFeatured: vendorProducts.isFeatured,
         })
@@ -6475,7 +6487,8 @@ export class DatabaseStorage implements IStorage {
         .offset(scope === 'products' ? offset : 0);
 
       for (const row of productRows) {
-        if (!isAdmin && row.bOwnerId?.toLowerCase().includes('demo')) continue;
+        // Same rule as the business itself: approved + active plan + working payouts.
+        if (!(await isSearchReady({ id: row.p.businessId, approvalStatus: row.bApproval, ownerId: row.bOwnerId, stripeOnboardingComplete: row.bStripe, stripeAccountId: row.bStripeAccount }))) continue;
 
         const lower = searchTerm.toLowerCase();
         const nameLower = row.p.name.toLowerCase();
@@ -6532,6 +6545,7 @@ export class DatabaseStorage implements IStorage {
           bState: businesses.state,
           bOwnerId: businesses.ownerId,
           bStripe: businesses.stripeOnboardingComplete,
+          bStripeAccount: businesses.stripeAccountId,
           bApproval: businesses.approvalStatus,
           isFeatured: vendorServices.isFeatured,
         })
@@ -6555,7 +6569,8 @@ export class DatabaseStorage implements IStorage {
         .offset(scope === 'services' ? offset : 0);
 
       for (const row of vendorServiceRows) {
-        if (!isAdmin && row.bOwnerId?.toLowerCase().includes('demo')) continue;
+        // Same rule as the business itself: approved + active plan + working payouts.
+        if (!(await isSearchReady({ id: row.s.businessId, approvalStatus: row.bApproval, ownerId: row.bOwnerId, stripeOnboardingComplete: row.bStripe, stripeAccountId: row.bStripeAccount }))) continue;
 
         const lower = searchTerm.toLowerCase();
         const nameLower = row.s.name.toLowerCase();
