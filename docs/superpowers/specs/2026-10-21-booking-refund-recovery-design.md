@@ -1,6 +1,6 @@
 # Booking refund recovery (P1 #5): design
 
-Status: draft for Legend's approval (2026-10-21).
+Status: for Legend's approval (2026-10-21). Builder check done (section G).
 Audit basis: backend main `c84dd25`, read-only audit 2026-10-21 (refund paths A1 to A8, payout records, event recovery code), Neon read-only, docs.stripe.com (account balances, account debits, pending transfer reversals).
 
 ## Why
@@ -31,6 +31,7 @@ A booking's seller (business, staff member or photographer) is paid by a Stripe 
 ## Decided (Legend)
 - Steps 1, 2, 4, 5 now; step 3 after the legal walkthrough (2026-10-21).
 - All booking refund paths recover (2026-10-21).
+- Staff bookings: the staff member pays back, even when the business started the refund (2026-10-21).
 - Agreements (Vendor Agreement update, new Event Host Agreement with scroll and checkbox) are drafted later; listed in the vault (2026-10-21).
 
 ## Design ("call" = Claude's call)
@@ -41,7 +42,7 @@ A booking's seller (business, staff member or photographer) is paid by a Stripe 
 
 ### B. How much comes back
 - Sent = sum of the booking's transfers in Stripe (`transfer_group` `appointment_<id>` or `shoot_booking_<id>`), each `amount − amount_reversed`. Never `vendor_net` or `staff_payout`.
-- Share = Sent × min(1, refund ÷ min(base, amount received)), base = deposit or total price, rounded to the cent, capped at what is left after earlier recoveries for that booking. A full refund takes back everything left. Call (the audit's option 2; matches "the 8% fee is never refunded" and the cap at what Stripe holds).
+- Share = intended payout × min(1, refund ÷ min(base, amount received)), base = deposit or total price, intended payout = base minus 2% (as settlement computes it), rounded to the cent, capped at Sent minus earlier recoveries for that booking. A full refund takes back everything left. Call (the audit's option 2 with the builder check's cap; matches "the 8% fee is never refunded" and the cap at what Stripe holds).
 - Nothing sent yet (expired accepts A1/A2, unpaid issue rows, legacy charges): the row closes as `nothing_sent`, amount 0, no Stripe call. The hourly payout retry already drops unpaid parts once a refund exists.
 - Several transfers on one booking (base, `_src`, `_rewards`): reversed in order, largest remaining first, until the share is covered. Call.
 
@@ -64,6 +65,12 @@ A booking's seller (business, staff member or photographer) is paid by a Stripe 
 
 ### F. Bank payout
 - Owed booking recoveries are money owed TO Outsyde: never counted as cash in `computeHeld` (same as event recoveries). Nothing else in the bank payout changes.
+
+### G. Builder check answers (2026-10-21)
+- **Stripe when the seller's balance is too low:** our sellers are Express accounts with Outsyde responsible for negative balances, and we are not in Stripe's private preview for pending reversals, so Stripe's docs say the reversal is refused with an error ("Reversals that don't meet these criteria return an error if the connected account has insufficient balance", docs.stripe.com/connect/pending-transfer-reversals). A plain reversal never takes the seller below zero (that needs an account debit, step 3). So section C's `owed` path is right. The exact error code is checked in Stripe test mode during the build; until then the code treats any error it doesn't recognise as insufficient by retrying, then lookup only after 5 tries, then `owed` (same safety net as events). Call.
+- **Start date:** only refunds created at or after the deploy recorded in the migration (a `recovery_start_at` setting, default the migration time) are recovered; event recoveries already `owed` before deploy get no seller alert. Neon 2026-10-21 has 0 booking refunds, 0 booking transfers and 0 event recoveries, so nothing old exists either way. Call.
+- **Staff bookings (Legend 2026-10-21):** the staff member pays back, even when the business owner started the refund (refund button or bulk cancel). Their payout, their debt: taken back from their Stripe balance, and if short, from their next booking payout. The staff member and the business owner both get the alert.
+- **Part of the payout never sent (`_rewards` part dropped by the retry):** share = intended payout (deposit or total minus 2%) × refund ratio, capped at what was actually sent and not yet reversed. The seller never gives back more than their fair share of what they should have received. Call.
 
 ## Constraints
 Same as PR 5a and 5b: one SQL statement per multi-row change, claim before every money step, per-try keys plus lookup before every reversal, bounded calls, tests on localhost with the Stripe stub, migration hand-run in Neon by Claude before merge, backend only, every response unchanged.
