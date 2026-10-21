@@ -150,9 +150,10 @@ async function realRecoveryStripe(): Promise<RecoveryStripe> {
   return stripeService;
 }
 
+/** notice "taken_back": the share was taken back (sent with its own email log tag and push type); absent: owed. */
 export type RecoveryNotice =
-  | { channel: "email"; to: string; kind: "booking" | "shoot" | "staff" | "ticket"; subject: string; text: string }
-  | { channel: "push"; userId: string; title: string; body: string };
+  | { channel: "email"; to: string; kind: "booking" | "shoot" | "staff" | "ticket"; subject: string; text: string; notice?: "taken_back" }
+  | { channel: "push"; userId: string; title: string; body: string; notice?: "taken_back" };
 let notifyForTest: ((m: RecoveryNotice) => Promise<void>) | null = null;
 /** Test seam only: records seller emails and pushes instead of sending them. Never set in production. */
 export function setRecoveryNotifyForTest(fn: ((m: RecoveryNotice) => Promise<void>) | null): void { notifyForTest = fn; }
@@ -161,12 +162,13 @@ export function setRecoveryNotifyForTest(fn: ((m: RecoveryNotice) => Promise<voi
 async function deliver(m: RecoveryNotice): Promise<void> {
   try {
     if (notifyForTest) return await notifyForTest(m);
+    const takenBack = m.notice === "taken_back";
     if (m.channel === "email") {
-      const { sendRefundOwedEmail } = await import("./emailService");
-      await sendRefundOwedEmail({ to: m.to, kind: m.kind, subject: m.subject, text: m.text });
+      const { sendRefundOwedEmail, sendRefundTakenBackEmail } = await import("./emailService");
+      await (takenBack ? sendRefundTakenBackEmail : sendRefundOwedEmail)({ to: m.to, kind: m.kind, subject: m.subject, text: m.text });
     } else {
       const { sendExpoPush } = await import("./expoPushService");
-      await sendExpoPush({ userId: m.userId, title: m.title, body: m.body, data: { type: "refund_owed" } });
+      await sendExpoPush({ userId: m.userId, title: m.title, body: m.body, data: { type: takenBack ? "refund_taken_back" : "refund_owed" } });
     }
   } catch (err) {
     console.error(`[bookingRecoveries] seller ${m.channel} failed:`, String((err as Error)?.message ?? err).slice(0, 200));
@@ -464,14 +466,64 @@ function owedText(refundCents: number, owedCents: number, what: string): string 
 function eventOwedText(title: string, owedCents: number): string {
   return `A ticket for your event ${title} was refunded. ${OWED_TAIL(owedCents)}`;
 }
+const TAKEN_SUBJECT = "Refund taken back from your balance";
+const TAKEN_TAIL = (takenCents: number) =>
+  `Your share of ${money(takenCents)} was taken back from your Stripe balance. If your balance didn't cover it, it shows as negative and your next sales pay it back first.`;
+function takenText(refundCents: number, takenCents: number, what: string): string {
+  return `A customer was refunded ${money(refundCents)} for your ${what}. ${TAKEN_TAIL(takenCents)}`;
+}
+function eventTakenText(title: string, takenCents: number): string {
+  return `A ticket for your event ${title} was refunded. ${TAKEN_TAIL(takenCents)}`;
+}
 function dateText(d: unknown): string {
   const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(d ?? ""));
   if (!m) return String(d ?? "");
   return new Date(Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3]))).toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric", timeZone: "UTC" });
 }
-async function tell(email: string | null | undefined, userId: string | null | undefined, kind: "booking" | "shoot" | "staff" | "ticket", text: string) {
-  if (email) await deliver({ channel: "email", to: email, kind, subject: OWED_SUBJECT, text });
-  if (userId) await deliver({ channel: "push", userId, title: OWED_SUBJECT, body: text });
+type NoticeKind = { subject: string; notice?: "taken_back" };
+const OWED_NOTICE: NoticeKind = { subject: OWED_SUBJECT };
+const TAKEN_NOTICE: NoticeKind = { subject: TAKEN_SUBJECT, notice: "taken_back" };
+async function tell(email: string | null | undefined, userId: string | null | undefined, kind: "booking" | "shoot" | "staff" | "ticket", text: string, n: NoticeKind = OWED_NOTICE) {
+  if (email) await deliver({ channel: "email", to: email, kind, subject: n.subject, text, ...(n.notice ? { notice: n.notice } : {}) });
+  if (userId) await deliver({ channel: "push", userId, title: n.subject, body: text, ...(n.notice ? { notice: n.notice } : {}) });
+}
+
+/**
+ * Tells the seller of one booking recovery row: the photographer for a shoot; for an appointment the business
+ * owner, or the staff member and the business owner when the staff member was paid. text gets the booking's
+ * "booking on <date>" wording.
+ */
+async function tellBookingSeller(r: any, text: (what: string) => string, n: NoticeKind): Promise<void> {
+  if (r.reference_type === "shoot_booking") {
+    const [x] = await rows<any>(sql`
+      SELECT sb.date AS d, p.user_id, u.email FROM shoot_bookings sb JOIN photographers p ON p.id = sb.photographer_id
+      LEFT JOIN users u ON u.id = p.user_id WHERE sb.id = ${r.reference_id}`);
+    if (!x) return;
+    await tell(x.email, x.user_id, "shoot", text(`booking on ${dateText(x.d)}`), n);
+  } else {
+    const [x] = await rows<any>(sql`
+      SELECT a.appointment_date AS d, b.owner_id, COALESCE(b.contact_email, ou.email) AS owner_email, sm.email AS staff_email, sm.user_id AS staff_user
+      FROM appointments a JOIN businesses b ON b.id = a.business_id LEFT JOIN users ou ON ou.id = b.owner_id
+      LEFT JOIN staff_members sm ON sm.id = a.staff_member_id WHERE a.id = ${r.reference_id}`);
+    if (!x) return;
+    const t = text(`booking on ${dateText(x.d)}`);
+    if (r.recipient === "staff") {
+      await tell(x.staff_email, x.staff_user, "staff", t, n);
+      await tell(x.owner_email, x.owner_id, "staff", t, n);
+    } else {
+      await tell(x.owner_email, x.owner_id, "booking", t, n);
+    }
+  }
+}
+
+/** Tells the host of one event recovery row (the event behind its payout). text gets the event title. */
+async function tellEventHost(r: any, text: (title: string) => string, n: NoticeKind): Promise<void> {
+  const [x] = await rows<any>(sql`
+    SELECT e.title, e.host_user_id, u.email FROM event_payouts p JOIN events e ON e.id = p.event_id
+    LEFT JOIN users u ON u.id = e.host_user_id
+    WHERE p.id = ${r.payout_id}`);
+  if (!x) return;
+  await tell(x.email, x.host_user_id, "ticket", text(String(x.title ?? "")), n);
 }
 
 /**
@@ -488,26 +540,7 @@ export async function notifyOwedSellers(): Promise<number> {
   for (const r of bk) {
     try {
       const owed = Math.max(0, Number(r.amount_cents) - Number(r.reversed_cents));
-      if (r.reference_type === "shoot_booking") {
-        const [x] = await rows<any>(sql`
-          SELECT sb.date AS d, p.user_id, u.email FROM shoot_bookings sb JOIN photographers p ON p.id = sb.photographer_id
-          LEFT JOIN users u ON u.id = p.user_id WHERE sb.id = ${r.reference_id}`);
-        if (!x) continue;
-        await tell(x.email, x.user_id, "shoot", owedText(r.refund_cents, owed, `booking on ${dateText(x.d)}`));
-      } else {
-        const [x] = await rows<any>(sql`
-          SELECT a.appointment_date AS d, b.owner_id, COALESCE(b.contact_email, ou.email) AS owner_email, sm.email AS staff_email, sm.user_id AS staff_user
-          FROM appointments a JOIN businesses b ON b.id = a.business_id LEFT JOIN users ou ON ou.id = b.owner_id
-          LEFT JOIN staff_members sm ON sm.id = a.staff_member_id WHERE a.id = ${r.reference_id}`);
-        if (!x) continue;
-        const text = owedText(r.refund_cents, owed, `booking on ${dateText(x.d)}`);
-        if (r.recipient === "staff") {
-          await tell(x.staff_email, x.staff_user, "staff", text);
-          await tell(x.owner_email, x.owner_id, "staff", text);
-        } else {
-          await tell(x.owner_email, x.owner_id, "booking", text);
-        }
-      }
+      await tellBookingSeller(r, (what) => owedText(r.refund_cents, owed, what), OWED_NOTICE);
     } catch (err) {
       console.error(`[bookingRecoveries] seller notice for ${r.id} failed:`, errText(err));
     }
@@ -521,14 +554,48 @@ export async function notifyOwedSellers(): Promise<number> {
     RETURNING id, ticket_id, payout_id, amount_cents`);
   for (const r of ev) {
     try {
-      const [x] = await rows<any>(sql`
-        SELECT e.title, e.host_user_id, u.email FROM event_payouts p JOIN events e ON e.id = p.event_id
-        LEFT JOIN users u ON u.id = e.host_user_id
-        WHERE p.id = ${r.payout_id}`);
-      if (!x) continue;
-      await tell(x.email, x.host_user_id, "ticket", eventOwedText(String(x.title ?? ""), Number(r.amount_cents)));
+      await tellEventHost(r, (title) => eventOwedText(title, Number(r.amount_cents)), OWED_NOTICE);
     } catch (err) {
       console.error(`[bookingRecoveries] host notice for event recovery ${r.id} failed:`, errText(err));
+    }
+  }
+  return bk.length + ev.length;
+}
+
+/**
+ * One email and one push each time a share was taken back from a seller's Stripe balance (the reversal goes through
+ * even when the balance is too low: it then shows as negative and Stripe takes it from the next sales). Booking rows
+ * that ended 'reversed' with something reversed, and event rows that ended 'reversed' and were created at or after
+ * the start date. Same people as notifyOwedSellers. Once per row (claimed by setting seller_notified_at before
+ * sending): an owed row was told when it became owed, so it is never told again when it is later recovered, and
+ * nothing_sent / not_booking rows are never told. Returns how many rows were told.
+ */
+export async function notifyTakenBack(): Promise<number> {
+  const bk = await rows<any>(sql`
+    UPDATE booking_refund_recoveries SET seller_notified_at = now(), updated_at = now()
+    WHERE id IN (SELECT id FROM booking_refund_recoveries
+                 WHERE status = 'reversed' AND reversed_cents > 0 AND seller_notified_at IS NULL ORDER BY updated_at LIMIT 50)
+      AND status = 'reversed' AND reversed_cents > 0 AND seller_notified_at IS NULL
+    RETURNING id, reference_type, reference_id, recipient, refund_cents, reversed_cents`);
+  for (const r of bk) {
+    try {
+      await tellBookingSeller(r, (what) => takenText(r.refund_cents, Number(r.reversed_cents), what), TAKEN_NOTICE);
+    } catch (err) {
+      console.error(`[bookingRecoveries] taken back notice for ${r.id} failed:`, errText(err));
+    }
+  }
+  const ev = await rows<any>(sql`
+    UPDATE event_payout_recoveries SET seller_notified_at = now(), updated_at = now()
+    WHERE id IN (SELECT id FROM event_payout_recoveries
+                 WHERE status = 'reversed' AND seller_notified_at IS NULL AND created_at >= to_timestamp(${RECOVERY_START_UNIX})
+                 ORDER BY created_at LIMIT 50)
+      AND status = 'reversed' AND seller_notified_at IS NULL
+    RETURNING id, ticket_id, payout_id, amount_cents`);
+  for (const r of ev) {
+    try {
+      await tellEventHost(r, (title) => eventTakenText(title, Number(r.amount_cents)), TAKEN_NOTICE);
+    } catch (err) {
+      console.error(`[bookingRecoveries] taken back notice for event recovery ${r.id} failed:`, errText(err));
     }
   }
   return bk.length + ev.length;
@@ -580,11 +647,11 @@ export async function alertStuckPending(): Promise<number> {
 
 /**
  * Every minute: record refunds the hook missed (on minutes 0, 15, 30 and 45 only), take back up to 20 due recoveries
- * (least recently tried first), make owed ones due after a new payout, tell sellers, report old owed ones and stuck
+ * (least recently tried first), make owed ones due after a new payout, tell sellers what is owed and what was taken back, report old owed ones and stuck
  * pending ones. Each step has its own try/catch. now is injectable for tests.
  */
-export async function runBookingRecoveryJob(s?: RecoveryStripe, now: Date = new Date()): Promise<{ recorded: number; reversed: number; owed: number; retried: number; notified: number; alerted: number; stuck: number }> {
-  const out = { recorded: 0, reversed: 0, owed: 0, retried: 0, notified: 0, alerted: 0, stuck: 0 };
+export async function runBookingRecoveryJob(s?: RecoveryStripe, now: Date = new Date()): Promise<{ recorded: number; reversed: number; owed: number; retried: number; notified: number; takenBack: number; alerted: number; stuck: number }> {
+  const out = { recorded: 0, reversed: 0, owed: 0, retried: 0, notified: 0, takenBack: 0, alerted: 0, stuck: 0 };
   if (now.getUTCMinutes() % BACKFILL_EVERY_MINUTES === 0) {
     try {
       out.recorded = await backfillRefunds(BACKFILL_LIMIT, s);
@@ -618,6 +685,11 @@ export async function runBookingRecoveryJob(s?: RecoveryStripe, now: Date = new 
     out.notified = await notifyOwedSellers();
   } catch (err) {
     console.error("[bookingRecoveries] seller notice step failed:", errText(err));
+  }
+  try {
+    out.takenBack = await notifyTakenBack();
+  } catch (err) {
+    console.error("[bookingRecoveries] taken back notice step failed:", errText(err));
   }
   try {
     out.alerted = await alertOldOwed();

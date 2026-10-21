@@ -2197,6 +2197,23 @@ export async function sendRefundOwedEmail(params: {
   await sendBrandedEmail(params.to, params.subject, html, { kind: params.kind, label: 'Refund owed notice' });
 }
 
+/** Seller notice that a refund's share was taken back from their Stripe balance. Same layout as sendRefundOwedEmail. */
+export async function sendRefundTakenBackEmail(params: {
+  to: string;
+  kind: 'booking' | 'shoot' | 'staff' | 'ticket';
+  subject: string;
+  text: string;
+}): Promise<void> {
+  const html = wrapEmail(`
+    ${emailHeader(escapeHtml(params.subject), 'About a recent refund')}
+    <tr><td style="background:#1A1A1A;padding:8px 32px 24px;">
+      <p style="color:#FFFFFF;font-size:15px;line-height:1.6;margin:0;">${escapeHtml(params.text)}</p>
+    </td></tr>
+    ${emailFooter()}
+  `);
+  await sendBrandedEmail(params.to, params.subject, html, { kind: params.kind, label: 'Refund taken back notice' });
+}
+
 // ─── Event tickets (Events & Ticketing Phase 2 PR 4) ─────────────────────────
 // Copy rules: real punctuation, no dashes, and the service fee is named but never given as a percentage.
 // Every value from the database is escaped. These throw on a send failure; callers catch.
