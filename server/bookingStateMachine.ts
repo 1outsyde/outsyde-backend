@@ -521,6 +521,15 @@ export function startBookingCleanupJob(intervalMs: number = 60000): NodeJS.Timeo
     } catch (error) {
       console.error("[BookingCleanup] Error during bank payout job:", error);
     }
+
+    // Booking refund recovery: take the seller's share of each booking refund back from their transfer, owed when their balance is short, seller alerts (claim with a 10 minute in-flight lock, lookup before every reversal, one key per try: safe to run twice).
+    // Own try/catch, after the bank payout job, so neither can starve the other.
+    try {
+      const { runBookingRecoveryJob } = await import("./bookingRecoveries");
+      await runBookingRecoveryJob();
+    } catch (error) {
+      console.error("[BookingCleanup] Error during booking refund recovery job:", error);
+    }
   };
 
   cleanup();
