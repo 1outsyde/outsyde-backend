@@ -19,6 +19,12 @@ function eventPayoutRequestOptions(o: { timeoutMs?: number; maxNetworkRetries?: 
   };
 }
 
+/** Bound for the bank payout calls: eventPayoutRequestOptions plus defaults of 30 s and 1 network retry for missing fields. */
+function boundedPayoutOptions(o: { timeoutMs?: number; maxNetworkRetries?: number }): { timeout: number; maxNetworkRetries: number } {
+  const set = eventPayoutRequestOptions(o);
+  return { timeout: set.timeout ?? 30000, maxNetworkRetries: set.maxNetworkRetries ?? 1 };
+}
+
 export class StripeService {
   // =========================
   // CUSTOMERS
@@ -688,6 +694,72 @@ export class StripeService {
     const stripe = await getUncachableStripeClient();
     const balance = await stripe.balance.retrieve();
     return (balance.available ?? []).filter(b => b.currency === 'usd').reduce((sum, b) => sum + b.amount, 0);
+  }
+
+  // =========================
+  // DAILY BANK PAYOUT (platform balance -> Outsyde's bank). Every call is bounded by opts (defaults: 30 s, 1 network retry).
+  // =========================
+
+  /** The platform's own payout schedule interval ('manual', 'daily', 'weekly', 'monthly'), or null when Stripe returns none. */
+  async getPlatformPayoutInterval(opts: { timeoutMs?: number; maxNetworkRetries?: number } = {}): Promise<string | null> {
+    const stripe = await getUncachableStripeClient();
+    // GET /v1/account (the platform itself, no account id).
+    const account = await stripe.accounts.retrieveCurrent({}, boundedPayoutOptions(opts));
+    return account.settings?.payouts?.schedule?.interval ?? null;
+  }
+
+  /** Available USD balance in cents, plus the other currencies that hold a non-zero available amount. */
+  async getAvailableUsdBalance(opts: { timeoutMs?: number; maxNetworkRetries?: number } = {}): Promise<{ usdCents: number; otherCurrencies: string[] }> {
+    const stripe = await getUncachableStripeClient();
+    const balance = await stripe.balance.retrieve({}, boundedPayoutOptions(opts));
+    const available = balance.available ?? [];
+    const usdCents = available.filter(b => b.currency === 'usd').reduce((sum, b) => sum + b.amount, 0);
+    const otherCurrencies = Array.from(new Set(available.filter(b => b.currency !== 'usd' && b.amount !== 0).map(b => b.currency)));
+    return { usdCents, otherCurrencies };
+  }
+
+  /** Platform payouts created at or after sinceUnix. Follows has_more for up to 5 pages of 100. */
+  async listPlatformPayoutsCreatedSince(sinceUnix: number, opts: { timeoutMs?: number; maxNetworkRetries?: number } = {}): Promise<Array<{ id: string; amount: number; status: string; created: number; metadata: Record<string, string> }>> {
+    const stripe = await getUncachableStripeClient();
+    const out: Array<{ id: string; amount: number; status: string; created: number; metadata: Record<string, string> }> = [];
+    let startingAfter: string | undefined;
+    for (let page = 0; page < 5; page++) {
+      const list = await stripe.payouts.list(
+        { created: { gte: sinceUnix }, limit: 100, ...(startingAfter ? { starting_after: startingAfter } : {}) },
+        boundedPayoutOptions(opts),
+      );
+      for (const p of list.data) out.push({ id: p.id, amount: p.amount, status: p.status, created: p.created, metadata: (p.metadata ?? {}) as Record<string, string> });
+      if (!list.has_more || list.data.length === 0) break;
+      startingAfter = list.data[list.data.length - 1].id;
+    }
+    return out;
+  }
+
+  /**
+   * Send one standard payout from the platform's USD balance to its bank. The caller supplies the idempotency
+   * key (one per try: Stripe replays a saved response, errors included, for 24 hours).
+   */
+  async createPlatformPayout(p: {
+    amountCents: number; payoutDate: string; rowId: string; idempotencyKey: string;
+    timeoutMs?: number; maxNetworkRetries?: number;
+  }): Promise<{ id: string; status: string }> {
+    const stripe = await getUncachableStripeClient();
+    const payout = await stripe.payouts.create({
+      amount: p.amountCents,
+      currency: 'usd',
+      method: 'standard',
+      statement_descriptor: 'OUTSYDE',
+      description: `Outsyde daily payout ${p.payoutDate}`,
+      metadata: { type: 'outsyde_bank_payout', payoutDate: p.payoutDate, rowId: p.rowId },
+    }, { idempotencyKey: p.idempotencyKey, ...boundedPayoutOptions(p) });
+    return { id: payout.id, status: payout.status };
+  }
+
+  /** Current state of a platform payout, with Stripe's failure code when it failed. */
+  async retrievePlatformPayout(id: string, opts: { timeoutMs?: number; maxNetworkRetries?: number } = {}): Promise<{ id: string; status: string; failureCode: string | null }> {
+    const stripe = await getUncachableStripeClient();
+    const payout = await stripe.payouts.retrieve(id, {}, boundedPayoutOptions(opts));
+    return { id: payout.id, status: payout.status, failureCode: payout.failure_code ?? null };
   }
 
   /**
