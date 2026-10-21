@@ -670,6 +670,66 @@ export class StripeService {
     throw new Error(`more than 1000 reversals on transfer ${transferId}: can't tell if ticket ${ticketId} was reversed`);
   }
 
+  // =========================
+  // BOOKING REFUND RECOVERY. Every call is bounded by opts (defaults: 30 s, 1 network retry).
+
+  /** Transfers made for a booking charge (by transfer_group): id, amount, amount already reversed and destination account. */
+  async listBookingTransfers(transferGroup: string, opts: { timeoutMs?: number; maxNetworkRetries?: number } = {}): Promise<Array<{ id: string; amount: number; amountReversed: number; destination: string }>> {
+    const stripe = await getUncachableStripeClient();
+    const list = await stripe.transfers.list({ transfer_group: transferGroup, limit: 100 }, boundedPayoutOptions(opts));
+    return list.data.map(t => ({
+      id: t.id,
+      amount: t.amount,
+      amountReversed: t.amount_reversed ?? 0,
+      destination: typeof t.destination === 'string' ? t.destination : (t.destination?.id ?? ''),
+    }));
+  }
+
+  /** Refunds on a PaymentIntent: id, amount, created (unix seconds) and status. */
+  async listPaymentIntentRefunds(paymentIntentId: string, opts: { timeoutMs?: number; maxNetworkRetries?: number } = {}): Promise<Array<{ id: string; amount: number; created: number; status: string }>> {
+    const stripe = await getUncachableStripeClient();
+    const list = await stripe.refunds.list({ payment_intent: paymentIntentId, limit: 100 }, boundedPayoutOptions(opts));
+    return list.data.map(r => ({ id: r.id, amount: r.amount, created: r.created, status: r.status ?? '' }));
+  }
+
+  /**
+   * Reversals already made on a transfer for one refund (metadata.refundId). Up to 10 pages of 100 are read; each
+   * page call is bounded by opts.
+   */
+  async findRecoveryReversals(transferId: string, refundId: string, opts: { timeoutMs?: number; maxNetworkRetries?: number } = {}): Promise<Array<{ id: string; amount: number }>> {
+    const stripe = await getUncachableStripeClient();
+    const found: Array<{ id: string; amount: number }> = [];
+    let startingAfter: string | undefined;
+    for (let page = 0; page < 10; page++) {
+      const params = { limit: 100, ...(startingAfter ? { starting_after: startingAfter } : {}) };
+      const list = await stripe.transfers.listReversals(transferId, params, boundedPayoutOptions(opts));
+      for (const r of list.data) if (r.metadata?.refundId === refundId) found.push({ id: r.id, amount: r.amount });
+      if (!list.has_more || list.data.length === 0) return found;
+      startingAfter = list.data[list.data.length - 1].id;
+    }
+    return found;
+  }
+
+  /** Take back part of a seller's transfer after a booking refund. The caller passes its own idempotency key (one per try). */
+  async reverseForRecovery(p: {
+    transferId: string; amountCents: number; refundId: string; bookingType: string; bookingId: string; idempotencyKey: string;
+    timeoutMs?: number; maxNetworkRetries?: number;
+  }): Promise<{ id: string }> {
+    const stripe = await getUncachableStripeClient();
+    const reversal = await stripe.transfers.createReversal(p.transferId, {
+      amount: p.amountCents,
+      metadata: { type: 'booking_refund_recovery', refundId: p.refundId, bookingType: p.bookingType, bookingId: p.bookingId },
+    }, { idempotencyKey: p.idempotencyKey, ...boundedPayoutOptions(p) });
+    return { id: reversal.id };
+  }
+
+  /** Amount the customer was charged on a PaymentIntent, in cents. */
+  async getPaymentIntentAmountReceived(paymentIntentId: string, opts: { timeoutMs?: number; maxNetworkRetries?: number } = {}): Promise<number> {
+    const stripe = await getUncachableStripeClient();
+    const pi = await stripe.paymentIntents.retrieve(paymentIntentId, {}, boundedPayoutOptions(opts));
+    return pi.amount_received ?? 0;
+  }
+
   /** True when Stripe or the platform balance says there are not enough funds (same match as payouts.ts). */
   isInsufficientFundsError(err: unknown): boolean {
     const e = err as { code?: string; raw?: { code?: string }; message?: string } | null;
@@ -957,7 +1017,7 @@ export class StripeService {
       }
     }
 
-    return stripe.refunds.create(
+    const refund = await stripe.refunds.create(
       {
         payment_intent: params.paymentIntentId,
         amount: amountCents,
@@ -966,6 +1026,24 @@ export class StripeService {
       },
       params.idempotencyKey ? { idempotencyKey: params.idempotencyKey } : undefined
     );
+
+    // Record the refund so the seller's share is taken back later. Fire and forget: never throws, never
+    // delays or changes the refund; a failure is only logged.
+    void (async () => {
+      try {
+        const { recordBookingRefund } = await import("../bookingRecoveries");
+        await recordBookingRefund({
+          refundId: refund.id,
+          paymentIntentId: params.paymentIntentId,
+          refundCents: refund.amount,
+          createdUnix: refund.created,
+        });
+      } catch (err) {
+        console.error(`[Refund] could not record refund ${refund.id} for recovery:`, err);
+      }
+    })();
+
+    return refund;
   }
 
   /**
