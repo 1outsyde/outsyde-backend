@@ -85,6 +85,8 @@ function pureTests() {
   const sessions: Record<string, any> = {};
   const calls: { method: string; path: string; form: URLSearchParams }[] = [];
   let seq = 0;
+  let createMode: 'ok' | 'fail_after_create' | 'slow' = 'ok';
+  let switchMode: 'paid' | 'pending' = 'paid';
   const newSub = (id: string, price: string, status: string, extra: Record<string, unknown> = {}) => {
     const s = { id, object: 'subscription', status, collection_method: 'charge_automatically', metadata: {}, items: { data: [{ id: `si_${id}`, current_period_start: now(), current_period_end: now() + 30 * 86400, price: { id: price } }] }, ...extra };
     subs[id] = s; return s;
@@ -104,18 +106,33 @@ function pureTests() {
         return send({ id: c.id, object: 'customer', invoice_settings: { default_payment_method: c.invoice_settings.default_payment_method } });
       }
       if (path === '/v1/payment_methods' && req.method === 'GET') { const c = customers[form.get('customer') || '']; return send({ object: 'list', data: c?.cards ?? [] }); }
+      if (path === '/v1/subscriptions' && req.method === 'GET') {
+        const cus = form.get('customer');
+        return send({ object: 'list', data: Object.values(subs).filter((x: any) => x.customer === cus) });
+      }
       if (path === '/v1/subscriptions' && req.method === 'POST') {
         const pm = form.get('default_payment_method');
+        if (createMode === 'fail_after_create' && Object.values(subs).some((x: any) => x.metadata?.offerId === form.get('metadata[offerId]'))) {
+          return send({ error: { type: 'api_error', message: 'stub: answer lost' } }, 500);
+        }
         const id = `sub_new${++seq}`;
         const trialEnd = form.get('trial_end');
         const status = pm === 'pm_sca' ? 'incomplete' : trialEnd ? 'trialing' : 'active';
-        const s = newSub(id, form.get('items[0][price]') || '', status, trialEnd ? { trial_end: Number(trialEnd), items: { data: [{ id: `si_${id}`, current_period_start: now(), current_period_end: Number(trialEnd), price: { id: form.get('items[0][price]') } }] } } : {});
-        return send({ ...s, latest_invoice: { id: `in_${id}`, amount_paid: status === 'active' ? 4099 : 0, status: status === 'incomplete' ? 'open' : 'paid' } });
+        const md: Record<string, string> = {};
+        for (const [k, v] of form.entries()) { const mm = k.match(/^metadata\[(.+)\]$/); if (mm) md[mm[1]] = v; }
+        const s = newSub(id, form.get('items[0][price]') || '', status, { customer: form.get('customer'), metadata: md, ...(trialEnd ? { trial_end: Number(trialEnd), items: { data: [{ id: `si_${id}`, current_period_start: now(), current_period_end: Number(trialEnd), price: { id: form.get('items[0][price]') } }] } } : {}) });
+        const body = { ...s, latest_invoice: { id: `in_${id}`, amount_paid: status === 'active' ? 4099 : 0, status: status === 'incomplete' ? 'open' : 'paid' } };
+        if (createMode === 'fail_after_create') return send({ error: { type: 'api_error', message: 'stub: answer lost' } }, 500);
+        if (createMode === 'slow') { setTimeout(() => send(body), 700); return; }
+        return send(body);
       }
       if ((m = path.match(/^\/v1\/subscriptions\/([^/]+)$/))) {
         const s = subs[m[1]]; if (!s) return send({ error: { type: 'invalid_request_error', code: 'resource_missing', message: 'No such subscription' } }, 404);
         if (req.method === 'GET') return send(s);
         if (req.method === 'DELETE') { s.status = 'canceled'; s.ended_at = now(); return send(s); }
+        if (req.method === 'POST' && switchMode === 'pending') {
+          return send({ ...s, pending_update: { expires_at: now() + 82800 }, latest_invoice: { id: 'in_pending', status: 'open', amount_paid: 0, hosted_invoice_url: 'https://invoice.stripe.com/i/pending' } });
+        }
         if (req.method === 'POST') { // paid switch
           const u = { ...s, status: 'active', items: { data: [{ id: s.items.data[0].id, current_period_start: now(), current_period_end: now() + 30 * 86400, price: { id: form.get('items[0][price]') } }] } };
           subs[m[1]] = u; return send({ ...u, latest_invoice: { id: 'in_switch', status: 'paid', amount_paid: 4099 } });
@@ -327,7 +344,7 @@ function pureTests() {
       const r = await offers.acceptPlanOffer({ userId: v.u, body: { offerId: o.id } });
       assert(r.status === 200 && (r.body as any).accepted === true && !(r.body as any).checkoutUrl, 'accepted in one tap, no checkout', r);
       const create = stripeCalls('POST', /^\/v1\/subscriptions$/).slice(before)[0];
-      assert(!!create && create.form.get('default_payment_method') === 'pm_ok' && create.form.get('payment_behavior') === 'allow_incomplete' && create.form.get('metadata[offerId]') === o.id && !create.form.get('trial_end'), 'subscription charged now on the saved card', create?.form?.toString());
+      assert(!!create && create.form.get('default_payment_method') === 'pm_ok' && create.form.get('payment_behavior') === 'allow_incomplete' && create.form.get('metadata[offerId]') === o.id && !create.form.get('trial_end') && !create.form.get('off_session') && create.form.get('metadata[source]') === 'plan_offer_one_tap', 'subscription charged now on the saved card, on session, marked one tap', create?.form?.toString());
       const rr = await row(v.b);
       assert(rr?.status === 'active' && rr.tier_name === 'grandfathered' && !!rr.stripe_subscription_id, 'row written by the route itself (no webhook needed)', rr);
       assert((await offerRow(v.b)).status === 'accepted' && (await storage.isBusinessSubscriptionActive(v.b)).active, 'offer accepted, business active');
@@ -378,10 +395,16 @@ function pureTests() {
       assert(r.status === 400 && (r.body as any).error.code === 'NOT_SWITCHABLE' && (await offerRow(v.b)).status === 'pending' && (await row(v.b)).tier_id === tierGr, 'refused with the invoice message; nothing changed', r);
     }
 
-    console.log('\nGrandfathered while the paid plan switch is waiting on the bank: webhook completes the offer');
+    console.log('\nPaid switch waiting on the bank: the Stripe payment page, then the webhook completes the offer');
     {
       const v = await seed('pendsw', { sub: { tier: tierGr, status: 'active', price: GR_PRICE } });
       await offerFor(v.b, { plan: 'grandfathered' });
+      const o = (await offers.getOwnerPlanOffer(v.u)).body.offer as any;
+      switchMode = 'pending';
+      const pend = await offers.acceptPlanOffer({ userId: v.u, body: { offerId: o.id } });
+      switchMode = 'paid';
+      assert(pend.status === 200 && (pend.body as any).pendingPayment === true && (pend.body as any).url === 'https://invoice.stripe.com/i/pending', 'bank wants a confirmation: the Stripe payment page, nothing switched yet', pend);
+      assert((await row(v.b)).tier_id === tierGr && (await offerRow(v.b)).status === 'pending', 'old plan kept, offer still pending');
       // The vendor paid on Stripe's page; Stripe sends subscription.updated with the Grandfathered price.
       subs[v.subId!].items.data[0].price.id = GF_PRICE;
       await WebhookHandlers.handleEvent({ type: 'customer.subscription.updated', data: { object: subs[v.subId!] } });
@@ -444,6 +467,120 @@ function pureTests() {
       const v = await seed('ongf', { sub: { tier: tierGf, status: 'active', price: GF_PRICE } });
       const r = await offerFor(v.b, { plan: 'grandfathered' });
       assert(r.status === 409 && (r.body as any).error.code === 'ALREADY_ON_PLAN', '409 ALREADY_ON_PLAN', r);
+    }
+
+    // ── Review fixes (2026-10-21) ──
+    console.log('\nOne tap whose answer from Stripe was lost: found, activated, no second subscription');
+    {
+      const v = await seed('lost', { card: 'pm_ok' });
+      await offerFor(v.b, { plan: 'grandfathered' });
+      const o = (await offers.getOwnerPlanOffer(v.u)).body.offer as any;
+      createMode = 'fail_after_create';
+      const before = Object.keys(subs).length;
+      const r = await offers.acceptPlanOffer({ userId: v.u, body: { offerId: o.id } });
+      createMode = 'ok';
+      const made = Object.values(subs).filter((x: any) => x.metadata?.offerId === o.id);
+      assert(r.status === 200 && (r.body as any).accepted === true && !(r.body as any).checkoutUrl, 'accepted from the subscription Stripe really made, not sent to Checkout', r);
+      assert(made.length === 1 && Object.keys(subs).length === before + 1, 'exactly one subscription exists for the offer', made.map((x: any) => x.id));
+      assert((await row(v.b))?.stripe_subscription_id === (made[0] as any).id, 'row points at it');
+    }
+
+    console.log('\nOne tap saved nothing (crash): Stripe\'s subscription.created activates it');
+    {
+      const v = await seed('backstop');
+      await offerFor(v.b, { plan: 'grandfathered' });
+      const o = (await offers.getOwnerPlanOffer(v.u)).body.offer as any;
+      const subId = `sub_${P}_bk`;
+      newSub(subId, GF_PRICE, 'active', { customer: v.cus, metadata: { type: 'vendor_subscription', source: 'plan_offer_one_tap', vendorId: v.u, businessId: v.b, tierId: tierGf, offerId: o.id } });
+      take();
+      await WebhookHandlers.handleEvent({ type: 'customer.subscription.created', data: { object: subs[subId] } });
+      assert((await row(v.b))?.stripe_subscription_id === subId && (await row(v.b))?.status === 'active' && (await offerRow(v.b)).status === 'accepted', 'row written, offer accepted', await row(v.b));
+      assert(take().filter((x) => x.subject === "You're live on Outsyde").length === 1, 'announced once');
+      const plain = `sub_${P}_plainco2`;
+      const w = await seed('nobackstop');
+      newSub(plain, GR_PRICE, 'active', { customer: w.cus, metadata: { type: 'vendor_subscription', vendorId: w.u, businessId: w.b, tierId: tierGr } });
+      await WebhookHandlers.handleEvent({ type: 'customer.subscription.created', data: { object: subs[plain] } });
+      assert(!(await row(w.b)), 'a regular Checkout subscription is left to checkout.session.completed (no double "You\'re live")');
+    }
+
+    console.log('\nDouble tap at the same moment: one payment, the other waits');
+    {
+      const v = await seed('double', { card: 'pm_ok' });
+      await offerFor(v.b, { plan: 'grandfathered' });
+      const o = (await offers.getOwnerPlanOffer(v.u)).body.offer as any;
+      createMode = 'slow';
+      const [a, b] = await Promise.all([
+        offers.acceptPlanOffer({ userId: v.u, body: { offerId: o.id } }),
+        offers.acceptPlanOffer({ userId: v.u, body: { offerId: o.id } }),
+      ]);
+      createMode = 'ok';
+      const codes = [a, b].map((x) => (x.body as any).accepted ? 'accepted' : ((x.body as any).error?.code ?? ((x.body as any).checkoutUrl ? 'checkout' : 'other'))).sort();
+      assert(JSON.stringify(codes) === JSON.stringify(['OFFER_BUSY', 'accepted']), 'one accepted, the other 409 OFFER_BUSY (never a Checkout next to a charge)', [a.body, b.body]);
+      assert(Object.values(subs).filter((x: any) => x.metadata?.offerId === o.id).length === 1, 'one subscription');
+    }
+
+    console.log('\nAn open Checkout is closed when the offer is accepted with the saved card');
+    {
+      const v = await seed('leftopen', { card: 'pm_ok' });
+      await offerFor(v.b, { plan: 'grandfathered' });
+      const o = (await offers.getOwnerPlanOffer(v.u)).body.offer as any;
+      await offers.acceptPlanOffer({ userId: v.u, body: { offerId: o.id, useCheckout: true } });
+      const sid = (await offerRow(v.b)).checkout_session_id;
+      assert(sessions[sid]?.status === 'open', 'setup: "Change" opened a Checkout');
+      const r = await offers.acceptPlanOffer({ userId: v.u, body: { offerId: o.id } });
+      assert((r.body as any).accepted === true && sessions[sid].status === 'expired', 'accepted with the card, and the Checkout can no longer be paid', r);
+    }
+
+    console.log('\nGrandfathered over a late paid plan: pay that first');
+    {
+      const v = await seed('lateoffer', { sub: { tier: tierGr, status: 'past_due', price: GR_PRICE, pastDueDaysAgo: 2 }, card: 'pm_ok' });
+      subs[v.subId!].status = 'past_due';
+      await offerFor(v.b, { plan: 'grandfathered' });
+      const o = (await offers.getOwnerPlanOffer(v.u)).body.offer as any;
+      assert(o.outcome === 'paid_plan_late', 'confirm page: plan is late', o.outcome);
+      const before = Object.keys(subs).length;
+      const r = await offers.acceptPlanOffer({ userId: v.u, body: { offerId: o.id } });
+      assert(r.status === 409 && (r.body as any).error.code === 'PLAN_LATE' && Object.keys(subs).length === before && (await row(v.b)).status === 'past_due', '409 PLAN_LATE, nothing charged, nothing changed', r);
+    }
+
+    console.log('\nReconcile with an old checkout never brings access back');
+    {
+      const v = await seed('replay');
+      const subA = `sub_${P}_ra`;
+      newSub(subA, GR_PRICE, 'active');
+      const sidA = `cs_${P}_ra`;
+      sessions[sidA] = { id: sidA, object: 'checkout.session', status: 'complete', subscription: subA, customer: v.cus, amount_total: 5900, metadata: { type: 'vendor_subscription', vendorId: v.u, businessId: v.b, tierId: tierGr } };
+      await offers.reconcileCheckoutSession({ userId: v.u, body: { sessionId: sidA } });
+      assert((await row(v.b))?.status === 'active', 'setup: first reconcile activates');
+      // Plan goes late past grace and listings pause
+      subs[subA].status = 'past_due';
+      await q(`UPDATE vendor_subscriptions SET status = 'past_due', past_due_since = now() - interval '9 days' WHERE business_id = $1`, [v.b]);
+      take();
+      let rec = await offers.reconcileCheckoutSession({ userId: v.u, body: { sessionId: sidA } });
+      let rr = await row(v.b);
+      assert((rec.body as any).active === false && rr.status === 'past_due' && rr.past_due_since !== null, 'late plan: old session changes nothing, grace not reset', { rec, rr });
+      assert(take().length === 0, 'nothing sent');
+      // Stripe ends it
+      subs[subA].status = 'canceled';
+      await q(`UPDATE vendor_subscriptions SET status = 'canceled', current_period_end = now() - interval '1 day' WHERE business_id = $1`, [v.b]);
+      rec = await offers.reconcileCheckoutSession({ userId: v.u, body: { sessionId: sidA } });
+      assert((rec.body as any).active === false && (await row(v.b)).status === 'canceled', 'ended plan: old session gives no access');
+      // Resubscribed on a new subscription; the old session must not point the row back or cancel it
+      const subB = `sub_${P}_rb`;
+      newSub(subB, GF_PRICE, 'active');
+      await WebhookHandlers.handleEvent({ type: 'checkout.session.completed', data: { object: { id: `cs_${P}_rb`, subscription: subB, customer: v.cus, amount_total: 4099, metadata: { type: 'vendor_subscription', vendorId: v.u, businessId: v.b, tierId: tierGf } } } });
+      await offers.reconcileCheckoutSession({ userId: v.u, body: { sessionId: sidA } });
+      rr = await row(v.b);
+      assert(rr.stripe_subscription_id === subB && subs[subB].status === 'active', 'newer subscription kept and not cancelled', rr);
+    }
+
+    console.log('\nThe plan written is what Stripe bills now, not the old checkout metadata');
+    {
+      const v = await seed('price');
+      const subP = `sub_${P}_pr`;
+      newSub(subP, GF_PRICE, 'active'); // was Growth at checkout, switched to Grandfathered since
+      await WebhookHandlers.handleEvent({ type: 'checkout.session.completed', data: { object: { id: `cs_${P}_pr`, subscription: subP, customer: v.cus, amount_total: 5900, metadata: { type: 'vendor_subscription', vendorId: v.u, businessId: v.b, tierId: tierGr } } } });
+      assert((await row(v.b)).tier_id === tierGf, 'tier from the current Stripe price');
     }
 
     // ── Free offers ──

@@ -43,6 +43,8 @@ import { toDate } from "./policy";
 
 export const WEB_BASE_URL = "https://www.goutsyde.com";
 export const PLAN_OFFER_URL = `${WEB_BASE_URL}/plan-offer`;
+/** Where Stripe Checkout sends the vendor back: FRONTEND_URL like the regular checkout (goutsyde.com in production). */
+const frontendBase = () => (process.env.FRONTEND_URL || WEB_BASE_URL).replace(/\/$/, "");
 /** Stripe Checkout needs a trial end at least 48 hours away. Closer than that, billing starts now. */
 export const MIN_DEFERRED_BILLING_MS = 48 * 60 * 60 * 1000;
 const PERMANENT_MS = new Date(PERMANENT_EXPIRY_ISO).getTime();
@@ -161,6 +163,7 @@ export type AcceptOutcome =
   | "start_paid_after_free"   // a Free plan with an end date: billing starts when it ends
   | "replace_free_with_paid"  // a permanent Free plan: billing starts today and the Free plan ends
   | "invoice_billed"          // a live Send invoice plan: can't be switched here
+  | "paid_plan_late"          // the current paid plan is late: pay it first (no second charge for the same time)
   | "already_on_plan";
 
 interface PlanState {
@@ -195,7 +198,7 @@ async function acceptOutcome(offer: PlanOffer, state: PlanState, now: Date): Pro
     return { outcome: "already_on_plan", billingStartsAt: null };
   }
   if (offer.plan === "free") return { outcome: state.paidLive ? "replace_paid_with_free" : "start_free", billingStartsAt: null };
-  if (state.paidLive && (state.row?.status === "active" || state.row?.status === "trialing")) {
+  if (state.paidLive) {
     try {
       const stripe = await getUncachableStripeClient();
       const sub: any = await stripe.subscriptions.retrieve(state.row!.stripeSubscriptionId!);
@@ -203,6 +206,8 @@ async function acceptOutcome(offer: PlanOffer, state: PlanState, now: Date): Pro
     } catch {
       // the switch itself reports a Stripe problem
     }
+    // A late plan has an open invoice for the same time: starting Grandfathered now could charge twice.
+    if (state.row?.status === "past_due") return { outcome: "paid_plan_late", billingStartsAt: null };
     return { outcome: "switch_paid", billingStartsAt: null };
   }
   if (state.freeLive) {
@@ -338,7 +343,8 @@ export async function getOwnerPlanOffer(userId: string, now: Date = new Date()):
   const business = await storage.getBusinessByOwnerId(userId);
   if (!business) return { status: 200, body: { success: true, offer: null } };
   const offer = await getPendingOfferForBusiness(business.id);
-  if (!offer || offer.ownerId !== userId) return { status: 200, body: { success: true, offer: null } };
+  // Ownership is the business's current owner (the same rule accept uses), not who owned it when offered.
+  if (!offer) return { status: 200, body: { success: true, offer: null } };
 
   const tier = await getTier(offer.tierId);
   const user = await storage.getUser(userId);
@@ -401,9 +407,31 @@ export async function acceptPlanOffer(p: { userId: string; body: unknown; ip?: s
   const loaded = await loadOwnedPendingOffer(p.userId, parsed.data.offerId);
   if ("status" in loaded) return loaded;
   const { offer } = loaded;
-  return offer.plan === "free"
-    ? acceptFreeOffer(offer, p)
-    : acceptGrandfatheredOffer(offer, { ...p, useCheckout: parsed.data.useCheckout === true });
+  // One accept at a time per offer (a double tap must never start two payments). One Render instance today;
+  // the Stripe idempotency key and the offer's single open checkout cover the rest.
+  if (acceptInFlight.has(offer.id)) return err(409, "OFFER_BUSY", "Your plan is already being set up. Give it a moment.");
+  acceptInFlight.add(offer.id);
+  try {
+    return offer.plan === "free"
+      ? await acceptFreeOffer(offer, p)
+      : await acceptGrandfatheredOffer(offer, { ...p, useCheckout: parsed.data.useCheckout === true });
+  } finally {
+    acceptInFlight.delete(offer.id);
+  }
+}
+
+const acceptInFlight = new Set<string>();
+
+/** An offer accepted any other way must not leave a payable Checkout behind (review 2026-10-21). */
+async function expireOfferCheckout(offer: PlanOffer): Promise<void> {
+  if (!offer.checkoutSessionId) return;
+  try {
+    const stripe = await getUncachableStripeClient();
+    const session: any = await stripe.checkout.sessions.retrieve(offer.checkoutSessionId);
+    if (session?.status === "open") await stripe.checkout.sessions.expire(offer.checkoutSessionId);
+  } catch (e) {
+    console.error(`[PlanOffer] could not expire checkout for offer ${offer.id}:`, e instanceof Error ? e.message : "unknown error");
+  }
 }
 
 /** Free: ONE statement accepts the offer and writes the Free row (also over a paid row). */
@@ -497,6 +525,21 @@ async function acceptFreeOffer(offer: PlanOffer, p: { userId: string; ip?: strin
   return { status: 200, body: { success: true, accepted: true, plan: "free", freeExpiresAt: offer.freeExpiresAt, permanent: offer.freeExpiresAt == null } };
 }
 
+export const PLAN_LATE_MESSAGE =
+  "Your current plan payment is late. Pay it from Manage Plan first, then come back to accept this plan.";
+
+/** This offer's one tap subscription on the customer, if Stripe made one (for a lost answer). */
+async function findOfferSubscription(customerId: string, offerId: string): Promise<any | null> {
+  try {
+    const stripe = await getUncachableStripeClient();
+    const list: any = await stripe.subscriptions.list({ customer: customerId, status: "all", limit: 20 } as any);
+    return (list?.data ?? []).find((s: any) => s?.metadata?.offerId === offerId && s?.metadata?.source === "plan_offer_one_tap" && s.status !== "canceled" && s.status !== "incomplete_expired") ?? null;
+  } catch (e) {
+    console.error(`[PlanOffer] could not list subscriptions for ${customerId}:`, e instanceof Error ? e.message : "unknown error");
+    return null;
+  }
+}
+
 async function ensureStripeCustomer(userId: string): Promise<string> {
   const user = await storage.getUser(userId);
   if (!user) throw new Error("user not found");
@@ -519,11 +562,15 @@ async function acceptGrandfatheredOffer(
 
   if (outcome === "already_on_plan") {
     await db.execute(sql`UPDATE plan_offers SET status = 'accepted', accepted_at = now() WHERE id = ${offer.id} AND status = 'pending'`);
+    await expireOfferCheckout(offer);
     return { status: 200, body: { success: true, accepted: true, plan: "grandfathered" } };
   }
   if (outcome === "invoice_billed") {
     const { INVOICE_BILLED_MESSAGE } = await import("./planSwitch");
     return err(400, "NOT_SWITCHABLE", INVOICE_BILLED_MESSAGE);
+  }
+  if (outcome === "paid_plan_late") {
+    return err(409, "PLAN_LATE", PLAN_LATE_MESSAGE);
   }
 
   // A live paid plan: the normal paid switch (full new price now, billing date restarts, no credit).
@@ -539,6 +586,7 @@ async function acceptGrandfatheredOffer(
     }
     await applySwitchedPlan(state.row!, tier, sw);
     await db.execute(sql`UPDATE plan_offers SET status = 'accepted', accepted_at = now() WHERE id = ${offer.id} AND status = 'pending'`);
+    await expireOfferCheckout(offer);
     return { status: 200, body: { success: true, accepted: true, plan: "grandfathered" } };
   }
 
@@ -546,24 +594,31 @@ async function acceptGrandfatheredOffer(
   const customerId = await ensureStripeCustomer(p.userId);
   const trialEnd = billingStartsAt ? Math.floor(billingStartsAt.getTime() / 1000) : null;
   const metadata = { type: "vendor_subscription", vendorId: p.userId, businessId: offer.businessId, tierId: tier.id, offerId: offer.id };
+  // Marks a one tap subscription so the webhook can activate it if this request never saves the row.
+  const oneTapMetadata = { ...metadata, source: "plan_offer_one_tap" };
   const stripe = await getUncachableStripeClient();
 
   const card = p.useCheckout ? null : await findSavedCard(customerId);
   if (card) {
     let sub: any = null;
     try {
+      // On session (the vendor is tapping): a bank that wants a confirmation leaves it incomplete and we use Checkout.
       sub = await stripe.subscriptions.create({
         customer: customerId,
         items: [{ price: tier.stripePriceId }],
         default_payment_method: card.id,
-        off_session: true,
         payment_behavior: "allow_incomplete",
         ...(trialEnd ? { trial_end: trialEnd } : {}),
-        metadata,
+        metadata: oneTapMetadata,
         expand: ["latest_invoice"],
-      } as any, { idempotencyKey: `plan-offer-${offer.id}-${card.id}` });
-    } catch (e) {
+      } as any, { idempotencyKey: `plan-offer-${offer.id}-${card.id}-${trialEnd ?? "now"}-${Math.floor(Date.now() / (10 * 60 * 1000))}` });
+    } catch (e: any) {
       console.error(`[PlanOffer] one tap charge failed for offer ${offer.id}:`, e instanceof Error ? e.message : "unknown error");
+      if (e?.statusCode === 409 || e?.type === "StripeIdempotencyError") {
+        return err(409, "OFFER_BUSY", "Your plan is already being set up. Give it a moment.");
+      }
+      // The charge may have gone through with the answer lost: find this offer's subscription before anything else.
+      sub = await findOfferSubscription(customerId, offer.id);
     }
     if (sub && (sub.status === "active" || sub.status === "trialing")) {
       const invoice = sub.latest_invoice && typeof sub.latest_invoice === "object" ? sub.latest_invoice : null;
@@ -577,6 +632,7 @@ async function acceptGrandfatheredOffer(
         amountCents: typeof invoice?.amount_paid === "number" ? invoice.amount_paid : null,
         stripeSubscription: sub,
       });
+      await expireOfferCheckout(offer);
       const period = getSubscriptionPeriod(sub);
       return {
         status: 200,
@@ -612,8 +668,8 @@ async function acceptGrandfatheredOffer(
     mode: "subscription",
     payment_method_types: ["card"],
     line_items: [{ price: tier.stripePriceId, quantity: 1 }],
-    success_url: `${WEB_BASE_URL}/subscription/success?session_id={CHECKOUT_SESSION_ID}`,
-    cancel_url: PLAN_OFFER_URL,
+    success_url: `${frontendBase()}/subscription/success?session_id={CHECKOUT_SESSION_ID}`,
+    cancel_url: `${frontendBase()}/plan-offer`,
     metadata,
     subscription_data: { metadata: { vendorId: p.userId, businessId: offer.businessId, tierId: tier.id, offerId: offer.id }, ...(trialEnd ? { trial_end: trialEnd } : {}) },
   } as any);
@@ -644,8 +700,14 @@ export async function reconcileCheckoutSession(p: { userId: string; body: unknow
     return err(404, "NOT_FOUND", "Checkout not found.");
   }
   if (session.status === "complete" && session.subscription) {
-    const { WebhookHandlers } = await import("../stripe/webhookHandlers");
-    await WebhookHandlers.handleVendorSubscriptionCheckoutCompleted(session);
+    const row = await storage.getVendorSubscriptionByBusinessId(business.id);
+    const alreadyLinked = row?.stripeSubscriptionId === session.subscription && (row?.status === "active" || row?.status === "trialing");
+    // Only a checkout the row doesn't reflect yet is applied, and only while its subscription is paid up
+    // (activation refuses past_due, unpaid and canceled ones), so an old session can never bring access back.
+    if (!alreadyLinked) {
+      const { WebhookHandlers } = await import("../stripe/webhookHandlers");
+      await WebhookHandlers.handleVendorSubscriptionCheckoutCompleted(session, { strict: true });
+    }
   }
   const policy = await storage.isBusinessSubscriptionActive(business.id);
   return { status: 200, body: { success: true, checkoutStatus: session.status ?? null, active: policy.active, subscriptionStatus: policy.status ?? null } };

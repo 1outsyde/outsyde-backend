@@ -31,13 +31,17 @@ export interface ActivationInput {
   amountCents?: number | null;
   /** The Stripe subscription when the caller already has it (saves a retrieve). */
   stripeSubscription?: any;
+  /** Refuse when Stripe can't be read (the success page reconcile). The webhook keeps its old fail-open. */
+  strict?: boolean;
 }
 
 export interface ActivationResult {
-  subscriptionRowId: string;
-  status: "active" | "trialing";
+  subscriptionRowId: string | null;
+  status: "active" | "trialing" | null;
   /** True only for the call that sent the notices. */
   announced: boolean;
+  /** Set when nothing was written: the Stripe subscription isn't paid up (or couldn't be read in strict mode). */
+  refused?: string;
 }
 
 /** A paid plan for this business and tier was started: any pending offer for it is now accepted. */
@@ -50,7 +54,7 @@ export async function markPlanOffersAccepted(businessId: string, tierId: string)
 }
 
 export async function activatePaidSubscription(input: ActivationInput): Promise<ActivationResult> {
-  const { vendorId, businessId, tierId, stripeSubscriptionId, stripeCustomerId } = input;
+  const { vendorId, businessId, stripeSubscriptionId, stripeCustomerId } = input;
 
   // The Stripe subscription: its status (a plan that starts on a free trial is 'trialing') and period.
   let stripeSub: any = input.stripeSubscription ?? null;
@@ -62,8 +66,26 @@ export async function activatePaidSubscription(input: ActivationInput): Promise<
       console.error(`[Activation] Could not read ${stripeSubscriptionId} from Stripe:`, err instanceof Error ? err.message : "unknown error");
     }
   }
+  // Only a paid up subscription (active, or trialing on a deferred start) ever gives access. An old checkout
+  // whose subscription is now past_due, unpaid or canceled must never bring access back (review 2026-10-21).
+  if (stripeSub && stripeSub.status !== "active" && stripeSub.status !== "trialing") {
+    console.log(`[Activation] Not activating ${stripeSubscriptionId}: Stripe status is ${stripeSub.status}`);
+    return { subscriptionRowId: null, status: null, announced: false, refused: `subscription_${stripeSub.status}` };
+  }
+  if (!stripeSub && input.strict) {
+    return { subscriptionRowId: null, status: null, announced: false, refused: "stripe_unreadable" };
+  }
   const status: "active" | "trialing" = stripeSub?.status === "trialing" ? "trialing" : "active";
   const period = stripeSub ? getSubscriptionPeriod(stripeSub) : null;
+
+  // The plan is whatever Stripe is billing now (a later paid switch changes the price, not the old checkout's
+  // metadata). Falls back to the metadata tier when the price matches no tier.
+  let tierId = input.tierId;
+  const priceId = stripeSub?.items?.data?.[0]?.price?.id;
+  if (priceId) {
+    const [byPrice] = await db.select().from(subscriptionTiers).where(eq(subscriptionTiers.stripePriceId, priceId));
+    if (byPrice) tierId = byPrice.id;
+  }
   const trialEnd = status === "trialing" && typeof stripeSub?.trial_end === "number" ? new Date(stripeSub.trial_end * 1000) : null;
 
   // One row per business (uq_vendor_subscriptions_business): by business first, then by vendor.

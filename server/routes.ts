@@ -25117,7 +25117,10 @@ export async function registerRoutes(
   });
 
   // POST /api/vendor/subscription/reconcile  { sessionId }  (success page: activate now if the webhook is late)
-  app.post("/api/vendor/subscription/reconcile", authMiddleware, async (req, res) => {
+  // Each call reads Stripe: the success page polls a few times at most, so 60 per 15 minutes per IP is plenty.
+  const reconcileRateLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 60, standardHeaders: true, legacyHeaders: false,
+    message: { success: false, error: { code: "RATE_LIMITED", message: "Too many checks. Try again in a few minutes." } } });
+  app.post("/api/vendor/subscription/reconcile", authMiddleware, reconcileRateLimiter, async (req, res) => {
     try {
       const out = await reconcileCheckoutSession({ userId: (req as AuthenticatedRequest).user!.userId, body: req.body });
       res.status(out.status).json(out.body);

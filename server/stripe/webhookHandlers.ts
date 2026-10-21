@@ -1646,7 +1646,7 @@ export class WebhookHandlers {
   /* =====================================================
      VENDOR SUBSCRIPTION
   ===================================================== */
-  static async handleVendorSubscriptionCheckoutCompleted(session: any) {
+  static async handleVendorSubscriptionCheckoutCompleted(session: any, opts: { strict?: boolean } = {}) {
     const { vendorId, businessId, tierId } = session.metadata || {};
     if (!vendorId || !businessId || !tierId) {
       console.error('[Webhook] checkout.session.completed missing metadata:', { vendorId, businessId, tierId });
@@ -1701,6 +1701,7 @@ export class WebhookHandlers {
         stripeCustomerId: session.customer ?? null,
         ref: `checkout:${session.id ?? session.subscription}`,
         amountCents: session.amount_total ?? null,
+        strict: opts.strict === true,
       });
 
     } catch (error) {
@@ -2082,7 +2083,26 @@ export class WebhookHandlers {
   ===================================================== */
   static async handleSubscriptionChange(subscription: any) {
     const vendorSub = await storage.getVendorSubscriptionByStripeId(subscription.id);
-    if (!vendorSub) return;
+    if (!vendorSub) {
+      // Backstop for a plan offer accepted with one tap: if the route was charged but never saved the row
+      // (lost response, crash), Stripe's own event activates it. Same notice ref as the route, so once only.
+      const md = subscription.metadata || {};
+      if (md.type === 'vendor_subscription' && md.source === 'plan_offer_one_tap' && md.vendorId && md.businessId && md.tierId
+          && (subscription.status === 'active' || subscription.status === 'trialing')) {
+        try {
+          await activatePaidSubscription({
+            vendorId: md.vendorId, businessId: md.businessId, tierId: md.tierId,
+            stripeSubscriptionId: subscription.id,
+            stripeCustomerId: typeof subscription.customer === 'string' ? subscription.customer : subscription.customer?.id ?? null,
+            ref: `subscription:${subscription.id}`,
+            stripeSubscription: subscription,
+          });
+        } catch (err) {
+          console.error('[Webhook] one tap backstop activation failed:', err);
+        }
+      }
+      return;
+    }
 
     const previousStatus = vendorSub.status;
     const newStatus = subscription.status;
@@ -2201,6 +2221,12 @@ export class WebhookHandlers {
       });
 
       await sendSubscriptionNotice('plan_switched', planSwitchRef(newTierId, period?.start), ctx, { previousPlanName: previousTierName, amountCents: newPrice, periodEnd: period?.end ?? null });
+    }
+
+    // A trialing subscription switched onto an offered plan also completes the offer.
+    if (tierChanged && newStatus === 'trialing' && vendorSub.businessId) {
+      await markPlanOffersAccepted(vendorSub.businessId, newTierId).catch((err) =>
+        console.error('[Webhook] could not mark plan offer accepted:', err instanceof Error ? err.message : err));
     }
 
     // Cancellation audit (a failed payment is no longer reported as "canceled"; see the late notice above)
