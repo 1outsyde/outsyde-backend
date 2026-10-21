@@ -138,7 +138,8 @@ function assert(cond: boolean, name: string, detail?: unknown) {
     const alertStuckPending: (() => Promise<number>) | undefined = brMod.alertStuckPending;
     const { setBankAlertForTest } = await import("./bankPayout");
     const sent: any[] = [];
-    setRecoveryNotifyForTest(async (m: any) => { sent.push(m); });
+    const history: any[] = []; // every notice in this run (sent is cleared between sections)
+    setRecoveryNotifyForTest(async (m: any) => { sent.push(m); history.push(m); });
     const admin: Array<{ subject: string; detail: string }> = [];
     setBankAlertForTest(async (subject: string, detail: string) => { admin.push({ subject, detail }); });
 
@@ -563,10 +564,98 @@ function assert(cond: boolean, name: string, detail?: unknown) {
       const after = (await q(`SELECT next_attempt_at, updated_at::text AS u FROM event_payout_recoveries WHERE id = 'br-test-epr1'`))[0];
       assert(String(before.next_attempt_at) === String(after.next_attempt_at) && before.u === after.u, "retryOwed leaves event recoveries alone");
     }
+
+    console.log("notifyTakenBack");
     {
-      const all = sent.concat([]);
+      const notifyTakenBack: (() => Promise<number>) | undefined = brMod.notifyTakenBack;
+      assert(typeof notifyTakenBack === "function", "notifyTakenBack exported");
+      const nt = async () => (typeof notifyTakenBack === "function" ? notifyTakenBack() : 0);
+      const TB = "Refund taken back from your balance";
+      const TAIL = "If your balance didn't cover it, it shows as negative and your next sales pay it back first.";
+      // Rows from earlier sections are marked told so this section only sees its own rows.
+      await q(`UPDATE booking_refund_recoveries SET seller_notified_at = now() WHERE refund_id LIKE 'br-test-%' AND seller_notified_at IS NULL AND status IN ('reversed', 'recovered')`);
+      fs.insufficientFor.clear();
+      const tb = await booking("tbbiz", { refund: 7000 });
+      await processBookingRecovery(await idOf(tb.refundId), fk);
+      const ts = await booking("tbstaff", { refund: 4000, staff: true });
+      await processBookingRecovery(await idOf(ts.refundId), fk);
+      await q(`UPDATE shoot_bookings SET start_time = '12:00' WHERE id = 'br-test-nph'`); // free the photographer's 10:00 slot
+      const tp = await booking("tbph", { refund: 20000, shoot: true, total: 20000, transfers: [19600] });
+      await processBookingRecovery(await idOf(tp.refundId), fk);
+      // Owed first (told then), recovered later: no second notice.
+      const to = await booking("tbowed", { refund: 3000 });
+      const toT = fs.transfers.find((x) => x.group === to.group)!;
+      fs.insufficientFor.add(toT.id);
+      await processBookingRecovery(await idOf(to.refundId), fk);
+      sent.length = 0;
+      await notifyOwedSellers();
+      const owedTold = sent.filter((m) => (m.text ?? m.body ?? "").includes("$30.00"));
+      fs.insufficientFor.delete(toT.id);
+      await due(to.refundId);
+      const recRes = await processBookingRecovery(await idOf(to.refundId), fk);
+      // Nothing sent: no notice.
+      const tn = await booking("tbnone", { refund: 2000, transfers: [] });
+      await processBookingRecovery(await idOf(tn.refundId), fk);
+      const rows0 = { biz: await row(tb.refundId), staff: await row(ts.refundId), ph: await row(tp.refundId), owed: await row(to.refundId), none: await row(tn.refundId) };
+      assert(rows0.biz.status === "reversed" && rows0.biz.reversed_cents === 6860 && rows0.staff.status === "reversed" && rows0.ph.status === "reversed"
+        && rows0.owed.status === "recovered" && recRes === "reversed" && owedTold.length === 2 && rows0.none.status === "nothing_sent", "taken-back setup: reversed rows, owed told then recovered, nothing_sent", { rows0, recRes, owedTold });
+
+      // Event recoveries: reversed after the start (told), reversed before the start (never), owed one untouched.
+      await ins("event_payout_recoveries", { id: "br-test-epr2", ticket_id: "br-test-tk2", payout_id: "br-test-ep1", connected_account_id: "acct_br_host", amount_cents: 1225, status: "reversed" });
+      await ins("event_payout_recoveries", { id: "br-test-epr3", ticket_id: "br-test-tk3", payout_id: "br-test-ep1", connected_account_id: "acct_br_host", amount_cents: 1300, status: "reversed", created_at: new Date((RECOVERY_START_UNIX - 3600) * 1000).toISOString() });
+      await q(`UPDATE event_payout_recoveries SET updated_at = now() - interval '1 hour' WHERE id = 'br-test-epr2'`);
+
+      sent.length = 0;
+      const n1 = await nt();
+      const n2 = await nt();
+      const textOf = (m: any) => (m.channel === "email" ? m.text : m.body);
+      const mine = (amt: string) => sent.filter((m) => textOf(m).includes(amt));
+
+      const biz = mine("$68.60");
+      const bizMail = biz.find((m) => m.channel === "email");
+      assert(biz.length === 2 && biz.every((m) => m.to === "br-test-biz@example.test" || m.userId === "br-test-u-owner") && biz.some((m) => m.channel === "push" && m.title === TB) && bizMail?.subject === TB && bizMail?.kind === "booking",
+        "reversed booking: business owner gets one email and one push", biz);
+      assert(bizMail?.text === `A customer was refunded $70.00 for your booking on November 3, 2026. Your share of $68.60 was taken back from your Stripe balance. ${TAIL}`, "taken-back booking copy exact", bizMail?.text);
+      assert(biz.find((m) => m.channel === "push")?.body === bizMail?.text, "push body is the same copy");
+      const staff = mine("$39.20");
+      const staffSelf = staff.filter((m) => m.to === "br-test-staff@example.test" || m.userId === "br-test-u-staff");
+      const staffOwner = staff.filter((m) => m.to === "br-test-biz@example.test" || m.userId === "br-test-u-owner");
+      assert(staff.length === 4 && staffSelf.length === 2 && staffOwner.length === 2 && staffSelf.some((m) => m.channel === "email" && m.kind === "staff") && staffOwner.some((m) => m.channel === "email" && m.kind === "staff"),
+        "staff booking: staff member and business owner each get one email and one push", staff);
+      const ph = mine("$196.00");
+      assert(ph.length === 2 && ph.every((m) => m.to === "br-test-ph@example.test" || m.userId === "br-test-u-ph") && ph.some((m) => m.channel === "email" && m.kind === "shoot" && m.text === `A customer was refunded $200.00 for your booking on November 2, 2026. Your share of $196.00 was taken back from your Stripe balance. ${TAIL}`),
+        "shoot booking: photographer gets one email and one push, exact copy", ph);
+      assert(mine("$29.40").length === 0 && mine("$30.00").length === 0, "owed then recovered: no second notice", mine("$29.40"));
+      assert(mine("$20.00").length === 0 && (await row(tn.refundId)).seller_notified_at === null, "nothing_sent: no notice, never marked told");
+      const tk = (await row("br-test-re-ticket"));
+      assert(tk.status === "not_booking" && tk.seller_notified_at === null, "not_booking: never marked told", tk);
+
+      const host = sent.filter((m) => m.to === "br-test-host@example.test" || m.userId === "br-test-u-host");
+      const hostMail = host.find((m) => m.channel === "email");
+      assert(host.length === 2 && host.filter((m) => m.channel === "push").length === 1 && hostMail?.subject === TB && hostMail?.kind === "ticket" && host.find((m) => m.channel === "push")?.title === TB,
+        "event reversed recovery after the start: host gets one email and one push", host);
+      assert(hostMail?.text === `A ticket for your event Night Market was refunded. Your share of $12.25 was taken back from your Stripe balance. ${TAIL}`, "taken-back event copy exact", hostMail?.text);
+      assert(!sent.some((m) => textOf(m).includes("$13.00")), "event recovery before the start: no notice");
+      const ev = await q(`SELECT id, seller_notified_at, updated_at > now() - interval '5 minutes' AS fresh FROM event_payout_recoveries WHERE id IN ('br-test-epr2', 'br-test-epr3') ORDER BY id`);
+      assert(ev[0].seller_notified_at !== null && ev[0].fresh === true && ev[1].seller_notified_at === null, "event: seller_notified_at set (updated_at bumped) only on the told row", ev);
+
+      const told = await q(`SELECT refund_id, seller_notified_at FROM booking_refund_recoveries WHERE refund_id IN ($1, $2, $3)`, [tb.refundId, ts.refundId, tp.refundId]);
+      assert(told.length === 3 && told.every((x) => x.seller_notified_at !== null), "booking rows marked told", told);
+      assert(n1 === 4 && n2 === 0, "first run tells 3 booking rows and 1 event row, second run nothing", { n1, n2 });
+      assert(sent.length === 2 + 4 + 2 + 2, "running twice: still one notice each", sent.length);
+
+      // The every-minute job sends them too, right after the owed notices.
+      sent.length = 0;
+      const tj = await booking("tbjob", { refund: 9000 });
+      const out = await runBookingRecoveryJob(fk, new Date(Date.UTC(2026, 9, 21, 12, 7)));
+      const jobMsgs = sent.filter((m) => textOf(m).includes("$88.20") && (m.subject ?? m.title) === TB);
+      assert((await row(tj.refundId)).status === "reversed" && jobMsgs.length === 2 && (await row(tj.refundId)).seller_notified_at !== null && out.takenBack === 1, "runBookingRecoveryJob reverses and tells the seller in the same run", { out, jobMsgs });
+    }
+    {
+      const all = history.concat([]);
       const texts = all.map((m) => `${m.subject ?? m.title} ${m.text ?? m.body}`);
       assert(texts.length > 0 && texts.every((x) => !/ - | – | — |—|–/.test(x) && !x.includes("8%")), "copy has no dash separators and no 8%", texts);
+      assert(texts.some((x) => x.startsWith("Refund taken back from your balance ")) && texts.some((x) => x.startsWith("Money owed for a refund ")), "dash and 8% check covers the owed and the taken-back copy");
     }
 
     console.log("alertOldOwed");
