@@ -2,6 +2,7 @@
  * /api/events — Events & Ticketing, Phase 1 PR 1 (host side + public event page data).
  *
  *   POST  /                  (auth)  create a draft event
+ *   GET   /                  (public) listed upcoming events for Discover (eventList.ts), no private address data
  *   GET   /mine              (auth)  the events I host
  *   GET   /slug/:slug        (public; host sees own drafts) event page data, address hidden until you have a ticket
  *   GET   /:id/manage        (auth, host)  full event + ticket types
@@ -33,6 +34,7 @@ import {
   type TicketTypeForSale,
 } from "./eventRules";
 import { geocodeEventInBackground } from "./eventGeocode";
+import { listQuerySchema, listPublicEvents } from "./eventList";
 
 const router = Router();
 
@@ -304,6 +306,21 @@ router.post("/", hybridAuthMiddleware, async (req: Request, res: Response) => {
   } catch (err) {
     console.error("[Events] create failed:", err);
     return fail(res, 500, "SERVER_ERROR", "Couldn't create the event.");
+  }
+});
+
+// Public list. Registered before every /:id route and without auth middleware on purpose: a stale or
+// invalid Bearer must not turn a public read into a 401.
+router.get("/", async (req: Request, res: Response) => {
+  const parsed = listQuerySchema.safeParse(req.query);
+  if (!parsed.success) return fail(res, 400, "INVALID_QUERY", "Check the filters and try again.");
+  try {
+    const out = await listPublicEvents(parsed.data, (q) => rows(q));
+    if ("badCursor" in out) return fail(res, 400, "INVALID_QUERY", "Check the filters and try again.");
+    return res.json({ success: true, events: out.events, nextCursor: out.nextCursor });
+  } catch (err) {
+    console.error("[Events] list failed:", err);
+    return fail(res, 500, "SERVER_ERROR", "Couldn't load events.");
   }
 });
 
