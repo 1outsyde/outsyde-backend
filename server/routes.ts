@@ -162,6 +162,8 @@ import {
   syncWeeklyAvailabilityToHoursOfOperation
 } from "./availabilityService";
 import { isHoldStillBookable, SERVICE_UNAVAILABLE_BODY } from "./bookableService";
+import { serviceCitiesInput } from "./estimates/serviceCities";
+import { registerEstimateRequestRoutes } from "./estimates/estimateRequestRoutes";
 import {
   transitionAppointmentState,
   transitionShootBookingState,
@@ -12357,9 +12359,18 @@ export async function registerRoutes(
         "categoryCode",
         "specialties",
         "otherDescription",
+        // Cities the business serves (migration 066), checked and cleaned below.
+        "serviceCities",
       ]);
       if (otherFields.allowPastClosing !== undefined && typeof otherFields.allowPastClosing !== "boolean") {
         return res.status(400).json({ error: "allowPastClosing must be true or false" });
+      }
+      if (otherFields.serviceCities !== undefined) {
+        const cities = serviceCitiesInput.safeParse(otherFields.serviceCities);
+        if (!cities.success) {
+          return res.status(400).json({ error: "serviceCities must be a list of up to 50 city names", field: "serviceCities" });
+        }
+        otherFields.serviceCities = cities.data;
       }
       const droppedKeys = Object.keys(otherFields).filter((key) => !VENDOR_MY_BUSINESS_ALLOWED_FIELDS.has(key));
       if (droppedKeys.length > 0) {
@@ -13588,6 +13599,9 @@ export async function registerRoutes(
     }
   });
 
+  // Estimate requests (migration 066): saved form + vendor dashboard list. See server/estimates.
+  registerEstimateRequestRoutes(app);
+
   // Create vendor service
   app.post("/api/vendor/services", async (req, res) => {
     const xBusinessId = req.headers['x-business-id'] as string | undefined;
@@ -13631,6 +13645,9 @@ export async function registerRoutes(
         alternateZipCode: z.string().nullable().optional(),
         virtualLink: z.string().nullable().optional(),
         depositAmountCents: z.number().int().min(0).nullable().optional(),
+        // Migration 066: cities the service is offered in (empty = every city) and request only.
+        serviceCities: serviceCitiesInput.optional(),
+        requestOnly: z.boolean().optional(),
       });
 
       const validated = serviceSchema.parse(req.body);
@@ -13707,6 +13724,9 @@ export async function registerRoutes(
         alternateZipCode: z.string().nullable().optional(),
         virtualLink: z.string().nullable().optional(),
         depositAmountCents: z.number().int().min(0).nullable().optional(),
+        // Migration 066: cities the service is offered in (empty = every city) and request only.
+        serviceCities: serviceCitiesInput.optional(),
+        requestOnly: z.boolean().optional(),
       });
 
       const validated = updateSchema.parse(req.body);
