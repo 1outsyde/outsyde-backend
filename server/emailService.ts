@@ -2276,6 +2276,36 @@ export async function sendTicketReceiptToBuyer(params: TicketReceiptParams): Pro
   await sendBrandedEmail(params.toEmail, subject, html, { kind: 'ticket', label: params.totalCents === 0 ? 'RSVP confirmation' : 'Ticket receipt' });
 }
 
+export type AddressRevealParams = {
+  toEmail: string;
+  firstName: string | null;
+  /** whereText is the full address here: this email is only sent once the reveal time has passed. */
+  event: TicketEmailEvent;
+  /** Link to My Tickets. */
+  ticketsUrl: string;
+};
+
+export function renderAddressReveal(params: AddressRevealParams): { subject: string; html: string } {
+  const name = params.firstName ? `Hi ${escapeHtml(params.firstName)}, ` : '';
+  const html = wrapEmail(`
+    ${emailHeader('Your event address is ready', `${name}the address for this event is now available.`)}
+    <tr><td style="background:#1A1A1A;padding:0 32px 8px;">
+      <table width="100%" cellpadding="0" cellspacing="0" style="border-radius:6px;overflow:hidden;border:1px solid #2A2A2A;">${ticketEventRows(params.event)}</table>
+      <p style="color:#888888;font-size:13px;margin:16px 0 8px 0;">You can always find the address and your ticket codes in My Tickets.</p>
+      <p style="text-align:center;margin:16px 0 8px 0;">
+        <a href="${escapeHtml(params.ticketsUrl)}" style="background:#E8B930;color:#111111;padding:12px 30px;text-decoration:none;border-radius:6px;font-weight:bold;display:inline-block;">Open My Tickets</a>
+      </p>
+    </td></tr>
+    ${emailFooter()}
+  `);
+  return { subject: `Your address is ready: ${params.event.title}`, html };
+}
+
+export async function sendAddressRevealToHolder(params: AddressRevealParams): Promise<void> {
+  const { subject, html } = renderAddressReveal(params);
+  await sendBrandedEmail(params.toEmail, subject, html, { kind: 'ticket', label: 'Event address reveal' });
+}
+
 export type TicketRefundParams = {
   toEmail: string;
   firstName: string | null;

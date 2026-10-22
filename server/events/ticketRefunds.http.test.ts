@@ -136,6 +136,7 @@ async function waitFor(check: () => boolean, ms = 5000) { const end = Date.now()
     sendReceipt: async (p) => { notices.push({ kind: "receipt", p }); },
     sendRefund: async (p) => { notices.push({ kind: "refund", p }); },
     sendCancelled: async (p) => { notices.push({ kind: "cancelled", p }); },
+    sendAddressReveal: async () => {},
     sendPush: async (p) => { notices.push({ kind: "push", p }); return true; },
   });
 

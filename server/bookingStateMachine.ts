@@ -530,6 +530,15 @@ export function startBookingCleanupJob(intervalMs: number = 60000): NodeJS.Timeo
     } catch (error) {
       console.error("[BookingCleanup] Error during booking refund recovery job:", error);
     }
+
+    // Day-of address reveal: one push and email per ticket holder once the reveal time passes (atomic claim on tickets.address_reveal_notified_at: safe to run twice).
+    // Own try/catch, after the booking recovery step, so neither can starve the other.
+    try {
+      const { runAddressRevealJob } = await import("./events/addressReveal");
+      await runAddressRevealJob();
+    } catch (error) {
+      console.error("[BookingCleanup] Error during address reveal job:", error);
+    }
   };
 
   cleanup();
