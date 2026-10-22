@@ -151,6 +151,7 @@ export async function loadTicketTypes(eventId: string): Promise<any[]> {
   return rows(sql`SELECT * FROM ticket_types WHERE event_id = ${eventId} ORDER BY sort_order, created_at`);
 }
 
+// Keep naming rules in sync with hostIdentityFrom in eventList.ts (the public list shapes the same host names).
 async function hostIdentity(e: any): Promise<{ publicName: string; avatarUrl: string | null }> {
   const [u] = await rows<any>(sql`
     SELECT id, name, first_name, username, profile_image_url FROM users WHERE id = ${e.host_user_id}`);

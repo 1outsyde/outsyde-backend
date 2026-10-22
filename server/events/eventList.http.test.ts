@@ -20,6 +20,7 @@
  *  - ORDER BY distance instead of starts_at    -> "near filter keeps start order"
  *  - drop the ROUND(...,1) CASE (use exact ev.latitude/longitude) -> "1 km radius on the exact point does NOT match a hidden-address event"
  *  - drop the radius haversine condition       -> "near filter excludes an event 100 km away"
+ *  - drop the Date.parse / round-trip check in decodeCursor -> "forged cursor with a valid shape but impossible date -> 400" (500 instead)
  *  - drop `.strict()` on listQuerySchema       -> "unknown query keys are refused"
  *  - move the route after hybridAuthMiddleware / below a /:id route -> "invalid Bearer still gets 200"
  */
@@ -227,6 +228,11 @@ async function call(method: string, path: string, o: { token?: string } = {}): P
     ] as const) {
       r = await call("GET", `/api/events?${qs}`);
       assert(r.status === 400 && r.body.success === false && r.body.error.code === "INVALID_QUERY", `${name} -> 400 INVALID_QUERY`, r);
+    }
+    const forge = (v: string) => Buffer.from(v, "utf8").toString("base64url");
+    for (const bad of ["2026-13-45T99:99:99.000000Z|abc", "2026-02-30T10:00:00.000000Z|abc", "0000-01-01T00:00:00.000000Z|abc"]) {
+      r = await call("GET", `/api/events?cursor=${enc(forge(bad))}`);
+      assert(r.status === 400 && r.body?.error?.code === "INVALID_QUERY", `forged cursor with a valid shape but impossible date -> 400 (${bad.slice(0, 10)})`, { status: r.status, body: r.body });
     }
     r = await call("GET", "/api/events?city=a&city=b");
     assert(r.status === 400 && r.body.error.code === "INVALID_QUERY", "repeated parameter -> 400 INVALID_QUERY", r);

@@ -55,6 +55,10 @@ export function decodeCursor(c: string): { ts: string; id: string } | null {
   try {
     const [ts, id, extra] = Buffer.from(c, "base64url").toString("utf8").split("|");
     if (extra !== undefined || !CURSOR_TS.test(ts ?? "") || !CURSOR_ID.test(id ?? "")) return null;
+    // Shape alone isn't enough: Postgres would reject an impossible date with a 500. Require a real
+    // calendar date (the ISO round-trip catches month 13, Feb 30, hour 99) within Postgres' year range.
+    const ms = Date.parse(ts);
+    if (!Number.isFinite(ms) || ts < "1000" || new Date(ms).toISOString().slice(0, 19) !== ts.slice(0, 19)) return null;
     return { ts, id };
   } catch {
     return null;
@@ -69,7 +73,7 @@ export interface EventCard {
   priceFromCents: number | null; hasFree: boolean; soldOut: boolean;
 }
 
-/** Same naming rules as the event page (hostIdentity in eventsRouter.ts), from columns already joined. */
+/** Same naming rules as the event page (hostIdentity in eventsRouter.ts), from columns already joined. Keep naming rules in sync with hostIdentity. */
 export function hostIdentityFrom(r: {
   host_type: string; host_user_id: string;
   u_name?: string | null; u_first_name?: string | null; u_username?: string | null; u_image?: string | null;
