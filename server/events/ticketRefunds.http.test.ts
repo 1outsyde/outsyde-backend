@@ -484,9 +484,9 @@ async function waitFor(check: () => boolean, ms = 5000) { const end = Date.now()
     notices.length = 0;
     await q(`UPDATE events SET status = 'cancelled', cancelled_at = now(), cancel_reason = 'Rain.' WHERE id = $1`, [e20.id]);
     await runTicketRefundJob(direct as any); // its sweep cancels the free RSVP and refunds the paid order, both due now
-    await waitFor(() => notices.some((n) => n.kind === "cancelled" && mine(n, 6)) && notices.some((n) => n.kind === "refund" && mine(n, 5)));
-    await sleep(500);
-    const cn20 = notices.filter((n) => (n.kind === "cancelled" && mine(n, 6)) || (n.kind === "refund" && mine(n, 5)));
+    const cnNotices = () => notices.filter((n) => (n.kind === "cancelled" && mine(n, 6)) || (n.kind === "refund" && mine(n, 5)));
+    await waitFor(() => cnNotices().length >= 2, 10000); // bounded wait on the expected count, no fixed sleep
+    const cn20 = cnNotices();
     assert(rsvp20.status === 201 && cn20.length === 2 && cn20.every((n) => n.p.event.whereText === "Freeport, NY" && !JSON.stringify(n.p).includes("9 Hidden Way")),
       "day-of before reveal: cancel and cancel refund emails show only city and state", cn20.map((n) => ({ k: n.kind, w: n.p.event.whereText })));
     assert(o20b.status === "completed", "second day-of order completed");

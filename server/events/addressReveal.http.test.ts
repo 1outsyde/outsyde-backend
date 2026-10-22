@@ -265,6 +265,51 @@ const noDash = (s: string) => !/[‒–—―]| - /.test(s);
       assert(emails.filter((m) => m.event.title === e4.ev.title).length === 0 && forEvent(pushes, e4.ev.title, (x) => x.body).length === 1, "REVEAL_EMAIL_DAILY_CAP=0 from the environment: push only");
     }
 
+    console.log("Reveal email also respects the total daily email ceiling");
+    {
+      await q(`UPDATE tickets SET address_reveal_notified_at = now() WHERE address_reveal_notified_at IS NULL AND event_id IN (SELECT id FROM events WHERE slug LIKE $1)`, [`${P}-%`]);
+      const e = await mkEvent();
+      await e.addTickets(users[0], 1);
+      const stamp = e.after;
+      await q(`INSERT INTO email_log (kind, label, status, created_at) SELECT 'transactional', $1, 'sent', $2::timestamptz FROM generate_series(1, 70)`, [`${P}-fill`, stamp.toISOString()]);
+      reset();
+      const r = await runAddressRevealJob(stamp, BIG);
+      assert(r.notified === 1 && forEvent(pushes, e.ev.title, (x) => x.body).length === 1, "70 emails already logged today: the push still goes out", r);
+      assert(emails.filter((m) => m.event.title === e.ev.title).length === 0, "70 emails already logged today: no reveal email", emails.length);
+      await q(`DELETE FROM email_log WHERE label = $1`, [`${P}-fill`]);
+      const e2 = await mkEvent();
+      await e2.addTickets(users[1], 1);
+      await q(`INSERT INTO email_log (kind, label, status, created_at) SELECT 'transactional', $1, 'sent', $2::timestamptz FROM generate_series(1, 69)`, [`${P}-fill`, e2.after.toISOString()]);
+      reset();
+      await runAddressRevealJob(e2.after, BIG);
+      assert(emails.filter((m) => m.event.title === e2.ev.title).length === 1, "69 emails logged today: the reveal email is still sent", emails.length);
+      await q(`DELETE FROM email_log WHERE label = $1`, [`${P}-fill`]);
+    }
+
+    console.log("Hosts who are inactive or deleting");
+    {
+      await q(`UPDATE tickets SET address_reveal_notified_at = now() WHERE address_reveal_notified_at IS NULL AND event_id IN (SELECT id FROM events WHERE slug LIKE $1)`, [`${P}-%`]);
+      const hostInactive = await mkUser("hostoff");
+      const hostDeleting = await mkUser("hostdel");
+      const mk = async (hostId: string) => {
+        const e = await mkEvent();
+        await q(`UPDATE events SET host_user_id = $1 WHERE id = $2`, [hostId, e.ev.id]);
+        await e.addTickets(users[2], 1);
+        return e;
+      };
+      const eOff = await mk(hostInactive);
+      const eDel = await mk(hostDeleting);
+      const eOk = await mk(host);
+      await q(`UPDATE users SET is_active = false WHERE id = $1`, [hostInactive]);
+      await q(`UPDATE users SET deletion_status = 'pending_deletion' WHERE id = $1`, [hostDeleting]);
+      reset();
+      const at = new Date(Math.max(eOff.after.getTime(), eDel.after.getTime(), eOk.after.getTime()));
+      await runAddressRevealJob(at, BIG);
+      assert(forEvent(pushes, eOff.ev.title, (x) => x.body).length === 0 && forEvent(pushes, eDel.ev.title, (x) => x.body).length === 0, "events of an inactive or deleting host get no notice", pushes.length);
+      assert(forEvent(pushes, eOk.ev.title, (x) => x.body).length === 1, "an active host's event still does", pushes.length);
+      await q(`DELETE FROM tickets WHERE event_id IN ($1, $2)`, [eOff.ev.id, eDel.ev.id]);
+    }
+
     console.log("Email copy");
     {
       const em = await import("../emailService");

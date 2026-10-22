@@ -40,7 +40,7 @@ export async function geocodeAddress(address: GeocodingInput): Promise<Geocoding
       const lat = parseFloat(data[0].lat);
       const lon = parseFloat(data[0].lon);
       if (!isNaN(lat) && !isNaN(lon)) {
-        console.log(`[Geocode] ${address.city}, ${address.state} → ${lat}, ${lon}`);
+        console.log(`[Geocode] ${address.city}, ${address.state} ok`);
         return { latitude: lat, longitude: lon };
       }
     }

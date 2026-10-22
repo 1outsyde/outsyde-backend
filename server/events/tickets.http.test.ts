@@ -187,6 +187,37 @@ async function call(method: string, path: string, o: { token?: string; body?: un
     r = await call("GET", "/api/events/me/tickets", { token: tok(g0) });
     assert(r.body.tickets.length === 0, "cancelled ticket leaves my tickets", r.body);
 
+    console.log("My tickets shows the address once the holder can see it");
+    {
+      const mkAddrEvent = async (visibility: string) => {
+        const e = await newEvent({ addressVisibility: visibility });
+        await q(`UPDATE events SET venue_name = 'The Loft', address_line1 = '9 Hidden Way', address_line2 = 'Suite 2', postal_code = '11520' WHERE id = $1`, [e.id]);
+        const t = (await addType(e.id, { name: "Free", priceCents: 0, quantity: 5 })).body.ticketType;
+        await call("POST", `/api/events/${e.id}/publish`, { token: tok(host) });
+        return { e, t };
+      };
+      const mineFor = async (user: string, slug: string) => (await call("GET", "/api/events/me/tickets", { token: tok(user) })).body.tickets.find((x: any) => x.event.slug === slug);
+      const far = await mkAddrEvent("ticket_holders_day_of");
+      await rsvp(far.e.id, guests[44], { ticketTypeId: far.t.id });
+      let mine = await mineFor(guests[44], far.e.slug);
+      const { addressRevealAt } = await import("./eventRules");
+      const expectIso = addressRevealAt(new Date(mine.event.startsAt), "America/New_York").toISOString();
+      assert(mine.event.addressHidden === true && mine.event.addressLine1 === null && mine.event.addressLine2 === null && mine.event.venueName === null && mine.event.postalCode === null,
+        "day-of before the reveal: street fields null, addressHidden true", mine.event);
+      assert(mine.event.addressRevealAt === expectIso && mine.event.city === "Freeport" && mine.event.state === "NY", "day-of before the reveal: addressRevealAt set, city and state kept", mine.event);
+      assert(mine.code && mine.orderId && mine.ticketTypeName === "Free" && mine.event.timezone === "America/New_York" && "coverImageUrl" in mine.event, "existing fields are all still there", mine);
+      await q(`UPDATE events SET starts_at = now() + interval '2 hours', ends_at = now() + interval '7 hours' WHERE id = $1`, [far.e.id]);
+      mine = await mineFor(guests[44], far.e.slug);
+      assert(mine.event.addressHidden === false && mine.event.addressLine1 === "9 Hidden Way" && mine.event.addressLine2 === "Suite 2" && mine.event.venueName === "The Loft" && mine.event.postalCode === "11520",
+        "day-of after the reveal: the street is there", mine.event);
+      assert(typeof mine.event.addressRevealAt === "string", "day-of after the reveal: addressRevealAt still reported", mine.event);
+      const th = await mkAddrEvent("ticket_holders");
+      await rsvp(th.e.id, guests[1], { ticketTypeId: th.t.id });
+      mine = await mineFor(guests[1], th.e.slug);
+      assert(mine.event.addressHidden === false && mine.event.addressLine1 === "9 Hidden Way" && mine.event.venueName === "The Loft" && mine.event.addressRevealAt === null,
+        "ticket_holders event: street present, addressRevealAt null", mine.event);
+    }
+
     const ev2 = await newEvent();
     r = await addType(ev2.id, { name: "Free", priceCents: 0, quantity: 2 });
     const t2 = r.body.ticketType;

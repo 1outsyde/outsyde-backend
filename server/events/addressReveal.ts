@@ -6,16 +6,20 @@
  * single UPDATE ... RETURNING guarded by `address_reveal_notified_at IS NULL`, so two runs at once notify each holder
  * once (the claim is per HOLDER: every unstamped valid pre-reveal ticket of up to 200 holders is stamped in the same
  * statement, so a holder is never split across batches). Tickets bought after the reveal already see the address, so they get no notice. Each distinct holder gets one push
- * and, while the daily budget lasts, one email (REVEAL_EMAIL_DAILY_CAP, default 40 per UTC day, counted in tickets.address_reveal_emailed_at;
- * Resend's plan allows 100 emails a day). Holders past the budget get the push only. Failures are logged and never thrown (a claimed ticket is not retried: one notice at most).
+ * and, while the daily budget lasts, one email (REVEAL_EMAIL_DAILY_CAP, default 40 per UTC day, counted in tickets.address_reveal_emailed_at, and only while
+ * today's total email_log count is under TOTAL_EMAIL_DAILY_CEILING; Resend's plan allows 100 emails a day). Holders past the budget get the push only. Failures are logged and never thrown (a claimed ticket is not retried: one notice at most).
  */
 import { sql } from "drizzle-orm";
+import { startOfNewYorkDay } from "../emailHistory";
 import { rows } from "./eventsRouter";
 import { addressRevealAt } from "./eventRules";
 import { noticeDeps, paced, formatEventWhen, formatEventWhere } from "./ticketNotices";
 
 const CLAIM_BATCH = 200;
 const MAX_BATCHES_PER_EVENT = 50;
+// Leave at least 30 of Resend's 100 a day for receipts and bookings: a reveal email is only sent while today's total
+// email_log count (all kinds, New York day, the same day the admin broadcast budget uses) is below this.
+const TOTAL_EMAIL_DAILY_CEILING = 70;
 
 export type RevealJobOptions = { batchSize?: number; emailDailyCap?: number };
 
@@ -39,7 +43,8 @@ export async function runAddressRevealJob(now: Date = new Date(), opts: RevealJo
       FROM events
       WHERE status = 'published' AND address_visibility = 'ticket_holders_day_of'
         AND ends_at > ${nowIso}::timestamptz
-        AND starts_at <= ${nowIso}::timestamptz + interval '18 hours'`);
+        AND starts_at <= ${nowIso}::timestamptz + interval '18 hours'
+        AND host_user_id IN (SELECT id FROM users WHERE is_active = true AND COALESCE(deletion_status, 'active') = 'active')`);
     for (const e of events) {
       try {
         const revealAt = addressRevealAt(new Date(e.starts_at), e.timezone);
@@ -62,9 +67,12 @@ export async function runAddressRevealJob(now: Date = new Date(), opts: RevealJo
  */
 async function takeEmailBudget(ticketId: string, now: Date, cap: number): Promise<boolean> {
   const nowIso = now.toISOString();
+  const nyDayStart = startOfNewYorkDay(now).toISOString();
   const got = await rows<any>(sql`
     UPDATE tickets SET address_reveal_emailed_at = ${nowIso}::timestamptz
     WHERE id = ${ticketId} AND address_reveal_emailed_at IS NULL
+      AND (SELECT count(*) FROM email_log WHERE created_at >= ${nyDayStart}::timestamptz
+             AND created_at < ${nyDayStart}::timestamptz + interval '1 day') < ${TOTAL_EMAIL_DAILY_CEILING}
       AND (SELECT count(*) FROM tickets
            WHERE address_reveal_emailed_at >= date_trunc('day', ${nowIso}::timestamptz AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'
              AND address_reveal_emailed_at < (date_trunc('day', ${nowIso}::timestamptz AT TIME ZONE 'UTC') + interval '1 day') AT TIME ZONE 'UTC') < ${cap}

@@ -285,6 +285,14 @@ async function call(method: string, path: string, o: { token?: string; body?: un
     await q(`UPDATE events SET starts_at = now() + interval '3 days', ends_at = now() + interval '3 days 5 hours' WHERE id = $1`, [dayOfFar.id]);
     r = await call("GET", `/api/events/slug/${dayOfFar.slug}`, { token: tok(guest) });
     assert(r.body.event.addressHidden === true && r.body.event.addressLine1 === null, "still hidden at 3 days out");
+    {
+      const { addressRevealAt } = await import("./eventRules");
+      assert(r.body.event.addressRevealAt === addressRevealAt(new Date(r.body.event.startsAt), r.body.event.timezone).toISOString(), "day-of slug route reports addressRevealAt", r.body?.event);
+      const plain = await call("POST", "/api/events", { token: tok(host), body: base() });
+      eventIds.push(plain.body.event.id);
+      const pub = await call("GET", `/api/events/slug/${plain.body.event.slug}`, { token: tok(host) });
+      assert(pub.status === 200 && pub.body.event.addressRevealAt === null && "addressRevealAt" in pub.body.event, "non day-of event: addressRevealAt is null", pub);
+    }
     r = await call("GET", `/api/events/slug/${dayOfFar.slug}`, { token: tok(host) });
     assert(r.body.event.addressLine1 === "1 Main St" && r.body.event.viewerIsHost === true, "host sees the street on a day-of event", r.body?.event);
 

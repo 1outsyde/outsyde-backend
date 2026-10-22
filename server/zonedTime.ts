@@ -27,5 +27,7 @@ export function wallClockToUtc(date: string | null | undefined, time: string | n
 
 /** The calendar date ("YYYY-MM-DD") of `instant` as seen in `timeZone`. */
 export function localDateInZone(instant: Date, timeZone: string): string {
-  return new Intl.DateTimeFormat("en-CA", { timeZone, year: "numeric", month: "2-digit", day: "2-digit" }).format(instant);
+  const parts = new Intl.DateTimeFormat("en-US", { timeZone, year: "numeric", month: "2-digit", day: "2-digit" }).formatToParts(instant);
+  const get = (t: string) => parts.find((p) => p.type === t)?.value ?? "";
+  return `${get("year")}-${get("month")}-${get("day")}`;
 }
