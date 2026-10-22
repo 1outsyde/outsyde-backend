@@ -423,7 +423,7 @@ export const businesses = pgTable("businesses", {
   // Vendor whitelabel site media config (stylist photo + gallery slots)
   siteConfig: jsonb("site_config").$type<SiteConfig>(),
 
-  // Cities this business serves (migration 066). Shown on its site's estimate form.
+  // Cities this business serves (migration 067). Shown on its site's estimate form.
   serviceCities: text("service_cities").array().notNull().default(sql`'{}'::text[]`),
 
   createdAt: timestamp("created_at").defaultNow().notNull(),
@@ -563,16 +563,16 @@ export const vendorServices = pgTable("vendor_services", {
   imageUrl: text("image_url"),
   depositAmountCents: integer('deposit_amount_cents'),
 
-  // Migration 066. Cities this service is offered in; empty = every city of the business.
+  // Migration 067. Cities this service is offered in; empty = every city of the business.
   serviceCities: text("service_cities").array().notNull().default(sql`'{}'::text[]`),
-  // Migration 066. true = customers request an estimate instead of booking; never held or paid for.
+  // Migration 067. true = customers request an estimate instead of booking; never held or paid for.
   requestOnly: boolean("request_only").notNull().default(false),
 
   createdAt: timestamp("created_at").defaultNow().notNull(),
 });
 
 /* =====================================================
-   ESTIMATE REQUESTS (migration 066)
+   ESTIMATE REQUESTS (migration 067)
 ===================================================== */
 // A customer's estimate request to a business (Royal Elite first), saved from the business's site.
 // The business calls the customer back and moves the status along by hand. No payment is involved.

@@ -6,7 +6,7 @@
 export const SERVICE_UNAVAILABLE_MESSAGE =
   "This service isn't available to book right now. Please choose another service.";
 
-/** A request only service (migration 066) is listed but never booked: customers request an estimate. */
+/** A request only service (migration 067) is listed but never booked: customers request an estimate. */
 export function isServiceBookable(
   svc: { status?: string | null; isActive?: boolean | null; requestOnly?: boolean | null } | null | undefined,
 ): boolean {

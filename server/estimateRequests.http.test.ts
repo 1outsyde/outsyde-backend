@@ -1,10 +1,10 @@
 /**
- * Estimate requests + service cities + request only services (migration 066) — HTTP integration tests.
+ * Estimate requests + service cities + request only services (migration 067) — HTTP integration tests.
  *
  * Run with: npx tsx server/estimateRequests.http.test.ts
  *
  * SCRATCH ONLY. Needs a backend booted on localhost against a LOCAL scratch Postgres (full schema +
- * migration 066 applied) with a Stripe stub, exactly like server/holdBookable.http.test.ts:
+ * migration 067 applied) with a Stripe stub, exactly like server/holdBookable.http.test.ts:
  *   ER_TEST_BASE_URL      e.g. http://localhost:5062   (must be localhost)
  *   ER_TEST_PG_URL        the SAME scratch database (localhost only; seeds + cleans up)
  *   ER_TEST_STRIPE_PORT   port for the in-process Stripe stub started here; boot the server with
@@ -126,7 +126,10 @@ async function call(method: string, path: string, o: { token?: string; body?: un
 
   const customer = await mkUser('c');
   const customer2 = await mkUser('c2');
-  const admin = await mkUser('adm', { email: 'info@goutsyde.com' });
+  // Admin = the platform admin email. Other scratch tests may already have made that user: reuse it then
+  // (and leave it in place), otherwise make one for this run.
+  const [existingAdmin] = await q(`SELECT id FROM users WHERE email = 'info@goutsyde.com'`);
+  const admin = existingAdmin?.id ?? await mkUser('adm', { email: 'info@goutsyde.com' });
   const tok = (u: string, o: { isVendor?: boolean } = {}) => generateAccessToken({ userId: u, isVendor: o.isVendor ?? false, isAdmin: false });
   const tC = tok(customer), tC2 = tok(customer2), tR = tok(vendorR, { isVendor: true }), tO = tok(vendorO, { isVendor: true }), tA = tok(admin);
 
