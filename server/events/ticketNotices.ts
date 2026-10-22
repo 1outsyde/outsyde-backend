@@ -11,6 +11,7 @@
  */
 import { sql } from "drizzle-orm";
 import { rows } from "./eventsRouter";
+import { holderCanSeeAddress } from "./eventRules";
 import type { TicketEmailEvent } from "../emailService";
 
 export type NoticeDeps = {
@@ -70,14 +71,22 @@ export function formatEventWhere(e: { venue_name?: string | null; address_line1?
   return parts.length ? parts.join(", ") : null;
 }
 
-function emailEvent(e: any): TicketEmailEvent {
-  return { title: String(e.title), whenText: formatEventWhen(e.starts_at, e.timezone), whereText: formatEventWhere(e) };
+/** "City, ST" (only the parts present), or null when the event has neither. */
+function cityState(e: { city?: string | null; state?: string | null }): string | null {
+  const parts = [e.city, e.state].map((s) => (s ?? "").trim()).filter(Boolean);
+  return parts.length ? parts.join(", ") : null;
+}
+
+/** Day-of events keep the venue and street out of emails until the reveal time. */
+function emailEvent(e: any, now: Date = new Date()): TicketEmailEvent {
+  const full = holderCanSeeAddress(e.address_visibility, new Date(e.starts_at), e.timezone, now);
+  return { title: String(e.title), whenText: formatEventWhen(e.starts_at, e.timezone), whereText: full ? formatEventWhere(e) : cityState(e) };
 }
 
 async function loadOrder(orderId: string) {
   const [o] = await rows<any>(sql`
     SELECT o.*, u.email AS buyer_email, u.first_name AS buyer_first_name,
-           e.title, e.starts_at, e.timezone, e.venue_name, e.address_line1, e.address_line2, e.city, e.state, e.postal_code,
+           e.title, e.starts_at, e.timezone, e.address_visibility, e.venue_name, e.address_line1, e.address_line2, e.city, e.state, e.postal_code,
            e.status AS event_status, e.host_user_id, e.cancel_reason,
            (SELECT tt.name FROM ticket_order_items i JOIN ticket_types tt ON tt.id = i.ticket_type_id
              WHERE i.order_id = o.id ORDER BY i.created_at LIMIT 1) AS ticket_type_name
