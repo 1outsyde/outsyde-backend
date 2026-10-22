@@ -300,7 +300,9 @@ async function call(method: string, path: string, o: { token?: string; body?: un
 
     console.log("Event geocoding");
     const stubLog = process.env.EVENT_GEOCODE_STUB_LOG;
-    if (!process.env.EVENT_GEOCODE_STUB || !stubLog) throw new Error("boot the server with EVENT_GEOCODE_STUB=40.7,-73.6 and EVENT_GEOCODE_STUB_LOG=<file>, and pass the same EVENT_GEOCODE_STUB_LOG to this test");
+    const geocodeReady = !!process.env.EVENT_GEOCODE_STUB && !!stubLog;
+    if (!geocodeReady) console.log("  ⏭  geocode tests skipped: boot the server with ALLOW_TEST_SEAMS=1 EVENT_GEOCODE_STUB=40.7,-73.6 EVENT_GEOCODE_STUB_LOG=<file> and pass EVENT_GEOCODE_STUB(_LOG) to the test");
+    if (geocodeReady) {
     const fs = await import("fs");
     const stubCalls = () => { try { return fs.readFileSync(stubLog, "utf8").split("\n").filter(Boolean); } catch { return [] as string[]; } };
     const waitFor = async (fn: () => Promise<boolean> | boolean) => { for (let i = 0; i < 40; i++) { if (await fn()) return true; await new Promise((x) => setTimeout(x, 100)); } return false; };
@@ -347,6 +349,26 @@ async function call(method: string, path: string, o: { token?: string; body?: un
     const callsNow = stubCalls().length;
     await new Promise((x) => setTimeout(x, 400));
     assert(r.status === 201 && stubCalls().length === callsNow && stubCalls().every((l) => !l.includes("Rooftop")), "no city/state means no geocode call");
+
+    console.log("Stale geocode result can't land");
+    process.env.ALLOW_TEST_SEAMS = "1";
+    const gmod = await import("./eventGeocode");
+    let seen = 0;
+    gmod.setGeocoderForTest(async () => { seen++; return { latitude: 1.5, longitude: 2.5 }; });
+    r = await call("POST", "/api/events", { token: tok(host), body: { ...noCoords(), city: "Nowhere" } });
+    const stale = r.body.event; eventIds.push(stale.id);
+    await waitFor(() => stubCalls().some((l) => l.includes("Nowhere")));
+    await q(`UPDATE events SET latitude = NULL, longitude = NULL WHERE id = $1`, [stale.id]);
+    // A result for the OLD address arrives after the row moved on: it must not be written.
+    gmod.geocodeEventInBackground(stale.id, { addressLine1: "1 Main St", city: "Old City", state: "NY", postalCode: "11520" });
+    await waitFor(() => seen > 0);
+    await new Promise((x) => setTimeout(x, 500));
+    assert(seen > 0 && (await latOf(stale.id)).latitude == null, "stale geocode result for an old address is dropped", await latOf(stale.id));
+    gmod.geocodeEventInBackground(stale.id, { addressLine1: "1 Main St", city: "Nowhere", state: "NY", postalCode: "11520" });
+    const landed = await waitFor(async () => (await latOf(stale.id)).latitude != null);
+    assert(landed && Number((await latOf(stale.id)).latitude) === 1.5, "a result for the current address still lands", await latOf(stale.id));
+    gmod.setGeocoderForTest(null);
+    }
   } finally {
     // Every event a test user hosts (also ones a mutated server let through).
     eventIds.push(...(await q(`SELECT id FROM events WHERE host_user_id IN (SELECT id FROM users WHERE email LIKE $1)`, [`${P}-%`])).map((x) => x.id));
