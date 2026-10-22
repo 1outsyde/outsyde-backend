@@ -542,6 +542,21 @@ async function waitFor(check: () => boolean, ms = 5000) { const end = Date.now()
     const o23 = await buy(e23.id, g[10], t23.id);
     await waitFor(() => notices.some((n) => n.kind === "receipt" && mine(n, 10)));
     assert(notices.find((n) => n.kind === "receipt" && mine(n, 10))!.p.event.whereText === null && o23.status === "completed", "day-of before reveal with no city or state: no place line");
+
+    console.log("A QR failure never blocks the receipt or the host push");
+    process.env.ALLOW_TEST_SEAMS = "1";
+    const { setQrBuilderForTest } = await import("./ticketNotices");
+    const { ev: e24, types: [t24] } = await paidEvent([{ name: "GA", priceCents: 2000, quantity: 20 }]);
+    notices.length = 0;
+    setQrBuilderForTest(() => { throw new Error("qr secret missing"); });
+    let o24: any;
+    try {
+      o24 = await buy(e24.id, g[8], t24.id);
+      await waitFor(() => notices.some((n) => n.kind === "receipt" && mine(n, 8)) && notices.some((n) => n.kind === "push"));
+    } finally { setQrBuilderForTest(null); }
+    const rc24 = notices.find((n) => n.kind === "receipt" && mine(n, 8));
+    assert(o24?.status === "completed" && !!rc24 && rc24.p.qrUrls === undefined && rc24.p.codes.length === 1, "failing QR builder: receipt still sent, without qrUrls", rc24?.p);
+    assert(notices.filter((n) => n.kind === "push" && n.p.data?.type === "ticket_sold").length === 1, "failing QR builder: host push still sent");
   } finally {
     setNoticeDepsForTest(null);
     stub.close();

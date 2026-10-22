@@ -128,6 +128,9 @@ router.post("/:id/door/team", hybridAuthMiddleware, async (req: Request, res: Re
       return fail(res, 400, "INVALID_REQUEST", `${first?.path.join(".") || "body"}: ${first?.message ?? "invalid"}`);
     }
     const { username, scope } = parsed.data;
+    if (scope === "event" && (ctx.event.status === "cancelled" || new Date(ctx.event.ends_at).getTime() <= Date.now())) {
+      return fail(res, 409, "EVENT_ENDED", "This event is over, so no one can be added to its door team.");
+    }
     const [target] = await rows<any>(sql`
       SELECT id, first_name, username FROM users
       WHERE LOWER(username) = LOWER(${username}) AND is_active = true AND COALESCE(deletion_status, 'active') = 'active'`);
@@ -186,18 +189,8 @@ router.delete("/:id/door/team/:userId", hybridAuthMiddleware, async (req: Reques
 
 // ─── Check in, undo, guest list (Task 3) ────────────────────────────────────
 
-/**
- * 120 per minute per signed in user (never per IP: a whole door team can share one venue wifi address).
- * Tests may lower it through DOOR_RATE_LIMIT_PER_MIN, read once at load, only outside production AND with
- * ALLOW_TEST_SEAMS=1. In any other setup the limit is exactly 120.
- */
-const DOOR_LIMIT = (() => {
-  if (process.env.NODE_ENV !== "production" && process.env.ALLOW_TEST_SEAMS === "1") {
-    const n = Number(process.env.DOOR_RATE_LIMIT_PER_MIN);
-    if (Number.isInteger(n) && n > 0 && n < 120) return n;
-  }
-  return 120;
-})();
+/** 120 per minute per signed in user (never per IP: a whole door team can share one venue wifi address). */
+const DOOR_LIMIT = 120;
 const doorLimiter = rateLimit({
   windowMs: 60 * 1000,
   limit: DOOR_LIMIT,
@@ -289,6 +282,10 @@ async function classifyFailedCheckIn(res: Response, eventId: string, key: Ticket
     });
   }
   // Refunded or cancelled wins over "already checked in": a refunded guest must be turned away.
+  // Never paid (held or expired order): say so. A refunding or refunded order stays NOT_VALID below.
+  if (t.status === "valid" && (t.order_status === "pending" || t.order_status === "expired")) {
+    return fail(res, 409, "NOT_PAID", "This ticket isn't paid for yet.");
+  }
   if (t.status !== "valid" || t.order_status !== "completed") {
     return fail(res, 409, "NOT_VALID", "This ticket is not valid. It was refunded or cancelled.");
   }

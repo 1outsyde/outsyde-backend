@@ -27,6 +27,13 @@ let testDeps: NoticeDeps | null = null;
 /** Tests only: route every notice to these senders (null restores the real ones). */
 export function setNoticeDepsForTest(d: NoticeDeps | null) { testDeps = d; }
 
+let qrBuilder: (ticketId: string) => string = qrUrlFor;
+/** Tests only (needs NODE_ENV !== "production" and ALLOW_TEST_SEAMS=1): replace the QR URL builder; null restores it. */
+export function setQrBuilderForTest(f: ((ticketId: string) => string) | null) {
+  if (process.env.NODE_ENV === "production" || process.env.ALLOW_TEST_SEAMS !== "1") return;
+  qrBuilder = f ?? qrUrlFor;
+}
+
 export async function noticeDeps(): Promise<NoticeDeps> {
   if (testDeps) return testDeps;
   const email = await import("../emailService");
@@ -106,7 +113,10 @@ export async function notifyOrderSettled(orderId: string): Promise<void> {
     if (!o || o.status !== "completed" || Number(o.total_cents) === 0 || o.event_status === "cancelled") return;
     const tix = await rows<any>(sql`SELECT id, code FROM tickets WHERE order_id = ${orderId} ORDER BY item_index`);
     const codes = tix.map((t) => String(t.code));
-    const qrUrls = tix.map((t) => qrUrlFor(String(t.id)));
+    // A QR failure must never block the receipt or the host push: the email just goes without images.
+    let qrUrls: string[] | undefined;
+    try { qrUrls = tix.map((t) => qrBuilder(String(t.id))); }
+    catch (err) { console.error(`[Tickets] qr urls failed for order ${orderId}:`, (err as Error)?.message ?? err); }
     const n = Number(o.ticket_count);
     if (o.buyer_email) {
       await paced(() => d.sendReceipt({

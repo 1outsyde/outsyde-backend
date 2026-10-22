@@ -201,7 +201,9 @@ async function callAt(base: string, method: string, path: string, o: { token?: s
     assert(r.status === 409 && r.body.error.code === "NOT_VALID", "cancelled ticket is NOT_VALID", r);
     const tPend = await mkTicket(evA, tA, g[7].id, { orderStatus: "pending" });
     r = await scan(evA, host.id, tPend.code);
-    assert(r.status === 409 && r.body.error.code === "NOT_VALID", "pending order ticket is not checkable", r);
+    assert(r.status === 409 && r.body.error.code === "NOT_PAID" && r.body.error.message === "This ticket isn't paid for yet.", "pending order ticket is NOT_PAID with its own message", r);
+    r = await scanId(evA, host.id, tPend.id);
+    assert(r.status === 409 && r.body.error.code === "NOT_PAID", "pending order ticket by id is NOT_PAID too", r);
     assert((await row(tPend.id)).checked_in_at === null, "pending order ticket stays unscanned");
     const tRefn = await mkTicket(evA, tVip, g[7].id, { priceCents: 5000 });
     await q(`UPDATE ticket_orders SET status = 'refunding', refund_reason = 'host', refund_amount_cents = 5000 WHERE id = $1`, [tRefn.orderId]);
