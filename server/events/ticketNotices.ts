@@ -10,7 +10,7 @@
  * Senders are injectable so tests can check what would be sent without Resend or Expo.
  */
 import { sql } from "drizzle-orm";
-import { rows } from "./eventsRouter";
+import { rows, hostIdentity } from "./eventsRouter";
 import { holderCanSeeAddress } from "./eventRules";
 import type { TicketEmailEvent } from "../emailService";
 
@@ -172,5 +172,22 @@ export async function notifyPayoutSent(payoutId: string): Promise<void> {
     });
   } catch (err) {
     console.error(`[Tickets] payout push failed for payout ${payoutId}:`, (err as Error)?.message ?? err);
+  }
+}
+
+/** After a host adds someone to the door team (push only, no email). Never throws. */
+export async function notifyDoorTeamAdded(p: { userId: string; scope: "standing" | "event"; eventId: string }): Promise<void> {
+  try {
+    const d = await noticeDeps();
+    const [e] = await rows<any>(sql`SELECT * FROM events WHERE id = ${p.eventId}`);
+    if (!e) return;
+    const what = p.scope === "standing" ? `${(await hostIdentity(e)).publicName}'s events` : String(e.title);
+    await d.sendPush({
+      userId: p.userId, title: "You're on the door team",
+      body: `You can now scan tickets for ${what}.`,
+      data: { type: "door_team_added", eventId: p.eventId, scope: p.scope },
+    });
+  } catch (err) {
+    console.error(`[Door] team push failed for event ${p.eventId}:`, (err as Error)?.message ?? err);
   }
 }
