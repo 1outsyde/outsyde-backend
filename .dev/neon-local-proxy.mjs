@@ -63,6 +63,15 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
+function toPgArray(arr) {
+  return '{' + arr.map((v) => {
+    if (v === null || v === undefined) return 'NULL';
+    if (Array.isArray(v)) return toPgArray(v);
+    const t = v instanceof Date ? v.toISOString() : String(v);
+    return '"' + t.replace(/\\/g, '\\\\').replace(/"/g, '\\"') + '"';
+  }).join(',') + '}';
+}
+
 function formatResult(result) {
   const fields = (result.fields || []).map(f => ({
     name: f.name,
@@ -79,6 +88,9 @@ function formatResult(result) {
       const val = row[f.name];
       if (val === null || val === undefined) return null;
       if (val instanceof Date) return val.toISOString();
+      // Postgres arrays (e.g. text[]) come back from Neon's HTTP API as array literals ('{a,"b c"}'),
+      // which the driver parses. JSON ('["a"]') would be read as an empty array.
+      if (Array.isArray(val) && f.dataTypeID !== 114 && f.dataTypeID !== 3802) return toPgArray(val);
       if (typeof val === 'object') return JSON.stringify(val);
       return String(val);
     });

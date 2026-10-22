@@ -53,6 +53,8 @@ export interface AdminEmailParams {
   text?: string;
   /** Set only for emails to customers or vendors; internal alerts stay unlogged (PR C2). */
   log?: EmailLogTag;
+  /** Optional Reply-To (estimate requests: the vendor replies straight to the customer). */
+  replyTo?: string;
 }
 
 export async function sendAdminEmail(params: AdminEmailParams): Promise<boolean> {
@@ -69,6 +71,7 @@ export async function sendAdminEmail(params: AdminEmailParams): Promise<boolean>
       subject: params.subject,
       html: params.html,
       text: params.text,
+      ...(params.replyTo ? { replyTo: params.replyTo } : {}),
     });
 
     if (result.error) {

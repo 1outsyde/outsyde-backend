@@ -423,6 +423,9 @@ export const businesses = pgTable("businesses", {
   // Vendor whitelabel site media config (stylist photo + gallery slots)
   siteConfig: jsonb("site_config").$type<SiteConfig>(),
 
+  // Cities this business serves (migration 066). Shown on its site's estimate form.
+  serviceCities: text("service_cities").array().notNull().default(sql`'{}'::text[]`),
+
   createdAt: timestamp("created_at").defaultNow().notNull(),
 }, (table) => ({
   idxBusinessOwner: index("idx_businesses_owner").on(table.ownerId),
@@ -560,8 +563,46 @@ export const vendorServices = pgTable("vendor_services", {
   imageUrl: text("image_url"),
   depositAmountCents: integer('deposit_amount_cents'),
 
+  // Migration 066. Cities this service is offered in; empty = every city of the business.
+  serviceCities: text("service_cities").array().notNull().default(sql`'{}'::text[]`),
+  // Migration 066. true = customers request an estimate instead of booking; never held or paid for.
+  requestOnly: boolean("request_only").notNull().default(false),
+
   createdAt: timestamp("created_at").defaultNow().notNull(),
 });
+
+/* =====================================================
+   ESTIMATE REQUESTS (migration 066)
+===================================================== */
+// A customer's estimate request to a business (Royal Elite first), saved from the business's site.
+// The business calls the customer back and moves the status along by hand. No payment is involved.
+export const ESTIMATE_REQUEST_STATUSES = ["new", "called", "quoted", "booked", "closed"] as const;
+export type EstimateRequestStatus = typeof ESTIMATE_REQUEST_STATUSES[number];
+
+export const estimateRequests = pgTable("estimate_requests", {
+  id: varchar("id", { length: 36 }).primaryKey().default(sql`gen_random_uuid()`),
+  businessId: varchar("business_id", { length: 36 }).notNull().references(() => businesses.id, { onDelete: "cascade" }),
+  customerId: varchar("customer_id", { length: 36 }),
+  serviceId: varchar("service_id", { length: 36 }),
+  serviceName: text("service_name"),
+  city: text("city"),
+  customerName: text("customer_name").notNull(),
+  customerEmail: text("customer_email").notNull(),
+  customerPhone: text("customer_phone").notNull(),
+  preferredDate: text("preferred_date"),
+  details: jsonb("details").$type<Record<string, string>>().notNull().default(sql`'{}'::jsonb`),
+  status: text("status").$type<EstimateRequestStatus>().notNull().default("new"),
+  vendorNotes: text("vendor_notes"),
+  source: text("source"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+}, (table) => ({
+  businessCreatedIdx: index("idx_estimate_requests_business_created").on(table.businessId, table.createdAt),
+  customerIdx: index("idx_estimate_requests_customer").on(table.customerId),
+}));
+
+export type EstimateRequest = typeof estimateRequests.$inferSelect;
+export type InsertEstimateRequest = typeof estimateRequests.$inferInsert;
 
 /* =====================================================
    SERVICE ADD-ONS (Optional extras for vendor services)

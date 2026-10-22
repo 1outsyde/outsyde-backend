@@ -78,5 +78,7 @@ export function toPublicBusinessDTO(
 
     ctaConfig: business.ctaConfig ?? null,
     siteConfig: business.siteConfig ?? null,
+    // Migration 066: cities the business serves (its site's estimate form). Additive field.
+    serviceCities: business.serviceCities ?? [],
   };
 }

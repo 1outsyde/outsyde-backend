@@ -27,6 +27,9 @@ assert(isServiceBookable({ status: 'live', isActive: false }) === false, 'live b
 assert(isServiceBookable({ status: 'live', isActive: null }) === false, 'live, isActive null → not bookable (public list treats it the same)');
 assert(isServiceBookable(null) === false, 'missing service → not bookable');
 assert(isServiceBookable(undefined) === false, 'undefined service → not bookable');
+assert(isServiceBookable({ status: 'live', isActive: true, requestOnly: true }) === false, 'request only (066) → never bookable');
+assert(isServiceBookable({ status: 'live', isActive: true, requestOnly: false }) === true, 'requestOnly false → bookable');
+assert(isServiceBookable({ status: 'live', isActive: true, requestOnly: null }) === true, 'requestOnly null (staff / photographer rows) → bookable');
 
 console.log('\n── ownsService ──');
 assert(ownsService('biz-1', 'biz-1') === true, 'same owner → true');
