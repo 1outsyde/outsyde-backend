@@ -1,5 +1,5 @@
 /**
- * Pure tests for service cities and the estimate request email (migration 067). No database, no network.
+ * Pure tests for service cities and the estimate request email (migration 068). No database, no network.
  * Run with: npx tsx server/estimates/estimates.test.ts
  */
 import { normalizeCityList, serviceCitiesInput, isServiceOfferedInCity, isBusinessCity, cityKey } from './serviceCities';

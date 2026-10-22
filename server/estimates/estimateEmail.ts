@@ -1,5 +1,5 @@
 /**
- * The estimate request email (migration 067), sent to the business owner and to Outsyde.
+ * The estimate request email (migration 068), sent to the business owner and to Outsyde.
  * Pure: builds subject, html and text only (no database), so it can be tested on its own.
  */
 import type { EstimateRequest } from "@shared/schema";

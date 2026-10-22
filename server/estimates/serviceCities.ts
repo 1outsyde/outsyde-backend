@@ -1,5 +1,5 @@
 /**
- * Service cities (migration 067): which cities a business serves, and which of them each service is
+ * Service cities (migration 068): which cities a business serves, and which of them each service is
  * offered in. Pure helpers, no database.
  *
  * - businesses.service_cities        the business's list (its site's estimate form shows these).

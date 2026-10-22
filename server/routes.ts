@@ -12359,7 +12359,7 @@ export async function registerRoutes(
         "categoryCode",
         "specialties",
         "otherDescription",
-        // Cities the business serves (migration 067), checked and cleaned below.
+        // Cities the business serves (migration 068), checked and cleaned below.
         "serviceCities",
       ]);
       if (otherFields.allowPastClosing !== undefined && typeof otherFields.allowPastClosing !== "boolean") {
@@ -13599,7 +13599,7 @@ export async function registerRoutes(
     }
   });
 
-  // Estimate requests (migration 067): saved form + vendor dashboard list. See server/estimates.
+  // Estimate requests (migration 068): saved form + vendor dashboard list. See server/estimates.
   registerEstimateRequestRoutes(app);
 
   // Create vendor service
@@ -13645,7 +13645,7 @@ export async function registerRoutes(
         alternateZipCode: z.string().nullable().optional(),
         virtualLink: z.string().nullable().optional(),
         depositAmountCents: z.number().int().min(0).nullable().optional(),
-        // Migration 067: cities the service is offered in (empty = every city) and request only.
+        // Migration 068: cities the service is offered in (empty = every city) and request only.
         serviceCities: serviceCitiesInput.optional(),
         requestOnly: z.boolean().optional(),
       });
@@ -13724,7 +13724,7 @@ export async function registerRoutes(
         alternateZipCode: z.string().nullable().optional(),
         virtualLink: z.string().nullable().optional(),
         depositAmountCents: z.number().int().min(0).nullable().optional(),
-        // Migration 067: cities the service is offered in (empty = every city) and request only.
+        // Migration 068: cities the service is offered in (empty = every city) and request only.
         serviceCities: serviceCitiesInput.optional(),
         requestOnly: z.boolean().optional(),
       });

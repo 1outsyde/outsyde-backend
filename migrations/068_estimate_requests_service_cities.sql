@@ -1,4 +1,4 @@
--- Migration 067: estimate requests + service cities + request only services (Royal Elite standalone site)
+-- Migration 068: estimate requests + service cities + request only services (Royal Elite standalone site)
 -- Run manually in the Neon SQL editor BEFORE Render deploys the PR that uses it. Never via drizzle-kit push.
 -- Idempotent: safe to re-run. Additive only: one new table, two new columns on vendor_services, one new
 -- column on businesses. Every new column has a default, so existing rows and every existing client read

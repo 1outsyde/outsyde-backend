@@ -1,10 +1,10 @@
 /**
- * Estimate requests + service cities + request only services (migration 067) — HTTP integration tests.
+ * Estimate requests + service cities + request only services (migration 068) — HTTP integration tests.
  *
  * Run with: npx tsx server/estimateRequests.http.test.ts
  *
  * SCRATCH ONLY. Needs a backend booted on localhost against a LOCAL scratch Postgres (full schema +
- * migration 067 applied) with a Stripe stub, exactly like server/holdBookable.http.test.ts:
+ * migration 068 applied) with a Stripe stub, exactly like server/holdBookable.http.test.ts:
  *   ER_TEST_BASE_URL      e.g. http://localhost:5062   (must be localhost)
  *   ER_TEST_PG_URL        the SAME scratch database (localhost only; seeds + cleans up)
  *   ER_TEST_STRIPE_PORT   port for the in-process Stripe stub started here; boot the server with

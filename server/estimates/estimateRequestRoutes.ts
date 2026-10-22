@@ -1,5 +1,5 @@
 /**
- * Estimate requests (migration 067), first used by Royal Elite Moving's site.
+ * Estimate requests (migration 068), first used by Royal Elite Moving's site.
  *
  * Same flow the business already runs by phone: the customer fills in the estimate form, the business is
  * emailed every detail, and calls the customer back within 24 to 48 hours to confirm and quote. The only
