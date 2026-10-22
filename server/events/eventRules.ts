@@ -3,6 +3,7 @@
  * Plan and decisions: vault Handoffs/2026-10-18 Events & Ticketing — Audit & Design.
  */
 import { randomBytes } from "crypto";
+import { localDateInZone, wallClockToUtc } from "../zonedTime";
 
 export type RefundPolicy = "no_refunds" | "until_cutoff";
 
@@ -96,15 +97,36 @@ export interface AddressFields {
   longitude: number | null;
 }
 
+export type AddressVisibility = "public" | "ticket_holders" | "ticket_holders_day_of";
+
+const SIX_HOURS_MS = 6 * 60 * 60 * 1000;
+
+/**
+ * When ticket holders see the address on a day-of event: 9 AM on the event's local date, or 6 hours
+ * before the start, whichever is earlier (so a 1 AM event still reveals the evening before).
+ */
+export function addressRevealAt(startsAt: Date, timeZone: string): Date {
+  const nineAm = wallClockToUtc(localDateInZone(startsAt, timeZone), "09:00", timeZone);
+  const sixBefore = new Date(startsAt.getTime() - SIX_HOURS_MS);
+  return nineAm && nineAm.getTime() < sixBefore.getTime() ? nineAm : sixBefore;
+}
+
+/** Whether a ticket holder may see the address now. Only the day-of mode waits for the reveal time. */
+export function holderCanSeeAddress(v: AddressVisibility, startsAt: Date, timeZone: string, now: Date): boolean {
+  if (v !== "ticket_holders_day_of") return true;
+  return now.getTime() >= addressRevealAt(startsAt, timeZone).getTime();
+}
+
 /**
  * Hidden address = only the general area (city, state) is shown. The venue name, street, postal
- * code and map pin are revealed to the host and to people holding a valid ticket.
+ * code and map pin are revealed to the host and to people holding a valid ticket (for day-of
+ * events, once `holderRevealed` is true; it defaults to true).
  */
 export function visibleAddress(
   a: AddressFields,
-  opts: { addressVisibility: "public" | "ticket_holders"; viewerIsHost: boolean; viewerHasTicket: boolean },
+  opts: { addressVisibility: AddressVisibility; viewerIsHost: boolean; viewerHasTicket: boolean; holderRevealed?: boolean },
 ): AddressFields & { addressHidden: boolean } {
-  const show = opts.addressVisibility === "public" || opts.viewerIsHost || opts.viewerHasTicket;
+  const show = opts.addressVisibility === "public" || opts.viewerIsHost || (opts.viewerHasTicket && (opts.holderRevealed ?? true));
   if (show) return { ...a, addressHidden: false };
   return {
     venueName: null, addressLine1: null, addressLine2: null, postalCode: null, latitude: null, longitude: null,

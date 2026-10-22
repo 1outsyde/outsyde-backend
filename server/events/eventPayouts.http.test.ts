@@ -606,7 +606,7 @@ async function getNoFollow(path: string): Promise<{ status: number; location: st
     const pushes: any[] = [];
     const { setNoticeDepsForTest } = await import("./ticketNotices");
     setNoticeDepsForTest({
-      sendReceipt: async () => {}, sendRefund: async () => {}, sendCancelled: async () => {},
+      sendReceipt: async () => {}, sendRefund: async () => {}, sendCancelled: async () => {}, sendAddressReveal: async () => {},
       sendPush: async (p) => { pushes.push(p); return true; },
     });
     const adminEmails: Array<{ subject: string; detail: string }> = [];

@@ -11,12 +11,14 @@
  */
 import { sql } from "drizzle-orm";
 import { rows } from "./eventsRouter";
+import { holderCanSeeAddress } from "./eventRules";
 import type { TicketEmailEvent } from "../emailService";
 
 export type NoticeDeps = {
   sendReceipt: (p: Parameters<typeof import("../emailService").sendTicketReceiptToBuyer>[0]) => Promise<void>;
   sendRefund: (p: Parameters<typeof import("../emailService").sendTicketRefundToBuyer>[0]) => Promise<void>;
   sendCancelled: (p: Parameters<typeof import("../emailService").sendEventCancelledToGuest>[0]) => Promise<void>;
+  sendAddressReveal: (p: Parameters<typeof import("../emailService").sendAddressRevealToHolder>[0]) => Promise<void>;
   sendPush: (p: { userId: string; title: string; body: string; data?: Record<string, unknown> }) => Promise<boolean>;
 };
 
@@ -24,7 +26,7 @@ let testDeps: NoticeDeps | null = null;
 /** Tests only: route every notice to these senders (null restores the real ones). */
 export function setNoticeDepsForTest(d: NoticeDeps | null) { testDeps = d; }
 
-async function deps(): Promise<NoticeDeps> {
+export async function noticeDeps(): Promise<NoticeDeps> {
   if (testDeps) return testDeps;
   const email = await import("../emailService");
   const push = await import("../expoPushService");
@@ -32,6 +34,7 @@ async function deps(): Promise<NoticeDeps> {
     sendReceipt: email.sendTicketReceiptToBuyer,
     sendRefund: email.sendTicketRefundToBuyer,
     sendCancelled: email.sendEventCancelledToGuest,
+    sendAddressReveal: email.sendAddressRevealToHolder,
     sendPush: (p) => push.sendExpoPush(p as any),
   };
 }
@@ -42,7 +45,7 @@ async function deps(): Promise<NoticeDeps> {
  */
 export const EMAIL_GAP_MS = 150;
 let emailChain: Promise<unknown> = Promise.resolve();
-function paced<T>(send: () => Promise<T>): Promise<T> {
+export function paced<T>(send: () => Promise<T>): Promise<T> {
   const run = emailChain.then(send);
   emailChain = run.then(
     () => new Promise((r) => setTimeout(r, EMAIL_GAP_MS)),
@@ -70,14 +73,22 @@ export function formatEventWhere(e: { venue_name?: string | null; address_line1?
   return parts.length ? parts.join(", ") : null;
 }
 
-function emailEvent(e: any): TicketEmailEvent {
-  return { title: String(e.title), whenText: formatEventWhen(e.starts_at, e.timezone), whereText: formatEventWhere(e) };
+/** "City, ST" (only the parts present), or null when the event has neither. */
+function cityState(e: { city?: string | null; state?: string | null }): string | null {
+  const parts = [e.city, e.state].map((s) => (s ?? "").trim()).filter(Boolean);
+  return parts.length ? parts.join(", ") : null;
+}
+
+/** Day-of events keep the venue and street out of emails until the reveal time. */
+function emailEvent(e: any, now: Date = new Date()): TicketEmailEvent {
+  const full = holderCanSeeAddress(e.address_visibility, new Date(e.starts_at), e.timezone, now);
+  return { title: String(e.title), whenText: formatEventWhen(e.starts_at, e.timezone), whereText: full ? formatEventWhere(e) : cityState(e) };
 }
 
 async function loadOrder(orderId: string) {
   const [o] = await rows<any>(sql`
     SELECT o.*, u.email AS buyer_email, u.first_name AS buyer_first_name,
-           e.title, e.starts_at, e.timezone, e.venue_name, e.address_line1, e.address_line2, e.city, e.state, e.postal_code,
+           e.title, e.starts_at, e.timezone, e.address_visibility, e.venue_name, e.address_line1, e.address_line2, e.city, e.state, e.postal_code,
            e.status AS event_status, e.host_user_id, e.cancel_reason,
            (SELECT tt.name FROM ticket_order_items i JOIN ticket_types tt ON tt.id = i.ticket_type_id
              WHERE i.order_id = o.id ORDER BY i.created_at LIMIT 1) AS ticket_type_name
@@ -89,7 +100,7 @@ async function loadOrder(orderId: string) {
 /** After a paid order is settled for the first time. Skipped when the event was cancelled meanwhile (the refund email follows). */
 export async function notifyOrderSettled(orderId: string): Promise<void> {
   try {
-    const d = await deps();
+    const d = await noticeDeps();
     const o = await loadOrder(orderId);
     if (!o || o.status !== "completed" || Number(o.total_cents) === 0 || o.event_status === "cancelled") return;
     const codes = (await rows<any>(sql`SELECT code FROM tickets WHERE order_id = ${orderId} ORDER BY item_index`)).map((t) => String(t.code));
@@ -117,7 +128,7 @@ export async function notifyOrderSettled(orderId: string): Promise<void> {
 /** After Stripe confirmed a refund. */
 export async function notifyOrderRefunded(orderId: string, reason: "buyer" | "host" | "event_cancelled", refundCents: number): Promise<void> {
   try {
-    const d = await deps();
+    const d = await noticeDeps();
     const o = await loadOrder(orderId);
     if (!o || !o.buyer_email) return;
     const kept = Math.max(0, Number(o.total_cents) - Number(o.refunded_cents));
@@ -133,7 +144,7 @@ export async function notifyOrderRefunded(orderId: string, reason: "buyer" | "ho
 /** Free RSVP guests of a cancelled event (paid buyers get the refund email instead). */
 export async function notifyFreeOrdersCancelled(orderIds: string[]): Promise<void> {
   if (!orderIds.length) return;
-  const d = await deps().catch(() => null);
+  const d = await noticeDeps().catch(() => null);
   if (!d) return;
   for (const id of orderIds) {
     try {
@@ -149,7 +160,7 @@ export async function notifyFreeOrdersCancelled(orderIds: string[]): Promise<voi
 /** After an event payout was sent (or found already sent) to the host's Stripe account: one push to the host. */
 export async function notifyPayoutSent(payoutId: string): Promise<void> {
   try {
-    const d = await deps();
+    const d = await noticeDeps();
     const [p] = await rows<any>(sql`
       SELECT p.id, p.status, p.event_id, e.title, e.host_user_id
       FROM event_payouts p JOIN events e ON e.id = p.event_id WHERE p.id = ${payoutId}`);

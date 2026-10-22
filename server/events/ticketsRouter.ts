@@ -21,7 +21,7 @@ import { getUserIdFromRequest, hybridAuthMiddleware } from "../auth";
 import {
   rows, pgError, iso, fail, zodError, optionalText, loadActiveUser, loadEventForHost, loadTicketTypes, hostTicketTypeJson,
 } from "./eventsRouter";
-import { makeTicketCode, paidEventsEnabled, wouldCreateUnlockLoop } from "./eventRules";
+import { makeTicketCode, paidEventsEnabled, wouldCreateUnlockLoop, holderCanSeeAddress, visibleAddress, addressRevealAt } from "./eventRules";
 
 const router = Router();
 
@@ -505,7 +505,7 @@ router.get("/me/tickets", hybridAuthMiddleware, async (req: Request, res: Respon
     const list = await rows<any>(sql`
       SELECT t.id, t.code, t.status, t.order_id, t.checked_in_at, tt.name AS ticket_type_name,
              e.id AS event_id, e.slug, e.title, e.status AS event_status, e.starts_at, e.ends_at, e.timezone,
-             e.cover_image_url, e.city, e.state
+             e.cover_image_url, e.city, e.state, e.venue_name, e.address_line1, e.address_line2, e.postal_code, e.address_visibility
       FROM tickets t
       JOIN ticket_types tt ON tt.id = t.ticket_type_id
       JOIN events e ON e.id = t.event_id
@@ -514,14 +514,30 @@ router.get("/me/tickets", hybridAuthMiddleware, async (req: Request, res: Respon
       LIMIT 500`);
     return res.json({
       success: true,
-      tickets: list.map((t) => ({
+      tickets: list.map((t) => {
+        const dayOf = t.address_visibility === "ticket_holders_day_of";
+        const addr = visibleAddress(
+          {
+            venueName: t.venue_name ?? null, addressLine1: t.address_line1 ?? null, addressLine2: t.address_line2 ?? null,
+            city: t.city ?? null, state: t.state ?? null, postalCode: t.postal_code ?? null, latitude: null, longitude: null,
+          },
+          {
+            addressVisibility: t.address_visibility, viewerIsHost: false, viewerHasTicket: true,
+            holderRevealed: holderCanSeeAddress(t.address_visibility, new Date(t.starts_at), t.timezone, new Date()),
+          },
+        );
+        return {
         id: t.id, code: t.code, status: t.status, orderId: t.order_id, checkedInAt: iso(t.checked_in_at),
         ticketTypeName: t.ticket_type_name,
         event: {
           id: t.event_id, slug: t.slug, title: t.title, status: t.event_status, startsAt: iso(t.starts_at),
           endsAt: iso(t.ends_at), timezone: t.timezone, coverImageUrl: t.cover_image_url ?? null, city: t.city ?? null, state: t.state ?? null,
+          venueName: addr.venueName, addressLine1: addr.addressLine1, addressLine2: addr.addressLine2, postalCode: addr.postalCode,
+          addressHidden: addr.addressHidden,
+          addressRevealAt: dayOf ? iso(addressRevealAt(new Date(t.starts_at), t.timezone)) : null,
         },
-      })),
+        };
+      }),
     });
   } catch (err) {
     console.error("[Events] my tickets failed:", err);

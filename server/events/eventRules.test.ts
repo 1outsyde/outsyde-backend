@@ -6,9 +6,11 @@
  *  - drop the locked check → "paid tier locked while free remains" fails.
  *  - return `show = true` in visibleAddress → "street hidden from strangers" fails.
  *  - drop `if (cur === typeId) return true` in wouldCreateUnlockLoop → the loop checks fail.
+ *  - drop the 6 hour branch in addressRevealAt → `1 AM event reveals 7 PM the day before` fails.
  */
 import {
   checkTimes, isRefundPolicyChangeAllowed, isValidTimeZone, paidEventsEnabled, makeEventSlug, makeTicketCode, ticketSalesStatus, visibleAddress,
+  addressRevealAt, holderCanSeeAddress,
   wouldCreateUnlockLoop, type TicketTypeForSale,
 } from "./eventRules";
 
@@ -72,6 +74,36 @@ a = visibleAddress(addr, { addressVisibility: "ticket_holders", viewerIsHost: tr
 assert(!a.addressHidden && a.postalCode === "11520", "host sees the street");
 a = visibleAddress(addr, { addressVisibility: "public", viewerIsHost: false, viewerHasTicket: false });
 assert(!a.addressHidden && a.venueName === "The Loft", "public address shown to everyone");
+
+// Day-of address reveal
+{
+  const ny = "America/New_York";
+  const cases: [string, string, string, string][] = [
+    ["9 PM event reveals 9 AM same day", "2026-10-25T01:00:00Z", ny, "2026-10-24T13:00:00.000Z"],
+    ["1 AM event reveals 7 PM the day before", "2026-10-25T05:00:00Z", ny, "2026-10-24T23:00:00.000Z"],
+    ["3 PM event reveals at 9 AM", "2026-10-24T19:00:00Z", ny, "2026-10-24T13:00:00.000Z"],
+    ["11 AM event reveals 6 hours before", "2026-10-24T15:00:00Z", ny, "2026-10-24T09:00:00.000Z"],
+    ["9 AM on DST end day", "2026-11-02T00:00:00Z", ny, "2026-11-01T14:00:00.000Z"],
+    ["local date used, not UTC date", "2026-10-24T23:00:00Z", "Asia/Tokyo", "2026-10-24T17:00:00.000Z"],
+  ];
+  for (const [name, start, tz, want] of cases) {
+    const got = addressRevealAt(new Date(start), tz).toISOString();
+    assert(got === want, name, { got, want });
+  }
+  const start = new Date("2026-10-25T01:00:00Z");
+  const at = addressRevealAt(start, "America/New_York");
+  const before = new Date(at.getTime() - 1);
+  assert(holderCanSeeAddress("ticket_holders_day_of", start, "America/New_York", before) === false, "day-of: hidden 1 ms before reveal");
+  assert(holderCanSeeAddress("ticket_holders_day_of", start, "America/New_York", at) === true, "day-of: shown at reveal");
+  assert(holderCanSeeAddress("public", start, "America/New_York", before) === true, "public always true");
+  assert(holderCanSeeAddress("ticket_holders", start, "America/New_York", before) === true, "ticket_holders always true");
+  const d = (holderRevealed: boolean, viewerIsHost: boolean, viewerHasTicket: boolean) =>
+    visibleAddress(addr, { addressVisibility: "ticket_holders_day_of", viewerIsHost, viewerHasTicket, holderRevealed });
+  assert(d(false, false, true).addressHidden === true, "day-of: holder before reveal hidden");
+  assert(d(true, false, true).addressHidden === false, "day-of: holder after reveal shown");
+  assert(d(false, true, false).addressHidden === false, "day-of: host before reveal shown");
+  assert(d(true, false, false).addressHidden === true, "day-of: stranger after reveal hidden");
+}
 
 // Ticket codes
 const codes = new Set(Array.from({ length: 2000 }, () => makeTicketCode()));

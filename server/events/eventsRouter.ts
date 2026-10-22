@@ -2,6 +2,7 @@
  * /api/events — Events & Ticketing, Phase 1 PR 1 (host side + public event page data).
  *
  *   POST  /                  (auth)  create a draft event
+ *   GET   /                  (public) listed upcoming events for Discover (eventList.ts), no private address data
  *   GET   /mine              (auth)  the events I host
  *   GET   /slug/:slug        (public; host sees own drafts) event page data, address hidden until you have a ticket
  *   GET   /:id/manage        (auth, host)  full event + ticket types
@@ -27,10 +28,14 @@ import {
   makeEventSlug,
   paidEventsEnabled,
   ticketSalesStatus,
+  holderCanSeeAddress,
+  addressRevealAt,
   visibleAddress,
   type RefundPolicy,
   type TicketTypeForSale,
 } from "./eventRules";
+import { geocodeEventInBackground } from "./eventGeocode";
+import { listQuerySchema, listPublicEvents } from "./eventList";
 
 const router = Router();
 
@@ -82,7 +87,7 @@ const eventFields = {
   postalCode: optionalText(20),
   latitude: z.number().min(-90).max(90).nullable().optional(),
   longitude: z.number().min(-180).max(180).nullable().optional(),
-  addressVisibility: z.enum(["public", "ticket_holders"]).optional(),
+  addressVisibility: z.enum(["public", "ticket_holders", "ticket_holders_day_of"]).optional(),
   visibility: z.enum(["public", "unlisted"]).optional(),
   capacity: z.number().int().min(1).max(100000).nullable().optional(),
   refundPolicy: z.enum(["no_refunds", "until_cutoff"]).optional(),
@@ -147,6 +152,7 @@ export async function loadTicketTypes(eventId: string): Promise<any[]> {
   return rows(sql`SELECT * FROM ticket_types WHERE event_id = ${eventId} ORDER BY sort_order, created_at`);
 }
 
+// Keep naming rules in sync with hostIdentityFrom in eventList.ts (the public list shapes the same host names).
 async function hostIdentity(e: any): Promise<{ publicName: string; avatarUrl: string | null }> {
   const [u] = await rows<any>(sql`
     SELECT id, name, first_name, username, profile_image_url FROM users WHERE id = ${e.host_user_id}`);
@@ -285,6 +291,12 @@ router.post("/", hybridAuthMiddleware, async (req: Request, res: Response) => {
             ${b.addressVisibility ?? "ticket_holders"}, ${b.visibility ?? "public"}, ${b.capacity ?? null},
             ${refundPolicy}, ${refundPolicy === "until_cutoff" ? b.refundCutoffHours ?? null : null}
           ) RETURNING *`);
+        if (b.latitude == null && b.longitude == null && (b.addressLine1 || b.city || b.state || b.postalCode)) {
+          geocodeEventInBackground(created.id, {
+            addressLine1: created.address_line1 ?? null, city: created.city ?? null,
+            state: created.state ?? null, postalCode: created.postal_code ?? null,
+          });
+        }
         return res.status(201).json({ success: true, event: hostEventJson(created), ticketTypes: [] });
       } catch (err) {
         const pe = pgError(err);
@@ -296,6 +308,21 @@ router.post("/", hybridAuthMiddleware, async (req: Request, res: Response) => {
   } catch (err) {
     console.error("[Events] create failed:", err);
     return fail(res, 500, "SERVER_ERROR", "Couldn't create the event.");
+  }
+});
+
+// Public list. Registered before every /:id route and without auth middleware on purpose: a stale or
+// invalid Bearer must not turn a public read into a 401.
+router.get("/", async (req: Request, res: Response) => {
+  const parsed = listQuerySchema.safeParse(req.query);
+  if (!parsed.success) return fail(res, 400, "INVALID_QUERY", "Check the filters and try again.");
+  try {
+    const out = await listPublicEvents(parsed.data, (q) => rows(q));
+    if ("badCursor" in out) return fail(res, 400, "INVALID_QUERY", "Check the filters and try again.");
+    return res.json({ success: true, events: out.events, nextCursor: out.nextCursor });
+  } catch (err) {
+    console.error("[Events] list failed:", err);
+    return fail(res, 500, "SERVER_ERROR", "Couldn't load events.");
   }
 });
 
@@ -359,7 +386,10 @@ router.get("/slug/:slug", async (req: Request, res: Response) => {
         city: e.city ?? null, state: e.state ?? null, postalCode: e.postal_code ?? null,
         latitude: e.latitude == null ? null : Number(e.latitude), longitude: e.longitude == null ? null : Number(e.longitude),
       },
-      { addressVisibility: e.address_visibility, viewerIsHost, viewerHasTicket },
+      {
+        addressVisibility: e.address_visibility, viewerIsHost, viewerHasTicket,
+        holderRevealed: holderCanSeeAddress(e.address_visibility, new Date(e.starts_at), e.timezone, new Date()),
+      },
     );
     const host = await hostIdentity(e);
 
@@ -369,6 +399,7 @@ router.get("/slug/:slug", async (req: Request, res: Response) => {
         id: e.id, slug: e.slug, status: e.status, title: e.title, description: e.description ?? null,
         coverImageUrl: e.cover_image_url ?? null, startsAt: iso(e.starts_at), endsAt: iso(e.ends_at), timezone: e.timezone,
         ...address,
+        addressRevealAt: e.address_visibility === "ticket_holders_day_of" ? iso(addressRevealAt(new Date(e.starts_at), e.timezone)) : null,
         refundPolicy: e.refund_policy, refundCutoffHours: e.refund_cutoff_hours == null ? null : Number(e.refund_cutoff_hours),
         soldOut: remainingAtEvent === 0,
         host: { name: host.publicName, avatarUrl: host.avatarUrl, kind: e.host_type },
@@ -447,6 +478,11 @@ router.patch("/:id", hybridAuthMiddleware, async (req: Request, res: Response) =
     const sets: SQL[] = Object.keys(b)
       .filter((k) => COLUMNS[k])
       .map((k) => sql`${sql.raw(COLUMNS[k])} = ${b[k] ?? null}`);
+    // Moving the address without sending coordinates clears the old ones in the same write; they are re-geocoded below.
+    const addressChanged = ["addressLine1", "city", "state", "postalCode"].some((k) => b[k] !== undefined);
+    const coordsSent = b.latitude !== undefined || b.longitude !== undefined;
+    const regeocode = addressChanged && !coordsSent;
+    if (regeocode) sets.push(sql`latitude = NULL`, sql`longitude = NULL`);
     sets.push(sql`updated_at = now()`);
 
     try {
@@ -459,6 +495,12 @@ router.patch("/:id", hybridAuthMiddleware, async (req: Request, res: Response) =
           AND (starts_at > now() OR ${b.startsAt === undefined} OR ${newStartsAt}::timestamptz = date_trunc('milliseconds', starts_at))
         RETURNING *`);
       if (!updated) return fail(res, 409, "EVENT_CHANGED", "This event just changed. Reload and try again.");
+      if (regeocode) {
+        geocodeEventInBackground(updated.id, {
+          addressLine1: updated.address_line1 ?? null, city: updated.city ?? null,
+          state: updated.state ?? null, postalCode: updated.postal_code ?? null,
+        });
+      }
       const types = await loadTicketTypes(e.id);
       return res.json({ success: true, event: hostEventJson(updated), ticketTypes: types.map(hostTicketTypeJson) });
     } catch (err) {

@@ -10,6 +10,11 @@
  *   JWT_SECRET         identical to the server's
  * Skips (exit 0) when EV_TEST_BASE_URL is unset; refuses any non-local host.
  *
+ * Geocoding tests need the booted server to stub the geocoder (separate process). Boot it with
+ *   EVENT_GEOCODE_STUB=40.7,-73.6 EVENT_GEOCODE_STUB_LOG=/some/file   (ignored when NODE_ENV=production)
+ * and run this test with the same EVENT_GEOCODE_STUB_LOG (and EVENT_GEOCODE_STUB set to anything). The stub returns the
+ * fixed coords for every address except city "Nowhere" (returns null), and appends one line per call to the log file.
+ *
  * Mutation checks:
  *  - drop `.strict()` on createSchema → "host ids in the body are refused" fails.
  *  - drop the approval_status check → "pending business can't host" fails.
@@ -254,6 +259,124 @@ async function call(method: string, path: string, o: { token?: string; body?: un
     assert(r.status === 404, "paused event hidden from the public", r);
     r = await call("PATCH", `/api/events/${ev.id}`, { token: tok(host), body: { title: "Sneaky" } });
     assert(r.status === 409 && r.body.error.code === "EVENT_PAUSED", "host can't edit a paused event", r);
+
+    console.log("Day-of address reveal");
+    r = await call("POST", "/api/events", { token: tok(host), body: { ...base(), addressVisibility: "bogus" } });
+    assert(r.status === 400 && r.body.error.code === "INVALID_EVENT", "bogus addressVisibility refused", r);
+    // Hold a valid ticket on a (seeded as published) event so a holder can read the page.
+    const seedHolder = async (eventId: string, holder: string, code: string) => {
+      await q(`UPDATE events SET status = 'published', published_at = now() WHERE id = $1`, [eventId]);
+      const [tt] = await q(`INSERT INTO ticket_types (event_id, name, price_cents, quantity) VALUES ($1, 'Free', 0, 10) RETURNING id`, [eventId]);
+      const [o] = await q(`INSERT INTO ticket_orders (event_id, buyer_user_id, status, ticket_count) VALUES ($1, $2, 'completed', 1) RETURNING id`, [eventId, holder]);
+      const [it] = await q(`INSERT INTO ticket_order_items (order_id, event_id, ticket_type_id, buyer_user_id, quantity, unit_price_cents, status, expires_at) VALUES ($1, $2, $3, $4, 1, 0, 'issued', now()) RETURNING id`, [o.id, eventId, tt.id, holder]);
+      await q(`INSERT INTO tickets (order_id, order_item_id, event_id, ticket_type_id, holder_user_id, item_index, code, price_cents) VALUES ($1, $2, $3, $4, $5, 1, $6, 0)`, [o.id, it.id, eventId, tt.id, holder, code]);
+      await q(`UPDATE ticket_types SET reserved_count = 1 WHERE id = $1`, [tt.id]);
+      await q(`UPDATE events SET reserved_count = 1 WHERE id = $1`, [eventId]);
+    };
+    r = await call("POST", "/api/events", { token: tok(host), body: { ...base(), addressVisibility: "ticket_holders_day_of" } });
+    assert(r.status === 201 && r.body.event.addressVisibility === "ticket_holders_day_of", "create accepts ticket_holders_day_of", r);
+    const dayOfFar = r.body.event; eventIds.push(dayOfFar.id);
+    r = await call("GET", `/api/events/${dayOfFar.id}/manage`, { token: tok(host) });
+    assert(r.status === 200 && r.body.event.addressVisibility === "ticket_holders_day_of", "manage shows the day-of value", r.body?.event);
+    await seedHolder(dayOfFar.id, guest, `${P}dayfar`);
+    r = await call("GET", `/api/events/slug/${dayOfFar.slug}`, { token: tok(guest) });
+    assert(r.status === 200 && r.body.event.viewerHasTicket === true && r.body.event.addressHidden === true && r.body.event.addressLine1 === null && r.body.event.venueName === null,
+      "holder of a day-of event starting in 3 days gets area only", r.body?.event);
+    await q(`UPDATE events SET starts_at = now() + interval '3 days', ends_at = now() + interval '3 days 5 hours' WHERE id = $1`, [dayOfFar.id]);
+    r = await call("GET", `/api/events/slug/${dayOfFar.slug}`, { token: tok(guest) });
+    assert(r.body.event.addressHidden === true && r.body.event.addressLine1 === null, "still hidden at 3 days out");
+    {
+      const { addressRevealAt } = await import("./eventRules");
+      assert(r.body.event.addressRevealAt === addressRevealAt(new Date(r.body.event.startsAt), r.body.event.timezone).toISOString(), "day-of slug route reports addressRevealAt", r.body?.event);
+      const plain = await call("POST", "/api/events", { token: tok(host), body: base() });
+      eventIds.push(plain.body.event.id);
+      const pub = await call("GET", `/api/events/slug/${plain.body.event.slug}`, { token: tok(host) });
+      assert(pub.status === 200 && pub.body.event.addressRevealAt === null && "addressRevealAt" in pub.body.event, "non day-of event: addressRevealAt is null", pub);
+    }
+    r = await call("GET", `/api/events/slug/${dayOfFar.slug}`, { token: tok(host) });
+    assert(r.body.event.addressLine1 === "1 Main St" && r.body.event.viewerIsHost === true, "host sees the street on a day-of event", r.body?.event);
+
+    r = await call("POST", "/api/events", { token: tok(host), body: { ...base(), startsAt: inDays(0, 2), endsAt: inDays(0, 7), addressVisibility: "ticket_holders_day_of" } });
+    assert(r.status === 201, "day-of event starting in 2 hours created", r);
+    const dayOfNear = r.body.event; eventIds.push(dayOfNear.id);
+    await seedHolder(dayOfNear.id, guest, `${P}daynear`);
+    r = await call("GET", `/api/events/slug/${dayOfNear.slug}`, { token: tok(guest) });
+    assert(r.status === 200 && r.body.event.addressLine1 === "1 Main St" && r.body.event.venueName === "The Loft" && !r.body.event.addressHidden,
+      "holder sees the street once the reveal has passed", r.body?.event);
+    r = await call("GET", `/api/events/slug/${dayOfNear.slug}`, { token: tok(other) });
+    assert(r.body.event.addressHidden === true && r.body.event.addressLine1 === null, "non-holder still sees area only after the reveal", r.body?.event);
+
+    console.log("Event geocoding");
+    const stubLog = process.env.EVENT_GEOCODE_STUB_LOG;
+    const geocodeReady = !!process.env.EVENT_GEOCODE_STUB && !!stubLog;
+    if (!geocodeReady) console.log("  ⏭  geocode tests skipped: boot the server with ALLOW_TEST_SEAMS=1 EVENT_GEOCODE_STUB=40.7,-73.6 EVENT_GEOCODE_STUB_LOG=<file> and pass EVENT_GEOCODE_STUB(_LOG) to the test");
+    if (geocodeReady) {
+    const fs = await import("fs");
+    const stubCalls = () => { try { return fs.readFileSync(stubLog, "utf8").split("\n").filter(Boolean); } catch { return [] as string[]; } };
+    const waitFor = async (fn: () => Promise<boolean> | boolean) => { for (let i = 0; i < 40; i++) { if (await fn()) return true; await new Promise((x) => setTimeout(x, 100)); } return false; };
+    const latOf = async (id: string) => (await q(`SELECT latitude, longitude FROM events WHERE id = $1`, [id]))[0];
+    const noCoords = () => { const { latitude, longitude, ...rest } = base(); return rest; };
+
+    const callsBefore = stubCalls().length;
+    r = await call("POST", "/api/events", { token: tok(host), body: base() });
+    const withCoords = r.body.event; eventIds.push(withCoords.id);
+    await new Promise((x) => setTimeout(x, 600));
+    assert(r.status === 201 && stubCalls().length === callsBefore && Number((await latOf(withCoords.id)).latitude) === 40.65, "create with lat/lng does not call the geocoder", { n: stubCalls().length - callsBefore });
+
+    r = await call("POST", "/api/events", { token: tok(host), body: noCoords() });
+    const geo = r.body.event; eventIds.push(geo.id);
+    assert(r.status === 201, "create without lat/lng succeeds", r);
+    const filled = await waitFor(async () => (await latOf(geo.id)).latitude != null);
+    const gc = await latOf(geo.id);
+    assert(filled && Number(gc.latitude) === 40.7 && Number(gc.longitude) === -73.6, "stubbed geocoder fills lat/lng after create", gc);
+
+    r = await call("PATCH", `/api/events/${geo.id}`, { token: tok(host), body: { addressLine1: "99 Other Ave" } });
+    assert(r.status === 200 && r.body.event.latitude === null && r.body.event.longitude === null, "PATCH of the street clears lat/lng in the response", r.body?.event);
+    const refilled = await waitFor(async () => (await latOf(geo.id)).latitude != null);
+    assert(refilled && stubCalls().some((l) => l.includes("99 Other Ave")), "PATCH of the street re-geocodes", stubCalls());
+
+    r = await call("PATCH", `/api/events/${geo.id}`, { token: tok(host), body: { title: "Renamed" } });
+    await new Promise((x) => setTimeout(x, 400));
+    assert(r.status === 200 && Number((await latOf(geo.id)).latitude) === 40.7, "PATCH of an unrelated field keeps lat/lng", r.body?.event);
+
+    r = await call("PATCH", `/api/events/${geo.id}`, { token: tok(host), body: { city: "Elsewhere", latitude: 10, longitude: 20 } });
+    await new Promise((x) => setTimeout(x, 400));
+    const given = await latOf(geo.id);
+    assert(r.status === 200 && Number(given.latitude) === 10 && Number(given.longitude) === 20, "PATCH that sends lat/lng keeps them", given);
+
+    r = await call("POST", "/api/events", { token: tok(host), body: { ...noCoords(), city: "Nowhere" } });
+    const nul = r.body.event; eventIds.push(nul.id);
+    await waitFor(() => stubCalls().some((l) => l.includes("Nowhere")));
+    await new Promise((x) => setTimeout(x, 400));
+    const nc = await latOf(nul.id);
+    r = await call("GET", `/api/events/${nul.id}/manage`, { token: tok(host) });
+    assert(nc.latitude == null && r.status === 200 && r.body.event.title === "Rooftop Party!", "geocoder returning null leaves the event saved", { nc, status: r.status });
+
+    r = await call("POST", "/api/events", { token: tok(host), body: { ...noCoords(), city: undefined, state: undefined } });
+    eventIds.push(r.body.event.id);
+    const callsNow = stubCalls().length;
+    await new Promise((x) => setTimeout(x, 400));
+    assert(r.status === 201 && stubCalls().length === callsNow && stubCalls().every((l) => !l.includes("Rooftop")), "no city/state means no geocode call");
+
+    console.log("Stale geocode result can't land");
+    process.env.ALLOW_TEST_SEAMS = "1";
+    const gmod = await import("./eventGeocode");
+    let seen = 0;
+    gmod.setGeocoderForTest(async () => { seen++; return { latitude: 1.5, longitude: 2.5 }; });
+    r = await call("POST", "/api/events", { token: tok(host), body: { ...noCoords(), city: "Nowhere" } });
+    const stale = r.body.event; eventIds.push(stale.id);
+    await waitFor(() => stubCalls().some((l) => l.includes("Nowhere")));
+    await q(`UPDATE events SET latitude = NULL, longitude = NULL WHERE id = $1`, [stale.id]);
+    // A result for the OLD address arrives after the row moved on: it must not be written.
+    gmod.geocodeEventInBackground(stale.id, { addressLine1: "1 Main St", city: "Old City", state: "NY", postalCode: "11520" });
+    await waitFor(() => seen > 0);
+    await new Promise((x) => setTimeout(x, 500));
+    assert(seen > 0 && (await latOf(stale.id)).latitude == null, "stale geocode result for an old address is dropped", await latOf(stale.id));
+    gmod.geocodeEventInBackground(stale.id, { addressLine1: "1 Main St", city: "Nowhere", state: "NY", postalCode: "11520" });
+    const landed = await waitFor(async () => (await latOf(stale.id)).latitude != null);
+    assert(landed && Number((await latOf(stale.id)).latitude) === 1.5, "a result for the current address still lands", await latOf(stale.id));
+    gmod.setGeocoderForTest(null);
+    }
   } finally {
     // Every event a test user hosts (also ones a mutated server let through).
     eventIds.push(...(await q(`SELECT id FROM events WHERE host_user_id IN (SELECT id FROM users WHERE email LIKE $1)`, [`${P}-%`])).map((x) => x.id));

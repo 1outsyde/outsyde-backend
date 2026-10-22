@@ -6,6 +6,9 @@
  * SCRATCH ONLY. Same setup as ticketCheckout.http.test.ts (local Postgres with migrations 056, 059, 060,
  * backend on localhost with the Stripe stub preload, DATABASE_URL + neon preload for in-process calls):
  *   EV_TEST_BASE_URL, EV_TEST_PG_URL, EV_TEST_STRIPE_PORT, JWT_SECRET
+ * Mutation note: make emailEvent always use formatEventWhere (ignore the reveal time) and the
+ * "day-of event before the reveal" assertions fail (the street shows in receipt, refund and cancel emails).
+ *
  * Skips (exit 0) when EV_TEST_BASE_URL is unset; refuses any non-local host. Nothing reaches real Stripe,
  * Resend or Expo (notices in this process go to recording fakes; the server has no Resend key).
  */
@@ -133,11 +136,12 @@ async function waitFor(check: () => boolean, ms = 5000) { const end = Date.now()
     sendReceipt: async (p) => { notices.push({ kind: "receipt", p }); },
     sendRefund: async (p) => { notices.push({ kind: "refund", p }); },
     sendCancelled: async (p) => { notices.push({ kind: "cancelled", p }); },
+    sendAddressReveal: async () => {},
     sendPush: async (p) => { notices.push({ kind: "push", p }); return true; },
   });
 
   const { WebhookHandlers } = await import("../stripe/webhookHandlers");
-  const { processTicketRefund, runTicketRefundJob, queueCancelledEventOrders, refundKey, REFUND_MAX_ATTEMPTS } = await import("./ticketRefunds");
+  const { requestOrderRefund, processTicketRefund, runTicketRefundJob, queueCancelledEventOrders, refundKey, REFUND_MAX_ATTEMPTS } = await import("./ticketRefunds");
 
   const P = `rf${Date.now().toString(36)}`;
   const mkUser = async (s: string) => (await q(
@@ -455,6 +459,63 @@ async function waitFor(check: () => boolean, ms = 5000) { const end = Date.now()
     await call("POST", `/api/events/orders/${k.body.orderId}/refund`, { token: tok(g[3]) });
     r = await call("POST", `/api/events/${e11.id}/checkout`, { token: tok(g[3]), body: { ticketTypeId: t11.id, idempotencyKey: `${P}-key11` } });
     assert(r.status === 200 && r.body.repeated && r.body.order.status === "refunded", "same key shows the refunded order instead of 'closed'", r);
+
+    console.log("Emails hide the street until the day-of reveal");
+    const { ev: e20, types: [t20, f20] } = await paidEvent([
+      { name: "GA", priceCents: 2000, quantity: 20, maxPerOrder: 4 },
+      { name: "Free", priceCents: 0, quantity: 20 },
+    ], { addressVisibility: "ticket_holders_day_of", addressLine1: "9 Hidden Way", refundPolicy: "until_cutoff", refundCutoffHours: 2 });
+    const mine = (n: { p: any }, i: number) => n.p.toEmail === `${P}-g${i}@test.local`;
+    notices.length = 0;
+    const o20 = await buy(e20.id, g[4], t20.id);
+    await waitFor(() => notices.some((n) => n.kind === "receipt" && mine(n, 4)));
+    const rc20 = notices.find((n) => n.kind === "receipt" && mine(n, 4))!;
+    assert(rc20.p.event.whereText === "Freeport, NY", "day-of before reveal: receipt shows only city and state", rc20.p.event);
+    assert(!JSON.stringify(rc20.p).includes("The Loft") && !JSON.stringify(rc20.p).includes("9 Hidden Way"), "day-of before reveal: no venue or street anywhere in the receipt", rc20.p);
+    notices.length = 0;
+    // Driven in this process so the recorded notices are ours (the server process would send its own).
+    const rr20 = await requestOrderRefund(o20.id, g[4], "buyer");
+    await processTicketRefund(o20.id, direct as any, true);
+    await waitFor(() => notices.some((n) => n.kind === "refund" && mine(n, 4)));
+    const rf20 = notices.find((n) => n.kind === "refund" && mine(n, 4))!;
+    assert(rr20 && rf20.p.event.whereText === "Freeport, NY" && !JSON.stringify(rf20.p).includes("9 Hidden Way"), "day-of before reveal: refund email shows only city and state", rf20.p.event);
+    const o20b = await buy(e20.id, g[5], t20.id);
+    const rsvp20 = await call("POST", `/api/events/${e20.id}/rsvp`, { token: tok(g[6]), body: { ticketTypeId: f20.id } });
+    notices.length = 0;
+    await q(`UPDATE events SET status = 'cancelled', cancelled_at = now(), cancel_reason = 'Rain.' WHERE id = $1`, [e20.id]);
+    await runTicketRefundJob(direct as any); // its sweep cancels the free RSVP and refunds the paid order, both due now
+    const cnNotices = () => notices.filter((n) => (n.kind === "cancelled" && mine(n, 6)) || (n.kind === "refund" && mine(n, 5)));
+    await waitFor(() => cnNotices().length >= 2, 10000); // bounded wait on the expected count, no fixed sleep
+    const cn20 = cnNotices();
+    assert(rsvp20.status === 201 && cn20.length === 2 && cn20.every((n) => n.p.event.whereText === "Freeport, NY" && !JSON.stringify(n.p).includes("9 Hidden Way")),
+      "day-of before reveal: cancel and cancel refund emails show only city and state", cn20.map((n) => ({ k: n.kind, w: n.p.event.whereText })));
+    assert(o20b.status === "completed", "second day-of order completed");
+
+    const { ev: e21, types: [t21] } = await paidEvent([{ name: "GA", priceCents: 2000, quantity: 20 }], { addressVisibility: "ticket_holders_day_of", addressLine1: "9 Hidden Way" });
+    await q(`UPDATE events SET starts_at = now() + interval '2 hours', ends_at = now() + interval '6 hours' WHERE id = $1`, [e21.id]);
+    notices.length = 0;
+    await buy(e21.id, g[7], t21.id);
+    await waitFor(() => notices.some((n) => n.kind === "receipt" && mine(n, 7)));
+    const rc21 = notices.find((n) => n.kind === "receipt" && mine(n, 7))!;
+    assert(rc21.p.event.whereText === "The Loft, 9 Hidden Way, Freeport, NY", "day-of after reveal: receipt shows the full address", rc21.p.event);
+
+    const { ev: e22, types: [t22] } = await paidEvent([{ name: "GA", priceCents: 2000, quantity: 20 }], { addressVisibility: "ticket_holders", addressLine1: "9 Hidden Way" });
+    notices.length = 0;
+    await buy(e22.id, g[8], t22.id);
+    await waitFor(() => notices.some((n) => n.kind === "receipt" && mine(n, 8)));
+    assert(notices.find((n) => n.kind === "receipt" && mine(n, 8))!.p.event.whereText === "The Loft, 9 Hidden Way, Freeport, NY", "ticket_holders event: receipt keeps the full address");
+
+    const { ev: e23, types: [t23] } = await paidEvent([{ name: "GA", priceCents: 2000, quantity: 20 }], { addressVisibility: "ticket_holders_day_of" });
+    await q(`UPDATE events SET state = NULL WHERE id = $1`, [e23.id]);
+    notices.length = 0;
+    await buy(e23.id, g[9], t23.id);
+    await waitFor(() => notices.some((n) => n.kind === "receipt" && mine(n, 9)));
+    const rc23 = notices.find((n) => n.kind === "receipt" && mine(n, 9))!;
+    assert(rc23.p.event.whereText === "Freeport", "day-of before reveal with only a city: just the city", rc23.p.event);
+    await q(`UPDATE events SET city = NULL WHERE id = $1`, [e23.id]);
+    const o23 = await buy(e23.id, g[10], t23.id);
+    await waitFor(() => notices.some((n) => n.kind === "receipt" && mine(n, 10)));
+    assert(notices.find((n) => n.kind === "receipt" && mine(n, 10))!.p.event.whereText === null && o23.status === "completed", "day-of before reveal with no city or state: no place line");
   } finally {
     setNoticeDepsForTest(null);
     stub.close();
