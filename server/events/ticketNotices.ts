@@ -12,6 +12,7 @@
 import { sql } from "drizzle-orm";
 import { rows, hostIdentity } from "./eventsRouter";
 import { holderCanSeeAddress } from "./eventRules";
+import { qrUrlFor } from "./ticketQr";
 import type { TicketEmailEvent } from "../emailService";
 
 export type NoticeDeps = {
@@ -103,7 +104,9 @@ export async function notifyOrderSettled(orderId: string): Promise<void> {
     const d = await noticeDeps();
     const o = await loadOrder(orderId);
     if (!o || o.status !== "completed" || Number(o.total_cents) === 0 || o.event_status === "cancelled") return;
-    const codes = (await rows<any>(sql`SELECT code FROM tickets WHERE order_id = ${orderId} ORDER BY item_index`)).map((t) => String(t.code));
+    const tix = await rows<any>(sql`SELECT id, code FROM tickets WHERE order_id = ${orderId} ORDER BY item_index`);
+    const codes = tix.map((t) => String(t.code));
+    const qrUrls = tix.map((t) => qrUrlFor(String(t.id)));
     const n = Number(o.ticket_count);
     if (o.buyer_email) {
       await paced(() => d.sendReceipt({
@@ -111,7 +114,7 @@ export async function notifyOrderSettled(orderId: string): Promise<void> {
         ticketTypeName: String(o.ticket_type_name ?? "Ticket"), quantity: n,
         ticketPriceCents: Number(o.subtotal_cents) + Number(o.tax_cents) - Number(o.discount_cents),
         serviceFeeCents: Number(o.service_fee_cents) + Number(o.per_ticket_fee_cents),
-        totalCents: Number(o.total_cents), codes,
+        totalCents: Number(o.total_cents), codes, qrUrls,
       })).catch((err) => console.error(`[Tickets] receipt email failed for order ${orderId}:`, (err as Error)?.message ?? err));
     }
     const who = o.buyer_first_name ? String(o.buyer_first_name) : "Someone";
