@@ -18,6 +18,7 @@
  *  - drop `tt.hidden = false` in the free NOT EXISTS -> "free=true excludes ... paid hidden type doesn't" 
  *  - pass viewerHasTicket:true in shapeCard    -> "ticket_holders event card has no venue / street / coordinates"
  *  - ORDER BY distance instead of starts_at    -> "near filter keeps start order"
+ *  - drop the ROUND(...,1) CASE (use exact ev.latitude/longitude) -> "1 km radius on the exact point does NOT match a hidden-address event"
  *  - drop the radius haversine condition       -> "near filter excludes an event 100 km away"
  *  - drop `.strict()` on listQuerySchema       -> "unknown query keys are refused"
  *  - move the route after hybridAuthMiddleware / below a /:id route -> "invalid Bearer still gets 200"
@@ -177,6 +178,19 @@ async function call(method: string, path: string, o: { token?: string } = {}): P
     assert(listIds(r).includes(near) && !listIds(r).includes(far), "default radius is 40 km", listIds(r));
     r = await call("GET", `/api/events?lat=40.65&lng=-73.58&limit=50`);
     assert(r.status === 200 && r.body.events.every((e: any) => !("latitude" in e) && !("distanceKm" in e)), "plain near query works", r.status);
+
+    console.log("Near: hidden addresses use 0.1 degree coordinates");
+    // P is exact; its 0.1-degree rounding is (40.6, -73.5), about 6.8 km away.
+    const PLAT = 40.649, PLNG = -73.549, RLAT = 40.6, RLNG = -73.5;
+    const hidP = await mkEv({ title: "Hidden at P", address_visibility: "ticket_holders", latitude: PLAT, longitude: PLNG, starts_at: inDays(12), ends_at: inDays(12, 2) });
+    const pubP = await mkEv({ title: "Public at P", address_visibility: "public", latitude: PLAT, longitude: PLNG, starts_at: inDays(13), ends_at: inDays(13, 2) });
+    r = await call("GET", inCity(`&lat=${PLAT}&lng=${PLNG}&radiusKm=1`));
+    assert(!listIds(r).includes(hidP), "1 km radius on the exact point does NOT match a hidden-address event", listIds(r));
+    assert(listIds(r).includes(pubP), "1 km radius on the exact point still matches a public-address event", listIds(r));
+    r = await call("GET", inCity(`&lat=${RLAT}&lng=${RLNG}&radiusKm=1`));
+    assert(listIds(r).includes(hidP) && !listIds(r).includes(pubP), "1 km radius on the rounded point matches the hidden-address event (and not the public one)", listIds(r));
+    r = await call("GET", inCity(`&lat=${PLAT}&lng=${PLNG}&radiusKm=10`));
+    assert(listIds(r).includes(hidP) && listIds(r).includes(pubP), "a 10 km radius covers both", listIds(r));
 
     console.log("Paging");
     const all = await call("GET", inCity("&limit=50"));

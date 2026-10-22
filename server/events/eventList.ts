@@ -8,7 +8,8 @@
  *    latitude/longitude or any distance number.
  *  - The near-me filter reads the stored coordinates INSIDE SQL only. Results are ordered strictly by
  *    (starts_at, id), never by distance, so repeated queries from different points cannot be used to
- *    locate a hidden address from the order.
+ *    locate a hidden address from the order. For non-public addresses the filter also uses the coordinates
+ *    rounded to 0.1 degree, so tiny-radius sweeps can't pin the spot.
  *  - Hidden ticket types never contribute to price, free or any other card field.
  */
 import { z } from "zod";
@@ -137,16 +138,20 @@ export function buildListSql(q: ListQuery, cursor: { ts: string; id: string } | 
   if (q.lat !== undefined && q.lng !== undefined) {
     const r = q.radiusKm ?? DEFAULT_RADIUS_KM;
     const dLat = r / 111.045;
+    // Non-public addresses are compared at 0.1 degree (~11 km) resolution, so a sweep of tiny radii
+    // cannot pin the real spot down; public addresses keep their exact point.
+    const effLat = sql`(CASE WHEN ev.address_visibility = 'public' THEN ev.latitude ELSE ROUND(ev.latitude::numeric, 1)::float8 END)`;
+    const effLng = sql`(CASE WHEN ev.address_visibility = 'public' THEN ev.longitude ELSE ROUND(ev.longitude::numeric, 1)::float8 END)`;
     conds.push(sql`ev.latitude IS NOT NULL AND ev.longitude IS NOT NULL`);
-    conds.push(sql`ev.latitude BETWEEN ${q.lat - dLat}::float8 AND ${q.lat + dLat}::float8`);
+    conds.push(sql`${effLat} BETWEEN ${q.lat - dLat}::float8 AND ${q.lat + dLat}::float8`);
     const cosLat = Math.cos((q.lat * Math.PI) / 180);
     const dLng = cosLat > 0.01 ? r / (111.045 * cosLat) : 360;
     if (q.lng - dLng >= -180 && q.lng + dLng <= 180) {
-      conds.push(sql`ev.longitude BETWEEN ${q.lng - dLng}::float8 AND ${q.lng + dLng}::float8`);
+      conds.push(sql`${effLng} BETWEEN ${q.lng - dLng}::float8 AND ${q.lng + dLng}::float8`);
     }
     conds.push(sql`(6371 * acos(LEAST(1.0, GREATEST(-1.0,
-      cos(radians(${q.lat}::float8)) * cos(radians(ev.latitude)) * cos(radians(ev.longitude) - radians(${q.lng}::float8)) +
-      sin(radians(${q.lat}::float8)) * sin(radians(ev.latitude))
+      cos(radians(${q.lat}::float8)) * cos(radians(${effLat})) * cos(radians(${effLng}) - radians(${q.lng}::float8)) +
+      sin(radians(${q.lat}::float8)) * sin(radians(${effLat}))
     )))) <= ${r}::float8`);
   }
   if (cursor) conds.push(sql`(ev.starts_at, ev.id) > (${cursor.ts}::timestamptz, ${cursor.id}::varchar)`);
