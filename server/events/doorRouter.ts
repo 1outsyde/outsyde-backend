@@ -22,6 +22,7 @@ import { getUserIdFromRequest, hybridAuthMiddleware } from "../auth";
 import { rows, iso, fail, pgError } from "./eventsRouter";
 import { loadEventForDoor, isWithinScanWindow } from "./doorAccess";
 import { notifyDoorTeamAdded } from "./ticketNotices";
+import { ticketIdFromQrToken, qrPng } from "./ticketQr";
 
 const router = Router();
 
@@ -42,6 +43,33 @@ async function hostOnly(req: Request, res: Response): Promise<{ userId: string; 
   if (!access || access.role !== "host") { fail(res, 404, "EVENT_NOT_FOUND", "Event not found."); return null; }
   return { userId, event: access.event };
 }
+
+const qrLimiter = rateLimit({
+  windowMs: 60_000, limit: 120, standardHeaders: true, legacyHeaders: false,
+  handler: (_req, res) => { res.status(429).json({ success: false, error: { code: "RATE_LIMITED", message: "Too many requests. Try again in a minute." } }); },
+});
+
+/** Public, signed QR image. Unknown, tampered, refunded and cancelled tickets all get the same 404. */
+router.get("/qr/:token.png", qrLimiter, async (req: Request, res: Response) => {
+  const notFound = () => res.status(404).json({ success: false, error: { code: "NOT_FOUND", message: "Not found." } });
+  try {
+    const ticketId = ticketIdFromQrToken(String(req.params.token));
+    if (!ticketId) return notFound();
+    const [t] = await rows<any>(sql`SELECT code FROM tickets WHERE id = ${ticketId} AND status = 'valid' LIMIT 1`);
+    if (!t) return notFound();
+    const png = await qrPng(String(t.code));
+    res.set({
+      "Content-Type": "image/png",
+      "Cross-Origin-Resource-Policy": "cross-site",
+      "Referrer-Policy": "no-referrer",
+      "Cache-Control": "private, max-age=86400",
+    });
+    return res.send(png);
+  } catch (err) {
+    console.error("[Events] qr image failed:", err);
+    return notFound();
+  }
+});
 
 router.get("/door/mine", hybridAuthMiddleware, async (req: Request, res: Response) => {
   try {

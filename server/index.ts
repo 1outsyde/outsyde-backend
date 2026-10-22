@@ -3,6 +3,7 @@ import { createServer } from "http";
 import cors from "cors";
 import cookieParser from "cookie-parser";
 import helmet from "helmet";
+import { redactLogPath } from "./logRedaction";
 import compression from "compression";
 import { storage } from "./storage";
 import { registerRoutes } from "./routes";
@@ -187,7 +188,7 @@ app.use(express.urlencoded({ extended: false }));
 
 app.use((req, res, next) => {
   const start = Date.now();
-  const path = req.path;
+  const path = redactLogPath(req.path);
   let capturedJsonResponse: Record<string, any> | undefined;
 
   const originalResJson = res.json;

@@ -147,6 +147,8 @@ async function call(method: string, path: string, o: { token?: string; body?: un
     assert(r.status === 409 && r.body.error.code === "LIMIT_REACHED", "second RSVP on a 1-per-account type refused", r);
     r = await call("GET", "/api/events/me/tickets", { token: tok(g0) });
     assert(r.status === 200 && r.body.tickets.length === 1 && r.body.tickets[0].event.slug === ev.slug && r.body.tickets[0].code === g0Order.tickets[0].code, "my tickets lists it", r);
+    assert(typeof r.body.tickets[0].qrUrl === "string" && /\/api\/events\/qr\/[A-Za-z0-9_~-]+\.png$/.test(r.body.tickets[0].qrUrl) && !r.body.tickets[0].qrUrl.includes(g0Order.tickets[0].code), "my tickets adds a signed qrUrl without the code", r.body.tickets[0].qrUrl);
+    assert(JSON.stringify(Object.keys(r.body.tickets[0]).sort()) === JSON.stringify(["checkedInAt", "code", "event", "id", "orderId", "qrUrl", "status", "ticketTypeName"]), "my tickets: old keys unchanged, qrUrl added", Object.keys(r.body.tickets[0]));
     r = await call("GET", `/api/events/slug/${ev.slug}`, { token: tok(g0) });
     assert(r.body.event.viewerHasTicket === true, "event page knows I have a ticket", r.body?.event);
 
