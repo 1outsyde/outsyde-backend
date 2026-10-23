@@ -318,6 +318,13 @@ export async function loadRecoveries(eventId: string) {
 
 const usd = (c: number) => `$${(c / 100).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 const REASON_TEXT: Record<string, string> = { buyer: "by the buyer", host: "by the host", event_cancelled: "because the event was cancelled" };
+/** audit_logs actions written by adminEventsActions.ts. */
+const ADMIN_ACTION_TEXT: Record<string, string> = {
+  "event_payout.retry": "Payout set to try again",
+  "event_payout.email_host": "Host emailed about the payout",
+  "event_payout_recovery.collected": "Owed amount marked collected",
+  "event_payout_recovery.written_off": "Owed amount written off",
+};
 const HOLD_TEXT: Record<string, string> = {
   no_account: "the host has no payout account", not_complete: "the host hasn't finished payout setup",
   stripe_not_ready: "Stripe isn't ready to pay the host", event_paused: "the event is paused",
@@ -374,14 +381,15 @@ export async function loadActivity(eventId: string) {
       case "payout_created": text = `Payout of ${usd(amountCents ?? 0)} created for ${n} ticket${n === 1 ? "" : "s"}.`; break;
       case "payout_paid": text = `Payout of ${usd(amountCents ?? 0)} sent to the host.`; break;
       case "payout_held": text = `Payout on hold: ${HOLD_TEXT[r.detail] ?? "waiting"}.`; break;
-      case "payout_review": text = `Payout moved to review after ${n} tries.`; break;
+      // Review also comes from an amount mismatch or a cancelled event, so the count is only told when it says something.
+      case "payout_review": text = `Payout moved to review.${n != null && n > 1 ? ` Tried ${n} times.` : ""}`; break;
       case "recovery_created": text = `Ticket refunded after payout, ${usd(amountCents ?? 0)} to take back from the host.`; break;
       case "recovery_reversed": text = `${usd(amountCents ?? 0)} taken back from the host's Stripe balance.`; break;
       case "recovery_owed": text = `Host owes ${usd(amountCents ?? 0)}: taking it back from Stripe failed.`; break;
       case "recovery_recovered": text = `${usd(amountCents ?? 0)} taken from a later payout.`; break;
       case "recovery_collected": text = `${usd(amountCents ?? 0)} marked collected by an admin.`; break;
       case "recovery_written_off": text = `${usd(amountCents ?? 0)} written off by an admin.`; break;
-      case "admin_action": text = `Admin action: ${String(r.detail ?? "").replace(/_/g, " ")}${r.actor ? ` by @${r.actor}` : ""}.`; break;
+      case "admin_action": text = `${ADMIN_ACTION_TEXT[r.detail] ?? `Admin action: ${String(r.detail ?? "").replace(/[_.]/g, " ")}`}${r.actor ? ` by @${r.actor}` : ""}.`; break;
       default: text = kind.replace(/_/g, " ");
     }
     return { at: iso(r.at)!, kind, refId: (r.ref_id ?? null) as string | null, amountCents, detail, actorUsername: (r.actor ?? null) as string | null, text };

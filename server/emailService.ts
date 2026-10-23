@@ -516,7 +516,7 @@ const BRAND = {
 
 // `log` is set for emails to customers, vendors and photographers; internal alerts pass none and are
 // never logged. Logging never changes what this function returns or throws (PR C2).
-async function sendBrandedEmail(to: string, subject: string, html: string, log?: EmailLogTag): Promise<void> {
+async function sendBrandedEmail(to: string, subject: string, html: string, log?: EmailLogTag, replyTo?: string): Promise<void> {
   const apiKey = process.env.RESEND_API_KEY;
   if (!apiKey) {
     throw new Error('[emailService] RESEND_API_KEY not set');
@@ -524,7 +524,7 @@ async function sendBrandedEmail(to: string, subject: string, html: string, log?:
   const resend = new Resend(apiKey);
   let result: Awaited<ReturnType<typeof resend.emails.send>>;
   try {
-    result = await resend.emails.send({ from: FROM_ORDERS, to, subject, html });
+    result = await resend.emails.send({ from: FROM_ORDERS, to, subject, html, ...(replyTo ? { replyTo } : {}) });
   } catch (err) {
     logTransactionalEmail(log, to, { error: err });
     throw err;
@@ -2177,6 +2177,23 @@ export async function sendPayoutAlertToAdmin(params: {
     ${emailFooter()}
   `);
   await sendBrandedEmail(ADMIN_NOTIFICATION_EMAIL, `[Outsyde] ${params.items.length} business payout${params.items.length === 1 ? '' : 's'} waiting (${cents(params.totalCents)})`, html);
+}
+
+/**
+ * Event host notice sent from the admin events page (Email the host): the payout is held or in review.
+ * Same layout as sendRefundOwedEmail; copy comes from the caller (real punctuation, no dashes, no fee percentage).
+ * Replies go to the Outsyde inbox. Logged in email history as kind 'ticket' with a plain label (no personal data).
+ * Throws on a send failure; the caller catches.
+ */
+export async function sendEventPayoutHostEmail(params: { to: string; subject: string; text: string }): Promise<void> {
+  const html = wrapEmail(`
+    ${emailHeader(escapeHtml(params.subject), 'About your event payout')}
+    <tr><td style="background:#1A1A1A;padding:8px 32px 24px;">
+      <p style="color:#FFFFFF;font-size:15px;line-height:1.6;margin:0;">${escapeHtml(params.text)}</p>
+    </td></tr>
+    ${emailFooter()}
+  `);
+  await sendBrandedEmail(params.to, params.subject, html, { kind: 'ticket', label: 'Event payout notice' }, ADMIN_NOTIFICATION_EMAIL);
 }
 
 /**
