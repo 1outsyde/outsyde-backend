@@ -176,10 +176,10 @@ export async function hostIdentity(e: any): Promise<{ publicName: string; avatar
       return { publicName: id.publicName, avatarUrl: id.avatarUrl, followId: String(p.id) };
     }
   }
-  // A person hosting as themselves: first name or @username only (users.name often holds "First Last").
-  const first = (u?.first_name ?? "").trim();
-  const username = (u?.username ?? "").trim();
-  return { publicName: first || (username ? `@${username}` : "Outsyde member"), avatarUrl: (u?.profile_image_url ?? "").trim() || null, followId: String(e.host_user_id) };
+  // A person hosting as themselves: their display name (users.name), else @username, never the real
+  // first or last name (Legend 2026-10-18 and 2026-10-23, server/personName.ts). Same rule as the feed.
+  const id = pickPublicIdentity(user);
+  return { publicName: id.publicName, avatarUrl: id.avatarUrl, followId: String(e.host_user_id) };
 }
 
 // ─── Serializers (additive only once clients ship) ──────────────────────────

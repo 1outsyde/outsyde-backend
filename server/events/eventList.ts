@@ -92,9 +92,9 @@ export function hostIdentityFrom(r: {
     const id = pickPublicIdentity({ ...user, isPhotographer: true }, null, { id: r.p_id, displayName: r.p_name ?? "", logoImage: r.p_logo ?? null });
     return { publicName: id.publicName, avatarUrl: id.avatarUrl };
   }
-  const first = (r.u_first_name ?? "").trim();
-  const username = (r.u_username ?? "").trim();
-  return { publicName: first || (username ? `@${username}` : "Outsyde member"), avatarUrl: (r.u_image ?? "").trim() || null };
+  // Display name (users.name), else @username, never the real name. Same rule as hostIdentity.
+  const id = pickPublicIdentity(user);
+  return { publicName: id.publicName, avatarUrl: id.avatarUrl };
 }
 
 const isoOf = (v: unknown) => new Date(v as string).toISOString();

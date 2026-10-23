@@ -71,7 +71,8 @@ async function call(method: string, path: string, o: { token?: string; body?: un
     [`${P}-${s}@test.local`, `Person ${s}`, `${P}${s}`.slice(0, 20)],
   ))[0].id as string;
   const host = await mkUser("host");
-  await q(`UPDATE users SET name = 'Jane Doe', first_name = 'Jane' WHERE id = $1`, [host]);
+  // users.name is the public display name; first and last names are real names (server/personName.ts).
+  await q(`UPDATE users SET name = 'Jay Vibes', first_name = 'Jane', last_name = 'Doe' WHERE id = $1`, [host]);
   const other = await mkUser("other");
   const guest = await mkUser("guest");
   const owner = await mkUser("owner");
@@ -180,8 +181,8 @@ async function call(method: string, path: string, o: { token?: string; body?: un
     r = await call("GET", `/api/events/slug/${ev.slug}`);
     const pub = r.body?.event;
     assert(r.status === 200 && pub.addressHidden === true && pub.addressLine1 === null && pub.venueName === null && pub.latitude === null && pub.city === "Freeport", "stranger sees area only", pub);
-    assert(pub.host.name === "Jane" && pub.host.kind === "user" && !("email" in pub.host), "person host shown by first name only", pub?.host);
-    assert(!JSON.stringify(r.body).includes("Doe"), "last name never in the payload");
+    assert(pub.host.name === "Jay Vibes" && pub.host.kind === "user" && !("email" in pub.host), "person host shown by display name", pub?.host);
+    assert(!JSON.stringify(r.body).includes("Doe") && !JSON.stringify(r.body).includes("Jane"), "real first and last name never in the payload");
     assert(pub.host.followId === host, "person host: followId is their user id", pub.host);
     const names = r.body.ticketTypes.map((t: any) => `${t.name}:${t.salesStatus}`);
     assert(JSON.stringify(names) === JSON.stringify(["Free RSVP:on_sale", "Second wave:locked", "After comps:locked"]), "hidden + archived types left out; tiers behind free and behind hidden comps locked", names);
