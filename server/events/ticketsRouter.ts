@@ -23,6 +23,7 @@ import {
 } from "./eventsRouter";
 import { makeTicketCode, paidEventsEnabled, wouldCreateUnlockLoop, holderCanSeeAddress, visibleAddress, addressRevealAt } from "./eventRules";
 import { qrUrlFor } from "./ticketQr";
+import { notifyRsvpConfirmed } from "./ticketNotices";
 
 const router = Router();
 
@@ -395,6 +396,8 @@ router.post("/:id/rsvp", hybridAuthMiddleware, async (req: Request, res: Respons
                CASE WHEN EXISTS (SELECT 1 FROM tt) AND (SELECT count(*) FROM tk) <> ${quantity}
                  THEN ('GUARD_NOT_OPEN:' || (SELECT count(*) FROM tk))::int END AS guard`));
       if (r?.order_id) {
+        // Fire and forget: the confirmation email never delays or fails the RSVP.
+        void notifyRsvpConfirmed(String(r.order_id));
         return res.status(201).json({ success: true, order: await orderWithTickets(r.order_id, userId) });
       }
       const why = await whyNotClaimable(eventId, ticketTypeId, quantity);

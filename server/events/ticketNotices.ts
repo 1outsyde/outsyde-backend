@@ -4,7 +4,7 @@
  *   buyer receipt (paid order, first settle only), with the ticket codes
  *   host push for each paid sale (no host email per sale: Resend's plan allows 100 emails a day)
  *   buyer refund email (when Stripe confirms the refund), wording by reason
- *   free RSVP guests: "event cancelled" email
+ *   free RSVP guests: "RSVP confirmed" email with QR codes, and the "event cancelled" email
  *
  * Every function here is fire and forget: it never throws, so a failed email can't undo a sale or a refund.
  * Senders are injectable so tests can check what would be sent without Resend or Expo.
@@ -103,6 +103,34 @@ async function loadOrder(orderId: string) {
     FROM ticket_orders o JOIN users u ON u.id = o.buyer_user_id JOIN events e ON e.id = o.event_id
     WHERE o.id = ${orderId}`);
   return o ?? null;
+}
+
+/**
+ * After a free RSVP is created (new order only, never on a repeated idempotency key): the guest gets the
+ * "Your RSVP is confirmed" email with one QR image per ticket, the same email paid buyers get without the
+ * money lines. Skipped for paid orders (they get notifyOrderSettled), cancelled events and anything not
+ * completed. No host push (that stays a paid sale notice).
+ */
+export async function notifyRsvpConfirmed(orderId: string): Promise<void> {
+  try {
+    const d = await noticeDeps();
+    const o = await loadOrder(orderId);
+    if (!o || o.status !== "completed" || Number(o.total_cents) !== 0 || o.event_status === "cancelled" || !o.buyer_email) return;
+    const tix = await rows<any>(sql`SELECT id, code FROM tickets WHERE order_id = ${orderId} AND status = 'valid' ORDER BY item_index`);
+    if (!tix.length) return;
+    const codes = tix.map((t) => String(t.code));
+    // A QR failure must never block the email: it just goes without images.
+    let qrUrls: string[] | undefined;
+    try { qrUrls = tix.map((t) => qrBuilder(String(t.id))); }
+    catch (err) { console.error(`[Tickets] qr urls failed for RSVP ${orderId}:`, (err as Error)?.message ?? err); }
+    await paced(() => d.sendReceipt({
+      toEmail: o.buyer_email, firstName: o.buyer_first_name ?? null, event: emailEvent(o),
+      ticketTypeName: String(o.ticket_type_name ?? "Ticket"), quantity: tix.length,
+      ticketPriceCents: 0, serviceFeeCents: 0, totalCents: 0, codes, qrUrls,
+    })).catch((err) => console.error(`[Tickets] RSVP email failed for order ${orderId}:`, (err as Error)?.message ?? err));
+  } catch (err) {
+    console.error(`[Tickets] RSVP notice failed for order ${orderId}:`, (err as Error)?.message ?? err);
+  }
 }
 
 /** After a paid order is settled for the first time. Skipped when the event was cancelled meanwhile (the refund email follows). */
