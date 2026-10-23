@@ -141,7 +141,44 @@ async function call(method: string, p: string, o: { token?: string; body?: unkno
     assert((out.html.match(/<img src="https:\/\/api\.example\.test\/api\/events\/qr\//g) ?? []).length === 2, "two QR images in the html");
     assert(!/[–—]| - /.test(out.html.replace(/<[^>]+>/g, " ")), "no dashes in the copy");
 
+    console.log("Daily email budget");
+    notices.length = 0;
+    await tn.notifyRsvpConfirmed(order.id, { emailCeiling: 0 });
+    assert(notices.length === 0, "budget used up: no email, no throw", notices);
+    const [{ n: todayCount }] = await q(`SELECT count(*)::int AS n FROM email_log WHERE created_at >= now() - interval '1 day'`);
+    await tn.notifyRsvpConfirmed(order.id, { emailCeiling: Number(todayCount) + 1 });
+    assert(notices.filter((x) => x.kind === "receipt").length === 1, "under the budget: the email goes", notices.length);
+    assert(tn.RSVP_EMAIL_DAILY_CEILING === 60, "default ceiling is 60 (below the reveal job's 70)", tn.RSVP_EMAIL_DAILY_CEILING);
+
+    console.log("Failures never break anything");
+    notices.length = 0;
+    tn.setQrBuilderForTest(() => { throw new Error("qr down"); });
+    await tn.notifyRsvpConfirmed(order.id);
+    const noQr = notices.find((x) => x.kind === "receipt")?.p;
+    assert(!!noQr && noQr.qrUrls === undefined && noQr.codes.length === 2, "QR failure: email still goes, codes only", noQr);
+    tn.setQrBuilderForTest((id) => `https://api.example.test/api/events/qr/${id}.png`);
+    tn.setNoticeDepsForTest({
+      sendReceipt: async () => { throw new Error("resend down"); },
+      sendRefund: async () => {}, sendCancelled: async () => {}, sendAddressReveal: async () => {},
+      sendPush: async () => true,
+    });
+    let threw = false;
+    try { await tn.notifyRsvpConfirmed(order.id); } catch { threw = true; }
+    assert(!threw, "a failing sender never throws");
+    tn.setNoticeDepsForTest({
+      sendReceipt: async (p) => { notices.push({ kind: "receipt", p }); },
+      sendRefund: async (p) => { notices.push({ kind: "refund", p }); },
+      sendCancelled: async (p) => { notices.push({ kind: "cancelled", p }); },
+      sendAddressReveal: async () => {},
+      sendPush: async (p) => { notices.push({ kind: "push", p }); return true; },
+    });
+
     console.log("When it must not send");
+    notices.length = 0;
+    await q(`UPDATE ticket_orders SET status = 'cancelled', cancelled_at = now() WHERE id = $1`, [order.id]).catch((e) => console.error(e.message));
+    await tn.notifyRsvpConfirmed(order.id);
+    assert(notices.length === 0, "cancelled RSVP (not completed): no email", notices);
+    await q(`UPDATE ticket_orders SET status = 'completed', cancelled_at = NULL WHERE id = $1`, [order.id]);
     notices.length = 0;
     await tn.notifyRsvpConfirmed("00000000-0000-4000-8000-000000000000");
     assert(notices.length === 0, "unknown order: nothing sent, no throw");

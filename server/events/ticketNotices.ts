@@ -14,6 +14,7 @@ import { rows, hostIdentity } from "./eventsRouter";
 import { holderCanSeeAddress } from "./eventRules";
 import { qrUrlFor } from "./ticketQr";
 import type { TicketEmailEvent } from "../emailService";
+import { startOfNewYorkDay } from "../emailHistory";
 
 export type NoticeDeps = {
   sendReceipt: (p: Parameters<typeof import("../emailService").sendTicketReceiptToBuyer>[0]) => Promise<void>;
@@ -106,28 +107,58 @@ async function loadOrder(orderId: string) {
 }
 
 /**
+ * Free RSVP emails stop once today's email_log total (New York day, all kinds) reaches this. Below the address
+ * reveal job's 70 (addressReveal.ts) so the last slots of Resend's 100 a day stay for receipts, bookings and resets.
+ */
+export const RSVP_EMAIL_DAILY_CEILING = 60;
+
+function rsvpEmailable(o: any): boolean {
+  return !!o && o.status === "completed" && Number(o.total_cents) === 0 && o.event_status !== "cancelled" && !!o.buyer_email;
+}
+
+async function emailsSentToday(now: Date): Promise<number> {
+  const start = startOfNewYorkDay(now).toISOString();
+  const [r] = await rows<any>(sql`
+    SELECT count(*)::int AS n FROM email_log
+    WHERE created_at >= ${start}::timestamptz AND created_at < ${start}::timestamptz + interval '1 day'`);
+  return Number(r?.n ?? 0);
+}
+
+/**
  * After a free RSVP is created (new order only, never on a repeated idempotency key): the guest gets the
  * "Your RSVP is confirmed" email with one QR image per ticket, the same email paid buyers get without the
  * money lines. Skipped for paid orders (they get notifyOrderSettled), cancelled events and anything not
  * completed. No host push (that stays a paid sale notice).
  */
-export async function notifyRsvpConfirmed(orderId: string): Promise<void> {
+export async function notifyRsvpConfirmed(orderId: string, opts: { emailCeiling?: number; now?: Date } = {}): Promise<void> {
   try {
     const d = await noticeDeps();
     const o = await loadOrder(orderId);
-    if (!o || o.status !== "completed" || Number(o.total_cents) !== 0 || o.event_status === "cancelled" || !o.buyer_email) return;
+    if (!rsvpEmailable(o)) return;
     const tix = await rows<any>(sql`SELECT id, code FROM tickets WHERE order_id = ${orderId} AND status = 'valid' ORDER BY item_index`);
     if (!tix.length) return;
+    // Resend allows 100 emails a day for everything (receipts, bookings, password resets). Free RSVPs can come in
+    // bursts, so their email stops once today's total reaches the ceiling; the guest still has the tickets and QR
+    // codes in My Tickets.
+    const ceiling = opts.emailCeiling ?? RSVP_EMAIL_DAILY_CEILING;
+    if ((await emailsSentToday(opts.now ?? new Date())) >= ceiling) {
+      console.log(`[Tickets] daily email budget reached: RSVP ${orderId} confirmed without an email`);
+      return;
+    }
     const codes = tix.map((t) => String(t.code));
     // A QR failure must never block the email: it just goes without images.
     let qrUrls: string[] | undefined;
     try { qrUrls = tix.map((t) => qrBuilder(String(t.id))); }
     catch (err) { console.error(`[Tickets] qr urls failed for RSVP ${orderId}:`, (err as Error)?.message ?? err); }
-    await paced(() => d.sendReceipt({
-      toEmail: o.buyer_email, firstName: o.buyer_first_name ?? null, event: emailEvent(o),
-      ticketTypeName: String(o.ticket_type_name ?? "Ticket"), quantity: tix.length,
-      ticketPriceCents: 0, serviceFeeCents: 0, totalCents: 0, codes, qrUrls,
-    })).catch((err) => console.error(`[Tickets] RSVP email failed for order ${orderId}:`, (err as Error)?.message ?? err));
+    await paced(async () => {
+      // The pacing queue can be long (e.g. during a mass cancel): check the order again right before sending.
+      if (!rsvpEmailable(await loadOrder(orderId))) return;
+      await d.sendReceipt({
+        toEmail: o.buyer_email, firstName: o.buyer_first_name ?? null, event: emailEvent(o),
+        ticketTypeName: String(o.ticket_type_name ?? "Ticket"), quantity: tix.length,
+        ticketPriceCents: 0, serviceFeeCents: 0, totalCents: 0, codes, qrUrls,
+      });
+    }).catch((err) => console.error(`[Tickets] RSVP email failed for order ${orderId}:`, (err as Error)?.message ?? err));
   } catch (err) {
     console.error(`[Tickets] RSVP notice failed for order ${orderId}:`, (err as Error)?.message ?? err);
   }
