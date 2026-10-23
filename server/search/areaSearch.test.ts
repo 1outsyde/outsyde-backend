@@ -3,7 +3,7 @@
  */
 import {
   normalizeState, knownCenter, validCoords, clampRadius, resolveSearchArea, milesBetween,
-  DEFAULT_RADIUS_MILES, MAX_RADIUS_MILES,
+  DEFAULT_RADIUS_MILES, MAX_RADIUS_MILES, MIN_RADIUS_MILES,
 } from "./areaSearch";
 
 let passed = 0;
@@ -39,6 +39,7 @@ function assert(cond: boolean, name: string, detail?: unknown) {
   assert(clampRadius("10") === 10, "custom radius");
   assert(clampRadius(5000) === MAX_RADIUS_MILES, "capped");
   assert(clampRadius(-3) === DEFAULT_RADIUS_MILES && clampRadius(0) === DEFAULT_RADIUS_MILES, "non-positive → default");
+  assert(clampRadius(0.01) === MIN_RADIUS_MILES && clampRadius("1") === MIN_RADIUS_MILES, "tiny radius raised to the minimum");
 
   console.log("milesBetween");
   const miami = { latitude: 25.7617, longitude: -80.1918 };

@@ -15,6 +15,8 @@ import { geocodeAddress } from "../geocoding";
 
 export const DEFAULT_RADIUS_MILES = 30;
 export const MAX_RADIUS_MILES = 100;
+/** Smallest allowed radius, so nobody can narrow a person down to a spot with tiny circles. */
+export const MIN_RADIUS_MILES = 5;
 const EARTH_RADIUS_MILES = 3958.8;
 
 export interface SearchArea {
@@ -90,24 +92,54 @@ export function validCoords(lat: unknown, lng: unknown) {
 export function clampRadius(raw: unknown): number {
   const r = num(raw);
   if (r === null || r <= 0) return DEFAULT_RADIUS_MILES;
-  return Math.min(MAX_RADIUS_MILES, r);
+  return Math.min(MAX_RADIUS_MILES, Math.max(MIN_RADIUS_MILES, r));
 }
 
-type Geocoder = (city: string, state: string | null) => Promise<{ latitude: number; longitude: number } | null>;
+type Geocoder = (
+  city: string,
+  state: string | null,
+  opts?: { wait?: boolean },
+) => Promise<{ latitude: number; longitude: number } | null>;
 
 const CACHE_MS = 24 * 60 * 60 * 1000;
 const FAIL_CACHE_MS = 10 * 60 * 1000;
+const CACHE_MAX = 500;
+/** OpenStreetMap Nominatim allows about 1 request a second; never go faster than that. */
+const MIN_LOOKUP_GAP_MS = 1100;
 const geoCache = new Map<string, { at: number; value: { latitude: number; longitude: number } | null }>();
+let lastLookupAt = 0;
 
-/** City-level geocode with an in-memory cache (also caches misses briefly so a bad name can't hammer it). */
-export const cachedCityGeocode: Geocoder = async (city, state) => {
+/**
+ * City-level geocode with an in-memory least-recently-used cache (misses cached briefly) and a
+ * global throttle: a lookup that would come too soon after the last one is skipped (null = text
+ * match only for that search) instead of queued, so search never waits and Nominatim is never hammered.
+ */
+export const cachedCityGeocode: Geocoder = async (city, state, opts = {}) => {
   const key = `${city.trim().toLowerCase()}|${state ?? ""}`;
   const hit = geoCache.get(key);
   const now = Date.now();
-  if (hit && now - hit.at < (hit.value ? CACHE_MS : FAIL_CACHE_MS)) return hit.value;
+  if (hit && now - hit.at < (hit.value ? CACHE_MS : FAIL_CACHE_MS)) {
+    geoCache.delete(key);
+    geoCache.set(key, hit); // most recently used last
+    return hit.value;
+  }
+  const gap = MIN_LOOKUP_GAP_MS - (now - lastLookupAt);
+  if (gap > 0) {
+    // Search skips (null = text match only, not cached). A profile save waits its turn instead.
+    if (!opts.wait) return null;
+    lastLookupAt = now + gap;
+    await new Promise((r) => setTimeout(r, gap));
+  } else {
+    lastLookupAt = now;
+  }
   const value = await geocodeAddress({ city: city.trim(), state: state ?? "" });
-  if (geoCache.size > 500) geoCache.clear();
+  geoCache.delete(key);
   geoCache.set(key, { at: now, value });
+  while (geoCache.size > CACHE_MAX) {
+    const oldest = geoCache.keys().next().value;
+    if (oldest === undefined) break;
+    geoCache.delete(oldest);
+  }
   return value;
 };
 
@@ -150,14 +182,19 @@ export function milesBetween(a: { latitude: number; longitude: number }, b: { la
 export function inAreaSql(
   area: SearchArea | null,
   cols: { city: AnyPgColumn; latitude: AnyPgColumn; longitude: AnyPgColumn },
+  opts: { coarse?: boolean } = {},
 ): SQL | undefined {
   if (!area) return undefined;
   const textMatch = ilike(cols.city, `%${area.city}%`);
   if (!area.center) return textMatch;
   const { latitude: lat0, longitude: lng0 } = area.center;
+  // People (coarse): compare a point rounded to 0.1° (about 7 miles), never the stored point itself,
+  // so a stored point that happens to be precise can't be located by repeated searches.
+  const lat = opts.coarse ? sql`round((${cols.latitude})::numeric, 1)::float8` : sql`${cols.latitude}`;
+  const lng = opts.coarse ? sql`round((${cols.longitude})::numeric, 1)::float8` : sql`${cols.longitude}`;
   const distance = sql`${EARTH_RADIUS_MILES} * acos(least(1, greatest(-1,
-    cos(radians(${lat0})) * cos(radians(${cols.latitude})) * cos(radians(${cols.longitude}) - radians(${lng0}))
-    + sin(radians(${lat0})) * sin(radians(${cols.latitude})))))`;
+    cos(radians(${lat0})) * cos(radians(${lat})) * cos(radians(${lng}) - radians(${lng0}))
+    + sin(radians(${lat0})) * sin(radians(${lat})))))`;
   return or(
     and(isNotNull(cols.latitude), isNotNull(cols.longitude), sql`${distance} <= ${area.radiusMiles}`),
     textMatch,

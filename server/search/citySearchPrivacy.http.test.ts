@@ -54,7 +54,7 @@ const isLocal = (u: string) => ['localhost', '127.0.0.1', '::1', '[::1]'].includ
   // who, city, state, lat, lng, public, admin
   const people: Array<[string, string | null, string | null, number | null, number | null, boolean, boolean]> = [
     ['pubhialeah', 'Hialeah', 'FL', 25.8576, -80.2781, true, false],   // near Miami, shares → found
-    ['hiddenhialeah', 'Hialeah', 'FL', 25.8576, -80.2781, false, false], // near Miami, hidden → never
+    ['hiddenhialeah', 'Hialeah', 'FL', 25.857612, -80.278134, false, false], // near Miami, hidden (precise point) → never
     ['pubbeach', 'Miami Beach', 'FL', null, null, true, false],          // no coords, text match → found
     ['puborlando', 'Orlando', 'FL', 28.5384, -81.3789, true, false],     // far → not found
     ['pubfreeport', 'Freeport', 'NY', 40.6576, -73.5832, true, false],   // New York area
@@ -123,6 +123,12 @@ const isLocal = (u: string) => ['localhost', '127.0.0.1', '::1', '[::1]'].includ
 
     const coords = await call('GET', `/api/search?q=${TERM}&scope=consumers&city=Freeport&state=NY&lat=40.6576&lng=-73.5832&radiusMiles=5`);
     assert(has(coords, 'pubfreeport') && !has(coords, 'pubhialeah'), 'client coords + small radius', names(coords));
+    // A point ~3 miles from Freeport with a tiny radius: the minimum (5 mi) + rounding still find her,
+    // so tiny circles can't be used to pin someone down.
+    const tiny = await call('GET', `/api/search?q=${TERM}&scope=consumers&city=zzzz&lat=40.70&lng=-73.55&radiusMiles=0.01`);
+    assert(has(tiny, 'pubfreeport'), 'tiny radius is raised to the minimum', names(tiny));
+    const farTiny = await call('GET', `/api/search?q=${TERM}&scope=consumers&city=zzzz&lat=41.30&lng=-73.58&radiusMiles=0.01`);
+    assert(!has(farTiny, 'pubfreeport'), 'far point still excludes her', names(farTiny));
 
     console.log('Customers: name search without a city');
     const byName = await call('GET', `/api/search?q=${TERM}&scope=consumers`);
@@ -164,7 +170,7 @@ const isLocal = (u: string) => ['localhost', '127.0.0.1', '::1', '[::1]'].includ
     const postSpoof = await call('POST', '/api/user/location', { body: { userId: id('hiddenhialeah'), latitude: 1, longitude: 1, city: 'Hacked' } });
     assert(postSpoof.status === 401, 'POST body userId without sign-in → 401', postSpoof);
     const [afterSpoof] = await q(`SELECT city, latitude FROM users WHERE id = $1`, [id('hiddenhialeah')]);
-    assert(afterSpoof.city === 'Hialeah' && afterSpoof.latitude === 25.8576, 'spoof changed nothing', afterSpoof);
+    assert(afterSpoof.city === 'Hialeah' && afterSpoof.latitude === 25.857612, 'spoof changed nothing', afterSpoof);
     const getOwn = await call('GET', '/api/user/location', { bearer: hidden });
     assert(getOwn.status === 200 && getOwn.body.location.city === 'Hialeah', 'own location still readable', getOwn.body);
 
@@ -178,8 +184,10 @@ const isLocal = (u: string) => ['localhost', '127.0.0.1', '::1', '[::1]'].includ
     assert(bad.status === 400, 'non-boolean locationPublic → 400', bad.status);
     const on = await call('PATCH', '/api/users/me', { bearer: hidden, body: { locationPublic: true } });
     assert(on.status === 200 && on.body.user.locationPublic === true, 'turn sharing on', on.body?.user?.locationPublic);
-    const [kept] = await q(`SELECT latitude FROM users WHERE id = $1`, [id('hiddenhialeah')]);
-    assert(kept.latitude === 25.8576, 'existing coordinates kept when turning sharing on', kept);
+    const [rederived] = await q(`SELECT latitude FROM users WHERE id = $1`, [id('hiddenhialeah')]);
+    assert(rederived.latitude !== 25.857612, 'precise point replaced when turning sharing on (city-level lookup or none)', rederived);
+    // The scratch box has no internet, so the lookup returns nothing: put the city-level point back by hand.
+    await q(`UPDATE users SET latitude = 25.8576, longitude = -80.2781 WHERE id = $1`, [id('hiddenhialeah')]);
     const nowFound = await call('GET', `/api/search?q=${TERM}&scope=consumers&city=Miami&state=FL`);
     assert(has(nowFound, 'hiddenhialeah'), 'found by city once shared', names(nowFound));
     const off = await call('PATCH', '/api/users/me', { bearer: hidden, body: { locationPublic: false } });

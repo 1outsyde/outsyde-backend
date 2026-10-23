@@ -3610,7 +3610,7 @@ export async function registerRoutes(
       }
 
       // City search uses coordinates: keep a CITY-LEVEL point (never a street address) in step with the city.
-      // Geocoded when the city changes, or when sharing is turned on and no point exists yet. Best effort:
+      // Geocoded when the city changes or sharing is turned on. Best effort:
       // a failed lookup leaves coordinates empty and the person is still found by city name.
       if (cityChanged || validated.data.locationPublic === true) {
         const current = await storage.getUser(userId);
@@ -3619,8 +3619,10 @@ export async function registerRoutes(
         if (!nextCity) {
           updateData.latitude = null;
           updateData.longitude = null;
-        } else if (cityChanged || current?.latitude == null || current?.longitude == null) {
-          const point = await cachedCityGeocode(nextCity, normalizeState(nextState) ?? nextState ?? null);
+        } else {
+          // Always re-derive a CITY-LEVEL point (also when turning sharing on), so a precise point
+          // written elsewhere (e.g. /api/feed lat/lng) is never what city search compares against.
+          const point = await cachedCityGeocode(nextCity, normalizeState(nextState) ?? nextState ?? null, { wait: true });
           updateData.latitude = point?.latitude ?? null;
           updateData.longitude = point?.longitude ?? null;
         }

@@ -6215,7 +6215,7 @@ export class DatabaseStorage implements IStorage {
               // Real names are searchable by admins only (personName.ts rule).
               ...(isAdmin ? [ilike(users.firstName, likePattern), ilike(users.lastName, likePattern)] : []),
             ),
-            inAreaSql(area, { city: users.city, latitude: users.latitude, longitude: users.longitude }),
+            inAreaSql(area, { city: users.city, latitude: users.latitude, longitude: users.longitude }, { coarse: true }),
             // A customer is found by city only when they share their city (users.location_public).
             !area || isAdmin ? undefined : eq(users.locationPublic, true)
           )
