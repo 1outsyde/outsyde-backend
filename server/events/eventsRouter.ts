@@ -154,7 +154,8 @@ export async function loadTicketTypes(eventId: string): Promise<any[]> {
 }
 
 // Keep naming rules in sync with hostIdentityFrom in eventList.ts (the public list shapes the same host names).
-export async function hostIdentity(e: any): Promise<{ publicName: string; avatarUrl: string | null }> {
+/** followId is what POST /api/follows takes: the business or photographer id (resolved to its owner there), else the user id. */
+export async function hostIdentity(e: any): Promise<{ publicName: string; avatarUrl: string | null; followId: string }> {
   const [u] = await rows<any>(sql`
     SELECT id, name, first_name, username, profile_image_url FROM users WHERE id = ${e.host_user_id}`);
   const user = {
@@ -165,20 +166,20 @@ export async function hostIdentity(e: any): Promise<{ publicName: string; avatar
     const [b] = await rows<any>(sql`SELECT id, name, logo_image FROM businesses WHERE id = ${e.host_business_id}`);
     if (b) {
       const id = pickPublicIdentity({ ...user, isVendor: true }, { id: b.id, name: b.name, logoImage: b.logo_image });
-      return { publicName: id.publicName, avatarUrl: id.avatarUrl };
+      return { publicName: id.publicName, avatarUrl: id.avatarUrl, followId: String(b.id) };
     }
   }
   if (e.host_type === "photographer" && e.host_photographer_id) {
     const [p] = await rows<any>(sql`SELECT id, display_name, logo_image FROM photographers WHERE id = ${e.host_photographer_id}`);
     if (p) {
       const id = pickPublicIdentity({ ...user, isPhotographer: true }, null, { id: p.id, displayName: p.display_name, logoImage: p.logo_image });
-      return { publicName: id.publicName, avatarUrl: id.avatarUrl };
+      return { publicName: id.publicName, avatarUrl: id.avatarUrl, followId: String(p.id) };
     }
   }
   // A person hosting as themselves: first name or @username only (users.name often holds "First Last").
   const first = (u?.first_name ?? "").trim();
   const username = (u?.username ?? "").trim();
-  return { publicName: first || (username ? `@${username}` : "Outsyde member"), avatarUrl: (u?.profile_image_url ?? "").trim() || null };
+  return { publicName: first || (username ? `@${username}` : "Outsyde member"), avatarUrl: (u?.profile_image_url ?? "").trim() || null, followId: String(e.host_user_id) };
 }
 
 // ─── Serializers (additive only once clients ship) ──────────────────────────
@@ -409,7 +410,7 @@ router.get("/slug/:slug", async (req: Request, res: Response) => {
         refundPolicy: e.refund_policy, refundCutoffHours: e.refund_cutoff_hours == null ? null : Number(e.refund_cutoff_hours),
         visibility: e.visibility,
         soldOut: remainingAtEvent === 0,
-        host: { name: host.publicName, avatarUrl: host.avatarUrl, kind: e.host_type },
+        host: { name: host.publicName, avatarUrl: host.avatarUrl, kind: e.host_type, followId: host.followId },
         viewerIsHost, viewerHasTicket,
       },
       ticketTypes,
