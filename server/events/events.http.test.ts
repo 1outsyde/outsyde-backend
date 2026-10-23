@@ -71,7 +71,8 @@ async function call(method: string, path: string, o: { token?: string; body?: un
     [`${P}-${s}@test.local`, `Person ${s}`, `${P}${s}`.slice(0, 20)],
   ))[0].id as string;
   const host = await mkUser("host");
-  await q(`UPDATE users SET name = 'Jane Doe', first_name = 'Jane' WHERE id = $1`, [host]);
+  // users.name is the public display name; first and last names are real names (server/personName.ts).
+  await q(`UPDATE users SET name = 'Jay Vibes', first_name = 'Jane', last_name = 'Doe' WHERE id = $1`, [host]);
   const other = await mkUser("other");
   const guest = await mkUser("guest");
   const owner = await mkUser("owner");
@@ -120,7 +121,7 @@ async function call(method: string, path: string, o: { token?: string; body?: un
     assert(r.status === 201 && r.body.event.hostBusinessId === approvedSecond.id, "owner with a pending + an approved business hosts as the approved one", r);
     r = await call("POST", "/api/events", { token: tok(shooter), body: { ...base(), hostAs: "photographer" } });
     assert(r.status === 201 && r.body.event.hostPhotographerId === photog.id, "photographer hosts as their profile", r);
-    eventIds.push(r.body.event.id);
+    const photogEvent = r.body.event; eventIds.push(photogEvent.id);
     r = await call("POST", "/api/events", { token: tok(banned), body: base() });
     assert(r.status === 403 && r.body.error.code === "ACCOUNT_INACTIVE", "banned account can't host", r);
 
@@ -180,13 +181,28 @@ async function call(method: string, path: string, o: { token?: string; body?: un
     r = await call("GET", `/api/events/slug/${ev.slug}`);
     const pub = r.body?.event;
     assert(r.status === 200 && pub.addressHidden === true && pub.addressLine1 === null && pub.venueName === null && pub.latitude === null && pub.city === "Freeport", "stranger sees area only", pub);
-    assert(pub.host.name === "Jane" && pub.host.kind === "user" && !("email" in pub.host), "person host shown by first name only", pub?.host);
-    assert(!JSON.stringify(r.body).includes("Doe"), "last name never in the payload");
+    assert(pub.host.name === "Jay Vibes" && pub.host.kind === "user" && !("email" in pub.host), "person host shown by display name", pub?.host);
+    assert(!JSON.stringify(r.body).includes("Doe") && !JSON.stringify(r.body).includes("Jane"), "real first and last name never in the payload");
+    assert(pub.host.followId === host, "person host: followId is their user id", pub.host);
     const names = r.body.ticketTypes.map((t: any) => `${t.name}:${t.salesStatus}`);
     assert(JSON.stringify(names) === JSON.stringify(["Free RSVP:on_sale", "Second wave:locked", "After comps:locked"]), "hidden + archived types left out; tiers behind free and behind hidden comps locked", names);
     assert(!JSON.stringify(r.body).includes("Secret comps") && !JSON.stringify(r.body).includes("1 Main St"), "nothing hidden leaks in the payload");
     r = await call("GET", `/api/events/slug/${ev.slug.toUpperCase()}`);
     assert(r.status === 200, "slug lookup ignores letter case", r.status);
+
+    console.log("Host follow id");
+    r = await call("GET", `/api/events/slug/${bizEvent.slug}`, { token: tok(owner) });
+    assert(r.status === 200 && r.body.event.host.followId === biz.id && r.body.event.host.kind === "business", "business host: followId is the business id", r.body?.event?.host);
+    assert(!JSON.stringify(r.body.event.host).includes(owner), "business host: owner's user id not in host", r.body?.event?.host);
+    r = await call("GET", `/api/events/slug/${photogEvent.slug}`, { token: tok(shooter) });
+    assert(r.status === 200 && r.body.event.host.followId === photog.id && r.body.event.host.kind === "photographer", "photographer host: followId is the photographer id", r.body?.event?.host);
+    assert(!JSON.stringify(r.body.event.host).includes(shooter), "photographer host: user id not in host", r.body?.event?.host);
+    // The id the page hands to Follow really follows the owner (POST /api/follows resolves business and photographer ids).
+    for (const [fid, ownerId, label] of [[biz.id, owner, "business"], [photog.id, shooter, "photographer"]] as const) {
+      r = await call("POST", "/api/follows", { token: tok(host), body: { targetUserId: fid } });
+      const [f] = await q(`SELECT 1 FROM follows WHERE follower_user_id = $1 AND target_user_id = $2`, [host, ownerId]);
+      assert(r.status === 201 && !!f, `following the ${label} followId follows its owner`, r);
+    }
 
     console.log("Fee preview and visibility");
     assert(pub.visibility === "public", "public event page says visibility public", pub.visibility);
@@ -446,6 +462,8 @@ async function call(method: string, path: string, o: { token?: string; body?: un
       await q(`DELETE FROM ticket_types WHERE event_id = ANY($1)`, [eventIds]);
       await q(`DELETE FROM events WHERE id = ANY($1)`, [eventIds]);
     }
+    await q(`DELETE FROM notifications WHERE user_id IN (SELECT id FROM users WHERE email LIKE $1)`, [`${P}-%`]);
+    await q(`DELETE FROM follows WHERE follower_user_id IN (SELECT id FROM users WHERE email LIKE $1) OR target_user_id IN (SELECT id FROM users WHERE email LIKE $1)`, [`${P}-%`]);
     await q(`DELETE FROM photographers WHERE user_id IN (SELECT id FROM users WHERE email LIKE $1)`, [`${P}-%`]);
     await q(`DELETE FROM businesses WHERE owner_id IN (SELECT id FROM users WHERE email LIKE $1)`, [`${P}-%`]);
     await q(`DELETE FROM users WHERE email LIKE $1`, [`${P}-%`]);

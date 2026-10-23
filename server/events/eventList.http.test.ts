@@ -70,7 +70,7 @@ async function call(method: string, path: string, o: { token?: string } = {}): P
     return id;
   };
   const host = await mkUser("host");
-  await q(`UPDATE users SET first_name = 'Jane' WHERE id = $1`, [host]);
+  await q(`UPDATE users SET name = 'Jay Vibes', first_name = 'Jane', last_name = 'Doe' WHERE id = $1`, [host]);
   const inactiveHost = await mkUser("inact", { is_active: false });
   const deletingHost = await mkUser("del", { deletion_status: "pending_deletion" });
   const owner = await mkUser("owner");
@@ -135,6 +135,7 @@ async function call(method: string, path: string, o: { token?: string } = {}): P
     const pd = r.body.events.find((e: any) => e.id === privDay);
     assert(!!pc && pc.addressHidden === true && pc.venueName === null && pc.city === CITY && pc.state === "NY", "ticket_holders event card has no venue / street / coordinates (area only)", pc);
     assert(!!pd && pd.addressHidden === true && pd.venueName === null, "day-of event card hides the address too", pd);
+    assert(pc?.host?.kind === "user" && pc.host.name === "Jay Vibes" && !/Jane|Doe/.test(JSON.stringify(pc)), "person host card shows the display name, never the real name", pc?.host);
     const withheld = ["1 Main St", "The Loft", "11520", "latitude", "longitude", "lat", "lng", "40.65", "-73.58", "addressLine"];
     const leaked = withheld.filter((w) => JSON.stringify([pc, pd]).includes(w));
     assert(leaked.length === 0, "hidden cards carry none of: street, venue, postal code, lat/lng keys or values", leaked);

@@ -58,15 +58,16 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
   const tok = (id: string) => generateAccessToken({ userId: id, isVendor: false });
 
   const P = `dt${Date.now().toString(36)}`;
-  const mkUser = async (s: string, o: { active?: boolean; first?: string } = {}) => {
+  const mkUser = async (s: string, o: { active?: boolean; first?: string; name?: string } = {}) => {
     const username = `${P}${s}`.slice(0, 24);
     const id = (await q(
       `INSERT INTO users (id, email, name, first_name, username, is_active) VALUES (gen_random_uuid(), $1, $2, $3, $4, $5) RETURNING id`,
-      [`${P}-${s}@test.local`, `Person ${s} Last`, o.first ?? `First${s}`, username, o.active ?? true],
+      [`${P}-${s}@test.local`, o.name ?? `Person ${s} Last`, o.first ?? `First${s}`, username, o.active ?? true],
     ))[0].id as string;
     return { id, username };
   };
-  const host = await mkUser("host", { first: "Hosty" });
+  // Display name "Hosty" (users.name); the real first name must not be used in copy.
+  const host = await mkUser("host", { name: "Hosty", first: "Realfirst" });
   const other = await mkUser("other");
   const m1 = await mkUser("m1");
   const m2 = await mkUser("m2");
