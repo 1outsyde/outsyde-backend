@@ -25,6 +25,7 @@ import { rows, iso, fail, loadActiveUser, loadEventForHost } from "./eventsRoute
 import { guardCode, withDeadlockRetry, orderWithTickets } from "./ticketsRouter";
 import { flagForReview, releasePendingTicketOrder } from "./ticketCheckout";
 import { HOST_PAYOUT_DELAY_DAYS } from "./payoutTiming";
+import { payoutStatusFor } from "./payoutStatus";
 import { notifyOrderRefunded, notifyFreeOrdersCancelled } from "./ticketNotices";
 
 const router = Router();
@@ -369,24 +370,6 @@ router.get("/:id/orders", hybridAuthMiddleware, async (req: Request, res: Respon
  * Sold = valid tickets on completed orders (same rule as the payout job). Refunded = tickets marked 'refunded'
  * (set when the refund is requested), summed at ticket price, so an event cancellation's fee refunds are left out.
  */
-type PayoutStatus = "scheduled" | "paid" | "on_hold" | "payout_setup_needed" | "event_paused" | "none";
-type PayoutRow = { status: string; hold_reason: string | null } | undefined;
-
-/** Status of the host payout. With no row yet, "payable" means the payout job would pay something (host_net_cents > 0). */
-function payoutStatusFor(row: PayoutRow, o: { eventStatus: string; payable: boolean; expectedAt: string | null }): PayoutStatus {
-  if (!row) {
-    if (o.eventStatus === "paused" && o.payable) return "event_paused";
-    return o.expectedAt ? "scheduled" : "none";
-  }
-  if (row.status === "pending") return "scheduled";
-  if (row.status === "paid") return "paid";
-  if (row.status === "held") {
-    if (row.hold_reason === "event_paused") return "event_paused";
-    if (row.hold_reason && ["no_account", "not_complete", "stripe_not_ready"].includes(row.hold_reason)) return "payout_setup_needed";
-  }
-  return "on_hold";
-}
-
 router.get("/:id/summary", hybridAuthMiddleware, async (req: Request, res: Response) => {
   const userId = getUserIdFromRequest(req);
   if (!userId) return fail(res, 401, "NO_AUTH", "Sign in to see sales.");
