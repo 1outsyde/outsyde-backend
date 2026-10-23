@@ -264,6 +264,12 @@ async function getNoFollow(path: string): Promise<{ status: number; location: st
     [`${P}-${s}@test.local`, `Host ${s}`, `Host${s}`, `${P}${s}`.slice(0, 20)],
   ))[0].id as string;
   const tok = (id: string) => generateAccessToken({ userId: id, isVendor: false });
+  // Publishing needs the current Event Host Agreement accepted (hostAgreement.ts): hosts accept it the way the app does.
+  const acceptAgreement = async (id: string) => {
+    const g = await call("GET", "/api/events/host-agreement", { token: tok(id) });
+    const a = await call("POST", "/api/events/host-agreement/accept", { token: tok(id), body: { version: g.body?.agreement?.version } });
+    if (a.status !== 200) throw new Error("agreement accept failed " + JSON.stringify(a));
+  };
   const hostA = await mkUser("a");   // plain customer
   const hostB = await mkUser("b");   // business owner
   const hostC = await mkUser("c");   // photographer
@@ -492,7 +498,10 @@ async function getNoFollow(path: string): Promise<{ status: number; location: st
     };
     const addType = (ev: string, host: string, priceCents: number, o: { base?: string } = {}) =>
       call("POST", `/api/events/${ev}/ticket-types`, { token: tok(host), body: { name: priceCents ? "Paid" : "Free", priceCents, quantity: 50 }, ...o });
-    const publish = (ev: string, host: string, o: { base?: string } = {}) => call("POST", `/api/events/${ev}/publish`, { token: tok(host), ...o });
+    const publish = async (ev: string, host: string, o: { base?: string } = {}) => {
+      await acceptAgreement(host);
+      return call("POST", `/api/events/${ev}/publish`, { token: tok(host), ...o });
+    };
 
     // switch off (5071): unchanged behaviour, even for a ready host
     let ev = await mkEvent(hostReadyU);
@@ -1641,6 +1650,7 @@ async function getNoFollow(path: string): Promise<{ status: number; location: st
     await q(`DELETE FROM user_payout_accounts WHERE user_id IN (SELECT id FROM users WHERE email LIKE $1)`, [`${P}-%`]);
     await q(`DELETE FROM businesses WHERE owner_id IN (SELECT id FROM users WHERE email LIKE $1)`, [`${P}-%`]);
     await q(`DELETE FROM photographers WHERE user_id IN (SELECT id FROM users WHERE email LIKE $1)`, [`${P}-%`]);
+    await q(`DELETE FROM host_agreement_acceptances WHERE user_id IN (SELECT id FROM users WHERE email LIKE $1)`, [`${P}-%`]);
     await q(`DELETE FROM users WHERE email LIKE $1`, [`${P}-%`]);
     await db.end();
   }

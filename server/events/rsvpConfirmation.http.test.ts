@@ -80,10 +80,17 @@ async function call(method: string, p: string, o: { token?: string; body?: unkno
   const host = await mkUser("host");
   const guest = await mkUser("guest");
   const tok = (id: string) => generateAccessToken({ userId: id, isVendor: false });
+  // Publishing needs the current Event Host Agreement accepted (hostAgreement.ts): hosts accept it the way the app does.
+  const acceptAgreement = async (id: string) => {
+    const g = await call("GET", "/api/events/host-agreement", { token: tok(id) });
+    const a = await call("POST", "/api/events/host-agreement/accept", { token: tok(id), body: { version: g.body?.agreement?.version } });
+    if (a.status !== 200) throw new Error("agreement accept failed " + JSON.stringify(a));
+  };
   const inDays = (d: number, h = 0) => new Date(Date.now() + d * 86400000 + h * 3600000).toISOString();
   const eventIds: string[] = [];
 
   try {
+    await acceptAgreement(host);
     console.log("Setup: a published free event with a 2-per-order RSVP");
     let r = await call("POST", "/api/events", { token: tok(host), body: {
       title: `${P} Free Night`, startsAt: inDays(5), endsAt: inDays(5, 4), timezone: "America/New_York",
@@ -218,6 +225,7 @@ async function call(method: string, p: string, o: { token?: string; body?: unkno
       }
     }
     await q(`DELETE FROM notifications WHERE user_id IN (SELECT id FROM users WHERE email LIKE $1)`, [`${P}-%`]).catch(() => {});
+    await q(`DELETE FROM host_agreement_acceptances WHERE user_id IN (SELECT id FROM users WHERE email LIKE $1)`, [`${P}-%`]).catch(() => {});
     await q(`DELETE FROM users WHERE email LIKE $1`, [`${P}-%`]).catch((e) => console.error("cleanup users", e.message));
     await db.end();
   }

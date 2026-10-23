@@ -15,6 +15,7 @@ import { emailAdminRouter, broadcastPublicRouter } from "./routes/emailAdmin";
 import { resumeBroadcasts } from "./broadcasts/broadcasts";
 import vendorAnalyticsRouter from "./routes/vendorAnalytics";
 import eventsRouter from "./events/eventsRouter";
+import hostAgreementRouter from "./events/hostAgreement";
 import ticketsRouter from "./events/ticketsRouter";
 import ticketCheckoutRouter from "./events/ticketCheckout";
 import ticketRefundsRouter from "./events/ticketRefunds";
@@ -387,6 +388,8 @@ if (process.env.NODE_ENV === 'production') {
   app.use('/api/events', hostPayoutsRouter);
   // Events door check-in: door team + /door/mine, before eventsRouter so /door/mine isn't read as /:id
   app.use('/api/events', doorRouter);
+  // Events: Event Host Agreement text + acceptance (publish requires it). Before eventsRouter so /host-agreement isn't read as /:id
+  app.use('/api/events', hostAgreementRouter);
   // Events & Ticketing (Phase 1): host create/edit/publish/cancel + public event page data
   app.use('/api/events', eventsRouter);
   // Events & Ticketing (Phase 1 PR 2): ticket types, free RSVP + cancel, my tickets
