@@ -27,6 +27,7 @@ import http from "http";
 
 const BASE = process.env.EV_TEST_BASE_URL;
 const PG_URL = process.env.EV_TEST_PG_URL;
+const STUB_PORT = Number(process.env.EV_TEST_STRIPE_PORT || "0");
 
 let passed = 0;
 let failed = 0;
@@ -186,6 +187,63 @@ async function call(method: string, path: string, o: { token?: string; body?: un
     assert(!JSON.stringify(r.body).includes("Secret comps") && !JSON.stringify(r.body).includes("1 Main St"), "nothing hidden leaks in the payload");
     r = await call("GET", `/api/events/slug/${ev.slug.toUpperCase()}`);
     assert(r.status === 200, "slug lookup ignores letter case", r.status);
+
+    console.log("Fee preview and visibility");
+    assert(pub.visibility === "public", "public event page says visibility public", pub.visibility);
+    {
+      const fp = (await call("POST", "/api/events", { token: tok(host), body: { ...base(), title: "Fee Preview Night", visibility: "unlisted" } })).body.event;
+      eventIds.push(fp.id);
+      const [paid20] = await q(`INSERT INTO ticket_types (event_id, name, price_cents, quantity, sort_order) VALUES ($1, 'General', 2000, 50, 0) RETURNING id`, [fp.id]);
+      await q(`INSERT INTO ticket_types (event_id, name, price_cents, quantity, sort_order) VALUES ($1, 'Free RSVP', 0, 50, 1)`, [fp.id]);
+      await q(`INSERT INTO ticket_types (event_id, name, price_cents, quantity, hidden, sort_order) VALUES ($1, 'Secret VIP', 5000, 5, true, 2)`, [fp.id]);
+      // Paid events can't be published until payouts ship; open this one directly.
+      await q(`UPDATE events SET status = 'published', published_at = now() WHERE id = $1`, [fp.id]);
+      r = await call("GET", `/api/events/slug/${fp.slug}`);
+      const gen = r.body?.ticketTypes?.find((t: any) => t.name === "General");
+      const fre = r.body?.ticketTypes?.find((t: any) => t.name === "Free RSVP");
+      assert(r.status === 200 && r.body.event.visibility === "unlisted", "unlisted event says visibility unlisted", r.body?.event);
+      assert(gen && gen.serviceFeeCents === 259 && gen.buyerTotalCents === 2259, "$20 type previews fee 259 and total 2259", gen);
+      assert(fre && fre.serviceFeeCents === null && fre.buyerTotalCents === null, "free type has null fee and total", fre);
+      assert(r.body.ticketTypes.length === 2 && !JSON.stringify(r.body).includes("Secret VIP"), "hidden type still absent", r.body.ticketTypes);
+      const badKey = (o: unknown): boolean => !!o && typeof o === "object" && Object.entries(o as object).some(([k, v]) => /rate|percent/i.test(k) || badKey(v));
+      assert(!badKey(r.body), "no key mentions a rate or percent", r.body);
+
+      // Preview equals what checkout charges for one ticket (Stripe stub, local only).
+      if (STUB_PORT) {
+        const piStore: Record<string, any> = {};
+        const stub = http.createServer((req, res) => {
+          let raw = ""; req.on("data", (c) => (raw += c));
+          req.on("end", () => {
+            const send = (code: number, obj: unknown) => { res.writeHead(code, { "content-type": "application/json" }); res.end(JSON.stringify(obj)); };
+            const form = new URLSearchParams(raw);
+            if (req.method === "POST" && req.url === "/v1/customers") return send(200, { id: `cus_stub_${Date.now()}`, object: "customer" });
+            const custM = req.url?.match(/^\/v1\/customers\/([^/?]+)/);
+            if (req.method === "GET" && custM) return send(200, { id: custM[1], object: "customer" });
+            if (req.method === "POST" && req.url === "/v1/payment_intents") {
+              const id = `pi_ev_${Date.now()}`;
+              piStore[id] = { id, object: "payment_intent", amount: Number(form.get("amount") || 0), amount_received: 0, status: "requires_payment_method", client_secret: `${id}_secret`, metadata: {} };
+              return send(200, piStore[id]);
+            }
+            const cancelM = req.url?.match(/^\/v1\/payment_intents\/([^/?]+)\/cancel/);
+            if (req.method === "POST" && cancelM) return send(200, { id: cancelM[1], object: "payment_intent", status: "canceled" });
+            send(404, { error: { type: "invalid_request_error", message: `stub: no route ${req.method} ${req.url}` } });
+          });
+        });
+        await new Promise<void>((x) => stub.listen(STUB_PORT, "127.0.0.1", () => x()));
+        try {
+          const co = await call("POST", `/api/events/${fp.id}/checkout`, { token: tok(other), body: { ticketTypeId: paid20.id, quantity: 1, idempotencyKey: `${P}-preview` } });
+          assert(co.status === 201 && co.body.serviceFeeCents === gen.serviceFeeCents && co.body.totalCents === gen.buyerTotalCents, "preview matches checkout", { co, gen });
+        } finally { await new Promise<void>((x) => stub.close(() => x())); }
+      } else {
+        console.log("  (skipped: preview matches checkout, set EV_TEST_STRIPE_PORT)");
+      }
+      await q(`UPDATE events SET status = 'draft' WHERE id = $1`, [fp.id]);
+      r = await call("GET", `/api/events/slug/${fp.slug}`);
+      assert(r.status === 404, "draft still 404 for a stranger", r);
+      await q(`UPDATE events SET status = 'paused' WHERE id = $1`, [fp.id]);
+      r = await call("GET", `/api/events/slug/${fp.slug}`);
+      assert(r.status === 404, "paused still 404 for a stranger", r);
+    }
 
     // A guest with a valid ticket sees the address.
     const [order] = await q(`INSERT INTO ticket_orders (event_id, buyer_user_id, status, ticket_count) VALUES ($1, $2, 'completed', 1) RETURNING id`, [ev.id, guest]);
@@ -381,6 +439,7 @@ async function call(method: string, path: string, o: { token?: string; body?: un
     // Every event a test user hosts (also ones a mutated server let through).
     eventIds.push(...(await q(`SELECT id FROM events WHERE host_user_id IN (SELECT id FROM users WHERE email LIKE $1)`, [`${P}-%`])).map((x) => x.id));
     if (eventIds.length) {
+      await q(`DELETE FROM ticket_account_counts WHERE ticket_type_id IN (SELECT id FROM ticket_types WHERE event_id = ANY($1))`, [eventIds]);
       await q(`DELETE FROM tickets WHERE event_id = ANY($1)`, [eventIds]);
       await q(`DELETE FROM ticket_order_items WHERE event_id = ANY($1)`, [eventIds]);
       await q(`DELETE FROM ticket_orders WHERE event_id = ANY($1)`, [eventIds]);

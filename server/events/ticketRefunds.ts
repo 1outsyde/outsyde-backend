@@ -24,6 +24,7 @@ import { getUserIdFromRequest, hybridAuthMiddleware } from "../auth";
 import { rows, iso, fail, loadActiveUser, loadEventForHost } from "./eventsRouter";
 import { guardCode, withDeadlockRetry, orderWithTickets } from "./ticketsRouter";
 import { flagForReview, releasePendingTicketOrder } from "./ticketCheckout";
+import { HOST_PAYOUT_DELAY_DAYS } from "./payoutTiming";
 import { notifyOrderRefunded, notifyFreeOrdersCancelled } from "./ticketNotices";
 
 const router = Router();
@@ -360,6 +361,86 @@ router.get("/:id/orders", hybridAuthMiddleware, async (req: Request, res: Respon
   } catch (err) {
     console.error("[Tickets] host orders read failed:", err);
     return fail(res, 500, "SERVER_ERROR", "Couldn't load orders.");
+  }
+});
+
+/**
+ * Host sales summary. Counts and ticket price only: no buyer fees, no fee rates, no payout internals.
+ * Sold = valid tickets on completed orders (same rule as the payout job). Refunded = tickets marked 'refunded'
+ * (set when the refund is requested), summed at ticket price, so an event cancellation's fee refunds are left out.
+ */
+type PayoutStatus = "scheduled" | "paid" | "on_hold" | "payout_setup_needed" | "event_paused" | "none";
+type PayoutRow = { status: string; hold_reason: string | null } | undefined;
+
+/** Status of the host payout. With no row yet, "payable" means the payout job would pay something (host_net_cents > 0). */
+function payoutStatusFor(row: PayoutRow, o: { eventStatus: string; payable: boolean; expectedAt: string | null }): PayoutStatus {
+  if (!row) {
+    if (o.eventStatus === "paused" && o.payable) return "event_paused";
+    return o.expectedAt ? "scheduled" : "none";
+  }
+  if (row.status === "pending") return "scheduled";
+  if (row.status === "paid") return "paid";
+  if (row.status === "held") {
+    if (row.hold_reason === "event_paused") return "event_paused";
+    if (row.hold_reason && ["no_account", "not_complete", "stripe_not_ready"].includes(row.hold_reason)) return "payout_setup_needed";
+  }
+  return "on_hold";
+}
+
+router.get("/:id/summary", hybridAuthMiddleware, async (req: Request, res: Response) => {
+  const userId = getUserIdFromRequest(req);
+  if (!userId) return fail(res, 401, "NO_AUTH", "Sign in to see sales.");
+  try {
+    if (!(await loadActiveUser(userId))) return fail(res, 403, "ACCOUNT_INACTIVE", "This account can't host events.");
+    const e = await loadEventForHost(String(req.params.id), userId);
+    if (!e) return fail(res, 404, "EVENT_NOT_FOUND", "Event not found.");
+    const types = await rows<any>(sql`
+      SELECT tt.id, tt.name, tt.price_cents, (tt.status = 'archived') AS archived,
+             count(t.id) FILTER (WHERE t.status = 'valid' AND o.status = 'completed')::int AS sold,
+             COALESCE(sum(t.price_cents) FILTER (WHERE t.status = 'valid' AND o.status = 'completed'), 0)::int AS gross
+      FROM ticket_types tt
+      LEFT JOIN tickets t ON t.ticket_type_id = tt.id
+      LEFT JOIN ticket_orders o ON o.id = t.order_id
+      WHERE tt.event_id = ${e.id}
+        AND (tt.status <> 'archived'
+             OR EXISTS (SELECT 1 FROM tickets x WHERE x.ticket_type_id = tt.id AND x.status IN ('valid', 'refunded')))
+      GROUP BY tt.id ORDER BY tt.sort_order, tt.created_at`);
+    // Totals cover every ticket of the event. A removed (archived) type is listed only while it has sales or refunds,
+    // so the listed rows add up to the totals.
+    const [tot] = await rows<any>(sql`
+      SELECT count(*) FILTER (WHERE t.status = 'valid' AND o.status = 'completed')::int AS sold,
+             COALESCE(sum(t.price_cents) FILTER (WHERE t.status = 'valid' AND o.status = 'completed'), 0)::int AS gross,
+             COALESCE(sum(t.host_net_cents) FILTER (WHERE t.status = 'valid' AND o.status = 'completed'), 0)::int AS host_net,
+             count(*) FILTER (WHERE t.status = 'refunded')::int AS refunded,
+             COALESCE(sum(t.price_cents) FILTER (WHERE t.status = 'refunded'), 0)::int AS refunded_cents,
+             count(*) FILTER (WHERE t.status = 'refunded' AND o.status = 'refunding')::int AS refund_pending
+      FROM tickets t JOIN ticket_orders o ON o.id = t.order_id
+      WHERE t.event_id = ${e.id}`);
+    const [p] = await rows<any>(sql`
+      SELECT status, hold_reason, amount_cents, deducted_cents, paid_at FROM event_payouts WHERE event_id = ${e.id}`);
+    // Same as the payout job: published events only, paying valid tickets of completed orders with host_net_cents > 0.
+    const payable = Number(tot?.host_net ?? 0) > 0;
+    const expectedAt = e.status === "published" && payable && e.ends_at
+      ? new Date(new Date(e.ends_at).getTime() + HOST_PAYOUT_DELAY_DAYS * 86400000).toISOString() : null;
+    return res.json({
+      success: true,
+      ticketTypes: types.map((t) => ({
+        ticketTypeId: t.id, name: t.name, priceCents: Number(t.price_cents), archived: t.archived === true, sold: Number(t.sold), grossCents: Number(t.gross),
+      })),
+      totals: {
+        sold: Number(tot?.sold ?? 0), grossCents: Number(tot?.gross ?? 0), hostEarningsCents: Number(tot?.host_net ?? 0),
+        refundedTickets: Number(tot?.refunded ?? 0), refundedCents: Number(tot?.refunded_cents ?? 0),
+        refundPendingTickets: Number(tot?.refund_pending ?? 0),
+      },
+      payout: {
+        expectedAt, status: payoutStatusFor(p, { eventStatus: e.status, payable, expectedAt }),
+        amountCents: p ? Number(p.amount_cents) : null, deductedCents: p ? Number(p.deducted_cents) : null,
+        paidAt: p ? iso(p.paid_at) : null,
+      },
+    });
+  } catch (err) {
+    console.error("[Tickets] host summary read failed:", err);
+    return fail(res, 500, "SERVER_ERROR", "Couldn't load sales.");
   }
 });
 
