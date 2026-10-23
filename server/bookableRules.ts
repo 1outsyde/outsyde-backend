@@ -6,8 +6,11 @@
 export const SERVICE_UNAVAILABLE_MESSAGE =
   "This service isn't available to book right now. Please choose another service.";
 
-export function isServiceBookable(svc: { status?: string | null; isActive?: boolean | null } | null | undefined): boolean {
-  return !!svc && svc.status === "live" && svc.isActive === true;
+/** A request only service (migration 068) is listed but never booked: customers request an estimate. */
+export function isServiceBookable(
+  svc: { status?: string | null; isActive?: boolean | null; requestOnly?: boolean | null } | null | undefined,
+): boolean {
+  return !!svc && svc.status === "live" && svc.isActive === true && svc.requestOnly !== true;
 }
 
 export function ownsService(serviceOwnerId: string | null | undefined, providerId: string): boolean {
