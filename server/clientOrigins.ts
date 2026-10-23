@@ -11,6 +11,7 @@ export const clientSiteOrigins = [
   'https://www.braidsbylana.com',
   'https://braids-with-lana-site.vercel.app',
   'https://nail-sniper-web.vercel.app', // The Nail Sniper (custom domain to be added later)
+  'https://royal-elite-site-gamma.vercel.app', // Royal Elite Moving (Vercel URL; custom domain later)
   'https://dialuxkollecionn.com',       // Dia Lux Kollection (spelled "kollecionn")
   'https://www.dialuxkollecionn.com',
 ];

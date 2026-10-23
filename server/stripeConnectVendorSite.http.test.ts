@@ -38,13 +38,14 @@ const ORIGINS_AT_7393DEF = [
   'https://braids-with-lana-site.vercel.app',
 ];
 const NAIL_SNIPER = 'https://nail-sniper-web.vercel.app';
+const ROYAL_ELITE = 'https://royal-elite-site-gamma.vercel.app';
 const DIA_LUX = ['https://dialuxkollecionn.com', 'https://www.dialuxkollecionn.com'];
 const NAIL_SNIPER_ENC = encodeURIComponent(NAIL_SNIPER);
 
 function unitTests() {
   console.log('\n— clientOrigins (unit)');
-  assert(JSON.stringify(clientSiteOrigins) === JSON.stringify([...ORIGINS_AT_7393DEF, NAIL_SNIPER, ...DIA_LUX]),
-    'clientSiteOrigins = the 7393def list (same order) + nail-sniper-web.vercel.app + both dialuxkollecionn.com origins appended', clientSiteOrigins);
+  assert(JSON.stringify(clientSiteOrigins) === JSON.stringify([...ORIGINS_AT_7393DEF, NAIL_SNIPER, ROYAL_ELITE, ...DIA_LUX]),
+    'clientSiteOrigins = the 7393def list (same order) + nail-sniper-web.vercel.app + royal-elite-site-gamma.vercel.app + both dialuxkollecionn.com origins appended', clientSiteOrigins);
   for (const bad of ['https://dialuxkollection.com', 'http://www.dialuxkollecionn.com', 'https://shop.dialuxkollecionn.com']) {
     assert(!isAllowedClientOrigin(bad), `rejected: ${bad}`);
   }
