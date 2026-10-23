@@ -6,6 +6,7 @@
  *   POST /api/admin/events/payouts/:payoutId/retry          { success, payout: { id, status, attempts, nextAttemptAt } }
  *   POST /api/admin/events/recoveries/:recoveryId/resolve   body { action: "collected" | "written_off" } -> { success, recovery: { id, status, resolvedAt } }
  *   POST /api/admin/events/payouts/:payoutId/email-host     { success, sent: true, notice: "held" | "review" }
+ *        (only when the payout waits on the host: never for a paused or cancelled event or a Stripe amount mismatch)
  *
  * Shapes and money rules: adminEventsQueries.ts; actions (one SQL statement each, audit_logs in the same statement):
  * adminEventsActions.ts. Spec: docs/superpowers/specs/2026-10-23-admin-events-money-design.md.
@@ -16,7 +17,7 @@ import { z } from "zod";
 import { requirePlatformAdmin } from "../middleware/requirePlatformAdmin";
 import { hostPayoutDestination } from "./hostPayouts";
 import {
-  retryPayout, resolveRecovery, loadHostEmailTarget, claimHostEmail, releaseHostEmail, hostEmailCopy, RECOVERY_ACTIONS,
+  retryPayout, resolveRecovery, loadHostEmailTarget, isHostIssue, claimHostEmail, releaseHostEmail, hostEmailCopy, RECOVERY_ACTIONS,
 } from "./adminEventsActions";
 import {
   listAdminEvents, listAttention, totalsOf, loadAdminEventRow, loadTicketTypes, loadRecoveries, loadActivity,
@@ -177,6 +178,7 @@ adminEventsRouter.post("/payouts/:payoutId/email-host", async (req, res) => {
     if (t.status !== "held" && t.status !== "review") {
       return fail(res, 409, "NOT_HELD_OR_REVIEW", "Only a payout on hold or in review can be sent to the host.");
     }
+    if (!isHostIssue(t)) return fail(res, 409, "NOT_A_HOST_ISSUE", "This payout is not waiting on the host.");
     if (!t.toEmail) return fail(res, 409, "HOST_NO_EMAIL", "This host has no email on their account.");
     const notice = t.status as "held" | "review";
     const claim = await claimHostEmail(id, adminIdOf(req), notice);

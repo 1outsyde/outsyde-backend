@@ -112,14 +112,39 @@ export async function resolveRecovery(recoveryId: string, action: RecoveryAction
   return { ok: true, recovery: { id: r.id, status: r.status, resolvedAt: iso(r.resolved_at) } };
 }
 
+/**
+ * Review reasons the host can't fix, by the exact texts eventPayouts.ts writes: the event was cancelled
+ * (sendPayout's toReview "the event was cancelled after its payout was created, so it was not sent"), and a transfer
+ * already in Stripe for another amount ("Stripe already has transfer <id> of <n> cents for this payout, but the
+ * payout is <m> cents"). Everything else in review comes from failed transfers ("the transfer failed N times, last
+ * error: ..."), which points at the host's account.
+ */
+const NOT_HOST_REVIEW_PREFIXES = ["the event was cancelled after its payout was created", "Stripe already has transfer"];
+
+/**
+ * True when the payout waits on the host: held for an account reason (no_account, not_complete, stripe_not_ready),
+ * or in review after failed transfers. False for a paused event (hold_reason event_paused), a cancelled event, and
+ * the review reasons above: emailing the host about their payout setup would tell them the wrong thing.
+ */
+export function isHostIssue(t: { status: string; holdReason: string | null; lastError: string | null; eventStatus: string }): boolean {
+  if (t.eventStatus === "cancelled") return false;
+  if (t.status === "held") return t.holdReason !== "event_paused";
+  if (t.status === "review") {
+    const err = (t.lastError ?? "").trim();
+    return !NOT_HOST_REVIEW_PREFIXES.some((p) => err.startsWith(p));
+  }
+  return false;
+}
+
 /** The payout, its event and the host's account email (server side only: never returned or logged). */
 export async function loadHostEmailTarget(payoutId: string): Promise<{
   id: string; status: string; eventId: string; title: string; toEmail: string | null; toUserId: string | null;
+  holdReason: string | null; lastError: string | null; eventStatus: string;
 } | null> {
   // Recipient by host type, same branching as the payout job's destination (createDuePayouts dst): the business
   // owner's user, the photographer's user, otherwise the host user.
   const [r] = await rows<any>(sql`
-    SELECT p.id, p.status, e.id AS event_id, e.title,
+    SELECT p.id, p.status, p.hold_reason, p.last_error, e.id AS event_id, e.title, e.status AS event_status,
            CASE WHEN e.host_type = 'business' AND e.host_business_id IS NOT NULL THEN bo.email
                 WHEN e.host_type = 'photographer' AND e.host_photographer_id IS NOT NULL THEN pu.email
                 ELSE hu.email END AS to_email,
@@ -138,6 +163,7 @@ export async function loadHostEmailTarget(payoutId: string): Promise<{
   return {
     id: r.id, status: r.status, eventId: r.event_id, title: r.title,
     toEmail: r.to_email ? String(r.to_email).trim() || null : null, toUserId: r.to_user_id ?? null,
+    holdReason: r.hold_reason ?? null, lastError: r.last_error ?? null, eventStatus: r.event_status,
   };
 }
 
@@ -159,7 +185,13 @@ export async function claimHostEmail(payoutId: string, adminId: string, kind: st
   const dayStart = startOfNewYorkDay(now).toISOString();
   const [r] = await rows<any>(sql`
     WITH p AS (
-      SELECT id, status, attempts, last_error, event_id FROM event_payouts WHERE id = ${payoutId} AND status IN ('held', 'review')
+      -- Same rule as isHostIssue, again here so a payout that changed since the read is not claimed.
+      SELECT ep.id, ep.status, ep.attempts, ep.last_error, ep.event_id
+      FROM event_payouts ep JOIN events e ON e.id = ep.event_id
+      WHERE ep.id = ${payoutId} AND ep.status IN ('held', 'review') AND e.status <> 'cancelled'
+        AND NOT (ep.status = 'held' AND ep.hold_reason IS NOT DISTINCT FROM 'event_paused')
+        AND NOT (ep.status = 'review' AND (ltrim(COALESCE(ep.last_error, '')) LIKE ${NOT_HOST_REVIEW_PREFIXES[0] + "%"}
+                                       OR ltrim(COALESCE(ep.last_error, '')) LIKE ${NOT_HOST_REVIEW_PREFIXES[1] + "%"}))
     ),
     prev AS (
       SELECT id, created_at FROM audit_logs
@@ -204,6 +236,8 @@ export async function releaseHostEmail(auditId: string): Promise<void> {
 /** Subject and body by payout state (spec copy: real punctuation, no dashes, no fee percentage). */
 export function hostEmailCopy(status: "held" | "review", eventTitle: string): { subject: string; text: string } {
   const title = eventTitle.trim();
+  // A title that already ends a sentence ("Party!", "Who's in?") gets no extra period.
+  const titleEnd = /[.!?]["')\]]*$/.test(title) ? title : `${title}.`;
   if (status === "held") {
     return {
       subject: `Your payout for ${title} is waiting`,
@@ -212,6 +246,6 @@ export function hostEmailCopy(status: "held" | "review", eventTitle: string): { 
   }
   return {
     subject: `We couldn't send your payout for ${title}`,
-    text: `We couldn't send your payout for ${title}. Please check your payout account details in Stripe, then reply to this email.`,
+    text: `We couldn't send your payout for ${titleEnd} Please check your payout account details in Stripe, then reply to this email.`,
   };
 }

@@ -410,6 +410,69 @@ const ADMIN_EMAIL = "info@goutsyde.com";
       assert(log.some((l) => l.includes(payEF)) && !log.some((l) => /@test\.local|hostf\+fail/.test(l)), "backend log shows the failed payout id but never the address", log.slice(-5));
     }
 
+    console.log("\nemail only for host issues (final review)");
+    const noIssue = async (label: string, pid: string) => {
+      const b = sent.length;
+      const res = await call("POST", `/api/admin/events/payouts/${pid}/email-host`, { token: adminTok });
+      assert(res.status === 409 && res.body?.error?.code === "NOT_A_HOST_ISSUE" && res.body.error.message === "This payout is not waiting on the host."
+        && sent.length === b && (await auditFor(pid)).length === 0, `${label}: 409 NOT_A_HOST_ISSUE, no email, no audit row`, res);
+    };
+    const evPause = await mkEvent({ host: hostU, status: "paused", endedDaysAgo: 5, title: "Paused" });
+    const payPause = await mkPayout(evPause, { status: "held", gross: 2923, hold: "event_paused" });
+    await mkTickets(evPause, buyer, 1, { payoutId: payPause });
+    await noIssue("held because the event is paused", payPause);
+    await noIssue("review because the event was cancelled", payCan);
+    const evMis = await mkEvent({ host: hostU, endedDaysAgo: 5, title: "Mismatch" });
+    const payMis = await mkPayout(evMis, { status: "review", acct: acctU, gross: 2923, attempts: 1,
+      lastError: "Stripe already has transfer tr_123 of 2000 cents for this payout, but the payout is 2923 cents" });
+    await mkTickets(evMis, buyer, 1, { payoutId: payMis });
+    await noIssue("review because Stripe already has a transfer for another amount", payMis);
+    const evHeldCan = await mkEvent({ host: hostU, status: "cancelled", endedDaysAgo: 5, title: "Held then cancelled" });
+    const payHeldCan = await mkPayout(evHeldCan, { status: "held", gross: 2923, hold: "no_account" });
+    await mkTickets(evHeldCan, buyer, 1, { payoutId: payHeldCan });
+    await noIssue("held for setup but the event is now cancelled", payHeldCan);
+
+    console.log("\ntitle ending in ! or ? (final review)");
+    const evBang = await mkEvent({ host: hostU, endedDaysAgo: 5, title: "Party!" });
+    const payBang = await mkPayout(evBang, { status: "review", acct: acctU, gross: 2923, attempts: 5, lastError: "the transfer failed 5 times, last error: boom" });
+    await mkTickets(evBang, buyer, 1, { payoutId: payBang });
+    let b0 = sent.length;
+    r = await call("POST", `/api/admin/events/payouts/${payBang}/email-host`, { token: adminTok });
+    const bangHtml = String(sent[b0]?.html ?? "").replace(/&#39;/g, "'");
+    assert(r.status === 200 && bangHtml.includes(`We couldn't send your payout for ${P} Party! Please check your payout account details in Stripe, then reply to this email.`)
+      && !bangHtml.includes("!.") && sent[b0]?.subject === `We couldn't send your payout for ${P} Party!`, "review copy: no period added after \"Party!\"", { status: r.status, subject: sent[b0]?.subject });
+    const evAsk = await mkEvent({ host: hostU, endedDaysAgo: 5, title: "Who's in?" });
+    const payAsk = await mkPayout(evAsk, { status: "review", acct: acctU, gross: 2923, attempts: 5, lastError: "the transfer failed 5 times, last error: boom" });
+    await mkTickets(evAsk, buyer, 1, { payoutId: payAsk });
+    b0 = sent.length;
+    r = await call("POST", `/api/admin/events/payouts/${payAsk}/email-host`, { token: adminTok });
+    const askHtml = String(sent[b0]?.html ?? "").replace(/&#39;/g, "'");
+    assert(r.status === 200 && askHtml.includes(`for ${P} Who's in? Please check`) && !askHtml.includes("?."), "review copy: no period added after a question mark", r.status);
+
+    console.log("\ncancelled event owes nothing (final review)");
+    const LL = await call("GET", "/api/admin/events", { token: adminTok });
+    const canRow = (LL.body.events as any[]).find((e) => e.id === evCan);
+    assert(canRow && canRow.payout?.status === "review" && canRow.owedToHostCents === 0 && canRow.paidToHostCents === 0,
+      "review payout on a cancelled event: owedToHostCents 0", canRow && { owed: canRow.owedToHostCents, payout: canRow.payout });
+    const evs: any[] = LL.body.events;
+    assert(LL.body.totals.owedToHostCents === evs.reduce((a, e) => a + e.owedToHostCents, 0), "totals.owedToHostCents still equals the sum of the rows");
+
+    console.log("\nevent whose host user row is missing (final review)");
+    const [{ su }] = await q(`SELECT rolsuper AS su FROM pg_roles WHERE rolname = current_user`);
+    if (!su) console.log("  ⏭  skipped: seeding an event without its users row needs a superuser (session_replication_role)");
+    else {
+      // The events FK makes this impossible through normal writes, so the FK trigger is bypassed for this one insert.
+      await q(`SET session_replication_role = replica`);
+      let evGhost: string;
+      try { evGhost = await mkEvent({ host: "00000000-0000-4000-8000-00000000dead", endedDaysAgo: 2, title: "Ghost host" }); }
+      finally { await q(`SET session_replication_role = origin`); }
+      const GL = await call("GET", "/api/admin/events", { token: adminTok });
+      const ghost = (GL.body.events as any[]).find((e) => e.id === evGhost);
+      assert(GL.status === 200 && ghost?.host?.name === "Unknown host" && ghost.host.ownerUsername === null, "list keeps the event, host shown as Unknown host", ghost?.host);
+      const GD = await call("GET", `/api/admin/events/${evGhost}`, { token: adminTok });
+      assert(GD.status === 200 && GD.body.host.name === "Unknown host", "detail opens it too", GD.status);
+    }
+
     console.log("\nactivity text (B2 carry over)");
     const DR = await call("GET", `/api/admin/events/${evRetry}`, { token: adminTok });
     const retryAct = (DR.body.activity as any[]).find((a) => a.kind === "admin_action");
@@ -421,6 +484,8 @@ const ADMIN_EMAIL = "info@goutsyde.com";
     const DC = await call("GET", `/api/admin/events/${evCan}`, { token: adminTok });
     const rv1 = (DC.body.activity as any[]).find((a) => a.kind === "payout_review");
     assert(rv1?.text === "Payout moved to review.", "review after 1 try (cancelled event): no count, no \"1 tries\"", rv1);
+    const canAct = (DC.body.activity as any[]).find((x) => x.kind === "event_cancelled");
+    assert(canAct?.text === "Event cancelled.", "cancelled activity reads \"Event cancelled.\" (not \"by the host\")", canAct);
     const DP = await call("GET", `/api/admin/events/${evPaid}`, { token: adminTok });
     const texts = (DP.body.activity as any[]).map((a) => a.text);
     assert(texts.includes(`Owed amount marked collected by @${P}adm.`), "collected shows in activity", texts);

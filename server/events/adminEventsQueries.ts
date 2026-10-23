@@ -110,7 +110,7 @@ function eventRowsSql(where: SQL): SQL {
     SELECT e.id, e.slug, e.title, e.city, e.state, e.starts_at, e.ends_at, e.timezone, e.status, e.capacity,
            e.created_at, e.published_at, e.cancelled_at,
            e.host_type, e.host_user_id, e.host_business_id, e.host_photographer_id,
-           u.name AS u_name, u.first_name AS u_first_name, u.username AS u_username, u.profile_image_url AS u_image,
+           u.id AS u_id, u.name AS u_name, u.first_name AS u_first_name, u.username AS u_username, u.profile_image_url AS u_image,
            b.id AS b_id, b.name AS b_name, b.logo_image AS b_logo, b.stripe_account_id AS b_acct, b.stripe_onboarding_complete AS b_done,
            ph.id AS p_id, ph.display_name AS p_name, ph.logo_image AS p_logo, ph.stripe_account_id AS p_acct, ph.stripe_onboarding_complete AS p_done,
            upa.stripe_account_id AS u_acct, upa.onboarding_complete AS u_done,
@@ -125,7 +125,7 @@ function eventRowsSql(where: SQL): SQL {
            ep.created_at AS ep_created_at, ep.updated_at AS ep_updated_at
     FROM ev
     JOIN events e ON e.id = ev.id
-    JOIN users u ON u.id = e.host_user_id
+    LEFT JOIN users u ON u.id = e.host_user_id
     LEFT JOIN businesses b ON b.id = e.host_business_id
     LEFT JOIN photographers ph ON ph.id = e.host_photographer_id
     LEFT JOIN user_payout_accounts upa ON upa.user_id = e.host_user_id
@@ -143,12 +143,17 @@ export type AdminHost = {
   payoutReady: boolean; payoutSetup: PayoutSetup;
 };
 
+export const UNKNOWN_HOST = "Unknown host";
+
 function hostOf(r: any): AdminHost {
   const ident = hostIdentityFrom(r);
+  // No users row for the host (the list keeps the event, LEFT JOIN): a business or photographer keeps its own name.
+  const profileNamed = (r.host_type === "business" && r.b_id) || (r.host_type === "photographer" && r.p_id);
+  const name = !r.u_id && !profileNamed ? UNKNOWN_HOST : ident.publicName;
   const acct = payoutAccountFrom(r);
   const id = r.host_type === "business" && r.b_id ? r.b_id : r.host_type === "photographer" && r.p_id ? r.p_id : r.host_user_id;
   return {
-    type: r.host_type, id, name: ident.publicName, avatarUrl: ident.avatarUrl, ownerUsername: r.u_username ?? null,
+    type: r.host_type, id, name, avatarUrl: ident.avatarUrl, ownerUsername: r.u_username ?? null,
     payoutReady: payoutSetupOf(acct) === "ready", payoutSetup: payoutSetupOf(acct),
   };
 }
@@ -172,7 +177,9 @@ export function shapeEvent(r: any) {
   const expectedAt = r.status === "published" && payable ? dueAt : null;
   const payoutRow = r.ep_id ? { status: r.ep_status as string, hold_reason: (r.ep_hold_reason ?? null) as string | null } : undefined;
   const payoutStatus: PayoutStatus = payoutStatusFor(payoutRow, { eventStatus: r.status, payable, expectedAt });
-  const open = r.ep_id && ["pending", "held", "review"].includes(r.ep_status) ? num(r.ep_amount) : 0;
+  // A cancelled event owes the host nothing (its payout is never sent, every ticket is refunded): same rule as the web.
+  const cancelled = r.status === "cancelled";
+  const open = !cancelled && r.ep_id && ["pending", "held", "review"].includes(r.ep_status) ? num(r.ep_amount) : 0;
   return {
     id: r.id as string, slug: r.slug as string, title: r.title as string, city: r.city ?? null, state: r.state ?? null,
     startsAt: iso(r.starts_at)!, endsAt, timezone: r.timezone as string, status: r.status as string,
@@ -180,7 +187,7 @@ export function shapeEvent(r: any) {
     ticketsSold: num(r.sold), ticketsValid: num(r.valid), ticketsRefunded: num(r.refunded),
     salesCents: num(r.sales_cents), refundedCents: num(r.refunded_cents), hostEarnsCents, outsydeFeesCents: num(r.fees_cents),
     // Not paid yet: valid tickets no payout covers yet, plus an open payout (same two parts as bankPayout computeHeld).
-    owedToHostCents: num(r.unstamped_cents) + open,
+    owedToHostCents: cancelled ? 0 : num(r.unstamped_cents) + open,
     paidToHostCents: r.ep_id && r.ep_status === "paid" ? num(r.ep_amount) : 0,
     refundsPending: num(r.orders_refunding),
     recoveriesOwed: { count: num(r.owed_n), amountCents: num(r.owed_cents) },
@@ -234,13 +241,13 @@ export async function listAttention() {
       WHERE r.status = 'owed' AND r.created_at <= now() - make_interval(days => ${OWED_ATTENTION_DAYS})
     )
     SELECT i.*, e.title, e.host_type, e.host_user_id,
-           u.name AS u_name, u.first_name AS u_first_name, u.username AS u_username, u.profile_image_url AS u_image,
+           u.id AS u_id, u.name AS u_name, u.first_name AS u_first_name, u.username AS u_username, u.profile_image_url AS u_image,
            b.id AS b_id, b.name AS b_name, b.logo_image AS b_logo, b.stripe_account_id AS b_acct, b.stripe_onboarding_complete AS b_done,
            ph.id AS p_id, ph.display_name AS p_name, ph.logo_image AS p_logo, ph.stripe_account_id AS p_acct, ph.stripe_onboarding_complete AS p_done,
            upa.stripe_account_id AS u_acct, upa.onboarding_complete AS u_done
     FROM items i
     JOIN events e ON e.id = i.event_id
-    JOIN users u ON u.id = e.host_user_id
+    LEFT JOIN users u ON u.id = e.host_user_id
     LEFT JOIN businesses b ON b.id = e.host_business_id
     LEFT JOIN photographers ph ON ph.id = e.host_photographer_id
     LEFT JOIN user_payout_accounts upa ON upa.user_id = e.host_user_id
@@ -374,7 +381,7 @@ export async function loadActivity(eventId: string) {
     switch (kind) {
       case "event_created": text = "Event created."; break;
       case "event_published": text = "Event published."; break;
-      case "event_cancelled": text = "Event cancelled by the host."; break;
+      case "event_cancelled": text = "Event cancelled."; break;
       case "event_ended": text = "Event ended."; break;
       case "order_refund_requested": text = `Refund of ${usd(amountCents ?? 0)} started${REASON_TEXT[r.detail] ? ` ${REASON_TEXT[r.detail]}` : ""} for ${n} ticket${n === 1 ? "" : "s"}.`; break;
       case "order_refunded": text = `${usd(amountCents ?? 0)} refunded to the buyer for ${n} ticket${n === 1 ? "" : "s"}.`; break;
