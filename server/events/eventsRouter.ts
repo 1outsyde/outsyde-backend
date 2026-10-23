@@ -34,6 +34,7 @@ import {
   type RefundPolicy,
   type TicketTypeForSale,
 } from "./eventRules";
+import { calculateTicketFees } from "../fees";
 import { geocodeEventInBackground } from "./eventGeocode";
 import { listQuerySchema, listPublicEvents } from "./eventList";
 
@@ -371,8 +372,13 @@ router.get("/slug/:slug", async (req: Request, res: Response) => {
       const s = e.status === "cancelled"
         ? { status: "ended" as const, remaining: 0 }
         : ticketSalesStatus(forSale[i], allForSale, remainingAtEvent, now);
+      // Same math checkout uses for one ticket. Free types have nothing to preview.
+      const priceCents = Number(t.price_cents);
+      const f = priceCents > 0 ? calculateTicketFees(priceCents, 1) : null;
       return {
         id: t.id, name: t.name, description: t.description ?? null, priceCents: Number(t.price_cents),
+        serviceFeeCents: f ? f.unitServiceFeeCents + f.unitPerTicketFeeCents : null,
+        buyerTotalCents: f ? f.unitBuyerTotalCents : null,
         salesStatus: s.status, remaining: s.remaining,
         salesStartAt: iso(t.sales_start_at), salesEndAt: iso(t.sales_end_at),
         minPerOrder: Number(t.min_per_order), maxPerOrder: Number(t.max_per_order),
@@ -401,6 +407,7 @@ router.get("/slug/:slug", async (req: Request, res: Response) => {
         ...address,
         addressRevealAt: e.address_visibility === "ticket_holders_day_of" ? iso(addressRevealAt(new Date(e.starts_at), e.timezone)) : null,
         refundPolicy: e.refund_policy, refundCutoffHours: e.refund_cutoff_hours == null ? null : Number(e.refund_cutoff_hours),
+        visibility: e.visibility,
         soldOut: remainingAtEvent === 0,
         host: { name: host.publicName, avatarUrl: host.avatarUrl, kind: e.host_type },
         viewerIsHost, viewerHasTicket,
