@@ -198,6 +198,7 @@ import { quoteDeposit } from "./fees";
 import { isExpiredUnbilledActiveRow } from "./complimentary";
 import { SUBSCRIPTION_GRACE_DAYS } from "./subscriptions/policy";
 import { realName, publicDisplayName } from "./personName";
+import { inAreaSql, DEFAULT_RADIUS_MILES, type SearchArea } from "./search/areaSearch";
 
 const pendingRecomputes = new Map<string, NodeJS.Timeout>();
 
@@ -933,6 +934,8 @@ export interface UnifiedSearchParams {
   scope: string;
   viewerUserId: string | null;
   city: string | null;
+  /** City search area (areaSearch.ts). When absent, `city` alone is matched as text (old behaviour). */
+  area?: SearchArea | null;
   personalized: boolean;
   limit: number;
   offset: number;
@@ -3436,9 +3439,10 @@ export class DatabaseStorage implements IStorage {
         consumerConditions.push(sql`NOT (${users.id}::text ILIKE '%demo%')`);
       }
       
-      // City-based filtering for consumers
+      // City-based filtering for consumers: only people who share their city (users.location_public).
       if (city) {
         consumerConditions.push(ilike(users.city, `%${city}%`));
+        if (!isAdmin) consumerConditions.push(eq(users.locationPublic, true));
       }
       
       // Text query matching for consumers
@@ -3481,10 +3485,11 @@ export class DatabaseStorage implements IStorage {
         description: user.username ? `@${user.username}` : null,
         category: null,
         tags: null,
-        city: user.city || null,
-        state: user.state || null,
-        latitude: user.latitude || null,
-        longitude: user.longitude || null,
+        // Location only for people who share it; coordinates never leave the backend for customers.
+        city: isAdmin || user.locationPublic ? user.city || null : null,
+        state: isAdmin || user.locationPublic ? user.state || null : null,
+        latitude: null,
+        longitude: null,
         imageUrl: user.profileImageUrl || null,
         priceCents: null,
         rating: null,
@@ -6133,6 +6138,9 @@ export class DatabaseStorage implements IStorage {
 
   async unifiedSearchWithScope(params: UnifiedSearchParams): Promise<UnifiedSearchResponse> {
     const { q, scope, viewerUserId, city, personalized, limit, offset, isAdmin } = params;
+    // City search (2026-10-23): the city and its surrounding area. Without an area, plain text match as before.
+    const area: SearchArea | null =
+      params.area !== undefined ? params.area : city ? { city, state: null, center: null, radiusMiles: DEFAULT_RADIUS_MILES } : null;
     const searchTerm = q?.trim() || '';
     const likePattern = searchTerm ? `%${searchTerm}%` : '%';
 
@@ -6207,7 +6215,9 @@ export class DatabaseStorage implements IStorage {
               // Real names are searchable by admins only (personName.ts rule).
               ...(isAdmin ? [ilike(users.firstName, likePattern), ilike(users.lastName, likePattern)] : []),
             ),
-            city ? ilike(users.city, `%${city}%`) : undefined
+            inAreaSql(area, { city: users.city, latitude: users.latitude, longitude: users.longitude }, { coarse: true }),
+            // A customer is found by city only when they share their city (users.location_public).
+            !area || isAdmin ? undefined : eq(users.locationPublic, true)
           )
         )
         .limit(scope === 'all' ? 15 : limit)
@@ -6237,7 +6247,8 @@ export class DatabaseStorage implements IStorage {
           id: u.id,
           type: 'consumer',
           title: displayName,
-          subtitle: [u.city, u.state].filter(Boolean).join(', ') || null,
+          // City/state only for people who share it (admins see everything).
+          subtitle: isAdmin || u.locationPublic ? [u.city, u.state].filter(Boolean).join(', ') || null : null,
           imageUrl: u.profileImageUrl || null,
           avatarUrl: nonEmpty(u.profileImageUrl),
           coverImage: coverStillImage(u.coverMediaUrl, u.coverMediaType),
@@ -6265,7 +6276,7 @@ export class DatabaseStorage implements IStorage {
               ilike(photographers.bio, likePattern),
               sql`${photographers.specialties}::text ILIKE ${likePattern}`
             ),
-            city ? ilike(photographers.city, `%${city}%`) : undefined,
+            inAreaSql(area, { city: photographers.city, latitude: photographers.latitude, longitude: photographers.longitude }),
             isAdmin ? undefined : eq(photographers.visibilityStatus, 'public')
           )
         )
@@ -6327,7 +6338,7 @@ export class DatabaseStorage implements IStorage {
               ilike(businesses.description, likePattern),
               ilike(businesses.tagline, likePattern)
             ),
-            city ? ilike(businesses.city, `%${city}%`) : undefined,
+            inAreaSql(area, { city: businesses.city, latitude: businesses.latitude, longitude: businesses.longitude }),
             isAdmin ? undefined : eq(businesses.approvalStatus, 'approved'),
             searchReadySql
           )
@@ -6419,7 +6430,7 @@ export class DatabaseStorage implements IStorage {
               ilike(staffMembers.displayName, likePattern),
               sql`${staffMembers.specialties}::text ILIKE ${likePattern}`
             ),
-            city ? ilike(businesses.city, `%${city}%`) : undefined,
+            inAreaSql(area, { city: businesses.city, latitude: businesses.latitude, longitude: businesses.longitude }),
             searchReadySql
           )
         )
@@ -6501,7 +6512,7 @@ export class DatabaseStorage implements IStorage {
               ilike(vendorProducts.description, likePattern),
               ilike(vendorProducts.category, likePattern)
             ),
-            city ? ilike(businesses.city, `%${city}%`) : undefined,
+            inAreaSql(area, { city: businesses.city, latitude: businesses.latitude, longitude: businesses.longitude }),
             isAdmin ? undefined : eq(businesses.approvalStatus, 'approved'),
             isAdmin ? undefined : eq(businesses.stripeOnboardingComplete, true),
             searchReadySql
@@ -6586,7 +6597,7 @@ export class DatabaseStorage implements IStorage {
               ilike(vendorServices.description, likePattern),
               ilike(vendorServices.category, likePattern)
             ),
-            city ? ilike(businesses.city, `%${city}%`) : undefined,
+            inAreaSql(area, { city: businesses.city, latitude: businesses.latitude, longitude: businesses.longitude }),
             isAdmin ? undefined : eq(businesses.approvalStatus, 'approved'),
             isAdmin ? undefined : eq(businesses.stripeOnboardingComplete, true),
             searchReadySql
@@ -6664,7 +6675,7 @@ export class DatabaseStorage implements IStorage {
               ilike(photographerServices.description, likePattern),
               ilike(photographerServices.category, likePattern)
             ),
-            city ? ilike(photographers.city, `%${city}%`) : undefined,
+            inAreaSql(area, { city: photographers.city, latitude: photographers.latitude, longitude: photographers.longitude }),
             isAdmin ? undefined : eq(photographers.visibilityStatus, 'public')
           )
         )

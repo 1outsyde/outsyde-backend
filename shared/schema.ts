@@ -210,6 +210,8 @@ export const users = pgTable("users", {
   country: text("country").default("United States"),
   latitude: doublePrecision("latitude"),
   longitude: doublePrecision("longitude"),
+  // City privacy (migration 070): false = city/state never shown to anyone else or used in city search.
+  locationPublic: boolean("location_public").default(false).notNull(),
 
   // Billing address
   billingAddress: jsonb("billing_address").$type<BillingAddress>(), // legacy JSONB field
