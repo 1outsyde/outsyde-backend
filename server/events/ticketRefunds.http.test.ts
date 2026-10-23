@@ -198,6 +198,10 @@ async function waitFor(check: () => boolean, ms = 5000) { const end = Date.now()
     assert(receipts.length === 1 && receipts[0].p.toEmail === `${P}-g0@test.local` && receipts[0].p.codes.length === 2
       && receipts[0].p.ticketPriceCents === 4000 && receipts[0].p.serviceFeeCents === 518 && receipts[0].p.totalCents === 4518, "one receipt with both ticket codes and the money split", receipts);
     assert(receipts[0]?.p.event.title === "Refund Night" && receipts[0]?.p.event.whereText === "The Loft, Freeport, NY", "receipt shows the event and place", receipts[0]?.p.event);
+    const tIds = (await q(`SELECT id FROM tickets WHERE order_id = $1 ORDER BY item_index`, [o1.id])).map((t) => String(t.id));
+    const qrMod = await import("./ticketQr");
+    assert(Array.isArray(receipts[0].p.qrUrls) && receipts[0].p.qrUrls.length === 2 && receipts[0].p.qrUrls.every((u: string, i: number) => u === qrMod.qrUrlFor(tIds[i])), "receipt gets one QR url per ticket, in item order", receipts[0].p.qrUrls);
+    assert((receipts[0].p.qrUrls ?? [""]).every((u: string, i: number) => !u.includes(receipts[0].p.codes[i])), "the ticket code is never inside a QR url");
     assert(pushes.length === 1 && pushes[0].p.userId === host && pushes[0].p.data.type === "ticket_sold" && pushes[0].p.body === `Guestg0 bought 2 tickets to Refund Night.`, "host gets one push", pushes);
     notices.length = 0;
     await WebhookHandlers.handlePaymentIntentSucceeded(piStore[o1.stripe_payment_intent_id]);
@@ -224,6 +228,28 @@ async function waitFor(check: () => boolean, ms = 5000) { const end = Date.now()
     assert(texts[1].includes("$40.00") && texts[1].includes("$5.18, not refunded"), "buyer refund email: refund and kept fee", texts[1]);
     assert(texts[3].includes("$45.18") && !texts[3].includes("not refunded") && texts[3].includes("Rain."), "cancel refund email: everything back, host message shown", texts[3]);
     assert(!rendered.some((x) => x.html.includes("<b>Out</b>")) && rendered[0].html.includes("Night &lt;b&gt;Out&lt;/b&gt;"), "event title is escaped in the HTML");
+
+    console.log("Receipt QR codes");
+    const base = { toEmail: "a@b.c", firstName: "Ana", event: evx, ticketTypeName: "GA", quantity: 2, ticketPriceCents: 4000, serviceFeeCents: 518, totalCents: 4518, codes: ["ABCD", "EFGH"] };
+    const plain = em.renderTicketReceipt(base);
+    const urls = ["https://api.test/api/events/qr/aaa~bbb.png?x=1&y=<2>", "https://api.test/api/events/qr/ccc~ddd.png"];
+    const withQr = em.renderTicketReceipt({ ...base, qrUrls: urls });
+    const imgs = withQr.html.match(/<img [^>]*>/g) ?? [];
+    assert(imgs.length === 2, "one image per ticket", imgs);
+    assert(imgs[0].includes('width="160" height="160"') && imgs[0].includes('alt="QR code for ticket 1"') && imgs[1].includes('alt="QR code for ticket 2"') && imgs[0].includes('style="display:block;border:0;"'), "image size, alt text and style", imgs);
+    assert(imgs[0].includes('src="https://api.test/api/events/qr/aaa~bbb.png?x=1&amp;y=&lt;2&gt;"') && imgs[1].includes('src="https://api.test/api/events/qr/ccc~ddd.png"'), "src values in order and escaped", imgs);
+    assert(withQr.html.indexOf(imgs[0]) < withQr.html.indexOf("ABCD") && withQr.html.indexOf(imgs[1]) < withQr.html.indexOf("EFGH") && withQr.html.indexOf("ABCD") < withQr.html.indexOf(imgs[1]), "each image sits above its own code row");
+    assert(withQr.html.includes("Show the QR code at the door. Each code lets one person in.") && !withQr.html.includes("Show a ticket code at the door"), "QR instruction line");
+    assert(plain.html.includes("Show a ticket code at the door. Each code lets one person in.") && !plain.html.includes("<img"), "without qrUrls the old line and no image");
+    const moneyOf = (h: string) => (h.match(/Tickets[\s\S]*?Total charged[\s\S]*?<\/tr>/) ?? [""])[0];
+    assert(moneyOf(withQr.html).includes("Total charged") && moneyOf(withQr.html) === moneyOf(plain.html), "money rows identical with and without QR");
+    assert(withQr.subject === plain.subject, "subject unchanged");
+    const stripQr = withQr.html.replace(/<img [^>]*>/g, "").replace("Show the QR code at the door.", "Show a ticket code at the door.");
+    assert(stripQr.replace(/\s+/g, "") === plain.html.replace(/\s+/g, ""), "apart from images and the line, the email is unchanged");
+    const mism = em.renderTicketReceipt({ ...base, qrUrls: [urls[0]] });
+    assert(mism.html === plain.html, "length mismatch renders exactly as without qrUrls");
+    assert(em.renderTicketReceipt({ ...base, qrUrls: [] }).html === plain.html, "empty qrUrls renders exactly as without");
+    assert(noDash(`${withQr.subject} ${visible(withQr.html)}`) && !visible(withQr.html).includes("%"), "QR receipt: no dashes, no percentage");
 
     console.log("Buyer refund under the host's policy");
     const before1 = await counts(t1.id, e1.id, g[0]);
@@ -516,6 +542,21 @@ async function waitFor(check: () => boolean, ms = 5000) { const end = Date.now()
     const o23 = await buy(e23.id, g[10], t23.id);
     await waitFor(() => notices.some((n) => n.kind === "receipt" && mine(n, 10)));
     assert(notices.find((n) => n.kind === "receipt" && mine(n, 10))!.p.event.whereText === null && o23.status === "completed", "day-of before reveal with no city or state: no place line");
+
+    console.log("A QR failure never blocks the receipt or the host push");
+    process.env.ALLOW_TEST_SEAMS = "1";
+    const { setQrBuilderForTest } = await import("./ticketNotices");
+    const { ev: e24, types: [t24] } = await paidEvent([{ name: "GA", priceCents: 2000, quantity: 20 }]);
+    notices.length = 0;
+    setQrBuilderForTest(() => { throw new Error("qr secret missing"); });
+    let o24: any;
+    try {
+      o24 = await buy(e24.id, g[8], t24.id);
+      await waitFor(() => notices.some((n) => n.kind === "receipt" && mine(n, 8)) && notices.some((n) => n.kind === "push"));
+    } finally { setQrBuilderForTest(null); }
+    const rc24 = notices.find((n) => n.kind === "receipt" && mine(n, 8));
+    assert(o24?.status === "completed" && !!rc24 && rc24.p.qrUrls === undefined && rc24.p.codes.length === 1, "failing QR builder: receipt still sent, without qrUrls", rc24?.p);
+    assert(notices.filter((n) => n.kind === "push" && n.p.data?.type === "ticket_sold").length === 1, "failing QR builder: host push still sent");
   } finally {
     setNoticeDepsForTest(null);
     stub.close();

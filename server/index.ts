@@ -3,6 +3,7 @@ import { createServer } from "http";
 import cors from "cors";
 import cookieParser from "cookie-parser";
 import helmet from "helmet";
+import { redactLogPath } from "./logRedaction";
 import compression from "compression";
 import { storage } from "./storage";
 import { registerRoutes } from "./routes";
@@ -17,6 +18,7 @@ import eventsRouter from "./events/eventsRouter";
 import ticketsRouter from "./events/ticketsRouter";
 import ticketCheckoutRouter from "./events/ticketCheckout";
 import ticketRefundsRouter from "./events/ticketRefunds";
+import doorRouter from "./events/doorRouter";
 import hostPayoutsRouter from "./events/hostPayouts";
 // stripe-replit-sync removed — no longer on Replit
 import { WebhookHandlers } from "./stripe/webhookHandlers";
@@ -186,7 +188,7 @@ app.use(express.urlencoded({ extended: false }));
 
 app.use((req, res, next) => {
   const start = Date.now();
-  const path = req.path;
+  const path = redactLogPath(req.path);
   let capturedJsonResponse: Record<string, any> | undefined;
 
   const originalResJson = res.json;
@@ -383,6 +385,8 @@ if (process.env.NODE_ENV === 'production') {
   app.use('/api/vendor/analytics', authMiddleware, vendorAnalyticsRouter);
   // Events & Ticketing (Phase 2 PR 5a): host payout accounts. Before eventsRouter so /payouts/* isn't read as /:id
   app.use('/api/events', hostPayoutsRouter);
+  // Events door check-in: door team + /door/mine, before eventsRouter so /door/mine isn't read as /:id
+  app.use('/api/events', doorRouter);
   // Events & Ticketing (Phase 1): host create/edit/publish/cancel + public event page data
   app.use('/api/events', eventsRouter);
   // Events & Ticketing (Phase 1 PR 2): ticket types, free RSVP + cancel, my tickets

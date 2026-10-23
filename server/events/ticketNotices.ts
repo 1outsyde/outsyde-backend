@@ -10,8 +10,9 @@
  * Senders are injectable so tests can check what would be sent without Resend or Expo.
  */
 import { sql } from "drizzle-orm";
-import { rows } from "./eventsRouter";
+import { rows, hostIdentity } from "./eventsRouter";
 import { holderCanSeeAddress } from "./eventRules";
+import { qrUrlFor } from "./ticketQr";
 import type { TicketEmailEvent } from "../emailService";
 
 export type NoticeDeps = {
@@ -25,6 +26,13 @@ export type NoticeDeps = {
 let testDeps: NoticeDeps | null = null;
 /** Tests only: route every notice to these senders (null restores the real ones). */
 export function setNoticeDepsForTest(d: NoticeDeps | null) { testDeps = d; }
+
+let qrBuilder: (ticketId: string) => string = qrUrlFor;
+/** Tests only (needs NODE_ENV !== "production" and ALLOW_TEST_SEAMS=1): replace the QR URL builder; null restores it. */
+export function setQrBuilderForTest(f: ((ticketId: string) => string) | null) {
+  if (process.env.NODE_ENV === "production" || process.env.ALLOW_TEST_SEAMS !== "1") return;
+  qrBuilder = f ?? qrUrlFor;
+}
 
 export async function noticeDeps(): Promise<NoticeDeps> {
   if (testDeps) return testDeps;
@@ -103,7 +111,12 @@ export async function notifyOrderSettled(orderId: string): Promise<void> {
     const d = await noticeDeps();
     const o = await loadOrder(orderId);
     if (!o || o.status !== "completed" || Number(o.total_cents) === 0 || o.event_status === "cancelled") return;
-    const codes = (await rows<any>(sql`SELECT code FROM tickets WHERE order_id = ${orderId} ORDER BY item_index`)).map((t) => String(t.code));
+    const tix = await rows<any>(sql`SELECT id, code FROM tickets WHERE order_id = ${orderId} ORDER BY item_index`);
+    const codes = tix.map((t) => String(t.code));
+    // A QR failure must never block the receipt or the host push: the email just goes without images.
+    let qrUrls: string[] | undefined;
+    try { qrUrls = tix.map((t) => qrBuilder(String(t.id))); }
+    catch (err) { console.error(`[Tickets] qr urls failed for order ${orderId}:`, (err as Error)?.message ?? err); }
     const n = Number(o.ticket_count);
     if (o.buyer_email) {
       await paced(() => d.sendReceipt({
@@ -111,7 +124,7 @@ export async function notifyOrderSettled(orderId: string): Promise<void> {
         ticketTypeName: String(o.ticket_type_name ?? "Ticket"), quantity: n,
         ticketPriceCents: Number(o.subtotal_cents) + Number(o.tax_cents) - Number(o.discount_cents),
         serviceFeeCents: Number(o.service_fee_cents) + Number(o.per_ticket_fee_cents),
-        totalCents: Number(o.total_cents), codes,
+        totalCents: Number(o.total_cents), codes, qrUrls,
       })).catch((err) => console.error(`[Tickets] receipt email failed for order ${orderId}:`, (err as Error)?.message ?? err));
     }
     const who = o.buyer_first_name ? String(o.buyer_first_name) : "Someone";
@@ -172,5 +185,22 @@ export async function notifyPayoutSent(payoutId: string): Promise<void> {
     });
   } catch (err) {
     console.error(`[Tickets] payout push failed for payout ${payoutId}:`, (err as Error)?.message ?? err);
+  }
+}
+
+/** After a host adds someone to the door team (push only, no email). Never throws. */
+export async function notifyDoorTeamAdded(p: { userId: string; scope: "standing" | "event"; eventId: string }): Promise<void> {
+  try {
+    const d = await noticeDeps();
+    const [e] = await rows<any>(sql`SELECT * FROM events WHERE id = ${p.eventId}`);
+    if (!e) return;
+    const what = p.scope === "standing" ? `${(await hostIdentity(e)).publicName}'s events` : String(e.title);
+    await d.sendPush({
+      userId: p.userId, title: "You're on the door team",
+      body: `You can now scan tickets for ${what}.`,
+      data: { type: "door_team_added", eventId: p.eventId, scope: p.scope },
+    });
+  } catch (err) {
+    console.error(`[Door] team push failed for event ${p.eventId}:`, (err as Error)?.message ?? err);
   }
 }

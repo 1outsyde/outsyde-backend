@@ -22,6 +22,7 @@ import {
   rows, pgError, iso, fail, zodError, optionalText, loadActiveUser, loadEventForHost, loadTicketTypes, hostTicketTypeJson,
 } from "./eventsRouter";
 import { makeTicketCode, paidEventsEnabled, wouldCreateUnlockLoop, holderCanSeeAddress, visibleAddress, addressRevealAt } from "./eventRules";
+import { qrUrlFor } from "./ticketQr";
 
 const router = Router();
 
@@ -529,6 +530,8 @@ router.get("/me/tickets", hybridAuthMiddleware, async (req: Request, res: Respon
         return {
         id: t.id, code: t.code, status: t.status, orderId: t.order_id, checkedInAt: iso(t.checked_in_at),
         ticketTypeName: t.ticket_type_name,
+        // Only a valid ticket gets a QR image (the query returns valid tickets only today; the guard stays in case that widens).
+        qrUrl: t.status === "valid" ? qrUrlFor(t.id) : null,
         event: {
           id: t.event_id, slug: t.slug, title: t.title, status: t.event_status, startsAt: iso(t.starts_at),
           endsAt: iso(t.ends_at), timezone: t.timezone, coverImageUrl: t.cover_image_url ?? null, city: t.city ?? null, state: t.state ?? null,

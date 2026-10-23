@@ -2246,13 +2246,19 @@ export type TicketReceiptParams = {
   serviceFeeCents: number;
   totalCents: number;
   codes: string[];
+  /** One QR image URL per code, same order. Only used when the length matches codes. */
+  qrUrls?: string[];
 };
 
 export function renderTicketReceipt(params: TicketReceiptParams): { subject: string; html: string } {
   const free = params.totalCents === 0;
   const hello = params.firstName ? `Hi ${escapeHtml(params.firstName)}, you're going.` : `You're going.`;
+  const qrUrls = params.qrUrls && params.qrUrls.length === params.codes.length ? params.qrUrls : null;
   const codeRows = params.codes
-    .map((c, i) => detailRow(`Ticket ${i + 1}`, `<span style="font-family:monospace;letter-spacing:2px;">${escapeHtml(c)}</span>`, i % 2 === 0))
+    .map((c, i) => {
+      const qr = qrUrls ? `<img src="${escapeHtml(qrUrls[i])}" width="160" height="160" alt="QR code for ticket ${i + 1}" style="display:block;border:0;">` : '';
+      return detailRow(`Ticket ${i + 1}`, `${qr}<span style="font-family:monospace;letter-spacing:2px;">${escapeHtml(c)}</span>`, i % 2 === 0);
+    })
     .join('');
   const moneyRows = free ? '' : `
     ${detailRow('Tickets', `${params.quantity} x ${escapeHtml(params.ticketTypeName)}, ${cents(params.ticketPriceCents)}`, true)}
@@ -2266,7 +2272,7 @@ export function renderTicketReceipt(params: TicketReceiptParams): { subject: str
         ${free ? detailRow('Tickets', `${params.quantity} x ${escapeHtml(params.ticketTypeName)}`, false) : ''}
       </table>
       ${moneyRows ? `<table width="100%" cellpadding="0" cellspacing="0" style="margin-top:8px;">${moneyRows}</table>` : ''}
-      <p style="color:#888888;font-size:13px;margin:16px 0 8px 0;">Show a ticket code at the door. Each code lets one person in.</p>
+      <p style="color:#888888;font-size:13px;margin:16px 0 8px 0;">${qrUrls ? 'Show the QR code at the door. Each code lets one person in.' : 'Show a ticket code at the door. Each code lets one person in.'}</p>
       <table width="100%" cellpadding="0" cellspacing="0" style="border-radius:6px;overflow:hidden;border:1px solid #2A2A2A;">${codeRows}</table>
     </td></tr>
     ${emailFooter('Keep this email. Your ticket codes are also in your Outsyde account.')}
