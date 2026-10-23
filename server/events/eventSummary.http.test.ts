@@ -176,6 +176,50 @@ async function callAt(base: string, method: string, path: string, o: { token?: s
     assert(r.body.payout.status === "none" && r.body.payout.expectedAt === null, "draft: no date", r.body.payout);
     assert(r.body.ticketTypes.length === 1 && r.body.totals.sold === 0, "draft still returns its types", r.body);
 
+    console.log("\nremoved ticket types and payout timing");
+    const evA = await mkEvent(host, "published", 48);
+    const aFree = await mkType(evA.id, "Free", 0, { sort: 0 });
+    const aGone = await mkType(evA.id, "Gone", 2000, { sort: 1, status: "archived" });
+    const aGoneRefunded = await mkType(evA.id, "Gone refunded", 1000, { sort: 2, status: "archived" });
+    await mkType(evA.id, "Gone empty", 3000, { sort: 3, status: "archived" });
+    await mkOrder(evA.id, aFree, buyers[0], 0, 2);
+    await mkOrder(evA.id, aGone, buyers[1], 2000, 2);
+    await mkOrder(evA.id, aGoneRefunded, buyers[2], 1000, 1, { order: "refunded", ticket: "refunded", reason: "buyer", refundedCents: 1100 });
+    r = await call(`/api/events/${evA.id}/summary`, ht);
+    const ta = r.body.ticketTypes ?? [];
+    assert(JSON.stringify(ta.map((t: any) => t.name)) === JSON.stringify(["Free", "Gone", "Gone refunded"]), "archived types with sales or refunds are listed, an empty archived type is not", ta);
+    const byA = (n: string) => ta.find((t: any) => t.name === n) ?? {};
+    assert(byA("Gone").archived === true && byA("Gone").sold === 2 && byA("Gone").grossCents === 4000, "archived type with sales: archived true, counted", byA("Gone"));
+    assert(byA("Gone refunded").archived === true && byA("Gone refunded").sold === 0, "archived type with only refunded tickets is listed with zero sold", byA("Gone refunded"));
+    assert(byA("Free").archived === false, "active type: archived false", byA("Free"));
+    assert(ta.every((t: any) => typeof t.archived === "boolean"), "every row has archived boolean", ta);
+    assert(ta.reduce((n: number, t: any) => n + t.sold, 0) === r.body.totals.sold && ta.reduce((n: number, t: any) => n + t.grossCents, 0) === r.body.totals.grossCents
+      && r.body.totals.sold === 4 && r.body.totals.grossCents === 4000, "listed rows add up to totals.sold and totals.grossCents", { ta, totals: r.body.totals });
+    assert(tt.every((t: any) => t.archived === false), "main event rows all archived false", tt);
+    const expectedA = new Date(evA.ends_at.getTime() + HOST_PAYOUT_DELAY_DAYS * 86400000).toISOString();
+    assert(r.body.payout.status === "scheduled" && r.body.payout.expectedAt === expectedA, "archived paid type with sales, only a free type active: scheduled, ends_at + 3 days", r.body.payout);
+
+    const evZ = await mkEvent(host, "published", 48);
+    await mkType(evZ.id, "General", 2000);
+    r = await call(`/api/events/${evZ.id}/summary`, ht);
+    assert(r.body.payout.status === "none" && r.body.payout.expectedAt === null, "published paid event with zero sales: none, no date", r.body.payout);
+
+    const evR = await mkEvent(host, "published", 48);
+    const rT = await mkType(evR.id, "General", 2000);
+    await mkOrder(evR.id, rT, buyers[0], 2000, 2, { order: "refunded", ticket: "refunded", reason: "buyer", refundedCents: 4200 });
+    r = await call(`/api/events/${evR.id}/summary`, ht);
+    assert(r.body.payout.status === "none" && r.body.payout.expectedAt === null && r.body.totals.refundedTickets === 2, "published paid event, every paid ticket refunded: none, no date", r.body);
+
+    const evP = await mkEvent(host, "paused", 48);
+    const pT = await mkType(evP.id, "General", 2000);
+    await mkOrder(evP.id, pT, buyers[0], 2000, 1);
+    r = await call(`/api/events/${evP.id}/summary`, ht);
+    assert(r.body.payout.status === "event_paused" && r.body.payout.expectedAt === null && r.body.payout.amountCents === null, "paused event with sales and no payout row: event_paused, no date", r.body.payout);
+    const evP0 = await mkEvent(host, "paused", 48);
+    await mkType(evP0.id, "General", 2000);
+    r = await call(`/api/events/${evP0.id}/summary`, ht);
+    assert(r.body.payout.status === "none" && r.body.payout.expectedAt === null, "paused event with nothing to pay: none", r.body.payout);
+
     const setPayout = async (eventId: string, status: string, hold: string | null, o: { paid?: boolean; deducted?: number } = {}) => {
       await q(`DELETE FROM event_payouts WHERE event_id = $1`, [eventId]);
       const ded = o.deducted ?? 0;
@@ -217,6 +261,20 @@ async function callAt(base: string, method: string, path: string, o: { token?: s
     r = await call(`/api/events/door/mine`, ht);
     assert(r.status === 200, "/door/mine still resolves", r);
   } finally {
+    // Every event a test user hosts, and everything seeded under it.
+    const evIds = (await q(`SELECT id FROM events WHERE host_user_id IN (SELECT id FROM users WHERE email LIKE $1)`, [`${P}-%`])).map((x) => x.id);
+    await q(`DELETE FROM event_door_team WHERE host_user_id IN (SELECT id FROM users WHERE email LIKE $1)`, [`${P}-%`]);
+    if (evIds.length) {
+      await q(`DELETE FROM event_door_members WHERE event_id = ANY($1)`, [evIds]);
+      await q(`DELETE FROM ticket_account_counts WHERE ticket_type_id IN (SELECT id FROM ticket_types WHERE event_id = ANY($1))`, [evIds]);
+      await q(`DELETE FROM tickets WHERE event_id = ANY($1)`, [evIds]);
+      await q(`DELETE FROM ticket_order_items WHERE event_id = ANY($1)`, [evIds]);
+      await q(`DELETE FROM ticket_orders WHERE event_id = ANY($1)`, [evIds]);
+      await q(`DELETE FROM event_payouts WHERE event_id = ANY($1)`, [evIds]);
+      await q(`DELETE FROM ticket_types WHERE event_id = ANY($1)`, [evIds]);
+      await q(`DELETE FROM events WHERE id = ANY($1)`, [evIds]);
+    }
+    await q(`DELETE FROM users WHERE email LIKE $1`, [`${P}-%`]);
     await db.end();
   }
   console.log(`\n${passed} passed, ${failed} failed`);
