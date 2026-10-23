@@ -105,6 +105,7 @@ export function sanitizeUserForResponse(user: User, options: { includeOwnData?: 
 import { eq, desc, sql, gte, lte, or, isNull, gt, inArray, and } from "drizzle-orm";
 import { validateOptionsPayload, planVariantSync, withEffectivePrice, summarizeVariants, type VariantSummary } from "./productOptions";
 import { z } from "zod";
+import { resolveSearchArea, cachedCityGeocode, normalizeState } from "./search/areaSearch";
 import {
   hashPassword,
   verifyPassword,
@@ -698,10 +699,17 @@ export async function registerRoutes(
         scope = 'all',
         viewerUserId,
         city,
+        state,
+        lat,
+        lng,
+        radiusMiles,
         personalized,
         limit = '50',
         offset = '0',
       } = req.query;
+
+      // City search (2026-10-23): the city and its surrounding area. Old apps send only `city`.
+      const area = await resolveSearchArea({ city, state, lat, lng, radiusMiles });
 
       const validScopes = ['all', 'consumers', 'photographers', 'businesses', 'products', 'services', 'staff'];
       const searchScope = validScopes.includes(scope as string) ? scope as string : 'all';
@@ -726,6 +734,7 @@ export async function registerRoutes(
         scope: searchScope,
         viewerUserId: effectiveViewerUserId,
         city: (city as string) || null,
+        area,
         personalized: enablePersonalization,
         limit: Math.min(100, parseInt(limit as string) || 50),
         offset: parseInt(offset as string) || 0,
@@ -3528,6 +3537,10 @@ export async function registerRoutes(
         firstName: z.string().max(100).optional().nullable(),
         lastName: z.string().max(100).optional().nullable(),
         phone: z.string().max(30).optional().nullable(),
+        // City privacy + city (2026-10-23, migration 070). City/state are the person's home city.
+        locationPublic: z.boolean().optional(),
+        city: z.string().trim().max(100).optional().nullable(),
+        state: z.string().trim().max(50).optional().nullable(),
       });
 
       const validated = updateSchema.safeParse(req.body);
@@ -3580,9 +3593,32 @@ export async function registerRoutes(
       if (validated.data.phone !== undefined) {
         updateData.phone = validated.data.phone;
       }
+      if (validated.data.locationPublic !== undefined) {
+        updateData.locationPublic = validated.data.locationPublic;
+      }
+      const cityChanged = validated.data.city !== undefined || validated.data.state !== undefined;
+      if (validated.data.city !== undefined) updateData.city = validated.data.city || null;
+      if (validated.data.state !== undefined) updateData.state = validated.data.state || null;
 
       if (Object.keys(updateData).length === 0) {
         return res.status(400).json({ error: "No fields to update" });
+      }
+
+      // City search uses coordinates: keep a CITY-LEVEL point (never a street address) in step with the city.
+      // Geocoded when the city changes, or when sharing is turned on and no point exists yet. Best effort:
+      // a failed lookup leaves coordinates empty and the person is still found by city name.
+      if (cityChanged || validated.data.locationPublic === true) {
+        const current = await storage.getUser(userId);
+        const nextCity = (updateData.city !== undefined ? updateData.city : current?.city) as string | null | undefined;
+        const nextState = (updateData.state !== undefined ? updateData.state : current?.state) as string | null | undefined;
+        if (!nextCity) {
+          updateData.latitude = null;
+          updateData.longitude = null;
+        } else if (cityChanged || current?.latitude == null || current?.longitude == null) {
+          const point = await cachedCityGeocode(nextCity, normalizeState(nextState) ?? nextState ?? null);
+          updateData.latitude = point?.latitude ?? null;
+          updateData.longitude = point?.longitude ?? null;
+        }
       }
 
       const user = await storage.updateUser(userId, updateData);
@@ -3694,14 +3730,12 @@ export async function registerRoutes(
 
       const { latitude, longitude, city, state } = parsed.data;
 
-      // Priority: JWT userId > session userId > body userId
-      const userId = authReq.user?.userId || req.session?.userId || parsed.data.userId;
-      
+      // Signed-in person only (2026-10-23). A userId in the body was trusted before, which let anyone
+      // overwrite anyone's location. No client sends one (checked every repo).
+      const userId = authReq.user?.userId || req.session?.userId;
+
       if (!userId) {
-        return res.status(400).json({ 
-          success: false, 
-          error: "userId is required (via auth token, session, or request body)" 
-        });
+        return res.status(401).json({ success: false, error: "Not authenticated" });
       }
 
       // Check if user exists
@@ -3740,14 +3774,12 @@ export async function registerRoutes(
   app.get("/api/user/location", optionalAuthMiddleware, async (req, res) => {
     const authReq = req as AuthenticatedRequest;
     try {
-      // Priority: JWT userId > session userId > query userId
-      const userId = authReq.user?.userId || req.session?.userId || (req.query.userId as string);
-      
+      // Signed-in person only (2026-10-23). ?userId= let anyone read anyone's coordinates and city.
+      // No client calls this route (checked every repo).
+      const userId = authReq.user?.userId || req.session?.userId;
+
       if (!userId) {
-        return res.status(400).json({ 
-          success: false, 
-          error: "userId is required (via auth token, session, or query param)" 
-        });
+        return res.status(401).json({ success: false, error: "Not authenticated" });
       }
 
       const user = await storage.getUser(userId);
@@ -16659,9 +16691,11 @@ export async function registerRoutes(
   // address, billing, tokens, stripe ids) are never exposed.
   // Placed AFTER all static /api/users/* and /api/users/:userId/* routes so
   // it does not shadow more specific handlers (e.g. GET /api/users/blocked).
-  app.get("/api/users/:id", async (req, res) => {
+  app.get("/api/users/:id", optionalAuthMiddleware, async (req, res) => {
     try {
       const { id } = req.params;
+      // Who is asking (Bearer or session). Only the person themselves or an admin sees a hidden city.
+      const viewerId = (req as AuthenticatedRequest).user?.userId || req.session?.userId || null;
       console.log('[GET /api/users/:id] returning public profile for', id);
 
       const user = await storage.getUser(id);
@@ -16673,6 +16707,13 @@ export async function registerRoutes(
         storage.getFollowerCount(id),
         storage.getFollowingCount(id),
       ]);
+
+      const isSelf = !!viewerId && viewerId === user.id;
+      let showCity = isSelf || user.locationPublic === true;
+      if (!showCity && viewerId) {
+        const viewer = await storage.getUser(viewerId);
+        showCity = !!viewer?.isAdmin;
+      }
 
       // Resolve the best available avatar across user/business/photographer tables
       let resolvedAvatar: string | null = user.profileImageUrl ?? null;
@@ -16698,9 +16739,12 @@ export async function registerRoutes(
         coverMediaType: user.coverMediaType,
         // Still picture for image-only screens (Mux thumbnail for video covers). Additive.
         coverPosterUrl: coverPosterUrl(user.coverMediaUrl, user.coverMediaType),
-        // Location (coarse — city/state only, not full address)
-        city: user.city,
-        state: user.state,
+        // Location (coarse — city/state only, not full address). Shown only when the person shares it
+        // (users.location_public, migration 070); the person themselves and admins always see it.
+        city: showCity ? user.city : null,
+        state: showCity ? user.state : null,
+        // Their own sharing choice, only to themselves. Additive.
+        ...(isSelf ? { locationPublic: user.locationPublic } : {}),
         // Role flags (no single role column; boolean flags convey the same info)
         isVendor: user.isVendor,
         isPhotographer: user.isPhotographer,
