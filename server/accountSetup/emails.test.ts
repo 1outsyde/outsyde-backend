@@ -131,6 +131,15 @@ function noDashes(s: string): boolean {
     assert(calls[0].body?.subject === "Two steps from your first Outsyde booking", "sent subject matches render", calls[0].body?.subject);
   }
 
+  // ── unsubscribe link host ──
+  {
+    assert(E.unsubscribeUrl("user-1").startsWith("https://api.example.test/api/account-setup/unsubscribe?u=user-1&s="), "falls back to API_BASE_URL");
+    process.env.EMAIL_LINK_BASE_URL = "https://www.goutsyde.com/";
+    const u = E.unsubscribeUrl("user-1");
+    assert(u === `https://www.goutsyde.com/api/account-setup/unsubscribe?u=user-1&s=${E.unsubscribeSig("user-1")}`, "EMAIL_LINK_BASE_URL wins, trailing slash trimmed", u);
+    delete process.env.EMAIL_LINK_BASE_URL;
+  }
+
   console.log(`\n${passed} passed, ${failed} failed`);
   process.exit(failed ? 1 : 0);
 })();

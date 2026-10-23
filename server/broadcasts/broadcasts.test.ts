@@ -50,6 +50,10 @@ function assert(cond: boolean, name: string, detail?: unknown) {
     const setup = await import("../accountSetup/emails");
     assert(setup.unsubscribeSig("user-1") !== sig, "different key from setup reminders unsubscribe");
     assert(B.broadcastUnsubUrl("a b").startsWith("https://api.example.test/api/broadcasts/unsubscribe?u=a%20b&s="), "unsubscribe url");
+    process.env.EMAIL_LINK_BASE_URL = "https://www.goutsyde.com/";
+    assert(B.broadcastUnsubUrl("a b").startsWith("https://www.goutsyde.com/api/broadcasts/unsubscribe?u=a%20b&s="), "EMAIL_LINK_BASE_URL wins, trailing slash trimmed", B.broadcastUnsubUrl("a b"));
+    assert(B.broadcastUnsubUrl("a b").endsWith(`&s=${B.broadcastUnsubSig("a b")}`), "same signature on the new host");
+    delete process.env.EMAIL_LINK_BASE_URL;
   }
 
   // ── request validation ──
