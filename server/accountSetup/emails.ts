@@ -16,8 +16,15 @@ export function frontendUrl(): string {
   return (process.env.FRONTEND_URL || "https://www.goutsyde.com").replace(/\/+$/, "");
 }
 
-function apiBaseUrl(): string {
-  return (process.env.API_BASE_URL || "https://outsyde-backend.onrender.com").replace(/\/+$/, "");
+/**
+ * Base for links inside emails (unsubscribe). EMAIL_LINK_BASE_URL points them at our own domain
+ * (https://www.goutsyde.com, which relays /api/account-setup/unsubscribe and /api/broadcasts/unsubscribe
+ * to this backend) so spam filters don't see links to a different host than the sender. Falls back to
+ * API_BASE_URL, so nothing changes until the variable is set. Links already sent keep working because
+ * this backend still serves both unsubscribe routes directly.
+ */
+function emailLinkBaseUrl(): string {
+  return (process.env.EMAIL_LINK_BASE_URL || process.env.API_BASE_URL || "https://outsyde-backend.onrender.com").replace(/\/+$/, "");
 }
 
 function escapeHtml(s: string): string {
@@ -44,7 +51,7 @@ export function verifyUnsubscribeSig(userId: string, sig: string): boolean {
 }
 
 export function unsubscribeUrl(userId: string): string {
-  return `${apiBaseUrl()}/api/account-setup/unsubscribe?u=${encodeURIComponent(userId)}&s=${unsubscribeSig(userId)}`;
+  return `${emailLinkBaseUrl()}/api/account-setup/unsubscribe?u=${encodeURIComponent(userId)}&s=${unsubscribeSig(userId)}`;
 }
 
 // ── sending ─────────────────────────────────────────────────────────────────
