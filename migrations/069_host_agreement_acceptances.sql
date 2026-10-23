@@ -1,6 +1,6 @@
 -- Migration 069: Event Host Agreement acceptances (who accepted which version, and when)
 -- Run manually in the Neon SQL editor BEFORE Render deploys the PR that uses it. Never via drizzle-kit push.
--- Idempotent: safe to re-run. Additive: one new table and one index. No existing column changes.
+-- Idempotent: safe to re-run. Additive: one new table (its UNIQUE constraint is its only index). No existing column changes.
 --
 --   host_agreement_acceptances   one row per (user, agreement version). Publishing an event needs a row for the
 --                                current version (server/events/hostAgreement.ts). Rows are never updated or deleted:

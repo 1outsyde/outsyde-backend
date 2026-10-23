@@ -171,7 +171,8 @@ async function call(method: string, path: string, o: { token?: string; body?: un
     await q(`INSERT INTO ticket_types (event_id, name, price_cents, quantity, unlock_after_ticket_type_id, sort_order) VALUES ($1, 'Second wave', 0, 20, $2, 2)`, [ev.id, freeType.id]);
     // The stranger has accepted the agreement too, so only the host check can stop them.
     const agO = await call("GET", "/api/events/host-agreement", { token: tok(other) });
-    await call("POST", "/api/events/host-agreement/accept", { token: tok(other), body: { version: agO.body?.agreement?.version } });
+    const accO = await call("POST", "/api/events/host-agreement/accept", { token: tok(other), body: { version: agO.body?.agreement?.version } });
+    assert(accO.status === 200 && accO.body.agreement.accepted === true, "stranger accepted the agreement (so the next check tests the host condition)", accO);
     r = await call("POST", `/api/events/${ev.id}/publish`, { token: tok(other) });
     const [stillDraft] = await q(`SELECT status FROM events WHERE id = $1`, [ev.id]);
     assert(r.status === 404 && stillDraft.status === "draft", "stranger can't publish a ready event", { r, stillDraft });

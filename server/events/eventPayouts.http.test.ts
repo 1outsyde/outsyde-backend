@@ -265,9 +265,9 @@ async function getNoFollow(path: string): Promise<{ status: number; location: st
   ))[0].id as string;
   const tok = (id: string) => generateAccessToken({ userId: id, isVendor: false });
   // Publishing needs the current Event Host Agreement accepted (hostAgreement.ts): hosts accept it the way the app does.
-  const acceptAgreement = async (id: string) => {
-    const g = await call("GET", "/api/events/host-agreement", { token: tok(id) });
-    const a = await call("POST", "/api/events/host-agreement/accept", { token: tok(id), body: { version: g.body?.agreement?.version } });
+  const acceptAgreement = async (id: string, o: { base?: string } = {}) => {
+    const g = await call("GET", "/api/events/host-agreement", { token: tok(id), ...o });
+    const a = await call("POST", "/api/events/host-agreement/accept", { token: tok(id), body: { version: g.body?.agreement?.version }, ...o });
     if (a.status !== 200) throw new Error("agreement accept failed " + JSON.stringify(a));
   };
   const hostA = await mkUser("a");   // plain customer
@@ -499,7 +499,7 @@ async function getNoFollow(path: string): Promise<{ status: number; location: st
     const addType = (ev: string, host: string, priceCents: number, o: { base?: string } = {}) =>
       call("POST", `/api/events/${ev}/ticket-types`, { token: tok(host), body: { name: priceCents ? "Paid" : "Free", priceCents, quantity: 50 }, ...o });
     const publish = async (ev: string, host: string, o: { base?: string } = {}) => {
-      await acceptAgreement(host);
+      await acceptAgreement(host, o);
       return call("POST", `/api/events/${ev}/publish`, { token: tok(host), ...o });
     };
 
@@ -512,6 +512,9 @@ async function getNoFollow(path: string): Promise<{ status: number; location: st
     // switch on (5072)
     ev = await mkEvent(hostNotReadyU);
     await addType(ev, hostNotReadyU, 2000);
+    // Not accepted yet AND not set up: the payout reason is reported first (the agreement is the last step).
+    r = await call("POST", `/api/events/${ev}/publish`, { token: tok(hostNotReadyU), ...PAID });
+    assert(r.status === 409 && r.body.error.code === "PAYOUTS_NOT_SET_UP", "switch on: not set up and agreement not accepted -> PAYOUTS_NOT_SET_UP first", r);
     r = await publish(ev, hostNotReadyU, PAID);
     assert(r.status === 409 && r.body.error.code === "PAYOUTS_NOT_SET_UP" && r.body.error.message === "Set up payouts before selling paid tickets.", "switch on: publish paid, host not set up -> PAYOUTS_NOT_SET_UP", r);
     assert((await q(`SELECT status FROM events WHERE id = $1`, [ev]))[0].status === "draft", "event stays a draft");
@@ -526,6 +529,17 @@ async function getNoFollow(path: string): Promise<{ status: number; location: st
     r = await publish(ev, hostReadyU, PAID);
     assert(r.status === 200 && r.body.event.status === "published", "switch on: publish paid, host ready -> 200", r);
     const evPaidPub = ev;
+
+    // A payout ready host who hasn't accepted the Event Host Agreement can't publish a paid event either.
+    const hostReadyNoAgree = await mkUser("pa");
+    const acctPA = `acct_pa_${P}`;
+    await q(`INSERT INTO user_payout_accounts (user_id, stripe_account_id, onboarding_complete) VALUES ($1, $2, true)`, [hostReadyNoAgree, acctPA]);
+    setReady(acctPA);
+    const evNoAgree = await mkEvent(hostReadyNoAgree);
+    await addType(evNoAgree, hostReadyNoAgree, 2000);
+    r = await call("POST", `/api/events/${evNoAgree}/publish`, { token: tok(hostReadyNoAgree), ...PAID });
+    assert(r.status === 409 && r.body.error.code === "HOST_AGREEMENT_REQUIRED", "switch on: paid, host ready, agreement not accepted -> HOST_AGREEMENT_REQUIRED", r);
+    assert((await q(`SELECT status FROM events WHERE id = $1`, [evNoAgree]))[0].status === "draft", "that event stays a draft");
 
     // paid type on a published event
     r = await addType(evFreePub, hostNotReadyU, 1500);

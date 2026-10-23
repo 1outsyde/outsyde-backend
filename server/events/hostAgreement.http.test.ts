@@ -136,6 +136,12 @@ async function call(method: string, path: string, o: { token?: string; body?: un
     r = await call("GET", "/api/events/host-agreement", { token: tok(host) });
     assert(r.status === 200 && r.body.agreement.accepted === true && r.body.agreement.acceptedVersion === VERSION, "reading again shows it accepted", r.body?.agreement?.accepted);
 
+    // Two accepts at once (a double tap) still leave one row.
+    const racer = await mkUser("race");
+    const both = await Promise.all([1, 2].map(() => call("POST", "/api/events/host-agreement/accept", { token: tok(racer), body: { version: VERSION } })));
+    const raced = await rowsFor(racer);
+    assert(both.every((x) => x.status === 200) && raced.length === 1, "two accepts at once: both answer 200, one row", { s: both.map((x) => x.status), raced });
+
     console.log("Publishing after accepting");
     r = await call("POST", `/api/events/${ev1}/publish`, { token: tok(host) });
     assert(r.status === 200 && r.body.event.status === "published", "accepted: publish works", r);
