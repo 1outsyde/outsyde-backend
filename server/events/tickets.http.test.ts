@@ -66,11 +66,18 @@ async function call(method: string, path: string, o: { token?: string; body?: un
     [`${P}-${s}@test.local`, `Guest ${s} Lastname`, `Guest${s}`, `${P}${s}`.slice(0, 20)],
   ))[0].id as string;
   const tok = (id: string) => generateAccessToken({ userId: id, isVendor: false });
+  // Publishing needs the current Event Host Agreement accepted (hostAgreement.ts): hosts accept it the way the app does.
+  const acceptAgreement = async (id: string) => {
+    const g = await call("GET", "/api/events/host-agreement", { token: tok(id) });
+    const a = await call("POST", "/api/events/host-agreement/accept", { token: tok(id), body: { version: g.body?.agreement?.version } });
+    if (a.status !== 200) throw new Error("agreement accept failed " + JSON.stringify(a));
+  };
   const host = await mkUser("host");
   const other = await mkUser("other");
   const guests: string[] = [];
   for (let i = 0; i < 45; i++) guests.push(await mkUser(`g${i}`));
   const [g0, g1, g2] = guests;
+  await acceptAgreement(host);
 
   const inDays = (d: number, h = 0) => new Date(Date.now() + d * 86400000 + h * 3600000).toISOString();
   const newEvent = async (over: Record<string, unknown> = {}) => {
@@ -305,6 +312,7 @@ async function call(method: string, path: string, o: { token?: string; body?: un
       await q(`DELETE FROM ticket_types WHERE event_id = ANY($1)`, [ids]);
       await q(`DELETE FROM events WHERE id = ANY($1)`, [ids]);
     }
+    await q(`DELETE FROM host_agreement_acceptances WHERE user_id IN (SELECT id FROM users WHERE email LIKE $1)`, [`${P}-%`]);
     await q(`DELETE FROM users WHERE email LIKE $1`, [`${P}-%`]);
     await db.end();
   }

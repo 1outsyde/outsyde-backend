@@ -169,9 +169,19 @@ async function call(method: string, path: string, o: { token?: string; body?: un
     const [comps] = await q(`INSERT INTO ticket_types (event_id, name, price_cents, quantity, hidden, sort_order) VALUES ($1, 'Secret comps', 0, 5, true, 1) RETURNING id`, [ev.id]);
     await q(`INSERT INTO ticket_types (event_id, name, price_cents, quantity, unlock_after_ticket_type_id, sort_order) VALUES ($1, 'After comps', 0, 5, $2, 3)`, [ev.id, comps.id]);
     await q(`INSERT INTO ticket_types (event_id, name, price_cents, quantity, unlock_after_ticket_type_id, sort_order) VALUES ($1, 'Second wave', 0, 20, $2, 2)`, [ev.id, freeType.id]);
+    // The stranger has accepted the agreement too, so only the host check can stop them.
+    const agO = await call("GET", "/api/events/host-agreement", { token: tok(other) });
+    const accO = await call("POST", "/api/events/host-agreement/accept", { token: tok(other), body: { version: agO.body?.agreement?.version } });
+    assert(accO.status === 200 && accO.body.agreement.accepted === true, "stranger accepted the agreement (so the next check tests the host condition)", accO);
     r = await call("POST", `/api/events/${ev.id}/publish`, { token: tok(other) });
     const [stillDraft] = await q(`SELECT status FROM events WHERE id = $1`, [ev.id]);
     assert(r.status === 404 && stillDraft.status === "draft", "stranger can't publish a ready event", { r, stillDraft });
+    r = await call("POST", `/api/events/${ev.id}/publish`, { token: tok(host) });
+    const [notYet] = await q(`SELECT status FROM events WHERE id = $1`, [ev.id]);
+    assert(r.status === 409 && r.body.error.code === "HOST_AGREEMENT_REQUIRED" && notYet.status === "draft", "ready event needs the Event Host Agreement accepted", { r, notYet });
+    const ag = await call("GET", "/api/events/host-agreement", { token: tok(host) });
+    r = await call("POST", "/api/events/host-agreement/accept", { token: tok(host), body: { version: ag.body?.agreement?.version } });
+    assert(r.status === 200 && r.body.agreement.accepted === true, "host accepts the agreement", r);
     r = await call("POST", `/api/events/${ev.id}/publish`, { token: tok(host) });
     assert(r.status === 200 && r.body.event.status === "published" && r.body.event.publishedAt, "free event publishes", r);
     r = await call("POST", `/api/events/${ev.id}/publish`, { token: tok(host) });
@@ -466,6 +476,7 @@ async function call(method: string, path: string, o: { token?: string; body?: un
     await q(`DELETE FROM follows WHERE follower_user_id IN (SELECT id FROM users WHERE email LIKE $1) OR target_user_id IN (SELECT id FROM users WHERE email LIKE $1)`, [`${P}-%`]);
     await q(`DELETE FROM photographers WHERE user_id IN (SELECT id FROM users WHERE email LIKE $1)`, [`${P}-%`]);
     await q(`DELETE FROM businesses WHERE owner_id IN (SELECT id FROM users WHERE email LIKE $1)`, [`${P}-%`]);
+    await q(`DELETE FROM host_agreement_acceptances WHERE user_id IN (SELECT id FROM users WHERE email LIKE $1)`, [`${P}-%`]);
     await q(`DELETE FROM users WHERE email LIKE $1`, [`${P}-%`]);
     await db.end();
   }

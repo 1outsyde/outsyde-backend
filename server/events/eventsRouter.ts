@@ -7,7 +7,8 @@
  *   GET   /slug/:slug        (public; host sees own drafts) event page data, address hidden until you have a ticket
  *   GET   /:id/manage        (auth, host)  full event + ticket types
  *   PATCH /:id               (auth, host)  edit (refund policy can only become more flexible once published)
- *   POST  /:id/publish       (auth, host)  draft -> published (needs a future start + at least one visible free ticket type)
+ *   POST  /:id/publish       (auth, host)  draft -> published (needs a future start, at least one visible ticket type and
+ *                                          the current Event Host Agreement accepted: 409 HOST_AGREEMENT_REQUIRED, hostAgreement.ts)
  *   POST  /:id/cancel        (auth, host)  cancel; free RSVPs cancelled, paid orders refunded in full (ticketRefunds.ts)
  *
  * Tables: migrations/056_events_tickets.sql (raw SQL, not in shared/schema.ts, like booking_payout_issues).
@@ -529,6 +530,8 @@ router.post("/:id/publish", hybridAuthMiddleware, async (req: Request, res: Resp
   if (!userId) return fail(res, 401, "NO_AUTH", "Sign in to publish this event.");
   try {
     if (!(await loadActiveUser(userId))) return fail(res, 403, "ACCOUNT_INACTIVE", "This account can't host events.");
+    // The publishing user must have accepted the current Event Host Agreement (hostAgreement.ts). Checked inside the UPDATE.
+    const { acceptedCurrentVersionSql } = await import("./hostAgreement");
     // Paid tickets need the switch on AND a host who can be paid. Checked before the single UPDATE below.
     let paidAllowed = false;
     if (paidEventsEnabled()) {
@@ -544,6 +547,7 @@ router.post("/:id/publish", hybridAuthMiddleware, async (req: Request, res: Resp
     const [published] = await rows(sql`
       UPDATE events SET status = 'published', published_at = now(), updated_at = now()
       WHERE id = ${req.params.id} AND host_user_id = ${userId} AND status = 'draft' AND starts_at > now()
+        AND ${acceptedCurrentVersionSql(userId)}
         AND EXISTS (SELECT 1 FROM ticket_types t WHERE t.event_id = events.id AND t.status = 'active' AND t.hidden = false)
         AND (NOT EXISTS (SELECT 1 FROM ticket_types t WHERE t.event_id = events.id AND t.status = 'active' AND t.price_cents > 0)
              OR ${paidAllowed})
@@ -564,6 +568,10 @@ router.post("/:id/publish", hybridAuthMiddleware, async (req: Request, res: Resp
     if (types.some((t) => Number(t.price_cents) > 0) && !paidAllowed) {
       if (!paidEventsEnabled()) return fail(res, 409, "PAID_TICKETS_NOT_AVAILABLE", "Paid tickets aren't available yet. Use free tickets for now.");
       return fail(res, 409, "PAYOUTS_NOT_SET_UP", "Set up payouts before selling paid tickets.");
+    }
+    const { acceptanceOf } = await import("./hostAgreement");
+    if (!(await acceptanceOf(userId))) {
+      return fail(res, 409, "HOST_AGREEMENT_REQUIRED", "Read and accept the Event Host Agreement to publish.");
     }
     return fail(res, 409, "EVENT_CHANGED", "This event just changed. Reload and try again.");
   } catch (err) {
