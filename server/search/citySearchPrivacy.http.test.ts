@@ -168,6 +168,11 @@ const isLocal = (u: string) => ['localhost', '127.0.0.1', '::1', '[::1]'].includ
     const getOwn = await call('GET', '/api/user/location', { bearer: hidden });
     assert(getOwn.status === 200 && getOwn.body.location.city === 'Hialeah', 'own location still readable', getOwn.body);
 
+    console.log('GET /api/auth/me (own data)');
+    const me = await call('GET', '/api/auth/me', { bearer: hidden });
+    assert(me.status === 200 && me.body.user.city === 'Hialeah' && me.body.user.state === 'FL' && me.body.user.locationPublic === false,
+      'auth/me returns own city, state and sharing choice', me.body?.user);
+
     console.log('PATCH /api/users/me');
     const bad = await call('PATCH', '/api/users/me', { bearer: hidden, body: { locationPublic: 'yes' } });
     assert(bad.status === 400, 'non-boolean locationPublic → 400', bad.status);
@@ -179,6 +184,8 @@ const isLocal = (u: string) => ['localhost', '127.0.0.1', '::1', '[::1]'].includ
     assert(has(nowFound, 'hiddenhialeah'), 'found by city once shared', names(nowFound));
     const off = await call('PATCH', '/api/users/me', { bearer: hidden, body: { locationPublic: false } });
     assert(off.status === 200 && off.body.user.locationPublic === false, 'turn sharing off', off.body?.user?.locationPublic);
+    const meAfterOn = await call('GET', '/api/auth/me', { bearer: hidden });
+    assert(meAfterOn.body.user.locationPublic === false, 'auth/me follows the saved choice', meAfterOn.body?.user);
     const goneAgain = await call('GET', `/api/search?q=${TERM}&scope=consumers&city=Miami&state=FL`);
     assert(!has(goneAgain, 'hiddenhialeah'), 'hidden again right away', names(goneAgain));
     const clear = await call('PATCH', '/api/users/me', { bearer: hidden, body: { city: '' } });

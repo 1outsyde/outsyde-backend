@@ -2952,6 +2952,11 @@ export async function registerRoutes(
           photographerId: sessionState.photographerId,
           loyaltyPoints: sessionState.loyaltyPoints ?? 0,
           profileImageUrl: sessionState.profilePhotoUrl ?? null,
+          // Additive (2026-10-23): the person's own city and their sharing choice (migration 070),
+          // so Edit Profile can show them after a reload. Only ever sent to the person themselves.
+          city: user.city ?? null,
+          state: user.state ?? null,
+          locationPublic: user.locationPublic === true,
         },
       });
     } catch (error) {
