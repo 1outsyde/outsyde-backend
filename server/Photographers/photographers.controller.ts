@@ -14,6 +14,7 @@ import { provisionConnectedCatalogItem } from "../services/connectedCatalog";
 import { validatePhotographerDeposit, invalidDepositBody } from "../deposits";
 import { resolvePhotographerSpecialties } from "../../shared/photographerTaxonomy";
 import { filterProviderBookings } from "../providerBookingLists";
+import { refreshCityPoint } from "../geo/cityPoint";
 
 // Rate limit for displayName changes (7 days cooldown)
 const DISPLAY_NAME_CHANGE_COOLDOWN_DAYS = 7;
@@ -201,6 +202,12 @@ export class PhotographerController {
       if (bio !== undefined) updates.bio = bio;
       if (city !== undefined) updates.city = city;
       if (state !== undefined) updates.state = state;
+      // City changed → fresh city-level map point (city search measures distance from it). 2026-10-23.
+      const cityPoint = await refreshCityPoint(photographer, { city, state });
+      if (cityPoint) {
+        updates.latitude = cityPoint.latitude;
+        updates.longitude = cityPoint.longitude;
+      }
       if (portfolioUrl !== undefined) updates.portfolioUrl = portfolioUrl;
       // Convert hourlyRate from dollars to cents for storage
       if (hourlyRate !== undefined) updates.hourlyRate = Math.round(Number(hourlyRate) * 100);
