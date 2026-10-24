@@ -186,20 +186,48 @@ const isLocal = (u?: string) => !!u && ['localhost', '127.0.0.1'].includes(new U
     assert(list2.status === 200 && Array.isArray(list2.json.transactions), 'platform admin can list', list2.status);
   }
 
-  console.log('\n7. Referral apply pays nothing until the first purchase');
+  console.log('\n7. Friend referrals: app tokens, share link, code at signup, nothing paid yet');
   {
     const A = await mkUser('refA');
-    const B = await mkUser('refB');
     const codeRes = await call('GET', '/api/referral/code', tok(A));
-    // /api/referral/* are session-only routes; with a Bearer token they answer 401 — exercise storage directly instead.
-    if (codeRes.status === 401) {
-      const { storage } = await import('./storage');
-      const rc = await storage.generateReferralCode(A);
-      const applied = await storage.processReferral(B, rc);
-      assert(applied.success && (await balance(B)) === 0 && (await balance(A)) === 0, 'code applied, 0 points paid yet (was 250 instantly)');
-    } else {
-      assert(codeRes.json.bonusForReferrer === 500 && codeRes.json.bonusForNewUser === 500, 'referral copy shows 500 / 500', codeRes.json);
-    }
+    const code = codeRes.json?.referralCode;
+    assert(codeRes.status === 200 && typeof code === 'string' && code.length === 8, 'app token gets a referral code', codeRes);
+    const front = (process.env.FRONTEND_URL || 'https://www.goutsyde.com').replace(/\/+$/, '');
+    assert(codeRes.json?.referralLink === `${front}/r/${code}`, 'share link is the website /r/ link, not the API host', codeRes.json?.referralLink);
+    assert(codeRes.json?.bonusForReferrer === 2500 && codeRes.json?.bonusForNewUser === 2500 && codeRes.json?.minimumPurchaseCents === 1000,
+      'reward shows 2,500 / 2,500 on a $10 first purchase', codeRes.json);
+    assert(typeof codeRes.json?.note === 'string' && !/[–—]/.test(codeRes.json.note) && !/%/.test(codeRes.json.note), 'note copy has no dashes or percentages', codeRes.json?.note);
+    const bad = await call('GET', '/api/referral/code', 'not-a-real-token');
+    assert(bad.status === 401 && bad.json?.code === 'TOKEN_INVALID', 'bad app token answers TOKEN_INVALID so the app refreshes', bad);
+    const none = await call('GET', '/api/referral/stats');
+    assert(none.status === 401 && none.json?.code === undefined, 'signed out without a token: plain 401 as before', none);
+
+    // Code at signup: applied, pays nothing yet
+    const signup = (extra: Record<string, unknown>) => call('POST', '/api/auth/customer/signup', undefined, {
+      email: `${P}-su${Math.random().toString(36).slice(2, 8)}@x.test`, password: 'secret123', name: 'Test Friend', ...extra,
+    });
+    const s1 = await signup({ referralCode: code.toLowerCase() });
+    const friend = s1.json?.user?.id;
+    assert(s1.status === 200 && s1.json?.referralApplied === true && !!s1.json?.accessToken, 'signup with a code (any case) applies it', s1.json?.referralApplied);
+    const ref = await q(`SELECT referrer_id, status FROM referrals WHERE referred_user_id = $1`, [friend]);
+    assert(ref.length === 1 && ref[0].referrer_id === A && ref[0].status === 'pending' && (await balance(friend)) === 0 && (await balance(A)) === 0,
+      'referral pending, 0 points paid yet', ref);
+
+    const s2 = await signup({ referralCode: 'NOPE2345' });
+    assert(s2.status === 200 && s2.json?.referralApplied === false && !!s2.json?.accessToken, 'unknown code: signup still succeeds, referralApplied false', s2.status);
+    const s3 = await signup({ referralCode: { evil: true } });
+    assert(s3.status === 200 && s3.json?.referralApplied === false, 'a non-text code never fails the signup', s3.status);
+    const s4 = await signup({});
+    assert(s4.status === 200 && s4.json?.referralApplied === false, 'signup without a code is unchanged', s4.status);
+
+    // Apply after signup with an app token; stats count it
+    const late = await mkUser('refLate');
+    const ap = await call('POST', '/api/referral/apply', tok(late), { referralCode: code });
+    assert(ap.status === 200 && ap.json?.success === true && ap.json?.pointsEarned === 0, 'app token can apply a code after signup', ap);
+    const again = await call('POST', '/api/referral/apply', tok(late), { referralCode: code });
+    assert(again.status === 400 && again.json?.success === false, 'a second code is refused', again);
+    const st = await call('GET', '/api/referral/stats', tok(A));
+    assert(st.status === 200 && st.json?.asReferrer?.pendingReferrals === 2 && st.json?.asReferrer?.qualifyingReferrals === 0, 'stats show both pending friends', st.json);
   }
 
   console.log('\n8. Internal rewards events: one write, retries never double credit');

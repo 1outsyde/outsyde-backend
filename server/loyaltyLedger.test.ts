@@ -214,7 +214,7 @@ function assert(condition: boolean, name: string, detail?: unknown) {
       'shortfall: takes 300, ledger row says -300, balance equals ledger', { sf, lastRow });
   }
 
-  console.log('\n7. Referrals: 500 each, only when the first purchase is final');
+  console.log('\n7. Referrals: 2,500 each, only when the first $10+ purchase is final');
   {
     const A = await user();
     const B = await user();
@@ -224,19 +224,22 @@ function assert(condition: boolean, name: string, detail?: unknown) {
 
     const owner = await user();
     const shop = await business(owner);
-    const small = await order(B, shop);
-    assert((await ledger.qualifyReferral(B, { type: 'order', id: small, grossCents: 700, final: false })) === 'skipped', 'purchase under $7 base does not qualify');
+    const small = await ins('orders', { id: crypto.randomUUID(), customer_id: B, business_id: shop, status: 'paid', total_amount: 900 });
+    assert((await ledger.qualifyReferral(B, { type: 'order', id: small, grossCents: 972, final: false })) === 'skipped', 'purchase under $10 base does not qualify');
 
     const o = await order(B, shop);
     const res = await ledger.qualifyReferral(B, { type: 'order', id: o, grossCents: 1080, final: false });
     const pend = await q(`SELECT user_id, points_earned, status FROM pending_points_transactions WHERE reference_type LIKE 'referral_%' AND user_id = ANY($1)`, [[A, B]]);
-    assert(res === 'qualified' && pend.length === 2 && pend.every((p: any) => p.points_earned === 500 && p.status === 'pending'), 'product purchase: both bonuses held as pending', pend);
+    assert(res === 'qualified' && pend.length === 2 && pend.every((p: any) => p.points_earned === 2500 && p.status === 'pending'), 'product purchase: both bonuses held as pending (2,500 each)', pend);
     await ledger.releaseDuePendingPoints();
     assert((await balance(A)) === 0, 'not released before 3 days');
     await q(`UPDATE pending_points_transactions SET release_after = now() - interval '1 minute' WHERE reference_type LIKE 'referral_%' AND user_id = ANY($1)`, [[A, B]]);
     await ledger.releaseDuePendingPoints();
     const ref = (await q('SELECT status FROM referrals WHERE referred_user_id=$1', [B]))[0];
-    assert((await balance(A)) === 500 && (await balance(B)) === 500 && ref.status === 'completed', 'after 3 days both get 500, referral completed', { a: await balance(A), b: await balance(B), ref });
+    assert((await balance(A)) === 2500 && (await balance(B)) === 2500 && ref.status === 'completed', 'after 3 days both get 2,500 (an under $10 first order did not burn it), referral completed', { a: await balance(A), b: await balance(B), ref });
+    await ledger.releaseDuePendingPoints();
+    const notes = await q(`SELECT user_id FROM notifications WHERE type = 'referral_reward' AND user_id = ANY($1)`, [[A, B]]);
+    assert(notes.length === 2 && new Set(notes.map((x: any) => x.user_id)).size === 2, 'each person gets one reward notice, even after another release run', notes);
 
     // Cancelled qualifying order: bonuses rejected, referral can qualify again later
     const C = await user();
@@ -256,9 +259,11 @@ function assert(condition: boolean, name: string, detail?: unknown) {
     const revived = await q(`SELECT status FROM pending_points_transactions WHERE reference_type LIKE 'referral_%' AND user_id = ANY($1)`, [[C, D]]);
     assert(again === 'qualified' && revived.length === 2 && revived.every((r: any) => r.status === 'pending'), 'second purchase re-qualifies: both bonus rows pending again', { again, revived });
     await q(`UPDATE pending_points_transactions SET release_after = now() - interval '1 minute' WHERE reference_type LIKE 'referral_%' AND user_id = ANY($1)`, [[C, D]]);
-    await ledger.releaseDuePendingPoints();
+    await Promise.all([ledger.releaseDuePendingPoints(), ledger.releaseDuePendingPoints(), ledger.releaseDuePendingPoints()]);
+    const notesCD = await q(`SELECT user_id FROM notifications WHERE type = 'referral_reward' AND user_id = ANY($1)`, [[C, D]]);
+    assert(notesCD.length === 2, 'three release runs at the same moment still send one notice each', notesCD);
     const ref2b = (await q('SELECT status FROM referrals WHERE referred_user_id=$1', [D]))[0];
-    assert((await balance(C)) === 500 && (await balance(D)) === 500 && ref2b.status === 'completed', 'then both get 500 once and the referral completes', { c: await balance(C), d: await balance(D), ref2b });
+    assert((await balance(C)) === 2500 && (await balance(D)) === 2500 && ref2b.status === 'completed', 'then both get 2,500 once and the referral completes', { c: await balance(C), d: await balance(D), ref2b });
 
     // A referral is only marked completed when both bonuses were really paid
     const I = await user();
@@ -285,8 +290,82 @@ function assert(condition: boolean, name: string, detail?: unknown) {
     const ap = await appt(H, shop, 'confirmed');
     await storage.createPendingPointTransaction({ userId: H, dollarAmountCents: 3240, transactionType: 'business_transaction', referenceType: 'appointment', referenceId: ap });
     await ledger.releasePendingForReference('appointment', ap, owner);
-    assert((await balance(H)) === 600 + 500 && (await balance(G)) === 500, 'completed booking: friend gets 600 purchase + 500, referrer 500', { h: await balance(H), g: await balance(G) });
+    assert((await balance(H)) === 600 + 2500 && (await balance(G)) === 2500, 'completed booking: friend gets 600 purchase + 2,500, referrer 2,500', { h: await balance(H), g: await balance(G) });
     for (const x of [A, B, G, H]) assert((await ledgerSum(x)) === (await balance(x)), `balance equals ledger (${x.slice(0, 6)})`);
+  }
+
+
+  console.log('\n7c. Referral rules: new friends only, 30 days, once per person');
+  {
+    const owner = await user();
+    const shop = await business(owner);
+    const R = await user();
+    const code = await storage.generateReferralCode(R);
+
+    // 30 days from signup
+    const old = await user();
+    await q(`UPDATE users SET created_at = now() - interval '31 days' WHERE id=$1`, [old]);
+    const late = await storage.processReferral(old, code);
+    assert(!late.success && /30 days/.test(late.error || ''), 'code refused 31 days after signup', late);
+    const day29 = await user();
+    await q(`UPDATE users SET created_at = now() - interval '29 days' WHERE id=$1`, [day29]);
+    assert((await storage.processReferral(day29, code)).success, 'code accepted 29 days after signup');
+
+    // Existing customers: a standing $10+ purchase or any paid ticket
+    const buyer = await user();
+    await order(buyer, shop, 'paid');
+    const refusedBuyer = await storage.processReferral(buyer, code);
+    assert(!refusedBuyer.success && /new customers/.test(refusedBuyer.error || ''), 'someone with a standing $10 order is not new', refusedBuyer);
+    assert((await q('SELECT count(*)::int n FROM referrals WHERE referred_user_id=$1', [buyer]))[0].n === 0
+      && (await q('SELECT referred_by FROM users WHERE id=$1', [buyer]))[0].referred_by === null, 'refused apply writes nothing');
+
+    const refunded = await user();
+    await order(refunded, shop, 'refunded');
+    await order(refunded, shop, 'cancelled');
+    assert((await storage.processReferral(refunded, code)).success, 'refunded or cancelled purchases still count as new');
+
+    const smallBuyer = await user();
+    await ins('orders', { id: crypto.randomUUID(), customer_id: smallBuyer, business_id: shop, status: 'paid', total_amount: 900 });
+    assert((await storage.processReferral(smallBuyer, code)).success, 'an under $10 purchase still counts as new');
+
+    const booker = await user();
+    await appt(booker, shop, 'completed');
+    assert(!(await storage.processReferral(booker, code)).success, 'a completed $10+ booking is not new');
+
+    const ticketBuyer = await user();
+    const host = await user();
+    const ev = await ins('events', { id: crypto.randomUUID(), host_user_id: host, title: 'Test event', slug: `ev-${S}-${++n}`, starts_at: new Date(Date.now() + 86_400_000), ends_at: new Date(Date.now() + 90_000_000) }).catch(() => null);
+    if (ev) {
+      await ins('ticket_orders', { id: crypto.randomUUID(), event_id: ev, buyer_user_id: ticketBuyer, status: 'completed', ticket_count: 1, subtotal_cents: 500, host_net_cents: 500, total_cents: 500 });
+      assert(!(await storage.processReferral(ticketBuyer, code)).success, 'a paid ticket makes someone an existing customer');
+    } else {
+      assert(false, 'could not create a test event for the ticket case');
+    }
+
+    // Once per person, even with two applies at the same moment
+    const twice = await user();
+    const R2 = await user();
+    const code2 = await storage.generateReferralCode(R2);
+    const both = await Promise.all([storage.processReferral(twice, code), storage.processReferral(twice, code2)]);
+    const rowsTwice = await q('SELECT referrer_id FROM referrals WHERE referred_user_id=$1', [twice]);
+    const by = (await q('SELECT referred_by FROM users WHERE id=$1', [twice]))[0].referred_by;
+    assert(both.filter((r) => r.success).length === 1 && rowsTwice.length === 1 && by === rowsTwice[0].referrer_id,
+      'two codes at once: exactly one referral, and referred_by matches it', { both, rowsTwice, by });
+    assert(!(await storage.processReferral(twice, code)).success, 'a second code later is refused');
+
+    // An earlier $10+ purchase (by time) blocks a later one from qualifying; the earlier one still can
+    const P = await user();
+    await storage.processReferral(P, code);
+    const early = await ins('appointments', {
+      id: crypto.randomUUID(), client_id: P, business_id: shop, status: 'confirmed', appointment_date: '2026-02-11', appointment_time: '11:00', total_price: 10000,
+      created_at: new Date(Date.now() - 60_000),
+    });
+    const later = await order(P, shop, 'paid');
+    assert((await ledger.qualifyReferral(P, { type: 'order', id: later, grossCents: 1080, final: false })) === 'skipped',
+      'a product bought after an earlier $10+ booking does not qualify');
+    assert((await ledger.qualifyReferral(P, { type: 'appointment', id: early, grossCents: 10800, final: true })) === 'qualified',
+      'the earlier booking qualifies when it is final');
+    assert((await balance(P)) === 2500, 'friend paid 2,500 once', await balance(P));
   }
 
   console.log('\n7b. Settlement (main booking path) holds points on the deposit, not the full price');

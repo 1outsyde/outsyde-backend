@@ -191,6 +191,9 @@ import {
   REDEMPTION_TIERS,
   REFERRAL_BONUS_POINTS,
   MAX_SUCCESSFUL_REFERRALS,
+  REFERRAL_APPLY_WINDOW_DAYS,
+  referralApplyBlocker,
+  createReferralAtomic,
   type RedeemResult,
 } from "./loyaltyLedger";
 import { randomUUID, createHash } from "crypto";
@@ -513,7 +516,7 @@ export interface IStorage {
   getUserByReferralCode(code: string): Promise<User | undefined>;
   processReferral(newUserId: string, referralCode: string): Promise<{ success: boolean; referrerId?: string; error?: string }>;
   getPendingReferral(referredUserId: string): Promise<Referral | undefined>;
-  getReferralStats(userId: string): Promise<{ totalReferrals: number; completedReferrals: number; pendingReferrals: number; totalPointsEarned: number }>;
+  getReferralStats(userId: string): Promise<{ totalReferrals: number; completedReferrals: number; pendingReferrals: number; qualifyingReferrals: number; totalPointsEarned: number }>;
   getSuccessfulReferralCount(referrerId: string): Promise<number>;
 
   // Push Subscriptions (Browser Push Notifications)
@@ -2773,27 +2776,26 @@ export class DatabaseStorage implements IStorage {
       return { success: false, error: 'Referral already applied' };
     }
 
+    // New friends only (2026-10-23): within 30 days of signing up, and no purchase yet.
+    const blocker = await referralApplyBlocker(newUserId);
+    if (blocker === 'too_late') {
+      return { success: false, error: `Referral codes can be used within ${REFERRAL_APPLY_WINDOW_DAYS} days of joining.` };
+    }
+    if (blocker === 'not_new') {
+      return { success: false, error: 'Referral codes are for new customers only.' };
+    }
+
     // One-to-many abuse prevention: limit referrals per user
     const successfulCount = await this.getSuccessfulReferralCount(referrer.id);
     if (successfulCount >= MAX_SUCCESSFUL_REFERRALS) {
       return { success: false, error: 'Referrer has reached the maximum number of referrals' };
     }
 
-    // Mark the new user as referred
-    await db.update(users)
-      .set({ referredBy: referrer.id })
-      .where(eq(users.id, newUserId));
-
-    // Create pending referral record (referrer bonus is deferred)
-    const referralId = randomUUID();
-    await db.insert(referrals).values({
-      id: referralId,
-      referrerId: referrer.id,
-      referredUserId: newUserId,
-      status: 'pending',
-      referrerBonusPoints: REFERRAL_BONUS_POINTS,
-      referredBonusPoints: REFERRAL_BONUS_POINTS,
-    });
+    // Referral row + referred_by in one statement; a second code for the same person is a no-op.
+    const created = await createReferralAtomic(newUserId, referrer.id);
+    if (!created) {
+      return { success: false, error: 'You have already used a referral code' };
+    }
 
     return { success: true, referrerId: referrer.id };
   }
@@ -2805,19 +2807,22 @@ export class DatabaseStorage implements IStorage {
     return result[0];
   }
 
-  async getReferralStats(userId: string): Promise<{ totalReferrals: number; completedReferrals: number; pendingReferrals: number; totalPointsEarned: number }> {
+  async getReferralStats(userId: string): Promise<{ totalReferrals: number; completedReferrals: number; pendingReferrals: number; qualifyingReferrals: number; totalPointsEarned: number }> {
     const allReferrals = await db.select()
       .from(referrals)
       .where(eq(referrals.referrerId, userId));
     
     const completed = allReferrals.filter(r => r.status === 'completed');
     const pending = allReferrals.filter(r => r.status === 'pending');
+    // Qualifying = the friend bought, the reward is waiting for the purchase to be final.
+    const qualifying = allReferrals.filter(r => r.status === 'qualifying');
     const totalPointsEarned = completed.reduce((sum, r) => sum + r.referrerBonusPoints, 0);
 
     return {
       totalReferrals: allReferrals.length,
       completedReferrals: completed.length,
       pendingReferrals: pending.length,
+      qualifyingReferrals: qualifying.length,
       totalPointsEarned,
     };
   }

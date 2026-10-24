@@ -1,6 +1,6 @@
 import { storage } from './storage';
 import { sendPushNotification, isPushConfigured } from './pushService';
-import { isEmailConfigured, sendNewConsumerSignupEmail, sendNewVendorApplicationEmail, sendNewPhotographerApplicationEmail, sendNewInfluencerApplicationEmail, sendVendorApprovalEmail, sendVendorRejectionEmail, sendCancellationAdminEmail } from './emailService';
+import { isEmailConfigured, sendReferralRewardEmail, sendNewConsumerSignupEmail, sendNewVendorApplicationEmail, sendNewPhotographerApplicationEmail, sendNewInfluencerApplicationEmail, sendVendorApprovalEmail, sendVendorRejectionEmail, sendCancellationAdminEmail } from './emailService';
 import { sendExpoPush } from './expoPushService';
 import type { InsertNotification } from '@shared/schema';
 
@@ -28,7 +28,8 @@ export type NotificationType =
   | 'staff_invite_accepted'
   | 'staff_onboarding_complete'
   | 'staff_bookable'
-  | 'new_consumer_signup';
+  | 'new_consumer_signup'
+  | 'referral_reward';
 
 interface NotificationData {
   userId: string;
@@ -104,12 +105,50 @@ function getNotificationUrl(type: NotificationType, referenceType?: string, refe
       return '/staff/dashboard';
     case 'new_consumer_signup':
       return referenceId ? `/admin/users/${referenceId}` : '/admin/users';
+    case 'referral_reward':
+      return '/account/points';
     default:
       return '/';
   }
 }
 
 export const NotificationTriggers = {
+  /**
+   * Friend referral reward (2026-10-23): both people, once, after the bonus points are released.
+   * In app + web push, app push, email. Each channel is best effort; nothing here throws.
+   */
+  async referralReward(params: { referralId: string; referrerId: string; friendId: string; points: number }): Promise<void> {
+    const pts = params.points.toLocaleString('en-US');
+    const people: Array<{ userId: string; role: 'referrer' | 'friend' }> = [
+      { userId: params.referrerId, role: 'referrer' },
+      { userId: params.friendId, role: 'friend' },
+    ];
+    for (const p of people) {
+      const title = `You earned ${pts} points`;
+      const message = p.role === 'referrer'
+        ? `Your friend made their first purchase. ${pts} points are in your Outsyde loyalty rewards.`
+        : `Your first purchase unlocked ${pts} bonus points in your Outsyde loyalty rewards.`;
+      try {
+        await sendNotification({ userId: p.userId, type: 'referral_reward', title, message, referenceType: 'referral', referenceId: params.referralId });
+      } catch (err) {
+        console.error(`[ReferralReward] in-app failed for ${p.userId}:`, err);
+      }
+      try {
+        await sendExpoPush({ userId: p.userId, title, body: message, data: { type: 'referral_reward', referenceId: params.referralId } });
+      } catch (err) {
+        console.error(`[ReferralReward] app push failed for ${p.userId}:`, err);
+      }
+      try {
+        const user = await storage.getUser(p.userId);
+        if (user?.email && (await isEmailConfigured())) {
+          await sendReferralRewardEmail({ to: user.email, firstName: user.firstName ?? null, role: p.role, points: params.points });
+        }
+      } catch (err) {
+        console.error(`[ReferralReward] email failed for ${p.userId}:`, err);
+      }
+    }
+  },
+
   async bookingConfirmed(params: {
     customerId: string;
     photographerId: string;

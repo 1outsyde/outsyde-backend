@@ -11,9 +11,13 @@
 //     appointment / shoot time if it was not cancelled. Any cancel, decline, expiry or no-show
 //     rejects them.
 //   - Product orders credit right away (refunds reverse them).
-//   - Referrals: when the referred user's first paid purchase of at least $7 (base) is final,
-//     both people get 500 points. Nothing is paid if they buy from the referrer's own business,
-//     staff profile or photographer profile. Max 50 successful referrals per referrer.
+//   - Referrals (rules decided by Legend 2026-10-23): when the referred friend's first paid
+//     purchase of at least $10 (base) is final, both people get 2,500 points ($5 each). A code can
+//     be applied once per person, within 30 days of signing up, and only by a new customer (no
+//     standing $10+ purchase and no paid event ticket yet; refunded or cancelled purchases and
+//     purchases under $10 don't count). A purchase only qualifies if no earlier standing $10+
+//     purchase exists. Nothing is paid if they buy from the referrer's own business, staff profile
+//     or photographer profile. Max 50 successful referrals per referrer.
 //   - Product orders: a promo code can only be used when the order base is at least 10x the code
 //     value, so the discount never cuts into the vendor's payout (product charges are destination
 //     charges: the charge must cover the transfer).
@@ -40,9 +44,10 @@ import { db } from "./db";
 // ── Rules ────────────────────────────────────────────────────────────────
 
 export const POINTS_PER_DOLLAR = 500;
-export const REFERRAL_BONUS_POINTS = 500;
+export const REFERRAL_BONUS_POINTS = 2500;
 export const MAX_SUCCESSFUL_REFERRALS = 50;
-export const REFERRAL_MIN_BASE_CENTS = 700;
+export const REFERRAL_MIN_BASE_CENTS = 1000;
+export const REFERRAL_APPLY_WINDOW_DAYS = 30;
 export const AUTO_RELEASE_DAYS = 3;
 export const PROMO_MIN_BASE_MULTIPLIER = 10;
 export const REDEMPTION_TIERS: ReadonlyArray<{ points: number; valueCents: number }> = [
@@ -794,9 +799,95 @@ async function sellerUserIds(type: QualifyingType, id: string): Promise<string[]
 }
 
 /**
+ * Does the user already have a standing purchase of at least REFERRAL_MIN_BASE_CENTS (base)?
+ * Standing = not pending, cancelled or refunded (orders) / confirmed or completed (bookings), the
+ * same rule as purchaseStillValid. Multi-shop carts count as one purchase (their orders summed).
+ * exclude: leave this purchase out, and only count purchases created before it.
+ */
+async function hasStandingQualifyingPurchase(
+  userId: string,
+  opts: { exclude?: { type: QualifyingType; id: string } } = {},
+): Promise<boolean> {
+  const ex = opts.exclude;
+  const exId = ex?.id ?? null;
+  // Created time of the excluded purchase; only purchases made before it count. None = no limit.
+  const beforeSql = !ex
+    ? sql`'infinity'::timestamp`
+    : ex.type === 'order'
+      ? sql`COALESCE((SELECT created_at FROM orders WHERE id = ${exId}), 'infinity'::timestamp)`
+      : ex.type === 'multi_vendor_order'
+        ? sql`COALESCE((SELECT min(created_at) FROM orders WHERE order_group_id = ${exId}), 'infinity'::timestamp)`
+        : ex.type === 'appointment'
+          ? sql`COALESCE((SELECT created_at FROM appointments WHERE id = ${exId}), 'infinity'::timestamp)`
+          : sql`COALESCE((SELECT created_at FROM shoot_bookings WHERE id = ${exId}), 'infinity'::timestamp)`;
+  const [r] = await rows<{ found: unknown }>(sql`
+    WITH lim AS (SELECT ${beforeSql} AS before)
+    SELECT EXISTS (
+      SELECT 1 FROM (
+        SELECT COALESCE(order_group_id, id) AS k, SUM(total_amount) AS amt, min(created_at) AS created
+        FROM orders
+        WHERE customer_id = ${userId} AND status NOT IN ('pending', 'cancelled', 'refunded')
+        GROUP BY 1
+      ) o, lim
+      WHERE o.amt >= ${REFERRAL_MIN_BASE_CENTS} AND o.k IS DISTINCT FROM ${exId} AND o.created < lim.before
+      UNION ALL
+      SELECT 1 FROM appointments a, lim
+      WHERE a.client_id = ${userId} AND a.status IN ('confirmed', 'completed') AND a.total_price >= ${REFERRAL_MIN_BASE_CENTS}
+        AND a.id IS DISTINCT FROM ${exId} AND a.created_at < lim.before
+      UNION ALL
+      SELECT 1 FROM shoot_bookings s, lim
+      WHERE s.client_id = ${userId} AND s.status IN ('confirmed', 'completed') AND s.total_price >= ${REFERRAL_MIN_BASE_CENTS}
+        AND s.id IS DISTINCT FROM ${exId} AND s.created_at < lim.before
+    ) AS found
+  `);
+  const v = r?.found;
+  return v === true || v === 't' || v === 'true';
+}
+
+/**
+ * Why this user can't apply a referral code right now, or null when they can.
+ * too_late: more than REFERRAL_APPLY_WINDOW_DAYS since signing up.
+ * not_new: a standing $10+ purchase or any paid event ticket already.
+ */
+export async function referralApplyBlocker(userId: string): Promise<null | 'too_late' | 'not_new'> {
+  const [u] = await rows<{ late: unknown; ticket: unknown }>(sql`
+    SELECT (u.created_at < now() - make_interval(days => ${REFERRAL_APPLY_WINDOW_DAYS})) AS late,
+           EXISTS (SELECT 1 FROM ticket_orders t WHERE t.buyer_user_id = u.id AND t.status = 'completed' AND t.total_cents > 0) AS ticket
+    FROM users u WHERE u.id = ${userId}
+  `);
+  const yes = (v: unknown) => v === true || v === 't' || v === 'true';
+  if (!u || yes(u.late)) return 'too_late';
+  if (yes(u.ticket) || (await hasStandingQualifyingPurchase(userId))) return 'not_new';
+  return null;
+}
+
+/**
+ * Tie a new friend to a referrer: one statement, so the referral row and users.referred_by are
+ * written together. uq_referrals_referred_user (migration 071) makes a second code for the same
+ * person a no-op, even when two arrive at the same moment. Returns false when nothing was written.
+ */
+export async function createReferralAtomic(referredUserId: string, referrerId: string): Promise<boolean> {
+  const id = randomUUID();
+  const res = await rows<{ id: string }>(sql`
+    WITH ins AS (
+      INSERT INTO referrals (id, referrer_id, referred_user_id, status, referrer_bonus_points, referred_bonus_points)
+      SELECT ${id}, ${referrerId}, ${referredUserId}, 'pending', ${REFERRAL_BONUS_POINTS}, ${REFERRAL_BONUS_POINTS}
+      WHERE NOT EXISTS (SELECT 1 FROM users WHERE id = ${referredUserId} AND referred_by IS NOT NULL)
+      ON CONFLICT (referred_user_id) DO NOTHING
+      RETURNING id
+    )
+    UPDATE users SET referred_by = ${referrerId}
+    WHERE id = ${referredUserId} AND referred_by IS NULL AND EXISTS (SELECT 1 FROM ins)
+    RETURNING id
+  `);
+  return res.length === 1;
+}
+
+/**
  * Called when the referred user makes a paid purchase. If they have a pending referral and this
- * purchase qualifies (base >= $7, not from the referrer's own business/profile, referrer under the
- * cap), the referral moves to 'qualifying' and both 500-point bonuses are held as pending.
+ * purchase qualifies (base >= $10, no earlier standing $10+ purchase, not from the referrer's own
+ * business/profile, referrer under the cap), the referral moves to 'qualifying' and both 2,500-point
+ * bonuses are held as pending.
  * final = true (a booking whose points were just released): the bonuses are released now.
  * final = false (a product order): they release after AUTO_RELEASE_DAYS if the order still stands.
  */
@@ -813,6 +904,10 @@ export async function qualifyReferral(
 
   const sellers = await sellerUserIds(purchase.type, purchase.id);
   if (sellers.includes(referral.referrer_id) || sellers.includes(referredUserId)) return 'skipped';
+
+  // Only the friend's first $10+ purchase counts: an earlier one that still stands means this
+  // isn't it (that earlier booking qualifies itself when it is final).
+  if (await hasStandingQualifyingPurchase(referredUserId, { exclude: { type: purchase.type, id: purchase.id } })) return 'skipped';
 
   const [count] = await rows<{ n: number }>(sql`
     SELECT count(*)::int AS n FROM referrals WHERE referrer_id = ${referral.referrer_id} AND status IN ('qualifying', 'completed')
@@ -877,7 +972,7 @@ async function releaseReferralBonuses(referralId: string, reviewerId: string): P
   }
 
   for (const p of pending) await releasePendingRow(p.id, reviewerId);
-  await rows(sql`
+  const done = await rows<{ id: string }>(sql`
     UPDATE referrals
     SET status = 'completed', referrer_bonus_paid_at = now(), referred_bonus_paid_at = now()
     WHERE id = ${referralId} AND status = 'qualifying'
@@ -885,7 +980,32 @@ async function releaseReferralBonuses(referralId: string, reviewerId: string): P
         SELECT count(*) FROM pending_points_transactions
         WHERE reference_type IN ('referral_referrer', 'referral_referred') AND reference_id = ${referralId} AND status = 'approved'
       ) = 2
+    RETURNING id
   `);
+  if (done[0]) await notifyReferralReward(referralId);
+}
+
+/**
+ * Tell both people their referral reward landed. Called only by the call that moved the referral
+ * to 'completed' (UPDATE ... RETURNING), so it runs once. Never throws: a failed notice must not
+ * undo or retry the points.
+ */
+async function notifyReferralReward(referralId: string): Promise<void> {
+  try {
+    const [r] = await rows<{ referrer_id: string; referred_user_id: string; referrer_bonus_points: number }>(sql`
+      SELECT referrer_id, referred_user_id, referrer_bonus_points FROM referrals WHERE id = ${referralId}
+    `);
+    if (!r) return;
+    const { NotificationTriggers } = await import("./notificationService");
+    await NotificationTriggers.referralReward({
+      referralId,
+      referrerId: r.referrer_id,
+      friendId: r.referred_user_id,
+      points: Number(r.referrer_bonus_points) || REFERRAL_BONUS_POINTS,
+    });
+  } catch (err) {
+    console.error(`[Points] referral reward notice for ${referralId} failed:`, err);
+  }
 }
 
 /** After a booking's pending points are released, the booking is final: it can qualify a referral. */
@@ -909,14 +1029,16 @@ export async function releasePendingById(pendingId: string, reviewerId: string, 
   const released = await releasePendingRow(pendingId, reviewerId, note);
   if (released) {
     if (released.referenceType === 'referral_referrer' || released.referenceType === 'referral_referred') {
-      await rows(sql`
+      const done = await rows<{ id: string }>(sql`
         UPDATE referrals SET status = 'completed', referrer_bonus_paid_at = now(), referred_bonus_paid_at = now()
         WHERE id = ${released.referenceId} AND status = 'qualifying'
           AND (
             SELECT count(*) FROM pending_points_transactions
             WHERE reference_type IN ('referral_referrer', 'referral_referred') AND reference_id = ${released.referenceId} AND status = 'approved'
           ) = 2
+        RETURNING id
       `);
+      if (done[0] && released.referenceId) await notifyReferralReward(released.referenceId);
     } else {
       await afterRelease(released);
     }

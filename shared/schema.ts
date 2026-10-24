@@ -2682,6 +2682,9 @@ export const customerSignupSchema = z.object({
   inviteCode: z.string().optional(),
   // Optional: tag the signup source (e.g. 'xo-beauty-web') for analytics
   source: z.string().optional(),
+  // Optional friend referral code (2026-10-23). Checked by applyReferralAtSignup, never here, so a
+  // bad value can never fail the signup.
+  referralCode: z.unknown().optional(),
 });
 
 export const vendorSignupSchema = z.object({

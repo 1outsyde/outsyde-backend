@@ -2217,6 +2217,34 @@ export async function sendRefundTakenBackEmail(params: {
   await sendBrandedEmail(params.to, params.subject, html, { kind: params.kind, label: 'Refund taken back notice' });
 }
 
+/**
+ * Friend referral reward (2026-10-23): sent to both people once the 2,500 bonus points are in their
+ * balance. Copy: real punctuation, no dashes, never a fee percentage.
+ */
+export async function sendReferralRewardEmail(params: {
+  to: string;
+  firstName: string | null;
+  role: 'referrer' | 'friend';
+  points: number;
+}): Promise<void> {
+  const pts = params.points.toLocaleString('en-US');
+  const dollars = params.points / 500;
+  const subject = `You earned ${pts} Outsyde points`;
+  const hi = params.firstName ? `Hi ${escapeHtml(params.firstName)},` : 'Hi,';
+  const body = params.role === 'referrer'
+    ? `Your friend made their first purchase on Outsyde, so ${pts} points just landed in your Outsyde loyalty rewards. That is a $${dollars} code waiting for you in Points. Thanks for sharing Outsyde.`
+    : `Welcome to Outsyde. Your first purchase unlocked ${pts} bonus points in your Outsyde loyalty rewards. That is a $${dollars} code waiting for you in Points.`;
+  const html = wrapEmail(`
+    ${emailHeader(escapeHtml(subject), 'Outsyde loyalty rewards')}
+    <tr><td style="background:#1A1A1A;padding:8px 32px 24px;">
+      <p style="color:#FFFFFF;font-size:15px;line-height:1.6;margin:0 0 12px;">${hi}</p>
+      <p style="color:#FFFFFF;font-size:15px;line-height:1.6;margin:0;">${escapeHtml(body)}</p>
+    </td></tr>
+    ${emailFooter()}
+  `);
+  await sendBrandedEmail(params.to, subject, html, { kind: 'account', label: 'Referral reward' });
+}
+
 // ─── Event tickets (Events & Ticketing Phase 2 PR 4) ─────────────────────────
 // Copy rules: real punctuation, no dashes, and the service fee is named but never given as a percentage.
 // Every value from the database is escaped. These throw on a send failure; callers catch.
