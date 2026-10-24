@@ -573,7 +573,8 @@ export class StripeService {
       },
       business_profile: {
         mcc: "7922", // Theatrical producers (except motion pictures) and ticket agencies
-        product_description: "Event hosting and ticketed events",
+        // Neutral (Legend 2026-10-24): this personal account also receives business referral rewards.
+        product_description: "Payouts from Outsyde, such as event ticket sales and referral rewards",
       },
       metadata: {
         role: "host",
@@ -614,6 +615,59 @@ export class StripeService {
    * Send an event payout to the host's Connect account. Idempotent on event_payout_<payoutId> unless the caller
    * passes its own key (the payout job uses one key per try, since Stripe replays a saved error for 24 hours).
    */
+  /** A business referral payout already sent for this payout, if any (group referral_<businessReferralId>, matched on metadata.payoutId). */
+  async findReferralPayoutTransfer(businessReferralId: string, payoutId: string, opts?: { timeoutMs?: number; maxNetworkRetries?: number }): Promise<{ id: string; amount: number } | null> {
+    const stripe = await getUncachableStripeClient();
+    const existing = await stripe.transfers.list({ transfer_group: `referral_${businessReferralId}`, limit: 100 }, boundedPayoutOptions(opts ?? {}));
+    const prior = existing.data.find(t => t.metadata?.payoutId === payoutId);
+    return prior ? { id: prior.id, amount: prior.amount } : null;
+  }
+
+  /** Send a $25 business referral reward from the platform balance (the caller passes one key per try). */
+  async createReferralPayoutTransfer(p: {
+    businessReferralId: string; payoutId: string; destination: string; amountCents: number; idempotencyKey: string;
+    timeoutMs?: number; maxNetworkRetries?: number;
+  }): Promise<{ id: string }> {
+    const stripe = await getUncachableStripeClient();
+    const transfer = await stripe.transfers.create({
+      amount: p.amountCents,
+      currency: 'usd',
+      destination: p.destination,
+      transfer_group: `referral_${p.businessReferralId}`,
+      description: 'Outsyde business referral reward',
+      metadata: { type: 'referral_reward', businessReferralId: p.businessReferralId, payoutId: p.payoutId },
+    }, { idempotencyKey: p.idempotencyKey, ...boundedPayoutOptions(p) });
+    return { id: transfer.id };
+  }
+
+  /**
+   * Does a paid invoice's payment still stand? 'refunded' when any part of its charge was refunded, 'disputed' when
+   * the charge is disputed, 'unpaid' when the invoice isn't paid (voided, uncollectible), 'unknown' when no charge
+   * can be found. Works with the invoice payments list (API 2025-03-31 basil and later) and the older
+   * invoice.payment_intent / invoice.charge fields.
+   */
+  async getInvoicePaymentStanding(invoiceId: string, opts?: { timeoutMs?: number; maxNetworkRetries?: number }): Promise<'stands' | 'refunded' | 'disputed' | 'unpaid' | 'unknown'> {
+    const stripe = await getUncachableStripeClient();
+    const ro = boundedPayoutOptions(opts ?? {});
+    const inv: any = await stripe.invoices.retrieve(invoiceId, { expand: ['payments'] } as any, ro);
+    if (inv?.status !== 'paid') return 'unpaid';
+    const paid = Array.isArray(inv?.payments?.data) ? inv.payments.data.find((x: any) => x?.status === 'paid') : null;
+    const ref = (v: any) => (typeof v === 'string' ? v : v?.id) ?? null;
+    const piId = ref(paid?.payment?.payment_intent) ?? ref(inv?.payment_intent);
+    let charge: any = null;
+    if (piId) {
+      const pi: any = await stripe.paymentIntents.retrieve(piId, { expand: ['latest_charge'] }, ro);
+      charge = pi?.latest_charge && typeof pi.latest_charge === 'object' ? pi.latest_charge : null;
+    } else {
+      const chargeId = ref(paid?.payment?.charge) ?? ref(inv?.charge);
+      if (chargeId) charge = await stripe.charges.retrieve(chargeId, {}, ro);
+    }
+    if (!charge) return 'unknown';
+    if (charge.disputed) return 'disputed';
+    if ((charge.amount_refunded ?? 0) > 0 || charge.refunded) return 'refunded';
+    return 'stands';
+  }
+
   async createEventPayoutTransfer(p: {
     eventId: string; payoutId: string; destination: string; amountCents: number; idempotencyKey?: string;
     /** Bounded so the whole call ends well inside the payout job's 10 minute claim (default 30 s, 1 network retry). */

@@ -326,6 +326,8 @@ export function registerPhase3Routes(app: Express, requireAdmin: (req: Request, 
           const business = await storage.getBusiness(vendorId);
           if (business) {
             await storage.updateBusiness(vendorId, { approvalStatus: 'approved' } as Record<string, unknown>);
+            // Business referral cash (2026-10-24): approval can complete a referred business. Fire and forget.
+            void import('./referrals/businessReferrals').then((m) => m.checkBusinessReferralSoon(vendorId)).catch(() => {});
             // Enable monetization on the owner
             if ((business as Record<string, unknown>).ownerId) {
               await storage.updateUser((business as Record<string, unknown>).ownerId as string, { canMonetize: true });

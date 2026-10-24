@@ -172,6 +172,7 @@ import {
 } from "./bookingStateMachine";
 import { isValidTimeZone } from "./manualRequests";
 import { applyReferralAtSignup } from "./referralSignup";
+import { applyBusinessReferralAtSignup, checkBusinessReferralSoon, checkBusinessReferralsForOwnerSoon, listBusinessReferralsFor } from "./referrals/businessReferrals";
 import { filterProviderBookings } from "./providerBookingLists";
 import { settleAppointmentBooking, settleShootBooking } from "./bookingSettlement";
 import { requirePlatformAdmin, isPlatformAdminUser } from "./middleware/requirePlatformAdmin";
@@ -1238,11 +1239,15 @@ export async function registerRoutes(
         req.session.businessId = business.id;
       }
 
+      // Business referral code (2026-10-24): after every write above, never fails the signup.
+      const referralApplied = await applyBusinessReferralAtSignup(user.id, business.id, data.referralCode);
+
       const safeUser = sanitizeUserForResponse(user, { includeOwnData: true });
       res.json({ 
         user: safeUser, 
         business,
-        message: "Your application has been submitted and is pending approval. You will be notified once reviewed."
+        message: "Your application has been submitted and is pending approval. You will be notified once reviewed.",
+        referralApplied,
       });
     } catch (error) {
       if (error instanceof z.ZodError) {
@@ -13175,6 +13180,8 @@ export async function registerRoutes(
       }
 
       const updated = await storage.updateVendorProduct(req.params.id, { ...validated, ...stripeUpdates });
+      // Business referral cash (2026-10-24): this can complete a referred business. Fire and forget.
+      if (updated?.status === "live") checkBusinessReferralSoon(updated.businessId);
       res.json({ product: updated });
     } catch (error) {
       if (error instanceof z.ZodError) {
@@ -13283,6 +13290,8 @@ export async function registerRoutes(
         stripePriceId: provisionResult.stripePriceId,
       });
 
+      // Business referral cash (2026-10-24): this can complete a referred business. Fire and forget.
+      checkBusinessReferralSoon(updated?.businessId);
       res.json({ product: updated, message: "Product is now live" });
     } catch (error) {
       console.error("Go live vendor product error:", error);
@@ -13860,6 +13869,8 @@ export async function registerRoutes(
       }
 
       const updated = await storage.updateVendorService(req.params.id, { ...validated, ...stripeUpdates });
+      // Business referral cash (2026-10-24): this can complete a referred business. Fire and forget.
+      if (updated?.status === "live") checkBusinessReferralSoon(updated.businessId);
       res.json({ service: updated });
     } catch (error) {
       if (error instanceof z.ZodError) {
@@ -14593,6 +14604,8 @@ export async function registerRoutes(
         stripePriceId: provisionResult.stripePriceId,
       });
 
+      // Business referral cash (2026-10-24): this can complete a referred business. Fire and forget.
+      checkBusinessReferralSoon(updated?.businessId);
       res.json({ service: updated, message: "Service is now live" });
     } catch (error) {
       console.error("Go live vendor service error:", error);
@@ -15944,6 +15957,8 @@ export async function registerRoutes(
       }
 
       const updated = await storage.updateStaffService(req.params.id, { status: 'live' });
+      // Business referral cash (2026-10-24): this can complete a referred business. Fire and forget.
+      checkBusinessReferralSoon(service.businessId);
       res.json({ service: updated, message: "Service is now live" });
     } catch (error) {
       console.error("Go live staff service error:", error);
@@ -17196,6 +17211,19 @@ export async function registerRoutes(
       }
       console.error("Apply referral error:", error);
       res.status(500).json({ error: "Failed to apply referral code" });
+    }
+  });
+
+  // Business referral cash (2026-10-24): the businesses this user referred, their status and the $25 for each.
+  app.get("/api/referral/business", async (req, res) => {
+    const userId = referralUserId(req, res);
+    if (!userId) return;
+    try {
+      const data = await listBusinessReferralsFor(userId);
+      res.json({ success: true, rewardCents: 2500, ...data });
+    } catch (error) {
+      console.error("Get business referrals error:", error);
+      res.status(500).json({ error: "Failed to load business referrals" });
     }
   });
 
@@ -18483,6 +18511,8 @@ export async function registerRoutes(
       
       console.log(`[Admin] Approved vendor: ${business.name} by ${adminUser.email}`);
 
+      // Business referral cash (2026-10-24): this can complete a referred business. Fire and forget.
+      checkBusinessReferralSoon(business.id);
       res.json({ success: true, business: updated });
     } catch (error) {
       console.error("Approve vendor error:", error);
@@ -21794,6 +21824,8 @@ export async function registerRoutes(
       }
 
       console.log(`[Admin] Approved business: ${business.name} by ${adminUser.email}`);
+      // Business referral cash (2026-10-24): this can complete a referred business. Fire and forget.
+      checkBusinessReferralSoon(business.id);
       res.json({ success: true, business: updated });
     } catch (error) {
       console.error("Approve business error:", error);
@@ -22833,6 +22865,8 @@ export async function registerRoutes(
       console.log('[POST /api/feed] persisting', { displayLayout: insertData.displayLayout, feedSurface: insertData.feedSurface });
       
       const post = await storage.createFeedPost(insertData as any);
+      // Business referral cash (2026-10-24): a first post can complete a referred business. Fire and forget.
+      checkBusinessReferralsForOwnerSoon(post.authorId);
       console.log(`[POST /api/feed] CREATED POST ID=${post.id}, feedSurface=${post.feedSurface}, mediaType=${post.mediaType}`);
 
       // Build canonical author object

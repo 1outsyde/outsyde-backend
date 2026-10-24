@@ -40,7 +40,7 @@ const ymd = (iso: string) => iso.slice(0, 10);
 
   // Children first. tickets before event_payouts (tickets.payout_id) and before ticket_order_items.
   const cleanup = async () => {
-    for (const t of ["event_payout_recoveries", "tickets", "ticket_order_items", "ticket_orders", "ticket_types", "event_payouts", "events",
+    for (const t of ["referral_payouts", "business_referrals", "event_payout_recoveries", "tickets", "ticket_order_items", "ticket_orders", "ticket_types", "event_payouts", "events",
       "booking_payout_issues", "appointments", "shoot_bookings", "orders", "refund_requests", "influencer_earning_ledger",
       "influencer_profiles", "photographers", "businesses", "users"]) {
       await q(`DELETE FROM ${t} WHERE id LIKE 'bp-test-%'`);
@@ -194,6 +194,28 @@ const ymd = (iso: string) => iso.slice(0, 10);
       await seedEvent({ status: "paused", starts: ago(10), ends: ago(9) });
       await ins("event_payouts", { id: "bp-test-payout", event_id: "bp-test-event", gross_cents: 600, amount_cents: 600, status: "pending", last_error: "Insufficient funds in Stripe account" });
     }, { eventPayoutsWaitingBalance: 1 });
+    // Business referral cash (072): $25 owed to a referrer stays on the platform until it is sent.
+    const seedReferral = async () => {
+      await baseParents();
+      await ins("users", { id: "bp-test-referrer", username: "bp-test-referrer" });
+      await ins("business_referrals", { id: "bp-test-bref", referrer_user_id: "bp-test-referrer", business_id: "bp-test-biz", referred_owner_user_id: "bp-test-user", code: "BPTEST", status: "qualified", expires_at: ahead(60), qualified_at: ago(1) });
+    };
+    for (const st of ["pending", "held", "review"]) {
+      await expectPart(`referral payout ${st} is held`, "referralPayoutsOpen", 2500, async () => {
+        await seedReferral();
+        await ins("referral_payouts", { id: "bp-test-rpay", business_referral_id: "bp-test-bref", recipient_user_id: "bp-test-referrer", amount_cents: 2500, status: st, payable_after: ago(1) });
+      });
+    }
+    for (const st of ["paid", "cancelled"]) {
+      await expectPart(`referral payout ${st} is not held`, null, 0, async () => {
+        await seedReferral();
+        await ins("referral_payouts", { id: "bp-test-rpay", business_referral_id: "bp-test-bref", recipient_user_id: "bp-test-referrer", amount_cents: 2500, status: st, payable_after: ago(1) });
+      });
+    }
+    await expectPart("referral payout waiting on balance gates the bank payout", "referralPayoutsOpen", 2500, async () => {
+      await seedReferral();
+      await ins("referral_payouts", { id: "bp-test-rpay", business_referral_id: "bp-test-bref", recipient_user_id: "bp-test-referrer", amount_cents: 2500, status: "pending", payable_after: ago(1), last_error: "Insufficient funds in Stripe account" });
+    }, { referralPayoutsWaitingBalance: 1 });
     await expectPart("ticket order refunding", "ticketRefundsSending", 300, async () => {
       await seedEvent({ status: "paused", starts: ahead(10), ends: ahead(11) });
       await seedOrder({ status: "refunding", subtotal_cents: 1000, total_cents: 1000, refund_reason: "buyer", refund_amount_cents: 300 });
@@ -359,7 +381,7 @@ const ymd = (iso: string) => iso.slice(0, 10);
 
     // Preconditions: the job tests read the real held total, so nothing may gate them on this local DB.
     const g0 = (await computeHeld()).gates;
-    if (g0.recentTopups || g0.openIssueRows || g0.eventPayoutsWaitingBalance) throw new Error(`local DB has gate rows (${JSON.stringify(g0)}): clean them first`);
+    if (g0.recentTopups || g0.openIssueRows || g0.eventPayoutsWaitingBalance || g0.referralPayoutsWaitingBalance) throw new Error(`local DB has gate rows (${JSON.stringify(g0)}): clean them first`);
     if (Number((await q(`SELECT count(*)::int AS n FROM bank_payouts WHERE status IN ('pending','sent') AND payout_date < '2090-01-01'`))[0].n)) throw new Error("local DB has open bank_payouts rows outside the test range");
 
     // ── nyDayAndHour ──

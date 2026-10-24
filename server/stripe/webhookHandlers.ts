@@ -2306,6 +2306,14 @@ export class WebhookHandlers {
       if (!vendorSub) return;
       const previousPastDueSince = pastDueSinceOf(vendorSub);
 
+      // Business referral cash (2026-10-24): remember the plan's first real charge ($0 invoices never count).
+      try {
+        const { recordFirstPlanPayment } = await import('../referrals/businessReferrals');
+        await recordFirstPlanPayment(vendorSub.id, invoice);
+      } catch (err) {
+        console.error('[Webhook] invoice.paid first payment record failed:', err);
+      }
+
       const stripe = await getUncachableStripeClient();
       const sub: any = await stripe.subscriptions.retrieve(stripeSubscriptionId);
       const period = getSubscriptionPeriod(sub);
@@ -2326,6 +2334,11 @@ export class WebhookHandlers {
       }
 
       await storage.createBenefitAllowances(vendorSub.id);
+
+      if (vendorSub.businessId) {
+        const { checkBusinessReferralSoon } = await import('../referrals/businessReferrals');
+        checkBusinessReferralSoon(vendorSub.businessId);
+      }
 
       const ctx = await loadNoticeContext(vendorSub);
       const amountCents = typeof invoice.amount_paid === 'number' ? invoice.amount_paid : null;
@@ -2499,6 +2512,8 @@ export class WebhookHandlers {
 
         if (isOnboardingComplete && !wasAlreadyComplete) {
           console.log(`[Stripe] Business ${business.id} (${business.name}) completed Stripe onboarding`);
+          // Business referral cash (2026-10-24): payouts set up can complete a referred business. Fire and forget, never throws.
+          void import('../referrals/businessReferrals').then((m) => m.checkBusinessReferralSoon(business.id)).catch(() => {});
 
           // Get vendor user and send notification
           const vendorUser = await storage.getUserByBusinessOwnerId(business.id);

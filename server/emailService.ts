@@ -2262,6 +2262,49 @@ export async function sendReferralRewardEmail(params: {
   await sendBrandedEmail(params.to, subject, html, { kind: 'account', label: 'Referral reward' });
 }
 
+/**
+ * Business referral cash (2026-10-24): to the referrer when the business qualifies, when they need to set up
+ * payouts to receive it, and when it is sent. Copy: real punctuation, no dashes, never a fee percentage.
+ */
+export async function sendBusinessReferralEmail(params: {
+  to: string;
+  firstName: string | null;
+  kind: 'qualified' | 'setup_payouts' | 'paid';
+  payableDate: string | null;
+}): Promise<void> {
+  const copy = businessReferralCopy(params.kind, params.payableDate);
+  const hi = params.firstName ? `Hi ${escapeHtml(params.firstName)},` : 'Hi,';
+  const html = wrapEmail(`
+    ${emailHeader(escapeHtml(copy.title), 'Outsyde referrals')}
+    <tr><td style="background:#1A1A1A;padding:8px 32px 24px;">
+      <p style="color:#FFFFFF;font-size:15px;line-height:1.6;margin:0 0 12px;">${hi}</p>
+      <p style="color:#FFFFFF;font-size:15px;line-height:1.6;margin:0;">${escapeHtml(copy.body)}</p>
+    </td></tr>
+    ${emailFooter()}
+  `);
+  await sendBrandedEmail(params.to, copy.title, html, { kind: 'account', label: 'Business referral reward' });
+}
+
+/** Shared copy for the business referral email, push and in app notice. */
+export function businessReferralCopy(kind: 'qualified' | 'setup_payouts' | 'paid', payableDate: string | null): { title: string; body: string } {
+  if (kind === 'qualified') {
+    return {
+      title: 'Your business referral qualified',
+      body: `A business you referred is now live on Outsyde, so you earned $25. It will be sent to your payouts account${payableDate ? ` on ${payableDate}` : ' in 7 days'}.`,
+    };
+  }
+  if (kind === 'setup_payouts') {
+    return {
+      title: 'Set up payouts to get your $25',
+      body: 'Your $25 business referral reward is ready, but you don\'t have a payouts account yet. Open Outsyde and set up payouts, and we will send it as soon as you are done.',
+    };
+  }
+  return {
+    title: '$25 is on its way',
+    body: 'We sent your $25 business referral reward to your payouts account. Thanks for bringing a business to Outsyde.',
+  };
+}
+
 // ─── Event tickets (Events & Ticketing Phase 2 PR 4) ─────────────────────────
 // Copy rules: real punctuation, no dashes, and the service fee is named but never given as a percentage.
 // Every value from the database is escaped. These throw on a send failure; callers catch.

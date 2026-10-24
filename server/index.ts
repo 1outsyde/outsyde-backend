@@ -32,6 +32,7 @@ import { initializePushService, sendCartReminderNotifications, isPushConfigured 
 import { startDraftCleanupJob } from "./bookingStateMachine";
 import { startReminderJob } from "./reminderService";
 import { startPointsReleaseJob } from "./loyaltyLedger";
+import { startBusinessReferralSweep } from "./referrals/businessReferrals";
 import { startPayoutRetryJob } from "./payouts";
 import { processScheduledDeletions } from "./services/accountDeletionService";
 import { cleanupExpiredStories } from "./services/stories";
@@ -351,6 +352,8 @@ if (process.env.NODE_ENV === 'production') {
 
   // Release pending loyalty points 3 days after a booking that still stands (runs hourly)
   startPointsReleaseJob(60 * 60 * 1000);
+  // Business referral cash: re-check pending referred businesses hourly and expire those past 90 days.
+  startBusinessReferralSweep(60 * 60 * 1000);
   // Booking payouts Stripe refused (e.g. balance too low): retried hourly, admin alerted.
   startPayoutRetryJob(60 * 60 * 1000);
   console.log("Loyalty points release job started");

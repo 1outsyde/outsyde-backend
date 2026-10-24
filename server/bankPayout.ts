@@ -28,6 +28,8 @@ export type HeldBreakdown = {
   ticketExposureStarted30d: number;
   influencerOwed: number;
   bookingRefundCover: number;
+  /** Business referral cash (072) owed to referrers and not sent yet: pending, held or review. */
+  referralPayoutsOpen: number;
 };
 
 /** Counts that block or flag the payout; not money, so never part of total. */
@@ -35,6 +37,7 @@ export type Gates = {
   recentTopups: number;
   openIssueRows: number;
   eventPayoutsWaitingBalance: number;
+  referralPayoutsWaitingBalance: number;
 };
 
 export async function computeHeld(): Promise<{ breakdown: HeldBreakdown; total: number; gates: Gates }> {
@@ -62,7 +65,9 @@ SELECT
  +(SELECT COALESCE(SUM(GREATEST(c + ROUND(c*0.08) - COALESCE(discount_amount_cents,0) - COALESCE(refund_amount,0),0)),0) FROM (SELECT COALESCE(deposit_amount_cents,total_price) c, discount_amount_cents, refund_amount FROM shoot_bookings, nyd WHERE status IN ('confirmed','completed','no_show') AND stripe_payment_intent_id IS NOT NULL AND (created_at > (now() AT TIME ZONE 'UTC') - interval '30 days' OR (status='confirmed' AND date >= nyd.d))) s))::bigint AS booking_refund_cover,
  (SELECT count(*) FROM booking_payout_issues WHERE topup_requested_at > now() - interval '7 days')::int AS recent_topups,
  (SELECT count(*) FROM booking_payout_issues WHERE status='open')::int AS open_issue_rows,
- (SELECT count(*) FROM event_payouts WHERE status='pending' AND last_error ILIKE '%insufficient%')::int AS event_payouts_waiting_balance
+ (SELECT count(*) FROM event_payouts WHERE status='pending' AND last_error ILIKE '%insufficient%')::int AS event_payouts_waiting_balance,
+ (SELECT COALESCE(SUM(amount_cents),0) FROM referral_payouts WHERE status IN ('pending','held','review'))::bigint AS referral_payouts_open,
+ (SELECT count(*) FROM referral_payouts WHERE status='pending' AND last_error ILIKE '%insufficient%')::int AS referral_payouts_waiting_balance
 `));
   const n = (v: unknown) => Number(v ?? 0);
   const breakdown: HeldBreakdown = {
@@ -78,11 +83,13 @@ SELECT
     ticketExposureStarted30d: n(r.ticket_exposure_started_30d),
     influencerOwed: n(r.influencer_owed),
     bookingRefundCover: n(r.booking_refund_cover),
+    referralPayoutsOpen: n(r.referral_payouts_open),
   };
   const gates: Gates = {
     recentTopups: n(r.recent_topups),
     openIssueRows: n(r.open_issue_rows),
     eventPayoutsWaitingBalance: n(r.event_payouts_waiting_balance),
+    referralPayoutsWaitingBalance: n(r.referral_payouts_waiting_balance),
   };
   const total = Object.values(breakdown).reduce((a, b) => a + b, 0);
   return { breakdown, total, gates };
@@ -418,6 +425,7 @@ export async function runBankPayoutJob(now: Date = new Date(), s?: BankStripe): 
     if (held.gates.recentTopups > 0) return await skip("recent_topup", { held: held.total, breakdown: held.breakdown });
     if (held.gates.openIssueRows > 0) return await skip("open_booking_payout_issues", { held: held.total, breakdown: held.breakdown });
     if (held.gates.eventPayoutsWaitingBalance > 0) return await skip("event_payout_waiting_balance", { held: held.total, breakdown: held.breakdown });
+    if (held.gates.referralPayoutsWaitingBalance > 0) return await skip("referral_payout_waiting_balance", { held: held.total, breakdown: held.breakdown });
 
     const bal = await st.getAvailableUsdBalance(STRIPE_CALL_BOUND);
     const available = Number(bal.usdCents);
