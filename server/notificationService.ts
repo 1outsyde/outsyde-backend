@@ -1,6 +1,6 @@
 import { storage } from './storage';
 import { sendPushNotification, isPushConfigured } from './pushService';
-import { isEmailConfigured, sendReferralRewardEmail, sendNewConsumerSignupEmail, sendNewVendorApplicationEmail, sendNewPhotographerApplicationEmail, sendNewInfluencerApplicationEmail, sendVendorApprovalEmail, sendVendorRejectionEmail, sendCancellationAdminEmail } from './emailService';
+import { isEmailConfigured, sendReferralRewardEmail, sendBusinessReferralEmail, businessReferralCopy, sendNewConsumerSignupEmail, sendNewVendorApplicationEmail, sendNewPhotographerApplicationEmail, sendNewInfluencerApplicationEmail, sendVendorApprovalEmail, sendVendorRejectionEmail, sendCancellationAdminEmail } from './emailService';
 import { sendExpoPush } from './expoPushService';
 import type { InsertNotification } from '@shared/schema';
 
@@ -29,7 +29,8 @@ export type NotificationType =
   | 'staff_onboarding_complete'
   | 'staff_bookable'
   | 'new_consumer_signup'
-  | 'referral_reward';
+  | 'referral_reward'
+  | 'business_referral_reward';
 
 interface NotificationData {
   userId: string;
@@ -107,12 +108,43 @@ function getNotificationUrl(type: NotificationType, referenceType?: string, refe
       return referenceId ? `/admin/users/${referenceId}` : '/admin/users';
     case 'referral_reward':
       return '/account/points';
+    case 'business_referral_reward':
+      return '/account/points';
     default:
       return '/';
   }
 }
 
 export const NotificationTriggers = {
+  /**
+   * Business referral cash (2026-10-24), to the referrer: qualified, set up payouts, or sent. In app + web push,
+   * app push, email; each channel best effort, nothing here throws.
+   */
+  async businessReferralReward(params: { kind: 'qualified' | 'setup_payouts' | 'paid'; referenceId: string; userId: string; payableAfter: Date | string | null }): Promise<void> {
+    const date = params.payableAfter
+      ? new Date(params.payableAfter).toLocaleDateString('en-US', { month: 'long', day: 'numeric', timeZone: 'America/New_York' })
+      : null;
+    const { title, body } = businessReferralCopy(params.kind, date);
+    try {
+      await sendNotification({ userId: params.userId, type: 'business_referral_reward', title, message: body, referenceType: 'business_referral', referenceId: params.referenceId, metadata: { kind: params.kind } });
+    } catch (err) {
+      console.error(`[BusinessReferral] in-app failed for ${params.userId}:`, err);
+    }
+    try {
+      await sendExpoPush({ userId: params.userId, title, body, data: { type: 'business_referral_reward', kind: params.kind, referenceId: params.referenceId } });
+    } catch (err) {
+      console.error(`[BusinessReferral] app push failed for ${params.userId}:`, err);
+    }
+    try {
+      const user = await storage.getUser(params.userId);
+      if (user?.email && (await isEmailConfigured())) {
+        await sendBusinessReferralEmail({ to: user.email, firstName: user.firstName ?? null, kind: params.kind, payableDate: date });
+      }
+    } catch (err) {
+      console.error(`[BusinessReferral] email failed for ${params.userId}:`, err);
+    }
+  },
+
   /**
    * Friend referral reward (2026-10-23): both people, once, after the bonus points are released.
    * In app + web push, app push, email. Each channel is best effort; nothing here throws.

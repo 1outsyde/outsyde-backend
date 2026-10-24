@@ -2722,6 +2722,9 @@ export const vendorSignupSchema = z.object({
   // App only: the app uploads the logo right after signup, then triggers the admin email
   // itself via POST /api/admin/notifications/business-application so the logo is included.
   deferAdminNotification: z.boolean().optional(),
+  // Optional business referral code (2026-10-24). Checked by applyBusinessReferralAtSignup, never here, so a
+  // bad value can never fail the signup.
+  referralCode: z.unknown().optional(),
   acceptedSubscription: z.boolean().refine((val) => val === true, {
     message: "You must accept the subscription terms",
   }),

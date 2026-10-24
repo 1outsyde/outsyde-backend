@@ -172,5 +172,8 @@ export async function activatePaidSubscription(input: ActivationInput): Promise<
     }
   }
 
+  // Business referral cash (2026-10-24): an active paid plan can complete a referred business. Fire and forget.
+  void import("../referrals/businessReferrals").then((m) => m.checkBusinessReferralSoon(businessId)).catch(() => {});
+
   return { subscriptionRowId, status, announced };
 }
