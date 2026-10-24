@@ -170,6 +170,7 @@ import {
   transitionShootBookingState,
 } from "./bookingStateMachine";
 import { isValidTimeZone } from "./manualRequests";
+import { applyReferralAtSignup } from "./referralSignup";
 import { filterProviderBookings } from "./providerBookingLists";
 import { settleAppointmentBooking, settleShootBooking } from "./bookingSettlement";
 import { requirePlatformAdmin, isPlatformAdminUser } from "./middleware/requirePlatformAdmin";
@@ -183,6 +184,7 @@ import {
   adjustPoints,
   REDEMPTION_TIERS,
   REFERRAL_BONUS_POINTS,
+  REFERRAL_MIN_BASE_CENTS,
   bookingMaxDiscountCents,
   getPromoCodeRow,
   getPromoCodeRowByCode,
@@ -955,6 +957,9 @@ export async function registerRoutes(
         }
       }
 
+      // Friend referral code: applied after the account exists, never blocks signup.
+      const referralApplied = await applyReferralAtSignup(user.id, data.referralCode);
+
       if (req.session) {
         req.session.userId = user.id;
         req.session.isVendor = false;
@@ -996,7 +1001,7 @@ export async function registerRoutes(
 
       // User sees their own data on signup (includes DOB, excludes ethnicity)
       const safeUser = sanitizeUserForResponse(user, { includeOwnData: true });
-      res.json({ success: true, user: safeUser, accessToken: signupAccessToken, refreshToken: signupRefreshToken, expiresIn: ACCESS_TOKEN_EXPIRY_SECONDS });
+      res.json({ success: true, user: safeUser, accessToken: signupAccessToken, refreshToken: signupRefreshToken, expiresIn: ACCESS_TOKEN_EXPIRY_SECONDS, referralApplied });
     } catch (error) {
       if (error instanceof z.ZodError) {
         return res
@@ -1581,6 +1586,7 @@ export async function registerRoutes(
         googleSignupToken,
         address, aptUnit, city, state, zipCode, country,
         billingSameAsHome = true, billingStreet, billingAptUnit, billingCity, billingState, billingZip, billingCountry,
+        referralCode,
       } = req.body;
 
       if (!googleSub || !email) {
@@ -1663,6 +1669,9 @@ export async function registerRoutes(
         return res.status(500).json({ success: false, message: "Failed to create user" });
       }
 
+      // Friend referral code: applied after the account exists, never blocks signup.
+      const referralApplied = await applyReferralAtSignup(fullUser.id, referralCode);
+
       // Issue tokens
       const tokenPayload: TokenPayload = {
         userId: fullUser.id,
@@ -1700,6 +1709,7 @@ export async function registerRoutes(
         expiresIn: ACCESS_TOKEN_EXPIRY_SECONDS,
         isNewUser: false,
         requiresUsername: false,
+        referralApplied,
       });
     } catch (error) {
       console.error("OAuth complete signup error:", error);
@@ -1790,7 +1800,7 @@ export async function registerRoutes(
   // Apple Sign-In complete signup — create user with chosen username
   app.post("/api/auth/oauth/apple/complete-signup", authRateLimiter, async (req, res) => {
     try {
-      const { appleId, email, username, fullName, firstName, lastName } = req.body;
+      const { appleId, email, username, fullName, firstName, lastName, referralCode } = req.body;
 
       if (!appleId) {
         return res.status(400).json({ success: false, message: "appleId is required" });
@@ -1823,6 +1833,9 @@ export async function registerRoutes(
       const fullUser = await storage.getUser(user.id);
       if (!fullUser) return res.status(500).json({ success: false, message: "Failed to create user" });
 
+      // Friend referral code: applied after the account exists, never blocks signup.
+      const referralApplied = await applyReferralAtSignup(fullUser.id, referralCode);
+
       const tokenPayload: TokenPayload = {
         userId: fullUser.id,
         isVendor: false,
@@ -1845,7 +1858,7 @@ export async function registerRoutes(
       }).catch(err => console.error('[apple-signup] admin notification failed:', err));
 
       const safeUser = sanitizeUserForResponse(fullUser, { includeOwnData: true });
-      res.json({ success: true, user: safeUser, accessToken, refreshToken, expiresIn: ACCESS_TOKEN_EXPIRY_SECONDS, isNewUser: false });
+      res.json({ success: true, user: safeUser, accessToken, refreshToken, expiresIn: ACCESS_TOKEN_EXPIRY_SECONDS, isNewUser: false, referralApplied });
     } catch (error) {
       console.error("Apple complete signup error:", error);
       res.status(500).json({ success: false, message: "Failed to complete Apple signup" });
@@ -17096,13 +17109,25 @@ export async function registerRoutes(
   // =========================
   // REFERRAL SYSTEM
   // =========================
+  // Friend referrals (rules 2026-10-23): 2,500 points each when the friend's first $10+ purchase is
+  // final. App and site clients sign in with a Bearer token, so these routes read it like
+  // /api/points/balance does; a bad token answers TOKEN_INVALID so the app refreshes and retries.
+  const referralUserId = (req: ExpressRequest, res: ExpressResponse): string | null => {
+    const userId = getUserIdFromRequest(req) ?? req.session?.userId ?? null;
+    if (!userId) {
+      const sentBearer = (req.headers.authorization || "").startsWith("Bearer ");
+      res.status(401).json(sentBearer ? { error: "Not authenticated", code: "TOKEN_INVALID" } : { error: "Not authenticated" });
+      return null;
+    }
+    return userId;
+  };
+  const referralLinkFor = (code: string) =>
+    `${(process.env.FRONTEND_URL || "https://www.goutsyde.com").replace(/\/+$/, "")}/r/${encodeURIComponent(code)}`;
 
   // Get user's referral code (generates one if not exists)
   app.get("/api/referral/code", async (req, res) => {
-    const userId = req.session?.userId;
-    if (!userId) {
-      return res.status(401).json({ error: "Not authenticated" });
-    }
+    const userId = referralUserId(req, res);
+    if (!userId) return;
 
     try {
       const code = await storage.generateReferralCode(userId);
@@ -17111,7 +17136,7 @@ export async function registerRoutes(
       
       res.json({
         referralCode: code,
-        referralLink: `${req.protocol}://${req.get('host')}/signup?ref=${code}`,
+        referralLink: referralLinkFor(code),
         bonusForReferrer: REFERRAL_BONUS_POINTS, // awarded when the friend's first purchase is final
         bonusForNewUser: REFERRAL_BONUS_POINTS, // awarded to the friend at the same time
         referredBy: user?.referredBy || null,
@@ -17119,9 +17144,11 @@ export async function registerRoutes(
           totalReferrals: stats.totalReferrals,
           completedReferrals: stats.completedReferrals,
           pendingReferrals: stats.pendingReferrals,
+          qualifyingReferrals: stats.qualifyingReferrals,
           totalPointsEarned: stats.totalPointsEarned,
         },
-        note: `You and your friend each get ${REFERRAL_BONUS_POINTS} points when your friend makes their first purchase.`,
+        minimumPurchaseCents: REFERRAL_MIN_BASE_CENTS,
+        note: `You and your friend each get ${REFERRAL_BONUS_POINTS.toLocaleString("en-US")} points when your friend makes their first purchase of $${REFERRAL_MIN_BASE_CENTS / 100} or more.`,
       });
     } catch (error) {
       console.error("Get referral code error:", error);
@@ -17131,10 +17158,8 @@ export async function registerRoutes(
 
   // Apply a referral code (for new users)
   app.post("/api/referral/apply", async (req, res) => {
-    const userId = req.session?.userId;
-    if (!userId) {
-      return res.status(401).json({ error: "Not authenticated" });
-    }
+    const userId = referralUserId(req, res);
+    if (!userId) return;
 
     try {
       const schema = z.object({
@@ -17152,7 +17177,7 @@ export async function registerRoutes(
 
       res.json({
         success: true,
-        message: `Referral applied. You and your friend will each get ${REFERRAL_BONUS_POINTS} points after your first purchase.`,
+        message: `Referral applied. You and your friend will each get ${REFERRAL_BONUS_POINTS.toLocaleString("en-US")} points after your first purchase of $${REFERRAL_MIN_BASE_CENTS / 100} or more.`,
         pointsEarned: 0,
         newBalance,
         referrerBonusPending: true,
@@ -17168,10 +17193,8 @@ export async function registerRoutes(
 
   // Get referral stats for the current user
   app.get("/api/referral/stats", async (req, res) => {
-    const userId = req.session?.userId;
-    if (!userId) {
-      return res.status(401).json({ error: "Not authenticated" });
-    }
+    const userId = referralUserId(req, res);
+    if (!userId) return;
 
     try {
       const stats = await storage.getReferralStats(userId);
