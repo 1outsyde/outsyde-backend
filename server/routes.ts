@@ -106,6 +106,7 @@ import { eq, desc, sql, gte, lte, or, isNull, gt, inArray, and } from "drizzle-o
 import { validateOptionsPayload, planVariantSync, withEffectivePrice, summarizeVariants, type VariantSummary } from "./productOptions";
 import { z } from "zod";
 import { resolveSearchArea, cachedCityGeocode, normalizeState } from "./search/areaSearch";
+import { refreshCityPoint } from "./geo/cityPoint";
 import {
   hashPassword,
   verifyPassword,
@@ -12588,6 +12589,13 @@ export async function registerRoutes(
 
       if (Object.keys(updates).length === 0) {
         return res.json({ business });
+      }
+
+      // City changed → fresh city-level map point (city search measures distance from it). 2026-10-23.
+      const cityPoint = await refreshCityPoint(business, updates);
+      if (cityPoint) {
+        updates.latitude = cityPoint.latitude;
+        updates.longitude = cityPoint.longitude;
       }
 
       const updated = await storage.updateBusiness(business.id, updates);
