@@ -17412,7 +17412,8 @@ export async function registerRoutes(
     }
   });
 
-  app.post("/api/push/send-cart-reminders", async (req, res) => {
+  // Admin only (was open to anyone). The 30 minute job in index.ts calls sendCartReminderNotifications directly.
+  app.post("/api/push/send-cart-reminders", requirePlatformAdmin, async (req, res) => {
     try {
       const sentCount = await sendCartReminderNotifications();
       res.json({ success: true, sentCount });
