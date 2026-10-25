@@ -23,6 +23,8 @@
  *      (user_payout_accounts). None ready -> 'held', checked hourly, the referrer is told once how to set up payouts.
  *      Not enough platform balance -> stays 'pending', not counted as a try, admin emailed at most daily.
  *      Other errors -> backoff 10, 20, 40, 60 minutes; after 5 tries 'review' + one admin email.
+ *      An admin can pause a payout (held, hold_reason 'admin_paused'): never claimed until released
+ *      (referrals/adminReferrals.ts, Step 5b).
  *
  * Copy rules: real punctuation, no dashes, never a fee percentage.
  * Why raw SQL in single statements: the neon-http driver has no transactions.
@@ -352,6 +354,7 @@ export async function sendReferralPayout(payoutId: string, s?: ReferralStripe): 
            next_attempt_at = now() + make_interval(mins => ${REFERRAL_PAYOUT_LOCK_MINUTES}::int), updated_at = now()
     WHERE id = ${payoutId} AND status IN ('pending', 'held') AND payable_after <= now()
       AND (next_attempt_at IS NULL OR next_attempt_at <= now())
+      AND hold_reason IS DISTINCT FROM 'admin_paused'
     RETURNING id, business_referral_id, recipient_user_id, amount_cents, attempts, ${OWNER_TAG} AS claim_tag`);
   if (!p) return "not_due";
   let tag = String(p.claim_tag);
@@ -462,6 +465,7 @@ export async function runReferralPayoutJob(s?: ReferralStripe): Promise<{ paid: 
   const due = await rows<{ id: string }>(sql`
     SELECT id FROM referral_payouts
     WHERE status IN ('pending', 'held') AND payable_after <= now() AND (next_attempt_at IS NULL OR next_attempt_at <= now())
+      AND hold_reason IS DISTINCT FROM 'admin_paused'
     ORDER BY updated_at LIMIT ${REFERRAL_PAYOUT_JOB_LIMIT}`);
   for (const d of due) {
     try {
@@ -493,16 +497,18 @@ export async function listBusinessReferralsFor(userId: string): Promise<{
     LEFT JOIN referral_payouts p ON p.business_referral_id = r.id
     WHERE r.referrer_user_id = ${userId}
     ORDER BY r.created_at DESC LIMIT 100`);
+  // A payout an admin paused shows to the referrer as "we're checking" (review), never as a setup prompt.
+  const paused = (x: any) => x.payout_status === "held" && x.hold_reason === "admin_paused";
   const referrals = list.map((x) => ({
     businessName: x.business_name,
     status: x.status,
     qualifiedAt: x.qualified_at ? new Date(x.qualified_at).toISOString() : null,
     expiresAt: new Date(x.expires_at).toISOString(),
     payout: x.payout_status ? {
-      status: x.payout_status, amountCents: Number(x.amount_cents),
+      status: paused(x) ? "review" : x.payout_status, amountCents: Number(x.amount_cents),
       payableAfter: new Date(x.payable_after).toISOString(),
       paidAt: x.paid_at ? new Date(x.paid_at).toISOString() : null,
-      holdReason: x.hold_reason ?? null,
+      holdReason: paused(x) ? null : x.hold_reason ?? null,
     } : null,
   }));
   const totals = {

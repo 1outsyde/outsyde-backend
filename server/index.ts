@@ -13,6 +13,7 @@ import accountSetupRouter, { accountSetupAdminRouter } from "./routes/accountSet
 import { startAccountSetupReminderJob } from "./accountSetup/reminders";
 import { emailAdminRouter, broadcastPublicRouter } from "./routes/emailAdmin";
 import { adminEventsRouter } from "./events/adminEventsRouter";
+import { adminReferralsRouter } from "./referrals/adminReferralsRouter";
 import { resumeBroadcasts } from "./broadcasts/broadcasts";
 import vendorAnalyticsRouter from "./routes/vendorAnalytics";
 import eventsRouter from "./events/eventsRouter";
@@ -385,6 +386,7 @@ if (process.env.NODE_ENV === 'production') {
   // Admin Events money page: list, detail, and actions (retry a payout in review, resolve an owed recovery,
   // email the host), each action one SQL statement with its audit_logs row (all requirePlatformAdmin)
   app.use('/api/admin/events', adminEventsRouter);
+  app.use('/api/admin/referrals', adminReferralsRouter);
   app.use('/api/broadcasts', broadcastPublicRouter);
   // Finish any broadcast a restart interrupted (never re-sends an email that may have gone out)
   resumeBroadcasts().catch((err) => console.error("[Broadcasts] resume failed:", err));

@@ -191,6 +191,8 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
       const gap = (await q(`SELECT (p.payable_after - r.qualified_at) AS d FROM referral_payouts p JOIN business_referrals r ON r.id=p.business_referral_id WHERE p.id=$1`, [pay?.id]))[0]?.d;
       assert(res.includes("qualified") && p.length === 1 && pay.amount_cents === 2500 && pay.status === "pending" && pay.recipient_user_id === ref && gap?.days === 7,
         "four checks at once: one payout of $25 to the referrer, payable 7 days after qualifying", { res, p, gap });
+      // The notice is sent in the background: wait for it (up to 3s), then make sure no second one follows.
+      for (let i = 0; i < 30 && (await notes(ref, "qualified")) === 0; i++) await sleep(100);
       await sleep(300);
       assert((await notes(ref, "qualified")) === 1, "referrer told once that it qualified");
     }
