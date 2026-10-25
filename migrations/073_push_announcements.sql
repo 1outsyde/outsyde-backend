@@ -58,3 +58,7 @@ CREATE TABLE IF NOT EXISTS push_news_optouts (
 
 -- Added while the tables were still empty (same build, before merge):
 ALTER TABLE push_log ADD COLUMN IF NOT EXISTS token_hash text;
+ALTER TABLE push_sends ADD COLUMN IF NOT EXISTS heartbeat_at timestamptz;
+-- One Activity row per account per push send, even if two server instances overlap during a deploy.
+-- Partial: only rows written by admin push sends (reference_type 'push_send'), no other notification.
+CREATE UNIQUE INDEX IF NOT EXISTS notifications_push_send_uq ON notifications (user_id, reference_id) WHERE reference_type = 'push_send';

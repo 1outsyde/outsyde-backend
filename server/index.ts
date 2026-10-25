@@ -16,7 +16,7 @@ import { adminEventsRouter } from "./events/adminEventsRouter";
 import { adminReferralsRouter } from "./referrals/adminReferralsRouter";
 import { resumeBroadcasts } from "./broadcasts/broadcasts";
 import { pushAdminRouter, pushPreferencesRouter } from "./routes/pushAdmin";
-import { resumePushSends, startPushReceiptJob } from "./push/pushBroadcasts";
+import { resumePushSends, startPushReceiptJob, startPushWatchdog } from "./push/pushBroadcasts";
 import vendorAnalyticsRouter from "./routes/vendorAnalytics";
 import eventsRouter from "./events/eventsRouter";
 import hostAgreementRouter from "./events/hostAgreement";
@@ -393,10 +393,12 @@ if (process.env.NODE_ENV === 'production') {
   // Finish any broadcast a restart interrupted (never re-sends an email that may have gone out)
   resumeBroadcasts().catch((err) => console.error("[Broadcasts] resume failed:", err));
   // Admin push announcements (migration 073): admin routes (all requirePlatformAdmin) and the app's
-  // "Outsyde news and offers" switch. Finish any send a restart interrupted, then read Expo receipts every 5 min.
+  // "Outsyde news and offers" switch. A watchdog (boot, then every minute) finishes any send no process is
+  // working on any more; Expo receipts are read every 5 minutes.
   app.use('/api/admin/push', pushAdminRouter);
   app.use('/api/push/preferences', pushPreferencesRouter);
   resumePushSends().catch((err) => console.error("[PushBroadcast] resume failed:", err));
+  startPushWatchdog();
   startPushReceiptJob();
   // Setup reminders: hourly, a no-op unless ACCOUNT_SETUP_REMINDERS_ENABLED=true
   startAccountSetupReminderJob();

@@ -17,7 +17,7 @@ import { sql } from "drizzle-orm";
 import { db } from "../db";
 import { pgTextArray } from "../emailHistory";
 import {
-  PUSH_DISPLAY_NAME, PUSH_ELIGIBLE, PUSH_ROLE, countPushRecipients, pushAudienceFilter, type PushAudience,
+  PUSH_DISPLAY_NAME, PUSH_ELIGIBLE, PUSH_ROLE, pushAudienceFilter, type PushAudience,
 } from "./pushAudience";
 
 export const MAX_TITLE = 65;
@@ -126,37 +126,33 @@ export async function startPushSend(p: {
   const existing = await findByClientKey(p.clientKey);
   if (existing) return { ok: true, sendId: existing.id, recipients: Number(existing.recipient_count), existing: true };
 
-  const dup = await db.execute(sql`
-    SELECT 1 FROM push_sends
-    WHERE kind = 'announcement' AND title = ${p.title} AND body = ${p.body}
-      AND created_at > now() - make_interval(mins => ${DUPLICATE_WINDOW_MINUTES})
-    LIMIT 1
-  `);
-  if (dup.rows.length > 0) {
-    return { ok: false, status: 409, code: "DUPLICATE_SEND", message: "You sent this same push in the last 10 minutes." };
-  }
-  const limits = await getPushLimits();
-  if (limits.remaining < 1) {
-    return { ok: false, status: 429, code: "OVER_DAILY_LIMIT", message: `You've sent ${PUSH_DAILY_LIMIT} pushes today. Send it tomorrow.`, extra: { limits } };
-  }
-  const recipients = await countPushRecipients(p.audience, p.userIds);
-  if (recipients === 0) {
-    return { ok: false, status: 400, code: "NO_RECIPIENTS", message: "Nobody in this group can get a push right now." };
-  }
-
+  // Everything below is one statement: the daily limit, the 10 minute duplicate check, the recipient
+  // count, the send row and its log rows. A concurrent second send waits on push_sends_one_active_uq and
+  // then fails, so two tabs can't both get past the limit. recipient_count is set in the same insert, so
+  // nothing can fail between "the send exists" and "processing is scheduled".
   let sendId: string;
   let logged: number;
   try {
     const r = await db.execute(sql`
-      WITH s AS (
-        INSERT INTO push_sends (kind, created_by, audience, title, body, screen, url, client_key, status)
-        VALUES ('announcement', ${p.createdBy}, ${p.audience}, ${p.title}, ${p.body}, ${p.screen}, ${p.url}, ${p.clientKey}, 'sending')
-        RETURNING id
-      ), r AS (
+      WITH r AS (
         SELECT u.id AS user_id,
                encode(sha256(convert_to(u.expo_push_token, 'UTF8')), 'hex') AS th,
                row_number() OVER (PARTITION BY u.expo_push_token ORDER BY u.created_at, u.id) AS rn
         FROM users u WHERE ${PUSH_ELIGIBLE} AND ${pushAudienceFilter(p.audience, p.userIds)}
+      ), g AS (
+        SELECT
+          (SELECT count(*)::int FROM push_sends WHERE kind = 'announcement' AND created_at >= ${NY_DAY_START}) AS today,
+          EXISTS (
+            SELECT 1 FROM push_sends
+            WHERE kind = 'announcement' AND title = ${p.title} AND body = ${p.body}
+              AND created_at > now() - make_interval(mins => ${DUPLICATE_WINDOW_MINUTES})
+          ) AS dup,
+          (SELECT count(*)::int FROM r) AS rc
+      ), s AS (
+        INSERT INTO push_sends (kind, created_by, audience, title, body, screen, url, client_key, status, recipient_count, heartbeat_at)
+        SELECT 'announcement', ${p.createdBy}, ${p.audience}, ${p.title}, ${p.body}, ${p.screen}, ${p.url}, ${p.clientKey}, 'sending', g.rc, now()
+        FROM g WHERE g.today < ${PUSH_DAILY_LIMIT} AND NOT g.dup AND g.rc > 0
+        RETURNING id
       ), l AS (
         INSERT INTO push_log (send_id, user_id, token_hash, status, error)
         SELECT s.id, r.user_id, r.th,
@@ -165,9 +161,16 @@ export async function startPushSend(p: {
         FROM s, r
         RETURNING 1
       )
-      SELECT (SELECT id FROM s) AS id, (SELECT count(*)::int FROM l) AS n
+      SELECT (SELECT id FROM s) AS id, (SELECT count(*)::int FROM l) AS n, g.today, g.dup, g.rc FROM g
     `);
-    const row = r.rows[0] as { id: string; n: number };
+    const row = r.rows[0] as { id: string | null; n: number; today: number; dup: boolean; rc: number };
+    if (!row.id) {
+      if (row.dup) return { ok: false, status: 409, code: "DUPLICATE_SEND", message: "You sent this same push in the last 10 minutes." };
+      if (Number(row.today) >= PUSH_DAILY_LIMIT) {
+        return { ok: false, status: 429, code: "OVER_DAILY_LIMIT", message: `You've sent ${PUSH_DAILY_LIMIT} pushes today. Send it tomorrow.`, extra: { limits: await getPushLimits() } };
+      }
+      return { ok: false, status: 400, code: "NO_RECIPIENTS", message: "Nobody in this group can get a push right now." };
+    }
     sendId = row.id;
     logged = Number(row.n);
   } catch (err) {
@@ -181,7 +184,6 @@ export async function startPushSend(p: {
     }
     throw err;
   }
-  await db.execute(sql`UPDATE push_sends SET recipient_count = ${logged} WHERE id = ${sendId}`);
   setImmediate(() => { void processPushSend(sendId, deps); });
   return { ok: true, sendId, recipients: logged, existing: false };
 }
@@ -208,6 +210,8 @@ export async function processPushSend(sendId: string, deps: PushDeps = defaultPu
     const seen = new Set<string>();
 
     for (;;) {
+      // Heartbeat: shows this process is still working on the send (the watchdog only takes over a stale one).
+      await db.execute(sql`UPDATE push_sends SET heartbeat_at = now() WHERE id = ${sendId}`);
       const claimed = await db.execute(sql`
         UPDATE push_log SET status = 'sending'
         WHERE id IN (
@@ -276,11 +280,20 @@ export async function processPushSend(sendId: string, deps: PushDeps = defaultPu
         }
       }
     }
-    if (send.kind === "announcement") await writeActivityRows(sendId);
   } catch (err) {
     console.error(`[PushBroadcast] send ${sendId} stopped:`, err instanceof Error ? err.message : String(err));
   } finally {
-    await finishPushSend(sendId).catch((e) => console.error(`[PushBroadcast] finish ${sendId} failed:`, e));
+    // Activity rows even when the loop stopped partway, so people who got the push still find it.
+    // A failure here or in finish leaves the send 'sending'; the watchdog finishes it later.
+    try {
+      // Rows this run claimed but couldn't close may already have been pushed: 'unknown', never re-sent.
+      await db.execute(sql`UPDATE push_log SET status = 'unknown', error = 'stopped_mid_send' WHERE send_id = ${sendId} AND status = 'sending'`);
+      const k = await db.execute(sql`SELECT kind FROM push_sends WHERE id = ${sendId}`);
+      if ((k.rows[0] as { kind?: string } | undefined)?.kind === "announcement") await writeActivityRows(sendId);
+    } catch (e) {
+      console.error(`[PushBroadcast] activity rows for ${sendId} failed:`, e instanceof Error ? e.message : String(e));
+    }
+    await finishPushSend(sendId).catch((e) => console.error(`[PushBroadcast] finish ${sendId} failed:`, e instanceof Error ? e.message : String(e)));
     running.delete(sendId);
   }
 }
@@ -302,6 +315,7 @@ export async function writeActivityRows(sendId: string): Promise<number> {
         SELECT 1 FROM notifications n
         WHERE n.user_id = pl.user_id AND n.reference_type = 'push_send' AND n.reference_id = s.id
       )
+    ON CONFLICT (user_id, reference_id) WHERE reference_type = 'push_send' DO NOTHING
     RETURNING id
   `);
   return r.rows.length;
@@ -329,12 +343,14 @@ export async function checkPushReceipts(sendId: string, deps: PushDeps = default
   `);
   const rows = r.rows as { id: string; user_id: string; ticket_id: string; token_hash: string | null }[];
   let failed = 0;
+  let missing = 0;
   for (let i = 0; i < rows.length; i += RECEIPT_CHUNK) {
     const part = rows.slice(i, i + RECEIPT_CHUNK);
     const receipts = await deps.getReceipts(part.map((x) => x.ticket_id));
     for (const row of part) {
       const rec = receipts[row.ticket_id] as (ExpoPushReceipt & { details?: { error?: string } }) | undefined;
-      if (!rec || rec.status !== "error") continue;
+      if (!rec) { missing++; continue; }
+      if (rec.status !== "error") continue;
       const code = (rec.details?.error || "error").slice(0, 100);
       await db.execute(sql`UPDATE push_log SET status = 'failed', error = ${code} WHERE id = ${row.id}`);
       failed++;
@@ -345,7 +361,8 @@ export async function checkPushReceipts(sendId: string, deps: PushDeps = default
     UPDATE push_sends SET
       sent_count = (SELECT count(*)::int FROM push_log WHERE send_id = ${sendId} AND status = 'sent'),
       failed_count = (SELECT count(*)::int FROM push_log WHERE send_id = ${sendId} AND status IN ('failed', 'unknown')),
-      receipts_checked_at = now()
+      -- Some receipts not ready yet: read again on the next run, for up to 2 hours after the send.
+      receipts_checked_at = CASE WHEN ${missing} > 0 AND finished_at > now() - interval '2 hours' THEN NULL ELSE now() END
     WHERE id = ${sendId}
   `);
   return { checked: rows.length, failed };
@@ -368,18 +385,40 @@ export async function checkDueReceipts(deps: PushDeps = defaultPushDeps, delayMi
   return n;
 }
 
+/** A send whose heartbeat is older than this is treated as abandoned (its process died or stopped). */
+export const STALE_SEND_MINUTES = 5;
+
 /**
- * At boot: pushes caught mid send by a restart may or may not have gone out, so they become
- * 'unknown' (never re-sent). Pending pushes of unfinished sends are then sent.
+ * Watchdog, run at boot and every minute: finishes sends that no process is working on any more.
+ * Only a send whose heartbeat is older than STALE_SEND_MINUTES is taken over, so during a Render deploy
+ * the new instance leaves alone a send the old instance is still pushing. Pushes caught mid send may or
+ * may not have gone out, so they become 'unknown' (never re-sent); pending pushes then go out.
  */
-export async function resumePushSends(deps: PushDeps = defaultPushDeps): Promise<void> {
+export async function resumePushSends(deps: PushDeps = defaultPushDeps, staleMinutes = STALE_SEND_MINUTES): Promise<number> {
+  let n = 0;
   try {
-    await db.execute(sql`UPDATE push_log SET status = 'unknown', error = 'server_restarted' WHERE status = 'sending'`);
-    const open = await db.execute(sql`SELECT id FROM push_sends WHERE status = 'sending'`);
-    for (const r of open.rows as { id: string }[]) void processPushSend(r.id, deps);
+    const stale = await db.execute(sql`
+      SELECT id FROM push_sends
+      WHERE status = 'sending' AND COALESCE(heartbeat_at, created_at) < now() - make_interval(mins => ${staleMinutes})
+    `);
+    for (const r of stale.rows as { id: string }[]) {
+      if (running.has(r.id)) continue;
+      await db.execute(sql`UPDATE push_log SET status = 'unknown', error = 'server_restarted' WHERE send_id = ${r.id} AND status = 'sending'`);
+      void processPushSend(r.id, deps);
+      n++;
+    }
   } catch (err) {
     console.error("[PushBroadcast] resume failed:", err instanceof Error ? err.message : String(err));
   }
+  return n;
+}
+
+let watchdogTimer: NodeJS.Timeout | null = null;
+/** Runs the watchdog every minute. */
+export function startPushWatchdog(intervalMs = 60 * 1000): void {
+  if (watchdogTimer) return;
+  watchdogTimer = setInterval(() => { void resumePushSends(); }, intervalMs);
+  watchdogTimer.unref?.();
 }
 
 let receiptTimer: NodeJS.Timeout | null = null;
@@ -407,8 +446,8 @@ export async function sendPushTest(p: {
   }
   const created = await db.execute(sql`
     WITH s AS (
-      INSERT INTO push_sends (kind, created_by, audience, title, body, screen, url, status, recipient_count)
-      VALUES ('test', ${p.adminId}, 'me', ${p.title}, ${p.body}, ${p.screen}, ${p.url}, 'sending', 1)
+      INSERT INTO push_sends (kind, created_by, audience, title, body, screen, url, status, recipient_count, heartbeat_at)
+      VALUES ('test', ${p.adminId}, 'me', ${p.title}, ${p.body}, ${p.screen}, ${p.url}, 'sending', 1, now())
       RETURNING id
     ), l AS (
       INSERT INTO push_log (send_id, user_id, token_hash, status) SELECT s.id, ${p.adminId}, ${tokenHash(token)}, 'pending' FROM s RETURNING 1

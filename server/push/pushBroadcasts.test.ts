@@ -306,11 +306,68 @@ try {
     const s = (await q(`INSERT INTO push_sends (kind, audience, title, body, status) VALUES ('announcement', 'picked', 'R', 'B', 'sending') RETURNING id`))[0].id;
     await q(`INSERT INTO push_log (send_id, user_id, status) VALUES ($1, 'pt-cust3', 'sending'), ($1, 'pt-vendor', 'pending')`, [s]);
     const f = fakeDeps();
-    await push.resumePushSends(f.deps);
+    assert.equal(await push.resumePushSends(f.deps), 0, "a send with a fresh heartbeat is left to its own process");
+    assert.equal((await q(`SELECT status FROM push_log WHERE send_id = $1 AND user_id = 'pt-cust3'`, [s]))[0].status, "sending");
+    await q(`UPDATE push_sends SET heartbeat_at = now() - interval '6 minutes' WHERE id = $1`, [s]);
+    assert.equal(await push.resumePushSends(f.deps), 1, "a stale send is taken over");
     await waitDone(s);
     const log = await q(`SELECT user_id, status FROM push_log WHERE send_id = $1 ORDER BY user_id`, [s]);
     assert.deepEqual(log, [{ user_id: "pt-cust3", status: "unknown" }, { user_id: "pt-vendor", status: "sent" }]);
     assert.equal(f.calls.flat().length, 1);
+  });
+
+  await t("a send that stops partway still writes Activity rows and finishes", async () => {
+    let calls = 0;
+    const deps = {
+      sendChunk: async (m: ExpoPushMessage[]) => m.map(() => ({ status: "ok", id: `x${++calls}` } as ExpoPushTicket)),
+      getReceipts: async () => ({}),
+    };
+    const s = (await q(`INSERT INTO push_sends (kind, audience, title, body, status) VALUES ('announcement', 'picked', 'P', 'B', 'sending') RETURNING id`))[0].id;
+    await q(`INSERT INTO push_log (send_id, user_id, status) VALUES ($1, 'pt-vendor', 'pending')`, [s]);
+    // Make the per row update fail after the push went out: a CHECK that rejects 'sent' for this send only.
+    await q(`ALTER TABLE push_log ADD CONSTRAINT pt_no_sent CHECK (status <> 'sent' OR send_id <> '${s}')`);
+    try { await push.processPushSend(s, deps); } finally { await q(`ALTER TABLE push_log DROP CONSTRAINT pt_no_sent`); }
+    assert.equal(calls, 1, "the push went out");
+    assert.equal((await q(`SELECT status FROM push_sends WHERE id = $1`, [s]))[0].status, "done", "not stuck in sending");
+    assert.deepEqual((await q(`SELECT status, error FROM push_log WHERE send_id = $1`, [s]))[0], { status: "unknown", error: "stopped_mid_send" });
+    assert.equal((await q(`SELECT count(*)::int n FROM notifications WHERE reference_id = $1`, [s]))[0].n, 1, "the person who got the push has an Activity row");
+  });
+
+  await t("Activity rows: two writers at once still give one row per account", async () => {
+    const f = fakeDeps();
+    const r = await push.startPushSend({ ...base, title: "Twice", audience: "picked", userIds: ["pt-cust3", "pt-vendor"], clientKey: ck() }, f.deps);
+    assert.ok(r.ok); if (!r.ok) return;
+    await waitDone(r.sendId);
+    await q(`DELETE FROM notifications WHERE reference_id = $1`, [r.sendId]);
+    const counts = await Promise.all([push.writeActivityRows(r.sendId), push.writeActivityRows(r.sendId), push.writeActivityRows(r.sendId)]);
+    assert.equal(counts.reduce((a, b) => a + b, 0), 2);
+    assert.equal((await q(`SELECT count(*)::int n FROM notifications WHERE reference_id = $1`, [r.sendId]))[0].n, 2);
+  });
+
+  await t("two sends at the same moment: one starts, the other is refused", async () => {
+    const f = fakeDeps();
+    const [a, b] = await Promise.all([
+      push.startPushSend({ ...base, title: "Race A", audience: "picked", userIds: ["pt-cust3"], clientKey: ck() }, f.deps),
+      push.startPushSend({ ...base, title: "Race B", audience: "picked", userIds: ["pt-vendor"], clientKey: ck() }, f.deps),
+    ]);
+    const ok = [a, b].filter((x) => x.ok);
+    const no = [a, b].filter((x) => !x.ok);
+    assert.equal(ok.length + no.length, 2);
+    for (const x of no) assert.ok(!x.ok && x.code === "SEND_IN_PROGRESS", JSON.stringify(x));
+    for (const x of ok) if (x.ok) await waitDone(x.sendId);
+    assert.ok(ok.length >= 1);
+  });
+
+  await t("receipts not ready yet are read again on the next run", async () => {
+    const f = fakeDeps({ tickets: () => ({ status: "ok", id: "late-1" } as ExpoPushTicket) });
+    const r = await push.startPushSend({ ...base, title: "Late", audience: "picked", userIds: ["pt-cust3"], clientKey: ck() }, f.deps);
+    assert.ok(r.ok); if (!r.ok) return;
+    await waitDone(r.sendId);
+    assert.equal(await push.checkDueReceipts(fakeDeps({ receipts: {} }).deps, 0), 1);
+    assert.equal((await q(`SELECT receipts_checked_at FROM push_sends WHERE id = $1`, [r.sendId]))[0].receipts_checked_at, null, "kept open");
+    const receipts = { "late-1": { status: "ok" } } as unknown as Record<string, ExpoPushReceipt>;
+    assert.equal(await push.checkDueReceipts(fakeDeps({ receipts }).deps, 0), 1);
+    assert.notEqual((await q(`SELECT receipts_checked_at FROM push_sends WHERE id = $1`, [r.sendId]))[0].receipts_checked_at, null, "closed once all are in");
   });
 
   await t("news preference: off, then back on", async () => {
