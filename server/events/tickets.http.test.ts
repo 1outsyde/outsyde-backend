@@ -74,6 +74,8 @@ async function call(method: string, path: string, o: { token?: string; body?: un
   };
   const host = await mkUser("host");
   const other = await mkUser("other");
+  // Every host needs payouts set up to publish (2026-10-26); this suite tests other rules, so its hosts have it.
+  await q(`INSERT INTO user_payout_accounts (user_id, stripe_account_id, onboarding_complete) VALUES ($1, $2, true)`, [host, `acct_${P}_host`]);
   const guests: string[] = [];
   for (let i = 0; i < 45; i++) guests.push(await mkUser(`g${i}`));
   const [g0, g1, g2] = guests;
@@ -313,6 +315,7 @@ async function call(method: string, path: string, o: { token?: string; body?: un
       await q(`DELETE FROM events WHERE id = ANY($1)`, [ids]);
     }
     await q(`DELETE FROM host_agreement_acceptances WHERE user_id IN (SELECT id FROM users WHERE email LIKE $1)`, [`${P}-%`]);
+    await q(`DELETE FROM user_payout_accounts WHERE user_id IN (SELECT id FROM users WHERE email LIKE $1)`, [`${P}-%`]);
     await q(`DELETE FROM users WHERE email LIKE $1`, [`${P}-%`]);
     await db.end();
   }

@@ -331,22 +331,22 @@ async function getNoFollow(path: string): Promise<{ status: number; location: st
 
     console.log("status for a user host");
     r = await call("GET", "/api/events/payouts/status?hostType=user", { token: tok(nobody) });
-    assert(r.status === 200 && r.body.success && r.body.hostType === "user" && r.body.hasAccount === false && r.body.ready === false && r.body.needsSetup === true, "before setup: no account, not ready, needs setup", r);
+    assert(r.status === 200 && r.body.success && r.body.hostType === "user" && r.body.hasAccount === false && r.body.ready === false && r.body.needsSetup === true && r.body.setupComplete === false, "before setup: no account, not ready, needs setup", r);
     r = await call("GET", "/api/events/payouts/status", { token: tok(hostA) });
-    assert(r.status === 200 && r.body.hasAccount === true && r.body.ready === false && r.body.needsSetup === true, "account made but not finished: needs setup (hostType defaults to user)", r);
+    assert(r.status === 200 && r.body.hasAccount === true && r.body.ready === false && r.body.needsSetup === true && r.body.setupComplete === false, "account made but not finished: needs setup (hostType defaults to user)", r);
     await q(`UPDATE user_payout_accounts SET onboarding_complete = true WHERE user_id = $1`, [hostA]);
     r = await call("GET", "/api/events/payouts/status?hostType=user", { token: tok(hostA) });
-    assert(r.status === 200 && r.body.hasAccount === true && r.body.ready === false && r.body.needsSetup === true, "flag true but Stripe not ready: still needs setup", r);
+    assert(r.status === 200 && r.body.hasAccount === true && r.body.ready === false && r.body.needsSetup === true && r.body.setupComplete === true, "flag true but Stripe not ready: still needs setup for paid, setup complete for free publishing", r);
     setReady(acctA);
     r = await call("GET", "/api/events/payouts/status?hostType=user", { token: tok(hostA) });
-    assert(r.status === 200 && r.body.hasAccount === true && r.body.ready === true && r.body.needsSetup === false, "flag true and Stripe ready: ready", r);
+    assert(r.status === 200 && r.body.hasAccount === true && r.body.ready === true && r.body.needsSetup === false && r.body.setupComplete === true, "flag true and Stripe ready: ready", r);
     r = await call("GET", "/api/events/payouts/status?hostType=nonsense", { token: tok(hostA) });
     assert(r.status === 400 && r.body.error.code === "INVALID_HOST_TYPE", "unknown hostType: 400", r);
 
     console.log("status when the saved account is unreachable");
     failRetrieveFor.add(acctA);
     r = await call("GET", "/api/events/payouts/status?hostType=user", { token: tok(hostA) });
-    assert(r.status === 200 && r.body.hasAccount === true && r.body.ready === false && r.body.needsSetup === true, "unreachable account: 200, not ready, needs setup (no 500)", r);
+    assert(r.status === 200 && r.body.hasAccount === true && r.body.ready === false && r.body.needsSetup === true && r.body.setupComplete === true, "unreachable account: 200, not ready, needs setup (no 500), local setup still complete", r);
     failRetrieveFor.delete(acctA);
 
     console.log("status for a business host uses the business account");
@@ -366,7 +366,7 @@ async function getNoFollow(path: string): Promise<{ status: number; location: st
     assert(r.status === 200 && r.body.hasAccount === true && r.body.ready === true && r.body.needsSetup === false, "business account ready", r);
     await q(`UPDATE businesses SET stripe_onboarding_complete = false WHERE id = $1`, [bizId]);
     r = await call("GET", "/api/events/payouts/status?hostType=business", { token: tok(hostB) });
-    assert(r.status === 200 && r.body.hasAccount === true && r.body.ready === false, "business local flag false: not ready even if Stripe is", r);
+    assert(r.status === 200 && r.body.hasAccount === true && r.body.ready === false && r.body.setupComplete === false, "business local flag false: not ready even if Stripe is", r);
     assert(accountCreates.length === createsBiz && (await q(`SELECT 1 FROM user_payout_accounts WHERE user_id = $1`, [hostB])).length === 0, "no new Stripe account and no user_payout_accounts row for the business owner");
 
     console.log("status for a photographer host");
@@ -521,7 +521,14 @@ async function getNoFollow(path: string): Promise<{ status: number; location: st
     ev = await mkEvent(hostNotReadyU);
     await addType(ev, hostNotReadyU, 0);
     r = await publish(ev, hostNotReadyU, PAID);
-    assert(r.status === 200 && r.body.event.status === "published", "switch on: publish free-only, host not set up -> 200", r);
+    assert(r.status === 409 && r.body.error.code === "PAYOUTS_NOT_SET_UP"
+      && r.body.error.message === "Set up payouts before you publish. Every host needs payouts set up, even for free events.",
+      "switch on: publish free-only, host not set up -> PAYOUTS_NOT_SET_UP (every host sets up payouts, 2026-10-26)", r);
+    // Setup finished on our side (the record the return writes), but Stripe isn't enabling payouts right now:
+    // a free event still publishes; paid stays gated by the live check (tests below).
+    await q(`INSERT INTO user_payout_accounts (user_id, stripe_account_id, onboarding_complete) VALUES ($1, $2, true)`, [hostNotReadyU, `acct_pn_${P}`]);
+    r = await publish(ev, hostNotReadyU, PAID);
+    assert(r.status === 200 && r.body.event.status === "published", "switch on: publish free-only, setup finished, Stripe not ready yet -> 200", r);
     const evFreePub = ev;
 
     ev = await mkEvent(hostReadyU);

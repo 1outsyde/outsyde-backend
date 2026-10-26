@@ -182,8 +182,28 @@ async function call(method: string, path: string, o: { token?: string; body?: un
     const ag = await call("GET", "/api/events/host-agreement", { token: tok(host) });
     r = await call("POST", "/api/events/host-agreement/accept", { token: tok(host), body: { version: ag.body?.agreement?.version } });
     assert(r.status === 200 && r.body.agreement.accepted === true, "host accepts the agreement", r);
+    // Every host needs payouts set up to publish, free events too (Legend 2026-10-26).
     r = await call("POST", `/api/events/${ev.id}/publish`, { token: tok(host) });
-    assert(r.status === 200 && r.body.event.status === "published" && r.body.event.publishedAt, "free event publishes", r);
+    const [noPayouts] = await q(`SELECT status FROM events WHERE id = $1`, [ev.id]);
+    assert(r.status === 409 && r.body.error.code === "PAYOUTS_NOT_SET_UP" && noPayouts.status === "draft"
+      && r.body.error.message === "Set up payouts before you publish. Every host needs payouts set up, even for free events.",
+      "free event needs payouts set up before it publishes", { r, noPayouts });
+    await q(`INSERT INTO user_payout_accounts (user_id, stripe_account_id, onboarding_complete) VALUES ($1, $2, false)`, [host, `acct_${P}_host`]);
+    r = await call("POST", `/api/events/${ev.id}/publish`, { token: tok(host) });
+    assert(r.status === 409 && r.body.error.code === "PAYOUTS_NOT_SET_UP", "a payout setup that isn't finished still can't publish", r);
+    await q(`UPDATE user_payout_accounts SET onboarding_complete = true WHERE user_id = $1`, [host]);
+    r = await call("POST", `/api/events/${ev.id}/publish`, { token: tok(host) });
+    assert(r.status === 200 && r.body.event.status === "published" && r.body.event.publishedAt, "free event publishes once payouts are set up", r);
+    // A business host is paid through the business's own Stripe account, never the owner's personal one.
+    await q(`INSERT INTO ticket_types (event_id, name, price_cents, quantity, sort_order) VALUES ($1, 'Free RSVP', 0, 10, 0)`, [bizEvent.id]);
+    const agB = await call("GET", "/api/events/host-agreement", { token: tok(owner) });
+    await call("POST", "/api/events/host-agreement/accept", { token: tok(owner), body: { version: agB.body?.agreement?.version } });
+    await q(`INSERT INTO user_payout_accounts (user_id, stripe_account_id, onboarding_complete) VALUES ($1, $2, true)`, [owner, `acct_${P}_owner`]);
+    r = await call("POST", `/api/events/${bizEvent.id}/publish`, { token: tok(owner) });
+    assert(r.status === 409 && r.body.error.code === "PAYOUTS_NOT_SET_UP", "business event needs the business's payouts, the owner's personal account doesn't count", r);
+    await q(`UPDATE businesses SET stripe_account_id = $2, stripe_onboarding_complete = true WHERE id = $1`, [biz.id, `acct_${P}_biz`]);
+    r = await call("POST", `/api/events/${bizEvent.id}/publish`, { token: tok(owner) });
+    assert(r.status === 200 && r.body.event.status === "published", "business event publishes once the business's payouts are set up", r);
     r = await call("POST", `/api/events/${ev.id}/publish`, { token: tok(host) });
     assert(r.status === 409 && r.body.error.code === "NOT_A_DRAFT", "publishing twice refused", r);
 
@@ -477,6 +497,7 @@ async function call(method: string, path: string, o: { token?: string; body?: un
     await q(`DELETE FROM photographers WHERE user_id IN (SELECT id FROM users WHERE email LIKE $1)`, [`${P}-%`]);
     await q(`DELETE FROM businesses WHERE owner_id IN (SELECT id FROM users WHERE email LIKE $1)`, [`${P}-%`]);
     await q(`DELETE FROM host_agreement_acceptances WHERE user_id IN (SELECT id FROM users WHERE email LIKE $1)`, [`${P}-%`]);
+    await q(`DELETE FROM user_payout_accounts WHERE user_id IN (SELECT id FROM users WHERE email LIKE $1)`, [`${P}-%`]);
     await q(`DELETE FROM users WHERE email LIKE $1`, [`${P}-%`]);
     await db.end();
   }

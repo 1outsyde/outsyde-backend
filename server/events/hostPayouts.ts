@@ -152,7 +152,9 @@ router.get("/payouts/status", hybridAuthMiddleware, async (req: Request, res: Re
     if (!ref) return; // resolveOwnedHost already answered
     const dest = await hostPayoutDestination(ref);
     const { ready } = await isHostReady(ref);
-    return res.json({ success: true, hostType, hasAccount: !!dest.accountId, ready, needsSetup: !ready });
+    // setupComplete: our own record says payouts are set up, the same check publish uses for free events.
+    // ready: that plus Stripe live (needed for paid tickets).
+    return res.json({ success: true, hostType, hasAccount: !!dest.accountId, ready, needsSetup: !ready, setupComplete: !!dest.accountId && dest.localReady });
   } catch (err) {
     console.error("[Events] payout status failed:", err);
     return fail(res, 500, "SERVER_ERROR", "Couldn't load your payout status.");
