@@ -118,10 +118,10 @@ const ELIGIBLE = sql`
   AND NOT EXISTS (SELECT 1 FROM broadcast_optouts o WHERE o.user_id = u.id)
 `;
 
-const IS_VENDOR = sql`EXISTS (SELECT 1 FROM businesses b WHERE b.owner_id = u.id AND COALESCE(b.approval_status, 'pending') <> 'rejected')`;
-const IS_PHOTOGRAPHER = sql`EXISTS (SELECT 1 FROM photographers p WHERE p.user_id = u.id)`;
+export const IS_VENDOR = sql`EXISTS (SELECT 1 FROM businesses b WHERE b.owner_id = u.id AND COALESCE(b.approval_status, 'pending') <> 'rejected')`;
+export const IS_PHOTOGRAPHER = sql`EXISTS (SELECT 1 FROM photographers p WHERE p.user_id = u.id)`;
 const IS_STAFF = sql`EXISTS (SELECT 1 FROM staff_members s WHERE s.user_id = u.id AND s.status = 'active')`;
-const IS_CONSUMER = sql`(
+export const IS_CONSUMER = sql`(
   NOT EXISTS (SELECT 1 FROM businesses b WHERE b.owner_id = u.id)
   AND NOT EXISTS (SELECT 1 FROM photographers p WHERE p.user_id = u.id)
   AND COALESCE(u.is_vendor, false) = false
