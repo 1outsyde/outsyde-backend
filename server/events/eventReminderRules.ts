@@ -43,8 +43,10 @@ function localDay(d: Date, timeZone: string): string {
   return new Intl.DateTimeFormat("en-CA", { timeZone, year: "numeric", month: "2-digit", day: "2-digit" }).format(d);
 }
 
-function isSameLocalDay(a: Date, b: Date, timeZone: string): boolean {
-  return localDay(a, timeZone) === localDay(b, timeZone);
+/** Whole calendar days from `now` to `start`, counted in `timeZone` (0 = same day, 1 = the next day). */
+function localDaysApart(now: Date, start: Date, timeZone: string): number {
+  const toUtcMidnight = (d: Date) => Date.parse(`${localDay(d, timeZone)}T00:00:00Z`);
+  return Math.round((toUtcMidnight(start) - toUtcMidnight(now)) / 86400e3);
 }
 
 function clockText(d: Date, timeZone: string): string {
@@ -69,7 +71,9 @@ export function guestReminderCopy(kind: ReminderKind, e: ReminderEvent, now: Dat
       body: `Starts at ${clockText(start, tz)}. Tap for your ticket and directions.`,
     };
   }
-  const day = isSameLocalDay(start, now, tz) ? "Today" : "Tomorrow";
+  const apart = localDaysApart(now, start, tz);
+  // 2 days apart only happens on a daylight saving weekend (24 hours before a 12:30 AM start): name the day.
+  const day = apart <= 0 ? "Today" : apart === 1 ? "Tomorrow" : fmt(start, tz, { weekday: "long" });
   const place = placeText(e.city, e.state);
   const when = `${fmt(start, tz, { weekday: "long" })} at ${clockText(start, tz)}`;
   return {
@@ -80,7 +84,9 @@ export function guestReminderCopy(kind: ReminderKind, e: ReminderEvent, now: Dat
 
 export function hostReminderCopy(e: { title: string; starts_at: Date | string; timezone: string }, going: number, now: Date): { title: string; body: string } {
   const tz = zoneOr(e.timezone);
-  const day = isSameLocalDay(new Date(e.starts_at), now, tz) ? "today" : "tomorrow";
+  const start = new Date(e.starts_at);
+  const apart = localDaysApart(now, start, tz);
+  const day = apart <= 0 ? "today" : apart === 1 ? "tomorrow" : `on ${fmt(start, tz, { weekday: "long" })}`;
   return {
     title: `Your event is ${day}: ${String(e.title)}`,
     body: `${going} going. Tap to see your guests and manage the event.`,

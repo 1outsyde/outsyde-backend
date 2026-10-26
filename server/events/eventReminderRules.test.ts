@@ -2,7 +2,7 @@
  * Event reminder timing and copy (Events canvas screen 36). Run: npx tsx server/events/eventReminderRules.test.ts
  * Mutation checks:
  *  - change `<` to `<=` on the soon end in dueKind → "at the start: nothing" fails.
- *  - compare UTC days instead of the event's own days → the Los Angeles checks fail.
+ *  - count days in UTC instead of the event's own time zone → the split day Los Angeles and late Today checks fail (6).
  *  - drop the 90 minute rule → "late 2 hour push says starts soon" fails.
  *  - always say Tomorrow → "late day before push says Today" fails.
  */
@@ -65,7 +65,21 @@ const la = guestReminderCopy("day_before", { ...ev, starts_at: late, timezone: "
 eq(la.title, "Tomorrow: Rooftop Night", "Los Angeles event: Tomorrow");
 eq(la.body.startsWith("Friday at 9:30 PM"), true, "Los Angeles event: Friday 9:30 PM");
 const sameDayLa = guestReminderCopy("day_before", { ...ev, starts_at: late, timezone: "America/Los_Angeles" }, new Date(late.getTime() - 3 * H));
-eq(sameDayLa.title, "Today: Rooftop Night", "Los Angeles: same local day is Today even though UTC days differ");
+eq(sameDayLa.title, "Today: Rooftop Night", "Los Angeles: same local day is Today");
+// Here the UTC days differ (Oct 30 vs Oct 31) but the Los Angeles day is the same (Fri Oct 30): only the event's
+// own calendar can say Today. Comparing UTC days would say Tomorrow.
+const splitDayLa = guestReminderCopy("day_before", { ...ev, starts_at: late, timezone: "America/Los_Angeles" }, new Date("2026-10-30T20:00:00Z"));
+eq(splitDayLa.title, "Today: Rooftop Night", "Los Angeles: same local day is Today even though UTC days differ");
+eq(hostReminderCopy({ ...ev, starts_at: late, timezone: "America/Los_Angeles" }, 1, new Date("2026-10-30T20:00:00Z")).title,
+  "Your event is today: Rooftop Night", "host, Los Angeles: same local day even though UTC days differ");
+
+// Daylight saving: 24 hours before Monday Mar 15 2027 12:30 AM in New York (clocks spring forward on Sunday Mar 14) is
+// Saturday 11:30 PM, two calendar days earlier. Never say Tomorrow then: name the day.
+const dst = { ...ev, starts_at: new Date("2027-03-15T04:30:00Z") };
+const dstNow = new Date("2027-03-14T04:30:00Z");
+eq(guestReminderCopy("day_before", dst, dstNow).title, "Monday: Rooftop Night", "spring forward: two days away says the weekday");
+eq(guestReminderCopy("day_before", dst, dstNow).body.startsWith("Monday at 12:30 AM"), true, "spring forward: body still names Monday");
+eq(hostReminderCopy(dst, 4, dstNow).title, "Your event is on Monday: Rooftop Night", "spring forward: host says the weekday");
 eq(guestReminderCopy("soon", { ...ev, timezone: "Not/AZone" }, at(-2 * H)).body, "Starts at 1:00 AM. Tap for your ticket and directions.",
   "bad time zone falls back to UTC");
 
