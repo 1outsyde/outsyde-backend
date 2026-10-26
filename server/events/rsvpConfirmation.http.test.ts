@@ -79,6 +79,8 @@ async function call(method: string, p: string, o: { token?: string; body?: unkno
   ))[0].id as string;
   const host = await mkUser("host");
   const guest = await mkUser("guest");
+  // Every host needs payouts set up to publish (2026-10-26); this suite tests other rules, so its hosts have it.
+  await q(`INSERT INTO user_payout_accounts (user_id, stripe_account_id, onboarding_complete) VALUES ($1, $2, true)`, [host, `acct_${P}_host`]);
   const tok = (id: string) => generateAccessToken({ userId: id, isVendor: false });
   // Publishing needs the current Event Host Agreement accepted (hostAgreement.ts): hosts accept it the way the app does.
   const acceptAgreement = async (id: string) => {
@@ -226,6 +228,7 @@ async function call(method: string, p: string, o: { token?: string; body?: unkno
     }
     await q(`DELETE FROM notifications WHERE user_id IN (SELECT id FROM users WHERE email LIKE $1)`, [`${P}-%`]).catch(() => {});
     await q(`DELETE FROM host_agreement_acceptances WHERE user_id IN (SELECT id FROM users WHERE email LIKE $1)`, [`${P}-%`]).catch(() => {});
+    await q(`DELETE FROM user_payout_accounts WHERE user_id IN (SELECT id FROM users WHERE email LIKE $1)`, [`${P}-%`]).catch((e) => console.error("cleanup payouts", e.message));
     await q(`DELETE FROM users WHERE email LIKE $1`, [`${P}-%`]).catch((e) => console.error("cleanup users", e.message));
     await db.end();
   }

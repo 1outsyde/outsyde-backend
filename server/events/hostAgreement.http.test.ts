@@ -70,7 +70,9 @@ async function call(method: string, path: string, o: { token?: string; body?: un
   const owner = await mkUser("owner");
   const banned = await mkUser("ban", false);
   const tok = (id: string) => generateAccessToken({ userId: id, isVendor: false });
-  await q(`INSERT INTO businesses (id, owner_id, name, category, approval_status) VALUES (gen_random_uuid(), $1, $2, 'Events', 'approved')`, [owner, `${P} Lounge`]);
+  await q(`INSERT INTO businesses (id, owner_id, name, category, approval_status, stripe_account_id, stripe_onboarding_complete) VALUES (gen_random_uuid(), $1, $2, 'Events', 'approved', $3, true)`, [owner, `${P} Lounge`, `acct_${P}_biz`]);
+  // Every host needs payouts set up to publish (2026-10-26); this suite tests other rules, so its hosts have it.
+  for (const u of [host, other]) await q(`INSERT INTO user_payout_accounts (user_id, stripe_account_id, onboarding_complete) VALUES ($1, $2, true)`, [u, `acct_${P}_${u.slice(0, 8)}`]);
 
   const inDays = (d: number, h = 0) => new Date(Date.now() + d * 86400000 + h * 3600000).toISOString();
   const body = () => ({
@@ -178,6 +180,7 @@ async function call(method: string, path: string, o: { token?: string; body?: un
     await q(`DELETE FROM notifications WHERE user_id IN (SELECT id FROM users WHERE email LIKE $1)`, [`${P}-%`]).catch(() => {});
     await q(`DELETE FROM businesses WHERE owner_id IN (SELECT id FROM users WHERE email LIKE $1)`, [`${P}-%`]);
     await q(`DELETE FROM host_agreement_acceptances WHERE user_id IN (SELECT id FROM users WHERE email LIKE $1)`, [`${P}-%`]);
+    await q(`DELETE FROM user_payout_accounts WHERE user_id IN (SELECT id FROM users WHERE email LIKE $1)`, [`${P}-%`]);
     await q(`DELETE FROM users WHERE email LIKE $1`, [`${P}-%`]);
     await db.end();
   }

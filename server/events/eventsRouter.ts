@@ -532,22 +532,27 @@ router.post("/:id/publish", hybridAuthMiddleware, async (req: Request, res: Resp
     if (!(await loadActiveUser(userId))) return fail(res, 403, "ACCOUNT_INACTIVE", "This account can't host events.");
     // The publishing user must have accepted the current Event Host Agreement (hostAgreement.ts). Checked inside the UPDATE.
     const { acceptedCurrentVersionSql } = await import("./hostAgreement");
-    // Paid tickets need the switch on AND a host who can be paid. Checked before the single UPDATE below.
+    // Every host needs payouts set up to publish, free events too (Legend 2026-10-26), so adding paid tickets
+    // later never stops a live event. Free: our own record of a finished setup on the account this event pays
+    // (the business's or photographer's for those hosts). Paid: also the switch AND a live Stripe check.
+    // Both are checked before the single UPDATE below.
+    const { hostPayoutDestination, isHostReady } = await import("./hostPayouts");
+    let payoutsSetUp = false;
     let paidAllowed = false;
-    if (paidEventsEnabled()) {
-      const ev = await loadEventForHost(req.params.id, userId);
-      if (ev && ev.status === "draft") {
+    const ev = await loadEventForHost(req.params.id, userId);
+    if (ev && ev.status === "draft") {
+      const dest = await hostPayoutDestination(ev);
+      payoutsSetUp = !!dest.accountId && dest.localReady;
+      if (paidEventsEnabled()) {
         const paid = await rows(sql`SELECT 1 FROM ticket_types WHERE event_id = ${ev.id} AND status = 'active' AND price_cents > 0 LIMIT 1`);
-        if (paid.length > 0) {
-          const { isHostReady } = await import("./hostPayouts");
-          paidAllowed = (await isHostReady(ev)).ready;
-        }
+        if (paid.length > 0) paidAllowed = (await isHostReady(ev)).ready;
       }
     }
     const [published] = await rows(sql`
       UPDATE events SET status = 'published', published_at = now(), updated_at = now()
       WHERE id = ${req.params.id} AND host_user_id = ${userId} AND status = 'draft' AND starts_at > now()
         AND ${acceptedCurrentVersionSql(userId)}
+        AND ${payoutsSetUp}
         AND EXISTS (SELECT 1 FROM ticket_types t WHERE t.event_id = events.id AND t.status = 'active' AND t.hidden = false)
         AND (NOT EXISTS (SELECT 1 FROM ticket_types t WHERE t.event_id = events.id AND t.status = 'active' AND t.price_cents > 0)
              OR ${paidAllowed})
@@ -572,6 +577,9 @@ router.post("/:id/publish", hybridAuthMiddleware, async (req: Request, res: Resp
     const { acceptanceOf } = await import("./hostAgreement");
     if (!(await acceptanceOf(userId))) {
       return fail(res, 409, "HOST_AGREEMENT_REQUIRED", "Read and accept the Event Host Agreement to publish.");
+    }
+    if (!payoutsSetUp) {
+      return fail(res, 409, "PAYOUTS_NOT_SET_UP", "Set up payouts before you publish. Every host needs payouts set up, even for free events.");
     }
     return fail(res, 409, "EVENT_CHANGED", "This event just changed. Reload and try again.");
   } catch (err) {

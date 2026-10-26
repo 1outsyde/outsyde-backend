@@ -521,7 +521,14 @@ async function getNoFollow(path: string): Promise<{ status: number; location: st
     ev = await mkEvent(hostNotReadyU);
     await addType(ev, hostNotReadyU, 0);
     r = await publish(ev, hostNotReadyU, PAID);
-    assert(r.status === 200 && r.body.event.status === "published", "switch on: publish free-only, host not set up -> 200", r);
+    assert(r.status === 409 && r.body.error.code === "PAYOUTS_NOT_SET_UP"
+      && r.body.error.message === "Set up payouts before you publish. Every host needs payouts set up, even for free events.",
+      "switch on: publish free-only, host not set up -> PAYOUTS_NOT_SET_UP (every host sets up payouts, 2026-10-26)", r);
+    // Setup finished on our side (the record the return writes), but Stripe isn't enabling payouts right now:
+    // a free event still publishes; paid stays gated by the live check (tests below).
+    await q(`INSERT INTO user_payout_accounts (user_id, stripe_account_id, onboarding_complete) VALUES ($1, $2, true)`, [hostNotReadyU, `acct_pn_${P}`]);
+    r = await publish(ev, hostNotReadyU, PAID);
+    assert(r.status === 200 && r.body.event.status === "published", "switch on: publish free-only, setup finished, Stripe not ready yet -> 200", r);
     const evFreePub = ev;
 
     ev = await mkEvent(hostReadyU);
