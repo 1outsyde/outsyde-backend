@@ -492,17 +492,30 @@ router.patch("/:id", hybridAuthMiddleware, async (req: Request, res: Response) =
     const coordsSent = b.latitude !== undefined || b.longitude !== undefined;
     const regeocode = addressChanged && !coordsSent;
     if (regeocode) sets.push(sql`latitude = NULL`, sql`longitude = NULL`);
+    // A new start time means new reminder moments: clear the host's and every guest's reminder stamps
+    // (eventReminders.ts) in this same statement, so the job can't claim against the old time in between.
+    const startMoved = newStartsAt !== null && new Date(newStartsAt).getTime() !== new Date(e.starts_at).getTime();
+    if (startMoved) sets.push(sql`host_reminder_at = NULL`);
     sets.push(sql`updated_at = now()`);
 
     try {
       const [updated] = await rows(sql`
-        UPDATE events SET ${sql.join(sets, sql`, `)}
-        WHERE id = ${e.id} AND host_user_id = ${userId} AND status = ${e.status}
-          AND refund_policy = ${e.refund_policy}
-          AND refund_cutoff_hours IS NOT DISTINCT FROM ${e.refund_cutoff_hours == null ? null : Number(e.refund_cutoff_hours)}::int
-          AND (starts_at > now() OR ${b.endsAt === undefined} OR ${newEndsAt}::timestamptz >= date_trunc('milliseconds', ends_at))
-          AND (starts_at > now() OR ${b.startsAt === undefined} OR ${newStartsAt}::timestamptz = date_trunc('milliseconds', starts_at))
-        RETURNING *`);
+        WITH u AS (
+          UPDATE events SET ${sql.join(sets, sql`, `)}
+          WHERE id = ${e.id} AND host_user_id = ${userId} AND status = ${e.status}
+            AND refund_policy = ${e.refund_policy}
+            AND refund_cutoff_hours IS NOT DISTINCT FROM ${e.refund_cutoff_hours == null ? null : Number(e.refund_cutoff_hours)}::int
+            AND (starts_at > now() OR ${b.endsAt === undefined} OR ${newEndsAt}::timestamptz >= date_trunc('milliseconds', ends_at))
+            AND (starts_at > now() OR ${b.startsAt === undefined} OR ${newStartsAt}::timestamptz = date_trunc('milliseconds', starts_at))
+          RETURNING *
+        ),
+        reminders AS (
+          UPDATE tickets SET reminder_day_before_at = NULL, reminder_soon_at = NULL
+          WHERE ${startMoved} AND event_id IN (SELECT id FROM u)
+            AND (reminder_day_before_at IS NOT NULL OR reminder_soon_at IS NOT NULL)
+          RETURNING 1
+        )
+        SELECT * FROM u`);
       if (!updated) return fail(res, 409, "EVENT_CHANGED", "This event just changed. Reload and try again.");
       if (regeocode) {
         geocodeEventInBackground(updated.id, {

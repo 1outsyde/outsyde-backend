@@ -548,6 +548,16 @@ export function startBookingCleanupJob(intervalMs: number = 60000): NodeJS.Timeo
     } catch (error) {
       console.error("[BookingCleanup] Error during address reveal job:", error);
     }
+
+    // Event reminders: guests get a push the day before and 2 hours before, the host one the day before (atomic claims on
+    // tickets.reminder_day_before_at / reminder_soon_at and events.host_reminder_at: safe to run twice). Push only.
+    // Own try/catch, after the address reveal, so neither can starve the other.
+    try {
+      const { runEventReminderJob } = await import("./events/eventReminders");
+      await runEventReminderJob();
+    } catch (error) {
+      console.error("[BookingCleanup] Error during event reminder job:", error);
+    }
   };
 
   cleanup();
