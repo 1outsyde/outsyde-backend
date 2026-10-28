@@ -25,7 +25,7 @@ function assert(cond: boolean, name: string, detail?: unknown) {
 
 (async () => {
   process.env.JWT_SECRET = process.env.JWT_SECRET || "test";
-  const { walletTokenFor, ticketIdFromWalletToken, walletConfig, walletUrlFor, buildTicketPass, resetWalletConfigCacheForTest } = await import("./walletPass");
+  const { walletTokenFor, ticketIdFromWalletToken, walletConfig, walletUrlFor, buildTicketPass, resetWalletConfigCacheForTest, cachedTicketPass, walletAssetsDir } = await import("./walletPass");
   const { qrTokenFor } = await import("./ticketQr");
   const certs = makeTestCerts();
   const id1 = "11111111-2222-4333-8444-555555555555";
@@ -109,6 +109,34 @@ function assert(cond: boolean, name: string, detail?: unknown) {
   assert(walletUrlFor(id1) === `https://api.example.test/api/events/wallet/${t1}.pkpass`, "url with API_BASE_URL, trailing slash trimmed", walletUrlFor(id1));
   if (prevBase === undefined) delete process.env.API_BASE_URL; else process.env.API_BASE_URL = prevBase;
 
+  {
+    const keep = { j: process.env.JWT_SECRET, s: process.env.SESSION_SECRET };
+    delete process.env.JWT_SECRET; delete process.env.SESSION_SECRET;
+    assert(walletUrlFor(id1) === null, "no JWT_SECRET or SESSION_SECRET → walletUrlFor null (a link that could never verify)");
+    process.env.JWT_SECRET = keep.j!; if (keep.s !== undefined) process.env.SESSION_SECRET = keep.s;
+  }
+  {
+    const { execFileSync } = await import("child_process");
+    // A certificate that has already expired (valid 2020-01-01 to 2020-01-02), made with the same key.
+    execFileSync("python3", ["-c", [
+      "import datetime,sys",
+      "from cryptography import x509",
+      "from cryptography.x509.oid import NameOID",
+      "from cryptography.hazmat.primitives import hashes, serialization",
+      "k=serialization.load_pem_private_key(open('signer.key','rb').read(),None)",
+      "n=x509.Name([x509.NameAttribute(NameOID.COMMON_NAME,'Pass Type ID: pass.com.goutsyde.tickets')])",
+      "c=x509.CertificateBuilder().subject_name(n).issuer_name(n).public_key(k.public_key()).serial_number(7)"
+        + ".not_valid_before(datetime.datetime(2020,1,1)).not_valid_after(datetime.datetime(2020,1,2)).sign(k,hashes.SHA256())",
+      "open('old.pem','wb').write(c.public_bytes(serialization.Encoding.PEM))",
+    ].join("\n")], { cwd: certs.dir, stdio: "pipe" });
+    const oldPem = fs.readFileSync(path.join(certs.dir, "old.pem"), "utf8");
+    const r2 = setWalletEnv(certs, { APPLE_PASS_CERT_PEM: oldPem });
+    resetWalletConfigCacheForTest();
+    assert(walletConfig() === null && walletUrlFor(id1) === null, "expired pass certificate → Wallet off");
+    r2();
+    resetWalletConfigCacheForTest();
+  }
+
   console.log("\nimages");
   const here = path.dirname(fileURLToPath(import.meta.url));
   const size = (f: string) => { const b = fs.readFileSync(path.join(here, "walletAssets", f)); return [b.readUInt32BE(16), b.readUInt32BE(20)]; };
@@ -116,6 +144,9 @@ function assert(cond: boolean, name: string, detail?: unknown) {
     const got = size(f);
     assert(got[0] === s && got[1] === s, `${f} is ${s}x${s}`, got);
   }
+
+  assert(fs.existsSync(path.join(walletAssetsDir(), "logo@3x.png")), "walletAssetsDir finds the images");
+  assert(walletAssetsDir(undefined).endsWith(path.join("server", "events", "walletAssets")), "no import.meta.url (bundled CJS) → falls back to the repo folder", walletAssetsDir(undefined));
 
   console.log("\nbuild");
   const conf = walletConfig()!;
@@ -181,6 +212,16 @@ function assert(cond: boolean, name: string, detail?: unknown) {
   assert((await buildTicketPass(long, conf)).subarray(0, 2).toString() === "PK", "300 character title still builds");
   const ny = JSON.parse(unzipPass(await buildTicketPass({ ...input, event: { ...baseEvent, timezone: "America/New_York" } }, conf))["pass.json"].toString("utf8"));
   assert([...ny.eventTicket.secondaryFields].find((f: any) => f.key === "when")?.value === "Fri, Nov 6, 9:00 PM", "New York event shows New York time");
+
+  console.log("\ncache");
+  const c1 = await cachedTicketPass(input, conf, new Date("2026-11-01T12:00:00Z"));
+  const c2 = await cachedTicketPass(input, conf, new Date("2026-11-01T12:00:00Z"));
+  assert(c1 === c2, "same ticket, same content → the built pass is reused");
+  const c3 = await cachedTicketPass({ ...input, event: { ...baseEvent, title: "Renamed" } }, conf, new Date("2026-11-01T12:00:00Z"));
+  assert(c3 !== c1 && JSON.parse(unzipPass(c3)["pass.json"].toString("utf8")).eventTicket.primaryFields[0].value === "Renamed", "host edits the event → a fresh pass");
+  const d1 = await cachedTicketPass(dayOf, conf, new Date("2026-11-06T12:00:00Z"));
+  const d2 = await cachedTicketPass(dayOf, conf, new Date("2026-11-06T18:00:00Z"));
+  assert(d1 !== d2 && JSON.stringify(JSON.parse(unzipPass(d2)["pass.json"].toString("utf8"))).includes("12 Main St"), "the reveal passing → a fresh pass with the address");
 
   restore();
   fs.rmSync(certs.dir, { recursive: true, force: true });

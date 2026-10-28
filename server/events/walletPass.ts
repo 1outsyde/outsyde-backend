@@ -76,7 +76,7 @@ function normalisePem(raw: string | undefined): string | null {
   return v.replace(/\\r\\n|\\n/g, "\n").replace(/\r\n/g, "\n") + "\n";
 }
 
-let cache: { key: string; value: WalletConfig | null } | null = null;
+let cache: { key: string; value: WalletConfig | null; validTo: number } | null = null;
 let warned = "";
 
 function warnOnce(why: string) {
@@ -90,10 +90,15 @@ export function walletConfig(): WalletConfig | null {
   const env = process.env;
   const key = [env.APPLE_PASS_TYPE_ID, env.APPLE_TEAM_ID, env.APPLE_PASS_CERT_PEM, env.APPLE_PASS_KEY_PEM, env.APPLE_PASS_KEY_PASSPHRASE, env.APPLE_WWDR_PEM]
     .map((v) => v ?? "").join("\u0000");
-  if (cache && cache.key === key) return cache.value;
-  const value = readConfig();
-  cache = { key, value };
-  return value;
+  if (!cache || cache.key !== key) {
+    const value = readConfig();
+    cache = { key, value, validTo: value ? Date.parse(new crypto.X509Certificate(value.signerCert).validTo) : 0 };
+  }
+  if (cache.value && !(cache.validTo > Date.now())) {
+    warnOnce("the pass certificate has expired (renew it in Apple Developer and update APPLE_PASS_CERT_PEM)");
+    return null;
+  }
+  return cache.value;
 }
 
 function readConfig(): WalletConfig | null {
@@ -112,7 +117,9 @@ function readConfig(): WalletConfig | null {
     new crypto.X509Certificate(signerCert);
     new crypto.X509Certificate(wwdr);
     const pk = crypto.createPrivateKey({ key: signerKey, format: "pem", passphrase });
-    if (!new crypto.X509Certificate(signerCert).checkPrivateKey(pk)) { warnOnce("the key doesn't belong to the pass certificate"); return null; }
+    const x = new crypto.X509Certificate(signerCert);
+    if (!x.checkPrivateKey(pk)) { warnOnce("the key doesn't belong to the pass certificate"); return null; }
+    if (Date.parse(x.validFrom) > Date.now()) { warnOnce("the pass certificate isn't valid yet"); return null; }
     return { passTypeId, teamId, signerCert, signerKey, signerKeyPassphrase: passphrase, wwdr };
   } catch {
     warnOnce("a certificate, key or passphrase doesn't parse");
@@ -125,7 +132,7 @@ export function resetWalletConfigCacheForTest() { cache = null; warned = ""; }
 
 /** The pass download link for a ticket, or null while Wallet isn't configured. Same base URL rule as qrUrlFor. */
 export function walletUrlFor(ticketId: string): string | null {
-  if (!walletConfig()) return null;
+  if (!secret() || !walletConfig()) return null;
   const p = `/api/events/wallet/${walletTokenFor(ticketId)}.pkpass`;
   const base = process.env.API_BASE_URL?.replace(/\/+$/, "");
   if (base) return base + p;
@@ -153,11 +160,20 @@ export type TicketPassInput = {
   };
 };
 
-const assetsDir = path.join(path.dirname(fileURLToPath(import.meta.url)), "walletAssets");
+/**
+ * Folder of the pass images. Worked out when first needed, never at import: a CJS bundle (script/build.ts) has no
+ * import.meta.url, so it falls back to the repo path from the working directory (Render runs from the repo root).
+ */
+export function walletAssetsDir(moduleUrl: string | undefined = typeof import.meta !== "undefined" ? import.meta.url : undefined): string {
+  if (moduleUrl) {
+    try { return path.join(path.dirname(fileURLToPath(moduleUrl)), "walletAssets"); } catch { /* fall through */ }
+  }
+  return path.resolve(process.cwd(), "server", "events", "walletAssets");
+}
 const ASSET_NAMES = ["icon.png", "icon@2x.png", "icon@3x.png", "logo.png", "logo@2x.png", "logo@3x.png"];
 let assets: Record<string, Buffer> | null = null;
 function passImages(): Record<string, Buffer> {
-  if (!assets) assets = Object.fromEntries(ASSET_NAMES.map((n) => [n, fs.readFileSync(path.join(assetsDir, n))]));
+  if (!assets) { const dir = walletAssetsDir(); assets = Object.fromEntries(ASSET_NAMES.map((n) => [n, fs.readFileSync(path.join(dir, n))])); }
   return assets;
 }
 
@@ -216,4 +232,22 @@ export async function buildTicketPass(t: TicketPassInput, cfg: WalletConfig, now
   pass.setRelevantDate(e.startsAt);
   pass.setExpirationDate(e.endsAt);
   return pass.getAsBuffer();
+}
+
+/**
+ * buildTicketPass with a small in memory cache (signing costs about 50 ms of CPU on a public route). The key covers
+ * everything that goes into the pass, the address reveal state at `now` and the signing setup, so an event edit,
+ * the reveal passing or a new certificate all build a fresh pass. Holds at most 300 passes.
+ */
+const PASS_CACHE_MAX = 300;
+const passCache = new Map<string, Buffer>();
+export async function cachedTicketPass(t: TicketPassInput, cfg: WalletConfig, now: Date = new Date()): Promise<Buffer> {
+  const revealed = holderCanSeeAddress(t.event.addressVisibility, t.event.startsAt, t.event.timezone, now);
+  const key = crypto.createHash("sha256").update(JSON.stringify([t, revealed, cfg.passTypeId, cfg.teamId, cfg.signerCert, cfg.wwdr])).digest("base64url");
+  const hit = passCache.get(key);
+  if (hit) { passCache.delete(key); passCache.set(key, hit); return hit; }
+  const built = await buildTicketPass(t, cfg, now);
+  passCache.set(key, built);
+  while (passCache.size > PASS_CACHE_MAX) passCache.delete(passCache.keys().next().value as string);
+  return built;
 }

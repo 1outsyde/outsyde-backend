@@ -27,7 +27,7 @@ import { rows, iso, fail, pgError, hostIdentity } from "./eventsRouter";
 import { loadEventForDoor, isWithinScanWindow } from "./doorAccess";
 import { notifyDoorInvite, notifyDoorAccepted } from "./ticketNotices";
 import { ticketIdFromQrToken, qrPng } from "./ticketQr";
-import { ticketIdFromWalletToken, walletConfig, buildTicketPass } from "./walletPass";
+import { ticketIdFromWalletToken, walletConfig, cachedTicketPass } from "./walletPass";
 
 const router = Router();
 
@@ -141,9 +141,15 @@ router.get("/qr/:token.png", qrLimiter, async (req: Request, res: Response) => {
 
 /**
  * Public, signed Apple Wallet pass (p3-wallet). Same 404 for unknown, tampered, refunded and cancelled tickets, a QR
- * token used here, and while Wallet isn't configured. Shares the QR images' per IP limit. Reads only.
+ * token used here, and while Wallet isn't configured. Reads only.
+ * Signing costs real CPU, so this route has its own tighter limit (20 a minute per IP) and reuses built passes.
  */
-router.get("/wallet/:token.pkpass", qrLimiter, async (req: Request, res: Response) => {
+const walletLimiter = rateLimit({
+  windowMs: 60_000, limit: 20, standardHeaders: true, legacyHeaders: false,
+  handler: (_req, res) => { res.status(429).json({ success: false, error: { code: "RATE_LIMITED", message: "Too many requests. Try again in a minute." } }); },
+});
+
+router.get("/wallet/:token.pkpass", walletLimiter, async (req: Request, res: Response) => {
   const notFound = () => res.status(404).json({ success: false, error: { code: "NOT_FOUND", message: "Not found." } });
   try {
     const cfg = walletConfig();
@@ -161,7 +167,7 @@ router.get("/wallet/:token.pkpass", qrLimiter, async (req: Request, res: Respons
       WHERE t.id = ${ticketId} AND t.status = 'valid'
       LIMIT 1`);
     if (!t) return notFound();
-    const pkpass = await buildTicketPass({
+    const pkpass = await cachedTicketPass({
       ticketId: String(t.id), code: String(t.code), ticketTypeName: String(t.ticket_type_name), holderFirstName: t.first_name ?? null,
       event: {
         title: String(t.title), startsAt: new Date(t.starts_at), endsAt: new Date(t.ends_at), timezone: String(t.timezone),

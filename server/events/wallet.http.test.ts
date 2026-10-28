@@ -17,6 +17,7 @@
  *  - skip the walletConfig() check in the route → "not configured → 404 (in process)" fails.
  *  - drop the wallet rule in redactLogPath → the redaction checks fail.
  *  - send walletUrl when the ticket isn't valid / always → "walletUrl null without config" fails.
+ *  - reuse qrLimiter for the wallet route → "QR images keep their own budget" fails.
  */
 import http from "http";
 import fs from "fs";
@@ -210,13 +211,15 @@ function get(base: string, p: string, headers: Record<string, string> = {}): Pro
     assert(redactLogPath("/api/events/walletx/abc") === "/api/events/walletx/abc", "sibling prefix untouched");
     assert(redactLogPath("/api/events/me/tickets") === "/api/events/me/tickets", "other paths untouched");
 
-    console.log("\nrate limit (per IP, in process; shared with the QR images)");
+    console.log("\nrate limit (per IP, in process; its own budget, not the QR images')")
     let ok = 0;
     const used = 3; // in-process wallet requests above that reach the limiter (the .png one never matches the route)
-    for (let i = 0; i < 120 - used; i++) { const x = await get(LOCAL, `/api/events/wallet/${flip(tg)}.pkpass`); if (x.status === 404) ok++; }
-    assert(ok === 120 - used, "up to 120 a minute answered", ok);
+    for (let i = 0; i < 20 - used; i++) { const x = await get(LOCAL, `/api/events/wallet/${flip(tg)}.pkpass`); if (x.status === 404) ok++; }
+    assert(ok === 20 - used, "up to 20 a minute answered", ok);
     r = await get(LOCAL, wPath(tg));
-    assert(r.status === 429 && r.body?.error?.code === "RATE_LIMITED", "121st request in a minute is 429", r.status);
+    assert(r.status === 429 && r.body?.error?.code === "RATE_LIMITED", "21st Wallet request in a minute is 429", r.status);
+    r = await get(LOCAL, `/api/events/qr/${qrTokenFor(good.id)}.png`);
+    assert(r.status === 200, "QR images keep their own budget while Wallet is limited", r.status);
   } finally {
     srv.close();
     await q(`DELETE FROM tickets WHERE event_id = $1`, [ev]);
