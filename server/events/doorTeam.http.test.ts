@@ -215,13 +215,17 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
     assert(!ids.includes(evEnded) && !ids.includes(evDraft) && !ids.includes(evOther), "no ended, draft or other host events", ids);
     const row = r.body.events.find((e: any) => e.id === evA);
     assert(row?.role === "standing" && row.title && row.slug && row.startsAt && row.endsAt && row.timezone, "event row shape", row);
+    const [m1inv] = await q(`SELECT id FROM event_door_team WHERE host_user_id = $1 AND member_user_id = $2 AND removed_at IS NULL`, [host.id, m1.id]);
+    assert(row?.inviteId === m1inv.id, "/door/mine gives a member the invite id (for Leave)", row);
     r = await call("GET", "/api/events/door/mine", { token: tok(m2.id) });
     assert((r.body.events ?? []).length === 1 && r.body.events[0].id === evA && r.body.events[0].role === "event", "event member sees only that event", r.body);
+    assert(typeof r.body.events[0]?.inviteId === "string", "event member row has its invite id", r.body);
     r = await call("GET", "/api/events/door/mine", { token: tok(stranger.id) });
     assert(r.status === 200 && r.body.events.length === 0, "stranger sees none", r.body);
     r = await call("GET", "/api/events/door/mine", { token: ht });
     const hostA = (r.body.events ?? []).find((e: any) => e.id === evA);
     assert(r.status === 200 && !!hostA && hostA.role === "host", "host sees their own published, not-ended event with role host", r.body);
+    assert(hostA?.inviteId === null, "the host's own row has no invite id", hostA);
 
     console.log("\nremove");
     r = await call("DELETE", `/api/events/${evA}/door/team/${m2.id}?scope=event`, { token: ht });
@@ -320,6 +324,35 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
     r = await ladd(evA, m3.username, "event");
     assert(r.status === 201, "failing push, Activity and email don't fail the invite", r);
     setNoticeDepsForTest(recording);
+
+    console.log("\ncancel then invite again (review #1: no spam loop)");
+    const m6 = await mkUser("m6");
+    clear();
+    r = await ladd(evA, m6.username, "event");
+    await sleep(300);
+    assert(r.status === 201 && pushes.length === 1 && emails.length === 1 && activities.length === 1, "first invite: push, email, Activity", { p: pushes.length, e: emails.length, a: activities.length });
+    clear();
+    r = await callAt(LOCAL, "DELETE", `/api/events/${evA}/door/team/${m6.id}?scope=event`, { token: lt(host.id) });
+    assert(r.status === 200, "host cancels the invite", r);
+    r = await ladd(evA, m6.username, "event");
+    await sleep(300);
+    assert(r.status === 201 && emails.length === 0, "cancel then invite again within 24 hours: no second email", emails);
+    assert(pushes.length === 0, "cancel then invite again within 10 minutes: no second push", pushes);
+    assert(activities.length === 1, "the new invite still gets its own Activity item (the old one points at a cancelled invite)", activities.length);
+
+    console.log("\nper host daily invite email cap (10)");
+    const host3 = await mkUser("host3", { name: "Hostthree" });
+    const evH3 = await mkEvent(host3.id, 24, 28, `${P} H3`);
+    eventIds.push(evH3);
+    clear();
+    for (let i = 0; i < 11; i++) {
+      const u = await mkUser(`cap${i}`);
+      r = await ladd(evH3, u.username, "event", host3.id);
+      assert(r.status === 201, `cap invite ${i + 1} sent`, r.status);
+    }
+    await sleep(800);
+    assert(emails.length === 10, "only 10 invite emails a day per host", emails.length);
+    assert(pushes.length === 11 && activities.length === 11, "push and Activity still go for the 11th", { p: pushes.length, a: activities.length });
 
     console.log("\nrate limit (30 invites an hour per host)");
     const host2 = await mkUser("host2", { name: "Hosttwo" });

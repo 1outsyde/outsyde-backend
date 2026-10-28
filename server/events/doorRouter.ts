@@ -146,7 +146,12 @@ router.get("/door/mine", hybridAuthMiddleware, async (req: Request, res: Respons
       SELECT e.id, e.slug, e.title, e.starts_at, e.ends_at, e.timezone,
         CASE WHEN e.host_user_id = u.id THEN 'host'
              WHEN EXISTS (SELECT 1 FROM event_door_team t WHERE t.host_user_id = e.host_user_id AND t.member_user_id = u.id AND t.removed_at IS NULL AND t.accepted_at IS NOT NULL) THEN 'standing'
-             ELSE 'event' END AS role
+             ELSE 'event' END AS role,
+        CASE WHEN e.host_user_id = u.id THEN NULL
+             ELSE COALESCE(
+               (SELECT t.id FROM event_door_team t WHERE t.host_user_id = e.host_user_id AND t.member_user_id = u.id AND t.removed_at IS NULL AND t.accepted_at IS NOT NULL LIMIT 1),
+               (SELECT m.id FROM event_door_members m WHERE m.event_id = e.id AND m.member_user_id = u.id AND m.removed_at IS NULL AND m.accepted_at IS NOT NULL LIMIT 1))
+        END AS invite_id
       FROM events e
       JOIN users u ON u.id = ${userId} AND u.is_active = true AND COALESCE(u.deletion_status, 'active') = 'active'
       WHERE e.status = 'published' AND e.ends_at > now()
@@ -158,6 +163,8 @@ router.get("/door/mine", hybridAuthMiddleware, async (req: Request, res: Respons
       success: true,
       events: list.map((e) => ({
         id: e.id, slug: e.slug, title: e.title, startsAt: iso(e.starts_at), endsAt: iso(e.ends_at), timezone: e.timezone, role: e.role,
+        // Additive (p4-scanner): the accepted invite behind a member's row, so they can open it and Leave. Null for the host.
+        inviteId: e.invite_id ? String(e.invite_id) : null,
       })),
     });
   } catch (err) {
