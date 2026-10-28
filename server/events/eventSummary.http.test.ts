@@ -124,8 +124,8 @@ async function callAt(base: string, method: string, path: string, o: { token?: s
     assert(r.status === 401 && r.body.error.code === "NO_AUTH" && r.body.success === false, "401 without auth", r);
     r = await call(`/api/events/${ev.id}/summary`, tok(stranger));
     assert(r.status === 404 && r.body.error.code === "EVENT_NOT_FOUND", "stranger gets 404", r);
-    await q(`INSERT INTO event_door_team (host_user_id, member_user_id, added_by_user_id) VALUES ($1, $2, $1)`, [host, doorMember]);
-    await q(`INSERT INTO event_door_members (event_id, member_user_id, added_by_user_id) VALUES ($1, $2, $3)`, [ev.id, doorMember, host]);
+    await q(`INSERT INTO event_door_team (host_user_id, member_user_id, added_by_user_id, accepted_at) VALUES ($1, $2, $1, now())`, [host, doorMember]);
+    await q(`INSERT INTO event_door_members (event_id, member_user_id, added_by_user_id, accepted_at) VALUES ($1, $2, $3, now())`, [ev.id, doorMember, host]);
     r = await call(`/api/events/${ev.id}/summary`, tok(doorMember));
     assert(r.status === 404 && r.body.error.code === "EVENT_NOT_FOUND", "door team member gets 404", r);
     r = await call(`/api/events/nope-${P}/summary`, ht);

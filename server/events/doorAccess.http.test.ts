@@ -10,6 +10,7 @@
  *  - drop `now() < e.ends_at` in the event member branch → "event member denied after ends_at" fails.
  *  - drop `removed_at IS NULL` in either team query → "removed member denied" / "removed event member denied" fails.
  *  - drop the is_active check → "inactive member denied" fails.
+ *  - drop `accepted_at IS NOT NULL` (p4-scanner, migration 075) in either branch → "pending ... denied" fails.
  */
 const PG_URL = process.env.EV_TEST_PG_URL;
 let passed = 0;
@@ -44,6 +45,10 @@ const isLocal = (u: string) => ["localhost", "127.0.0.1", "::1", "[::1]"].includ
   const stranger = await mkUser("str");
   const inactive = await mkUser("inact", false);
   const otherStanding = await mkUser("ostand");
+  const pendStanding = await mkUser("pstand");
+  const declStanding = await mkUser("dstand");
+  const pendEv = await mkUser("pevm");
+  const declEv = await mkUser("devm");
 
   const mkEvent = async (hostId: string, startsH: number, endsH: number, status = "published") => (await q(
     `INSERT INTO events (host_user_id, slug, title, status, starts_at, ends_at, timezone)
@@ -55,10 +60,15 @@ const isLocal = (u: string) => ["localhost", "127.0.0.1", "::1", "[::1]"].includ
   const otherHostEvent = await mkEvent(otherHost, -1, 2);
   const eventIds = [live, ended, otherHostEvent];
 
-  const addStanding = (h: string, m: string, removed = false) => q(
-    `INSERT INTO event_door_team (host_user_id, member_user_id, added_by_user_id, removed_at) VALUES ($1,$2,$1, ${removed ? "now()" : "NULL"})`, [h, m]);
-  const addEv = (e: string, m: string, h: string, removed = false) => q(
-    `INSERT INTO event_door_members (event_id, member_user_id, added_by_user_id, removed_at) VALUES ($1,$2,$3, ${removed ? "now()" : "NULL"})`, [e, m, h]);
+  // Invite state (075): accepted unless told otherwise; pending = accepted_at NULL; declined = declined_at set.
+  type St = "accepted" | "pending" | "declined";
+  const cols = (st: St) => st === "accepted" ? "now(), NULL" : st === "declined" ? "NULL, now()" : "NULL, NULL";
+  const addStanding = (h: string, m: string, removed = false, st: St = "accepted") => q(
+    `INSERT INTO event_door_team (host_user_id, member_user_id, added_by_user_id, removed_at, accepted_at, declined_at)
+     VALUES ($1,$2,$1, ${removed ? "now()" : "NULL"}, ${cols(st)})`, [h, m]);
+  const addEv = (e: string, m: string, h: string, removed = false, st: St = "accepted") => q(
+    `INSERT INTO event_door_members (event_id, member_user_id, added_by_user_id, removed_at, accepted_at, declined_at)
+     VALUES ($1,$2,$3, ${removed ? "now()" : "NULL"}, ${cols(st)})`, [e, m, h]);
   await addStanding(host, standing);
   await addStanding(host, removedStanding, true);
   await addStanding(host, inactive);
@@ -66,6 +76,10 @@ const isLocal = (u: string) => ["localhost", "127.0.0.1", "::1", "[::1]"].includ
   await addEv(live, evMember, host);
   await addEv(live, removedEv, host, true);
   await addEv(ended, evMember, host);
+  await addStanding(host, pendStanding, false, "pending");
+  await addStanding(host, declStanding, false, "declined");
+  await addEv(live, pendEv, host, false, "pending");
+  await addEv(live, declEv, host, false, "declined");
 
   try {
     console.log("\nloadEventForDoor");
@@ -84,6 +98,10 @@ const isLocal = (u: string) => ["localhost", "127.0.0.1", "::1", "[::1]"].includ
     assert((await loadEventForDoor(live, inactive)) === null, "inactive member denied");
     assert((await loadEventForDoor(otherHostEvent, evMember)) === null, "event member of another event denied");
     assert((await loadEventForDoor("00000000-0000-0000-0000-000000000000", host)) === null, "unknown event denied");
+    assert((await loadEventForDoor(live, pendStanding)) === null, "pending standing invite denied");
+    assert((await loadEventForDoor(live, declStanding)) === null, "declined standing invite denied");
+    assert((await loadEventForDoor(live, pendEv)) === null, "pending event invite denied");
+    assert((await loadEventForDoor(live, declEv)) === null, "declined event invite denied");
     r = await loadEventForDoor(ended, standing);
     assert(r?.role === "standing", "standing member still has access after the event ends", r?.role);
 

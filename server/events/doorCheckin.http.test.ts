@@ -122,8 +122,9 @@ async function callAt(base: string, method: string, path: string, o: { token?: s
   const tVip = await mkType(evA, "VIP", 5000);
   const tB = await mkType(evB, "Beta General");
   const tOther = await mkType(evOther, "Other General");
-  await q(`INSERT INTO event_door_team (host_user_id, member_user_id, added_by_user_id) VALUES ($1, $2, $1)`, [host.id, standing.id]);
-  await q(`INSERT INTO event_door_members (event_id, member_user_id, added_by_user_id) VALUES ($1, $2, $3), ($1, $4, $3), ($1, $5, $3)`, [evA, member.id, host.id, rl1.id, rl2.id]);
+  // Accepted members (migration 075: only accepted invites can scan).
+  await q(`INSERT INTO event_door_team (host_user_id, member_user_id, added_by_user_id, accepted_at) VALUES ($1, $2, $1, now())`, [host.id, standing.id]);
+  await q(`INSERT INTO event_door_members (event_id, member_user_id, added_by_user_id, accepted_at) VALUES ($1, $2, $3, now()), ($1, $4, $3, now()), ($1, $5, $3, now())`, [evA, member.id, host.id, rl1.id, rl2.id]);
   const scan = (ev: string, user: string, code: string) => call("POST", `/api/events/${ev}/door/check-in`, { token: tok(user), body: { code } });
   const scanId = (ev: string, user: string, ticketId: string) => call("POST", `/api/events/${ev}/door/check-in-ticket`, { token: tok(user), body: { ticketId } });
   const undo = (ev: string, user: string, ticketId: string) => call("POST", `/api/events/${ev}/door/undo`, { token: tok(user), body: { ticketId } });
@@ -179,7 +180,19 @@ async function callAt(base: string, method: string, path: string, o: { token?: s
     const t6 = await mkTicket(evA, tA, g[5].id);
     r = await scan(evA, noFirst.id, t6.code);
     assert(r.status === 404, "user without a role stays out (noFirst is a stranger here)", r);
+    // Invited but not accepted yet: no scanning, and /door/mine doesn't list the event.
     await q(`INSERT INTO event_door_members (event_id, member_user_id, added_by_user_id) VALUES ($1, $2, $3)`, [evA, noFirst.id, host.id]);
+    r = await scan(evA, noFirst.id, t6.code);
+    assert(r.status === 404 && r.body.error.code === "EVENT_NOT_FOUND", "pending invite can't check in", r);
+    assert((await row(t6.id)).checked_in_at === null, "pending invite did not check anything in");
+    r = await call("GET", "/api/events/door/mine", { token: tok(noFirst.id) });
+    assert(r.status === 200 && !r.body.events.some((e: any) => e.id === evA), "/door/mine leaves out a pending invite", r.body);
+    await q(`UPDATE event_door_members SET declined_at = now() WHERE event_id = $1 AND member_user_id = $2`, [evA, noFirst.id]);
+    r = await scan(evA, noFirst.id, t6.code);
+    assert(r.status === 404, "declined invite can't check in", r);
+    await q(`UPDATE event_door_members SET declined_at = NULL, accepted_at = now() WHERE event_id = $1 AND member_user_id = $2`, [evA, noFirst.id]);
+    r = await call("GET", "/api/events/door/mine", { token: tok(noFirst.id) });
+    assert(r.status === 200 && r.body.events.some((e: any) => e.id === evA && e.role === "event"), "/door/mine lists it once accepted", r.body);
     r = await scan(evA, noFirst.id, t6.code);
     assert(r.status === 200 && r.body.ticket.checkedInBy === noFirst.username, "checkedInBy falls back to username without a first name", r);
 
@@ -267,7 +280,7 @@ async function callAt(base: string, method: string, path: string, o: { token?: s
       assert((await row(k.id)).checked_in_at === null, `${st} event ticket stays unscanned`);
     }
     const kEv = await mkTicket(evJustEnded, await tt(evJustEnded), g[1].id);
-    await q(`INSERT INTO event_door_members (event_id, member_user_id, added_by_user_id) VALUES ($1, $2, $3)`, [evJustEnded, member.id, host.id]);
+    await q(`INSERT INTO event_door_members (event_id, member_user_id, added_by_user_id, accepted_at) VALUES ($1, $2, $3, now())`, [evJustEnded, member.id, host.id]);
     r = await scan(evJustEnded, member.id, kEv.code);
     assert(r.status === 404 && r.body.error.code === "EVENT_NOT_FOUND", "event member after the end loses access (404)", r);
 

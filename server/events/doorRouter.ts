@@ -1,7 +1,7 @@
 /**
  * Events door check-in: door team management (Task 2).
  *
- *   GET    /api/events/door/mine                 (auth)       events I can scan: published, not ended
+ *   GET    /api/events/door/mine                 (auth)       events I can scan: published, not ended, accepted invites only
  *   GET    /api/events/:id/door/team             (auth, host) standing + this event's door team
  *   POST   /api/events/:id/door/team             (auth, host) add by username, scope standing | event
  *   DELETE /api/events/:id/door/team/:userId     (auth, host) ?scope=standing|event, soft remove
@@ -78,14 +78,14 @@ router.get("/door/mine", hybridAuthMiddleware, async (req: Request, res: Respons
     const list = await rows<any>(sql`
       SELECT e.id, e.slug, e.title, e.starts_at, e.ends_at, e.timezone,
         CASE WHEN e.host_user_id = u.id THEN 'host'
-             WHEN EXISTS (SELECT 1 FROM event_door_team t WHERE t.host_user_id = e.host_user_id AND t.member_user_id = u.id AND t.removed_at IS NULL) THEN 'standing'
+             WHEN EXISTS (SELECT 1 FROM event_door_team t WHERE t.host_user_id = e.host_user_id AND t.member_user_id = u.id AND t.removed_at IS NULL AND t.accepted_at IS NOT NULL) THEN 'standing'
              ELSE 'event' END AS role
       FROM events e
       JOIN users u ON u.id = ${userId} AND u.is_active = true AND COALESCE(u.deletion_status, 'active') = 'active'
       WHERE e.status = 'published' AND e.ends_at > now()
         AND (e.host_user_id = u.id
-          OR EXISTS (SELECT 1 FROM event_door_team t WHERE t.host_user_id = e.host_user_id AND t.member_user_id = u.id AND t.removed_at IS NULL)
-          OR EXISTS (SELECT 1 FROM event_door_members m WHERE m.event_id = e.id AND m.member_user_id = u.id AND m.removed_at IS NULL))
+          OR EXISTS (SELECT 1 FROM event_door_team t WHERE t.host_user_id = e.host_user_id AND t.member_user_id = u.id AND t.removed_at IS NULL AND t.accepted_at IS NOT NULL)
+          OR EXISTS (SELECT 1 FROM event_door_members m WHERE m.event_id = e.id AND m.member_user_id = u.id AND m.removed_at IS NULL AND m.accepted_at IS NOT NULL))
       ORDER BY e.starts_at, e.id`);
     res.json({
       success: true,
