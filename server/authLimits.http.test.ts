@@ -21,7 +21,7 @@
  */
 import http from "http";
 import { ipKeyGenerator } from "express-rate-limit";
-import { loginAccountKey, resetEmailKey, LOGIN_LIMIT_MESSAGE } from "./authLimits";
+import { loginAccountKey, resetEmailKey, badAuthFields, LOGIN_LIMIT_MESSAGE } from "./authLimits";
 
 const BASE = process.env.PS_TEST_BASE_URL;
 const PG_URL = process.env.PS_TEST_PG_URL;
@@ -49,7 +49,15 @@ function unitBlock() {
   assert(loginAccountKey(r({ email: "x".repeat(400) + "@a.co" })).length <= 5 + 254, "very long input is capped");
   assert(resetEmailKey(r({ email: " A@B.co " })) === "email:a@b.co", "reset: email trimmed, lowercased");
   assert(resetEmailKey(r({})) === `net:${ipKeyGenerator("10.1.2.3")}`, "reset without email: keyed on the network");
-  assert(!/[–—]| - /.test(LOGIN_LIMIT_MESSAGE), "message has no dashes");
+  assert(!/[\u2013\u2014]| - /.test(LOGIN_LIMIT_MESSAGE), "message has no dashes");
+  assert(loginAccountKey(r({ username: "@MayaB" })) === "acct:mayab", "username with a leading @: same key as without (the handler strips it)");
+  assert(loginAccountKey(r({ identifier: " @mayab " })) === "acct:mayab", "identifier with @ and spaces: same key");
+  assert(loginAccountKey(r({ identifier: "maya@email.com" })) === "acct:maya@email.com", "an email identifier keeps its @");
+  assert(badAuthFields({ email: ["victim@x.com"], password: "p" }, ["email", "username", "identifier", "password"]) === "email", "array email is rejected");
+  assert(badAuthFields({ username: { a: 1 } }, ["email", "username"]) === "username", "object username is rejected");
+  assert(badAuthFields({ email: "a@b.co", password: "p" }, ["email", "username", "identifier", "password"]) === null, "strings pass");
+  assert(badAuthFields({ password: "p" }, ["email", "username"]) === null, "missing fields pass (the handler answers them)");
+  assert(badAuthFields(undefined, ["email"]) === null, "no body passes");
 }
 
 type Res = { status: number; body: any };
@@ -90,6 +98,16 @@ async function httpBlock() {
   }
   const ML = "/api/auth/mobile/login";
 
+  console.log("\n=== Non string login fields are refused before any lookup ===");
+  for (const path of [ML, "/api/auth/login"]) {
+    for (const body of [{ email: [email("g4")], password: PASS }, { identifier: [email("g4")], password: PASS }, { username: [`${P}g4`.slice(0, 20)], password: PASS }, { email: email("g4"), password: [PASS] }]) {
+      const rr = await call(path, body, direct("10.66.1.1"));
+      assert(rr.status === 400 && rr.body?.error?.code === "INVALID_INPUT" && typeof rr.body?.message === "string", `${path} ${Object.keys(body).join("+")} with an odd type → 400 INVALID_INPUT`, rr);
+    }
+  }
+  const ra = await call("/api/auth/forgot-password/send-code", { email: [email("g4")] }, direct("10.66.1.1"));
+  assert(ra.status === 400 && ra.body?.error?.code === "INVALID_INPUT", "reset route: array email → 400", ra);
+
   try {
     console.log("\n=== Per account, through one site (everyone on goutsyde.com shares Vercel's address) ===");
     let st: number[] = [];
@@ -105,6 +123,11 @@ async function httpBlock() {
     assert(r.status === 200 && typeof r.body?.accessToken === "string", "guest 2 is not blocked (same address)", { status: r.status });
     r = await call(ML, { email: email("g2"), password: "wrong" }, direct("10.66.0.1"));
     assert(r.status === 401, "guest 2's own wrong try is a normal 401", r.status);
+
+    console.log("\n=== A locked account's extra clicks don't use up the shared network count ===");
+    for (let i = 0; i < 120; i++) await call(ML, { email: email("g1"), password: PASS }, direct("10.66.0.1"));
+    r = await call(ML, { email: email("g2"), password: "wrong" }, direct("10.66.0.1"));
+    assert(r.status === 401, "after 120 more clicks on the locked account, guest 2's wrong try is still a normal 401", r.status);
 
     console.log("\n=== The same account from anywhere, any case, both login routes ===");
     r = await call(ML, { identifier: email("g1").toUpperCase(), password: "wrong" }, direct("10.66.9.9"));
@@ -141,24 +164,44 @@ async function httpBlock() {
     r = await call(ML, { email: `${P}-site-z@test.local`, password: "x" }, { "x-outsyde-proxy-key": "w".repeat(KEY.length), "x-outsyde-client-ip": "203.0.113.22", "X-Forwarded-For": "10.66.0.3" });
     assert(r.status === 429, "wrong key: header ignored, counted on the caller's own (full) address", r.status);
 
-    console.log("\n=== Password reset: 5 per email, its own buckets ===");
+    console.log("\n=== Password reset: asking for a code or link, 5 per email ===");
     st = [];
     for (let i = 0; i < 5; i++) st.push((await call("/api/auth/forgot-password/send-code", { email: email("web") }, direct("10.66.0.5"))).status);
     assert(st.every((s) => s === 200), "5 code requests for one email answered", st);
     r = await call("/api/auth/forgot-password/send-code", { email: email("web").toUpperCase() }, direct("10.66.0.6"));
-    assert(r.status === 429 && r.body?.code === "RATE_LIMITED" && typeof r.body?.message === "string", "6th for that email (any case, any address) → 429", r.body);
+    assert(r.status === 429 && r.body?.code === "RATE_LIMITED" && typeof r.body?.message === "string", "6th code request for that email (any case, any address) → 429", r.body);
+    r = await call("/api/auth/forgot-password", { email: email("web") }, direct("10.66.0.6"));
+    assert(r.status === 429, "the link request shares that count", r.status);
     r = await call("/api/auth/forgot-password/verify-code", { email: email("web"), code: "000000" }, direct("10.66.0.6"));
-    assert(r.status === 429, "verify-code shares the email's reset count (no code guessing)", r.status);
+    assert(r.status !== 429, "entering a code is not blocked by too many code requests (own count)", r.status);
     r = await call("/api/auth/forgot-password/send-code", { email: email("g2") }, direct("10.66.0.5"));
     assert(r.status === 200, "another email from the same address is fine", r.status);
     r = await call(ML, { email: email("web"), password: PASS }, direct("10.66.0.5"));
     assert(r.status === 200, "reset requests never use up that account's login tries", r.status);
+
+    console.log("\n=== Password reset: using a code or link, 15 per email ===");
+    st = [];
+    for (let i = 0; i < 14; i++) st.push((await call("/api/auth/forgot-password/verify-code", { email: email("g3"), code: "000000" }, direct(`10.66.2.${i + 1}`))).status);
+    r = await call("/api/auth/reset-password", { email: email("g3"), token: "nope", newPassword: "abcdef" }, direct("10.66.2.99"));
+    assert(st.every((s) => s !== 429) && r.status !== 429, "15 code or link uses for one email are answered", { st, last: r.status });
+    r = await call("/api/auth/forgot-password/verify-code", { email: email("g3"), code: "000000" }, direct("10.66.2.100"));
+    assert(r.status === 429, "16th use for that email → 429", r.status);
+
+    console.log("\n=== Password reset: 30 per visitor ===");
     st = [];
     for (let i = 0; i < 29; i++) st.push((await call("/api/auth/forgot-password", { email: `${P}-r${i}@test.local` }, direct("10.66.0.7"))).status);
     r = await call("/api/auth/reset-password", { email: `${P}-rz@test.local`, token: "x", newPassword: "abcdef" }, direct("10.66.0.7"));
     assert(st.every((s) => s === 200) && r.status !== 429, "30 reset requests per visitor are answered", { st: st.filter((s) => s !== 200), last: r.status });
     r = await call("/api/auth/forgot-password", { email: `${P}-rzz@test.local` }, direct("10.66.0.7"));
     assert(r.status === 429, "31st reset request from one visitor → 429", r.status);
+
+    console.log("\n=== The account's tries left aren't advertised ===");
+    const hdrs = await new Promise<http.IncomingHttpHeaders>((resolve, reject) => {
+      const u = new URL(ML, BASE!); const d = JSON.stringify({ email: email("g4"), password: "wrong" });
+      const rq = http.request({ hostname: u.hostname, port: u.port, path: u.pathname, method: "POST", headers: { "Content-Type": "application/json", "Content-Length": String(Buffer.byteLength(d)), "X-Forwarded-For": "10.66.3.1" } }, (res) => { res.resume(); resolve(res.headers); });
+      rq.on("error", reject); rq.write(d); rq.end();
+    });
+    assert(hdrs["ratelimit-limit"] !== "10", "RateLimit headers belong to the network backstop, not the account count", { limit: hdrs["ratelimit-limit"], remaining: hdrs["ratelimit-remaining"] });
   } finally {
     await q(`DELETE FROM refresh_tokens WHERE user_id IN (SELECT id FROM users WHERE email LIKE $1)`, [`${P}-%`]).catch(() => {});
     await q(`DELETE FROM password_reset_tokens WHERE user_id IN (SELECT id FROM users WHERE email LIKE $1)`, [`${P}-%`]).catch(() => {});

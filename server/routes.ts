@@ -8,7 +8,7 @@ import { coverPosterUrl, isMuxUploadId, resolveCoverVideoValue } from "./coverMe
 import { verifyMuxSignature } from "./muxWebhookSignature";
 import { resolvePublicIdentity } from "./publicIdentity";
 import { makeQuickSignupHandler, quickSignupRateLimiter } from "./quickSignup";
-import { loginLimits, resetLimits } from "./authLimits";
+import { loginLimits, resetRequestLimits, resetUseLimits } from "./authLimits";
 import { buildFollowRows, parseFollowPaging } from "./follows/followLists";
 import {
   customerSignupSchema,
@@ -3065,7 +3065,7 @@ export async function registerRoutes(
   // ==================== PASSWORD RESET (CODE-BASED FLOW) ====================
 
   // Send 6-digit verification code via email
-  app.post("/api/auth/forgot-password/send-code", ...resetLimits, async (req, res) => {
+  app.post("/api/auth/forgot-password/send-code", ...resetRequestLimits, async (req, res) => {
     try {
       const { email } = req.body;
       if (!email || typeof email !== 'string') {
@@ -3127,7 +3127,7 @@ export async function registerRoutes(
   });
 
   // Verify 6-digit code and issue one-time reset token
-  app.post("/api/auth/forgot-password/verify-code", ...resetLimits, async (req, res) => {
+  app.post("/api/auth/forgot-password/verify-code", ...resetUseLimits, async (req, res) => {
     try {
       const { email, code } = req.body;
       if (!email || !code) {
@@ -3186,7 +3186,7 @@ export async function registerRoutes(
 
   // ==================== PASSWORD RESET (DEEP LINK FLOW — LEGACY) ====================
 
-  app.post("/api/auth/forgot-password", ...resetLimits, async (req, res) => {
+  app.post("/api/auth/forgot-password", ...resetRequestLimits, async (req, res) => {
     try {
       const { email, redirect_uri } = req.body;
       if (!email || typeof email !== 'string') {
@@ -3250,7 +3250,7 @@ export async function registerRoutes(
     }
   });
 
-  app.post("/api/auth/reset-password", ...resetLimits, async (req, res) => {
+  app.post("/api/auth/reset-password", ...resetUseLimits, async (req, res) => {
     try {
       const { token, resetToken, email, newPassword } = req.body;
       const resolvedToken = resetToken || token;
