@@ -418,6 +418,11 @@ export const businesses = pgTable("businesses", {
   hasCancellationFee: boolean("has_cancellation_fee").default(false),
   cancellationFeeType: text("cancellation_fee_type"), // nullable, 'flat'|'percentage'
   cancellationFeeAmount: integer("cancellation_fee_amount"), // nullable, cents if flat / whole percent if percentage
+  // Migration 076: when the business last chose its cancellation policy (null = never chosen; the
+  // fullRefundWindow default 'never' can't tell "no refunds" from "not set").
+  cancellationPolicySetAt: timestamp("cancellation_policy_set_at", { withTimezone: true }),
+  // Migration 076: deposit pre-filled on NEW services by the app and sites only (null = none, else >= 700).
+  defaultDepositCents: integer("default_deposit_cents"),
 
   // Floating CTA button configuration (set by vendor on their profile screen)
   ctaConfig: jsonb("cta_config").$type<CtaConfig>(),
