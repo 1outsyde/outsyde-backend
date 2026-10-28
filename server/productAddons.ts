@@ -12,6 +12,13 @@
  * Checkout trusts nothing from the client except which add-on ids were picked
  * and the typed text. Prices, names and limits come from the database.
  *
+ * Shared library (step 2b): each choice can link to the vendor's add-on library
+ * (business_addons), the same library services use, with the same price rules:
+ * a choice follows the library price while priceSynced, keeps its own price
+ * otherwise, and is asked about each library price change once. A choice typed
+ * in a product's editor lands in the library (matched by name) but stays on
+ * that product only. See planLibraryLinks.
+ *
  * Old app builds send no `addons` key on a cart line. Those lines are never
  * checked against required groups (decision, Oct 28: old builds must not be
  * blocked), see server/cartPricing.ts.
@@ -53,6 +60,10 @@ export interface AddonRow {
   textMaxLength: number;
   isActive: boolean;
   sortOrder: number;
+  /** Library link (step 2b). Optional so in-memory test rows can leave them out. */
+  businessAddonId?: string | null;
+  priceSynced?: boolean;
+  declinedLibraryPriceCents?: number | null;
 }
 
 export interface AddonGroupWithChoices extends AddonGroupRow {
@@ -69,11 +80,18 @@ export function assembleGroups(groups: AddonGroupRow[], addons: AddonRow[]): Add
   }));
 }
 
-/** Only what a customer may pick: active groups, active choices, groups with at least one choice. */
+/**
+ * Only what a customer may pick: active groups, active choices, groups with at least one choice.
+ * The minimum is capped at the number of choices that are on, so a choice switched off from the
+ * library (or deleted there) can never leave a required group impossible to fill.
+ */
 export function activeGroups(groups: AddonGroupWithChoices[]): AddonGroupWithChoices[] {
   return groups
     .filter((g) => g.isActive)
-    .map((g) => ({ ...g, addons: g.addons.filter((a) => a.isActive) }))
+    .map((g) => {
+      const addons = g.addons.filter((a) => a.isActive);
+      return { ...g, addons, minSelect: Math.min(g.minSelect, addons.length) };
+    })
     .filter((g) => g.addons.length > 0);
 }
 
@@ -81,6 +99,8 @@ export function activeGroups(groups: AddonGroupWithChoices[]): AddonGroupWithCho
 
 export interface NormalizedAddon {
   id: string | null;
+  /** Only read for a new choice (id null): link it to this library add-on. */
+  businessAddonId: string | null;
   name: string;
   description: string | null;
   priceCents: number;
@@ -178,6 +198,8 @@ export function validateAddonGroupsPayload(
         }
       }
       if (a.isActive !== undefined && typeof a.isActive !== 'boolean') return fail(`${aName}: isActive must be true or false`);
+      const businessAddonId = optId(a.businessAddonId);
+      if (a.businessAddonId !== undefined && a.businessAddonId !== null && !businessAddonId) return fail(`${aName}: invalid library id`);
 
       const id = optId(a.id);
       if (a.id !== undefined && a.id !== null && !id) return fail(`${aName}: invalid id`);
@@ -185,7 +207,7 @@ export function validateAddonGroupsPayload(
         if (seenIds.has(id)) return fail(`${aName}: the same id is used twice`);
         seenIds.add(id);
       }
-      addons.push({ id, name: aName, description, priceCents, acceptsText, textLabel, textMaxLength, isActive: a.isActive !== false, sortOrder: ai });
+      addons.push({ id, businessAddonId: id ? null : businessAddonId, name: aName, description, priceCents, acceptsText, textLabel, textMaxLength, isActive: a.isActive !== false, sortOrder: ai });
     }
 
     const isActive = g.isActive !== false;
@@ -225,6 +247,108 @@ export function checkPayloadIds(
     }
   }
   return null;
+}
+
+/* ---------- shared library links (step 2b) ---------- */
+
+export interface LibraryRow {
+  id: string;
+  name: string;
+  priceCents: number;
+}
+
+export interface NewLibraryEntry {
+  id: string;
+  name: string;
+  description: string | null;
+  priceCents: number;
+}
+
+export interface LinkState {
+  businessAddonId: string | null;
+  priceSynced: boolean;
+  declinedLibraryPriceCents: number | null;
+}
+
+const nameKey = (n: string) => n.trim().toLowerCase();
+
+/**
+ * Decides the library link of every choice in a vendor save, with the service rules:
+ *  - a saved choice keeps its link; it follows the library only while its price equals the
+ *    library price (a turned-down library price is remembered until the price is synced)
+ *  - a new choice picked from the library (businessAddonId) links to it
+ *  - a new typed choice links to the library add-on with the same name, or creates one
+ *    (it still lands on this product only)
+ * A new choice whose price differs from the library counts as already asked about that price.
+ * Returns the state per choice, in payload order, and the library rows to create.
+ */
+export function planLibraryLinks(
+  groups: NormalizedGroup[],
+  existing: AddonGroupWithChoices[],
+  library: LibraryRow[],
+  newId: () => string,
+): { ok: true; links: LinkState[][]; newLibrary: NewLibraryEntry[] } | { ok: false; error: AddonsPayloadError } {
+  const byId = new Map(library.map((l) => [l.id, l]));
+  const byName = new Map(library.map((l) => [nameKey(l.name), l]));
+  const prev = new Map(existing.flatMap((g) => g.addons).map((a) => [a.id, a]));
+  const newLibrary: NewLibraryEntry[] = [];
+
+  const state = (libraryRow: LibraryRow | undefined, priceCents: number, declined: number | null, isNew: boolean): LinkState => {
+    if (!libraryRow) return { businessAddonId: null, priceSynced: true, declinedLibraryPriceCents: null };
+    const priceSynced = priceCents === libraryRow.priceCents;
+    return {
+      businessAddonId: libraryRow.id,
+      priceSynced,
+      declinedLibraryPriceCents: priceSynced ? null : (isNew ? libraryRow.priceCents : declined),
+    };
+  };
+
+  const links: LinkState[][] = [];
+  for (const g of groups) {
+    const row: LinkState[] = [];
+    for (const a of g.addons) {
+      if (a.id) {
+        const old = prev.get(a.id);
+        const linkId = old?.businessAddonId ?? null;
+        const lib = linkId ? byId.get(linkId) : undefined;
+        if (linkId && !lib) {
+          // Link to a library row this business can't see: keep it untouched rather than guess.
+          row.push({ businessAddonId: linkId, priceSynced: old?.priceSynced ?? true, declinedLibraryPriceCents: old?.declinedLibraryPriceCents ?? null });
+        } else {
+          row.push(state(lib, a.priceCents, old?.declinedLibraryPriceCents ?? null, false));
+        }
+        continue;
+      }
+      if (a.businessAddonId) {
+        const lib = byId.get(a.businessAddonId);
+        if (!lib) return { ok: false, error: { code: 'INVALID_ADDON_ID', message: `${a.name} is not in your add-on library. Reload and try again.` } };
+        row.push(state(lib, a.priceCents, null, true));
+        continue;
+      }
+      let lib = byName.get(nameKey(a.name));
+      if (!lib) {
+        const created: NewLibraryEntry = { id: newId(), name: a.name, description: a.description, priceCents: a.priceCents };
+        newLibrary.push(created);
+        lib = created;
+        byId.set(created.id, created);
+        byName.set(nameKey(created.name), created);
+      }
+      row.push(state(lib, a.priceCents, null, true));
+    }
+    links.push(row);
+  }
+  return { ok: true, links, newLibrary };
+}
+
+/** Same rule as services: ask once per library price change, only for a choice that keeps its own price. */
+export function needsAddonPriceReview(
+  choice: { businessAddonId?: string | null; priceSynced?: boolean; priceCents: number; declinedLibraryPriceCents?: number | null },
+  libraryPriceCents: number | null | undefined,
+): boolean {
+  if (!choice.businessAddonId || libraryPriceCents == null) return false;
+  if (choice.priceSynced !== false) return false;
+  if (choice.priceCents === libraryPriceCents) return false;
+  return (choice.declinedLibraryPriceCents ?? null) !== libraryPriceCents;
 }
 
 /* ---------- public product response ---------- */

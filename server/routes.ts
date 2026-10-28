@@ -113,6 +113,10 @@ import {
   toPublicGroups,
   summarizeAddons,
   orderItemDetail,
+  planLibraryLinks,
+  needsAddonPriceReview as needsProductAddonPriceReview,
+  MAX_GROUPS as MAX_ADDON_GROUPS,
+  MAX_ADDONS_PER_GROUP,
   type AddonGroupWithChoices,
   type AddonSummary,
 } from "./productAddons";
@@ -136,8 +140,16 @@ async function loadAddonGroupsFor(productIds: string[]): Promise<Map<string, Add
 async function loadAddonGroups(productId: string): Promise<AddonGroupWithChoices[]> {
   return (await loadAddonGroupsFor([productId])).get(productId) ?? [];
 }
-// Vendor editor shape: every group and choice, switched-off ones too.
-function vendorAddonGroups(groups: AddonGroupWithChoices[]) {
+// Vendor editor shape: every group and choice, switched-off ones too, with the
+// library link and price prompt state (step 2b, same fields as service add-ons).
+async function vendorAddonGroups(groups: AddonGroupWithChoices[]) {
+  const libraryIds = Array.from(new Set(groups.flatMap((g) => g.addons.map((a) => a.businessAddonId)).filter((x): x is string => !!x)));
+  const libraryPrices = new Map<string, number>();
+  if (libraryIds.length > 0) {
+    const rows = await db.select({ id: businessAddons.id, priceCents: businessAddons.priceCents })
+      .from(businessAddons).where(inArray(businessAddons.id, libraryIds));
+    rows.forEach((r) => libraryPrices.set(r.id, r.priceCents));
+  }
   return groups.map((g) => ({
     id: g.id,
     name: g.name,
@@ -153,6 +165,10 @@ function vendorAddonGroups(groups: AddonGroupWithChoices[]) {
       textLabel: a.textLabel,
       textMaxLength: a.textMaxLength,
       isActive: a.isActive,
+      businessAddonId: a.businessAddonId ?? null,
+      priceSynced: a.priceSynced ?? true,
+      libraryPriceCents: a.businessAddonId ? libraryPrices.get(a.businessAddonId) ?? null : null,
+      needsPriceReview: needsProductAddonPriceReview(a, a.businessAddonId ? libraryPrices.get(a.businessAddonId) : null),
     })),
   }));
 }
@@ -13601,7 +13617,7 @@ export async function registerRoutes(
     try {
       const resolved = await resolveVendorProduct(req, req.params.productId);
       if ('error' in resolved) return res.status(resolved.status).json({ error: resolved.error });
-      res.json({ groups: vendorAddonGroups(await loadAddonGroups(resolved.product.id)) });
+      res.json({ groups: await vendorAddonGroups(await loadAddonGroups(resolved.product.id)) });
     } catch (error) {
       console.error("Get product add-ons error:", error);
       res.status(500).json({ error: "Failed to get add-ons" });
@@ -13622,10 +13638,25 @@ export async function registerRoutes(
       const idError = checkPayloadIds(validated.groups, existing);
       if (idError) return res.status(400).json({ error: idError });
 
+      // Shared library (step 2b): same rules as service add-ons. See planLibraryLinks.
+      const library = await db
+        .select({ id: businessAddons.id, name: businessAddons.name, priceCents: businessAddons.priceCents })
+        .from(businessAddons)
+        .where(eq(businessAddons.businessId, product.businessId));
+      const planned = planLibraryLinks(validated.groups, existing, library, () => randomUUID());
+      if (!planned.ok) return res.status(400).json({ error: planned.error });
+
       const now = new Date();
       const keepGroupIds = validated.groups.map((g) => g.id).filter((id): id is string => !!id);
       const keepAddonIds = validated.groups.flatMap((g) => g.addons.map((a) => a.id)).filter((id): id is string => !!id);
       const queries: any[] = [];
+      // New library entries first, in the same batch, so a failed save leaves none behind.
+      if (planned.newLibrary.length > 0) {
+        queries.push(db.insert(businessAddons).values(planned.newLibrary.map((l) => ({
+          id: l.id, businessId: product.businessId, name: l.name, description: l.description,
+          priceCents: l.priceCents, durationMinutes: 0, sortOrder: 0,
+        }))));
+      }
       // Removed choices first, then removed groups (their choices go with them).
       queries.push(
         keepAddonIds.length > 0
@@ -13637,7 +13668,8 @@ export async function registerRoutes(
           ? db.delete(productAddonGroups).where(and(eq(productAddonGroups.productId, product.id), notInArray(productAddonGroups.id, keepGroupIds)))
           : db.delete(productAddonGroups).where(eq(productAddonGroups.productId, product.id)),
       );
-      for (const g of validated.groups) {
+      for (let gi = 0; gi < validated.groups.length; gi++) {
+        const g = validated.groups[gi];
         const groupId = g.id ?? randomUUID();
         const groupValues = { name: g.name, minSelect: g.minSelect, maxSelect: g.maxSelect, isActive: g.isActive, sortOrder: g.sortOrder };
         queries.push(
@@ -13646,8 +13678,13 @@ export async function registerRoutes(
                 .where(and(eq(productAddonGroups.id, g.id), eq(productAddonGroups.productId, product.id)))
             : db.insert(productAddonGroups).values({ id: groupId, productId: product.id, ...groupValues }),
         );
-        for (const a of g.addons) {
+        for (let ai = 0; ai < g.addons.length; ai++) {
+          const a = g.addons[ai];
+          const link = planned.links[gi][ai];
           const addonValues = {
+            businessAddonId: link.businessAddonId,
+            priceSynced: link.priceSynced,
+            declinedLibraryPriceCents: link.declinedLibraryPriceCents,
             name: a.name,
             description: a.description,
             priceCents: a.priceCents,
@@ -13667,10 +13704,43 @@ export async function registerRoutes(
       }
       await db.batch(queries as [any, ...any[]]);
 
-      res.json({ groups: vendorAddonGroups(await loadAddonGroups(product.id)) });
+      res.json({ groups: await vendorAddonGroups(await loadAddonGroups(product.id)) });
     } catch (error) {
       console.error("Save product add-ons error:", error);
       res.status(500).json({ error: "Failed to save add-ons" });
+    }
+  });
+
+  // Vendor: the answer to "Library price is now $X. Use it on this product?" (step 2b).
+  // Same as the service route: sync follows the library from now on, keep is asked again
+  // only when the library price changes again.
+  app.post("/api/business/products/:productId/addons/:addonId/price-review", async (req, res) => {
+    try {
+      const resolved = await resolveVendorProduct(req, req.params.productId);
+      if ('error' in resolved) return res.status(resolved.status).json({ error: resolved.error });
+      const { product } = resolved;
+      const parsed = z.object({ action: z.enum(['sync', 'keep']) }).safeParse(req.body);
+      if (!parsed.success) return res.status(400).json({ error: 'Invalid data' });
+
+      const [choice] = await db.select().from(productAddons)
+        .where(and(eq(productAddons.id, req.params.addonId), eq(productAddons.productId, product.id)));
+      if (!choice) return res.status(404).json({ error: 'Add-on not found' });
+      const [library] = choice.businessAddonId
+        ? await db.select({ priceCents: businessAddons.priceCents }).from(businessAddons)
+            .where(and(eq(businessAddons.id, choice.businessAddonId), eq(businessAddons.businessId, product.businessId)))
+        : [];
+      if (!library) return res.status(400).json({ code: 'NOT_IN_LIBRARY', error: 'This add-on is not in your library' });
+
+      await db.update(productAddons)
+        .set(parsed.data.action === 'sync'
+          ? { priceCents: library.priceCents, priceSynced: true, declinedLibraryPriceCents: null, updatedAt: new Date() }
+          : { declinedLibraryPriceCents: library.priceCents, updatedAt: new Date() })
+        .where(eq(productAddons.id, choice.id));
+
+      res.json({ groups: await vendorAddonGroups(await loadAddonGroups(product.id)) });
+    } catch (error) {
+      console.error("Product add-on price review error:", error);
+      res.status(500).json({ error: "Failed to update add-on" });
     }
   });
 
@@ -14337,6 +14407,30 @@ export async function registerRoutes(
     return { ...copy, libraryPriceCents, needsPriceReview: needsAddonPriceReview(copy, libraryPriceCents) };
   }
 
+  // Product choices linked to these library add-ons (step 2b), with their product and group.
+  async function loadLibraryProductCopies(libraryIds: string[]) {
+    return db
+      .select({
+        businessAddonId: productAddons.businessAddonId,
+        addonId: productAddons.id,
+        productId: productAddons.productId,
+        productName: vendorProducts.name,
+        productStatus: vendorProducts.status,
+        groupId: productAddons.groupId,
+        groupName: productAddonGroups.name,
+        name: productAddons.name,
+        priceCents: productAddons.priceCents,
+        isActive: productAddons.isActive,
+        priceSynced: productAddons.priceSynced,
+        declinedLibraryPriceCents: productAddons.declinedLibraryPriceCents,
+      })
+      .from(productAddons)
+      .innerJoin(vendorProducts, eq(vendorProducts.id, productAddons.productId))
+      .innerJoin(productAddonGroups, eq(productAddonGroups.id, productAddons.groupId))
+      .where(inArray(productAddons.businessAddonId, libraryIds))
+      .orderBy(vendorProducts.name);
+  }
+
   async function findLibraryAddonByName(businessId: string, name: string) {
     const [row] = await db
       .select()
@@ -14396,6 +14490,9 @@ export async function registerRoutes(
         .where(inArray(serviceAddons.businessAddonId, libraryIds))
         .orderBy(vendorServices.name);
 
+      // Step 2b: where each library add-on is used on products. Additive field.
+      const productCopies = libraryIds.length === 0 ? [] : await loadLibraryProductCopies(libraryIds);
+
       const addons = library.map((lib) => ({
         id: lib.id,
         name: lib.name,
@@ -14410,6 +14507,20 @@ export async function registerRoutes(
             serviceId: c.serviceId,
             serviceName: c.serviceName,
             serviceStatus: c.serviceStatus,
+            addonId: c.addonId,
+            priceCents: c.priceCents,
+            isActive: c.isActive,
+            priceSynced: c.priceSynced,
+            needsPriceReview: needsAddonPriceReview(c, lib.priceCents),
+          })),
+        products: productCopies
+          .filter((c) => c.businessAddonId === lib.id)
+          .map((c) => ({
+            productId: c.productId,
+            productName: c.productName,
+            productStatus: c.productStatus,
+            groupId: c.groupId,
+            groupName: c.groupName,
             addonId: c.addonId,
             priceCents: c.priceCents,
             isActive: c.isActive,
@@ -14476,6 +14587,24 @@ export async function registerRoutes(
         if (clash && clash.id !== library.id) {
           return res.status(409).json({ code: 'DUPLICATE_ADDON', error: 'You already have an add-on with that name' });
         }
+        // Step 2b: a product group can't hold two choices with the same name.
+        const productClash = await db
+          .select({ productName: vendorProducts.name, groupName: productAddonGroups.name })
+          .from(productAddons)
+          .innerJoin(productAddonGroups, eq(productAddonGroups.id, productAddons.groupId))
+          .innerJoin(vendorProducts, eq(vendorProducts.id, productAddons.productId))
+          .where(and(
+            sql`${productAddons.groupId} IN (SELECT group_id FROM product_addons WHERE business_addon_id = ${library.id})`,
+            sql`${productAddons.businessAddonId} IS DISTINCT FROM ${library.id}`,
+            sql`lower(trim(${productAddons.name})) = ${validated.name.trim().toLowerCase()}`,
+          ))
+          .limit(1);
+        if (productClash.length > 0) {
+          return res.status(409).json({
+            code: 'NAME_TAKEN_ON_PRODUCT',
+            error: `${productClash[0].productName} already has a choice called ${validated.name} in ${productClash[0].groupName}`,
+          });
+        }
       }
 
       const [addon] = await db
@@ -14499,6 +14628,20 @@ export async function registerRoutes(
         rows.forEach((r) => updatedServiceIds.add(r.serviceId));
       }
 
+      // Step 2b: products get name and description (minutes don't apply to products).
+      const updatedProductIds = new Set<string>();
+      const productShared: { name?: string; description?: string | null } = {};
+      if (sharedFields.name !== undefined) productShared.name = sharedFields.name;
+      if (sharedFields.description !== undefined) productShared.description = sharedFields.description;
+      if (Object.keys(productShared).length > 0) {
+        const rows = await db
+          .update(productAddons)
+          .set({ ...productShared, updatedAt: new Date() })
+          .where(eq(productAddons.businessAddonId, library.id))
+          .returning({ productId: productAddons.productId });
+        rows.forEach((r) => updatedProductIds.add(r.productId));
+      }
+
       let customPriceServices: Array<{ serviceId: string; serviceName: string; priceCents: number }> = [];
       if (validated.priceCents !== undefined && validated.priceCents !== library.priceCents) {
         const rows = await db
@@ -14515,7 +14658,30 @@ export async function registerRoutes(
           .where(and(eq(serviceAddons.businessAddonId, library.id), eq(serviceAddons.priceSynced, false)));
       }
 
-      res.json({ addon, updatedServiceIds: Array.from(updatedServiceIds), customPriceServices });
+      // Step 2b: same price rule on products: only choices that follow the library move.
+      let customPriceProducts: Array<{ productId: string; productName: string; priceCents: number }> = [];
+      if (validated.priceCents !== undefined && validated.priceCents !== library.priceCents) {
+        const rows = await db
+          .update(productAddons)
+          .set({ priceCents: validated.priceCents, updatedAt: new Date() })
+          .where(and(eq(productAddons.businessAddonId, library.id), eq(productAddons.priceSynced, true)))
+          .returning({ productId: productAddons.productId });
+        rows.forEach((r) => updatedProductIds.add(r.productId));
+
+        customPriceProducts = await db
+          .select({ productId: productAddons.productId, productName: vendorProducts.name, priceCents: productAddons.priceCents })
+          .from(productAddons)
+          .innerJoin(vendorProducts, eq(vendorProducts.id, productAddons.productId))
+          .where(and(eq(productAddons.businessAddonId, library.id), eq(productAddons.priceSynced, false)));
+      }
+
+      res.json({
+        addon,
+        updatedServiceIds: Array.from(updatedServiceIds),
+        customPriceServices,
+        updatedProductIds: Array.from(updatedProductIds),
+        customPriceProducts,
+      });
     } catch (err) {
       if (err instanceof z.ZodError) return res.status(400).json({ error: 'Invalid data', details: err.errors });
       console.error('PATCH addon library error:', err);
@@ -14531,11 +14697,23 @@ export async function registerRoutes(
       if (!resolved) return;
       const { library } = resolved;
 
-      const { isActive, serviceIds } = z.object({
+      const { isActive, serviceIds, productIds } = z.object({
         isActive: z.boolean(),
         serviceIds: z.array(z.string().min(1)).max(100),
+        // Step 2b, optional: products ticked in the same pop-up. Old clients send none.
+        productIds: z.array(z.string().min(1)).max(100).optional(),
       }).parse(req.body);
       const ids = Array.from(new Set(serviceIds));
+      const pIds = Array.from(new Set(productIds ?? []));
+      if (pIds.length > 0) {
+        const linkedProducts = await db
+          .selectDistinct({ productId: productAddons.productId })
+          .from(productAddons)
+          .where(and(eq(productAddons.businessAddonId, library.id), inArray(productAddons.productId, pIds)));
+        if (linkedProducts.length !== pIds.length) {
+          return res.status(400).json({ code: 'NOT_ATTACHED', error: 'This add-on is not on one or more of those products' });
+        }
+      }
 
       if (ids.length > 0) {
         const linked = await db
@@ -14562,8 +14740,17 @@ export async function registerRoutes(
           .returning({ serviceId: serviceAddons.serviceId });
         updatedServiceIds = rows.map((r) => r.serviceId);
       }
+      let updatedProductIds: string[] = [];
+      if (pIds.length > 0) {
+        const rows = await db
+          .update(productAddons)
+          .set({ isActive, updatedAt: new Date() })
+          .where(and(eq(productAddons.businessAddonId, library.id), inArray(productAddons.productId, pIds)))
+          .returning({ productId: productAddons.productId });
+        updatedProductIds = Array.from(new Set(rows.map((r) => r.productId)));
+      }
 
-      res.json({ addon, updatedServiceIds });
+      res.json({ addon, updatedServiceIds, updatedProductIds });
     } catch (err) {
       if (err instanceof z.ZodError) return res.status(400).json({ error: 'Invalid data', details: err.errors });
       console.error('POST addon library active error:', err);
@@ -14584,9 +14771,30 @@ export async function registerRoutes(
         .from(serviceAddons)
         .where(eq(serviceAddons.businessAddonId, library.id));
 
-      await db.delete(businessAddons).where(eq(businessAddons.id, library.id));
+      // Step 2b: product choices go too (FK cascade). Clients built before products
+      // (vendor sites, older app builds) only warn about services, so they must not
+      // delete one that is on products: they get a readable refusal instead.
+      const productCopies = await loadLibraryProductCopies([library.id]);
+      const productIds = Array.from(new Set(productCopies.map((c) => c.productId)));
+      if (productIds.length > 0 && req.query.includeProducts !== 'true') {
+        const names = Array.from(new Set(productCopies.map((c) => c.productName)));
+        return res.status(409).json({
+          code: 'USED_ON_PRODUCTS',
+          error: `${library.name} is also on ${names.length === 1 ? names[0] : `${names.length} products`}. Delete it from the Outsyde app, where you can see your products.`,
+          products: names,
+        });
+      }
 
-      res.json({ success: true, removedFromServiceIds: copies.map((c) => c.serviceId) });
+      await db.delete(businessAddons).where(eq(businessAddons.id, library.id));
+      if (productIds.length > 0) {
+        // A group left with no choices is removed with it (an empty group can't be saved or picked).
+        await db.delete(productAddonGroups).where(and(
+          inArray(productAddonGroups.productId, productIds),
+          sql`NOT EXISTS (SELECT 1 FROM product_addons pa WHERE pa.group_id = ${productAddonGroups.id})`,
+        ));
+      }
+
+      res.json({ success: true, removedFromServiceIds: copies.map((c) => c.serviceId), removedFromProductIds: productIds });
     } catch (err) {
       console.error('DELETE addon library error:', err);
       res.status(500).json({ error: 'Failed to delete add-on' });
@@ -14649,6 +14857,91 @@ export async function registerRoutes(
       if (err instanceof z.ZodError) return res.status(400).json({ error: 'Invalid data', details: err.errors });
       console.error('POST addon library services error:', err);
       res.status(500).json({ error: 'Failed to add to services' });
+    }
+  });
+
+  // POST /api/vendor/addon-library/:id/products — step 2b: put a library add-on on the
+  // products the vendor picked. Each target names a group on that product, or none: then it
+  // goes into the product's "Add-ons" group (created if missing, optional, no limit).
+  app.post("/api/vendor/addon-library/:id/products", async (req, res) => {
+    try {
+      const resolved = await resolveLibraryAddon(req, res);
+      if (!resolved) return;
+      const { business, library } = resolved;
+
+      const { targets } = z.object({
+        targets: z.array(z.object({
+          productId: z.string().min(1).max(36),
+          groupId: z.string().min(1).max(36).nullable().optional(),
+        })).min(1).max(100),
+      }).parse(req.body);
+      const seen = new Set<string>();
+      const unique = targets.filter((t) => (seen.has(t.productId) ? false : (seen.add(t.productId), true)));
+
+      const productIds = unique.map((t) => t.productId);
+      const products = await db
+        .select({ id: vendorProducts.id, businessId: vendorProducts.businessId, status: vendorProducts.status })
+        .from(vendorProducts)
+        .where(inArray(vendorProducts.id, productIds));
+      if (products.length !== productIds.length || products.some((p) => p.businessId !== business.id)) {
+        return res.status(404).json({ error: 'Product not found' });
+      }
+      const statusById = new Map(products.map((p) => [p.id, p.status]));
+      const groupsByProduct = await loadAddonGroupsFor(productIds);
+      for (const t of unique) {
+        if (t.groupId && !(groupsByProduct.get(t.productId) ?? []).some((g) => g.id === t.groupId)) {
+          return res.status(404).json({ error: 'Add-on group not found on that product' });
+        }
+      }
+
+      const added: Array<{ productId: string; groupId: string }> = [];
+      const skipped: Array<{ productId: string; reason: 'archived' | 'already_added' | 'name_taken' | 'limit' }> = [];
+      const key = library.name.trim().toLowerCase();
+      for (const t of unique) {
+        if (statusById.get(t.productId) === 'archived') { skipped.push({ productId: t.productId, reason: 'archived' }); continue; }
+        const groups = groupsByProduct.get(t.productId) ?? [];
+        if (groups.some((g) => g.addons.some((a) => a.businessAddonId === library.id))) {
+          skipped.push({ productId: t.productId, reason: 'already_added' }); continue;
+        }
+        let group = t.groupId
+          ? groups.find((g) => g.id === t.groupId)
+          : groups.find((g) => g.name.trim().toLowerCase() === 'add-ons');
+        if (group && group.addons.some((a) => a.name.trim().toLowerCase() === key)) {
+          skipped.push({ productId: t.productId, reason: 'name_taken' }); continue;
+        }
+        if (group ? group.addons.length >= MAX_ADDONS_PER_GROUP : groups.length >= MAX_ADDON_GROUPS) {
+          skipped.push({ productId: t.productId, reason: 'limit' }); continue;
+        }
+        const now = new Date();
+        const queries: any[] = [];
+        const groupId = group?.id ?? randomUUID();
+        if (!group) {
+          queries.push(db.insert(productAddonGroups).values({
+            id: groupId, productId: t.productId, name: 'Add-ons', minSelect: 0, maxSelect: null,
+            sortOrder: groups.length, isActive: true,
+          }));
+        }
+        queries.push(db.insert(productAddons).values({
+          groupId,
+          productId: t.productId,
+          businessAddonId: library.id,
+          name: library.name,
+          description: library.description,
+          priceCents: library.priceCents,
+          isActive: library.isActive,
+          sortOrder: group ? group.addons.length : 0,
+          priceSynced: true,
+          updatedAt: now,
+        }));
+        await db.batch(queries as [any, ...any[]]);
+        added.push({ productId: t.productId, groupId });
+      }
+
+      res.json({ added, skipped });
+    } catch (err) {
+      if (err instanceof z.ZodError) return res.status(400).json({ error: 'Invalid data', details: err.errors });
+      console.error('POST addon library products error:', err);
+      res.status(500).json({ error: 'Failed to add to products' });
     }
   });
 

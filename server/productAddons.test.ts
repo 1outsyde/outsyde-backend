@@ -13,6 +13,9 @@ import {
   priceLineAddons,
   addonsLabel,
   orderItemDetail,
+  activeGroups,
+  planLibraryLinks,
+  needsAddonPriceReview,
   type AddonGroupRow,
   type AddonRow,
 } from "./productAddons";
@@ -244,6 +247,70 @@ async function test(name: string, fn: () => Promise<void> | void) {
       assert.equal(r.error.code, "INSUFFICIENT_STOCK");
       assert.ok(!/\d/.test(r.error.message), r.error.message);
     }
+  });
+
+
+  console.log("productAddons: shared library");
+
+  await test("typed choices link to the library by name, or create a library entry", () => {
+    const v = validateAddonGroupsPayload({ groups: [{ name: "Extras", addons: [
+      { name: "sprinkles", priceCents: 300 },
+      { name: "Cake topper", priceCents: 1200 },
+      { name: "Gold leaf", priceCents: 800 },
+    ] }, { name: "More", addons: [{ name: "gold LEAF", priceCents: 800 }] }] });
+    assert.ok(v.ok);
+    let n = 0;
+    const plan = planLibraryLinks(v.groups, [], [{ id: "lib-spr", name: "Sprinkles", priceCents: 300 }, { id: "lib-top", name: "Cake topper", priceCents: 1000 }], () => `new-${++n}`);
+    assert.ok(plan.ok);
+    assert.deepEqual(plan.links[0][0], { businessAddonId: "lib-spr", priceSynced: true, declinedLibraryPriceCents: null });
+    assert.deepEqual(plan.links[0][1], { businessAddonId: "lib-top", priceSynced: false, declinedLibraryPriceCents: 1000 }, "own price at creation counts as already asked");
+    assert.deepEqual(plan.newLibrary, [{ id: "new-1", name: "Gold leaf", description: null, priceCents: 800 }], "one library entry for the same name in two groups");
+    assert.equal(plan.links[1][0].businessAddonId, "new-1");
+  });
+
+  await test("saved choices keep their link; synced only while the price equals the library", () => {
+    const existing = assembleGroups([g("extras", "Extras", 0, null, 0)], [
+      a("c1", "extras", "Sprinkles", 300, 0, { businessAddonId: "lib-spr", priceSynced: true, declinedLibraryPriceCents: null }),
+      a("c2", "extras", "Cake topper", 1200, 1, { businessAddonId: "lib-top", priceSynced: false, declinedLibraryPriceCents: 1000 }),
+    ]);
+    const lib = [{ id: "lib-spr", name: "Sprinkles", priceCents: 300 }, { id: "lib-top", name: "Cake topper", priceCents: 1000 }];
+    const v = validateAddonGroupsPayload({ groups: [{ id: "extras", name: "Extras", addons: [
+      { id: "c1", name: "Rainbow sprinkles", priceCents: 350 },
+      { id: "c2", name: "Cake topper", priceCents: 1000 },
+    ] }] });
+    assert.ok(v.ok);
+    const plan = planLibraryLinks(v.groups, existing, lib, () => "x");
+    assert.ok(plan.ok);
+    assert.deepEqual(plan.links[0][0], { businessAddonId: "lib-spr", priceSynced: false, declinedLibraryPriceCents: null }, "rename keeps the link, own price stops syncing");
+    assert.deepEqual(plan.links[0][1], { businessAddonId: "lib-top", priceSynced: true, declinedLibraryPriceCents: null }, "back to library price = follows again");
+    assert.equal(plan.newLibrary.length, 0);
+  });
+
+  await test("picking a library add-on by id, and a foreign library id is refused", () => {
+    const v = validateAddonGroupsPayload({ groups: [{ name: "Extras", addons: [{ name: "Anything", priceCents: 300, businessAddonId: "lib-spr" }] }] });
+    assert.ok(v.ok);
+    const ok = planLibraryLinks(v.groups, [], [{ id: "lib-spr", name: "Sprinkles", priceCents: 300 }], () => "x");
+    assert.ok(ok.ok);
+    assert.equal(ok.links[0][0].businessAddonId, "lib-spr");
+    const bad = planLibraryLinks(v.groups, [], [], () => "x");
+    assert.equal(bad.ok ? "ok" : bad.error.code, "INVALID_ADDON_ID");
+  });
+
+  await test("price prompt rule matches services", () => {
+    const c = { businessAddonId: "lib", priceSynced: false, priceCents: 1200, declinedLibraryPriceCents: 1000 };
+    assert.equal(needsAddonPriceReview(c, 1000), false, "already turned down this price");
+    assert.equal(needsAddonPriceReview(c, 1100), true, "library price changed again");
+    assert.equal(needsAddonPriceReview({ ...c, priceSynced: true }, 1100), false, "follows the library");
+    assert.equal(needsAddonPriceReview({ ...c, businessAddonId: null }, 1100), false, "not in the library");
+    assert.equal(needsAddonPriceReview({ ...c, priceCents: 1100 }, 1100), false, "same price");
+  });
+
+  await test("a required group never asks for more picks than choices that are on", () => {
+    const gs = assembleGroups([g("fruit", "Fruit", 2, 3, 0)], [a("k", "fruit", "Kiwi", 0, 0), a("m", "fruit", "Mango", 0, 1, { isActive: false })]);
+    assert.equal(activeGroups(gs)[0].minSelect, 1);
+    const r = priceLineAddons(gs, [{ addonId: "k" }], "Cake");
+    assert.ok(r.ok, "one pick is enough when only one choice is on");
+    assert.equal(toPublicGroups(gs)[0].minSelect, 1);
   });
 
   console.log(`\n${passed} passed`);
