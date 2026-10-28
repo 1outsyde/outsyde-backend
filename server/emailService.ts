@@ -1167,8 +1167,8 @@ export async function sendOrderConfirmationToConsumer(params: {
       const itemBase = item.basePrice * item.quantity;
       return `<tr style="background:#1E1E1E;">
         <td style="padding:12px 14px;border-bottom:1px solid #2A2A2A;">
-          <div style="color:#FFFFFF;font-size:14px;font-weight:600;">${item.productName}</div>
-          ${item.variantLabel ? `<div style="color:#E8B930;font-size:12px;margin-top:2px;">${item.variantLabel}</div>` : ''}
+          <div style="color:#FFFFFF;font-size:14px;font-weight:600;">${escapeHtml(item.productName)}</div>
+          ${item.variantLabel ? `<div style="color:#E8B930;font-size:12px;margin-top:2px;">${escapeHtml(item.variantLabel)}</div>` : ''}
           <div style="color:#888888;font-size:12px;margin-top:2px;">by ${item.vendorName} &nbsp;·&nbsp; Qty: ${item.quantity} &nbsp;·&nbsp; ${cents(itemBase)}</div>
         </td>
       </tr>`;
@@ -1258,8 +1258,8 @@ export async function sendOrderNotificationToVendor(params: {
       computedPayout += itemBase;
       const bg = i % 2 === 0 ? '#1A1A1A' : '#212121';
       const nameCell = item.variantLabel
-        ? `${item.productName}<br/><span style="color:#888888;font-size:12px;">${item.variantLabel}</span>`
-        : item.productName;
+        ? `${escapeHtml(item.productName)}<br/><span style="color:#888888;font-size:12px;">${escapeHtml(item.variantLabel)}</span>`
+        : escapeHtml(item.productName);
       return `<tr style="background:${bg};">
         <td style="padding:10px 14px;color:#FFFFFF;font-size:13px;">${nameCell}</td>
         <td style="padding:10px 14px;color:#888888;font-size:13px;text-align:center;">${item.quantity}</td>
@@ -1364,7 +1364,7 @@ export async function sendInternalEventAlert(params: {
         const itemBase = item.basePrice * item.quantity;
         const bg = i % 2 === 0 ? '#1A1A1A' : '#212121';
         return `<tr style="background:${bg};">
-          <td style="padding:8px 14px;color:#FFFFFF;font-size:13px;">${item.productName} x${item.quantity}</td>
+          <td style="padding:8px 14px;color:#FFFFFF;font-size:13px;">${escapeHtml(item.productName)} x${item.quantity}</td>
           <td style="padding:8px 14px;color:#888888;font-size:13px;text-align:right;">${cents(itemBase)}</td>
         </tr>`;
       }).join('');
@@ -2071,8 +2071,8 @@ export async function sendOrderDeliveredEmail(params: {
     const orderRef = `#${String(params.orderNumber).padStart(4, '0')}`;
     const itemRows = params.items.map((item, i) => {
       const nameCell = item.variantLabel
-        ? `${item.productName}<br/><span style="color:#888888;font-size:12px;">${item.variantLabel}</span>`
-        : item.productName;
+        ? `${escapeHtml(item.productName)}<br/><span style="color:#888888;font-size:12px;">${escapeHtml(item.variantLabel)}</span>`
+        : escapeHtml(item.productName);
       return detailRow(nameCell, `Qty: ${item.quantity}`, i % 2 === 0);
     }).join('');
     const html = wrapEmail(`
@@ -2110,8 +2110,8 @@ export async function sendOrderDeliveredVendorEmail(params: {
     const orderRef = `#${String(params.orderNumber).padStart(4, '0')}`;
     const itemRows = params.items.map((item, i) => {
       const nameCell = item.variantLabel
-        ? `${item.productName}<br/><span style="color:#888888;font-size:12px;">${item.variantLabel}</span>`
-        : item.productName;
+        ? `${escapeHtml(item.productName)}<br/><span style="color:#888888;font-size:12px;">${escapeHtml(item.variantLabel)}</span>`
+        : escapeHtml(item.productName);
       return detailRow(nameCell, `Qty: ${item.quantity}`, i % 2 === 0);
     }).join('');
     const html = wrapEmail(`

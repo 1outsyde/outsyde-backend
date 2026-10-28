@@ -26,6 +26,7 @@ import { qualifyReferral, releaseAfterForBooking, type PromoRef } from "../loyal
 import { releasePromoForCanceledPaymentIntent } from "../promoCheckout";
 import { isComplimentaryTier, isTerminalStripeStatus } from "../complimentary";
 import { realName } from "../personName";
+import { orderItemDetail } from "../productAddons";
 import { getSubscriptionPeriod, getInvoiceSubscriptionId } from "./subscriptionFields";
 import { enforceSubscriptionAccess, lateRunRef, pastDueSinceOf } from "../subscriptions/lifecycle";
 import { loadNoticeContext, sendSubscriptionNotice } from "../subscriptions/notices";
@@ -1075,7 +1076,7 @@ export class WebhookHandlers {
         // Build order item list shared by consumer and vendor emails
         const piOrderItems = ((order.items as any[]) || []).map((i: any) => ({
           productName: i.name || i.title || i.productId || 'Item',
-          variantLabel: i.variantLabel ?? undefined,
+          variantLabel: orderItemDetail(i), // variant and add-ons, plain text
           vendorName: orderBusiness?.name || vendor?.name || 'Business',
           vendorContactEmail: orderBusiness?.contactEmail ?? undefined,
           quantity: i.quantity || 1,
@@ -1243,6 +1244,7 @@ export class WebhookHandlers {
                 orderNumber: order.orderNumber,
                 items: ((order.items as any[]) || []).map((i: any) => ({
                   productName: i.name || i.title || i.productId || 'Item',
+                  variantLabel: orderItemDetail(i), // variant and add-ons, plain text
                   quantity: i.quantity || 1,
                   basePrice: i.price || i.unitPrice || 0,
                 })),
@@ -1306,7 +1308,7 @@ export class WebhookHandlers {
         }
 
         // Consolidated consumer receipt + admin copy — not gated on any other lookup.
-        const allMvPiItems: Array<{ productName: string; vendorName: string; vendorContactEmail?: string; quantity: number; basePrice: number }> = [];
+        const allMvPiItems: Array<{ productName: string; variantLabel?: string; vendorName: string; vendorContactEmail?: string; quantity: number; basePrice: number }> = [];
         let firstMvPiOrderNumber = 0;
         let mvTotalAmountCents = 0;
         let mvServiceFeeCents = 0;
@@ -1324,6 +1326,7 @@ export class WebhookHandlers {
           for (const i of ((voOrder?.items as any[]) || [])) {
             allMvPiItems.push({
               productName: i.name || i.title || i.productId || 'Item',
+              variantLabel: orderItemDetail(i), // variant and add-ons, plain text
               vendorName: voBusiness?.name || 'Business',
               vendorContactEmail: voBusiness?.contactEmail ?? undefined,
               quantity: i.quantity || 1,
@@ -1768,6 +1771,7 @@ export class WebhookHandlers {
 
     const cartItems = ((order.items as any[]) || []).map((i: any) => ({
       productName: i.name || i.title || i.productId || 'Item',
+      variantLabel: orderItemDetail(i), // variant and add-ons, plain text
       vendorName: business?.name || vendor?.name || 'Business',
       vendorContactEmail: business?.contactEmail ?? undefined,
       quantity: i.quantity || 1,
@@ -1932,6 +1936,7 @@ export class WebhookHandlers {
             orderNumber: order.orderNumber,
             items: ((order.items as any[]) || []).map((i: any) => ({
               productName: i.name || i.title || i.productId || 'Item',
+              variantLabel: orderItemDetail(i), // variant and add-ons, plain text
               quantity: i.quantity || 1,
               basePrice: i.price || i.unitPrice || 0,
             })),
@@ -1998,7 +2003,7 @@ export class WebhookHandlers {
     }
 
     // Consolidated consumer receipt + admin copy — not gated on any other lookup.
-    const wcAllItems: Array<{ productName: string; vendorName: string; vendorContactEmail?: string; quantity: number; basePrice: number }> = [];
+    const wcAllItems: Array<{ productName: string; variantLabel?: string; vendorName: string; vendorContactEmail?: string; quantity: number; basePrice: number }> = [];
     let firstWcMvOrderNumber = 0;
     for (const vo of vendorOrders) {
       const voOrder = await storage.getOrder(vo.orderId).catch(() => undefined);
@@ -2007,6 +2012,7 @@ export class WebhookHandlers {
       for (const i of ((voOrder?.items as any[]) || [])) {
         wcAllItems.push({
           productName: i.name || i.title || i.productId || 'Item',
+          variantLabel: orderItemDetail(i), // variant and add-ons, plain text
           vendorName: voBusiness?.name || 'Business',
           vendorContactEmail: voBusiness?.contactEmail ?? undefined,
           quantity: i.quantity || 1,
