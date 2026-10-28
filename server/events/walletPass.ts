@@ -76,7 +76,7 @@ function normalisePem(raw: string | undefined): string | null {
   return v.replace(/\\r\\n|\\n/g, "\n").replace(/\r\n/g, "\n") + "\n";
 }
 
-let cache: { key: string; value: WalletConfig | null; validTo: number } | null = null;
+let cache: { key: string; value: WalletConfig | null; validFrom: number; validTo: number } | null = null;
 let warned = "";
 
 function warnOnce(why: string) {
@@ -92,8 +92,10 @@ export function walletConfig(): WalletConfig | null {
     .map((v) => v ?? "").join("\u0000");
   if (!cache || cache.key !== key) {
     const value = readConfig();
-    cache = { key, value, validTo: value ? Date.parse(new crypto.X509Certificate(value.signerCert).validTo) : 0 };
+    const x = value ? new crypto.X509Certificate(value.signerCert) : null;
+    cache = { key, value, validFrom: x ? Date.parse(x.validFrom) : 0, validTo: x ? Date.parse(x.validTo) : 0 };
   }
+  if (cache.value && !(cache.validFrom <= Date.now())) { warnOnce("the pass certificate isn't valid yet"); return null; }
   if (cache.value && !(cache.validTo > Date.now())) {
     warnOnce("the pass certificate has expired (renew it in Apple Developer and update APPLE_PASS_CERT_PEM)");
     return null;
@@ -119,7 +121,6 @@ function readConfig(): WalletConfig | null {
     const pk = crypto.createPrivateKey({ key: signerKey, format: "pem", passphrase });
     const x = new crypto.X509Certificate(signerCert);
     if (!x.checkPrivateKey(pk)) { warnOnce("the key doesn't belong to the pass certificate"); return null; }
-    if (Date.parse(x.validFrom) > Date.now()) { warnOnce("the pass certificate isn't valid yet"); return null; }
     return { passTypeId, teamId, signerCert, signerKey, signerKeyPassphrase: passphrase, wwdr };
   } catch {
     warnOnce("a certificate, key or passphrase doesn't parse");
@@ -240,14 +241,16 @@ export async function buildTicketPass(t: TicketPassInput, cfg: WalletConfig, now
  * the reveal passing or a new certificate all build a fresh pass. Holds at most 300 passes.
  */
 const PASS_CACHE_MAX = 300;
-const passCache = new Map<string, Buffer>();
+const passCache = new Map<string, Promise<Buffer>>();
 export async function cachedTicketPass(t: TicketPassInput, cfg: WalletConfig, now: Date = new Date()): Promise<Buffer> {
   const revealed = holderCanSeeAddress(t.event.addressVisibility, t.event.startsAt, t.event.timezone, now);
   const key = crypto.createHash("sha256").update(JSON.stringify([t, revealed, cfg.passTypeId, cfg.teamId, cfg.signerCert, cfg.wwdr])).digest("base64url");
   const hit = passCache.get(key);
   if (hit) { passCache.delete(key); passCache.set(key, hit); return hit; }
-  const built = await buildTicketPass(t, cfg, now);
+  // The promise is cached, so requests that arrive together share one signing; a failed build is dropped.
+  const built = buildTicketPass(t, cfg, now);
   passCache.set(key, built);
+  built.catch(() => { if (passCache.get(key) === built) passCache.delete(key); });
   while (passCache.size > PASS_CACHE_MAX) passCache.delete(passCache.keys().next().value as string);
   return built;
 }

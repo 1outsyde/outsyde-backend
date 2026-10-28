@@ -221,6 +221,14 @@ function assert(cond: boolean, name: string, detail?: unknown) {
   assert(c3 !== c1 && JSON.parse(unzipPass(c3)["pass.json"].toString("utf8")).eventTicket.primaryFields[0].value === "Renamed", "host edits the event → a fresh pass");
   const d1 = await cachedTicketPass(dayOf, conf, new Date("2026-11-06T12:00:00Z"));
   const d2 = await cachedTicketPass(dayOf, conf, new Date("2026-11-06T18:00:00Z"));
+  const [p1, p2] = await Promise.all([
+    cachedTicketPass({ ...input, ticketId: "33333333-2222-4333-8444-555555555555" }, conf),
+    cachedTicketPass({ ...input, ticketId: "33333333-2222-4333-8444-555555555555" }, conf),
+  ]);
+  assert(p1 === p2, "two requests at once for the same pass share one build");
+  let threw = false;
+  try { await cachedTicketPass({ ...input, ticketId: "44444444-2222-4333-8444-555555555555", event: { ...baseEvent, timezone: "Not/AZone" } }, conf); } catch { threw = true; }
+  assert(threw, "a pass that can't build rejects (the route answers 404)");
   assert(d1 !== d2 && JSON.stringify(JSON.parse(unzipPass(d2)["pass.json"].toString("utf8"))).includes("12 Main St"), "the reveal passing → a fresh pass with the address");
 
   restore();
