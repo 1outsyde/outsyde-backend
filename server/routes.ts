@@ -7,6 +7,7 @@ import { db } from "./db";
 import { coverPosterUrl, isMuxUploadId, resolveCoverVideoValue } from "./coverMedia";
 import { verifyMuxSignature } from "./muxWebhookSignature";
 import { resolvePublicIdentity } from "./publicIdentity";
+import { makeQuickSignupHandler, quickSignupRateLimiter } from "./quickSignup";
 import { buildFollowRows, parseFollowPaging } from "./follows/followLists";
 import {
   customerSignupSchema,
@@ -1092,6 +1093,13 @@ export async function registerRoutes(
   app.post("/api/auth/customer/signup", authRateLimiter, handleCustomerSignup);
   // Route alias used by client websites (xo-lashes-web etc.) for a consistent path
   app.post("/api/auth/register", authRateLimiter, handleCustomerSignup);
+  // Quick sign up from goutsyde.com event pages (p4-quicksignup): own 60 per 15 min limiter keyed
+  // on the visitor (server/quickSignup.ts). The two routes above are unchanged.
+  app.post(
+    "/api/auth/customer/quick-signup",
+    quickSignupRateLimiter,
+    makeQuickSignupHandler(handleCustomerSignup, (email) => storage.getUserByEmail(email)),
+  );
 
   // Shared business industry list (shared/businessTaxonomy.ts). Public: the app and
   // goutsyde.com signup screens load it so both always show the same choices.
