@@ -9,6 +9,7 @@ import { verifyMuxSignature } from "./muxWebhookSignature";
 import { resolvePublicIdentity } from "./publicIdentity";
 import { makeQuickSignupHandler, quickSignupRateLimiter } from "./quickSignup";
 import { loginLimits, resetRequestLimits, resetUseLimits } from "./authLimits";
+import { resetLinkBase } from "./resetLink";
 import { buildFollowRows, parseFollowPaging } from "./follows/followLists";
 import {
   customerSignupSchema,
@@ -3213,7 +3214,8 @@ export async function registerRoutes(
 
       // Build reset deep link for mobile app
       const resetLink = `outsyde://reset-password?token=${rawToken}&email=${encodeURIComponent(email)}`;
-      const frontendBase = (typeof redirect_uri === 'string' && redirect_uri) ? redirect_uri : (process.env.FRONTEND_URL || 'https://www.goutsyde.com');
+      // Only Outsyde's own sites may receive the reset link (R35, server/resetLink.ts).
+      const frontendBase = resetLinkBase(redirect_uri);
       const webResetLink = `${frontendBase}/reset-password?token=${rawToken}&email=${encodeURIComponent(email)}`;
 
       // Send email via Resend if configured
@@ -3237,7 +3239,7 @@ export async function registerRoutes(
           });
           console.log(`[Auth] Password reset email sent to ${email}`);
         } else {
-          console.log(`[Auth] RESEND_API_KEY not configured. Reset token for ${email}: ${rawToken}`);
+          console.log(`[Auth] RESEND_API_KEY not configured. Reset link not emailed for user ${user.id}.`);
         }
       } catch (emailError) {
         console.error("Failed to send reset email:", emailError);
