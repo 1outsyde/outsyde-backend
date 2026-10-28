@@ -8,6 +8,7 @@ import { coverPosterUrl, isMuxUploadId, resolveCoverVideoValue } from "./coverMe
 import { verifyMuxSignature } from "./muxWebhookSignature";
 import { resolvePublicIdentity } from "./publicIdentity";
 import { makeQuickSignupHandler, quickSignupRateLimiter } from "./quickSignup";
+import { loginLimits, resetLimits } from "./authLimits";
 import { buildFollowRows, parseFollowPaging } from "./follows/followLists";
 import {
   customerSignupSchema,
@@ -856,13 +857,8 @@ export async function registerRoutes(
     message: { success: false, message: "Too many requests, please try again later" },
   });
 
-  const strictAuthRateLimiter = rateLimit({
-    windowMs: 15 * 60 * 1000,
-    max: 5,
-    standardHeaders: true,
-    legacyHeaders: false,
-    message: { success: false, message: "Too many attempts, please try again later" },
-  });
+  // Login and password reset limits live in server/authLimits.ts (p4-loginlimit): per account /
+  // per email, plus a per visitor backstop. They replaced the shared 5 per 15 min strictAuthRateLimiter.
 
   // Free-plan link claims get their OWN bucket (not the shared authRateLimiter, which signups use):
   // 10 attempts per 15 minutes per IP. `error` is a plain string so the web BFF can show it.
@@ -1528,7 +1524,7 @@ export async function registerRoutes(
   });
 
   // Login — supports email, username, or generic identifier + password
-  app.post("/api/auth/login", strictAuthRateLimiter, async (req, res) => {
+  app.post("/api/auth/login", ...loginLimits, async (req, res) => {
     try {
       const { email, username, identifier, password } = req.body;
 
@@ -2670,7 +2666,7 @@ export async function registerRoutes(
   });
 
   // Mobile login — supports email, username, or identifier + password, returns JWT
-  app.post("/api/auth/mobile/login", strictAuthRateLimiter, async (req, res) => {
+  app.post("/api/auth/mobile/login", ...loginLimits, async (req, res) => {
     try {
       const { email, username, identifier, password } = req.body;
 
@@ -3069,7 +3065,7 @@ export async function registerRoutes(
   // ==================== PASSWORD RESET (CODE-BASED FLOW) ====================
 
   // Send 6-digit verification code via email
-  app.post("/api/auth/forgot-password/send-code", strictAuthRateLimiter, async (req, res) => {
+  app.post("/api/auth/forgot-password/send-code", ...resetLimits, async (req, res) => {
     try {
       const { email } = req.body;
       if (!email || typeof email !== 'string') {
@@ -3131,7 +3127,7 @@ export async function registerRoutes(
   });
 
   // Verify 6-digit code and issue one-time reset token
-  app.post("/api/auth/forgot-password/verify-code", strictAuthRateLimiter, async (req, res) => {
+  app.post("/api/auth/forgot-password/verify-code", ...resetLimits, async (req, res) => {
     try {
       const { email, code } = req.body;
       if (!email || !code) {
@@ -3190,7 +3186,7 @@ export async function registerRoutes(
 
   // ==================== PASSWORD RESET (DEEP LINK FLOW — LEGACY) ====================
 
-  app.post("/api/auth/forgot-password", strictAuthRateLimiter, async (req, res) => {
+  app.post("/api/auth/forgot-password", ...resetLimits, async (req, res) => {
     try {
       const { email, redirect_uri } = req.body;
       if (!email || typeof email !== 'string') {
@@ -3254,7 +3250,7 @@ export async function registerRoutes(
     }
   });
 
-  app.post("/api/auth/reset-password", strictAuthRateLimiter, async (req, res) => {
+  app.post("/api/auth/reset-password", ...resetLimits, async (req, res) => {
     try {
       const { token, resetToken, email, newPassword } = req.body;
       const resolvedToken = resetToken || token;
