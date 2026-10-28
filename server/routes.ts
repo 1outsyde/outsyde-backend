@@ -6,6 +6,7 @@ import { storage, appointmentChargeFields } from "./storage";
 import { db } from "./db";
 import { coverPosterUrl, isMuxUploadId, resolveCoverVideoValue } from "./coverMedia";
 import { verifyMuxSignature } from "./muxWebhookSignature";
+import { videoSizeFromMuxAsset } from "./muxVideoSize";
 import { resolvePublicIdentity } from "./publicIdentity";
 import { makeQuickSignupHandler, quickSignupRateLimiter } from "./quickSignup";
 import { loginLimits, resetRequestLimits, resetUseLimits } from "./authLimits";
@@ -4213,6 +4214,7 @@ export async function registerRoutes(
           mediaUrl: post.mediaUrl || post.imageUrl || null,
           mediaType: post.mediaType || 'image',
           mediaItems: post.mediaItems ?? [],
+          videoFit: post.videoFit ?? null,
           postIntent: post.postIntent,
           likeCount: post.likesCount || 0,
           duration: null,
@@ -4301,6 +4303,9 @@ export async function registerRoutes(
           createdAt: feedPosts.createdAt,
           aspectRatio: feedPosts.aspectRatio,
           mediaItems: feedPosts.mediaItems,
+          mediaWidth: feedPosts.mediaWidth,
+          mediaHeight: feedPosts.mediaHeight,
+          videoFit: feedPosts.videoFit,
           likesCount: feedPosts.likesCount,
           commentsCount: feedPosts.commentsCount,
           productId: feedPosts.productId,
@@ -23208,6 +23213,8 @@ export async function registerRoutes(
         mediaType: z.enum(['image', 'video']).optional(), // Mobile app sends this at top level
         thumbnailUrl: z.string().optional(), // Mobile app sends this at top level
         mediaDuration: z.number().optional(), // Mobile app sends video duration
+        // Migration 078: Fill / Fit for videos (TikTok style). Ignored for photos.
+        videoFit: z.enum(['fill', 'fit']).optional(),
         taggedBusinessId: z.string().optional(),
         taggedPhotographerId: z.string().optional(),
         postType: z.enum(['text', 'product', 'service']).optional(),
@@ -23420,6 +23427,7 @@ export async function registerRoutes(
         mediaHeight: firstMediaItem ? firstMediaItem.height : data.media?.height,
         aspectRatio: firstMediaItem ? firstMediaItem.aspectRatio : data.media?.aspectRatio,
         mediaItems: data.mediaItems ?? [],
+        videoFit: normalizedMediaType === 'video' ? (data.videoFit ?? null) : null,
         taggedBusinessId: data.taggedBusinessId,
         taggedPhotographerId: data.taggedPhotographerId,
         productId: data.productId,
@@ -24485,12 +24493,16 @@ export async function registerRoutes(
       const userId = authReq.user?.userId || req.session?.userId;
       if (!userId) return res.status(401).json({ error: "Unauthorized" });
 
-      const { mediaUrl, mediaType, thumbnailUrl, muxAssetId, caption } = req.body;
+      const { mediaUrl, mediaType, thumbnailUrl, muxAssetId, caption, videoFit } = req.body;
       if (!mediaUrl || !mediaType) {
         return res.status(400).json({ error: "mediaUrl and mediaType are required" });
       }
       if (mediaType !== "image" && mediaType !== "video") {
         return res.status(400).json({ error: "mediaType must be 'image' or 'video'" });
+      }
+      // Migration 078: optional Fill / Fit for video stories. Older apps never send it.
+      if (videoFit !== undefined && videoFit !== null && videoFit !== "fill" && videoFit !== "fit") {
+        return res.status(400).json({ error: "videoFit must be 'fill' or 'fit'" });
       }
 
       const story = await createStory({
@@ -24500,6 +24512,7 @@ export async function registerRoutes(
         thumbnailUrl,
         muxAssetId,
         caption,
+        videoFit: videoFit ?? null,
       });
       return res.status(201).json(story);
     } catch (error) {
@@ -24769,6 +24782,8 @@ export async function registerRoutes(
         if (playbackId && uploadId) {
           const videoUrl = `https://stream.mux.com/${playbackId}.m3u8`;
           const thumbnailUrl = `https://image.mux.com/${playbackId}/thumbnail.jpg`;
+          // Video size from Mux (2026-10-28): fills the post's size only where it is still empty.
+          const videoSize = videoSizeFromMuxAsset(data);
 
           await db
             .update(feedPosts)
@@ -24776,6 +24791,13 @@ export async function registerRoutes(
               mediaUrl: videoUrl,
               imageUrl: thumbnailUrl,
               thumbnailUrl,
+              ...(videoSize
+                ? {
+                    mediaWidth: sql`COALESCE(${feedPosts.mediaWidth}, ${videoSize.width})`,
+                    mediaHeight: sql`COALESCE(${feedPosts.mediaHeight}, ${videoSize.height})`,
+                    aspectRatio: sql`COALESCE(${feedPosts.aspectRatio}, ${videoSize.aspectRatio}::double precision)`,
+                  }
+                : {}),
               updatedAt: new Date(),
             })
             .where(eq(feedPosts.mediaUrl, uploadId));

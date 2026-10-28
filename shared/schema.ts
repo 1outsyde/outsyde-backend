@@ -2223,6 +2223,8 @@ export const feedPosts = pgTable("feed_posts", {
   // Multi-photo posts (migration 045): ordered photos, 2-10 items. [] = single media (use mediaUrl).
   // Photo 1 is also written to mediaUrl/imageUrl so older readers and app builds keep working.
   mediaItems: jsonb("media_items").$type<PostMediaItem[]>().default([]).notNull(),
+  // Migration 078: 'fill' | 'fit' for videos (TikTok style), NULL = automatic. Photos store NULL.
+  videoFit: text("video_fit"),
 
   taggedBusinessId: varchar("tagged_business_id", { length: 36 }).references(() => businesses.id),
   taggedPhotographerId: varchar("tagged_photographer_id", { length: 36 }).references(() => photographers.id),
@@ -3688,6 +3690,8 @@ export const stories = pgTable("stories", {
   thumbnailUrl: text("thumbnail_url"),
   muxAssetId: text("mux_asset_id"),
   caption: text("caption"),
+  // Migration 078: 'fill' | 'fit' for video stories, NULL = automatic. Photo stories store NULL.
+  videoFit: text("video_fit"),
 
   createdAt: timestamp("created_at").defaultNow().notNull(),
   expiresAt: timestamp("expires_at").notNull(), // set explicitly at insert time: created_at + interval '24 hours'
@@ -3720,6 +3724,7 @@ export const storyHighlights = pgTable("story_highlights", {
   thumbnailUrl: text("thumbnail_url"),
   muxAssetId:   text("mux_asset_id"),
   caption:      text("caption"),
+  videoFit:     text("video_fit"), // Migration 078: copied from the story when it is highlighted
   savedAt:      timestamp("saved_at").defaultNow().notNull(),
 }, (table) => ({
   uniqUserStory:     unique("story_highlights_unique").on(table.userId, table.storyId),

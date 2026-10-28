@@ -11,6 +11,8 @@ export interface CreateStoryInput {
   thumbnailUrl?: string;
   muxAssetId?: string;
   caption?: string;
+  /** Migration 078: video stories only. */
+  videoFit?: "fill" | "fit" | null;
 }
 
 export async function createStory(input: CreateStoryInput) {
@@ -23,6 +25,7 @@ export async function createStory(input: CreateStoryInput) {
       thumbnailUrl: input.thumbnailUrl ?? null,
       muxAssetId: input.muxAssetId ?? null,
       caption: input.caption ?? null,
+      videoFit: input.mediaType === "video" ? (input.videoFit ?? null) : null,
       expiresAt: sql`now() + interval '24 hours'`,
     })
     .returning();
@@ -156,8 +159,9 @@ export interface CreateStoryHighlightInput {
 
 export async function createStoryHighlight(input: CreateStoryHighlightInput): Promise<StoryHighlight> {
   const result = await db.execute(
-    sql`INSERT INTO story_highlights (user_id, story_id, media_url, media_type, thumbnail_url, mux_asset_id, caption)
-        VALUES (${input.userId}, ${input.storyId}, ${input.mediaUrl}, ${input.mediaType}, ${input.thumbnailUrl ?? null}, ${input.muxAssetId ?? null}, ${input.caption ?? null})
+    sql`INSERT INTO story_highlights (user_id, story_id, media_url, media_type, thumbnail_url, mux_asset_id, caption, video_fit)
+        VALUES (${input.userId}, ${input.storyId}, ${input.mediaUrl}, ${input.mediaType}, ${input.thumbnailUrl ?? null}, ${input.muxAssetId ?? null}, ${input.caption ?? null},
+                (SELECT s.video_fit FROM stories s WHERE s.id = ${input.storyId}))
         RETURNING *`
   );
   return result.rows[0] as StoryHighlight;
@@ -172,6 +176,8 @@ export interface StoryHighlight {
   thumbnail_url: string | null;
   mux_asset_id: string | null;
   caption: string | null;
+  /** Migration 078: copied from the story; 'fill' | 'fit' | null. */
+  video_fit: string | null;
   saved_at: string;
 }
 
