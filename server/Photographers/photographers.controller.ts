@@ -15,6 +15,7 @@ import { validatePhotographerDeposit, invalidDepositBody } from "../deposits";
 import { resolvePhotographerSpecialties } from "../../shared/photographerTaxonomy";
 import { filterProviderBookings } from "../providerBookingLists";
 import { refreshCityPoint } from "../geo/cityPoint";
+import { decideColorUpdate } from "../../shared/profileColor";
 
 // Rate limit for displayName changes (7 days cooldown)
 const DISPLAY_NAME_CHANGE_COOLDOWN_DAYS = 7;
@@ -182,7 +183,14 @@ export class PhotographerController {
       const { displayName, bio, city, state, portfolioUrl, hourlyRate, specialties, specialtyCodes, specialtyOther, coverImage, coverMediaType, logoImage, brandColors, ctaConfig } = req.body;
       
       const updates: any = {};
-      
+
+      // Brand color (2026-10-28, color wheel): checked first, before anything is written.
+      // A save from an old app version (no v:2) leaves a stored wheel color alone.
+      const colorDecision = brandColors !== undefined ? decideColorUpdate(brandColors, photographer.brandColors) : null;
+      if (colorDecision && !colorDecision.ok) {
+        return res.status(400).json({ error: colorDecision.error, field: "brandColors" });
+      }
+
       // Enforce displayName rate limit (7 days between changes)
       if (displayName !== undefined && displayName !== photographer.displayName) {
         const { allowed, daysRemaining } = canChangeDisplayName(user?.displayNameLastChangedAt);
@@ -240,11 +248,15 @@ export class PhotographerController {
         return res.status(400).json({ error: "coverMediaType is required when setting coverImage" });
       }
       if (logoImage !== undefined) updates.logoImage = logoImage;
-      if (brandColors !== undefined) updates.brandColors = brandColors;
+      if (colorDecision && colorDecision.ok && colorDecision.apply) updates.brandColors = colorDecision.value;
       if (ctaConfig !== undefined) updates.ctaConfig = ctaConfig;
 
       // Guard against empty update payload to prevent SQL error
       if (Object.keys(updates).length === 0) {
+        // Only a color an old app version sent, set aside to keep a wheel color: nothing to write, not an error.
+        if (colorDecision && colorDecision.ok && !colorDecision.apply) {
+          return res.json({ photographer });
+        }
         return res.status(400).json({ error: "No valid fields provided for update" });
       }
 

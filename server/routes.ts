@@ -327,6 +327,7 @@ import { createStory, getStoriesByUser, getStory, deleteStory, recordView, creat
 import { photographersRouter } from "./Photographers/photographers.routes";
 import { toPublicBusinessDTO } from "./serializers/business";
 import { grantToken } from "./utils/grantToken";
+import { colorInputSchema, decideColorUpdate } from "@shared/profileColor";
 import {
   bookingRevenueCents, bookingInPersonCents, bookingCountsAsRevenue, isPaidOrder, orderRevenueDate, monthKey, monthOf,
   bookingRevenueWhereSql, bookingRevenueAmountSql, paidOrderWhereSql, orderRevenueDateSql,
@@ -3052,6 +3053,8 @@ export async function registerRoutes(
           city: user.city ?? null,
           state: user.state ?? null,
           locationPublic: user.locationPublic === true,
+          // Additive (2026-10-28, migration 079): own profile color, so Edit Profile shows it after a reload.
+          profileColor: user.profileColor ?? null,
         },
       });
     } catch (error) {
@@ -3642,6 +3645,8 @@ export async function registerRoutes(
         locationPublic: z.boolean().optional(),
         city: z.string().trim().max(100).optional().nullable(),
         state: z.string().trim().max(50).optional().nullable(),
+        // Profile color (2026-10-28, migration 079): preset, color wheel hex, or null for gold.
+        profileColor: colorInputSchema.optional(),
       });
 
       const validated = updateSchema.safeParse(req.body);
@@ -3696,6 +3701,11 @@ export async function registerRoutes(
       }
       if (validated.data.locationPublic !== undefined) {
         updateData.locationPublic = validated.data.locationPublic;
+      }
+      if (validated.data.profileColor !== undefined) {
+        // No old app version sends profileColor, so nothing to guard: always applied.
+        const decision = decideColorUpdate(validated.data.profileColor, null);
+        if (decision.ok && decision.apply) updateData.profileColor = decision.value;
       }
       const cityChanged = validated.data.city !== undefined || validated.data.state !== undefined;
       if (validated.data.city !== undefined) updateData.city = validated.data.city || null;
@@ -12540,6 +12550,17 @@ export async function registerRoutes(
         }
       }
 
+      // Brand color (2026-10-28, color wheel): preset, wheel hex or null. A save from an old app
+      // version (no v:2) leaves a stored wheel color alone. Rules in shared/profileColor.ts.
+      if (updates.brandColors !== undefined) {
+        const decision = decideColorUpdate(updates.brandColors, business.brandColors);
+        if (!decision.ok) {
+          return res.status(400).json({ error: decision.error, field: "brandColors" });
+        }
+        if (decision.apply) updates.brandColors = decision.value;
+        else delete updates.brandColors;
+      }
+
       // Industry (2026-10-17, Legend): the stored code is the source of truth for future
       // customer matching. Whenever this save touches the industry or the offer type of a
       // business that has (or is getting) a code, the merged result must pass the same check
@@ -17344,6 +17365,8 @@ export async function registerRoutes(
         coverMediaType: user.coverMediaType,
         // Still picture for image-only screens (Mux thumbnail for video covers). Additive.
         coverPosterUrl: coverPosterUrl(user.coverMediaUrl, user.coverMediaType),
+        // Profile color (2026-10-28, migration 079). null = gold. Additive; old app versions ignore it.
+        profileColor: user.profileColor ?? null,
         // Location (coarse — city/state only, not full address). Shown only when the person shares it
         // (users.location_public, migration 070); the person themselves and admins always see it.
         city: showCity ? user.city : null,
