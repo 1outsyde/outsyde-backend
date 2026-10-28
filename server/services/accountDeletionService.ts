@@ -19,6 +19,7 @@ import {
   pulseEngagements,
   userInterests,
   userSavedPosts,
+  userFavorites,
   feedEngagementEvents,
   influencerApplications,
   influencerAttributions,
@@ -215,6 +216,7 @@ async function processSingleUserDeletion(userId: string): Promise<void> {
   await db.delete(pulseEngagements).where(eq(pulseEngagements.userId, userId));
   await db.delete(userInterests).where(eq(userInterests.userId, userId));
   await db.delete(userSavedPosts).where(eq(userSavedPosts.userId, userId));
+  await db.delete(userFavorites).where(eq(userFavorites.userId, userId));
   await db.delete(feedEngagementEvents).where(eq(feedEngagementEvents.userId, userId));
   await db.delete(influencerApplications).where(eq(influencerApplications.userId, userId));
   await db.delete(vendorEmailSequence).where(eq(vendorEmailSequence.vendorId, userId));

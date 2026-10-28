@@ -24417,6 +24417,10 @@ export async function registerRoutes(
   const { registerPlacesRoutes } = await import("./placesRoutes");
   registerPlacesRoutes(app);
 
+  // Saved businesses, photographers and products on the account (migration 077)
+  const { registerFavoritesRoutes } = await import("./favorites/favoritesRoutes");
+  registerFavoritesRoutes(app);
+
   // ==================== MEDIA ROUTES (R2 + Mux) ====================
 
   const multerUpload = multer({

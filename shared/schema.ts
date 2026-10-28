@@ -3582,6 +3582,19 @@ export const userSavedPosts = pgTable("user_saved_posts", {
   idxSavedUnique: unique("idx_user_saved_posts_unique").on(table.userId, table.postId),
 }));
 
+// Saved businesses, photographers and products (migration 077). target_id points at businesses,
+// photographers or vendor_products depending on target_type, so it has no foreign key.
+export const userFavorites = pgTable("user_favorites", {
+  id: varchar("id", { length: 36 }).primaryKey().default(sql`gen_random_uuid()`),
+  userId: varchar("user_id", { length: 36 }).notNull().references(() => users.id),
+  targetType: text("target_type").notNull(),
+  targetId: varchar("target_id", { length: 36 }).notNull(),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+}, (table) => ({
+  idxFavoritesUnique: unique("idx_user_favorites_unique").on(table.userId, table.targetType, table.targetId),
+  idxFavoritesUserCreated: index("idx_user_favorites_user_created").on(table.userId, table.createdAt),
+}));
+
 /* =====================================================
    PHASE 3 — SPONSORED POSTS
 ===================================================== */
