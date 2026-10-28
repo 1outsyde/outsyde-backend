@@ -37,6 +37,7 @@ import {
   type StaffMember,
   type StaffInvite,
   type SubscriptionTier,
+  type Business,
 } from "@shared/schema";
 import { sendStaffInviteEmail, sendStaffPayoutSetupEmail, sendStaffAcceptedOwnerEmail, sendDeletionConfirmationEmail, sendSupportContactEmail } from "./services/resendService";
 import { checkVendorStripeBalances, checkActiveOrders } from "./services/accountDeletionService";
@@ -268,6 +269,7 @@ import { claimPromoForCheckout, confirmPromoStillHeld, PROMO_TAKEN_RESPONSE } fr
 import { calculateProductFee, calculateBookingFee, calculateConsumerServiceFee, calculateBookingFees, quoteDeposit } from "./fees";
 import { resolveProviderRefund } from "./providerRefund";
 import { validateDeposit, invalidDepositBody, validatePhotographerDeposit, photographerBookingDepositCents } from "./deposits";
+import { parseCancellationPolicy, parseDefaultDeposit, computeBusinessSetupSteps, payoutsReady } from "./accountSetup/businessSetup";
 import {
   trackLinkClick,
   recordAttribution,
@@ -12496,9 +12498,18 @@ export async function registerRoutes(
         "otherDescription",
         // Cities the business serves (migration 068), checked and cleaned below.
         "serviceCities",
+        // Migration 076: deposit pre-filled on NEW services only (null = none). Checked below.
+        "defaultDepositCents",
       ]);
       if (otherFields.allowPastClosing !== undefined && typeof otherFields.allowPastClosing !== "boolean") {
         return res.status(400).json({ error: "allowPastClosing must be true or false" });
+      }
+      if (otherFields.defaultDepositCents !== undefined) {
+        const deposit = parseDefaultDeposit(otherFields.defaultDepositCents);
+        if (!deposit.ok) {
+          return res.status(400).json(invalidDepositBody(deposit.message, { field: "defaultDepositCents" }));
+        }
+        otherFields.defaultDepositCents = deposit.value;
       }
       if (otherFields.serviceCities !== undefined) {
         const cities = serviceCitiesInput.safeParse(otherFields.serviceCities);
@@ -12709,6 +12720,99 @@ export async function registerRoutes(
     } catch (error) {
       console.error("Update vendor business error:", error);
       res.status(500).json({ error: "Failed to update business" });
+    }
+  });
+
+  // Owner's business, or (platform admin + x-business-id) the named one. Same rule as
+  // PATCH /api/vendor/my-business, so vendor site BFFs that send x-business-id work the same way.
+  const resolveOwnedOrAdminBusiness = async (req: ExpressRequest): Promise<{ business: Business } | { status: number; body: unknown }> => {
+    const authReq = req as AuthenticatedRequest;
+    const userId = authReq.user?.userId || req.session?.userId;
+    if (!userId) return { status: 401, body: { error: "Not authenticated" } };
+    const xBusinessId = req.headers['x-business-id'] as string | undefined;
+    const ALLOWED_ADMIN_EMAILS = ['info@goutsyde.com', 'jamesmeyers2304@gmail.com'];
+    let isAdmin = authReq.user?.isAdmin === true;
+    if (!isAdmin && xBusinessId) {
+      const userRecord = await storage.getUser(userId);
+      isAdmin = ALLOWED_ADMIN_EMAILS.includes((userRecord?.email ?? '').toLowerCase());
+    }
+    const business = xBusinessId && isAdmin
+      ? await storage.getBusiness(xBusinessId)
+      : await storage.getBusinessByOwnerId(userId);
+    if (!business) return { status: 404, body: { error: "No business found for this account" } };
+    return { business };
+  };
+
+  // Save the business cancellation policy (Manage Business step 3, migration 076). The whole policy is
+  // replaced and the business is marked as having chosen one (cancellationPolicySetAt), which the setup
+  // checklist reads. New services pre-fill from it in the app; existing services are not changed here
+  // (that stays POST /api/vendor/services/:id/apply-cancellation-policy-to-all).
+  app.put("/api/vendor/my-business/cancellation-policy", hybridAuthMiddleware, async (req, res) => {
+    try {
+      const resolved = await resolveOwnedOrAdminBusiness(req);
+      if ("status" in resolved) return res.status(resolved.status).json(resolved.body);
+      const parsed = parseCancellationPolicy(req.body);
+      if (!parsed.ok) {
+        return res.status(400).json({ error: parsed.error, code: "INVALID_POLICY", field: "cancellationPolicy" });
+      }
+      const updated = await storage.updateBusiness(resolved.business.id, {
+        ...parsed.policy,
+        cancellationPolicySetAt: new Date(),
+      });
+      res.json({ business: updated });
+    } catch (error) {
+      console.error("Save business cancellation policy error:", error);
+      res.status(500).json({ error: "Failed to save cancellation policy" });
+    }
+  });
+
+  // One setup checklist for the app's Manage business hub and the vendor site dashboards.
+  // Read only, apart from the same Stripe onboarding self-heal GET /api/vendor/eligibility does.
+  app.get("/api/vendor/setup-status", hybridAuthMiddleware, async (req, res) => {
+    try {
+      const resolved = await resolveOwnedOrAdminBusiness(req);
+      if ("status" in resolved) return res.status(resolved.status).json(resolved.body);
+      let business = resolved.business;
+
+      let payoutsComplete = payoutsReady(business.stripeOnboardingComplete, business.stripeAccountId);
+      if (!payoutsComplete && business.stripeAccountId && !business.stripeOnboardingComplete) {
+        const synced = await stripeService.syncOnboardingStatus({
+          entityType: 'business',
+          entityId: business.id,
+          stripeAccountId: business.stripeAccountId,
+          currentOnboardingComplete: false,
+          updateFn: (id: string, data: Record<string, unknown>) => storage.updateBusiness(id, data),
+        }).catch(() => false);
+        payoutsComplete = payoutsReady(synced, business.stripeAccountId);
+      }
+
+      const [products, services, subscription] = await Promise.all([
+        storage.getVendorProducts(business.id),
+        storage.getVendorServicesByBusiness(business.id),
+        storage.getVendorSubscriptionByBusinessId(business.id),
+      ]);
+      let tier: SubscriptionTier | null = null;
+      if (subscription?.tierId) {
+        const tiers = await stripeService.getSubscriptionTiers();
+        tier = tiers.find((t: { id: string }) => t.id === subscription.tierId) ?? null;
+      }
+
+      res.json(computeBusinessSetupSteps({
+        businessId: business.id,
+        approvalStatus: business.approvalStatus ?? null,
+        hasServicesFlag: business.hasServices ?? null,
+        products: products.map((p) => ({ name: p.name, imageUrl: p.imageUrl, status: p.status })),
+        services: services.map((s) => ({ name: s.name, imageUrl: s.imageUrl, status: s.status })),
+        hoursOfOperation: business.hoursOfOperation,
+        vendorTermsAndConditions: business.vendorTermsAndConditions ?? null,
+        cancellationPolicySetAt: business.cancellationPolicySetAt ?? null,
+        subscription: subscription ?? null,
+        tier,
+        payoutsComplete,
+      }));
+    } catch (error) {
+      console.error("Get setup status error:", error);
+      res.status(500).json({ error: "Failed to get setup status" });
     }
   });
 
@@ -15123,7 +15227,9 @@ export async function registerRoutes(
   app.post("/api/vendor/services/:id/apply-cancellation-policy-to-all", async (req, res) => {
     const xBusinessId = req.headers['x-business-id'] as string | undefined;
     const ALLOWED_ADMIN_EMAILS = ['info@goutsyde.com', 'jamesmeyers2304@gmail.com'];
-    const userId = req.session?.userId || (req as any).user?.userId;
+    // Session or the app's Bearer token (2026-10-28). Before, only the session cookie worked, so the
+    // app got "Not authenticated" once its 7 day session cookie expired.
+    const userId = req.session?.userId || getUserIdFromRequest(req);
     if (!userId) return res.status(401).json({ error: 'Not authenticated' });
 
     const userRecord = await storage.getUser(userId);
@@ -15155,7 +15261,8 @@ export async function registerRoutes(
 
       const [updatedCount] = await Promise.all([
         storage.updateAllVendorServicesCancellationPolicy(business.id, service.id, policy),
-        storage.updateBusiness(business.id, policy),
+        // The business has now chosen its policy (migration 076, read by the setup checklist).
+        storage.updateBusiness(business.id, { ...policy, cancellationPolicySetAt: new Date() }),
       ]);
 
       res.json({ success: true, updatedCount });
