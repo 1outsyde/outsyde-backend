@@ -13238,7 +13238,9 @@ export async function registerRoutes(
         images: z.array(z.string()).optional(),
         category: z.string().nullable().optional(),
         tags: z.array(z.string()).optional(),
-        inventory: z.number().optional(),
+        // null = no stock number (with trackInventory false: no limit). Older app builds show
+        // "Out of stock" for 0, so a no-limit product is saved with null, not 0 (2026-10-28).
+        inventory: z.number().nullable().optional(),
         trackInventory: z.boolean().optional(),
         isActive: z.boolean().optional(),
         isFeatured: z.boolean().optional(),
@@ -13304,7 +13306,9 @@ export async function registerRoutes(
         images: z.array(z.string()).optional(),
         category: z.string().nullable().optional(),
         tags: z.array(z.string()).optional(),
-        inventory: z.number().optional(),
+        // null = no stock number (with trackInventory false: no limit). Older app builds show
+        // "Out of stock" for 0, so a no-limit product is saved with null, not 0 (2026-10-28).
+        inventory: z.number().nullable().optional(),
         trackInventory: z.boolean().optional(),
         isActive: z.boolean().optional(),
         isFeatured: z.boolean().optional(),
