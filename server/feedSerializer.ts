@@ -35,6 +35,8 @@ export interface VideoCard {
     height: number | null;
     aspectRatio: number | null;
   };
+  /** Migration 078: 'fill' | 'fit' chosen at upload, null = automatic. */
+  videoFit: 'fill' | 'fit' | null;
   businessId: string | null;
   photographerId: string | null;
   pulseScore: number;
@@ -81,6 +83,7 @@ export function formatVideoCard(post: PulseFeedPost): VideoCard | null {
       height: post.mediaHeight || null,
       aspectRatio: post.aspectRatio || null,
     },
+    videoFit: post.videoFit === 'fill' || post.videoFit === 'fit' ? post.videoFit : null,
     businessId: post.taggedBusinessId || null,
     photographerId: post.taggedPhotographerId || null,
     pulseScore: post.pulseScore || 0,
