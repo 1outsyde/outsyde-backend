@@ -4674,7 +4674,8 @@ export class DatabaseStorage implements IStorage {
       isActive: data.isActive ?? undefined,
       isFeatured: data.isFeatured ?? undefined,
       status: data.status ?? undefined,
-      inventory: data.inventory ?? undefined,
+      // null is kept (no stock number); undefined leaves the column default (0).
+      inventory: data.inventory === null ? null : data.inventory ?? undefined,
       trackInventory: data.trackInventory ?? undefined,
       tags: data.tags ?? undefined,
       stripeProductId: data.stripeProductId ?? undefined,
