@@ -9,8 +9,9 @@ import { execFileSync } from "child_process";
 
 export type TestCerts = { signerCert: string; signerKey: string; wwdr: string; passphrase: string; signerKeyEncrypted: string; dir: string };
 
-export function makeTestCerts(): TestCerts {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "wallet-certs-"));
+export function makeTestCerts(intoDir?: string): TestCerts {
+  const dir = intoDir ?? fs.mkdtempSync(path.join(os.tmpdir(), "wallet-certs-"));
+  fs.mkdirSync(dir, { recursive: true });
   const run = (args: string[]) => execFileSync("openssl", args, { cwd: dir, stdio: "pipe" });
   run(["req", "-x509", "-newkey", "rsa:2048", "-nodes", "-keyout", "wwdr.key", "-out", "wwdr.pem", "-days", "2", "-subj", "/CN=Test WWDR"]);
   run(["req", "-x509", "-newkey", "rsa:2048", "-nodes", "-keyout", "signer.key", "-out", "signer.pem", "-days", "2",

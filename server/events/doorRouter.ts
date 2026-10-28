@@ -27,6 +27,7 @@ import { rows, iso, fail, pgError, hostIdentity } from "./eventsRouter";
 import { loadEventForDoor, isWithinScanWindow } from "./doorAccess";
 import { notifyDoorInvite, notifyDoorAccepted } from "./ticketNotices";
 import { ticketIdFromQrToken, qrPng } from "./ticketQr";
+import { ticketIdFromWalletToken, walletConfig, buildTicketPass } from "./walletPass";
 
 const router = Router();
 
@@ -134,6 +135,48 @@ router.get("/qr/:token.png", qrLimiter, async (req: Request, res: Response) => {
     return res.send(png);
   } catch (err) {
     console.error("[Events] qr image failed:", err);
+    return notFound();
+  }
+});
+
+/**
+ * Public, signed Apple Wallet pass (p3-wallet). Same 404 for unknown, tampered, refunded and cancelled tickets, a QR
+ * token used here, and while Wallet isn't configured. Shares the QR images' per IP limit. Reads only.
+ */
+router.get("/wallet/:token.pkpass", qrLimiter, async (req: Request, res: Response) => {
+  const notFound = () => res.status(404).json({ success: false, error: { code: "NOT_FOUND", message: "Not found." } });
+  try {
+    const cfg = walletConfig();
+    if (!cfg) return notFound();
+    const ticketId = ticketIdFromWalletToken(String(req.params.token));
+    if (!ticketId) return notFound();
+    const [t] = await rows<any>(sql`
+      SELECT t.id, t.code, tt.name AS ticket_type_name, u.first_name,
+             e.title, e.starts_at, e.ends_at, e.timezone, e.address_visibility,
+             e.venue_name, e.address_line1, e.address_line2, e.city, e.state, e.postal_code
+      FROM tickets t
+      JOIN ticket_types tt ON tt.id = t.ticket_type_id
+      JOIN events e ON e.id = t.event_id
+      LEFT JOIN users u ON u.id = t.holder_user_id
+      WHERE t.id = ${ticketId} AND t.status = 'valid'
+      LIMIT 1`);
+    if (!t) return notFound();
+    const pkpass = await buildTicketPass({
+      ticketId: String(t.id), code: String(t.code), ticketTypeName: String(t.ticket_type_name), holderFirstName: t.first_name ?? null,
+      event: {
+        title: String(t.title), startsAt: new Date(t.starts_at), endsAt: new Date(t.ends_at), timezone: String(t.timezone),
+        addressVisibility: t.address_visibility, venueName: t.venue_name ?? null, addressLine1: t.address_line1 ?? null,
+        addressLine2: t.address_line2 ?? null, city: t.city ?? null, state: t.state ?? null, postalCode: t.postal_code ?? null,
+      },
+    }, cfg);
+    res.set({
+      "Content-Type": "application/vnd.apple.pkpass",
+      "Cache-Control": "private, no-store",
+      "Referrer-Policy": "no-referrer",
+    });
+    return res.send(pkpass);
+  } catch (err) {
+    console.error("[Events] wallet pass failed:", err instanceof Error ? err.message : err);
     return notFound();
   }
 });

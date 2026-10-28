@@ -224,7 +224,7 @@ const PNG = Buffer.from([0x89, 0x50, 0x4e, 0x47]);
     assert(mine && mine.qrUrl.endsWith(`/api/events/qr/${qrTokenFor(good.id)}.png`), "ticket carries qrUrl", mine?.qrUrl);
     assert(!JSON.stringify(r.body).includes(`qr/${good.code}`) && !mine.qrUrl.includes(good.code), "code never appears in qrUrl", mine?.qrUrl);
     const keys = Object.keys(mine).sort();
-    assert(JSON.stringify(keys) === JSON.stringify(["checkedInAt", "code", "event", "id", "orderId", "qrUrl", "status", "ticketTypeName"]), "ticket keys: old ones plus qrUrl only", keys);
+    assert(JSON.stringify(keys) === JSON.stringify(["checkedInAt", "code", "event", "id", "orderId", "qrUrl", "status", "ticketTypeName", "walletUrl"]), "ticket keys: old ones plus qrUrl and walletUrl only", keys);
     assert(JSON.stringify(Object.keys(mine.event).sort()) === JSON.stringify(["addressHidden", "addressLine1", "addressLine2", "addressRevealAt", "coverImageUrl", "city", "endsAt", "id", "postalCode", "slug", "startsAt", "state", "status", "timezone", "title", "venueName"].sort()), "event keys unchanged", Object.keys(mine.event));
     assert(mine.code === good.code && mine.status === "valid" && mine.ticketTypeName === "General" && mine.checkedInAt === null, "old values unchanged");
     const viaUrl = await get(BASE, new URL(mine.qrUrl, BASE).pathname);
