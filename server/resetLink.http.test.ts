@@ -45,6 +45,14 @@ const LOOK_ALIKES = [
   "javascript:alert(1)",
   "https://www.goutsyde.com.evil.example",
   " https://evil.example ",
+  "https://braidswithlove.com\\@evil.example",
+  "https:\\\\evil.example",
+  "https://braidswithlove.com:8443",
+  "https://braidswithlove.com.",
+  "https://braidswithlove.com#@evil.example",
+  "https://braidswithlove.com\"><x",
+  "https://xobeautyandlashes.com",
+  "https://braids-with-love-site.vercel.app",
 ];
 
 function unitBlock() {
@@ -61,7 +69,9 @@ function unitBlock() {
   assert(resetLinkBase("https://braidsbylana.com", {} as NodeJS.ProcessEnv) === "https://braidsbylana.com", "allowed site kept with no FRONTEND_URL set");
   assert(resetLinkBase("https://evil.example", {} as NodeJS.ProcessEnv) === "https://www.goutsyde.com", "no FRONTEND_URL: goutsyde.com fallback");
   assert(resetLinkBase("https://staging.example", { FRONTEND_URL: "https://staging.example/" } as NodeJS.ProcessEnv) === "https://staging.example", "FRONTEND_URL itself is always allowed");
-  assert(resetLinkBase("http://localhost:3001", { NODE_ENV: "production" } as NodeJS.ProcessEnv) === "https://www.goutsyde.com", "plain http (local dev) not allowed in production");
+  assert(resetLinkBase("http://localhost:3001", {} as NodeJS.ProcessEnv) === "https://www.goutsyde.com", "plain http is never allowed unless it is FRONTEND_URL");
+  assert(resetLinkBase("https://braidswithlove.com:443", env) === "https://braidswithlove.com", "the default https port is the same site");
+  assert(resetLinkBase("https://braidswithl%6Fve.com", env) === "https://braidswithlove.com", "a percent encoded host parses to the same site");
   assert(RESET_LINK_SITES.every((o) => o.startsWith("https://")), "every listed site is https");
 }
 

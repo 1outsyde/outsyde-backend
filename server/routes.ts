@@ -3239,7 +3239,7 @@ export async function registerRoutes(
           });
           console.log(`[Auth] Password reset email sent to ${email}`);
         } else {
-          console.log(`[Auth] RESEND_API_KEY not configured. Reset token for ${email}: ${rawToken}`);
+          console.log(`[Auth] RESEND_API_KEY not configured. Reset link not emailed for user ${user.id}.`);
         }
       } catch (emailError) {
         console.error("Failed to send reset email:", emailError);

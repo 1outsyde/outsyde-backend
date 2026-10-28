@@ -6,20 +6,27 @@
  * email a customer a real reset token on a link to their own site. Now only Outsyde's own sites
  * are kept; anything else becomes FRONTEND_URL (goutsyde.com).
  *
- * The list: every https entry of clientSiteOrigins, plus braidswithlove.com (what braids-with-love-site
- * sends; not in clientSiteOrigins, which also drives CORS and is left unchanged), plus goutsyde.com.
+ * The list is reset only (clientSiteOrigins, which drives CORS, is left unchanged): each site that
+ * sends redirect_uri today and has a /reset-password page (audit 2026-10-28), their www or apex
+ * twins, and goutsyde.com. Sites without a reset page (XO) and unused vercel.app names are left out,
+ * so a re-registered Vercel name can't receive tokens. Add a site here when it gets a reset page.
  */
-import { clientSiteOrigins } from "./clientOrigins";
-
 const DEFAULT_FRONTEND = "https://www.goutsyde.com";
 
-export const RESET_LINK_SITES: readonly string[] = Array.from(new Set([
-  ...clientSiteOrigins.filter((o) => o.startsWith("https://")),
+export const RESET_LINK_SITES: readonly string[] = [
   "https://braidswithlove.com",
   "https://www.braidswithlove.com",
+  "https://braidsbylana.com",
+  "https://www.braidsbylana.com",
+  "https://lotushouseblends.com",
+  "https://www.lotushouseblends.com",
+  "https://nail-sniper-web.vercel.app",
+  "https://royal-elite-site-gamma.vercel.app",
+  "https://dialuxkollecionn.com",
+  "https://www.dialuxkollecionn.com",
   "https://goutsyde.com",
   "https://www.goutsyde.com",
-]));
+];
 
 /** "scheme://host[:port]" in lower case, or null when the value isn't a plain http(s) origin. */
 function originOf(value: string): string | null {
