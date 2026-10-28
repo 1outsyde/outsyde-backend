@@ -11,9 +11,17 @@
  * sent, exactly as before this change, and are logged. A later step will refuse
  * them once every client sends real product ids.
  *
+ * Add-ons (migration 075, server/productAddons.ts): only a line that carries an
+ * `addons` array is checked and priced for add-ons. Old app builds send no such
+ * key, so their lines are priced exactly as before and are never refused for a
+ * required add-on group (decision, Oct 28). The unit price on a line with
+ * add-ons is the variant or product price plus the add-ons' prices.
+ *
  * Kept free of Express, Stripe and the db client so it can be tested directly
  * (server/cartPricing.test.ts) with in-memory lookups.
  */
+
+import { priceLineAddons, addonsLabel, type AddonGroupWithChoices, type AddonCheckoutError, type PricedAddon } from './productAddons';
 
 export interface CartLineInput {
   productId?: string | null;
@@ -32,6 +40,10 @@ export interface PricedCartLine extends CartLineInput {
   variantLabel?: string;
   /** true when the price came from the database, false for a legacy client-priced line */
   dbPriced: boolean;
+  /** Only on lines bought with add-ons: the unit price without them */
+  basePriceCents?: number;
+  addons?: PricedAddon[];
+  addonsLabel?: string;
 }
 
 export interface ProductRow {
@@ -61,6 +73,8 @@ export interface CartPricingDeps {
   /** active variants only */
   getActiveVariants(productId: string): Promise<VariantRow[]>;
   logLegacyLine?(line: CartLineInput): void;
+  /** All add-on groups of a product with their choices (active or not). Needed only when a line sends add-ons. */
+  getAddonGroups?(productId: string): Promise<AddonGroupWithChoices[]>;
 }
 
 export type CartPricingError = {
@@ -69,10 +83,10 @@ export type CartPricingError = {
     | 'PRODUCT_UNAVAILABLE'
     | 'INVALID_VARIANT'
     | 'VARIANT_REQUIRED'
-    | 'INSUFFICIENT_STOCK';
+    | 'INSUFFICIENT_STOCK'
+    | AddonCheckoutError['code'];
   message: string;
   productId?: string;
-  available?: number;
 };
 
 export type CartPricingResult =
@@ -109,7 +123,7 @@ export async function priceCartLines(
     if (!product) {
       // Legacy path: not a known product. Unchanged behavior.
       deps.logLegacyLine?.(item);
-      const { variantId: _ignoredVariant, ...rest } = item;
+      const { variantId: _ignoredVariant, addons: _ignoredAddons, ...rest } = item;
       lines.push({ ...rest, name: item.name ?? 'Item', dbPriced: false });
       continue;
     }
@@ -143,21 +157,38 @@ export async function priceCartLines(
           ok: false,
           error: {
             code: 'INSUFFICIENT_STOCK',
-            message: stock <= 0 ? `${what} is out of stock` : `Only ${stock} of ${what} available`,
+            // Stock counts are not shown to customers (decision, Oct 28): no count in the message,
+            // and no `available` field (no app or site read it).
+            message: stock <= 0 ? `${what} is out of stock` : `There aren't enough of ${what} left for this order. Lower the quantity and try again.`,
             productId: product.id,
-            available: Math.max(0, stock),
           },
         };
       }
     }
 
-    const { variantId: _clientVariant, ...rest } = item;
+    const basePriceCents = variant ? (variant.priceCents ?? product.price) : product.price;
+    let addonPart: Pick<PricedCartLine, 'basePriceCents' | 'addons' | 'addonsLabel'> = {};
+    let perUnitAddons = 0;
+    if (item.addons !== undefined && item.addons !== null) {
+      const groups = deps.getAddonGroups ? await deps.getAddonGroups(product.id) : [];
+      const priced = priceLineAddons(groups, item.addons, product.name);
+      if (!priced.ok) {
+        return { ok: false, error: { ...priced.error, productId: product.id } };
+      }
+      if (priced.addons.length > 0) {
+        perUnitAddons = priced.perUnitCents;
+        addonPart = { basePriceCents, addons: priced.addons, addonsLabel: addonsLabel(priced.addons) };
+      }
+    }
+
+    const { variantId: _clientVariant, addons: _clientAddons, ...rest } = item;
     lines.push({
       ...rest,
       productId: product.id,
       name: product.name,
-      priceCents: variant ? (variant.priceCents ?? product.price) : product.price,
+      priceCents: basePriceCents + perUnitAddons,
       ...(variant ? { variantId: variant.id, variantLabel: variant.label } : {}),
+      ...addonPart,
       dbPriced: true,
     });
   }
@@ -165,7 +196,7 @@ export async function priceCartLines(
   return { ok: true, lines };
 }
 
-/** The shape stored in orders.items. variantId/variantLabel only when a variant was bought. */
+/** The shape stored in orders.items. variantId/variantLabel only when a variant was bought; add-on fields only when add-ons were. */
 export function toOrderItem(line: PricedCartLine): {
   // Typed as string to match orders.items; legacy lines with no product have
   // always been stored without one (unchanged from before this file existed).
@@ -175,12 +206,19 @@ export function toOrderItem(line: PricedCartLine): {
   price: number;
   variantId?: string;
   variantLabel?: string;
+  basePrice?: number;
+  addons?: PricedAddon[];
+  addonsLabel?: string;
 } {
   return {
     productId: line.productId as string,
     name: line.name,
     quantity: line.quantity,
+    // Includes add-ons, so every reader that sums price × quantity stays right.
     price: line.priceCents,
     ...(line.variantId ? { variantId: line.variantId, variantLabel: line.variantLabel } : {}),
+    ...(line.addons && line.addons.length > 0
+      ? { basePrice: line.basePriceCents, addons: line.addons, addonsLabel: line.addonsLabel }
+      : {}),
   };
 }

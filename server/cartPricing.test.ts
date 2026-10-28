@@ -89,7 +89,8 @@ async function test(name: string, fn: () => Promise<void>) {
     const r = await priceCartLines([line, line], deps);
     assert.ok(!r.ok);
     assert.equal(r.error.code, "INSUFFICIENT_STOCK");
-    assert.equal(r.error.available, 3);
+    assert.ok(!("available" in r.error), "no stock count sent to customers");
+    assert.ok(!/\d/.test(r.error.message.replace('18"', "")), r.error.message);
   });
 
   await test("quantity over product stock is refused", async () => {

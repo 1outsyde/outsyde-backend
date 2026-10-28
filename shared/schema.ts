@@ -515,6 +515,52 @@ export const productOptions = pgTable("product_options", {
 
 export type ProductOption = typeof productOptions.$inferSelect;
 
+// Product add-on groups (migration 075), e.g. "Toppings (pick up to 3)". max_select NULL = no limit.
+// Add-ons have an on/off switch only, no stock. Checkout prices them in server/cartPricing.ts.
+export const productAddonGroups = pgTable("product_addon_groups", {
+  id: varchar("id", { length: 36 }).primaryKey().default(sql`gen_random_uuid()`),
+  productId: varchar("product_id", { length: 36 }).notNull()
+    .references(() => vendorProducts.id, { onDelete: "cascade" }),
+  name: text("name").notNull(),
+  minSelect: integer("min_select").notNull().default(0),
+  maxSelect: integer("max_select"),
+  sortOrder: integer("sort_order").notNull().default(0),
+  isActive: boolean("is_active").notNull().default(true),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().default(sql`now()`),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().default(sql`now()`),
+}, (table) => ({
+  productIdx: index("idx_product_addon_groups_product").on(table.productId, table.sortOrder),
+}));
+
+export const productAddons = pgTable("product_addons", {
+  id: varchar("id", { length: 36 }).primaryKey().default(sql`gen_random_uuid()`),
+  groupId: varchar("group_id", { length: 36 }).notNull()
+    .references(() => productAddonGroups.id, { onDelete: "cascade" }),
+  productId: varchar("product_id", { length: 36 }).notNull()
+    .references(() => vendorProducts.id, { onDelete: "cascade" }),
+  // Shared library link for step 2b; NULL until then.
+  businessAddonId: varchar("business_addon_id", { length: 36 }).references(() => businessAddons.id, { onDelete: "cascade" }),
+  name: text("name").notNull(),
+  description: text("description"),
+  priceCents: integer("price_cents").notNull().default(0),
+  acceptsText: boolean("accepts_text").notNull().default(false),
+  textLabel: text("text_label"),
+  textMaxLength: integer("text_max_length").notNull().default(40),
+  isActive: boolean("is_active").notNull().default(true),
+  sortOrder: integer("sort_order").notNull().default(0),
+  priceSynced: boolean("price_synced").notNull().default(true),
+  declinedLibraryPriceCents: integer("declined_library_price_cents"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().default(sql`now()`),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().default(sql`now()`),
+}, (table) => ({
+  groupIdx: index("idx_product_addons_group").on(table.groupId, table.sortOrder),
+  productIdx: index("idx_product_addons_product").on(table.productId),
+  libraryIdx: index("idx_product_addons_library").on(table.businessAddonId).where(sql`business_addon_id IS NOT NULL`),
+}));
+
+export type ProductAddonGroup = typeof productAddonGroups.$inferSelect;
+export type ProductAddon = typeof productAddons.$inferSelect;
+
 export type ProductVariant = typeof productVariants.$inferSelect;
 export type InsertProductVariant = typeof productVariants.$inferInsert;
 
@@ -1325,6 +1371,10 @@ export const orders = pgTable("orders", {
     price: number;
     variantId?: string | null;
     variantLabel?: string | null;
+    // Migration 075: only on lines bought with add-ons. price includes the add-ons; basePrice is without them.
+    basePrice?: number;
+    addons?: { addonId: string; groupName: string; name: string; priceCents: number; text?: string }[];
+    addonsLabel?: string;
   }[]>().notNull(),
   totalAmount: integer("total_amount").notNull(), // subtotal (product prices × qty)
   platformFee: integer("platform_fee").default(0), // 8% product fee (Outsyde revenue)

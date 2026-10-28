@@ -28,6 +28,8 @@ import {
   promoCodes,
   productVariants,
   productOptions,
+  productAddonGroups,
+  productAddons,
   vendorProducts,
   type VendorProduct,
   type User,
@@ -102,8 +104,58 @@ export function sanitizeUserForResponse(user: User, options: { includeOwnData?: 
     loyaltyPoints: user.loyaltyPoints ?? 0,
   };
 }
-import { eq, desc, sql, gte, lte, or, isNull, gt, inArray, and } from "drizzle-orm";
+import { eq, desc, sql, gte, lte, or, isNull, gt, inArray, notInArray, and } from "drizzle-orm";
 import { validateOptionsPayload, planVariantSync, withEffectivePrice, summarizeVariants, type VariantSummary } from "./productOptions";
+import {
+  assembleGroups,
+  validateAddonGroupsPayload,
+  checkPayloadIds,
+  toPublicGroups,
+  summarizeAddons,
+  orderItemDetail,
+  type AddonGroupWithChoices,
+  type AddonSummary,
+} from "./productAddons";
+
+// Add-on groups (migration 075) of one or more products, with their choices, active or not.
+async function loadAddonGroupsFor(productIds: string[]): Promise<Map<string, AddonGroupWithChoices[]>> {
+  const out = new Map<string, AddonGroupWithChoices[]>();
+  if (productIds.length === 0) return out;
+  const [groups, addons] = await Promise.all([
+    db.select().from(productAddonGroups).where(inArray(productAddonGroups.productId, productIds)),
+    db.select().from(productAddons).where(inArray(productAddons.productId, productIds)),
+  ]);
+  for (const id of productIds) {
+    out.set(id, assembleGroups(
+      groups.filter((g) => g.productId === id),
+      addons.filter((a) => a.productId === id),
+    ));
+  }
+  return out;
+}
+async function loadAddonGroups(productId: string): Promise<AddonGroupWithChoices[]> {
+  return (await loadAddonGroupsFor([productId])).get(productId) ?? [];
+}
+// Vendor editor shape: every group and choice, switched-off ones too.
+function vendorAddonGroups(groups: AddonGroupWithChoices[]) {
+  return groups.map((g) => ({
+    id: g.id,
+    name: g.name,
+    minSelect: g.minSelect,
+    maxSelect: g.maxSelect,
+    isActive: g.isActive,
+    addons: g.addons.map((a) => ({
+      id: a.id,
+      name: a.name,
+      description: a.description,
+      priceCents: a.priceCents,
+      acceptsText: a.acceptsText,
+      textLabel: a.textLabel,
+      textMaxLength: a.textMaxLength,
+      isActive: a.isActive,
+    })),
+  }));
+}
 import { z } from "zod";
 import { resolveSearchArea, cachedCityGeocode, normalizeState } from "./search/areaSearch";
 import { refreshCityPoint } from "./geo/cityPoint";
@@ -8618,6 +8670,7 @@ export async function registerRoutes(
             eq(productVariants.productId, productId),
             eq(productVariants.isActive, true),
           )) as any,
+        getAddonGroups: (productId) => loadAddonGroups(productId),
         logLegacyLine: (line) =>
           console.warn(`[Cart] Client-priced line (no known product): productId=${line.productId ?? 'none'} vendorId=${line.vendorId} priceCents=${line.priceCents} qty=${line.quantity}`),
       });
@@ -12263,6 +12316,14 @@ export async function registerRoutes(
         } catch (summaryError) {
           console.error("Get business products: variant summary failed, returning list without it:", summaryError);
         }
+        // addonSummary (migration 075): null when a product has no add-ons a customer can pick.
+        // Separate try so a failure here leaves variantSummary in place.
+        try {
+          const addonMap = await loadAddonGroupsFor(ids);
+          withSummary = withSummary.map((p) => ({ ...p, addonSummary: summarizeAddons(addonMap.get(p.id) ?? []) as AddonSummary | null }));
+        } catch (addonError) {
+          console.error("Get business products: add-on summary failed, returning list without it:", addonError);
+        }
       }
       res.json({ products: withSummary });
     } catch (error) {
@@ -13400,10 +13461,18 @@ export async function registerRoutes(
         ))
         .orderBy(productVariants.sortOrder);
       const options = await loadProductOptions(productId);
+      // Add-on groups a customer can pick (migration 075). Empty list if the lookup fails.
+      let addonGroups: ReturnType<typeof toPublicGroups> = [];
+      try {
+        addonGroups = toPublicGroups(await loadAddonGroups(productId));
+      } catch (addonError) {
+        console.error("Get product detail: add-on groups failed, returning product without them:", addonError);
+      }
       res.json({
         ...product,
         options,
         variants: variants.map((v) => withEffectivePrice(v, product.price)),
+        addonGroups,
       });
     } catch (error) {
       console.error("Get product detail error:", error);
@@ -13524,6 +13593,84 @@ export async function registerRoutes(
     } catch (error) {
       console.error("Save product options error:", error);
       res.status(500).json({ error: "Failed to save options" });
+    }
+  });
+
+  // Vendor: every add-on group of a product with its choices, switched-off ones too (migration 075).
+  app.get("/api/business/products/:productId/addons", async (req, res) => {
+    try {
+      const resolved = await resolveVendorProduct(req, req.params.productId);
+      if ('error' in resolved) return res.status(resolved.status).json({ error: resolved.error });
+      res.json({ groups: vendorAddonGroups(await loadAddonGroups(resolved.product.id)) });
+    } catch (error) {
+      console.error("Get product add-ons error:", error);
+      res.status(500).json({ error: "Failed to get add-ons" });
+    }
+  });
+
+  // Vendor: save the full list of add-on groups in one go. Groups and choices left out
+  // are deleted (orders keep their own copy of names and prices). Atomic (db.batch).
+  app.put("/api/business/products/:productId/addons", async (req, res) => {
+    try {
+      const resolved = await resolveVendorProduct(req, req.params.productId);
+      if ('error' in resolved) return res.status(resolved.status).json({ error: resolved.error });
+      const { product } = resolved;
+
+      const validated = validateAddonGroupsPayload(req.body);
+      if (!validated.ok) return res.status(400).json({ error: validated.error });
+      const existing = await loadAddonGroups(product.id);
+      const idError = checkPayloadIds(validated.groups, existing);
+      if (idError) return res.status(400).json({ error: idError });
+
+      const now = new Date();
+      const keepGroupIds = validated.groups.map((g) => g.id).filter((id): id is string => !!id);
+      const keepAddonIds = validated.groups.flatMap((g) => g.addons.map((a) => a.id)).filter((id): id is string => !!id);
+      const queries: any[] = [];
+      // Removed choices first, then removed groups (their choices go with them).
+      queries.push(
+        keepAddonIds.length > 0
+          ? db.delete(productAddons).where(and(eq(productAddons.productId, product.id), notInArray(productAddons.id, keepAddonIds)))
+          : db.delete(productAddons).where(eq(productAddons.productId, product.id)),
+      );
+      queries.push(
+        keepGroupIds.length > 0
+          ? db.delete(productAddonGroups).where(and(eq(productAddonGroups.productId, product.id), notInArray(productAddonGroups.id, keepGroupIds)))
+          : db.delete(productAddonGroups).where(eq(productAddonGroups.productId, product.id)),
+      );
+      for (const g of validated.groups) {
+        const groupId = g.id ?? randomUUID();
+        const groupValues = { name: g.name, minSelect: g.minSelect, maxSelect: g.maxSelect, isActive: g.isActive, sortOrder: g.sortOrder };
+        queries.push(
+          g.id
+            ? db.update(productAddonGroups).set({ ...groupValues, updatedAt: now })
+                .where(and(eq(productAddonGroups.id, g.id), eq(productAddonGroups.productId, product.id)))
+            : db.insert(productAddonGroups).values({ id: groupId, productId: product.id, ...groupValues }),
+        );
+        for (const a of g.addons) {
+          const addonValues = {
+            name: a.name,
+            description: a.description,
+            priceCents: a.priceCents,
+            acceptsText: a.acceptsText,
+            textLabel: a.textLabel,
+            textMaxLength: a.textMaxLength,
+            isActive: a.isActive,
+            sortOrder: a.sortOrder,
+          };
+          queries.push(
+            a.id
+              ? db.update(productAddons).set({ ...addonValues, updatedAt: now })
+                  .where(and(eq(productAddons.id, a.id), eq(productAddons.groupId, groupId), eq(productAddons.productId, product.id)))
+              : db.insert(productAddons).values({ groupId, productId: product.id, ...addonValues }),
+          );
+        }
+      }
+      await db.batch(queries as [any, ...any[]]);
+
+      res.json({ groups: vendorAddonGroups(await loadAddonGroups(product.id)) });
+    } catch (error) {
+      console.error("Save product add-ons error:", error);
+      res.status(500).json({ error: "Failed to save add-ons" });
     }
   });
 
@@ -20649,7 +20796,14 @@ export async function registerRoutes(
               customer_id: order.customerId,
               customer_name: order.customerName,
               items: Array.isArray(order.items)
-                ? order.items.map((it) => ({ name: it.name, qty: it.quantity, price: it.price, ...(it.variantLabel ? { variant_label: it.variantLabel } : {}) }))
+                ? order.items.map((it) => ({
+                    name: it.name, qty: it.quantity, price: it.price,
+                    ...(it.variantLabel ? { variant_label: it.variantLabel } : {}),
+                    // Migration 075: only on lines bought with add-ons. price includes them.
+                    ...(it.addons && it.addons.length > 0
+                      ? { base_price: it.basePrice ?? null, addons_label: it.addonsLabel ?? null, addons: it.addons.map((a) => ({ name: a.name, group_name: a.groupName, price_cents: a.priceCents, ...(a.text !== undefined ? { text: a.text } : {}) })) }
+                      : {}),
+                  }))
                 : [],
               total_amount: order.totalAmount,
               status: order.status ?? "pending",
@@ -23571,9 +23725,9 @@ export async function registerRoutes(
           const consumer = await storage.getUser(order.customerId);
           const business = order.businessId ? await storage.getBusiness(order.businessId) : null;
           const vendorOwner = business ? await storage.getUser(business.ownerId) : null;
-          const orderItems = ((order.items as Array<{ name?: string; variantLabel?: string; quantity?: number }>) || []).map(i => ({
+          const orderItems = ((order.items as Array<{ name?: string; variantLabel?: string; addonsLabel?: string; quantity?: number }>) || []).map(i => ({
             productName: i.name || 'Item',
-            variantLabel: i.variantLabel,
+            variantLabel: orderItemDetail(i),
             quantity: i.quantity || 1,
           }));
           if (consumer?.email) {
@@ -23816,6 +23970,10 @@ export async function registerRoutes(
               // The option the customer picked (e.g. 18"), only when the line has one.
               ...(item.variantId ? { variantId: item.variantId } : {}),
               ...(item.variantLabel ? { variantLabel: item.variantLabel } : {}),
+              // Add-ons (migration 075), only when the line has them. price includes them.
+              ...(item.addons && item.addons.length > 0
+                ? { basePrice: item.basePrice, addons: item.addons, addonsLabel: item.addonsLabel }
+                : {}),
             })),
             total: order.totalAmount,
             grossChargeAmount: order.grossChargeAmount,
