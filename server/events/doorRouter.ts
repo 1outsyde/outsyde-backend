@@ -6,6 +6,10 @@
  *   POST   /api/events/:id/door/team             (auth, host) invite by username, scope standing | event (30 an hour)
  *   DELETE /api/events/:id/door/team/:userId     (auth, host) ?scope=standing|event, soft remove (also cancels an invite)
  *
+ *   GET    /api/events/door/invites              (auth)       my open door team invites
+ *   GET    /api/events/door/invites/:inviteId    (auth, invitee) one invite: invited | accepted | declined | gone
+ *   POST   /api/events/door/invites/:inviteId/accept|decline|leave   (auth, invitee)
+ *
  *   POST   /api/events/:id/door/check-in         (auth, door)  { code } check a guest in
  *   POST   /api/events/:id/door/check-in-ticket  (auth, door)  { ticketId } same, from a guest list tap
  *   POST   /api/events/:id/door/undo             (auth, host)  { ticketId } clear a check in
@@ -19,9 +23,9 @@ import rateLimit from "express-rate-limit";
 import { sql } from "drizzle-orm";
 import { z } from "zod";
 import { getUserIdFromRequest, hybridAuthMiddleware } from "../auth";
-import { rows, iso, fail, pgError } from "./eventsRouter";
+import { rows, iso, fail, pgError, hostIdentity } from "./eventsRouter";
 import { loadEventForDoor, isWithinScanWindow } from "./doorAccess";
-import { notifyDoorInvite } from "./ticketNotices";
+import { notifyDoorInvite, notifyDoorAccepted } from "./ticketNotices";
 import { ticketIdFromQrToken, qrPng } from "./ticketQr";
 
 const router = Router();
@@ -87,6 +91,18 @@ async function hostOnly(req: Request, res: Response): Promise<{ userId: string; 
   return { userId, event: access.event };
 }
 
+/** 120 per minute per signed in user (never per IP: a whole door team can share one venue wifi address). */
+const DOOR_LIMIT = 120;
+const doorLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  limit: DOOR_LIMIT,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req) => getUserIdFromRequest(req as Request) ?? "anonymous",
+  validate: { keyGeneratorIpFallback: false },
+  handler: (_req, res) => { fail(res, 429, "RATE_LIMITED", "Too many scans. Wait a moment and try again."); },
+});
+
 /** 30 invites an hour per host (per signed in user, never per IP), so nobody can be flooded with invites. */
 const inviteLimiter = rateLimit({
   windowMs: 60 * 60 * 1000, limit: 30, standardHeaders: true, legacyHeaders: false,
@@ -147,6 +163,150 @@ router.get("/door/mine", hybridAuthMiddleware, async (req: Request, res: Respons
   } catch (err) {
     console.error("[Door] mine failed:", err);
     fail(res, 500, "SERVER_ERROR", "Could not load your door events.");
+  }
+});
+
+// ─── The invitee's side (p4-scanner, migration 075) ─────────────────────────
+
+type InviteRow = {
+  scope: Scope; id: string; host_user_id: string; event_id: string | null; member_user_id: string;
+  accepted_at: any; declined_at: any; removed_at: any; invited_at: any; role: string;
+  e_title: string | null; e_starts_at: any; e_ends_at: any; e_timezone: string | null; e_status: string | null;
+};
+
+/** One invite row from either table (ids are UUIDs, so they never collide). */
+async function loadInvite(inviteId: string): Promise<InviteRow | null> {
+  if (!validId(inviteId)) return null;
+  const [r] = await rows<any>(sql`
+    SELECT 'standing' AS scope, t.id, t.host_user_id, NULL::varchar AS event_id, t.member_user_id, t.accepted_at, t.declined_at,
+      t.removed_at, t.invited_at, t.role, NULL AS e_title, NULL::timestamptz AS e_starts_at, NULL::timestamptz AS e_ends_at,
+      NULL AS e_timezone, NULL AS e_status
+    FROM event_door_team t WHERE t.id = ${inviteId}
+    UNION ALL
+    SELECT 'event', m.id, e.host_user_id, m.event_id, m.member_user_id, m.accepted_at, m.declined_at,
+      m.removed_at, m.invited_at, m.role, e.title, e.starts_at, e.ends_at, e.timezone, e.status
+    FROM event_door_members m JOIN events e ON e.id = m.event_id WHERE m.id = ${inviteId}`);
+  return (r as InviteRow) ?? null;
+}
+
+/** An only-this-event invite closes when its event ends or is cancelled. */
+const eventClosed = (r: InviteRow) => r.scope === "event"
+  && (r.e_status === "cancelled" || new Date(r.e_ends_at).getTime() <= Date.now());
+const inviteStatus = (r: InviteRow): "invited" | "accepted" | "declined" | "gone" =>
+  r.removed_at || eventClosed(r) ? "gone" : r.accepted_at ? "accepted" : r.declined_at ? "declined" : "invited";
+
+/** Host public name from their latest published event, else their latest event (the invite names the host). */
+async function hostNameFor(hostUserId: string, eventId: string | null): Promise<string> {
+  const [e] = eventId
+    ? await rows<any>(sql`SELECT * FROM events WHERE id = ${eventId}`)
+    : await rows<any>(sql`SELECT * FROM events WHERE host_user_id = ${hostUserId}
+        ORDER BY (status = 'published') DESC, created_at DESC LIMIT 1`);
+  return (await hostIdentity(e ?? { host_user_id: hostUserId })).publicName;
+}
+
+async function inviteJson(r: InviteRow) {
+  const upcoming = r.scope === "standing"
+    ? await rows<any>(sql`SELECT id, title, starts_at, timezone FROM events
+        WHERE host_user_id = ${r.host_user_id} AND status = 'published' AND ends_at > now() ORDER BY starts_at, id LIMIT 5`)
+    : [];
+  return {
+    id: String(r.id), scope: r.scope, role: r.role, status: inviteStatus(r), invitedAt: iso(r.invited_at),
+    host: { name: await hostNameFor(r.host_user_id, r.event_id) },
+    event: r.scope === "event"
+      ? { id: String(r.event_id), title: r.e_title, startsAt: iso(r.e_starts_at), endsAt: iso(r.e_ends_at), timezone: r.e_timezone }
+      : null,
+    upcoming: upcoming.map((e) => ({ id: String(e.id), title: e.title, startsAt: iso(e.starts_at), timezone: e.timezone })),
+  };
+}
+
+/** The signed in invitee and their invite, or null after answering 401 / 404 INVITE_NOT_FOUND. */
+async function myInvite(req: Request, res: Response): Promise<{ userId: string; invite: InviteRow } | null> {
+  const userId = getUserIdFromRequest(req);
+  if (!userId) { fail(res, 401, "UNAUTHORIZED", "Sign in to continue."); return null; }
+  const invite = await loadInvite(String(req.params.inviteId));
+  if (!invite || invite.member_user_id !== userId) { fail(res, 404, "INVITE_NOT_FOUND", "Invite not found."); return null; }
+  return { userId, invite };
+}
+
+router.get("/door/invites", hybridAuthMiddleware, doorLimiter, async (req: Request, res: Response) => {
+  try {
+    const userId = getUserIdFromRequest(req);
+    if (!userId) return fail(res, 401, "UNAUTHORIZED", "Sign in to continue.");
+    const ids = await rows<any>(sql`
+      SELECT t.id, t.invited_at FROM event_door_team t
+      WHERE t.member_user_id = ${userId} AND t.removed_at IS NULL AND t.accepted_at IS NULL AND t.declined_at IS NULL
+      UNION ALL
+      SELECT m.id, m.invited_at FROM event_door_members m JOIN events e ON e.id = m.event_id
+      WHERE m.member_user_id = ${userId} AND m.removed_at IS NULL AND m.accepted_at IS NULL AND m.declined_at IS NULL
+        AND e.status <> 'cancelled' AND e.ends_at > now()
+      ORDER BY invited_at DESC, id LIMIT 50`);
+    const invites = [];
+    for (const { id } of ids) {
+      const r = await loadInvite(String(id));
+      if (r) invites.push(await inviteJson(r));
+    }
+    res.json({ success: true, invites });
+  } catch (err) {
+    console.error("[Door] invites failed:", err);
+    fail(res, 500, "SERVER_ERROR", "Could not load your invites.");
+  }
+});
+
+router.get("/door/invites/:inviteId", hybridAuthMiddleware, doorLimiter, async (req: Request, res: Response) => {
+  try {
+    const ctx = await myInvite(req, res);
+    if (!ctx) return;
+    res.json({ success: true, invite: await inviteJson(ctx.invite) });
+  } catch (err) {
+    console.error("[Door] invite failed:", err);
+    fail(res, 500, "SERVER_ERROR", "Could not load the invite.");
+  }
+});
+
+/** One atomic answer: only an open invite (not answered, not cancelled, event not over) changes. */
+async function answerInvite(r: InviteRow, userId: string, answer: "accept" | "decline"): Promise<boolean> {
+  const set = answer === "accept" ? sql`accepted_at = now()` : sql`declined_at = now()`;
+  const open = sql`id = ${r.id} AND member_user_id = ${userId} AND removed_at IS NULL AND accepted_at IS NULL AND declined_at IS NULL`;
+  const done = r.scope === "standing"
+    ? await rows<any>(sql`UPDATE event_door_team SET ${set} WHERE ${open} RETURNING id`)
+    : await rows<any>(sql`UPDATE event_door_members SET ${set} WHERE ${open}
+        AND EXISTS (SELECT 1 FROM events e WHERE e.id = event_door_members.event_id AND e.status <> 'cancelled' AND e.ends_at > now())
+        RETURNING id`);
+  return done.length > 0;
+}
+
+for (const answer of ["accept", "decline"] as const) {
+  router.post(`/door/invites/:inviteId/${answer}`, hybridAuthMiddleware, doorLimiter, async (req: Request, res: Response) => {
+    try {
+      const ctx = await myInvite(req, res);
+      if (!ctx) return;
+      if (!(await answerInvite(ctx.invite, ctx.userId, answer))) return fail(res, 409, "INVITE_CLOSED", "This invite is no longer open.");
+      if (answer === "accept") {
+        notifyDoorAccepted({ hostUserId: ctx.invite.host_user_id, memberUserId: ctx.userId, scope: ctx.invite.scope, eventId: ctx.invite.event_id }).catch(() => {});
+      }
+      const fresh = await loadInvite(ctx.invite.id);
+      res.json({ success: true, invite: await inviteJson(fresh!) });
+    } catch (err) {
+      console.error(`[Door] invite ${answer} failed:`, err);
+      fail(res, 500, "SERVER_ERROR", "Could not answer the invite.");
+    }
+  });
+}
+
+router.post("/door/invites/:inviteId/leave", hybridAuthMiddleware, doorLimiter, async (req: Request, res: Response) => {
+  try {
+    const ctx = await myInvite(req, res);
+    if (!ctx) return;
+    const done = await rows<any>(sql`
+      UPDATE ${doorTable(ctx.invite.scope)} SET removed_at = now(), removed_by_user_id = ${ctx.userId}
+      WHERE id = ${ctx.invite.id} AND member_user_id = ${ctx.userId} AND removed_at IS NULL AND accepted_at IS NOT NULL
+      RETURNING id`);
+    if (!done.length) return fail(res, 409, "NOT_ON_TEAM", "You aren't on this door team.");
+    const fresh = await loadInvite(ctx.invite.id);
+    res.json({ success: true, invite: await inviteJson(fresh!) });
+  } catch (err) {
+    console.error("[Door] leave failed:", err);
+    fail(res, 500, "SERVER_ERROR", "Could not leave the door team.");
   }
 });
 
@@ -233,18 +393,6 @@ router.delete("/:id/door/team/:userId", hybridAuthMiddleware, async (req: Reques
 });
 
 // ─── Check in, undo, guest list (Task 3) ────────────────────────────────────
-
-/** 120 per minute per signed in user (never per IP: a whole door team can share one venue wifi address). */
-const DOOR_LIMIT = 120;
-const doorLimiter = rateLimit({
-  windowMs: 60 * 1000,
-  limit: DOOR_LIMIT,
-  standardHeaders: true,
-  legacyHeaders: false,
-  keyGenerator: (req) => getUserIdFromRequest(req as Request) ?? "anonymous",
-  validate: { keyGeneratorIpFallback: false },
-  handler: (_req, res) => { fail(res, 429, "RATE_LIMITED", "Too many scans. Wait a moment and try again."); },
-});
 
 const codeSchema = z.object({
   code: z.string().trim().toUpperCase().regex(/^[A-Z0-9]{16}$/, "code: expected the 16 character ticket code"),

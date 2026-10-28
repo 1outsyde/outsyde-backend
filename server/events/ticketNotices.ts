@@ -321,3 +321,27 @@ export async function notifyDoorInvite(p: { inviteId: string; scope: "standing" 
     console.error(`[Door] invite notices failed for ${p.inviteId}:`, (err as Error)?.message ?? err);
   }
 }
+
+/**
+ * The host's push when someone accepts (no notice on decline). Named by first name, else @username, the same
+ * names the host sees on the team list. Never throws.
+ */
+export async function notifyDoorAccepted(p: { hostUserId: string; memberUserId: string; scope: "standing" | "event"; eventId: string | null }): Promise<void> {
+  try {
+    const d = await noticeDeps();
+    const [m] = await rows<any>(sql`SELECT first_name, username FROM users WHERE id = ${p.memberUserId}`);
+    if (!m) return;
+    const name = (m.first_name && String(m.first_name).trim()) || (m.username ? `@${m.username}` : "Someone");
+    let what = "all your events";
+    if (p.scope === "event" && p.eventId) {
+      const [e] = await rows<any>(sql`SELECT title FROM events WHERE id = ${p.eventId}`);
+      if (e) what = String(e.title);
+    }
+    await d.sendPush({
+      userId: p.hostUserId, title: `${name} joined your door team`, body: `They can scan tickets for ${what}.`,
+      data: { type: "door_team_accepted", eventId: p.scope === "event" ? p.eventId : null },
+    });
+  } catch (err) {
+    console.error(`[Door] accept push failed for host ${p.hostUserId}:`, (err as Error)?.message ?? err);
+  }
+}
