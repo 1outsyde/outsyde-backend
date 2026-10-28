@@ -22,6 +22,14 @@ export type NoticeDeps = {
   sendCancelled: (p: Parameters<typeof import("../emailService").sendEventCancelledToGuest>[0]) => Promise<void>;
   sendAddressReveal: (p: Parameters<typeof import("../emailService").sendAddressRevealToHolder>[0]) => Promise<void>;
   sendPush: (p: { userId: string; title: string; body: string; data?: Record<string, unknown> }) => Promise<boolean>;
+  /** Activity (notifications table) row. Optional so older test fakes keep compiling; missing = not recorded. */
+  createActivity?: (p: ActivityItem) => Promise<void>;
+  sendDoorInvite?: (p: Parameters<typeof import("../emailService").sendDoorTeamInviteEmail>[0]) => Promise<void>;
+};
+
+export type ActivityItem = {
+  userId: string; type: string; title: string; message: string;
+  referenceType: string; referenceId: string; metadata: Record<string, unknown>; triggeredByUserId: string | null;
 };
 
 let testDeps: NoticeDeps | null = null;
@@ -45,6 +53,11 @@ export async function noticeDeps(): Promise<NoticeDeps> {
     sendCancelled: email.sendEventCancelledToGuest,
     sendAddressReveal: email.sendAddressRevealToHolder,
     sendPush: (p) => push.sendExpoPush(p as any),
+    createActivity: async (p) => {
+      const { storage } = await import("../storage");
+      await storage.createNotification(p as any);
+    },
+    sendDoorInvite: email.sendDoorTeamInviteEmail,
   };
 }
 
@@ -247,19 +260,118 @@ export async function notifyPayoutSent(payoutId: string): Promise<void> {
   }
 }
 
-/** After a host adds someone to the door team (push only, no email). Never throws. */
-export async function notifyDoorTeamAdded(p: { userId: string; scope: "standing" | "event"; eventId: string }): Promise<void> {
+/**
+ * Door team invites (p4-scanner, migration 075). The invite email shares the New York day budget of all email_log
+ * rows with the day-of address email (addressReveal.ts TOTAL_EMAIL_DAILY_CEILING) and goes at most once a day per row.
+ */
+export const DOOR_INVITE_EMAIL_CEILING = 70;
+
+function doorUrl(): string {
+  const base = (process.env.FRONTEND_URL || process.env.APP_BASE_URL || "https://www.goutsyde.com").replace(/\/+$/, "");
+  return `${base}/events/door`;
+}
+
+const doorTable = (scope: "standing" | "event") => sql.raw(scope === "standing" ? "event_door_team" : "event_door_members");
+
+/** At most this many invite emails per host per New York day, so one host can't use up the shared budget. */
+export const DOOR_INVITE_EMAILS_PER_HOST_DAY = 10;
+/** A second invite to the same person within this many minutes (cancel, then invite again) gets no push. */
+export const DOOR_INVITE_PUSH_QUIET_MINUTES = 10;
+
+type InvitePair = { scope: "standing" | "event"; inviteId: string; hostUserId: string; memberUserId: string; eventId: string };
+/** Every row (removed ones too) for this host and person: standing rows by host, event rows by event. */
+const pairKey = (p: InvitePair) => p.scope === "standing"
+  ? sql`host_user_id = ${p.hostUserId} AND member_user_id = ${p.memberUserId}`
+  : sql`event_id = ${p.eventId} AND member_user_id = ${p.memberUserId}`;
+
+/**
+ * Claims today's invite email for this row. True only when nobody emailed this person about this host's team (or
+ * this event) in the last 24 hours, on any row, cancelled ones included; the host is under 10 invite emails today;
+ * and the New York day's email_log total is under the shared ceiling.
+ */
+async function claimInviteEmail(p: InvitePair): Promise<boolean> {
+  const nyDayStart = startOfNewYorkDay(new Date()).toISOString();
+  const got = await rows<any>(sql`
+    UPDATE ${doorTable(p.scope)} SET invite_emailed_at = now()
+    WHERE id = ${p.inviteId}
+      AND NOT EXISTS (SELECT 1 FROM ${doorTable(p.scope)} x WHERE ${pairKey(p)} AND x.invite_emailed_at > now() - interval '24 hours')
+      AND (SELECT count(*) FROM event_door_team t WHERE t.host_user_id = ${p.hostUserId} AND t.invite_emailed_at >= ${nyDayStart}::timestamptz)
+        + (SELECT count(*) FROM event_door_members m JOIN events e ON e.id = m.event_id
+           WHERE e.host_user_id = ${p.hostUserId} AND m.invite_emailed_at >= ${nyDayStart}::timestamptz) < ${DOOR_INVITE_EMAILS_PER_HOST_DAY}
+      AND (SELECT count(*) FROM email_log WHERE created_at >= ${nyDayStart}::timestamptz
+             AND created_at < ${nyDayStart}::timestamptz + interval '1 day') < ${DOOR_INVITE_EMAIL_CEILING}
+    RETURNING id`);
+  return got.length > 0;
+}
+
+/** Another row for this pair was sent in the last 10 minutes (a cancel, then invite again): skip the push. */
+async function pushedRecently(p: InvitePair): Promise<boolean> {
+  const r = await rows<any>(sql`
+    SELECT 1 AS x FROM ${doorTable(p.scope)} WHERE ${pairKey(p)} AND id <> ${p.inviteId}
+      AND invited_at > now() - (${DOOR_INVITE_PUSH_QUIET_MINUTES} * interval '1 minute') LIMIT 1`);
+  return r.length > 0;
+}
+
+/**
+ * After a host sends (or re-sends) a door team invite: push, Activity item, and an email while the budget lasts.
+ * eventId is the event the host invited from (its host identity names the host). Never throws; each channel on its own.
+ */
+export async function notifyDoorInvite(p: { inviteId: string; scope: "standing" | "event"; eventId: string; memberUserId: string; hostUserId: string }): Promise<void> {
   try {
     const d = await noticeDeps();
     const [e] = await rows<any>(sql`SELECT * FROM events WHERE id = ${p.eventId}`);
-    if (!e) return;
-    const what = p.scope === "standing" ? `${(await hostIdentity(e)).publicName}'s events` : String(e.title);
+    const [m] = await rows<any>(sql`SELECT email, first_name FROM users WHERE id = ${p.memberUserId}`);
+    if (!e || !m) return;
+    const hostName = (await hostIdentity(e)).publicName;
+    const title = `${hostName} invited you to their door team`;
+    const message = p.scope === "event" ? `Only this event: ${String(e.title)}.` : `All of ${hostName}'s events.`;
+    const log = (what: string) => (err: unknown) => console.error(`[Door] invite ${what} failed for ${p.inviteId}:`, (err as Error)?.message ?? err);
+    const pair: InvitePair = { scope: p.scope, inviteId: p.inviteId, hostUserId: p.hostUserId, memberUserId: p.memberUserId, eventId: p.eventId };
+    if (!(await pushedRecently(pair).catch(() => false))) {
+      await d.sendPush({ userId: p.memberUserId, title, body: "Tap to accept or decline.", data: { type: "door_team_invite", inviteId: p.inviteId } })
+        .catch(log("push"));
+    }
+    if (d.createActivity) {
+      await d.createActivity({
+        userId: p.memberUserId, type: "door_team_invite", title, message,
+        referenceType: "event_door_invite", referenceId: p.inviteId,
+        metadata: { inviteId: p.inviteId, scope: p.scope, eventId: p.scope === "event" ? p.eventId : null },
+        triggeredByUserId: p.hostUserId,
+      }).catch(log("activity"));
+    }
+    if (d.sendDoorInvite && m.email && (await claimInviteEmail(pair).catch(() => false))) {
+      await d.sendDoorInvite({
+        toEmail: String(m.email), firstName: m.first_name ?? null, hostName, scope: p.scope,
+        eventTitle: p.scope === "event" ? String(e.title) : null,
+        whenText: p.scope === "event" ? formatEventWhen(e.starts_at, e.timezone) : null,
+        doorUrl: doorUrl(),
+      }).catch(log("email"));
+    }
+  } catch (err) {
+    console.error(`[Door] invite notices failed for ${p.inviteId}:`, (err as Error)?.message ?? err);
+  }
+}
+
+/**
+ * The host's push when someone accepts (no notice on decline). Named by first name, else @username, the same
+ * names the host sees on the team list. Never throws.
+ */
+export async function notifyDoorAccepted(p: { hostUserId: string; memberUserId: string; scope: "standing" | "event"; eventId: string | null }): Promise<void> {
+  try {
+    const d = await noticeDeps();
+    const [m] = await rows<any>(sql`SELECT first_name, username FROM users WHERE id = ${p.memberUserId}`);
+    if (!m) return;
+    const name = (m.first_name && String(m.first_name).trim()) || (m.username ? `@${m.username}` : "Someone");
+    let what = "all your events";
+    if (p.scope === "event" && p.eventId) {
+      const [e] = await rows<any>(sql`SELECT title FROM events WHERE id = ${p.eventId}`);
+      if (e) what = String(e.title);
+    }
     await d.sendPush({
-      userId: p.userId, title: "You're on the door team",
-      body: `You can now scan tickets for ${what}.`,
-      data: { type: "door_team_added", eventId: p.eventId, scope: p.scope },
+      userId: p.hostUserId, title: `${name} joined your door team`, body: `They can scan tickets for ${what}.`,
+      data: { type: "door_team_accepted", eventId: p.scope === "event" ? p.eventId : null },
     });
   } catch (err) {
-    console.error(`[Door] team push failed for event ${p.eventId}:`, (err as Error)?.message ?? err);
+    console.error(`[Door] accept push failed for host ${p.hostUserId}:`, (err as Error)?.message ?? err);
   }
 }

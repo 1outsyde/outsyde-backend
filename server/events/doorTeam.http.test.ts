@@ -1,5 +1,6 @@
 /**
- * Events door check-in Task 2: door team management routes.
+ * Events door check-in Task 2: door team management routes. p4-scanner (migration 075): adding someone sends an
+ * invite (push, Activity item, email while the daily budget lasts); they can scan only after accepting.
  *
  * Run with: .superpowers/sdd/2026-10-22-events-list-day-of-address/env/run-suite.sh server/events/doorTeam.http.test.ts
  * SCRATCH ONLY. Local scratch Postgres with migrations through 067, backend on localhost (EV_TEST_BASE_URL),
@@ -13,6 +14,9 @@
  *  - drop the host check in the team routes → "stranger gets 404" fails.
  *  - drop LOWER() in the username lookup → "case-insensitive" fails.
  *  - drop `removed_at IS NULL` from the duplicate check → "re-add after remove" / "duplicate 409" fail.
+ *  - send the email without the 24 hour guard → "no second email within 24 hours" fails.
+ *  - drop the email_log ceiling → "over the daily email budget: no email" fails.
+ *  - reset accepted rows on invite again → "accepted is 409 ALREADY_ON_TEAM" fails.
  */
 import http from "http";
 
@@ -89,15 +93,24 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
   const eventIds = [evA, evB, evEnded, evDraft, evOther, evCancelled];
   const ht = tok(host.id);
   const add = (ev: string, username: string, scope: string, token = ht) => call("POST", `/api/events/${ev}/door/team`, { token, body: { username, scope } });
+  // Accept / decline straight in the DB (the member routes are tested in doorInvites.http.test.ts).
+  const acceptStanding = (m: string) => q(`UPDATE event_door_team SET accepted_at = now() WHERE host_user_id = $1 AND member_user_id = $2 AND removed_at IS NULL`, [host.id, m]);
+  const acceptEvent = (ev: string, m: string) => q(`UPDATE event_door_members SET accepted_at = now() WHERE event_id = $1 AND member_user_id = $2 AND removed_at IS NULL`, [ev, m]);
+  const declineEvent = (ev: string, m: string) => q(`UPDATE event_door_members SET declined_at = now() WHERE event_id = $1 AND member_user_id = $2 AND removed_at IS NULL`, [ev, m]);
 
   // In-process app for push checks
   const express = (await import("express")).default;
   const { setNoticeDepsForTest } = await import("./ticketNotices");
   const pushes: any[] = [];
-  setNoticeDepsForTest({
+  const activities: any[] = [];
+  const emails: any[] = [];
+  const recording = {
     sendReceipt: async () => {}, sendRefund: async () => {}, sendCancelled: async () => {}, sendAddressReveal: async () => {},
-    sendPush: async (p) => { pushes.push(p); return true; },
-  });
+    sendPush: async (p: any) => { pushes.push(p); return true; },
+    createActivity: async (p: any) => { activities.push(p); },
+    sendDoorInvite: async (p: any) => { emails.push(p); },
+  };
+  setNoticeDepsForTest(recording);
   const { default: doorRouter } = await import("./doorRouter");
   const app = express();
   app.use(express.json());
@@ -109,7 +122,10 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
     console.log("\nadd");
     let r = await add(evA, m1.username.toUpperCase(), "standing");
     assert(r.status === 201 && r.body.success && r.body.scope === "standing", "standing add by username, case-insensitive", r);
-    assert(r.body.member?.userId === m1.id && r.body.member.firstName === "Firstm1" && r.body.member.username === m1.username && !!r.body.member.addedAt, "member shape", r.body);
+    assert(r.body.member?.userId === m1.id && r.body.member.firstName === "Firstm1" && r.body.member.username === m1.username && !!r.body.member.addedAt, "member shape (old keys kept)", r.body);
+    assert(r.body.member.status === "invited" && typeof r.body.member.inviteId === "string" && !!r.body.member.invitedAt, "add sends an invite: status invited, inviteId, invitedAt", r.body);
+    const [m1row] = await q(`SELECT id, accepted_at, role FROM event_door_team WHERE host_user_id = $1 AND member_user_id = $2`, [host.id, m1.id]);
+    assert(m1row.id === r.body.member.inviteId && m1row.accepted_at === null && m1row.role === "door", "row is a pending door invite", m1row);
     assert(!/email|@test\.local/i.test(r.raw), "response never contains an email");
     r = await add(evA, m2.username, "event");
     assert(r.status === 201 && r.body.scope === "event" && r.body.member.userId === m2.id, "event add", r);
@@ -120,9 +136,16 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
     r = await add(evA, inactive.username, "event");
     assert(r.status === 404 && r.body.error.code === "USER_NOT_FOUND", "inactive user is 404", r);
     r = await add(evA, m1.username, "standing");
-    assert(r.status === 409 && r.body.error.code === "ALREADY_ON_TEAM", "duplicate standing is 409", r);
+    assert(r.status === 409 && r.body.error.code === "ALREADY_INVITED" && r.body.error.message === "You already invited them. They can scan once they accept.", "pending standing invite again is 409 ALREADY_INVITED", r);
     r = await add(evA, m2.username, "event");
-    assert(r.status === 409 && r.body.error.code === "ALREADY_ON_TEAM", "duplicate event is 409", r);
+    assert(r.status === 409 && r.body.error.code === "ALREADY_INVITED", "pending event invite again is 409 ALREADY_INVITED", r);
+    await acceptStanding(m1.id);
+    await acceptEvent(evA, m2.id);
+    r = await add(evA, m1.username, "standing");
+    assert(r.status === 409 && r.body.error.code === "ALREADY_ON_TEAM", "accepted standing member is 409 ALREADY_ON_TEAM", r);
+    r = await add(evA, m2.username, "event");
+    assert(r.status === 409 && r.body.error.code === "ALREADY_ON_TEAM", "accepted event member is 409 ALREADY_ON_TEAM", r);
+    assert((await q(`SELECT accepted_at FROM event_door_members WHERE event_id = $1 AND member_user_id = $2 AND removed_at IS NULL`, [evA, m2.id]))[0].accepted_at !== null, "a repeat add never resets an accepted row");
     r = await add(evEnded, m3.username, "event");
     assert(r.status === 409 && r.body.error.code === "EVENT_ENDED" && r.body.error.message === "This event is over, so no one can be added to its door team.", "event scope on an ended event is EVENT_ENDED", r);
     r = await add(evCancelled, m3.username, "event");
@@ -162,8 +185,28 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
     assert(r.status === 200 && r.body.standing.length === 1 && r.body.standing[0].userId === m1.id, "standing list", r.body);
     assert(r.body.event.length === 1 && r.body.event[0].userId === m2.id, "event list", r.body);
     assert(!/email|@test\.local/i.test(r.raw), "list never contains an email");
+    assert(r.body.standing[0].status === "accepted" && r.body.event[0].status === "accepted" && !!r.body.event[0].inviteId, "list shows accepted status and inviteId", r.body);
     r = await call("GET", `/api/events/${evB}/door/team`, { token: ht });
     assert(r.body.standing.length === 1 && r.body.event.length === 0, "event members are per event, standing is per host", r.body);
+
+    console.log("\ninvite again after a no");
+    r = await add(evB, m3.username, "event");
+    assert(r.status === 201 && r.body.member.status === "invited", "invite m3 to Beta", r);
+    const firstId = r.body.member.inviteId;
+    const firstAt = r.body.member.invitedAt;
+    await declineEvent(evB, m3.id);
+    r = await call("GET", `/api/events/${evB}/door/team`, { token: ht });
+    assert(r.body.event.length === 1 && r.body.event[0].status === "declined", "the host sees a decline (Said no)", r.body);
+    await sleep(20);
+    r = await add(evB, m3.username, "event");
+    assert(r.status === 201 && r.body.member.status === "invited" && r.body.member.inviteId === firstId, "invite again reuses the same row", r);
+    assert(new Date(r.body.member.invitedAt).getTime() > new Date(firstAt).getTime(), "invite again moves invitedAt", r.body);
+    const [again] = await q(`SELECT declined_at, accepted_at FROM event_door_members WHERE id = $1`, [firstId]);
+    assert(again.declined_at === null && again.accepted_at === null, "invite again clears the decline", again);
+    r = await call("DELETE", `/api/events/${evB}/door/team/${m3.id}?scope=event`, { token: ht });
+    assert(r.status === 200, "cancel a pending invite (same DELETE as remove)", r);
+    const [cancelled] = await q(`SELECT removed_at, removed_by_user_id FROM event_door_members WHERE id = $1`, [firstId]);
+    assert(!!cancelled.removed_at && cancelled.removed_by_user_id === host.id, "cancel records who removed it", cancelled);
 
     console.log("\nmine");
     r = await call("GET", "/api/events/door/mine", { token: tok(m1.id) });
@@ -172,13 +215,17 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
     assert(!ids.includes(evEnded) && !ids.includes(evDraft) && !ids.includes(evOther), "no ended, draft or other host events", ids);
     const row = r.body.events.find((e: any) => e.id === evA);
     assert(row?.role === "standing" && row.title && row.slug && row.startsAt && row.endsAt && row.timezone, "event row shape", row);
+    const [m1inv] = await q(`SELECT id FROM event_door_team WHERE host_user_id = $1 AND member_user_id = $2 AND removed_at IS NULL`, [host.id, m1.id]);
+    assert(row?.inviteId === m1inv.id, "/door/mine gives a member the invite id (for Leave)", row);
     r = await call("GET", "/api/events/door/mine", { token: tok(m2.id) });
     assert((r.body.events ?? []).length === 1 && r.body.events[0].id === evA && r.body.events[0].role === "event", "event member sees only that event", r.body);
+    assert(typeof r.body.events[0]?.inviteId === "string", "event member row has its invite id", r.body);
     r = await call("GET", "/api/events/door/mine", { token: tok(stranger.id) });
     assert(r.status === 200 && r.body.events.length === 0, "stranger sees none", r.body);
     r = await call("GET", "/api/events/door/mine", { token: ht });
     const hostA = (r.body.events ?? []).find((e: any) => e.id === evA);
     assert(r.status === 200 && !!hostA && hostA.role === "host", "host sees their own published, not-ended event with role host", r.body);
+    assert(hostA?.inviteId === null, "the host's own row has no invite id", hostA);
 
     console.log("\nremove");
     r = await call("DELETE", `/api/events/${evA}/door/team/${m2.id}?scope=event`, { token: ht });
@@ -192,48 +239,140 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
     r = await call("GET", "/api/events/door/mine", { token: tok(m2.id) });
     assert(r.body.events.length === 0, "nothing in /door/mine after removal", r.body);
     r = await add(evA, m2.username, "event");
-    assert(r.status === 201, "re-add after remove works", r);
+    assert(r.status === 201 && r.body.member.status === "invited", "re-add after remove sends a new invite", r);
     const hist = await q(`SELECT count(*)::int AS n FROM event_door_members WHERE event_id = $1 AND member_user_id = $2`, [evA, m2.id]);
     assert(hist[0].n === 2, "removal keeps history (soft remove)", hist);
     r = await call("DELETE", `/api/events/${evA}/door/team/${m1.id}?scope=standing`, { token: ht });
     assert(r.status === 200, "remove standing member", r);
+    assert((await q(`SELECT removed_by_user_id FROM event_door_team WHERE host_user_id = $1 AND member_user_id = $2 ORDER BY created_at DESC LIMIT 1`, [host.id, m1.id]))[0].removed_by_user_id === host.id, "remove records the host");
     r = await call("GET", "/api/events/door/mine", { token: tok(m1.id) });
     assert(r.body.events.length === 0, "removed standing member sees nothing", r.body);
 
-    console.log("\npush (in-process router, recording fakes)");
-    pushes.length = 0;
+    console.log("\nnotices (in-process router, recording fakes)");
+    const clear = () => { pushes.length = 0; activities.length = 0; emails.length = 0; };
+    clear();
     const lt = (id: string) => tok(id);
-    r = await callAt(LOCAL, "POST", `/api/events/${evA}/door/team`, { token: lt(host.id), body: { username: m3.username, scope: "event" } });
+    const ladd = (ev: string, username: string, scope: string, as = host.id) => callAt(LOCAL, "POST", `/api/events/${ev}/door/team`, { token: lt(as), body: { username, scope } });
+    r = await ladd(evA, m3.username, "event");
     await sleep(300);
-    assert(r.status === 201 && pushes.length === 1, "one push per add", { status: r.status, n: pushes.length });
-    assert(pushes[0]?.userId === m3.id && pushes[0].title === "You're on the door team" && pushes[0].body === `You can now scan tickets for ${P} Alpha.`, "event scope copy", pushes[0]);
-    pushes.length = 0;
-    r = await callAt(LOCAL, "POST", `/api/events/${evEnded}/door/team`, { token: lt(host.id), body: { username: m3.username, scope: "event" } });
+    const inviteId = r.body?.member?.inviteId;
+    assert(r.status === 201 && pushes.length === 1 && activities.length === 1 && emails.length === 1, "one push, one Activity item, one email per invite", { status: r.status, p: pushes.length, a: activities.length, e: emails.length });
+    assert(pushes[0]?.userId === m3.id && pushes[0].title === "Hosty invited you to their door team" && pushes[0].body === "Tap to accept or decline.", "push copy uses the host's public name", pushes[0]);
+    assert(pushes[0]?.data?.type === "door_team_invite" && pushes[0].data.inviteId === inviteId, "push data opens the invite", pushes[0]?.data);
+    assert(activities[0]?.userId === m3.id && activities[0].type === "door_team_invite" && activities[0].referenceType === "event_door_invite" && activities[0].referenceId === inviteId, "Activity item points at the invite", activities[0]);
+    assert(activities[0]?.title === "Hosty invited you to their door team" && activities[0].message === `Only this event: ${P} Alpha.` && activities[0].metadata?.inviteId === inviteId && activities[0].metadata?.scope === "event", "Activity copy and metadata", activities[0]);
+    assert(activities[0]?.triggeredByUserId === host.id, "Activity names the host as the one who acted", activities[0]);
+    assert(emails[0]?.toEmail === `${P}-m3@test.local` && emails[0].firstName === "Firstm3" && emails[0].hostName === "Hosty" && emails[0].scope === "event" && emails[0].eventTitle === `${P} Alpha` && emails[0].doorUrl === "https://goutsyde.test/events/door", "email params", emails[0]);
+    assert(typeof emails[0]?.whenText === "string" && emails[0].whenText.length > 0, "email has the event time", emails[0]);
+    assert(!/[–—]| - /.test(pushes[0].title + pushes[0].body + activities[0].message), "no dashes in copy");
+    assert(!/realfirst/i.test(JSON.stringify([pushes, activities, emails])), "the host's real first name is never used");
+    clear();
+    r = await ladd(evA, m3.username, "event");
     await sleep(200);
-    assert(r.status === 409 && r.body.error.code === "EVENT_ENDED" && pushes.length === 0, "EVENT_ENDED sends no push", { status: r.status, pushes });
-    r = await callAt(LOCAL, "POST", `/api/events/${evA}/door/team`, { token: lt(host.id), body: { username: m1.username, scope: "standing" } });
+    assert(r.status === 409 && pushes.length + activities.length + emails.length === 0, "a repeat invite sends nothing", { status: r.status });
+    await declineEvent(evA, m3.id);
+    clear();
+    r = await ladd(evA, m3.username, "event");
     await sleep(300);
-    assert(pushes.length === 1 && pushes[0].body === "You can now scan tickets for Hosty's events.", "standing scope copy uses the host name", pushes[0]);
-    assert(!/[–—]| - /.test(pushes[0].title + pushes[0].body), "no dashes in copy");
-    pushes.length = 0;
-    await callAt(LOCAL, "POST", `/api/events/${evA}/door/team`, { token: lt(host.id), body: { username: m1.username, scope: "standing" } });
+    assert(r.status === 201 && pushes.length === 1 && activities.length === 1, "invite again after a no: push and Activity again", { p: pushes.length, a: activities.length });
+    assert(emails.length === 0, "no second email within 24 hours for the same invite", emails);
+    clear();
+    r = await ladd(evEnded, m3.username, "event");
+    await sleep(200);
+    assert(r.status === 409 && r.body.error.code === "EVENT_ENDED" && pushes.length === 0, "EVENT_ENDED sends nothing", { status: r.status, pushes });
+    clear();
+    const m4 = await mkUser("m4");
+    r = await ladd(evA, m4.username, "standing");
+    await sleep(300);
+    assert(r.status === 201 && pushes.length === 1 && pushes[0].title === "Hosty invited you to their door team", "standing invite push", pushes[0]);
+    assert(activities[0]?.message === "All of Hosty's events." && activities[0].metadata?.scope === "standing", "standing Activity copy", activities[0]);
+    assert(emails[0]?.scope === "standing" && emails[0].eventTitle === null, "standing email has no single event", emails[0]);
+    clear();
     await callAt(LOCAL, "POST", `/api/events/${evA}/door/team`, { token: lt(host.id), body: { username: host.username, scope: "standing" } });
     await callAt(LOCAL, "POST", `/api/events/${evA}/door/team`, { token: lt(stranger.id), body: { username: m3.username, scope: "event" } });
     await sleep(200);
-    assert(pushes.length === 0, "no push on duplicate, self or non-host", pushes);
-    setNoticeDepsForTest({
-      sendReceipt: async () => {}, sendRefund: async () => {}, sendCancelled: async () => {}, sendAddressReveal: async () => {},
-      sendPush: async () => { throw new Error("expo down"); },
-    });
+    assert(pushes.length + activities.length + emails.length === 0, "no notices on self or non-host", pushes);
+
+    console.log("\ninvite email (render)");
+    const { renderDoorTeamInvite } = await import("../emailService");
+    const evMail = renderDoorTeamInvite({ toEmail: "x@test.local", firstName: "Ana<b>", hostName: "Club & Co", scope: "event", eventTitle: "Late <Night>", whenText: "Saturday, October 31 at 9:00 PM EDT", doorUrl: "https://goutsyde.test/events/door" });
+    assert(evMail.subject === "Club & Co invited you to their door team", "email subject", evMail.subject);
+    assert(evMail.html.includes("Hi Ana&lt;b&gt;, you&#39;re invited to the door team") || evMail.html.includes("Hi Ana&lt;b&gt;, you're invited to the door team"), "greeting escapes the first name", evMail.html.slice(0, 2000));
+    assert(evMail.html.includes("Club &amp; Co wants you to help check guests in at the door for <strong>Late &lt;Night&gt;</strong> on Saturday, October 31 at 9:00 PM EDT."), "event line escapes host and title", evMail.html.slice(0, 3000));
+    assert(evMail.html.includes("You won't see sales, earnings or anyone's contact details.") || evMail.html.includes("You won&#39;t see sales, earnings or anyone&#39;s contact details."), "privacy line", null);
+    assert(evMail.html.includes('href="https://goutsyde.test/events/door"') && evMail.html.includes("Accept or decline"), "button opens goutsyde.com/events/door", null);
+    assert(evMail.html.includes("Nothing changes unless you accept."), "ignore line", null);
+    const stMail = renderDoorTeamInvite({ toEmail: "x@test.local", firstName: null, hostName: "Hosty", scope: "standing", eventTitle: null, whenText: null, doorUrl: "https://goutsyde.test/events/door" });
+    assert(stMail.html.includes("Hosty wants you to help check guests in at the door for their events."), "standing line", null);
+    assert(!/[–—]/.test(evMail.html + stMail.html) && !/%/.test(evMail.subject), "no dashes, no percentages", null);
+
+    console.log("\ndaily email budget");
+    const BUDGET_LABEL = `${P}-budget`;
+    await q(`INSERT INTO email_log (kind, label, status) SELECT 'ticket', $1, 'sent' FROM generate_series(1, 70)`, [BUDGET_LABEL]);
+    const m5 = await mkUser("m5");
+    clear();
+    r = await ladd(evA, m5.username, "event");
+    await sleep(300);
+    assert(r.status === 201 && pushes.length === 1 && activities.length === 1, "over the daily email budget: push and Activity still go", { p: pushes.length, a: activities.length });
+    assert(emails.length === 0, "over the daily email budget: no email", emails);
+    assert((await q(`SELECT invite_emailed_at FROM event_door_members WHERE event_id = $1 AND member_user_id = $2`, [evA, m5.id]))[0].invite_emailed_at === null, "no email claimed when over budget");
+    await q(`DELETE FROM email_log WHERE label = $1`, [BUDGET_LABEL]);
+
+    console.log("\nfailures never fail the invite");
+    setNoticeDepsForTest({ ...recording, sendPush: async () => { throw new Error("expo down"); }, createActivity: async () => { throw new Error("db down"); }, sendDoorInvite: async () => { throw new Error("resend down"); } });
     await q(`UPDATE event_door_members SET removed_at = now() WHERE event_id = $1 AND member_user_id = $2`, [evA, m3.id]);
-    r = await callAt(LOCAL, "POST", `/api/events/${evA}/door/team`, { token: lt(host.id), body: { username: m3.username, scope: "event" } });
-    assert(r.status === 201, "a failing push doesn't fail the add", r);
+    r = await ladd(evA, m3.username, "event");
+    assert(r.status === 201, "failing push, Activity and email don't fail the invite", r);
+    setNoticeDepsForTest(recording);
+
+    console.log("\ncancel then invite again (review #1: no spam loop)");
+    const m6 = await mkUser("m6");
+    clear();
+    r = await ladd(evA, m6.username, "event");
+    await sleep(300);
+    assert(r.status === 201 && pushes.length === 1 && emails.length === 1 && activities.length === 1, "first invite: push, email, Activity", { p: pushes.length, e: emails.length, a: activities.length });
+    clear();
+    r = await callAt(LOCAL, "DELETE", `/api/events/${evA}/door/team/${m6.id}?scope=event`, { token: lt(host.id) });
+    assert(r.status === 200, "host cancels the invite", r);
+    r = await ladd(evA, m6.username, "event");
+    await sleep(300);
+    assert(r.status === 201 && emails.length === 0, "cancel then invite again within 24 hours: no second email", emails);
+    assert(pushes.length === 0, "cancel then invite again within 10 minutes: no second push", pushes);
+    assert(activities.length === 1, "the new invite still gets its own Activity item (the old one points at a cancelled invite)", activities.length);
+
+    console.log("\nper host daily invite email cap (10)");
+    const host3 = await mkUser("host3", { name: "Hostthree" });
+    const evH3 = await mkEvent(host3.id, 24, 28, `${P} H3`);
+    eventIds.push(evH3);
+    clear();
+    for (let i = 0; i < 11; i++) {
+      const u = await mkUser(`cap${i}`);
+      r = await ladd(evH3, u.username, "event", host3.id);
+      assert(r.status === 201, `cap invite ${i + 1} sent`, r.status);
+    }
+    await sleep(800);
+    assert(emails.length === 10, "only 10 invite emails a day per host", emails.length);
+    assert(pushes.length === 11 && activities.length === 11, "push and Activity still go for the 11th", { p: pushes.length, a: activities.length });
+
+    console.log("\nrate limit (30 invites an hour per host)");
+    const host2 = await mkUser("host2", { name: "Hosttwo" });
+    const evH2 = await mkEvent(host2.id, 24, 28, `${P} H2`);
+    eventIds.push(evH2);
+    let last = 0;
+    for (let i = 0; i < 30; i++) last = (await ladd(evH2, `nobody${i}_${P}`, "event", host2.id)).status;
+    assert(last === 404, "30 tries in an hour still answer normally", last);
+    r = await ladd(evH2, `nobody31_${P}`, "event", host2.id);
+    assert(r.status === 429 && r.body.error.code === "RATE_LIMITED", "the 31st invite in an hour is 429", r);
+    r = await callAt(LOCAL, "GET", `/api/events/${evH2}/door/team`, { token: lt(host2.id) });
+    assert(r.status === 200, "listing the team isn't rate limited by invites", r);
   } finally {
     setNoticeDepsForTest(null);
     srv.close();
     await q(`DELETE FROM event_door_members WHERE event_id = ANY($1)`, [eventIds]);
-    await q(`DELETE FROM event_door_team WHERE host_user_id IN ($1,$2)`, [host.id, other.id]);
+    await q(`DELETE FROM email_log WHERE label = $1`, [`${P}-budget`]).catch(() => {});
+    await q(`DELETE FROM event_door_team WHERE host_user_id IN (SELECT id FROM users WHERE email LIKE $1)`, [`${P}-%`]);
     await q(`DELETE FROM events WHERE id = ANY($1)`, [eventIds]);
+    await q(`DELETE FROM notifications WHERE user_id IN (SELECT id FROM users WHERE email LIKE $1) OR triggered_by_user_id IN (SELECT id FROM users WHERE email LIKE $1)`, [`${P}-%`]);
     await q(`DELETE FROM users WHERE email LIKE $1`, [`${P}-%`]);
     await db.end();
   }

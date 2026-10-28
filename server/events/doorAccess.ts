@@ -2,8 +2,10 @@
  * Door access rules for ticket check-in. Recomputed from the database on every call (no caching), so a removed
  * member or an ended event loses access on the very next request.
  *   host     events.host_user_id = user
- *   standing active row in event_door_team for that host
- *   event    active row in event_door_members for that event, and now() < events.ends_at
+ *   standing active, accepted row in event_door_team for that host
+ *   event    active, accepted row in event_door_members for that event, and now() < events.ends_at
+ * "Active, accepted" = removed_at IS NULL AND accepted_at IS NOT NULL (migration 075: an invite that is still pending
+ * or was declined gives no access).
  * Every role needs an active account (same test as loadActiveUser).
  */
 import { sql } from "drizzle-orm";
@@ -19,9 +21,11 @@ export async function loadEventForDoor(eventId: string, userId: string): Promise
       CASE
         WHEN e.host_user_id = u.id THEN 'host'
         WHEN EXISTS (SELECT 1 FROM event_door_team t
-                     WHERE t.host_user_id = e.host_user_id AND t.member_user_id = u.id AND t.removed_at IS NULL) THEN 'standing'
+                     WHERE t.host_user_id = e.host_user_id AND t.member_user_id = u.id AND t.removed_at IS NULL
+                       AND t.accepted_at IS NOT NULL) THEN 'standing'
         WHEN now() < e.ends_at AND EXISTS (SELECT 1 FROM event_door_members m
-                     WHERE m.event_id = e.id AND m.member_user_id = u.id AND m.removed_at IS NULL) THEN 'event'
+                     WHERE m.event_id = e.id AND m.member_user_id = u.id AND m.removed_at IS NULL
+                       AND m.accepted_at IS NOT NULL) THEN 'event'
         ELSE NULL
       END AS door_role
     FROM events e

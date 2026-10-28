@@ -1,10 +1,14 @@
 /**
  * Events door check-in: door team management (Task 2).
  *
- *   GET    /api/events/door/mine                 (auth)       events I can scan: published, not ended
+ *   GET    /api/events/door/mine                 (auth)       events I can scan: published, not ended, accepted invites only
  *   GET    /api/events/:id/door/team             (auth, host) standing + this event's door team
- *   POST   /api/events/:id/door/team             (auth, host) add by username, scope standing | event
- *   DELETE /api/events/:id/door/team/:userId     (auth, host) ?scope=standing|event, soft remove
+ *   POST   /api/events/:id/door/team             (auth, host) invite by username, scope standing | event (30 an hour)
+ *   DELETE /api/events/:id/door/team/:userId     (auth, host) ?scope=standing|event, soft remove (also cancels an invite)
+ *
+ *   GET    /api/events/door/invites              (auth)       my open door team invites
+ *   GET    /api/events/door/invites/:inviteId    (auth, invitee) one invite: invited | accepted | declined | gone
+ *   POST   /api/events/door/invites/:inviteId/accept|decline|leave   (auth, invitee)
  *
  *   POST   /api/events/:id/door/check-in         (auth, door)  { code } check a guest in
  *   POST   /api/events/:id/door/check-in-ticket  (auth, door)  { ticketId } same, from a guest list tap
@@ -19,9 +23,9 @@ import rateLimit from "express-rate-limit";
 import { sql } from "drizzle-orm";
 import { z } from "zod";
 import { getUserIdFromRequest, hybridAuthMiddleware } from "../auth";
-import { rows, iso, fail, pgError } from "./eventsRouter";
+import { rows, iso, fail, pgError, hostIdentity } from "./eventsRouter";
 import { loadEventForDoor, isWithinScanWindow } from "./doorAccess";
-import { notifyDoorTeamAdded } from "./ticketNotices";
+import { notifyDoorInvite, notifyDoorAccepted } from "./ticketNotices";
 import { ticketIdFromQrToken, qrPng } from "./ticketQr";
 
 const router = Router();
@@ -30,9 +34,52 @@ const scopeSchema = z.enum(["standing", "event"]);
 const addSchema = z.object({ username: z.string().trim().min(1).max(40), scope: scopeSchema }).strict();
 const validId = (v: string) => v.length > 0 && v.length <= 36;
 
+export type InviteStatus = "invited" | "accepted" | "declined";
+const statusOf = (r: any): InviteStatus => (r.accepted_at ? "accepted" : r.declined_at ? "declined" : "invited");
+
+/** Old keys (userId, firstName, username, addedAt) unchanged; inviteId, status, invitedAt added for invites (075). */
 const memberJson = (r: any) => ({
   userId: String(r.user_id), firstName: r.first_name ?? null, username: r.username ?? null, addedAt: iso(r.added_at),
+  inviteId: String(r.invite_id), status: statusOf(r), invitedAt: iso(r.invited_at),
 });
+
+type Scope = "standing" | "event";
+const doorTable = (scope: Scope) => sql.raw(scope === "standing" ? "event_door_team" : "event_door_members");
+const doorKey = (scope: Scope, hostUserId: string, eventId: string, memberId: string) => scope === "standing"
+  ? sql`host_user_id = ${hostUserId} AND member_user_id = ${memberId}`
+  : sql`event_id = ${eventId} AND member_user_id = ${memberId}`;
+
+/**
+ * Sends (or re-sends after a decline) an invite. Pending and accepted rows are never touched: the caller answers
+ * 409 ALREADY_INVITED / ALREADY_ON_TEAM. Returns the row (id, created_at, invited_at) or that code.
+ */
+async function inviteRow(scope: Scope, hostUserId: string, eventId: string, memberId: string): Promise<{ row: any } | { code: "ALREADY_INVITED" | "ALREADY_ON_TEAM" }> {
+  const key = doorKey(scope, hostUserId, eventId, memberId);
+  const [reopened] = await rows<any>(sql`
+    UPDATE ${doorTable(scope)} SET declined_at = NULL, invited_at = now(), added_by_user_id = ${hostUserId}
+    WHERE ${key} AND removed_at IS NULL AND declined_at IS NOT NULL
+    RETURNING id, created_at, invited_at`);
+  if (reopened) return { row: reopened };
+  let inserted: any;
+  try {
+    [inserted] = scope === "standing"
+      ? await rows<any>(sql`
+          INSERT INTO event_door_team (host_user_id, member_user_id, added_by_user_id, role)
+          VALUES (${hostUserId}, ${memberId}, ${hostUserId}, 'door')
+          ON CONFLICT (host_user_id, member_user_id) WHERE removed_at IS NULL DO NOTHING
+          RETURNING id, created_at, invited_at`)
+      : await rows<any>(sql`
+          INSERT INTO event_door_members (event_id, member_user_id, added_by_user_id, role)
+          VALUES (${eventId}, ${memberId}, ${hostUserId}, 'door')
+          ON CONFLICT (event_id, member_user_id) WHERE removed_at IS NULL DO NOTHING
+          RETURNING id, created_at, invited_at`);
+  } catch (err) {
+    if (pgError(err).code !== "23505") throw err;
+  }
+  if (inserted) return { row: inserted };
+  const [existing] = await rows<any>(sql`SELECT accepted_at FROM ${doorTable(scope)} WHERE ${key} AND removed_at IS NULL`);
+  return { code: existing?.accepted_at ? "ALREADY_ON_TEAM" : "ALREADY_INVITED" };
+}
 
 /** The host of this event, or null (and the caller answers 404 EVENT_NOT_FOUND). */
 async function hostOnly(req: Request, res: Response): Promise<{ userId: string; event: any } | null> {
@@ -43,6 +90,26 @@ async function hostOnly(req: Request, res: Response): Promise<{ userId: string; 
   if (!access || access.role !== "host") { fail(res, 404, "EVENT_NOT_FOUND", "Event not found."); return null; }
   return { userId, event: access.event };
 }
+
+/** 120 per minute per signed in user (never per IP: a whole door team can share one venue wifi address). */
+const DOOR_LIMIT = 120;
+const doorLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  limit: DOOR_LIMIT,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req) => getUserIdFromRequest(req as Request) ?? "anonymous",
+  validate: { keyGeneratorIpFallback: false },
+  handler: (_req, res) => { fail(res, 429, "RATE_LIMITED", "Too many scans. Wait a moment and try again."); },
+});
+
+/** 30 invites an hour per host (per signed in user, never per IP), so nobody can be flooded with invites. */
+const inviteLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000, limit: 30, standardHeaders: true, legacyHeaders: false,
+  keyGenerator: (req) => getUserIdFromRequest(req as Request) ?? "anonymous",
+  validate: { keyGeneratorIpFallback: false },
+  handler: (_req, res) => { fail(res, 429, "RATE_LIMITED", "Too many invites. Try again in an hour."); },
+});
 
 const qrLimiter = rateLimit({
   windowMs: 60_000, limit: 120, standardHeaders: true, legacyHeaders: false,
@@ -78,19 +145,26 @@ router.get("/door/mine", hybridAuthMiddleware, async (req: Request, res: Respons
     const list = await rows<any>(sql`
       SELECT e.id, e.slug, e.title, e.starts_at, e.ends_at, e.timezone,
         CASE WHEN e.host_user_id = u.id THEN 'host'
-             WHEN EXISTS (SELECT 1 FROM event_door_team t WHERE t.host_user_id = e.host_user_id AND t.member_user_id = u.id AND t.removed_at IS NULL) THEN 'standing'
-             ELSE 'event' END AS role
+             WHEN EXISTS (SELECT 1 FROM event_door_team t WHERE t.host_user_id = e.host_user_id AND t.member_user_id = u.id AND t.removed_at IS NULL AND t.accepted_at IS NOT NULL) THEN 'standing'
+             ELSE 'event' END AS role,
+        CASE WHEN e.host_user_id = u.id THEN NULL
+             ELSE COALESCE(
+               (SELECT t.id FROM event_door_team t WHERE t.host_user_id = e.host_user_id AND t.member_user_id = u.id AND t.removed_at IS NULL AND t.accepted_at IS NOT NULL LIMIT 1),
+               (SELECT m.id FROM event_door_members m WHERE m.event_id = e.id AND m.member_user_id = u.id AND m.removed_at IS NULL AND m.accepted_at IS NOT NULL LIMIT 1))
+        END AS invite_id
       FROM events e
       JOIN users u ON u.id = ${userId} AND u.is_active = true AND COALESCE(u.deletion_status, 'active') = 'active'
       WHERE e.status = 'published' AND e.ends_at > now()
         AND (e.host_user_id = u.id
-          OR EXISTS (SELECT 1 FROM event_door_team t WHERE t.host_user_id = e.host_user_id AND t.member_user_id = u.id AND t.removed_at IS NULL)
-          OR EXISTS (SELECT 1 FROM event_door_members m WHERE m.event_id = e.id AND m.member_user_id = u.id AND m.removed_at IS NULL))
+          OR EXISTS (SELECT 1 FROM event_door_team t WHERE t.host_user_id = e.host_user_id AND t.member_user_id = u.id AND t.removed_at IS NULL AND t.accepted_at IS NOT NULL)
+          OR EXISTS (SELECT 1 FROM event_door_members m WHERE m.event_id = e.id AND m.member_user_id = u.id AND m.removed_at IS NULL AND m.accepted_at IS NOT NULL))
       ORDER BY e.starts_at, e.id`);
     res.json({
       success: true,
       events: list.map((e) => ({
         id: e.id, slug: e.slug, title: e.title, startsAt: iso(e.starts_at), endsAt: iso(e.ends_at), timezone: e.timezone, role: e.role,
+        // Additive (p4-scanner): the accepted invite behind a member's row, so they can open it and Leave. Null for the host.
+        inviteId: e.invite_id ? String(e.invite_id) : null,
       })),
     });
   } catch (err) {
@@ -99,16 +173,162 @@ router.get("/door/mine", hybridAuthMiddleware, async (req: Request, res: Respons
   }
 });
 
+// ─── The invitee's side (p4-scanner, migration 075) ─────────────────────────
+
+type InviteRow = {
+  scope: Scope; id: string; host_user_id: string; event_id: string | null; member_user_id: string;
+  accepted_at: any; declined_at: any; removed_at: any; invited_at: any; role: string;
+  e_title: string | null; e_starts_at: any; e_ends_at: any; e_timezone: string | null; e_status: string | null;
+};
+
+/** One invite row from either table (ids are UUIDs, so they never collide). */
+async function loadInvite(inviteId: string): Promise<InviteRow | null> {
+  if (!validId(inviteId)) return null;
+  const [r] = await rows<any>(sql`
+    SELECT 'standing' AS scope, t.id, t.host_user_id, NULL::varchar AS event_id, t.member_user_id, t.accepted_at, t.declined_at,
+      t.removed_at, t.invited_at, t.role, NULL AS e_title, NULL::timestamptz AS e_starts_at, NULL::timestamptz AS e_ends_at,
+      NULL AS e_timezone, NULL AS e_status
+    FROM event_door_team t WHERE t.id = ${inviteId}
+    UNION ALL
+    SELECT 'event', m.id, e.host_user_id, m.event_id, m.member_user_id, m.accepted_at, m.declined_at,
+      m.removed_at, m.invited_at, m.role, e.title, e.starts_at, e.ends_at, e.timezone, e.status
+    FROM event_door_members m JOIN events e ON e.id = m.event_id WHERE m.id = ${inviteId}`);
+  return (r as InviteRow) ?? null;
+}
+
+/** An only-this-event invite closes when its event ends or is cancelled. */
+const eventClosed = (r: InviteRow) => r.scope === "event"
+  && (r.e_status === "cancelled" || new Date(r.e_ends_at).getTime() <= Date.now());
+const inviteStatus = (r: InviteRow): "invited" | "accepted" | "declined" | "gone" =>
+  r.removed_at || eventClosed(r) ? "gone" : r.accepted_at ? "accepted" : r.declined_at ? "declined" : "invited";
+
+/** Host public name from their latest published event, else their latest event (the invite names the host). */
+async function hostNameFor(hostUserId: string, eventId: string | null): Promise<string> {
+  const [e] = eventId
+    ? await rows<any>(sql`SELECT * FROM events WHERE id = ${eventId}`)
+    : await rows<any>(sql`SELECT * FROM events WHERE host_user_id = ${hostUserId}
+        ORDER BY (status = 'published') DESC, created_at DESC LIMIT 1`);
+  return (await hostIdentity(e ?? { host_user_id: hostUserId })).publicName;
+}
+
+async function inviteJson(r: InviteRow) {
+  const upcoming = r.scope === "standing"
+    ? await rows<any>(sql`SELECT id, title, starts_at, timezone FROM events
+        WHERE host_user_id = ${r.host_user_id} AND status = 'published' AND ends_at > now() ORDER BY starts_at, id LIMIT 5`)
+    : [];
+  return {
+    id: String(r.id), scope: r.scope, role: r.role, status: inviteStatus(r), invitedAt: iso(r.invited_at),
+    host: { name: await hostNameFor(r.host_user_id, r.event_id) },
+    event: r.scope === "event"
+      ? { id: String(r.event_id), title: r.e_title, startsAt: iso(r.e_starts_at), endsAt: iso(r.e_ends_at), timezone: r.e_timezone }
+      : null,
+    upcoming: upcoming.map((e) => ({ id: String(e.id), title: e.title, startsAt: iso(e.starts_at), timezone: e.timezone })),
+  };
+}
+
+/** The signed in invitee and their invite, or null after answering 401 / 404 INVITE_NOT_FOUND. */
+async function myInvite(req: Request, res: Response): Promise<{ userId: string; invite: InviteRow } | null> {
+  const userId = getUserIdFromRequest(req);
+  if (!userId) { fail(res, 401, "UNAUTHORIZED", "Sign in to continue."); return null; }
+  const invite = await loadInvite(String(req.params.inviteId));
+  if (!invite || invite.member_user_id !== userId) { fail(res, 404, "INVITE_NOT_FOUND", "Invite not found."); return null; }
+  return { userId, invite };
+}
+
+router.get("/door/invites", hybridAuthMiddleware, doorLimiter, async (req: Request, res: Response) => {
+  try {
+    const userId = getUserIdFromRequest(req);
+    if (!userId) return fail(res, 401, "UNAUTHORIZED", "Sign in to continue.");
+    const ids = await rows<any>(sql`
+      SELECT t.id, t.invited_at FROM event_door_team t
+      WHERE t.member_user_id = ${userId} AND t.removed_at IS NULL AND t.accepted_at IS NULL AND t.declined_at IS NULL
+      UNION ALL
+      SELECT m.id, m.invited_at FROM event_door_members m JOIN events e ON e.id = m.event_id
+      WHERE m.member_user_id = ${userId} AND m.removed_at IS NULL AND m.accepted_at IS NULL AND m.declined_at IS NULL
+        AND e.status <> 'cancelled' AND e.ends_at > now()
+      ORDER BY invited_at DESC, id LIMIT 50`);
+    const invites = [];
+    for (const { id } of ids) {
+      const r = await loadInvite(String(id));
+      if (r) invites.push(await inviteJson(r));
+    }
+    res.json({ success: true, invites });
+  } catch (err) {
+    console.error("[Door] invites failed:", err);
+    fail(res, 500, "SERVER_ERROR", "Could not load your invites.");
+  }
+});
+
+router.get("/door/invites/:inviteId", hybridAuthMiddleware, doorLimiter, async (req: Request, res: Response) => {
+  try {
+    const ctx = await myInvite(req, res);
+    if (!ctx) return;
+    res.json({ success: true, invite: await inviteJson(ctx.invite) });
+  } catch (err) {
+    console.error("[Door] invite failed:", err);
+    fail(res, 500, "SERVER_ERROR", "Could not load the invite.");
+  }
+});
+
+/** One atomic answer: only an open invite (not answered, not cancelled, event not over) changes. */
+async function answerInvite(r: InviteRow, userId: string, answer: "accept" | "decline"): Promise<boolean> {
+  const set = answer === "accept" ? sql`accepted_at = now()` : sql`declined_at = now()`;
+  const open = sql`id = ${r.id} AND member_user_id = ${userId} AND removed_at IS NULL AND accepted_at IS NULL AND declined_at IS NULL`;
+  const done = r.scope === "standing"
+    ? await rows<any>(sql`UPDATE event_door_team SET ${set} WHERE ${open} RETURNING id`)
+    : await rows<any>(sql`UPDATE event_door_members SET ${set} WHERE ${open}
+        AND EXISTS (SELECT 1 FROM events e WHERE e.id = event_door_members.event_id AND e.status <> 'cancelled' AND e.ends_at > now())
+        RETURNING id`);
+  return done.length > 0;
+}
+
+for (const answer of ["accept", "decline"] as const) {
+  router.post(`/door/invites/:inviteId/${answer}`, hybridAuthMiddleware, doorLimiter, async (req: Request, res: Response) => {
+    try {
+      const ctx = await myInvite(req, res);
+      if (!ctx) return;
+      if (!(await answerInvite(ctx.invite, ctx.userId, answer))) return fail(res, 409, "INVITE_CLOSED", "This invite is no longer open.");
+      if (answer === "accept") {
+        notifyDoorAccepted({ hostUserId: ctx.invite.host_user_id, memberUserId: ctx.userId, scope: ctx.invite.scope, eventId: ctx.invite.event_id }).catch(() => {});
+      }
+      const fresh = await loadInvite(ctx.invite.id);
+      res.json({ success: true, invite: await inviteJson(fresh!) });
+    } catch (err) {
+      console.error(`[Door] invite ${answer} failed:`, err);
+      fail(res, 500, "SERVER_ERROR", "Could not answer the invite.");
+    }
+  });
+}
+
+router.post("/door/invites/:inviteId/leave", hybridAuthMiddleware, doorLimiter, async (req: Request, res: Response) => {
+  try {
+    const ctx = await myInvite(req, res);
+    if (!ctx) return;
+    const done = await rows<any>(sql`
+      UPDATE ${doorTable(ctx.invite.scope)} SET removed_at = now(), removed_by_user_id = ${ctx.userId}
+      WHERE id = ${ctx.invite.id} AND member_user_id = ${ctx.userId} AND removed_at IS NULL AND accepted_at IS NOT NULL
+      RETURNING id`);
+    if (!done.length) return fail(res, 409, "NOT_ON_TEAM", "You aren't on this door team.");
+    const fresh = await loadInvite(ctx.invite.id);
+    res.json({ success: true, invite: await inviteJson(fresh!) });
+  } catch (err) {
+    console.error("[Door] leave failed:", err);
+    fail(res, 500, "SERVER_ERROR", "Could not leave the door team.");
+  }
+});
+
 router.get("/:id/door/team", hybridAuthMiddleware, async (req: Request, res: Response) => {
   try {
     const ctx = await hostOnly(req, res);
     if (!ctx) return;
     const standing = await rows<any>(sql`
-      SELECT u.id AS user_id, u.first_name, u.username, t.created_at AS added_at
+      SELECT u.id AS user_id, u.first_name, u.username, t.created_at AS added_at,
+        t.id AS invite_id, t.accepted_at, t.declined_at, t.invited_at
       FROM event_door_team t JOIN users u ON u.id = t.member_user_id
       WHERE t.host_user_id = ${ctx.userId} AND t.removed_at IS NULL ORDER BY t.created_at, u.id`);
     const event = await rows<any>(sql`
-      SELECT u.id AS user_id, u.first_name, u.username, m.created_at AS added_at
+      SELECT u.id AS user_id, u.first_name, u.username, m.created_at AS added_at,
+        m.id AS invite_id, m.accepted_at, m.declined_at, m.invited_at
       FROM event_door_members m JOIN users u ON u.id = m.member_user_id
       WHERE m.event_id = ${ctx.event.id} AND m.removed_at IS NULL ORDER BY m.created_at, u.id`);
     res.json({ success: true, standing: standing.map(memberJson), event: event.map(memberJson) });
@@ -118,7 +338,7 @@ router.get("/:id/door/team", hybridAuthMiddleware, async (req: Request, res: Res
   }
 });
 
-router.post("/:id/door/team", hybridAuthMiddleware, async (req: Request, res: Response) => {
+router.post("/:id/door/team", hybridAuthMiddleware, inviteLimiter, async (req: Request, res: Response) => {
   try {
     const ctx = await hostOnly(req, res);
     if (!ctx) return;
@@ -136,31 +356,23 @@ router.post("/:id/door/team", hybridAuthMiddleware, async (req: Request, res: Re
       WHERE LOWER(username) = LOWER(${username}) AND is_active = true AND COALESCE(deletion_status, 'active') = 'active'`);
     if (!target) return fail(res, 404, "USER_NOT_FOUND", "No active account has that username.");
     if (target.id === ctx.userId) return fail(res, 400, "CANNOT_ADD_SELF", "You already have full access to your own events.");
-    let added: any;
-    try {
-      [added] = scope === "standing"
-        ? await rows<any>(sql`
-            INSERT INTO event_door_team (host_user_id, member_user_id, added_by_user_id)
-            VALUES (${ctx.userId}, ${target.id}, ${ctx.userId})
-            ON CONFLICT (host_user_id, member_user_id) WHERE removed_at IS NULL DO NOTHING
-            RETURNING created_at`)
-        : await rows<any>(sql`
-            INSERT INTO event_door_members (event_id, member_user_id, added_by_user_id)
-            VALUES (${ctx.event.id}, ${target.id}, ${ctx.userId})
-            ON CONFLICT (event_id, member_user_id) WHERE removed_at IS NULL DO NOTHING
-            RETURNING created_at`);
-    } catch (err) {
-      if (pgError(err).code === "23505") added = undefined; else throw err;
+    const out = await inviteRow(scope, ctx.userId, ctx.event.id, target.id);
+    if ("code" in out) {
+      return out.code === "ALREADY_ON_TEAM"
+        ? fail(res, 409, "ALREADY_ON_TEAM", "They are already on your door team.")
+        : fail(res, 409, "ALREADY_INVITED", "You already invited them. They can scan once they accept.");
     }
-    if (!added) return fail(res, 409, "ALREADY_ON_TEAM", "They are already on your door team.");
-    notifyDoorTeamAdded({ userId: target.id, scope, eventId: ctx.event.id }).catch(() => {});
+    notifyDoorInvite({ inviteId: String(out.row.id), scope, eventId: ctx.event.id, memberUserId: target.id, hostUserId: ctx.userId }).catch(() => {});
     res.status(201).json({
       success: true, scope,
-      member: memberJson({ user_id: target.id, first_name: target.first_name, username: target.username, added_at: added.created_at }),
+      member: memberJson({
+        user_id: target.id, first_name: target.first_name, username: target.username, added_at: out.row.created_at,
+        invite_id: out.row.id, accepted_at: null, declined_at: null, invited_at: out.row.invited_at,
+      }),
     });
   } catch (err) {
-    console.error("[Door] team add failed:", err);
-    fail(res, 500, "SERVER_ERROR", "Could not add to the door team.");
+    console.error("[Door] team invite failed:", err);
+    fail(res, 500, "SERVER_ERROR", "Could not send the invite.");
   }
 });
 
@@ -174,10 +386,10 @@ router.delete("/:id/door/team/:userId", hybridAuthMiddleware, async (req: Reques
     if (!validId(memberId)) return fail(res, 404, "NOT_ON_TEAM", "That person isn't on your door team.");
     const done = scope.data === "standing"
       ? await rows<any>(sql`
-          UPDATE event_door_team SET removed_at = now()
+          UPDATE event_door_team SET removed_at = now(), removed_by_user_id = ${ctx.userId}
           WHERE host_user_id = ${ctx.userId} AND member_user_id = ${memberId} AND removed_at IS NULL RETURNING id`)
       : await rows<any>(sql`
-          UPDATE event_door_members SET removed_at = now()
+          UPDATE event_door_members SET removed_at = now(), removed_by_user_id = ${ctx.userId}
           WHERE event_id = ${ctx.event.id} AND member_user_id = ${memberId} AND removed_at IS NULL RETURNING id`);
     if (!done.length) return fail(res, 404, "NOT_ON_TEAM", "That person isn't on your door team.");
     res.json({ success: true, removed: true });
@@ -188,18 +400,6 @@ router.delete("/:id/door/team/:userId", hybridAuthMiddleware, async (req: Reques
 });
 
 // ─── Check in, undo, guest list (Task 3) ────────────────────────────────────
-
-/** 120 per minute per signed in user (never per IP: a whole door team can share one venue wifi address). */
-const DOOR_LIMIT = 120;
-const doorLimiter = rateLimit({
-  windowMs: 60 * 1000,
-  limit: DOOR_LIMIT,
-  standardHeaders: true,
-  legacyHeaders: false,
-  keyGenerator: (req) => getUserIdFromRequest(req as Request) ?? "anonymous",
-  validate: { keyGeneratorIpFallback: false },
-  handler: (_req, res) => { fail(res, 429, "RATE_LIMITED", "Too many scans. Wait a moment and try again."); },
-});
 
 const codeSchema = z.object({
   code: z.string().trim().toUpperCase().regex(/^[A-Z0-9]{16}$/, "code: expected the 16 character ticket code"),
