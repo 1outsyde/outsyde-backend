@@ -15,7 +15,7 @@
  */
 import http from "http";
 import { ipKeyGenerator } from "express-rate-limit";
-import { quickSignupKey } from "./quickSignup";
+import { quickSignupKey, proxyKeyStatus } from "./quickSignup";
 
 const BASE = process.env.PS_TEST_BASE_URL;
 const PG_URL = process.env.PS_TEST_PG_URL;
@@ -77,6 +77,10 @@ function unitBlock() {
     quickSignupKey({ headers: { "x-outsyde-client-ip": "203.0.113.7" } } as any, env(undefined)) === "unknown",
     "no req.ip and no trusted header: a fixed fallback, never throws",
   );
+  assert(proxyKeyStatus({}) === "unset", "proxyKeyStatus: unset");
+  assert(proxyKeyStatus({ OUTSYDE_PROXY_KEY: "k".repeat(40) }) === "ok", "proxyKeyStatus: ok");
+  assert(proxyKeyStatus({ OUTSYDE_PROXY_KEY: "k".repeat(31) }) === "too short", "proxyKeyStatus: too short");
+  assert(proxyKeyStatus({ OUTSYDE_PROXY_KEY: "k".repeat(40) + "\n" }) === "has spaces", "proxyKeyStatus: trailing newline flagged");
 }
 
 type Res = { status: number; body: any; raw: string };

@@ -36,6 +36,15 @@ function proxyKeyMatches(sent: string | null, expected: string | undefined): boo
   return crypto.timingSafeEqual(a, b);
 }
 
+/** Setup check for the boot log (never logs the value): a key with spaces or a newline never matches. */
+export function proxyKeyStatus(env: NodeJS.ProcessEnv = process.env): "unset" | "ok" | "too short" | "has spaces" {
+  const k = env.OUTSYDE_PROXY_KEY;
+  if (!k) return "unset";
+  if (k !== k.trim()) return "has spaces";
+  if (k.length < MIN_PROXY_KEY_LENGTH) return "too short";
+  return "ok";
+}
+
 /** Limiter key: the visitor's address when goutsyde.com proves itself, otherwise req.ip. */
 export function quickSignupKey(req: Request, env: NodeJS.ProcessEnv = process.env): string {
   if (proxyKeyMatches(headerValue(req, "x-outsyde-proxy-key"), env.OUTSYDE_PROXY_KEY)) {
@@ -43,6 +52,17 @@ export function quickSignupKey(req: Request, env: NodeJS.ProcessEnv = process.en
     if (clientIp && net.isIP(clientIp) !== 0) return ipKeyGenerator(clientIp);
   }
   return req.ip ? ipKeyGenerator(req.ip) : "unknown";
+}
+
+{
+  const status = proxyKeyStatus();
+  if (status !== "ok") {
+    console.log(
+      status === "has spaces"
+        ? "[quick-signup] OUTSYDE_PROXY_KEY has spaces or a newline at the ends; it must match goutsyde.com's value exactly"
+        : `[quick-signup] OUTSYDE_PROXY_KEY ${status}: the quick sign up limit counts by the caller's own address`,
+    );
+  }
 }
 
 export const quickSignupRateLimiter = rateLimit({
