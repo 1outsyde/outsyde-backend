@@ -22,6 +22,14 @@ export type NoticeDeps = {
   sendCancelled: (p: Parameters<typeof import("../emailService").sendEventCancelledToGuest>[0]) => Promise<void>;
   sendAddressReveal: (p: Parameters<typeof import("../emailService").sendAddressRevealToHolder>[0]) => Promise<void>;
   sendPush: (p: { userId: string; title: string; body: string; data?: Record<string, unknown> }) => Promise<boolean>;
+  /** Activity (notifications table) row. Optional so older test fakes keep compiling; missing = not recorded. */
+  createActivity?: (p: ActivityItem) => Promise<void>;
+  sendDoorInvite?: (p: Parameters<typeof import("../emailService").sendDoorTeamInviteEmail>[0]) => Promise<void>;
+};
+
+export type ActivityItem = {
+  userId: string; type: string; title: string; message: string;
+  referenceType: string; referenceId: string; metadata: Record<string, unknown>; triggeredByUserId: string | null;
 };
 
 let testDeps: NoticeDeps | null = null;
@@ -45,6 +53,11 @@ export async function noticeDeps(): Promise<NoticeDeps> {
     sendCancelled: email.sendEventCancelledToGuest,
     sendAddressReveal: email.sendAddressRevealToHolder,
     sendPush: (p) => push.sendExpoPush(p as any),
+    createActivity: async (p) => {
+      const { storage } = await import("../storage");
+      await storage.createNotification(p as any);
+    },
+    sendDoorInvite: email.sendDoorTeamInviteEmail,
   };
 }
 
@@ -247,19 +260,64 @@ export async function notifyPayoutSent(payoutId: string): Promise<void> {
   }
 }
 
-/** After a host adds someone to the door team (push only, no email). Never throws. */
-export async function notifyDoorTeamAdded(p: { userId: string; scope: "standing" | "event"; eventId: string }): Promise<void> {
+/**
+ * Door team invites (p4-scanner, migration 075). The invite email shares the New York day budget of all email_log
+ * rows with the day-of address email (addressReveal.ts TOTAL_EMAIL_DAILY_CEILING) and goes at most once a day per row.
+ */
+export const DOOR_INVITE_EMAIL_CEILING = 70;
+
+function doorUrl(): string {
+  const base = (process.env.FRONTEND_URL || process.env.APP_BASE_URL || "https://www.goutsyde.com").replace(/\/+$/, "");
+  return `${base}/events/door`;
+}
+
+const doorTable = (scope: "standing" | "event") => sql.raw(scope === "standing" ? "event_door_team" : "event_door_members");
+
+/** Claims today's invite email for this row: true only while under the daily ceiling and not emailed in 24 hours. */
+async function claimInviteEmail(scope: "standing" | "event", inviteId: string): Promise<boolean> {
+  const nyDayStart = startOfNewYorkDay(new Date()).toISOString();
+  const got = await rows<any>(sql`
+    UPDATE ${doorTable(scope)} SET invite_emailed_at = now()
+    WHERE id = ${inviteId} AND (invite_emailed_at IS NULL OR invite_emailed_at < now() - interval '24 hours')
+      AND (SELECT count(*) FROM email_log WHERE created_at >= ${nyDayStart}::timestamptz
+             AND created_at < ${nyDayStart}::timestamptz + interval '1 day') < ${DOOR_INVITE_EMAIL_CEILING}
+    RETURNING id`);
+  return got.length > 0;
+}
+
+/**
+ * After a host sends (or re-sends) a door team invite: push, Activity item, and an email while the budget lasts.
+ * eventId is the event the host invited from (its host identity names the host). Never throws; each channel on its own.
+ */
+export async function notifyDoorInvite(p: { inviteId: string; scope: "standing" | "event"; eventId: string; memberUserId: string; hostUserId: string }): Promise<void> {
   try {
     const d = await noticeDeps();
     const [e] = await rows<any>(sql`SELECT * FROM events WHERE id = ${p.eventId}`);
-    if (!e) return;
-    const what = p.scope === "standing" ? `${(await hostIdentity(e)).publicName}'s events` : String(e.title);
-    await d.sendPush({
-      userId: p.userId, title: "You're on the door team",
-      body: `You can now scan tickets for ${what}.`,
-      data: { type: "door_team_added", eventId: p.eventId, scope: p.scope },
-    });
+    const [m] = await rows<any>(sql`SELECT email, first_name FROM users WHERE id = ${p.memberUserId}`);
+    if (!e || !m) return;
+    const hostName = (await hostIdentity(e)).publicName;
+    const title = `${hostName} invited you to their door team`;
+    const message = p.scope === "event" ? `Only this event: ${String(e.title)}.` : `All of ${hostName}'s events.`;
+    const log = (what: string) => (err: unknown) => console.error(`[Door] invite ${what} failed for ${p.inviteId}:`, (err as Error)?.message ?? err);
+    await d.sendPush({ userId: p.memberUserId, title, body: "Tap to accept or decline.", data: { type: "door_team_invite", inviteId: p.inviteId } })
+      .catch(log("push"));
+    if (d.createActivity) {
+      await d.createActivity({
+        userId: p.memberUserId, type: "door_team_invite", title, message,
+        referenceType: "event_door_invite", referenceId: p.inviteId,
+        metadata: { inviteId: p.inviteId, scope: p.scope, eventId: p.scope === "event" ? p.eventId : null },
+        triggeredByUserId: p.hostUserId,
+      }).catch(log("activity"));
+    }
+    if (d.sendDoorInvite && m.email && (await claimInviteEmail(p.scope, p.inviteId).catch(() => false))) {
+      await d.sendDoorInvite({
+        toEmail: String(m.email), firstName: m.first_name ?? null, hostName, scope: p.scope,
+        eventTitle: p.scope === "event" ? String(e.title) : null,
+        whenText: p.scope === "event" ? formatEventWhen(e.starts_at, e.timezone) : null,
+        doorUrl: doorUrl(),
+      }).catch(log("email"));
+    }
   } catch (err) {
-    console.error(`[Door] team push failed for event ${p.eventId}:`, (err as Error)?.message ?? err);
+    console.error(`[Door] invite notices failed for ${p.inviteId}:`, (err as Error)?.message ?? err);
   }
 }
