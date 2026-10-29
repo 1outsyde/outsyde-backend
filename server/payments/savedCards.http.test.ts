@@ -9,6 +9,9 @@
  *   EV_TEST_PG_URL       the SAME scratch database     (localhost only; seeds + cleans up)
  *   EV_TEST_STRIPE_PORT  port for the Stripe stub started here (server booted with STRIPE_STUB_PORT=<same>)
  *   JWT_SECRET           identical to the server's
+ * Plan offer checks run in this process, so it also needs STRIPE_SECRET_KEY + STRIPE_PUBLISHABLE_KEY (fake),
+ * STRIPE_STUB_PORT=<same port>, DATABASE_URL (local) and
+ * NODE_OPTIONS="--import ./.dev/neon-preload.mjs --import ./.dev/stripe-stub-preload.mjs".
  * Skips (exit 0) when EV_TEST_BASE_URL is unset; refuses any non-local host. Nothing reaches real Stripe.
  */
 import http from "http";
@@ -69,6 +72,7 @@ function parseForm(body: string): Record<string, string> {
   const created: { setupIntents: Record<string, string>[]; customerSessions: Record<string, string>[]; paymentIntents: Record<string, string>[] } = { setupIntents: [], customerSessions: [], paymentIntents: [] };
   const updates: { id: string; body: Record<string, string> }[] = [];
   let failSetupList = false;
+  const invoiceDefault: Record<string, string> = {};
   const card = (fp: string | null, wallet?: string) => ({ brand: "visa", last4: "4242", exp_month: 8, exp_year: 2030, fingerprint: fp, wallet: wallet ? { type: wallet } : null });
   const addPm = (customer: string, id: string, o: { created: number; mark?: string; fp?: string | null; wallet?: string }) =>
     (pms[customer] ||= []).push({ id, customer, created: o.created, allow_redisplay: o.mark, card: card(o.fp === undefined ? `fp_${id}` : o.fp, o.wallet) });
@@ -81,7 +85,16 @@ function parseForm(body: string): Record<string, string> {
       const body = parseForm(raw);
       if (req.method === "POST" && u.pathname === "/v1/customers") return send(200, { id: `cus_stub_${Date.now()}`, object: "customer" });
       const cust = u.pathname.match(/^\/v1\/customers\/([^/]+)$/);
-      if (req.method === "GET" && cust) return send(200, { id: cust[1], object: "customer" });
+      if (req.method === "GET" && cust) {
+        const def = invoiceDefault[cust[1]];
+        const pmObj = def ? (pms[cust[1]] || []).find((p) => p.id === def) : undefined;
+        return send(200, { id: cust[1], object: "customer", invoice_settings: { default_payment_method: pmObj ? { object: "payment_method", type: "card", ...pmObj } : null } });
+      }
+      if (req.method === "POST" && u.pathname === "/v1/payment_intents") {
+        created.paymentIntents.push(body);
+        const id = `pi_stub_${created.paymentIntents.length}_${Date.now()}`;
+        return send(200, { id, object: "payment_intent", client_secret: `${id}_secret`, amount: Number(body.amount), status: "requires_payment_method", customer: body.customer ?? null, capture_method: body.capture_method ?? "automatic", metadata: {} });
+      }
       if (req.method === "GET" && u.pathname === "/v1/payment_methods") {
         const list = (pms[u.searchParams.get("customer") || ""] || []).map((p) => ({ object: "payment_method", type: "card", ...p }));
         return send(200, { object: "list", data: list, has_more: false });
@@ -179,6 +192,64 @@ function parseForm(body: string): Record<string, string> {
     const uNone = await mkUser("none", null);
     const listNone = await call("GET", "/api/me/payment-methods", { token: tok(uNone) });
     assert(listNone.status === 200 && listNone.body?.paymentMethods?.length === 0 && Array.isArray(listNone.body?.olderPaymentMethodIds), "no Stripe customer gives empty lists", listNone.body);
+
+    console.log("Shop payments");
+    const vendorId = await mkUser("v", null);
+    await q(`UPDATE users SET is_vendor = true WHERE id = $1`, [vendorId]);
+    const tier = `${P}t`;
+    await q(`INSERT INTO subscription_tiers (id, name, display_name, price_in_cents, platform_fee_bps) VALUES ($1, $2, 'T', 2900, 200)`, [tier, tier]);
+    const bizIds: string[] = [];
+    const productIds: string[] = [];
+    for (const n of ["1", "2"]) {
+      const biz = `${P}b${n}`;
+      bizIds.push(biz);
+      await q(`INSERT INTO businesses (id, owner_id, name, category, approval_status, stripe_account_id, stripe_onboarding_complete, has_products, subscription_active)
+               VALUES ($1, $2, $3, 'food', 'approved', $4, true, true, true)`, [biz, vendorId, `Card Shop ${n}`, `acct_${P}${n}`]);
+      await q(`INSERT INTO vendor_subscriptions (vendor_id, business_id, tier_id, stripe_subscription_id, status) VALUES ($1, $2, $3, $4, 'active')`, [vendorId, biz, tier, `sub_${P}${n}`]);
+      const tv = generateAccessToken({ userId: vendorId, isVendor: true, businessId: biz } as any);
+      const r = await call("POST", "/api/vendor/products", { token: tv, body: { name: `Item ${n}`, price: 1000, inventory: null, trackInventory: false } });
+      productIds.push(r.body?.product?.id);
+    }
+    for (let i = 0; i < 2; i++) await q(`UPDATE vendor_products SET business_id = $2 WHERE id = $1`, [productIds[i], bizIds[i]]);
+    await q(`UPDATE vendor_products SET status = 'live' WHERE id = ANY($1)`, [productIds]);
+    const shopper = await mkUser("shop", `cus_${P}_shop`);
+    const ship = { line1: "1 Main", city: "Freeport", state: "NY", zipCode: "11520" };
+    const item = (i: number) => ({ productId: productIds[i], vendorId: bizIds[i], priceCents: 1000, quantity: 1, name: `Item ${i + 1}` });
+    try {
+      let before = created.paymentIntents.length;
+      let r = await call("POST", "/api/cart/payment-intent", { token: tok(shopper), body: { items: [item(0)], shippingAddress: ship } });
+      const one = created.paymentIntents.slice(before);
+      assert(r.status === 200 && one.length === 1 && one[0]["metadata[type]"] === "product_purchase", "one shop cart makes a product_purchase payment", { s: r.status, e: r.body?.error, one });
+      assert(one.length === 1 && one[0].setup_future_usage === undefined, "one shop cart payment has no setup_future_usage", one[0]);
+      before = created.paymentIntents.length;
+      r = await call("POST", "/api/cart/payment-intent", { token: tok(shopper), body: { items: [item(0), item(1)], shippingAddress: ship } });
+      const multi = created.paymentIntents.slice(before);
+      assert(r.status === 200 && multi.length === 1 && multi[0]["metadata[type]"] === "multi_vendor_product_purchase", "two shop cart makes a multi_vendor_product_purchase payment", { s: r.status, e: r.body?.error, multi });
+      assert(multi.length === 1 && multi[0].setup_future_usage === undefined, "two shop cart payment has no setup_future_usage", multi[0]);
+    } finally {
+      await q(`DELETE FROM order_items WHERE order_id IN (SELECT id FROM orders WHERE business_id = ANY($1))`, [bizIds]).catch(() => {});
+      await q(`DELETE FROM orders WHERE business_id = ANY($1)`, [bizIds]).catch(() => {});
+      await q(`DELETE FROM order_groups WHERE user_id = $1`, [shopper]).catch(() => {});
+      await q(`DELETE FROM vendor_products WHERE business_id = ANY($1)`, [bizIds]).catch(() => {});
+      await q(`DELETE FROM vendor_subscriptions WHERE business_id = ANY($1)`, [bizIds]).catch(() => {});
+      await q(`DELETE FROM businesses WHERE id = ANY($1)`, [bizIds]).catch(() => {});
+      await q(`DELETE FROM subscription_tiers WHERE id = $1`, [tier]).catch(() => {});
+    }
+
+    console.log("Plan offer card");
+    const { findSavedCard } = await import("../subscriptions/planOffers");
+    const cD = `cus_${P}_d`;
+    addPm(cD, "pm_d_apple", { created: S + 50, mark: "always", wallet: "apple_pay" });
+    addPm(cD, "pm_d_old", { created: S - 50, mark: "unspecified" });
+    invoiceDefault[cD] = "pm_d_apple";
+    const offerCard = await findSavedCard(cD);
+    assert(offerCard?.id === "pm_d_old", "plan offer skips an Apple Pay default and keeps the other card", offerCard);
+    const cE = `cus_${P}_e`;
+    addPm(cE, "pm_e_sub", { created: S + 50, mark: "limited" });
+    assert((await findSavedCard(cE))?.id === "pm_e_sub", "plan offer keeps a card its subscription saved (limited)", await findSavedCard(cE));
+    const cF = `cus_${P}_f`;
+    addPm(cF, "pm_f_apple", { created: S + 50, mark: "always", wallet: "apple_pay" });
+    assert((await findSavedCard(cF)) === null, "plan offer with only an Apple Pay card has no one tap card");
   } finally {
     if (userIds.length) await q(`DELETE FROM users WHERE id = ANY($1::varchar[])`, [userIds]).catch((e: any) => console.error("cleanup", e.message));
     await db.end();

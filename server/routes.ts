@@ -8817,7 +8817,7 @@ export async function registerRoutes(
           customerId: stripeCustomerId,
           connectedAccountId: business.stripeAccountId,
           captureMethod: 'automatic',
-          saveForFutureUse: true,
+          // No saveForFutureUse: a shop card is saved only through the Save switch (SetupIntent route).
           metadata: {
             type: 'product_purchase',
             orderId: order.id,
@@ -8934,7 +8934,7 @@ export async function registerRoutes(
           amountCents: fullConsumerTotalCents,
           customerId: stripeCustomerId,
           captureMethod: 'automatic',
-          saveForFutureUse: true,
+          // No saveForFutureUse: a shop card is saved only through the Save switch (SetupIntent route).
           metadata: {
             type: 'multi_vendor_product_purchase',
             orderGroupId: orderGroup.id,
