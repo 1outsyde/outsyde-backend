@@ -774,6 +774,9 @@ export const staffMembers = pgTable("staff_members", {
   state: text("state"),
   title: text("title"), // Professional title, e.g. "Senior Stylist"
   instagramHandle: text("instagram_handle"),
+  // Staff's own profile color (migration 080, 2026-10-29): { type:"solid", id } | { type:"custom", hex } | null.
+  // null = the staff profile shows the business color. Rules in shared/profileColor.ts.
+  profileColor: jsonb("profile_color").$type<{ type: "solid"; id: string } | { type: "custom"; hex: string } | null>(),
 
   // Staff hours (can be different from business hours)
   hoursOfOperation: jsonb("hours_of_operation").$type<HoursOfOperation>(),
