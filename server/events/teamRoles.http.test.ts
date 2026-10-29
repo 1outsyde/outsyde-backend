@@ -1,7 +1,9 @@
 /**
  * p4-team step 1: event team roles on invites, and the scanner only for Admissions (door).
  *
- * SCRATCH ONLY. Local scratch Postgres with migrations through 082 (EV_TEST_PG_URL, localhost only) and DATABASE_URL
+ * SCRATCH ONLY. Local scratch Postgres with migrations through 081 (EV_TEST_PG_URL, localhost only) and DATABASE_URL
+ * via the neon shim preload. Run it twice: before 082 (a second role answers ALREADY_INVITED) and after 082 (it's allowed).
+ * The DATABASE_URL
  * via the neon shim preload. Runs the door router in this process (no backend server needed). Skips when
  * EV_TEST_PG_URL is unset.
  *
@@ -122,18 +124,53 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
     r = await invite(promo.username, "event", "admin");
     assert(r.status === 400 && r.body?.error?.code === "INVALID_REQUEST", "unknown role refused", r.body);
 
-    console.log("\none person, several roles");
+    const oldIndex = (await q(`SELECT 1 FROM pg_indexes WHERE indexname = 'uq_event_door_members_active'`)).length > 0;
+    console.log(`\none person, several roles (${oldIndex ? "before 082: second role refused" : "after 082: second role allowed"})`);
     clear();
     r = await invite(both.username, "event", "door");
     assert(r.status === 201, "both: door", r.body);
     r = await invite(both.username, "event", "host");
-    assert(r.status === 201 && r.body?.member?.role === "host", "same person, second role at the same event", r.body);
-    await sleep(300);
-    const bothPushes = pushes.filter((p) => p.title && activities.length >= 0 && p.userId === both.id);
-    assert(bothPushes.length === 2 && bothPushes[1].title.endsWith("host and promote with them"), "second role gets its own push (quiet window is per role)", bothPushes);
-    assert(emails.filter((e) => e.toEmail.startsWith(`${P}-both`)).length === 2, "second role gets its own email (daily email is per role)", emails.map((e) => e.role));
+    if (oldIndex) {
+      assert(r.status === 409 && r.body?.error?.code === "ALREADY_INVITED", "before 082: second role refused safely (no 500)", r.body);
+      assert((await q(`SELECT role FROM event_door_members WHERE event_id = $1 AND member_user_id = $2 AND removed_at IS NULL`, [ev, both.id])).length === 1, "before 082: only the door row exists");
+      // Let the rest of the test run as after 082 (this scratch DB only): drop the old index and add the host spot.
+      await q(`DROP INDEX uq_event_door_members_active`);
+      await q(`DROP INDEX IF EXISTS uq_event_door_team_active`);
+      await q(`INSERT INTO event_door_members (event_id, member_user_id, added_by_user_id, role) VALUES ($1, $2, $3, 'host')`, [ev, both.id, host.id]);
+    } else {
+      assert(r.status === 201 && r.body?.member?.role === "host", "same person, second role at the same event", r.body);
+      await sleep(300);
+      const bothPushes = pushes.filter((p) => p.userId === both.id);
+      assert(bothPushes.length === 2 && bothPushes[1].title.endsWith("host and promote with them"), "second role gets its own push (quiet window is per role)", bothPushes);
+      assert(emails.filter((e) => e.toEmail.startsWith(`${P}-both`)).length === 2, "second role gets its own email (daily email is per role)", emails.map((e) => e.role));
+    }
     r = await invite(both.username, "event", "host");
     assert(r.status === 409 && r.body?.error?.code === "ALREADY_INVITED", "same person, same role again: ALREADY_INVITED", r.body);
+    assert(r.body?.error?.message === "You already invited them for that role.", "duplicate message for a non-door role", r.body);
+    r = await invite(door.username, "event");
+    assert(r.body?.error?.message === "You already invited them. They can scan once they accept.", "door duplicate message unchanged", r.body);
+
+    console.log("\nold clients never see security or host invites as door invites");
+    const myInvites = async (m: string, all = false) => ((await call("GET", `/api/events/door/invites${all ? "?roles=all" : ""}`, { token: tok(m) })).body?.invites ?? []);
+    assert((await myInvites(sec.id)).length === 0, "security invite not in the default invite list", await myInvites(sec.id));
+    assert((await myInvites(sec.id, true)).some((i: any) => i.role === "security"), "security invite in roles=all");
+    assert((await myInvites(door.id)).some((i: any) => i.role === "door"), "door invite still in the default list");
+    const secInviteId = (await q(`SELECT id FROM event_door_members WHERE event_id = $1 AND member_user_id = $2`, [ev, sec.id]))[0].id;
+    r = await call("GET", `/api/events/door/invites/${secInviteId}`, { token: tok(sec.id) });
+    assert(r.status === 404 && r.body?.error?.code === "INVITE_NOT_FOUND", "security invite by id is hidden from old clients", r.body);
+    r = await call("GET", `/api/events/door/invites/${secInviteId}?roles=all`, { token: tok(sec.id) });
+    assert(r.status === 200 && r.body?.invite?.role === "security", "security invite by id with roles=all", r.body);
+    r = await call("POST", `/api/events/door/invites/${secInviteId}/accept`, { token: tok(sec.id) });
+    assert(r.status === 404, "old client can't accept a security invite (no roles=all)", r.body);
+    clear();
+    const late2 = await mkUser("late2");
+    await invite(late2.username, "event", "security");
+    await sleep(200);
+    assert(pushes[0]?.data?.type === "team_invite" && activities[0]?.type === "team_invite", "security invite push and Activity use team_invite (old app doesn't open the door screen)", { p: pushes[0]?.data, a: activities[0]?.type });
+    clear();
+    await invite((await mkUser("late3")).username, "event");
+    await sleep(200);
+    assert(pushes[0]?.data?.type === "door_team_invite" && activities[0]?.type === "door_team_invite", "door invite types unchanged", { p: pushes[0]?.data, a: activities[0]?.type });
 
     await Promise.all([door, sec, promo, both, standSec].map((u) => acceptAllFor(u.id)));
 
@@ -179,10 +216,10 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
     r = await invite(late.username, "event", "security");
     const inviteId = r.body?.member?.inviteId;
     clear();
-    r = await call("POST", `/api/events/door/invites/${inviteId}/accept`, { token: tok(late.id) });
+    r = await call("POST", `/api/events/door/invites/${inviteId}/accept?roles=all`, { token: tok(late.id) });
     await sleep(200);
     assert(r.status === 200 && r.body?.invite?.role === "security", "accept answers with the role", r.body);
-    assert(pushes.some((p) => p.userId === host.id && p.title.endsWith("joined your Security team")), "host push says Security", pushes);
+    assert(pushes.some((p) => p.userId === host.id && p.title.endsWith("joined your Security team") && p.data?.type === "team_accepted"), "host push says Security, type team_accepted", pushes);
   } finally {
     await q(`DELETE FROM event_door_members WHERE event_id = $1`, [ev]);
     await q(`DELETE FROM event_door_team WHERE host_user_id = $1`, [host.id]);

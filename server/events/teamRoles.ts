@@ -11,12 +11,6 @@
 export const TEAM_ROLES = ["door", "security", "host"] as const;
 export type TeamRole = (typeof TEAM_ROLES)[number];
 
-/** No role means door (old clients). Anything that isn't one of the three is refused (null). */
-export function parseTeamRole(v: unknown): TeamRole | null {
-  if (v === undefined) return "door";
-  return typeof v === "string" && (TEAM_ROLES as readonly string[]).includes(v) ? (v as TeamRole) : null;
-}
-
 /** Push and Activity title for an invite. */
 export function inviteTitle(hostName: string, role: TeamRole): string {
   if (role === "security") return `${hostName} invited you to their Security team`;
@@ -67,4 +61,19 @@ export function inviteEmailCopy(role: TeamRole, host: string, what: string): { s
       "If you accept, you can scan tickets and see the guest list in the Outsyde app or on goutsyde.com. You won't see sales, earnings or anyone's contact details.",
     ],
   };
+}
+
+/** 409 messages. Door keeps its old wording; other roles say "for that role", since one person can hold several. */
+export function duplicateMessage(role: TeamRole, code: "ALREADY_INVITED" | "ALREADY_ON_TEAM"): string {
+  if (role === "door") return code === "ALREADY_ON_TEAM" ? "They are already on your door team." : "You already invited them. They can scan once they accept.";
+  return code === "ALREADY_ON_TEAM" ? "They already have that role on your team." : "You already invited them for that role.";
+}
+
+/**
+ * Push and Activity types. Door keeps door_team_invite / door_team_accepted, which today's app opens on the door
+ * screens. Security and host use team_invite / team_accepted, which today's app doesn't route to the scanner, so
+ * an old app build never shows them as a door team invite.
+ */
+export function pushTypes(role: TeamRole): { invite: string; accepted: string } {
+  return role === "door" ? { invite: "door_team_invite", accepted: "door_team_accepted" } : { invite: "team_invite", accepted: "team_accepted" };
 }

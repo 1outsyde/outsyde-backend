@@ -1,5 +1,5 @@
 /** Unit tests for event team roles (p4-team step 1). No database: npx tsx server/events/teamRoles.test.ts */
-import { TEAM_ROLES, parseTeamRole, inviteTitle, joinedCopy, inviteEmailCopy } from "./teamRoles";
+import { TEAM_ROLES, inviteTitle, joinedCopy, inviteEmailCopy, duplicateMessage, pushTypes } from "./teamRoles";
 
 let passed = 0, failed = 0;
 function eq(actual: unknown, expected: unknown, name: string) {
@@ -9,11 +9,6 @@ function eq(actual: unknown, expected: unknown, name: string) {
 
 console.log("roles");
 eq(TEAM_ROLES, ["door", "security", "host"], "the three roles, same words as the database check (075)");
-eq(parseTeamRole(undefined), "door", "no role (old app, today's website): door, same as before");
-eq(parseTeamRole("security"), "security", "security");
-eq(parseTeamRole("host"), "host", "host");
-eq(parseTeamRole("admin"), null, "anything else is refused");
-eq(parseTeamRole(""), null, "empty is refused");
 
 console.log("invite title (push and Activity)");
 eq(inviteTitle("Hosty", "door"), "Hosty invited you to their door team", "door: unchanged until the app and site say Admissions");
@@ -42,6 +37,17 @@ eq(host.subject, "Club & Co invited you to host and promote with them", "host su
 eq(host.lines[1], "If you accept, you'll get your own link to share and see the tickets sold through it. You won't see anyone's contact details.", "host: own link, own sales");
 const all = [door, sec, host].flatMap((c) => [c.subject, c.heading, c.intro, ...c.lines]).join(" ");
 eq(/[–—]/.test(all) || / - /.test(all) || /%/.test(all), false, "no dashes, no percentages in any copy");
+
+console.log("duplicate messages");
+eq(duplicateMessage("door", "ALREADY_INVITED"), "You already invited them. They can scan once they accept.", "door invited: unchanged");
+eq(duplicateMessage("door", "ALREADY_ON_TEAM"), "They are already on your door team.", "door on team: unchanged");
+eq(duplicateMessage("security", "ALREADY_INVITED"), "You already invited them for that role.", "security invited");
+eq(duplicateMessage("host", "ALREADY_ON_TEAM"), "They already have that role on your team.", "host on team");
+
+console.log("push types");
+eq(pushTypes("door"), { invite: "door_team_invite", accepted: "door_team_accepted" }, "door: unchanged types");
+eq(pushTypes("security"), { invite: "team_invite", accepted: "team_accepted" }, "security: new types old apps don't route to the door screen");
+eq(pushTypes("host"), { invite: "team_invite", accepted: "team_accepted" }, "host: new types");
 
 console.log(`\n${passed} passed, ${failed} failed`);
 process.exit(failed ? 1 : 0);

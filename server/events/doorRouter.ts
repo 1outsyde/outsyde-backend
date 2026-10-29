@@ -25,7 +25,7 @@ import { z } from "zod";
 import { getUserIdFromRequest, hybridAuthMiddleware } from "../auth";
 import { rows, iso, fail, pgError, hostIdentity } from "./eventsRouter";
 import { loadEventForDoor, isWithinScanWindow } from "./doorAccess";
-import { TEAM_ROLES, type TeamRole } from "./teamRoles";
+import { TEAM_ROLES, duplicateMessage, type TeamRole } from "./teamRoles";
 import { notifyDoorInvite, notifyDoorAccepted } from "./ticketNotices";
 import { ticketIdFromQrToken, qrPng } from "./ticketQr";
 import { ticketIdFromWalletToken, walletConfig, cachedTicketPass } from "./walletPass";
@@ -286,6 +286,9 @@ async function myInvite(req: Request, res: Response): Promise<{ userId: string; 
   if (!userId) { fail(res, 401, "UNAUTHORIZED", "Sign in to continue."); return null; }
   const invite = await loadInvite(String(req.params.inviteId));
   if (!invite || invite.member_user_id !== userId) { fail(res, 404, "INVITE_NOT_FOUND", "Invite not found."); return null; }
+  // p4-team: a security or host invite only exists for clients that ask with ?roles=all (today's app would show it
+  // as a door team invite). Covers view, accept, decline and leave.
+  if ((invite.role ?? "door") !== "door" && req.query.roles !== "all") { fail(res, 404, "INVITE_NOT_FOUND", "Invite not found."); return null; }
   return { userId, invite };
 }
 
@@ -293,12 +296,16 @@ router.get("/door/invites", hybridAuthMiddleware, doorLimiter, async (req: Reque
   try {
     const userId = getUserIdFromRequest(req);
     if (!userId) return fail(res, 401, "UNAUTHORIZED", "Sign in to continue.");
+    // p4-team: door invites only unless ?roles=all, so today's app never shows a security or host invite as a door one.
+    const allRoles = req.query.roles === "all";
+    const tRole = allRoles ? sql`` : sql`AND t.role = 'door'`;
+    const mRole = allRoles ? sql`` : sql`AND m.role = 'door'`;
     const ids = await rows<any>(sql`
       SELECT t.id, t.invited_at FROM event_door_team t
-      WHERE t.member_user_id = ${userId} AND t.removed_at IS NULL AND t.accepted_at IS NULL AND t.declined_at IS NULL
+      WHERE t.member_user_id = ${userId} AND t.removed_at IS NULL AND t.accepted_at IS NULL AND t.declined_at IS NULL ${tRole}
       UNION ALL
       SELECT m.id, m.invited_at FROM event_door_members m JOIN events e ON e.id = m.event_id
-      WHERE m.member_user_id = ${userId} AND m.removed_at IS NULL AND m.accepted_at IS NULL AND m.declined_at IS NULL
+      WHERE m.member_user_id = ${userId} AND m.removed_at IS NULL AND m.accepted_at IS NULL AND m.declined_at IS NULL ${mRole}
         AND e.status <> 'cancelled' AND e.ends_at > now()
       ORDER BY invited_at DESC, id LIMIT 50`);
     const invites = [];
@@ -417,9 +424,7 @@ router.post("/:id/door/team", hybridAuthMiddleware, inviteLimiter, async (req: R
     if (target.id === ctx.userId) return fail(res, 400, "CANNOT_ADD_SELF", "You already have full access to your own events.");
     const out = await inviteRow(scope, ctx.userId, ctx.event.id, target.id, role);
     if ("code" in out) {
-      return out.code === "ALREADY_ON_TEAM"
-        ? fail(res, 409, "ALREADY_ON_TEAM", "They are already on your door team.")
-        : fail(res, 409, "ALREADY_INVITED", "You already invited them. They can scan once they accept.");
+      return fail(res, 409, out.code, duplicateMessage(role, out.code));
     }
     notifyDoorInvite({ inviteId: String(out.row.id), scope, eventId: ctx.event.id, memberUserId: target.id, hostUserId: ctx.userId, role }).catch(() => {});
     res.status(201).json({

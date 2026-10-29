@@ -9,7 +9,7 @@
  * Every function here is fire and forget: it never throws, so a failed email can't undo a sale or a refund.
  * Senders are injectable so tests can check what would be sent without Resend or Expo.
  */
-import { inviteTitle, joinedCopy, type TeamRole } from "./teamRoles";
+import { inviteTitle, joinedCopy, pushTypes, type TeamRole } from "./teamRoles";
 import { sql } from "drizzle-orm";
 import { rows, hostIdentity } from "./eventsRouter";
 import { holderCanSeeAddress } from "./eventRules";
@@ -333,12 +333,12 @@ export async function notifyDoorInvite(p: { inviteId: string; scope: "standing" 
     const log = (what: string) => (err: unknown) => console.error(`[Door] invite ${what} failed for ${p.inviteId}:`, (err as Error)?.message ?? err);
     const pair: InvitePair = { scope: p.scope, inviteId: p.inviteId, hostUserId: p.hostUserId, memberUserId: p.memberUserId, eventId: p.eventId, role };
     if (!(await pushedRecently(pair).catch(() => false))) {
-      await d.sendPush({ userId: p.memberUserId, title, body: "Tap to accept or decline.", data: { type: "door_team_invite", inviteId: p.inviteId } })
+      await d.sendPush({ userId: p.memberUserId, title, body: "Tap to accept or decline.", data: { type: pushTypes(role).invite, inviteId: p.inviteId } })
         .catch(log("push"));
     }
     if (d.createActivity) {
       await d.createActivity({
-        userId: p.memberUserId, type: "door_team_invite", title, message,
+        userId: p.memberUserId, type: pushTypes(role).invite, title, message,
         referenceType: "event_door_invite", referenceId: p.inviteId,
         metadata: { inviteId: p.inviteId, scope: p.scope, eventId: p.scope === "event" ? p.eventId : null, role },
         triggeredByUserId: p.hostUserId,
@@ -375,7 +375,7 @@ export async function notifyDoorAccepted(p: { hostUserId: string; memberUserId: 
     const copy = joinedCopy(name, p.role ?? "door", what);
     await d.sendPush({
       userId: p.hostUserId, title: copy.title, body: copy.body,
-      data: { type: "door_team_accepted", eventId: p.scope === "event" ? p.eventId : null },
+      data: { type: pushTypes(p.role ?? "door").accepted, eventId: p.scope === "event" ? p.eventId : null },
     });
   } catch (err) {
     console.error(`[Door] accept push failed for host ${p.hostUserId}:`, (err as Error)?.message ?? err);
