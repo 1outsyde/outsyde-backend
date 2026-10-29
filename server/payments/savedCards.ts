@@ -35,7 +35,8 @@ export function pickShownCards(
     const mark = pm.allow_redisplay ?? "unspecified";
     const chosen = mark === "always" || o.chosenIds.has(pm.id);
     const older = !chosen && mark === "unspecified" && pm.created < o.start;
-    if (chosen || older || pm.id === o.defaultId) kept.push({ pm, older: !chosen });
+    // A default card the customer picked stays, unless Stripe kept it for one payment only ("limited").
+    if (chosen || older || (pm.id === o.defaultId && mark !== "limited")) kept.push({ pm, older: !chosen });
   }
 
   // Best first: chosen, then the default, then newest.
@@ -57,6 +58,19 @@ export function pickShownCards(
   return Array.from(byCard.values()).sort((a, b) => order(a) - order(b) || b.pm.created - a.pm.created);
 }
 
+/** How far back the Save switch lookup goes: older builds refresh the list right after saving. */
+const SAVE_SWITCH_LOOKBACK_SECONDS = 7 * 24 * 60 * 60;
+
+/**
+ * Pure: unmarked, non wallet cards saved after `start` and in the last 7 days, the only ones that can
+ * still be a fresh Save switch card. Cards left by vendor site bookings stay unmarked forever; without the
+ * window every list read for those customers would pay a second Stripe call.
+ */
+export function cardsToCheckForSaveSwitch(pms: Stripe.PaymentMethod[], o: { start: number; now: number }): Stripe.PaymentMethod[] {
+  const since = Math.max(o.start, o.now - SAVE_SWITCH_LOOKBACK_SECONDS);
+  return pms.filter((p) => (p.allow_redisplay ?? "unspecified") === "unspecified" && p.created >= since && !!p.card && !p.card.wallet);
+}
+
 /**
  * The cards to show for a Stripe customer. Cards saved after SAVED_CARD_RULES_START through the shop's
  * Save switch (our SetupIntent, any app build) count as chosen and are promoted to "always" here,
@@ -68,7 +82,7 @@ export async function listShownCards(customerId: string, defaultId: string | nul
   const pms = listed.data;
 
   const chosenIds = new Set<string>();
-  const unmarkedNew = pms.filter((p) => (p.allow_redisplay ?? "unspecified") === "unspecified" && p.created >= SAVED_CARD_RULES_START && !p.card?.wallet);
+  const unmarkedNew = cardsToCheckForSaveSwitch(pms, { start: SAVED_CARD_RULES_START, now: Math.floor(Date.now() / 1000) });
   if (unmarkedNew.length) {
     try {
       const sis = await stripe.setupIntents.list({ customer: customerId, limit: 100 });

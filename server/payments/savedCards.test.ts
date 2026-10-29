@@ -10,7 +10,7 @@
  *    "merges duplicates keeping the default" fail.
  */
 import type Stripe from "stripe";
-import { pickShownCards } from "./savedCards";
+import { pickShownCards, cardsToCheckForSaveSwitch } from "./savedCards";
 
 let passed = 0;
 let failed = 0;
@@ -76,6 +76,8 @@ assert(run([pm("n", { redisplay: "unspecified", created: START })]).length === 0
 
 assert(run([pm("w", { wallet: "apple_pay" })], { defaultId: "w" }).length === 0, "drops wallet default");
 
+assert(run([pm("ld", { redisplay: "limited", created: START - 5 })], { defaultId: "ld" }).length === 0, "drops a limited default");
+
 {
   const r = run([
     pm("old", { redisplay: "unspecified", created: START - 50, fingerprint: "same" }),
@@ -118,6 +120,19 @@ assert(run([pm("w", { wallet: "apple_pay" })], { defaultId: "w" }).length === 0,
 }
 
 assert(run([{ ...pm("x"), card: null } as unknown as Stripe.PaymentMethod]).length === 0, "drops a payment method with no card");
+
+console.log("savedCards: cardsToCheckForSaveSwitch");
+{
+  const now = START + 30 * 86400;
+  const r = cardsToCheckForSaveSwitch([
+    pm("fresh", { redisplay: "unspecified", created: now - 3600 }),
+    pm("week_old", { redisplay: "unspecified", created: now - 8 * 86400 }),
+    pm("before_start", { redisplay: "unspecified", created: START - 10 }),
+    pm("marked", { redisplay: "always", created: now - 60 }),
+    pm("apple", { redisplay: "unspecified", created: now - 60, wallet: "apple_pay" }),
+  ], { start: START, now });
+  assert(r.map((p) => p.id).join() === "fresh", "only unmarked non wallet cards from the last 7 days after start are checked", r.map((p) => p.id));
+}
 
 console.log(`\n${passed} passed, ${failed} failed`);
 process.exit(failed ? 1 : 0);
