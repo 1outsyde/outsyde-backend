@@ -10,6 +10,7 @@
  * card for an on session payment.
  */
 import type Stripe from "stripe";
+import { getUncachableStripeClient } from "../stripe/stripeClient";
 
 /** 2026-10-29 00:00 America/New_York. Unmarked cards created before this are "older" cards. */
 export const SAVED_CARD_RULES_START = 1793246400;
@@ -53,5 +54,38 @@ export function pickShownCards(
   }
 
   const order = (c: ShownCard) => (c.pm.id === o.defaultId ? 0 : c.older ? 2 : 1);
-  return [...byCard.values()].sort((a, b) => order(a) - order(b) || b.pm.created - a.pm.created);
+  return Array.from(byCard.values()).sort((a, b) => order(a) - order(b) || b.pm.created - a.pm.created);
+}
+
+/**
+ * The cards to show for a Stripe customer. Cards saved after SAVED_CARD_RULES_START through the shop's
+ * Save switch (our SetupIntent, any app build) count as chosen and are promoted to "always" here,
+ * best effort. A Stripe error on that lookup only hides those new unmarked cards; it never fails the list.
+ */
+export async function listShownCards(customerId: string, defaultId: string | null): Promise<ShownCard[]> {
+  const stripe = await getUncachableStripeClient();
+  const listed = await stripe.paymentMethods.list({ customer: customerId, type: "card", limit: 100 });
+  const pms = listed.data;
+
+  const chosenIds = new Set<string>();
+  const unmarkedNew = pms.filter((p) => (p.allow_redisplay ?? "unspecified") === "unspecified" && p.created >= SAVED_CARD_RULES_START && !p.card?.wallet);
+  if (unmarkedNew.length) {
+    try {
+      const sis = await stripe.setupIntents.list({ customer: customerId, limit: 100 });
+      const fromSwitch = new Set(
+        sis.data
+          .filter((si) => si.status === "succeeded" && si.metadata?.outsyde_saved_card === SAVED_CARD_SETUP_METADATA.outsyde_saved_card)
+          .map((si) => (typeof si.payment_method === "string" ? si.payment_method : si.payment_method?.id))
+          .filter((id): id is string => !!id),
+      );
+      const promote = unmarkedNew.filter((p) => fromSwitch.has(p.id));
+      for (const p of promote) chosenIds.add(p.id);
+      await Promise.all(promote.map((p) =>
+        stripe.paymentMethods.update(p.id, { allow_redisplay: "always" }).catch((e: unknown) =>
+          console.error(`[SavedCards] could not mark ${p.id} as saved:`, e instanceof Error ? e.message : "unknown error"))));
+    } catch (e) {
+      console.error(`[SavedCards] could not read setup intents for ${customerId}:`, e instanceof Error ? e.message : "unknown error");
+    }
+  }
+  return pickShownCards(pms, { defaultId, chosenIds, start: SAVED_CARD_RULES_START });
 }
