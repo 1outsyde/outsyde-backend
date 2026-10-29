@@ -181,6 +181,9 @@ export const users = pgTable("users", {
   profileImageUrl: text("profile_image_url"),
   coverMediaUrl: text("cover_media_url"),
   coverMediaType: text("cover_media_type"), // 'image' or 'video'
+  // Profile color (migration 079, 2026-10-28): { type:"solid", id } | { type:"custom", hex } | null (gold).
+  // Rules in shared/profileColor.ts. Businesses and photographers use their own brand_colors instead.
+  profileColor: jsonb("profile_color").$type<{ type: "solid"; id: string } | { type: "custom"; hex: string } | null>(),
 
   isVendor: boolean("is_vendor").default(false).notNull(),
   isPhotographer: boolean("is_photographer").default(false).notNull(),
