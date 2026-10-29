@@ -16145,6 +16145,8 @@ export async function registerRoutes(
         followingCount: staffCounts[i][1],
         // Linked to an account, so the Follow button can work.
         canFollow: !!s.userId,
+        // Staff's own profile color (2026-10-29, migration 080). null = use the business color. Additive.
+        profileColor: s.profileColor ?? null,
       }));
 
       res.json({ staff: publicStaff });
@@ -16278,8 +16280,17 @@ export async function registerRoutes(
       }
       const staff = resolved.staff;
 
-      const { coverImage, coverMediaType, ...otherFields } = req.body;
+      const { coverImage, coverMediaType, profileColor, ...otherFields } = req.body;
       const updates: Record<string, any> = { ...otherFields };
+
+      // Staff's own profile color (2026-10-29, migration 080). Checked before anything is written.
+      // No old app version sends it, so it is always applied (no wheel-color guard needed).
+      if (profileColor !== undefined) {
+        const decision = decideColorUpdate(profileColor, null);
+        if (!decision.ok) {
+          return res.status(400).json({ error: decision.error, field: "profileColor" });
+        }
+      }
 
       const allowedFields = [
         "displayName", "username", "bio", "profileImageUrl",
@@ -16313,6 +16324,10 @@ export async function registerRoutes(
         if (coverImage !== null && coverMediaType === undefined) {
           return res.status(400).json({ error: "coverMediaType is required when setting coverImage" });
         }
+      }
+      if (profileColor !== undefined) {
+        const decision = decideColorUpdate(profileColor, null);
+        if (decision.ok && decision.apply) updates.profileColor = decision.value;
       }
 
       const updatedStaff = await storage.updateStaffMember(staff.id, updates);
