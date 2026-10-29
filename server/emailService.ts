@@ -1,4 +1,4 @@
-import { inviteEmailCopy } from "./events/teamRoles";
+import { inviteEmailCopy, type TeamRole } from "./events/teamRoles";
 import { Resend } from 'resend';
 import type { EmailLogTag } from './emailHistory';
 import type { Business, InfluencerApplication, Photographer, User } from '@shared/schema';
@@ -2473,7 +2473,7 @@ export async function sendEventCancelledToGuest(params: EventCancelledParams): P
   await sendBrandedEmail(params.toEmail, subject, html, { kind: 'ticket', label: 'Event cancelled' });
 }
 
-/** Door team invite (Events canvas 41). Standing invites have no single event: eventTitle and whenText are null. */
+/** Event team invite (Events canvas 41, 47). Standing invites have no single event: eventTitle and whenText are null. */
 export type DoorTeamInviteParams = {
   toEmail: string;
   firstName: string | null;
@@ -2482,8 +2482,10 @@ export type DoorTeamInviteParams = {
   eventTitle: string | null;
   whenText: string | null;
   doorUrl: string;
-  /** p4-team: door (Admissions), security or host / promoter. Missing = door. */
-  role?: 'door' | 'security' | 'host';
+  /** p4-team: door (Admissions), security, host (Promoter), entertainment, media, cohost or other. Missing = door. */
+  role?: TeamRole;
+  /** The host's name for an "other" role (plain text; escaped here). */
+  roleLabel?: string | null;
 };
 
 export function renderDoorTeamInvite(params: DoorTeamInviteParams): { subject: string; html: string } {
@@ -2492,7 +2494,8 @@ export function renderDoorTeamInvite(params: DoorTeamInviteParams): { subject: s
     ? `<strong>${escapeHtml(params.eventTitle)}</strong>${params.whenText ? ` on ${escapeHtml(params.whenText)}` : ''}`
     : 'their events';
   const role = params.role ?? 'door';
-  const copy = inviteEmailCopy(role, host, what);
+  const label = params.roleLabel ?? null;
+  const copy = inviteEmailCopy(role, host, what, label ? escapeHtml(label) : null);
   const heading = params.firstName ? `Hi ${escapeHtml(params.firstName)}, ${copy.heading}` : copy.heading.charAt(0).toUpperCase() + copy.heading.slice(1);
   const p = (t: string, color = '#CCCCCC') => `<p style="color:${color};font-size:15px;line-height:1.6;margin:0 0 14px 0;">${t}</p>`;
   const html = wrapEmail(`
@@ -2507,10 +2510,10 @@ export function renderDoorTeamInvite(params: DoorTeamInviteParams): { subject: s
     </td></tr>
     ${emailFooter()}
   `);
-  return { subject: inviteEmailCopy(role, params.hostName, '').subject, html };
+  return { subject: inviteEmailCopy(role, params.hostName, '', label).subject, html };
 }
 
 export async function sendDoorTeamInviteEmail(params: DoorTeamInviteParams): Promise<void> {
   const { subject, html } = renderDoorTeamInvite(params);
-  await sendBrandedEmail(params.toEmail, subject, html, { kind: 'ticket', label: 'Door team invite' });
+  await sendBrandedEmail(params.toEmail, subject, html, { kind: 'ticket', label: 'Event team invite' });
 }
