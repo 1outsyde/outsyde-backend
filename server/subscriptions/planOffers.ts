@@ -221,7 +221,12 @@ async function acceptOutcome(offer: PlanOffer, state: PlanState, now: Date): Pro
 
 export interface SavedCard { id: string; brand: string | null; last4: string | null }
 
-/** The customer's default card, else the most recent card on the customer. Any Stripe error: no card. */
+/**
+ * The customer's default card, else the most recent card on the customer, skipping Apple Pay and other
+ * wallet cards (Apple's terms forbid reusing a saved Apple Pay card on session; p4-applepay). Cards a
+ * subscription saved are marked "limited" by Stripe and still count here: the owner confirms the card on
+ * the offer page. Any Stripe error: no card.
+ */
 export async function findSavedCard(customerId: string | null | undefined): Promise<SavedCard | null> {
   if (!customerId) return null;
   try {
@@ -229,11 +234,11 @@ export async function findSavedCard(customerId: string | null | undefined): Prom
     const customer: any = await stripe.customers.retrieve(customerId, { expand: ["invoice_settings.default_payment_method"] });
     if (!customer || customer.deleted) return null;
     const def = customer.invoice_settings?.default_payment_method;
-    if (def && typeof def === "object" && def.type === "card") {
+    if (def && typeof def === "object" && def.type === "card" && !def.card?.wallet) {
       return { id: def.id, brand: def.card?.brand ?? null, last4: def.card?.last4 ?? null };
     }
-    const list: any = await stripe.paymentMethods.list({ customer: customerId, type: "card", limit: 1 });
-    const pm = list?.data?.[0];
+    const list: any = await stripe.paymentMethods.list({ customer: customerId, type: "card", limit: 20 });
+    const pm = (list?.data ?? []).find((p: any) => !p.card?.wallet);
     return pm ? { id: pm.id, brand: pm.card?.brand ?? null, last4: pm.card?.last4 ?? null } : null;
   } catch (e) {
     console.error(`[PlanOffer] could not read saved cards for ${customerId}:`, e instanceof Error ? e.message : "unknown error");

@@ -27,6 +27,7 @@ import { decideAbandoned } from "../abandonedCheckouts";
 import { rows, pgError, iso, fail, zodError, loadActiveUser } from "./eventsRouter";
 import { guardCode, withDeadlockRetry, orderWithTickets, whyNotClaimable } from "./ticketsRouter";
 import { makeTicketCode } from "./eventRules";
+import { paymentSheetFields } from "../payments/savedCards";
 
 const router = Router();
 
@@ -41,8 +42,8 @@ type StripeLike = {
   createPlatformPaymentIntent(p: {
     amountCents: number; customerId?: string; captureMethod: "automatic" | "manual";
     metadata: Record<string, string>; description?: string; idempotencyKey?: string;
-  }): Promise<{ id: string; client_secret: string | null; status: string }>;
-  getPaymentIntent(id: string): Promise<{ id: string; status: string; amount_received?: number; amount?: number; client_secret?: string | null }>;
+  }): Promise<{ id: string; client_secret: string | null; status: string; customer?: string | { id: string } | null }>;
+  getPaymentIntent(id: string): Promise<{ id: string; status: string; amount_received?: number; amount?: number; client_secret?: string | null; customer?: string | { id: string } | null }>;
   cancelPaymentIntent(id: string, reason?: "abandoned"): Promise<unknown>;
 };
 
@@ -275,6 +276,8 @@ const checkoutSchema = z.object({
   ticketTypeId: z.string().min(1).max(64),
   quantity: z.number().int().min(1).max(20).optional(),
   idempotencyKey: z.string().trim().min(8).max(100).optional(),
+  // The app opens Stripe's payment sheet: answer with a customer session too (p4-applepay).
+  paymentSheet: z.boolean().optional(),
 }).strict();
 
 function moneyJson(o: any) {
@@ -325,6 +328,7 @@ router.post("/:id/checkout", hybridAuthMiddleware, async (req: Request, res: Res
         return res.json({
           success: true, repeated: true, orderId: prev.id, paymentIntentId: pi.id, clientSecret: pi.client_secret ?? null,
           holdExpiresAt: iso(prev.expires_at), ...moneyJson(prev),
+          ...(await paymentSheetFields(pi.customer, parsed.data.paymentSheet === true)),
         });
       }
     }
@@ -410,7 +414,7 @@ router.post("/:id/checkout", hybridAuthMiddleware, async (req: Request, res: Res
     }
 
     // Stripe: customer + PaymentIntent. Any failure gives the seats back straight away.
-    let pi: { id: string; client_secret: string | null };
+    let pi: { id: string; client_secret: string | null; customer?: string | { id: string } | null };
     try {
       const [u] = await rows<any>(sql`SELECT email, stripe_customer_id FROM users WHERE id = ${userId}`);
       let customerId: string | undefined;
@@ -447,6 +451,7 @@ router.post("/:id/checkout", hybridAuthMiddleware, async (req: Request, res: Res
     return res.status(201).json({
       success: true, orderId, paymentIntentId: pi.id, clientSecret: pi.client_secret,
       holdExpiresAt: iso(saved.expires_at), ...moneyJson(saved),
+      ...(await paymentSheetFields(pi.customer, parsed.data.paymentSheet === true)),
     });
   } catch (err) {
     console.error("[Tickets] checkout failed:", err);
