@@ -89,3 +89,38 @@ export async function listShownCards(customerId: string, defaultId: string | nul
   }
   return pickShownCards(pms, { defaultId, chosenIds, start: SAVED_CARD_RULES_START });
 }
+
+/**
+ * Extra fields for a booking or ticket payment the app opens in Stripe's payment sheet: a CustomerSession
+ * for the PaymentIntent's own customer, so the sheet shows the customer's chosen cards, a Save box (off by
+ * default) and Apple Pay. Only when the caller asked (`paymentSheet: true`); {} otherwise, with no
+ * customer, or on any Stripe error, so the payment itself never fails over it.
+ */
+export async function paymentSheetFields(
+  customer: string | { id: string } | null | undefined,
+  wanted: boolean,
+): Promise<{ customerId?: string; customerSessionClientSecret?: string }> {
+  const customerId = typeof customer === "string" ? customer : customer?.id;
+  if (!wanted || !customerId) return {};
+  try {
+    const stripe = await getUncachableStripeClient();
+    const session = await stripe.customerSessions.create({
+      customer: customerId,
+      components: {
+        mobile_payment_element: {
+          enabled: true,
+          features: {
+            payment_method_save: "enabled",
+            payment_method_redisplay: "enabled",
+            payment_method_remove: "disabled",
+            payment_method_allow_redisplay_filters: ["always"],
+          },
+        },
+      },
+    });
+    return { customerId, customerSessionClientSecret: session.client_secret };
+  } catch (e) {
+    console.error(`[SavedCards] could not start a payment sheet session for ${customerId}:`, e instanceof Error ? e.message : "unknown error");
+    return {};
+  }
+}

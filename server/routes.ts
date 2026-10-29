@@ -205,7 +205,7 @@ import { isClaimable, issueClaimCode, firstNameOf } from "./accountSetup/claim";
 import { namesForNewAccount, realName, publicDisplayName } from "./personName";
 import { sendAppointmentReceipts, sendShootBookingReceipts } from "./stripe/webhookHandlers";
 import { getStripePublishableKey, getUncachableStripeClient } from "./stripe/stripeClient";
-import { listShownCards, SAVED_CARD_SETUP_METADATA } from "./payments/savedCards";
+import { listShownCards, paymentSheetFields, SAVED_CARD_SETUP_METADATA } from "./payments/savedCards";
 import { getSubscriptionPeriod } from "./stripe/subscriptionFields";
 import { switchPaidPlan, applySwitchedPlan, SWITCH_DECLINED_MESSAGE } from "./subscriptions/planSwitch";
 import { graceEndsAt } from "./subscriptions/policy";
@@ -6256,6 +6256,8 @@ export async function registerRoutes(
               });
               if (!changed.ok) return res.status(changed.status).json(changed.body);
               return res.json({
+                // Payment sheet session when the app asks (additive; p4-applepay).
+                ...(await paymentSheetFields(existingPI.customer, req.body?.paymentSheet === true)),
                 holdExpiresAt: new Date(hold.expiresAt).toISOString(), // Part B: payment screen counts down to this
                 clientSecret: existingPI.client_secret,
                 paymentIntentId: existingPI.id,
@@ -6295,6 +6297,8 @@ export async function registerRoutes(
               return res.status(409).json(PROMO_TAKEN_RESPONSE);
             }
             return res.json({
+              // Payment sheet session when the app asks (additive; p4-applepay).
+              ...(await paymentSheetFields(resumedPI.customer, req.body?.paymentSheet === true)),
               holdExpiresAt: new Date(hold.expiresAt).toISOString(), // Part B: payment screen counts down to this
               clientSecret: resumedPI.client_secret,
               paymentIntentId: resumedPI.id,
@@ -6439,6 +6443,8 @@ export async function registerRoutes(
         const inPersonDueCents = shootQuote.dueAtAppointmentCents;
 
         return res.json({
+          // Payment sheet session when the app asks (additive; p4-applepay).
+          ...(await paymentSheetFields(photographerPI.customer, req.body?.paymentSheet === true)),
           holdExpiresAt: new Date(hold.expiresAt).toISOString(), // Part B: payment screen counts down to this
           clientSecret: photographerPI.client_secret,
           paymentIntentId: photographerPI.id,
@@ -6512,6 +6518,8 @@ export async function registerRoutes(
             });
             if (!changed.ok) return res.status(changed.status).json(changed.body);
             return res.json({
+              // Payment sheet session when the app asks (additive; p4-applepay).
+              ...(await paymentSheetFields(existingPI.customer, req.body?.paymentSheet === true)),
               holdExpiresAt: new Date(hold.expiresAt).toISOString(), // Part B: payment screen counts down to this
               clientSecret: existingPI.client_secret,
               paymentIntentId: existingPI.id,
@@ -6584,6 +6592,8 @@ export async function registerRoutes(
           }
 
           return res.json({
+            // Payment sheet session when the app asks (additive; p4-applepay).
+            ...(await paymentSheetFields(resumedPI.customer, req.body?.paymentSheet === true)),
             holdExpiresAt: new Date(hold.expiresAt).toISOString(), // Part B: payment screen counts down to this
             clientSecret: resumedPI.client_secret,
             paymentIntentId: resumedPI.id,
@@ -6775,6 +6785,8 @@ export async function registerRoutes(
       }
 
       res.json({
+        // Payment sheet session when the app asks (additive; p4-applepay).
+        ...(await paymentSheetFields(paymentIntent.customer, req.body?.paymentSheet === true)),
         holdExpiresAt: new Date(hold.expiresAt).toISOString(), // Part B: payment screen counts down to this
         clientSecret: paymentIntent.client_secret,
         paymentIntentId: paymentIntent.id,
