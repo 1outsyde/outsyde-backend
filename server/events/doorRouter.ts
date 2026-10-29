@@ -1,5 +1,5 @@
 /**
- * Events door check-in: door team management (Task 2).
+ * Events door check-in and the Event team (door = Admissions; p4-team adds every other section, see teamRoles.ts).
  *
  *   GET    /api/events/door/mine                 (auth)       events I can scan: published, not ended, accepted invites only
  *   GET    /api/events/:id/door/team             (auth, host) standing + this event's door team
@@ -137,6 +137,14 @@ const inviteLimiter = rateLimit({
   keyGenerator: (req) => getUserIdFromRequest(req as Request) ?? "anonymous",
   validate: { keyGeneratorIpFallback: false },
   handler: (_req, res) => { fail(res, 429, "RATE_LIMITED", "Too many invites. Try again in an hour."); },
+});
+
+/** Times and the member's team view: 120 a minute per signed in user. */
+const teamLimiter = rateLimit({
+  windowMs: 60 * 1000, limit: 120, standardHeaders: true, legacyHeaders: false,
+  keyGenerator: (req) => getUserIdFromRequest(req as Request) ?? "anonymous",
+  validate: { keyGeneratorIpFallback: false },
+  handler: (_req, res) => { fail(res, 429, "RATE_LIMITED", "Too many requests. Wait a moment and try again."); },
 });
 
 const qrLimiter = rateLimit({
@@ -506,20 +514,20 @@ const scheduleSchema = z.object({
 const SCHEDULE_BEFORE_MS = 24 * 3600_000;
 const SCHEDULE_AFTER_MS = 12 * 3600_000;
 
-/** Is this person on the event's team in this role (pending or accepted, not removed)? Standing rows count. */
+/** Is this person on the event's team in this role (pending or accepted; not declined, not removed)? Standing rows count. */
 async function onTeam(event: any, memberId: string, role: TeamRole): Promise<boolean> {
   const r = await rows<any>(sql`
     SELECT 1 AS x FROM event_door_members m
-    WHERE m.event_id = ${event.id} AND m.member_user_id = ${memberId} AND m.role = ${role} AND m.removed_at IS NULL
+    WHERE m.event_id = ${event.id} AND m.member_user_id = ${memberId} AND m.role = ${role} AND m.removed_at IS NULL AND m.declined_at IS NULL
     UNION ALL
     SELECT 1 FROM event_door_team t
-    WHERE t.host_user_id = ${event.host_user_id} AND t.member_user_id = ${memberId} AND t.role = ${role} AND t.removed_at IS NULL
+    WHERE t.host_user_id = ${event.host_user_id} AND t.member_user_id = ${memberId} AND t.role = ${role} AND t.removed_at IS NULL AND t.declined_at IS NULL
     LIMIT 1`);
   return r.length > 0;
 }
 
 /** Saves the whole set: a field left out or null is cleared. Every field is optional for every role. */
-router.put("/:id/door/team/:userId/schedule", hybridAuthMiddleware, doorLimiter, async (req: Request, res: Response) => {
+router.put("/:id/door/team/:userId/schedule", hybridAuthMiddleware, teamLimiter, async (req: Request, res: Response) => {
   try {
     const ctx = await hostOnly(req, res);
     if (!ctx) return;
@@ -565,7 +573,7 @@ router.put("/:id/door/team/:userId/schedule", hybridAuthMiddleware, doorLimiter,
 });
 
 /** The member's side: their accepted roles at this event (standing ones too) with this event's times. */
-router.get("/:id/team/me", hybridAuthMiddleware, doorLimiter, async (req: Request, res: Response) => {
+router.get("/:id/team/me", hybridAuthMiddleware, teamLimiter, async (req: Request, res: Response) => {
   try {
     const userId = getUserIdFromRequest(req);
     if (!userId) return fail(res, 401, "UNAUTHORIZED", "Sign in to continue.");

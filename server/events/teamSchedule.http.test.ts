@@ -129,6 +129,16 @@ const at = (base: Date, minutes: number) => new Date(base.getTime() + minutes * 
     assert(r.status === 201, "security invite", r.body);
     r = await invite({ username: promo.username, scope: "standing", role: "host" });
     assert(r.status === 201, "standing promoter invite", r.body);
+    const doorP = await mkUser("doorp");
+    r = await invite({ username: doorP.username, scope: "event" });
+    assert(r.status === 201 && r.body?.member?.role === "door", "a door invite (old client, no role)", r.body);
+    const doorS = await mkUser("doors");
+    r = await invite({ username: doorS.username, scope: "standing" });
+    assert(r.status === 201, "a standing door invite", r.body);
+    const nope = await mkUser("nope");
+    r = await invite({ username: nope.username, scope: "event", role: "media" });
+    const nopeInvite = r.body?.member?.inviteId;
+    await q(`UPDATE event_door_members SET declined_at = now() WHERE id = $1`, [nopeInvite]);
 
     console.log("\ntimes for every role (all optional)");
     const t = { startsAt: at(starts, 0), endsAt: at(starts, 240), callAt: at(starts, -60), loadInAt: at(starts, -90), placeNote: "Side door on 5th", hostNote: "Black shirt please" };
@@ -152,6 +162,14 @@ const at = (base: Date, minutes: number) => new Date(base.getTime() + minutes * 
     assert(r.status === 404 && r.body?.error?.code === "NOT_ON_TEAM", "times only for someone on the team", r.body);
     r = await putTimes(dj.id, "media", t);
     assert(r.status === 404 && r.body?.error?.code === "NOT_ON_TEAM", "times only for a role they have", r.body);
+    r = await putTimes(nope.id, "media", t);
+    assert(r.status === 404 && r.body?.error?.code === "NOT_ON_TEAM", "no times for someone who said no", r.body);
+    r = await putTimes(sec.id, "security", { callAt: at(starts, -60).replace("Z", "+00:00").replace(/\.\d{3}/, "") });
+    assert(r.status === 200 && r.body?.schedule?.callAt === new Date(at(starts, -60)).toISOString().replace(/\.\d{3}Z$/, ".000Z"), "a +00:00 offset is saved as UTC", r.body);
+    r = await putTimes(sec.id, "security", { callAt: at(starts, -60).replace("Z", "") });
+    assert(r.status === 400, "a time with no offset refused", r.body);
+    r = await call("PUT", `/api/events/${ev}/door/team/${sec.id}/schedule?role=security`, { body: {} });
+    assert(r.status === 401, "signed out: 401", r.body);
     r = await putTimes(dj.id, "bogus", t);
     assert(r.status === 400, "unknown role refused", r.body);
     r = await putTimes(dj.id, "entertainment", t, tok(dj.id));
@@ -165,19 +183,24 @@ const at = (base: Date, minutes: number) => new Date(base.getTime() + minutes * 
     assert(find(dj.id, "entertainment")?.schedule?.placeNote === "Side door on 5th", "times on the list", find(dj.id, "entertainment"));
     assert(find(promo.id, "host")?.schedule?.callAt === at(starts, -30), "standing member's times for this event", find(promo.id, "host"));
     assert(find(cam.id, "media")?.schedule === null, "no times yet: null", find(cam.id, "media"));
+    assert(!JSON.stringify(r.body ?? {}).includes("@test.local"), "no emails in the host's team list", null);
     r = await call("GET", `/api/events/${ev}/door/team`, { token: ht });
-    assert((r.body?.event ?? []).every((m: any) => m.role === "door"), "default list still door only (old clients)", r.body);
+    const evIds = (r.body?.event ?? []).map((m: any) => m.userId);
+    const stIds = (r.body?.standing ?? []).map((m: any) => m.userId);
+    assert(evIds.includes(doorP.id) && !evIds.includes(dj.id) && !evIds.includes(co.id) && !evIds.includes(coat.id), "default event list: door yes, new sections no (old clients)", evIds);
+    assert(stIds.includes(doorS.id) && !stIds.includes(promo.id), "default standing list: door yes, promoter no", stIds);
 
     console.log("\na member's own view");
     r = await myTeam(dj.id);
     assert(r.status === 404 && r.body?.error?.code === "EVENT_NOT_FOUND", "pending invite: no team view yet", r.body);
-    await q(`UPDATE event_door_members SET accepted_at = now() WHERE event_id = $1`, [ev]);
+    await q(`UPDATE event_door_members SET accepted_at = now() WHERE event_id = $1 AND declined_at IS NULL`, [ev]);
     await q(`UPDATE event_door_team SET accepted_at = now() WHERE host_user_id = $1`, [host.id]);
     r = await myTeam(dj.id);
     const djRole = r.body?.roles?.[0];
     assert(r.status === 200 && r.body?.event?.id === ev && r.body?.roles?.length === 1 && djRole?.role === "entertainment", "accepted DJ sees their role", r.body);
     assert(djRole?.roleInfo?.name === "Entertainment" && djRole?.schedule?.loadInAt === t.loadInAt && djRole?.schedule?.placeNote === "Side door on 5th", "with their times and notes", djRole);
     assert(typeof r.body?.host?.name === "string", "names the host", r.body?.host);
+    assert(!JSON.stringify(r.body ?? {}).includes("@test.local"), "no emails in a member's view", null);
     r = await myTeam(promo.id);
     assert(r.status === 200 && r.body?.roles?.[0]?.scope === "standing" && r.body?.roles?.[0]?.schedule?.callAt === at(starts, -30), "standing promoter sees this event's time", r.body);
     r = await myTeam(cam.id);
@@ -186,7 +209,6 @@ const at = (base: Date, minutes: number) => new Date(base.getTime() + minutes * 
     assert(r.status === 404, "not on the team: 404", r.body);
     r = await myTeam(host.id);
     assert(r.status === 404, "the host has no team view (they have the host screens)", r.body);
-    assert(!JSON.stringify(r.body ?? {}).includes("@test.local"), "no emails in the answer", null);
     await call("DELETE", `/api/events/${ev}/door/team/${dj.id}?scope=event&role=entertainment`, { token: ht });
     r = await myTeam(dj.id);
     assert(r.status === 404, "removed: no team view", r.body);
@@ -198,6 +220,13 @@ const at = (base: Date, minutes: number) => new Date(base.getTime() + minutes * 
     assert(r.status === 400 && /cohost/.test(r.body?.error?.message), "role message lists every role", r.body);
     r = await call("DELETE", `/api/events/${ev}/door/team/${co.id}?scope=event&role=cohost`, { token: ht });
     assert(r.status === 404 && r.body?.error?.message === "That person isn't on your Event team.", "says Event team", r.body);
+
+    console.log("\ncancelled event");
+    await q(`UPDATE events SET status = 'cancelled' WHERE id = $1`, [ev]);
+    r = await putTimes(sec.id, "security", {});
+    assert(r.status === 409 && r.body?.error?.code === "EVENT_ENDED", "no times on a cancelled event", r.body);
+    r = await myTeam(cam.id);
+    assert(r.status === 404, "no team view on a cancelled event", r.body);
 
     console.log("\nemail render for Other escapes the name");
     const { renderDoorTeamInvite } = await import("../emailService");
