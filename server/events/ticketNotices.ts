@@ -9,6 +9,7 @@
  * Every function here is fire and forget: it never throws, so a failed email can't undo a sale or a refund.
  * Senders are injectable so tests can check what would be sent without Resend or Expo.
  */
+import { inviteTitle, joinedCopy, pushTypes, type TeamRole } from "./teamRoles";
 import { sql } from "drizzle-orm";
 import { rows, hostIdentity } from "./eventsRouter";
 import { holderCanSeeAddress } from "./eventRules";
@@ -278,11 +279,14 @@ export const DOOR_INVITE_EMAILS_PER_HOST_DAY = 10;
 /** A second invite to the same person within this many minutes (cancel, then invite again) gets no push. */
 export const DOOR_INVITE_PUSH_QUIET_MINUTES = 10;
 
-type InvitePair = { scope: "standing" | "event"; inviteId: string; hostUserId: string; memberUserId: string; eventId: string };
-/** Every row (removed ones too) for this host and person: standing rows by host, event rows by event. */
+type InvitePair = { scope: "standing" | "event"; inviteId: string; hostUserId: string; memberUserId: string; eventId: string; role: TeamRole };
+/**
+ * Every row (removed ones too) for this host, person and role: standing rows by host, event rows by event.
+ * Per role (p4-team): a second role for the same person is its own invite and gets its own push and email.
+ */
 const pairKey = (p: InvitePair) => p.scope === "standing"
-  ? sql`host_user_id = ${p.hostUserId} AND member_user_id = ${p.memberUserId}`
-  : sql`event_id = ${p.eventId} AND member_user_id = ${p.memberUserId}`;
+  ? sql`host_user_id = ${p.hostUserId} AND member_user_id = ${p.memberUserId} AND role = ${p.role}`
+  : sql`event_id = ${p.eventId} AND member_user_id = ${p.memberUserId} AND role = ${p.role}`;
 
 /**
  * Claims today's invite email for this row. True only when nobody emailed this person about this host's team (or
@@ -316,26 +320,27 @@ async function pushedRecently(p: InvitePair): Promise<boolean> {
  * After a host sends (or re-sends) a door team invite: push, Activity item, and an email while the budget lasts.
  * eventId is the event the host invited from (its host identity names the host). Never throws; each channel on its own.
  */
-export async function notifyDoorInvite(p: { inviteId: string; scope: "standing" | "event"; eventId: string; memberUserId: string; hostUserId: string }): Promise<void> {
+export async function notifyDoorInvite(p: { inviteId: string; scope: "standing" | "event"; eventId: string; memberUserId: string; hostUserId: string; role?: TeamRole }): Promise<void> {
+  const role: TeamRole = p.role ?? "door";
   try {
     const d = await noticeDeps();
     const [e] = await rows<any>(sql`SELECT * FROM events WHERE id = ${p.eventId}`);
     const [m] = await rows<any>(sql`SELECT email, first_name FROM users WHERE id = ${p.memberUserId}`);
     if (!e || !m) return;
     const hostName = (await hostIdentity(e)).publicName;
-    const title = `${hostName} invited you to their door team`;
+    const title = inviteTitle(hostName, role);
     const message = p.scope === "event" ? `Only this event: ${String(e.title)}.` : `All of ${hostName}'s events.`;
     const log = (what: string) => (err: unknown) => console.error(`[Door] invite ${what} failed for ${p.inviteId}:`, (err as Error)?.message ?? err);
-    const pair: InvitePair = { scope: p.scope, inviteId: p.inviteId, hostUserId: p.hostUserId, memberUserId: p.memberUserId, eventId: p.eventId };
+    const pair: InvitePair = { scope: p.scope, inviteId: p.inviteId, hostUserId: p.hostUserId, memberUserId: p.memberUserId, eventId: p.eventId, role };
     if (!(await pushedRecently(pair).catch(() => false))) {
-      await d.sendPush({ userId: p.memberUserId, title, body: "Tap to accept or decline.", data: { type: "door_team_invite", inviteId: p.inviteId } })
+      await d.sendPush({ userId: p.memberUserId, title, body: "Tap to accept or decline.", data: { type: pushTypes(role).invite, inviteId: p.inviteId } })
         .catch(log("push"));
     }
     if (d.createActivity) {
       await d.createActivity({
-        userId: p.memberUserId, type: "door_team_invite", title, message,
+        userId: p.memberUserId, type: pushTypes(role).invite, title, message,
         referenceType: "event_door_invite", referenceId: p.inviteId,
-        metadata: { inviteId: p.inviteId, scope: p.scope, eventId: p.scope === "event" ? p.eventId : null },
+        metadata: { inviteId: p.inviteId, scope: p.scope, eventId: p.scope === "event" ? p.eventId : null, role },
         triggeredByUserId: p.hostUserId,
       }).catch(log("activity"));
     }
@@ -344,7 +349,7 @@ export async function notifyDoorInvite(p: { inviteId: string; scope: "standing" 
         toEmail: String(m.email), firstName: m.first_name ?? null, hostName, scope: p.scope,
         eventTitle: p.scope === "event" ? String(e.title) : null,
         whenText: p.scope === "event" ? formatEventWhen(e.starts_at, e.timezone) : null,
-        doorUrl: doorUrl(),
+        doorUrl: doorUrl(), role,
       }).catch(log("email"));
     }
   } catch (err) {
@@ -356,7 +361,7 @@ export async function notifyDoorInvite(p: { inviteId: string; scope: "standing" 
  * The host's push when someone accepts (no notice on decline). Named by first name, else @username, the same
  * names the host sees on the team list. Never throws.
  */
-export async function notifyDoorAccepted(p: { hostUserId: string; memberUserId: string; scope: "standing" | "event"; eventId: string | null }): Promise<void> {
+export async function notifyDoorAccepted(p: { hostUserId: string; memberUserId: string; scope: "standing" | "event"; eventId: string | null; role?: TeamRole }): Promise<void> {
   try {
     const d = await noticeDeps();
     const [m] = await rows<any>(sql`SELECT first_name, username FROM users WHERE id = ${p.memberUserId}`);
@@ -367,9 +372,10 @@ export async function notifyDoorAccepted(p: { hostUserId: string; memberUserId: 
       const [e] = await rows<any>(sql`SELECT title FROM events WHERE id = ${p.eventId}`);
       if (e) what = String(e.title);
     }
+    const copy = joinedCopy(name, p.role ?? "door", what);
     await d.sendPush({
-      userId: p.hostUserId, title: `${name} joined your door team`, body: `They can scan tickets for ${what}.`,
-      data: { type: "door_team_accepted", eventId: p.scope === "event" ? p.eventId : null },
+      userId: p.hostUserId, title: copy.title, body: copy.body,
+      data: { type: pushTypes(p.role ?? "door").accepted, eventId: p.scope === "event" ? p.eventId : null },
     });
   } catch (err) {
     console.error(`[Door] accept push failed for host ${p.hostUserId}:`, (err as Error)?.message ?? err);

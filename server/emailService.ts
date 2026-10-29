@@ -1,3 +1,4 @@
+import { inviteEmailCopy } from "./events/teamRoles";
 import { Resend } from 'resend';
 import type { EmailLogTag } from './emailHistory';
 import type { Business, InfluencerApplication, Photographer, User } from '@shared/schema';
@@ -2481,20 +2482,24 @@ export type DoorTeamInviteParams = {
   eventTitle: string | null;
   whenText: string | null;
   doorUrl: string;
+  /** p4-team: door (Admissions), security or host / promoter. Missing = door. */
+  role?: 'door' | 'security' | 'host';
 };
 
 export function renderDoorTeamInvite(params: DoorTeamInviteParams): { subject: string; html: string } {
   const host = escapeHtml(params.hostName);
-  const heading = params.firstName ? `Hi ${escapeHtml(params.firstName)}, you're invited to the door team` : `You're invited to the door team`;
   const what = params.scope === 'event' && params.eventTitle
     ? `<strong>${escapeHtml(params.eventTitle)}</strong>${params.whenText ? ` on ${escapeHtml(params.whenText)}` : ''}`
     : 'their events';
+  const role = params.role ?? 'door';
+  const copy = inviteEmailCopy(role, host, what);
+  const heading = params.firstName ? `Hi ${escapeHtml(params.firstName)}, ${copy.heading}` : copy.heading.charAt(0).toUpperCase() + copy.heading.slice(1);
   const p = (t: string, color = '#CCCCCC') => `<p style="color:${color};font-size:15px;line-height:1.6;margin:0 0 14px 0;">${t}</p>`;
   const html = wrapEmail(`
-    ${emailHeader(heading, `${host} invited you to their door team.`)}
+    ${emailHeader(heading, copy.intro)}
     <tr><td style="background:#1A1A1A;padding:0 32px 8px;">
-      ${p(`${host} wants you to help check guests in at the door for ${what}.`)}
-      ${p(`If you accept, you can scan tickets and see the guest list in the Outsyde app or on goutsyde.com. You won't see sales, earnings or anyone's contact details.`)}
+      ${p(copy.lines[0])}
+      ${p(copy.lines[1])}
       <p style="text-align:center;margin:18px 0 14px 0;">
         <a href="${escapeHtml(params.doorUrl)}" style="background:#E8B930;color:#111111;padding:12px 30px;text-decoration:none;border-radius:6px;font-weight:bold;display:inline-block;">Accept or decline</a>
       </p>
@@ -2502,7 +2507,7 @@ export function renderDoorTeamInvite(params: DoorTeamInviteParams): { subject: s
     </td></tr>
     ${emailFooter()}
   `);
-  return { subject: `${params.hostName} invited you to their door team`, html };
+  return { subject: inviteEmailCopy(role, params.hostName, '').subject, html };
 }
 
 export async function sendDoorTeamInviteEmail(params: DoorTeamInviteParams): Promise<void> {

@@ -7,6 +7,8 @@
  * "Active, accepted" = removed_at IS NULL AND accepted_at IS NOT NULL (migration 075: an invite that is still pending
  * or was declined gives no access).
  * Every role needs an active account (same test as loadActiveUser).
+ * p4-team (2026-10-29): only team rows with role 'door' (Admissions) give scanner access. Security and host /
+ * promoter rows give none here; their own access comes with their own screens.
  */
 import { sql } from "drizzle-orm";
 import { rows } from "./eventsRouter";
@@ -22,10 +24,10 @@ export async function loadEventForDoor(eventId: string, userId: string): Promise
         WHEN e.host_user_id = u.id THEN 'host'
         WHEN EXISTS (SELECT 1 FROM event_door_team t
                      WHERE t.host_user_id = e.host_user_id AND t.member_user_id = u.id AND t.removed_at IS NULL
-                       AND t.accepted_at IS NOT NULL) THEN 'standing'
+                       AND t.accepted_at IS NOT NULL AND t.role = 'door') THEN 'standing'
         WHEN now() < e.ends_at AND EXISTS (SELECT 1 FROM event_door_members m
                      WHERE m.event_id = e.id AND m.member_user_id = u.id AND m.removed_at IS NULL
-                       AND m.accepted_at IS NOT NULL) THEN 'event'
+                       AND m.accepted_at IS NOT NULL AND m.role = 'door') THEN 'event'
         ELSE NULL
       END AS door_role
     FROM events e
