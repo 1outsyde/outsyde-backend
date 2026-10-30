@@ -382,3 +382,21 @@ export async function notifyDoorAccepted(p: { hostUserId: string; memberUserId: 
     console.error(`[Door] accept push failed for host ${p.hostUserId}:`, (err as Error)?.message ?? err);
   }
 }
+
+/**
+ * p4-team step 4a: the host changed someone's pay (Legend 2026-10-30: push on every change). Accepted members only;
+ * a pending invite shows the pay when they open it. Old app builds show the push and open nothing on tap
+ * (unknown type). Never throws.
+ */
+export async function notifyTeamPayChanged(p: { memberUserId: string; eventId: string; eventTitle: string }): Promise<void> {
+  try {
+    const d = await noticeDeps();
+    await d.sendPush({
+      userId: p.memberUserId, title: "Your pay was updated",
+      body: `The host updated your pay for ${p.eventTitle}. Open the event to see it.`,
+      data: { type: "team_pay_changed", eventId: p.eventId },
+    });
+  } catch (err) {
+    console.error(`[Door] pay change push failed for ${p.memberUserId}:`, (err as Error)?.message ?? err);
+  }
+}

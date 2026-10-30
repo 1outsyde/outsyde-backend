@@ -28,6 +28,7 @@ import { HOST_PAYOUT_DELAY_DAYS } from "./payoutTiming";
 import { payoutStatusFor } from "./payoutStatus";
 import { notifyOrderRefunded, notifyFreeOrdersCancelled } from "./ticketNotices";
 import { ensurePromoterLinks, promoterLinkStats } from "./promoterLinks";
+import { eventPay } from "./teamPay";
 
 const router = Router();
 
@@ -418,6 +419,16 @@ router.get("/:id/summary", hybridAuthMiddleware, async (req: Request, res: Respo
     } catch (err) {
       console.error("[Tickets] promoter breakdown failed (summary sent without it):", err);
     }
+    // Step 4a: team pay and what the host takes home (all or nothing). An estimate until step 4b fixes it 3 days after
+    // the event. Its own try: a failure sends the summary without it.
+    let teamPay: Record<string, unknown> | null = null;
+    try {
+      const pay = await eventPay(e);
+      teamPay = { totalCents: pay.teamTotalCents, covered: pay.covered, teamPaidCents: pay.teamPaidCents, hostTakeHomeCents: pay.hostTakeHomeCents,
+        members: pay.members.map((m) => ({ userId: m.userId, username: m.username, firstName: m.firstName, totalCents: m.totalCents, needsShift: m.needsShift })) };
+    } catch (err) {
+      console.error("[Tickets] team pay failed (summary sent without it):", err);
+    }
     const payable = Number(tot?.host_net ?? 0) > 0;
     const expectedAt = e.status === "published" && payable && e.ends_at
       ? new Date(new Date(e.ends_at).getTime() + HOST_PAYOUT_DELAY_DAYS * 86400000).toISOString() : null;
@@ -437,6 +448,7 @@ router.get("/:id/summary", hybridAuthMiddleware, async (req: Request, res: Respo
         paidAt: p ? iso(p.paid_at) : null,
       },
       promoters,
+      teamPay,
     });
   } catch (err) {
     console.error("[Tickets] host summary read failed:", err);

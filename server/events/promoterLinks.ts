@@ -1,13 +1,13 @@
 /**
  * p4-team step 3: personal promoter links + sales tracking (migration 085).
  *
- * One link per promoter (Event team role 'host', shown as Promoter) per event. Standing promoters get one for each
+ * One link per promoter (Event team role 'host', shown as Promoter) per event. Since step 4a, Entertainment gets one too. Standing promoters get one for each
  * event of their host. A sale counts for the link the buyer checked out through. Decided by Legend 2026-10-30:
  *   - a promoter buying through their own link doesn't count
  *   - a removed promoter's link stops counting new sales; past sales stay theirs
  *   - free RSVPs are counted apart from paid tickets
  *   - host and co-hosts see a per promoter breakdown
- *   - links for promoters only, for now
+ *   - links for promoters only (widened to Entertainment in step 4a, Legend 2026-10-30)
  * A link that doesn't count never blocks the sale: the order is saved with no link.
  * Counts use the host summary's rule: tickets 'valid' on 'completed' orders, so pending checkouts, refunds and
  * cancelled RSVPs never count.
@@ -15,9 +15,15 @@
 import { randomInt } from "crypto";
 import { sql, type SQL } from "drizzle-orm";
 import { rows } from "./eventsRouter";
+import { LINK_ROLES } from "./teamPay";
 
 /** Event team role stored for promoters. */
 export const PROMOTER_ROLE = "host";
+/**
+ * Roles that get a link (step 4a, Legend 2026-10-30): Promoters and Entertainment (DJs, performers, MCs), so both can
+ * earn commission on sales through it. Built from teamPay.LINK_ROLES (fixed role names, never user input).
+ */
+const LINK_ROLES_SQL = sql.raw(`(${LINK_ROLES.map((r) => `'${r}'`).join(", ")})`);
 
 /** 32 letters and digits with no I, O, 0 or 1 (easy to read aloud); matches the CHECK in migration 085. */
 const ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
@@ -39,10 +45,10 @@ export function normalizeLinkCode(raw: unknown): string | null {
 /** SQL true when `userId` is an accepted, not removed promoter at the event (this event or standing for its host). */
 function isActivePromoter(eventId: SQL, hostUserId: SQL, userId: SQL): SQL {
   return sql`(EXISTS (SELECT 1 FROM event_door_members pm
-                 WHERE pm.event_id = ${eventId} AND pm.member_user_id = ${userId} AND pm.role = ${PROMOTER_ROLE}
+                 WHERE pm.event_id = ${eventId} AND pm.member_user_id = ${userId} AND pm.role IN ${LINK_ROLES_SQL}
                    AND pm.removed_at IS NULL AND pm.accepted_at IS NOT NULL)
             OR EXISTS (SELECT 1 FROM event_door_team pt
-                 WHERE pt.host_user_id = ${hostUserId} AND pt.member_user_id = ${userId} AND pt.role = ${PROMOTER_ROLE}
+                 WHERE pt.host_user_id = ${hostUserId} AND pt.member_user_id = ${userId} AND pt.role IN ${LINK_ROLES_SQL}
                    AND pt.removed_at IS NULL AND pt.accepted_at IS NOT NULL))`;
 }
 
@@ -71,10 +77,10 @@ export async function ensurePromoterLinks(eventId: string, onlyUserId?: string):
   const missing = await rows<any>(sql`
     SELECT p.user_id FROM (
       SELECT m.member_user_id AS user_id FROM event_door_members m
-      WHERE m.event_id = ${eventId} AND m.role = ${PROMOTER_ROLE} AND m.removed_at IS NULL AND m.accepted_at IS NOT NULL
+      WHERE m.event_id = ${eventId} AND m.role IN ${LINK_ROLES_SQL} AND m.removed_at IS NULL AND m.accepted_at IS NOT NULL
       UNION
       SELECT t.member_user_id FROM event_door_team t JOIN events e ON e.id = ${eventId}
-      WHERE t.host_user_id = e.host_user_id AND t.role = ${PROMOTER_ROLE} AND t.removed_at IS NULL AND t.accepted_at IS NOT NULL
+      WHERE t.host_user_id = e.host_user_id AND t.role IN ${LINK_ROLES_SQL} AND t.removed_at IS NULL AND t.accepted_at IS NOT NULL
     ) p
     WHERE (${onlyUserId ?? null}::text IS NULL OR p.user_id = ${onlyUserId ?? null}::text)
       AND NOT EXISTS (SELECT 1 FROM event_promoter_links l WHERE l.event_id = ${eventId} AND l.promoter_user_id = p.user_id)`);
