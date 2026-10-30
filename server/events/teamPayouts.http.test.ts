@@ -348,6 +348,25 @@ function callAt(base: string, method: string, path: string, o: { token?: string;
     const rec7 = (await q(`SELECT * FROM event_payout_recoveries WHERE ticket_id = $1`, [t7ticket]))[0];
     assert(rec7?.status === "owed" && Number(rec7?.amount_cents) === 1960 && stripeCalls.length === 0, "recovery opened as owed (no transfer to reverse)", rec7);
 
+    console.log("\n$0 payout for a host with no payout account: the take back waits for their account");
+    const h7b = await user("h7b"); const sec7b = await user("s7b");
+    const e7b = await event(h7b, "noacct");
+    const t7b = await mkType(e7b.id);
+    const o7b = await mkOrder(e7b.id, t7b, buyer.id, 1);
+    await addMember(e7b.id, h7b, sec7b, "security");
+    await setPay(e7b.id, sec7b, "security", h7b, { type: "fixed", fixed: 1960 });
+    await runCreate();
+    p = await payoutOf(e7b.id);
+    assert(p && Number(p.amount_cents) === 0 && p.status === "paid" && p.connected_account_id === null, "team took it all, host has no account: $0 recorded", p);
+    await q(`UPDATE tickets SET status = 'refunded', refunded_at = now() WHERE id = $1`, [o7b.ticketIds[0]]);
+    await payouts.openRecoveries();
+    assert((await q(`SELECT 1 FROM event_payout_recoveries WHERE ticket_id = $1`, [o7b.ticketIds[0]])).length === 0, "no account yet: nothing to tie it to, waits");
+    await q(`INSERT INTO user_payout_accounts (user_id, stripe_account_id, onboarding_complete) VALUES ($1, $2, true)`, [h7b.id, `acct_${P}h7b`]);
+    await payouts.openRecoveries();
+    const rec7b = (await q(`SELECT * FROM event_payout_recoveries WHERE ticket_id = $1`, [o7b.ticketIds[0]]))[0];
+    assert(rec7b?.status === "owed" && rec7b?.connected_account_id === `acct_${P}h7b` && Number(rec7b?.amount_cents) === 1960,
+      "once they set up payouts: owed on their account, taken from their next payout", rec7b);
+
     // ── 8. Paused: nothing until released ──
     console.log("\npaused event: nothing until released");
     const h8 = await user("h8"); const sec8 = await user("s8");
@@ -403,7 +422,12 @@ function callAt(base: string, method: string, path: string, o: { token?: string;
 
     // ── 11. Owed reminders every 7 days (call 18) ──
     console.log("\nhosts who owe get a push and an email every 7 days");
+    // The one-time owed notice (bookingRecoveries notifyOwedSellers) covers day one; the weekly reminders start 7 days after it.
     pushes.length = 0; owedEmails.length = 0;
+    await q(`UPDATE event_payout_recoveries SET seller_notified_at = now() WHERE connected_account_id = ANY($1)`, [[`acct_${P}h7`, acct6b]]);
+    await payouts.remindOwedHosts();
+    assert(pushes.filter((x) => x.userId === h7.id || x.userId === h6b.id).length === 0, "just told it's owed: no weekly reminder yet", pushes);
+    await q(`UPDATE event_payout_recoveries SET seller_notified_at = now() - interval '8 days' WHERE connected_account_id = ANY($1)`, [[`acct_${P}h7`, acct6b]]);
     const sent1 = await payouts.remindOwedHosts();
     // h5's $50 was already taken from their next payout (case 5); h7 owes the $19.60 refund on their $0 payout.
     const pushH7 = pushes.filter((x) => x.userId === h7.id);
@@ -423,6 +447,24 @@ function callAt(base: string, method: string, path: string, o: { token?: string;
     await q(`UPDATE event_payout_recoveries SET status = 'collected', host_reminded_at = now() - interval '8 days' WHERE connected_account_id = $1`, [`acct_${P}h7`]);
     await payouts.remindOwedHosts();
     assert(pushes.filter((x) => x.userId === h7.id).length === 0, "collected by an admin: reminders stop");
+
+    console.log("\nhost refund racing the payout: refused once the payout commits");
+    const h13 = await user("h13");
+    const e13 = await event(h13, "race13");
+    const t13 = await mkType(e13.id);
+    const o13 = await mkOrder(e13.id, t13, buyer.id, 1);
+    const holder = new pg.Client({ connectionString: PG_URL });
+    await holder.connect();
+    await holder.query("BEGIN");
+    await holder.query(`SELECT id FROM events WHERE id = $1 FOR UPDATE`, [e13.id]); // what the payout statement holds
+    const racing = requestOrderRefund(o13.orderId, h13.id, "host");
+    await new Promise((res) => setTimeout(res, 400));
+    await holder.query(`UPDATE events SET team_pay_fixed_at = now() WHERE id = $1`, [e13.id]);
+    await holder.query("COMMIT");
+    await holder.end();
+    const raced = await racing;
+    assert(raced.ok === false && (await q(`SELECT status FROM ticket_orders WHERE id = $1`, [o13.orderId]))[0].status === "completed",
+      "refund that waited on the payout is refused, order untouched", raced);
 
     // ── 12. Refunds before payout day still work ──
     console.log("\nhost refund before the payout is worked out still works");
