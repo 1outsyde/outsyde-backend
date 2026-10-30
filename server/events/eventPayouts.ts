@@ -102,7 +102,7 @@ async function balanceText(s?: PayoutStripe): Promise<string> {
 // ─── Step 1: create the payout (one statement per event) ───────────────────
 
 /** One team member's fixed pay at payout time (4b-1): their total and how it was worked out, per role. */
-export type TeamLine = { userId: string; amountCents: number; breakdown: Record<string, unknown> };
+export type TeamLine = { userId: string; amountCents: number; breakdown: Record<string, unknown>; ready: boolean };
 
 /**
  * Step 4b-1: everyone's pay worked out from the pay the host set, as the team stood when the event ended (Legend
@@ -113,12 +113,15 @@ export async function teamLinesFor(e: { id: string; host_user_id: string; ends_a
   const { eventPay, rolePayJson } = await import("./teamPay");
   const pay = await eventPay(e, { asOf: e.ends_at });
   const lines: TeamLine[] = [];
+  // Step 4b-2 (Legend 2026-10-30, call 22): the deadline for payout setup is now. Not set up -> their share stays with the host.
+  const { readyMembers } = await import("./teamSend");
+  const ready = await readyMembers(pay.members.filter((m) => m.totalCents > 0).map((m) => m.userId));
   for (const m of pay.members) {
     if (m.totalCents <= 0) continue; // nothing owed (e.g. hourly with no shift): no row
     const roles = m.roles.map((role) => ({ role, ...rolePayJson(pay.byRole.get(`${m.userId}:${role}`)) }));
     const sum = (k: "fixedCents" | "hourlyCents" | "commissionCents") => roles.reduce((n, r) => n + Number((r as any)[k] ?? 0), 0);
     lines.push({
-      userId: m.userId, amountCents: m.totalCents,
+      userId: m.userId, amountCents: m.totalCents, ready: ready.has(m.userId),
       breakdown: {
         roles, fixedCents: sum("fixedCents"), hourlyCents: sum("hourlyCents"), commissionCents: sum("commissionCents"),
         hours: roles.reduce((n, r) => n + Number(r.hours ?? 0), 0),
@@ -134,8 +137,9 @@ export async function teamLinesFor(e: { id: string; host_user_id: string; ends_a
  * Step 4b-1 (Legend 2026-10-30): in ONE statement per event, from the host earnings: (1) what the host owes Outsyde
  * from earlier events, oldest first, as long as the running total stays within the earnings (it may take all of it,
  * call 17); (2) team pay, all or nothing against what is left; (3) the host gets the rest, $0 included (recorded as
- * paid, nothing to send). Team rows are written for covered ('pending', sent in 4b-2) and uncovered or free events
- * ('host_to_pay'). events.team_pay_fixed_at marks the event done, so free events with team pay are visited once.
+ * paid, nothing to send). Team rows are written for covered ('pending', sent by teamSend.ts) and uncovered or free events
+ * ('host_to_pay'). Step 4b-2 (call 22): this is the payout setup deadline. A covered member not set up by now is
+ * 'no_setup' ('host_to_pay'): their share is not taken from the host, who pays them directly. events.team_pay_fixed_at marks the event done, so free events with team pay are visited once.
  */
 export async function createDuePayouts(limit = PAYOUT_JOB_LIMIT): Promise<string> {
   // Candidates only: the statement below checks every rule again. Events with nothing to pay and no team pay set are
@@ -157,7 +161,9 @@ export async function createDuePayouts(limit = PAYOUT_JOB_LIMIT): Promise<string
       const { lines, earningsCents } = await teamLinesFor(e);
       if (afterTeamComputeHook) await afterTeamComputeHook(String(e.id));
       const teamTotal = lines.reduce((n, l) => n + l.amountCents, 0);
-      const linesJson = JSON.stringify(lines.map((l) => ({ member_user_id: l.userId, amount_cents: l.amountCents, breakdown: l.breakdown })));
+      // Taken from the host only for members set up for payouts (call 22). All or nothing is still judged on everyone.
+      const readyTotal = lines.reduce((n, l) => n + (l.ready ? l.amountCents : 0), 0);
+      const linesJson = JSON.stringify(lines.map((l) => ({ member_user_id: l.userId, amount_cents: l.amountCents, breakdown: l.breakdown, ready: l.ready })));
       const [r] = await withDeadlockRetry(() => rows<any>(sql`
         WITH RECURSIVE ev AS (
           SELECT e.id FROM events e
@@ -209,8 +215,8 @@ export async function createDuePayouts(limit = PAYOUT_JOB_LIMIT): Promise<string
         d AS (SELECT COALESCE(sum(amount), 0)::int AS ded FROM pick),
         -- Team pay, all or nothing against what is left after the debt. A free event (gross 0) covers nothing.
         tl AS (
-          SELECT m.member_user_id, m.amount_cents, m.breakdown
-          FROM jsonb_to_recordset(${linesJson}::jsonb) AS m(member_user_id varchar, amount_cents int, breakdown jsonb)
+          SELECT m.member_user_id, m.amount_cents, m.breakdown, m.ready
+          FROM jsonb_to_recordset(${linesJson}::jsonb) AS m(member_user_id varchar, amount_cents int, breakdown jsonb, ready boolean)
         ),
         cov AS (
           SELECT (g.gross > 0 AND ${teamTotal}::int > 0 AND ${teamTotal}::int <= g.gross - d.ded) AS covered FROM g, d
@@ -218,11 +224,11 @@ export async function createDuePayouts(limit = PAYOUT_JOB_LIMIT): Promise<string
         ins AS (
           INSERT INTO event_payouts (event_id, destination_type, connected_account_id, gross_cents, deducted_cents, team_cents, amount_cents, status, paid_at)
           SELECT ev.id, dst.dtype, dst.acct, g.gross, d.ded,
-                 CASE WHEN cov.covered THEN ${teamTotal}::int ELSE 0 END,
-                 g.gross - d.ded - CASE WHEN cov.covered THEN ${teamTotal}::int ELSE 0 END,
+                 CASE WHEN cov.covered THEN ${readyTotal}::int ELSE 0 END,
+                 g.gross - d.ded - CASE WHEN cov.covered THEN ${readyTotal}::int ELSE 0 END,
                  -- Nothing left for the host: recorded as paid, never sent (Stripe can't send $0).
-                 CASE WHEN g.gross - d.ded - CASE WHEN cov.covered THEN ${teamTotal}::int ELSE 0 END = 0 THEN 'paid' ELSE 'pending' END,
-                 CASE WHEN g.gross - d.ded - CASE WHEN cov.covered THEN ${teamTotal}::int ELSE 0 END = 0 THEN now() END
+                 CASE WHEN g.gross - d.ded - CASE WHEN cov.covered THEN ${readyTotal}::int ELSE 0 END = 0 THEN 'paid' ELSE 'pending' END,
+                 CASE WHEN g.gross - d.ded - CASE WHEN cov.covered THEN ${readyTotal}::int ELSE 0 END = 0 THEN now() END
           FROM ev, dst, g, d, cov WHERE g.gross > 0
           ON CONFLICT (event_id) DO NOTHING
           RETURNING id
@@ -230,8 +236,8 @@ export async function createDuePayouts(limit = PAYOUT_JOB_LIMIT): Promise<string
         tins AS (
           INSERT INTO event_team_payouts (event_id, member_user_id, payout_id, amount_cents, breakdown, outcome, status)
           SELECT ev.id, tl.member_user_id, (SELECT id FROM ins), tl.amount_cents, tl.breakdown,
-                 CASE WHEN cov.covered THEN 'covered' ELSE 'not_covered' END,
-                 CASE WHEN cov.covered THEN 'pending' ELSE 'host_to_pay' END
+                 CASE WHEN NOT cov.covered THEN 'not_covered' WHEN tl.ready THEN 'covered' ELSE 'no_setup' END,
+                 CASE WHEN cov.covered AND tl.ready THEN 'pending' ELSE 'host_to_pay' END
           FROM ev, tl, cov
           ON CONFLICT (event_id, member_user_id) DO NOTHING
           RETURNING id, amount_cents
@@ -724,10 +730,12 @@ export async function alertStuckRecoveries(): Promise<number> {
  * Every minute: create due payouts, send up to 20 that are due (least recently tried first), then open recoveries,
  * reverse up to 20 due ones and report old owed and stuck ones. Each step has its own try/catch, so one can't starve the others.
  */
-export async function runEventPayoutJob(s?: PayoutStripe & RecoveryStripe): Promise<{
+export async function runEventPayoutJob(s?: PayoutStripe & RecoveryStripe & Partial<import("./teamSend").TeamStripe>): Promise<{
   created: number; paid: number; held: number; review: number; opened: number; reversed: number; owed: number; alerted: number; stuck: number; reminded: number;
+  teamTold: number; teamSent: number; teamHeld: number; teamReview: number; setupReminded: number; teamFlagged: number;
 }> {
-  const out = { created: 0, paid: 0, held: 0, review: 0, opened: 0, reversed: 0, owed: 0, alerted: 0, stuck: 0, reminded: 0 };
+  const out = { created: 0, paid: 0, held: 0, review: 0, opened: 0, reversed: 0, owed: 0, alerted: 0, stuck: 0, reminded: 0,
+    teamTold: 0, teamSent: 0, teamHeld: 0, teamReview: 0, setupReminded: 0, teamFlagged: 0 };
   try {
     const ids = await createDuePayouts();
     out.created = ids ? ids.split(",").length : 0;
@@ -791,9 +799,33 @@ export async function runEventPayoutJob(s?: PayoutStripe & RecoveryStripe): Prom
   } catch (err) {
     console.error("[Events] owed reminder step failed:", (err as Error)?.message ?? err);
   }
+  // Step 4b-2: team pay. Each step on its own, like the ones above.
+  const team = await import("./teamSend");
+  try {
+    out.teamTold = await team.notifyNoSetupMembers();
+  } catch (err) {
+    console.error("[Events] team no setup notice step failed:", (err as Error)?.message ?? err);
+  }
+  try {
+    const t = await team.runTeamPayoutSends(s && typeof (s as any).createEventTeamPayoutTransfer === "function" ? (s as any) : undefined);
+    out.teamSent = t.sent; out.teamHeld = t.held; out.teamReview = t.review;
+  } catch (err) {
+    console.error("[Events] team pay send step failed:", (err as Error)?.message ?? err);
+  }
+  try {
+    out.setupReminded = await team.remindTeamSetup();
+  } catch (err) {
+    console.error("[Events] team setup reminder step failed:", (err as Error)?.message ?? err);
+  }
+  try {
+    out.teamFlagged = await team.flagNotReceived();
+  } catch (err) {
+    console.error("[Events] team not received flag step failed:", (err as Error)?.message ?? err);
+  }
   if (Object.values(out).some((n) => n > 0)) {
     console.log(`[Events] payout job: created ${out.created}, paid ${out.paid}, held ${out.held}, review ${out.review}, ` +
-      `recoveries opened ${out.opened}, reversed ${out.reversed}, owed ${out.owed}, owed alerts ${out.alerted}, stuck alerts ${out.stuck}, owed reminders ${out.reminded}`);
+      `recoveries opened ${out.opened}, reversed ${out.reversed}, owed ${out.owed}, owed alerts ${out.alerted}, stuck alerts ${out.stuck}, owed reminders ${out.reminded}, ` +
+      `team: told ${out.teamTold}, sent ${out.teamSent}, held ${out.teamHeld}, review ${out.teamReview}, setup reminders ${out.setupReminded}, flagged ${out.teamFlagged}`);
   }
   return out;
 }

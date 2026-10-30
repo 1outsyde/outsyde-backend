@@ -646,6 +646,34 @@ export class StripeService {
     return prior ? { id: prior.id, amount: prior.amount } : null;
   }
 
+  /**
+   * p4-team step 4b-2: a team pay transfer already sent for this event_team_payouts row, if any. Each row has its own
+   * transfer group (event_team_<teamPayoutId>), so the lookup never needs paging however big the team is.
+   */
+  async findEventTeamPayoutTransfer(teamPayoutId: string, opts?: { timeoutMs?: number; maxNetworkRetries?: number }): Promise<{ id: string; amount: number } | null> {
+    const stripe = await getUncachableStripeClient();
+    const existing = await stripe.transfers.list({ transfer_group: `event_team_${teamPayoutId}`, limit: 10 }, boundedPayoutOptions(opts ?? {}));
+    const prior = existing.data.find(t => t.metadata?.teamPayoutId === teamPayoutId);
+    return prior ? { id: prior.id, amount: prior.amount } : null;
+  }
+
+  /** p4-team step 4b-2: send one team member's pay for an event from the platform balance (the caller passes one key per try). */
+  async createEventTeamPayoutTransfer(p: {
+    eventId: string; teamPayoutId: string; destination: string; amountCents: number; idempotencyKey: string;
+    timeoutMs?: number; maxNetworkRetries?: number;
+  }): Promise<{ id: string }> {
+    const stripe = await getUncachableStripeClient();
+    const transfer = await stripe.transfers.create({
+      amount: p.amountCents,
+      currency: 'usd',
+      destination: p.destination,
+      transfer_group: `event_team_${p.teamPayoutId}`,
+      description: 'Outsyde event team pay',
+      metadata: { type: 'event_team_payout', eventId: p.eventId, teamPayoutId: p.teamPayoutId },
+    }, { idempotencyKey: p.idempotencyKey, ...boundedPayoutOptions(p) });
+    return { id: transfer.id };
+  }
+
   /** Send a $25 business referral reward from the platform balance (the caller passes one key per try). */
   async createReferralPayoutTransfer(p: {
     businessReferralId: string; payoutId: string; destination: string; amountCents: number; idempotencyKey: string;

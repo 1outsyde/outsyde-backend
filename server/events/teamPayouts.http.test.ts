@@ -134,11 +134,16 @@ function callAt(base: string, method: string, path: string, o: { token?: string;
     }
     return { orderId: oid, ticketIds: ids };
   };
-  /** Accepted event team member (accepted 10 days ago unless told otherwise). */
+  /**
+   * Accepted event team member (accepted 10 days ago unless told otherwise). 4b-2 (call 22): members need finished
+   * payout setup by payout time to be paid through Outsyde, so each one gets a ready payout account here; the
+   * no-setup rule itself is tested in teamSend.http.test.ts.
+   */
   const addMember = async (eventId: string, host: { id: string }, u: { id: string }, role: string, o: { acceptedAt?: string; removedAt?: string | null } = {}) =>
-    q(`INSERT INTO event_door_members (event_id, member_user_id, added_by_user_id, role, invited_at, accepted_at, removed_at)
+    (await q(`INSERT INTO user_payout_accounts (user_id, stripe_account_id, onboarding_complete) VALUES ($1, $2, true) ON CONFLICT (user_id) DO NOTHING`,
+      [u.id, `acct_member_${u.id.slice(0, 8)}`]), q(`INSERT INTO event_door_members (event_id, member_user_id, added_by_user_id, role, invited_at, accepted_at, removed_at)
        VALUES ($1, $2, $3, $4, now() - interval '12 days', ${o.acceptedAt ?? "now() - interval '10 days'"}, ${o.removedAt ?? "NULL"})`,
-      [eventId, u.id, host.id, role]);
+      [eventId, u.id, host.id, role]));
   const setPay = (eventId: string, u: { id: string }, role: string, host: { id: string }, p: { type: string; fixed?: number; hourly?: number; bps?: number }) =>
     q(`INSERT INTO event_team_pay (event_id, member_user_id, role, pay_type, fixed_cents, hourly_cents, commission_bps, updated_by_user_id)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`, [eventId, u.id, role, p.type, p.fixed ?? null, p.hourly ?? null, p.bps ?? null, host.id]);

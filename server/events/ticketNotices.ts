@@ -28,6 +28,8 @@ export type NoticeDeps = {
   sendDoorInvite?: (p: Parameters<typeof import("../emailService").sendDoorTeamInviteEmail>[0]) => Promise<void>;
   /** Step 4b-1: weekly email to a host who owes Outsyde. Optional so older test fakes keep compiling. */
   sendOwedReminder?: (p: Parameters<typeof import("../emailService").sendEventOwedReminderEmail>[0]) => Promise<void>;
+  /** Step 4b-2: day of / day after email to a paid team member without payout setup. Optional like the ones above. */
+  sendTeamSetupReminder?: (p: Parameters<typeof import("../emailService").sendTeamSetupReminderEmail>[0]) => Promise<void>;
 };
 
 export type ActivityItem = {
@@ -62,6 +64,7 @@ export async function noticeDeps(): Promise<NoticeDeps> {
     },
     sendDoorInvite: email.sendDoorTeamInviteEmail,
     sendOwedReminder: email.sendEventOwedReminderEmail,
+    sendTeamSetupReminder: email.sendTeamSetupReminderEmail,
   };
 }
 
