@@ -27,6 +27,7 @@ import { flagForReview, releasePendingTicketOrder } from "./ticketCheckout";
 import { HOST_PAYOUT_DELAY_DAYS } from "./payoutTiming";
 import { payoutStatusFor } from "./payoutStatus";
 import { notifyOrderRefunded, notifyFreeOrdersCancelled } from "./ticketNotices";
+import { ensurePromoterLinks, promoterLinkStats } from "./promoterLinks";
 
 const router = Router();
 
@@ -404,6 +405,19 @@ router.get("/:id/summary", hybridAuthMiddleware, async (req: Request, res: Respo
     const [p] = await rows<any>(sql`
       SELECT status, hold_reason, amount_cents, deducted_cents, paid_at FROM event_payouts WHERE event_id = ${e.id}`);
     // Same as the payout job: published events only, paying valid tickets of completed orders with host_net_cents > 0.
+    // p4-team step 3: per promoter breakdown for the host and co-hosts (Legend 2026-10-30). Every promoter has a
+    // link; removed promoters stay listed with their past sales, marked not active. No buyer details.
+    // Its own try: a failure here sends an empty list and never fails the summary old app builds read.
+    let promoters: Array<Record<string, unknown>> = [];
+    try {
+      await ensurePromoterLinks(String(e.id));
+      promoters = (await promoterLinkStats(String(e.id))).map((l) => ({
+        userId: l.userId, username: l.username, firstName: l.firstName, code: l.code,
+        rsvps: l.rsvps, ticketsSold: l.ticketsSold, salesCents: l.salesCents, active: l.active,
+      }));
+    } catch (err) {
+      console.error("[Tickets] promoter breakdown failed (summary sent without it):", err);
+    }
     const payable = Number(tot?.host_net ?? 0) > 0;
     const expectedAt = e.status === "published" && payable && e.ends_at
       ? new Date(new Date(e.ends_at).getTime() + HOST_PAYOUT_DELAY_DAYS * 86400000).toISOString() : null;
@@ -422,6 +436,7 @@ router.get("/:id/summary", hybridAuthMiddleware, async (req: Request, res: Respo
         amountCents: p ? Number(p.amount_cents) : null, deductedCents: p ? Number(p.deducted_cents) : null,
         paidAt: p ? iso(p.paid_at) : null,
       },
+      promoters,
     });
   } catch (err) {
     console.error("[Tickets] host summary read failed:", err);

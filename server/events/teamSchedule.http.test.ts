@@ -235,6 +235,8 @@ const at = (base: Date, minutes: number) => new Date(base.getTime() + minutes * 
     assert(mail.html.includes("Club &amp; Co wants you on their Event team as Bar &amp; Coat for their events."), "body escapes the name", mail.html.slice(0, 3000));
   } finally {
     await q(`DELETE FROM event_team_schedules WHERE event_id = $1`, [ev]).catch(() => {});
+    // Step 3: a promoter's team view makes their link (migration 085).
+    await q(`DELETE FROM event_promoter_links WHERE event_id = $1`, [ev]).catch(() => {});
     await q(`DELETE FROM event_door_members WHERE event_id = $1`, [ev]);
     await q(`DELETE FROM event_door_team WHERE host_user_id = $1`, [host.id]);
     await q(`DELETE FROM notifications WHERE user_id IN (SELECT id FROM users WHERE email LIKE $1)`, [`${P}-%`]).catch(() => {});

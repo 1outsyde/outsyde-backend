@@ -35,6 +35,7 @@ import { TEAM_ROLES, duplicateMessage, parseRoleLabel, roleInfo, type TeamRole }
 import { notifyDoorInvite, notifyDoorAccepted } from "./ticketNotices";
 import { ticketIdFromQrToken, qrPng } from "./ticketQr";
 import { ticketIdFromWalletToken, walletConfig, cachedTicketPass } from "./walletPass";
+import { PROMOTER_ROLE, ensurePromoterLinks, promoterLinkStats, promoterLinkUrl } from "./promoterLinks";
 
 const router = Router();
 
@@ -691,11 +692,26 @@ router.get("/:id/team/me", hybridAuthMiddleware, teamLimiter, async (req: Reques
         schedule: times.get(`${userId}:${r.role}`) ?? null,
       });
     }
+    // p4-team step 3: promoters get their own link and only their own numbers. Everyone else: null.
+    let promoter: { code: string; url: string; rsvps: number; ticketsSold: number; salesCents: number } | null = null;
+    // Its own try: a failure here leaves `promoter` null and never fails the roles old app builds read.
+    if (seen.has(PROMOTER_ROLE)) {
+      try {
+        await ensurePromoterLinks(String(e.id), userId);
+        const [mine1] = await promoterLinkStats(String(e.id), userId);
+        if (mine1) {
+          promoter = { code: mine1.code, url: promoterLinkUrl(e.slug, mine1.code), rsvps: mine1.rsvps, ticketsSold: mine1.ticketsSold, salesCents: mine1.salesCents };
+        }
+      } catch (err) {
+        console.error("[Door] promoter link failed (team view sent without it):", err);
+      }
+    }
     res.json({
       success: true,
       event: { id: String(e.id), slug: e.slug, title: e.title, startsAt: iso(e.starts_at), endsAt: iso(e.ends_at), timezone: e.timezone },
       host: { name: (await hostIdentity(e)).publicName },
       roles,
+      promoter,
     });
   } catch (err) {
     console.error("[Door] team me failed:", err);
