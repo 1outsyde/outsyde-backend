@@ -282,7 +282,8 @@ export async function listTeamAttention() {
     WHERE r.status IN ('review', 'held')
        OR (r.member_not_yet_at IS NOT NULL AND r.member_confirmed_at IS NULL
            AND r.member_not_yet_at <= now() - make_interval(days => ${NOT_RECEIVED_FLAG_DAYS}::int))
-    ORDER BY CASE WHEN r.status = 'review' THEN 0 WHEN r.status = 'held' THEN 1 ELSE 2 END, since, r.id`);
+    ORDER BY CASE WHEN r.status = 'review' THEN 0 WHEN r.status = 'held' THEN 1 ELSE 2 END, since, r.id
+    LIMIT 200`);
   return found.map((r) => ({
     kind: r.kind as "team_review" | "team_held" | "team_not_received",
     teamPayoutId: String(r.id), eventId: String(r.event_id), eventTitle: r.title as string,

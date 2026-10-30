@@ -128,6 +128,7 @@ function callAt(base: string, method: string, path: string, o: { token?: string;
   app.use(express.json());
   app.use("/api/events", (await import("./doorRouter")).default);
   app.use("/api/events", (await import("./eventsRouter")).default);
+  app.use("/api/events", (await import("./ticketRefunds")).default);
   const srv: http.Server = await new Promise((r) => { const s = app.listen(0, "127.0.0.1", () => r(s)); });
   const BASE = `http://127.0.0.1:${(srv.address() as any).port}`;
   const call = (m: string, p: string, o: { token?: string; body?: unknown } = {}) => callAt(BASE, m, p, o);
@@ -232,10 +233,26 @@ function callAt(base: string, method: string, path: string, o: { token?: string;
     assert(rb1?.outcome === "no_setup" && rb1?.status === "host_to_pay" && rc1?.outcome === "no_setup" && rc1?.status === "host_to_pay",
       "no account or setup not finished: no_setup, the host pays them", { rb1, rc1 });
     assert(rb1?.payout_id === p1.id, "no_setup rows still point at the payout");
+    let sm = await call("GET", `/api/events/${e1.id}/summary`, { token: tok(h1.id) });
+    const smB = sm.body?.teamPay?.members?.find((m: any) => m.userId === b1.id);
+    const smA = sm.body?.teamPay?.members?.find((m: any) => m.userId === a1.id);
+    assert(sm.status === 200 && sm.body?.teamPay?.covered === true && sm.body?.teamPay?.teamPaidCents === 5000 && sm.body?.teamPay?.hostTakeHomeCents === 14600,
+      "host summary: still covered (the host must not think nobody is paid by Outsyde)", sm.body?.teamPay);
+    assert(smA?.paidBy === "outsyde" && smB?.paidBy === "host" && smB?.outcome === "no_setup", "summary says who pays each person", sm.body?.teamPay?.members);
+    const heldNow = (await computeHeld()).breakdown.teamPayoutsOpen;
+    const hn = await user("hn"); await ready(hn);
+    const nn = await user("nn");
+    const en = await event(hn, "noheld");
+    await sell(en.id, 10);
+    await addMember(en.id, hn, nn, "security"); await setPay(en.id, nn, "security", hn, 7000);
+    await runCreate();
+    assert((await rowOf(en.id, nn.id))?.outcome === "no_setup" && (await computeHeld()).breakdown.teamPayoutsOpen === heldNow,
+      "no_setup pay is not held back from the bank payout (it is in the host's payout)", { heldNow });
 
     console.log("\nthe one last message to members whose share went to the host");
     pushes.length = 0; activity.length = 0;
     const told = await send.notifyNoSetupMembers();
+    pushes.splice(0, pushes.length, ...pushes.filter((x) => x.userId !== nn.id));
     const bPush = pushesTo(b1.id);
     assert(told >= 2 && bPush.length === 1 && pushesTo(c1.id).length === 1 && pushesTo(a1.id).length === 0, "one push each to the two members, none to the one set up", { told, pushes });
     assert(/\$30\.00/.test(bPush[0]?.body ?? "") && bPush[0]?.body.includes(e1.title) && /host/i.test(bPush[0]?.body ?? "") && !DASH.test(bPush[0]?.body ?? ""),
@@ -365,9 +382,12 @@ function callAt(base: string, method: string, path: string, o: { token?: string;
     adminEmails.length = 0;
     res = await send.sendTeamPayout(r8.id, fakeStripe);
     assert(res === "held" && (await rowOf(e8.id, m8.id)).hold_reason === "stripe_not_ready" && adminEmails.length === 1, "held + one admin email", { res, adminEmails });
+    const heldPush = pushesTo(m8.id).filter((x) => x.data?.type === "team_pay_held");
+    assert(heldPush.length === 1 && /\$20\.00/.test(heldPush[0].body) && !DASH.test(heldPush[0].body), "the member is told to finish payout setup", pushesTo(m8.id));
     await due(r8.id);
     res = await send.sendTeamPayout(r8.id, fakeStripe);
-    assert(res === "held" && adminEmails.length === 1, "same hold again: no second email", adminEmails.length);
+    assert(res === "held" && adminEmails.length === 1 && pushesTo(m8.id).filter((x) => x.data?.type === "team_pay_held").length === 1,
+      "same hold again: no second email or push", adminEmails.length);
     fake.notReady.delete(acct8);
     await due(r8.id);
     assert((await send.sendTeamPayout(r8.id, fakeStripe)) === "paid", "ready again: sent");
@@ -497,9 +517,11 @@ function callAt(base: string, method: string, path: string, o: { token?: string;
     r = await del(badM, "security", "&reason=no_show");
     assert(r.status === 200 && pushesTo(badM.id)[0]?.title === "Removed: No show", "No show", pushesTo(badM.id));
     pushes.length = 0;
-    const silentM = await user("silentm"); await addMember(er.id, hr, silentM, "door");
-    await del(silentM, "door");
-    assert(pushesTo(silentM.id).length === 0, "no reason given: no push (same as today)");
+    const silentM = await user("silentm"); const silentInv = await addMember(er.id, hr, silentM, "door");
+    r = await del(silentM, "door");
+    const silentRow = (await q(`SELECT removed_at, removal_reason FROM event_door_members WHERE id = $1`, [silentInv]))[0];
+    assert(r.status === 200 && !!silentRow?.removed_at && silentRow?.removal_reason === null && pushesTo(silentM.id).length === 0,
+      "no reason given: removed, no push (same as today)", { s: r.status, silentRow });
 
     console.log("\nunprofessional conduct, and a standing member with pay at an upcoming event");
     const stM = await user("stm");
@@ -563,6 +585,9 @@ function callAt(base: string, method: string, path: string, o: { token?: string;
     console.log("\nsetup reminders: emails the day of the event and the day after");
     const hd = await user("hd");
     const ed = await event(hd, "dayof", { startsIn: "1 minute" });
+    // Local noon today in New York, so the test never straddles midnight.
+    await q(`UPDATE events SET starts_at = (date_trunc('day', now() AT TIME ZONE 'America/New_York') + interval '12 hours') AT TIME ZONE 'America/New_York',
+             ends_at = (date_trunc('day', now() AT TIME ZONE 'America/New_York') + interval '17 hours') AT TIME ZONE 'America/New_York' WHERE id = $1`, [ed.id]);
     const dm = await user("dm");
     await addMember(ed.id, hd, dm, "security"); await setPay(ed.id, dm, "security", hd, 20000);
     setupEmails.length = 0; pushes.length = 0;
@@ -574,7 +599,7 @@ function callAt(base: string, method: string, path: string, o: { token?: string;
       "day of: the push says the $200 goes to the host if not set up", pushesTo(dm.id));
     await send.remindTeamSetup();
     assert(setupEmails.filter((x) => x.userId === dm.id).length === 1, "day of email once");
-    await q(`UPDATE events SET starts_at = now() - interval '1 day 2 hours', ends_at = now() - interval '1 day' WHERE id = $1`, [ed.id]);
+    await q(`UPDATE events SET starts_at = starts_at - interval '1 day', ends_at = ends_at - interval '1 day' WHERE id = $1`, [ed.id]);
     await q(`UPDATE event_team_setup_notices SET last_push_at = now() - interval '25 hours' WHERE event_id = $1`, [ed.id]);
     await send.remindTeamSetup();
     assert(setupEmails.filter((x) => x.userId === dm.id).length === 2, "day after: a second email", setupEmails.filter((x) => x.userId === dm.id));
@@ -584,9 +609,41 @@ function callAt(base: string, method: string, path: string, o: { token?: string;
     await send.remindTeamSetup();
     assert(pushesTo(dm.id).length === 0, "deadline passed (pay worked out): no more reminders");
 
+    console.log("\na standing member who left after the event ended is still owed, so still reminded");
+    const hx = await user("hx");
+    const ex = await event(hx, "leftafter", { ended: "1 hour" });
+    const sx = await user("sx");
+    await addStanding(hx, sx, "security");
+    await setPay(ex.id, sx, "security", hx, 4000);
+    await q(`UPDATE event_door_team SET removed_at = now(), removed_by_user_id = $1 WHERE host_user_id = $1 AND member_user_id = $2`, [hx.id, sx.id]);
+    pushes.length = 0;
+    await send.remindTeamSetup();
+    assert(pushesTo(sx.id).some((x) => x.data?.type === "team_payout_setup"), "reminded", pushesTo(sx.id));
+    const sy = await user("sy");
+    const ey = await event(hx, "joinedafter", { ended: "1 hour" });
+    await q(`INSERT INTO event_door_members (event_id, member_user_id, added_by_user_id, role, invited_at, accepted_at) VALUES ($1, $2, $3, 'door', now() - interval '2 hours', now() - interval '10 minutes')`, [ey.id, sy.id, hx.id]);
+    await setPay(ey.id, sy, "door", hx, 4000);
+    pushes.length = 0;
+    await send.remindTeamSetup();
+    assert(pushesTo(sy.id).length === 0, "someone who joined after the end isn't on that team: no reminder");
+
+    console.log("\npeople already told today don't block the ones still due");
+    const hz = await user("hz");
+    const ez = await event(hz, "starve", { ended: "2 days 20 hours" }); // earliest start of all, still before its deadline
+    const z1 = await user("z1"); const z2 = await user("z2");
+    await addMember(ez.id, hz, z1, "security"); await setPay(ez.id, z1, "security", hz, 1000);
+    await addMember(ez.id, hz, z2, "security"); await setPay(ez.id, z2, "security", hz, 1000);
+    const [firstId, secondId] = [z1.id, z2.id].sort();
+    await q(`INSERT INTO event_team_setup_notices (event_id, member_user_id, last_push_at) VALUES ($1, $2, now())`, [ez.id, firstId]);
+    pushes.length = 0;
+    await send.remindTeamSetup(1);
+    assert(pushesTo(secondId).length === 1 && pushesTo(firstId).length === 0, "with room for one, the one still due is reminded", pushes.map((x) => x.userId));
+
     console.log("\nsetup email copy");
     const { renderTeamSetupReminder } = await import("../emailService");
     const em = renderTeamSetupReminder({ toEmail: "a@b.c", userId: "u", firstName: "Ana", amountCents: 20000, eventTitle: "Big Night", deadlineText: "Monday, November 9", final: true });
+    const dl = send.deadlineText("2026-11-06T04:00:00Z", "America/New_York");
+    assert(dl === "Sunday, November 8 at 11:00 PM", "deadline names the day and the time", dl);
     assert(em.html.includes("$200.00") && em.html.includes("Big Night") && em.html.includes("Monday, November 9") && !DASH.test(em.subject) && !/[–—]/.test(em.html),
       "amount, event and deadline, no dashes", em.subject);
 

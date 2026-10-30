@@ -441,10 +441,13 @@ router.get("/:id/summary", hybridAuthMiddleware, async (req: Request, res: Respo
           FROM event_team_payouts tp JOIN users u ON u.id = tp.member_user_id
           WHERE tp.event_id = ${e.id} ORDER BY tp.amount_cents DESC, tp.member_user_id`);
         const total = fixedRows.reduce((n, x) => n + Number(x.amount_cents), 0);
-        const covered = fixedRows.length === 0 || fixedRows.every((x) => x.outcome === "covered");
+        // Covered = the event's earnings covered the team (all or nothing). 4b-2 (call 22): a member without payout setup
+        // ('no_setup') was covered too; their share went to the host, who pays them. paidBy says who pays each person.
+        const covered = fixedRows.length === 0 || fixedRows.every((x) => x.outcome === "covered" || x.outcome === "no_setup");
         teamPay = { fixed: true, totalCents: total, covered, teamPaidCents: p ? Number(p.team_cents) : 0,
           hostTakeHomeCents: p ? Number(p.amount_cents) : 0,
-          members: fixedRows.map((m) => ({ userId: m.member_user_id, username: m.username ?? null, firstName: m.first_name ?? null, totalCents: Number(m.amount_cents), needsShift: false })) };
+          members: fixedRows.map((m) => ({ userId: m.member_user_id, username: m.username ?? null, firstName: m.first_name ?? null, totalCents: Number(m.amount_cents), needsShift: false,
+            outcome: m.outcome, paidBy: m.outcome === "covered" ? "outsyde" : "host" })) };
       } else {
         const pay = await eventPay(e);
         teamPay = { fixed: false, totalCents: pay.teamTotalCents, covered: pay.covered, teamPaidCents: pay.teamPaidCents, hostTakeHomeCents: pay.hostTakeHomeCents,

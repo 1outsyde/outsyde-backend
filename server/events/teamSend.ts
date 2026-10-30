@@ -80,9 +80,10 @@ export async function readyMembers(userIds: string[]): Promise<Set<string>> {
 export function deadlineText(endsAt: Date | string, timeZone: string): string {
   const d = new Date(new Date(endsAt).getTime() + 3 * 24 * 3600_000);
   try {
-    return d.toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric", timeZone });
+    return `${d.toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric", timeZone })} at ${d.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit", timeZone })}`;
   } catch {
-    return d.toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric", timeZone: "America/New_York" });
+    const tz = "America/New_York";
+    return `${d.toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric", timeZone: tz })} at ${d.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit", timeZone: tz })}`;
   }
 }
 
@@ -97,6 +98,10 @@ export const teamCopy = {
   toHost: (title: string, cents: number) => ({
     title: "Your pay goes through the host",
     body: `Payouts weren't set up in time, so your ${usd(cents)} for ${title} went to the host. The host will pay you directly.`,
+  }),
+  heldSetup: (title: string, cents: number) => ({
+    title: "Finish payout setup",
+    body: `Your ${usd(cents)} for ${title} is waiting. Stripe needs a little more from you before it can be sent. Open payout setup to finish.`,
   }),
   sent: (title: string, cents: number) => ({
     title: "You got paid",
@@ -166,6 +171,12 @@ async function hold(p: any, reason: string, tag: string): Promise<TeamSendResult
   }
   await alertAdmin("Team pay on hold",
     `Team pay ${p.id} of ${p.amount_cents} cents to user ${p.member_user_id} for event ${p.event_id} is on hold: ${HOLD_TEXT[reason] ?? reason}. It is checked again every hour and sent once this is fixed.`);
+  // The member can fix their own payout setup: tell them once per reason (same rule as the admin email).
+  if (reason !== "event_paused") {
+    const [e] = await rows<any>(sql`SELECT title FROM events WHERE id = ${p.event_id}`);
+    void tell(String(p.member_user_id), teamCopy.heldSetup(String(e?.title ?? "your event"), Number(p.amount_cents)), "team_pay_held", String(p.id),
+      { eventId: String(p.event_id), amountCents: Number(p.amount_cents) });
+  }
   return "held";
 }
 
@@ -317,12 +328,17 @@ export async function notifyNoSetupMembers(limit = 100): Promise<number> {
 /** Pay set for this person at this event (any role), as the setup reminders read it. */
 const PAID_SPOT = sql`(p.pay_type <> 'none' OR p.commission_bps IS NOT NULL)`;
 
-/** On the team now: accepted, not removed, this event or the host's standing team, in a role with pay. */
+/**
+ * On the team, in a role with pay, this event or the host's standing team. Before the end: accepted and not removed.
+ * After the end: the team as it stood when the event ended (same rule as eventPay asOf), so someone who left the
+ * standing team afterwards is still owed this event's pay and still reminded.
+ */
+const onTeamAt = (a: string) => sql`${sql.raw(a)}.accepted_at IS NOT NULL AND (
+  (e.ends_at > now() AND ${sql.raw(a)}.removed_at IS NULL)
+  OR (e.ends_at <= now() AND ${sql.raw(a)}.accepted_at <= e.ends_at AND (${sql.raw(a)}.removed_at IS NULL OR ${sql.raw(a)}.removed_at > e.ends_at)))`;
 const ON_TEAM_IN_ROLE = sql`(
-  EXISTS (SELECT 1 FROM event_door_members m WHERE m.event_id = e.id AND m.member_user_id = p.member_user_id AND m.role = p.role
-          AND m.removed_at IS NULL AND m.accepted_at IS NOT NULL)
-  OR EXISTS (SELECT 1 FROM event_door_team t WHERE t.host_user_id = e.host_user_id AND t.member_user_id = p.member_user_id AND t.role = p.role
-          AND t.removed_at IS NULL AND t.accepted_at IS NOT NULL))`;
+  EXISTS (SELECT 1 FROM event_door_members m WHERE m.event_id = e.id AND m.member_user_id = p.member_user_id AND m.role = p.role AND ${onTeamAt("m")})
+  OR EXISTS (SELECT 1 FROM event_door_team t WHERE t.host_user_id = e.host_user_id AND t.member_user_id = p.member_user_id AND t.role = p.role AND ${onTeamAt("t")}))`;
 
 /** Events still before their deadline: published, pay not worked out yet. */
 const BEFORE_DEADLINE = sql`e.status = 'published' AND e.team_pay_fixed_at IS NULL AND e.ends_at + interval '3 days' > now()`;
@@ -357,7 +373,11 @@ export async function remindTeamSetup(limit = 200): Promise<number> {
     SELECT DISTINCT e.id, e.title, e.host_user_id, e.timezone, e.starts_at, e.ends_at, p.member_user_id,
            ${LOCAL_DAY(0)} AS is_day_of, ${LOCAL_DAY(1)} AS is_day_after
     FROM event_team_pay p JOIN events e ON e.id = p.event_id
+    LEFT JOIN event_team_setup_notices n ON n.event_id = e.id AND n.member_user_id = p.member_user_id
     WHERE ${PAID_SPOT} AND ${BEFORE_DEADLINE} AND ${ON_TEAM_IN_ROLE} AND NOT ${memberReadySql(sql`p.member_user_id`)}
+      -- Only people with something due, so nobody is starved behind ones already told today.
+      AND (n.last_push_at IS NULL OR n.last_push_at <= now() - interval '1 day'
+           OR (${LOCAL_DAY(0)} AND n.day_of_email_at IS NULL) OR (${LOCAL_DAY(1)} AND n.day_after_email_at IS NULL))
     ORDER BY e.starts_at, e.id, p.member_user_id
     LIMIT ${limit}`);
   if (!cand.length) return 0;
@@ -375,7 +395,13 @@ export async function remindTeamSetup(limit = 200): Promise<number> {
         UPDATE event_team_setup_notices SET last_push_at = now()
         WHERE event_id = ${eventId} AND member_user_id = ${userId} AND (last_push_at IS NULL OR last_push_at <= now() - interval '1 day')
         RETURNING 1 AS x`);
-      const emailCol = yes(c.is_day_of) ? sql`day_of_email_at` : yes(c.is_day_after) ? sql`day_after_email_at` : null;
+      let emailCol = yes(c.is_day_of) ? sql`day_of_email_at` : yes(c.is_day_after) ? sql`day_after_email_at` : null;
+      if (emailCol) {
+        // Over the shared daily email budget: leave the email unclaimed, so a later run (tomorrow at the latest) sends it.
+        const nyDayStart = startOfNewYorkDay(new Date()).toISOString();
+        const [n] = await rows<any>(sql`SELECT count(*)::int AS n FROM email_log WHERE created_at >= ${nyDayStart}::timestamptz AND created_at < ${nyDayStart}::timestamptz + interval '1 day'`);
+        if (Number(n?.n ?? 0) >= SETUP_EMAIL_CEILING) emailCol = null;
+      }
       const [mailed] = emailCol ? await rows<any>(sql`
         UPDATE event_team_setup_notices SET ${emailCol} = now()
         WHERE event_id = ${eventId} AND member_user_id = ${userId} AND ${emailCol} IS NULL
@@ -389,9 +415,7 @@ export async function remindTeamSetup(limit = 200): Promise<number> {
       }
       if (mailed && d.sendTeamSetupReminder) {
         const [u] = await rows<any>(sql`SELECT email, first_name FROM users WHERE id = ${userId}`);
-        const nyDayStart = startOfNewYorkDay(new Date()).toISOString();
-        const [n] = await rows<any>(sql`SELECT count(*)::int AS n FROM email_log WHERE created_at >= ${nyDayStart}::timestamptz AND created_at < ${nyDayStart}::timestamptz + interval '1 day'`);
-        if (u?.email && Number(n?.n ?? 0) < SETUP_EMAIL_CEILING) {
+        if (u?.email) {
           await d.sendTeamSetupReminder({
             userId, toEmail: u.email, firstName: u.first_name ?? null, amountCents: cents, eventTitle: String(c.title), deadlineText: day,
             final: yes(c.is_day_after),
