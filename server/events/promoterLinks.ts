@@ -7,7 +7,7 @@
  *   - a removed promoter's link stops counting new sales; past sales stay theirs
  *   - free RSVPs are counted apart from paid tickets
  *   - host and co-hosts see a per promoter breakdown
- *   - links for promoters only, for now
+ *   - links for promoters only (widened to Entertainment in step 4a, Legend 2026-10-30)
  * A link that doesn't count never blocks the sale: the order is saved with no link.
  * Counts use the host summary's rule: tickets 'valid' on 'completed' orders, so pending checkouts, refunds and
  * cancelled RSVPs never count.
@@ -15,14 +15,15 @@
 import { randomInt } from "crypto";
 import { sql, type SQL } from "drizzle-orm";
 import { rows } from "./eventsRouter";
+import { LINK_ROLES } from "./teamPay";
 
 /** Event team role stored for promoters. */
 export const PROMOTER_ROLE = "host";
 /**
  * Roles that get a link (step 4a, Legend 2026-10-30): Promoters and Entertainment (DJs, performers, MCs), so both can
- * earn commission on sales through it. Same list as teamPay.LINK_ROLES (checked in teamPay.http.test.ts).
+ * earn commission on sales through it. Built from teamPay.LINK_ROLES (fixed role names, never user input).
  */
-const LINK_ROLES_SQL = sql.raw(`('host', 'entertainment')`);
+const LINK_ROLES_SQL = sql.raw(`(${LINK_ROLES.map((r) => `'${r}'`).join(", ")})`);
 
 /** 32 letters and digits with no I, O, 0 or 1 (easy to read aloud); matches the CHECK in migration 085. */
 const ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";

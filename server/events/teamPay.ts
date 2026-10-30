@@ -123,7 +123,7 @@ export type EventPay = {
   /** "memberId:role" -> that role's pay (every pay row, pending invites included). */
   byRole: Map<string, RolePay>;
   /** Accepted, not removed people only. */
-  members: Array<{ userId: string; username: string | null; firstName: string | null; totalCents: number }>;
+  members: Array<{ userId: string; username: string | null; firstName: string | null; totalCents: number; needsShift: boolean }>;
   teamTotalCents: number;
   hostEarningsCents: number;
 } & ReturnType<typeof coverage>;
@@ -157,22 +157,36 @@ export async function eventPay(event: { id: string; host_user_id: string }): Pro
   const shiftOf = new Map(shifts.map((s) => [`${s.member_user_id}:${s.role}`, { startsAt: s.starts_at, endsAt: s.ends_at }]));
   const salesOf = new Map(links.map((l) => [l.userId, l.salesCents]));
   const settingFor = new Map(pays.map((p) => [`${p.member_user_id}:${p.role}`, settingOf(p)]));
+  // One link per person per event, so its sales earn commission once: the first link role with a commission gets them
+  // (the pay route also refuses a second one, COMMISSION_ON_OTHER_ROLE).
+  const commissionRoleOf = new Map<string, string>();
+  for (const role of LINK_ROLES) {
+    for (const p of pays) {
+      if (p.role === role && p.commission_bps && !commissionRoleOf.has(String(p.member_user_id))) commissionRoleOf.set(String(p.member_user_id), role);
+    }
+  }
   const byRole = new Map<string, RolePay>();
   const keys = new Set<string>(Array.from(settingFor.keys()).concat(active.map((a) => `${a.member_id}:${a.member_role}`)));
   for (const key of Array.from(keys)) {
     const [memberId, role] = key.split(":");
     const setting = settingFor.get(key) ?? NO_PAY;
-    const sales = LINK_ROLES.includes(role) ? salesOf.get(memberId) ?? 0 : 0;
+    const sales = commissionRoleOf.get(memberId) === role ? salesOf.get(memberId) ?? 0 : 0;
     byRole.set(key, computeRolePay(setting, shiftOf.get(key) ?? null, sales));
   }
-  const people = new Map<string, { userId: string; username: string | null; firstName: string | null; totalCents: number }>();
+  const people = new Map<string, { userId: string; username: string | null; firstName: string | null; totalCents: number; needsShift: boolean; hasPay: boolean }>();
   for (const a of active) {
     const id = String(a.member_id);
-    const person = people.get(id) ?? { userId: id, username: a.member_username ?? null, firstName: a.member_first_name ?? null, totalCents: 0 };
-    person.totalCents += byRole.get(`${id}:${a.member_role}`)?.totalCents ?? 0;
+    const key = `${id}:${a.member_role}`;
+    const person = people.get(id) ?? { userId: id, username: a.member_username ?? null, firstName: a.member_first_name ?? null, totalCents: 0, needsShift: false, hasPay: false };
+    const rp = byRole.get(key);
+    const s = settingFor.get(key);
+    person.totalCents += rp?.totalCents ?? 0;
+    person.needsShift = person.needsShift || !!rp?.needsShift;
+    person.hasPay = person.hasPay || (!!s && (s.payType !== "none" || !!s.commissionBps));
     people.set(id, person);
   }
-  const members = Array.from(people.values()).filter((m) => m.totalCents > 0);
+  // Everyone the host has set pay for (a $0 hourly still waiting for a shift too), not people with no pay at all.
+  const members = Array.from(people.values()).filter((m) => m.hasPay).map(({ hasPay: _h, ...m }) => m);
   const teamTotalCents = members.reduce((n, m) => n + m.totalCents, 0);
   const hostEarningsCents = Number(earned[0]?.host_net ?? 0);
   return { byRole, members, teamTotalCents, hostEarningsCents, ...coverage(teamTotalCents, hostEarningsCents) };

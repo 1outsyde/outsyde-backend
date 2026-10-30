@@ -425,7 +425,7 @@ router.get("/:id/summary", hybridAuthMiddleware, async (req: Request, res: Respo
     try {
       const pay = await eventPay(e);
       teamPay = { totalCents: pay.teamTotalCents, covered: pay.covered, teamPaidCents: pay.teamPaidCents, hostTakeHomeCents: pay.hostTakeHomeCents,
-        members: pay.members.map((m) => ({ userId: m.userId, username: m.username, firstName: m.firstName, totalCents: m.totalCents })) };
+        members: pay.members.map((m) => ({ userId: m.userId, username: m.username, firstName: m.firstName, totalCents: m.totalCents, needsShift: m.needsShift })) };
     } catch (err) {
       console.error("[Tickets] team pay failed (summary sent without it):", err);
     }

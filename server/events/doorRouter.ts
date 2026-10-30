@@ -334,7 +334,20 @@ async function inviteJson(r: InviteRow) {
       ? { id: String(r.event_id), title: r.e_title, startsAt: iso(r.e_starts_at), endsAt: iso(r.e_ends_at), timezone: r.e_timezone }
       : null,
     upcoming: upcoming.map((e) => ({ id: String(e.id), title: e.title, startsAt: iso(e.starts_at), timezone: e.timezone })),
+    // Step 4a: the pay offered for this event, only the invitee's own (null for standing invites and on any failure).
+    pay: await invitePay(r),
   };
+}
+
+async function invitePay(r: InviteRow) {
+  if (r.scope !== "event" || !r.event_id) return null;
+  try {
+    const pay = await eventPay({ id: String(r.event_id), host_user_id: String(r.host_user_id) });
+    return rolePayJson(pay.byRole.get(`${r.member_user_id}:${r.role}`));
+  } catch (err) {
+    console.error("[Door] invite pay failed (invite sent without it):", err);
+    return null;
+  }
 }
 
 /** The signed in invitee and their invite, or null after answering 401 / 404 INVITE_NOT_FOUND. */
@@ -644,21 +657,38 @@ router.put("/:id/door/team/:userId/pay", hybridAuthMiddleware, teamLimiter, asyn
       return fail(res, 404, "NOT_ON_TEAM", "That person isn't on your Event team in that role.");
     }
     const v = parsed.value;
-    const [before] = await rows<any>(sql`
-      SELECT pay_type, fixed_cents, hourly_cents, commission_bps FROM event_team_pay
-      WHERE event_id = ${ctx.event.id} AND member_user_id = ${memberId} AND role = ${role}`);
-    await rows(sql`
+    if (v.commissionBps) {
+      // One link per person per event: its sales earn commission on one role only.
+      const [other] = await rows<any>(sql`
+        SELECT role FROM event_team_pay
+        WHERE event_id = ${ctx.event.id} AND member_user_id = ${memberId} AND role <> ${role} AND commission_bps IS NOT NULL
+        LIMIT 1`);
+      if (other) {
+        return fail(res, 409, "COMMISSION_ON_OTHER_ROLE",
+          "This person already earns commission on their other role at this event. Remove it there first, since sales through their link can only pay commission once.");
+      }
+    }
+    // The change is decided in the save itself (no read before it), so two saves at once push at most once:
+    // an update only happens when something differs, and only a row that changed comes back.
+    const [saved] = await rows<any>(sql`
       INSERT INTO event_team_pay (event_id, member_user_id, role, pay_type, fixed_cents, hourly_cents, commission_bps, updated_by_user_id)
       VALUES (${ctx.event.id}, ${memberId}, ${role}, ${v.payType}, ${v.fixedCents}, ${v.hourlyCents}, ${v.commissionBps}, ${ctx.userId})
       ON CONFLICT (event_id, member_user_id, role) DO UPDATE SET
         pay_type = EXCLUDED.pay_type, fixed_cents = EXCLUDED.fixed_cents, hourly_cents = EXCLUDED.hourly_cents,
-        commission_bps = EXCLUDED.commission_bps, updated_by_user_id = EXCLUDED.updated_by_user_id, updated_at = now()`);
-    const changed = JSON.stringify(settingOf(before)) !== JSON.stringify(v);
+        commission_bps = EXCLUDED.commission_bps, updated_by_user_id = EXCLUDED.updated_by_user_id, updated_at = now()
+      WHERE (event_team_pay.pay_type, event_team_pay.fixed_cents, event_team_pay.hourly_cents, event_team_pay.commission_bps)
+        IS DISTINCT FROM (EXCLUDED.pay_type, EXCLUDED.fixed_cents, EXCLUDED.hourly_cents, EXCLUDED.commission_bps)
+      RETURNING (xmax = 0) AS inserted`);
+    // A first save of "no pay" isn't a change worth a push.
+    const changed = !!saved && !(saved.inserted === true && v.payType === "none" && !v.commissionBps);
     if (changed && (await onTeamAccepted(ctx.event, memberId, role))) {
       void notifyTeamPayChanged({ memberUserId: memberId, eventId: String(ctx.event.id), eventTitle: String(ctx.event.title ?? "your event") });
     }
-    const pay = await eventPay(ctx.event);
-    res.json({ success: true, role, pay: rolePayJson(pay.byRole.get(`${memberId}:${role}`)) });
+    // Saved either way: a failure working out the totals only leaves `pay` null in the answer.
+    let pay: ReturnType<typeof rolePayJson> | null = null;
+    try { pay = rolePayJson((await eventPay(ctx.event)).byRole.get(`${memberId}:${role}`)); }
+    catch (err) { console.error("[Door] pay saved, totals failed:", err); }
+    res.json({ success: true, role, pay });
   } catch (err) {
     console.error("[Door] pay save failed:", err);
     fail(res, 500, "SERVER_ERROR", "Could not save the pay.");

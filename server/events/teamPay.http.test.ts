@@ -10,6 +10,13 @@
  * Entertainment gets links too). Hourly = exact hours of the shift the host set. All or nothing: team owed more than the
  * host's earnings -> Outsyde pays the team $0. Pending invites, declined and removed people count for nothing.
  *
+ * Mutation checks (run 2026-10-30, 19 rules, each caught; script kept in the session): all or nothing, covered at exactly
+ * equal, pending and removed people, hourly rounding, commission roles, limits, host only, after the event, push only on a
+ * real change (decided in the upsert, so 3 saves at once push once), no push to pending invites, a second commission refused
+ * (COMMISSION_ON_OTHER_ROLE) and counted once if it slips in, the invitee's own offered pay, $0 hourly still listed for the
+ * host, Entertainment links, and the safety tries in summary and team view (caught by promoterLinks.http.test.ts).
+ * A save is the whole setting: leaving out commissionPercent clears it (same as the times route).
+ *
  * SCRATCH ONLY. Local scratch Postgres with migrations through 086 (EV_TEST_PG_URL, localhost only) and DATABASE_URL via
  * the neon shim preload; Stripe goes to a stub in this process (STRIPE_STUB_PORT + ./.dev/stripe-stub-preload.mjs).
  */
@@ -274,6 +281,71 @@ function callAt(base: string, method: string, path: string, o: { token?: string;
     assert(r.body?.teamPay?.totalCents === 26900, "removed: their pay drops out", r.body?.teamPay);
     r = await setPay(ev.id, gone, "security", { payType: "fixed", fixedCents: 100 });
     assert(r.status === 404, "can't set pay for someone removed", r.body);
+
+    console.log("\nthe invitee sees the pay offered (only their own)");
+    r = await call("GET", `/api/events/${ev.id}/door/team?roles=all`, { token: ht });
+    const pendInvite = (r.body?.event ?? []).find((m: any) => m.userId === pend.id && m.role === "security")?.inviteId;
+    r = await call("GET", `/api/events/door/invites/${pendInvite}?roles=all`, { token: tok(pend.id) });
+    assert(r.status === 200 && r.body?.invite?.pay?.payType === "fixed" && r.body?.invite?.pay?.fixedCents === 5000, "invitee sees $50 offered", r.body?.invite);
+    assert(!JSON.stringify(r.body).includes("payTotals") && !JSON.stringify(r.body).includes(sec.username), "nothing about anyone else", r.body);
+    r = await call("GET", `/api/events/door/invites/${pendInvite}?roles=all`, { token: tok(stranger.id) });
+    assert(r.status === 404, "someone else can't open it", r.body);
+
+    console.log("\ncommission once per person, even with two link roles");
+    const both = await mkUser("both");
+    await invite(ev.id, both, "host");
+    await invite(ev.id, both, "entertainment");
+    await q(`UPDATE event_door_members SET accepted_at = now() WHERE event_id = $1 AND member_user_id = $2`, [ev.id, both.id]);
+    r = await setPay(ev.id, both, "host", { payType: "none", commissionPercent: 10 });
+    assert(r.status === 200, "Promoter role: 10% commission", r.body);
+    r = await setPay(ev.id, both, "entertainment", { payType: "fixed", fixedCents: 5000, commissionPercent: 5 });
+    assert(r.status === 409 && r.body?.error?.code === "COMMISSION_ON_OTHER_ROLE", "a second commission on the same link is refused", r.body);
+    assert(!/[—–]/.test(r.body?.error?.message ?? "x") && !/%/.test(r.body?.error?.message ?? "%"), "message has no dashes or percent", r.body);
+    r = await setPay(ev.id, both, "entertainment", { payType: "fixed", fixedCents: 5000 });
+    assert(r.status === 200 && r.body?.pay?.earnedCents === 5000, "the DJ role can still have fixed pay", r.body);
+    r = await setPay(ev.id, both, "host", { payType: "none" });
+    r = await setPay(ev.id, both, "entertainment", { payType: "fixed", fixedCents: 5000, commissionPercent: 5 });
+    assert(r.status === 200 && r.body?.pay?.commissionPercent === 5, "moved to the DJ role once the Promoter role has none", r.body);
+    // Two saves racing could still leave commission on both roles: the totals must count the link's sales once.
+    const bothCode = (await me(both)).body?.promoter?.code;
+    await buy(buyers[0], 1, bothCode);
+    await q(`UPDATE event_team_pay SET commission_bps = 1000 WHERE event_id = $1 AND member_user_id = $2 AND role = 'host'`, [ev.id, both.id]);
+    r = await sum();
+    const bothRow = (r.body?.teamPay?.members ?? []).find((m: any) => m.userId === both.id);
+    assert(/^[A-HJ-NP-Z2-9]{8}$/.test(bothCode ?? "") && bothRow?.totalCents === 5000 + 200,
+      "commission on both roles anyway: the $20 sale earns commission once (10% on the first link role)", bothRow);
+    await q(`UPDATE event_team_pay SET commission_bps = NULL WHERE event_id = $1 AND member_user_id = $2 AND role = 'host'`, [ev.id, both.id]);
+
+    console.log("\nstanding team members get pay per event");
+    const stand = await mkUser("stand");
+    await invite(ev.id, stand, "security", "standing");
+    await q(`UPDATE event_door_team SET accepted_at = now() WHERE host_user_id = $1 AND member_user_id = $2`, [host.id, stand.id]);
+    const before = (await sum()).body?.teamPay?.totalCents;
+    r = await setPay(ev.id, stand, "security", { payType: "fixed", fixedCents: 2500 });
+    assert(r.status === 200, "host sets this event's pay for a standing member", r.body);
+    r = await sum();
+    assert(r.body?.teamPay?.totalCents === before + 2500, "counted in this event's team total", { before, after: r.body?.teamPay?.totalCents });
+    r = await me(stand);
+    assert(roleOf(r, "security")?.pay?.earnedCents === 2500 && r.body?.payTotalCents === 2500, "standing member sees their pay", r.body);
+
+    console.log("\nhourly still waiting for a shift is listed for the host");
+    const wait = await mkUser("wait");
+    await invite(ev.id, wait, "media");
+    await q(`UPDATE event_door_members SET accepted_at = now() WHERE event_id = $1 AND member_user_id = $2`, [ev.id, wait.id]);
+    await setPay(ev.id, wait, "media", { payType: "hourly", hourlyCents: 4000 });
+    r = await sum();
+    const w = (r.body?.teamPay?.members ?? []).find((m: any) => m.userId === wait.id);
+    assert(w?.totalCents === 0 && w?.needsShift === true, "shown with $0 and needs a shift", r.body?.teamPay?.members);
+
+    console.log("\ntwo saves at once: one push");
+    pushes.length = 0;
+    await Promise.all([
+      setPay(ev.id, sec, "security", { payType: "fixed", fixedCents: 4321 }),
+      setPay(ev.id, sec, "security", { payType: "fixed", fixedCents: 4321 }),
+      setPay(ev.id, sec, "security", { payType: "fixed", fixedCents: 4321 }),
+    ]);
+    await new Promise((res) => setTimeout(res, 200));
+    assert(pushes.filter((p) => p.userId === sec.id).length === 1, "exactly one push for one change", pushes);
 
     console.log("\nfree event with fixed pay: Outsyde pays nothing");
     const free = await mkEvent("free", "3 days", "3 days 4 hours");
