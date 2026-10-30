@@ -276,6 +276,9 @@ function callAt(base: string, method: string, path: string, o: { token?: string;
     r = await sum();
     assert(r.body?.teamPay?.totalCents === 26900 + 99999, "accepted Security with pay counts", r.body?.teamPay);
     r = await call("DELETE", `/api/events/${ev.id}/door/team/${gone.id}?scope=event&role=security`, { token: ht });
+    // 4b-2 (call 21): an accepted paid spot needs a reason to be taken off.
+    assert(r.status === 400 && r.body?.error?.code === "REASON_REQUIRED", "paid spot: a reason is needed", r.body);
+    r = await call("DELETE", `/api/events/${ev.id}/door/team/${gone.id}?scope=event&role=security&reason=no_show`, { token: ht });
     assert(r.status === 200, "host removes them", r.body);
     r = await sum();
     assert(r.body?.teamPay?.totalCents === 26900, "removed: their pay drops out", r.body?.teamPay);
