@@ -38,6 +38,10 @@ import { ticketIdFromQrToken, qrPng } from "./ticketQr";
 import { ticketIdFromWalletToken, walletConfig, cachedTicketPass } from "./walletPass";
 import { ensurePromoterLinks, promoterLinkStats, promoterLinkUrl } from "./promoterLinks";
 import { LINK_ROLES, eventPay, parsePay, rolePayJson, settingOf } from "./teamPay";
+import {
+  notifySetupOnAccept, notifyTeamRemoved, parseRemoval, removalLabel, memberReadySql,
+  teamPayoutsForHost, myTeamPayout, markPaid, undoPaid, memberAnswer, type SettleError,
+} from "./teamSend";
 
 const router = Router();
 
@@ -52,6 +56,27 @@ const addSchema = z.object({
   cohostLevel: levelSchema.optional(),
 }).strict();
 const validId = (v: string) => v.length > 0 && v.length <= 36;
+/** Step 4b-2 (call 21): the team is locked once the event is over. */
+const TEAM_LOCKED = "This event is over, so its Event team can't change.";
+
+/**
+ * Did this person accept a paid spot in this role? Event scope: at this event. Standing: at any of the host's events
+ * that hasn't ended. A pending invite is never paid yet (cancelling it needs no reason).
+ */
+async function acceptedPaidSpot(scope: "standing" | "event", event: any, memberId: string, role: string): Promise<boolean> {
+  const r = scope === "event"
+    ? await rows<any>(sql`
+        SELECT 1 AS x FROM event_door_members m JOIN event_team_pay p ON p.event_id = m.event_id AND p.member_user_id = m.member_user_id AND p.role = m.role
+        WHERE m.event_id = ${event.id} AND m.member_user_id = ${memberId} AND m.role = ${role} AND m.removed_at IS NULL AND m.accepted_at IS NOT NULL
+          AND (p.pay_type <> 'none' OR p.commission_bps IS NOT NULL) LIMIT 1`)
+    : await rows<any>(sql`
+        SELECT 1 AS x FROM event_door_team t
+        JOIN events e ON e.host_user_id = t.host_user_id AND e.status <> 'cancelled' AND e.ends_at > now()
+        JOIN event_team_pay p ON p.event_id = e.id AND p.member_user_id = t.member_user_id AND p.role = t.role
+        WHERE t.host_user_id = ${event.host_user_id} AND t.member_user_id = ${memberId} AND t.role = ${role} AND t.removed_at IS NULL AND t.accepted_at IS NOT NULL
+          AND (p.pay_type <> 'none' OR p.commission_bps IS NOT NULL) LIMIT 1`);
+  return r.length > 0;
+}
 
 export type InviteStatus = "invited" | "accepted" | "declined";
 const statusOf = (r: any): InviteStatus => (r.accepted_at ? "accepted" : r.declined_at ? "declined" : "invited");
@@ -287,6 +312,7 @@ router.get("/door/mine", hybridAuthMiddleware, async (req: Request, res: Respons
 type InviteRow = {
   scope: Scope; id: string; host_user_id: string; event_id: string | null; member_user_id: string;
   accepted_at: any; declined_at: any; removed_at: any; invited_at: any; role: string; role_label: string | null; cohost_level: string | null;
+  removal_reason?: string | null; removal_note?: string | null;
   e_title: string | null; e_starts_at: any; e_ends_at: any; e_timezone: string | null; e_status: string | null;
 };
 
@@ -295,12 +321,12 @@ async function loadInvite(inviteId: string): Promise<InviteRow | null> {
   if (!validId(inviteId)) return null;
   const [r] = await rows<any>(sql`
     SELECT 'standing' AS scope, t.id, t.host_user_id, NULL::varchar AS event_id, t.member_user_id, t.accepted_at, t.declined_at,
-      t.removed_at, t.invited_at, t.role, t.role_label, t.cohost_level, NULL AS e_title, NULL::timestamptz AS e_starts_at, NULL::timestamptz AS e_ends_at,
+      t.removed_at, t.invited_at, t.role, t.role_label, t.cohost_level, t.removal_reason, t.removal_note, NULL AS e_title, NULL::timestamptz AS e_starts_at, NULL::timestamptz AS e_ends_at,
       NULL AS e_timezone, NULL AS e_status
     FROM event_door_team t WHERE t.id = ${inviteId}
     UNION ALL
     SELECT 'event', m.id, e.host_user_id, m.event_id, m.member_user_id, m.accepted_at, m.declined_at,
-      m.removed_at, m.invited_at, m.role, m.role_label, m.cohost_level, e.title, e.starts_at, e.ends_at, e.timezone, e.status
+      m.removed_at, m.invited_at, m.role, m.role_label, m.cohost_level, m.removal_reason, m.removal_note, e.title, e.starts_at, e.ends_at, e.timezone, e.status
     FROM event_door_members m JOIN events e ON e.id = m.event_id WHERE m.id = ${inviteId}`);
   return (r as InviteRow) ?? null;
 }
@@ -336,6 +362,10 @@ async function inviteJson(r: InviteRow) {
     upcoming: upcoming.map((e) => ({ id: String(e.id), title: e.title, startsAt: iso(e.starts_at), timezone: e.timezone })),
     // Step 4a: the pay offered for this event, only the invitee's own (null for standing invites and on any failure).
     pay: await invitePay(r),
+    // Step 4b-2 (call 21): why they were taken off, when the host gave a reason. Null otherwise.
+    removal: r.removed_at && r.removal_reason
+      ? { reason: r.removal_reason, label: removalLabel(r.removal_reason, r.removal_note ?? null), note: r.removal_note ?? null, at: iso(r.removed_at) }
+      : null,
   };
 }
 
@@ -421,6 +451,8 @@ for (const answer of ["accept", "decline"] as const) {
       if (!(await answerInvite(ctx.invite, ctx.userId, answer))) return fail(res, 409, "INVITE_CLOSED", "This invite is no longer open.");
       if (answer === "accept") {
         notifyDoorAccepted({ hostUserId: ctx.invite.host_user_id, memberUserId: ctx.userId, scope: ctx.invite.scope, eventId: ctx.invite.event_id, role: (ctx.invite.role ?? "door") as TeamRole, roleLabel: ctx.invite.role_label ?? null }).catch(() => {});
+        // Step 4b-2 (call 22): a paid spot without payout setup gets its first reminder now.
+        notifySetupOnAccept({ scope: ctx.invite.scope, eventId: ctx.invite.event_id, hostUserId: String(ctx.invite.host_user_id), memberUserId: ctx.userId, role: String(ctx.invite.role ?? "door") }).catch(() => {});
       }
       const fresh = await loadInvite(ctx.invite.id);
       res.json({ success: true, invite: await inviteJson(fresh!) });
@@ -435,6 +467,10 @@ router.post("/door/invites/:inviteId/leave", hybridAuthMiddleware, doorLimiter, 
   try {
     const ctx = await myInvite(req, res);
     if (!ctx) return;
+    // Step 4b-2 (call 21): once the event is over its team is locked.
+    if (ctx.invite.scope === "event" && ctx.invite.e_ends_at && new Date(ctx.invite.e_ends_at).getTime() <= Date.now()) {
+      return fail(res, 409, "EVENT_ENDED", TEAM_LOCKED);
+    }
     const done = await rows<any>(sql`
       UPDATE ${doorTable(ctx.invite.scope)} SET removed_at = now(), removed_by_user_id = ${ctx.userId}
       WHERE id = ${ctx.invite.id} AND member_user_id = ${ctx.userId} AND removed_at IS NULL AND accepted_at IS NOT NULL
@@ -546,14 +582,34 @@ router.delete("/:id/door/team/:userId", hybridAuthMiddleware, async (req: Reques
     if (cohostCantTouch(res, ctx, scope.data, role)) return;
     const memberId = String(req.params.userId);
     if (!validId(memberId)) return fail(res, 404, "NOT_ON_TEAM", "That person isn't on your Event team.");
+    // Step 4b-2 (call 21): once the event is over its team is locked. Standing team changes only reach future events.
+    if (scope.data === "event" && new Date(ctx.event.ends_at).getTime() <= Date.now()) return fail(res, 409, "EVENT_ENDED", TEAM_LOCKED);
+    const reason = parseRemoval(req.query.reason, req.query.note);
+    if (!reason.ok) return fail(res, 400, "INVALID_REQUEST", reason.message);
+    // A reason is needed to take off someone who accepted a paid spot. Today's app and website send none, and no
+    // screen there sets pay yet, so they keep working for everyone they can reach.
+    if (!reason.value && (await acceptedPaidSpot(scope.data, ctx.event, memberId, role))) {
+      return fail(res, 400, "REASON_REQUIRED", "Choose why you're taking them off: late, no show, unprofessional conduct, or another reason.");
+    }
+    const why = reason.value;
     const done = scope.data === "standing"
       ? await rows<any>(sql`
-          UPDATE event_door_team SET removed_at = now(), removed_by_user_id = ${ctx.userId}
+          UPDATE event_door_team SET removed_at = now(), removed_by_user_id = ${ctx.userId},
+                 removal_reason = ${why?.reason ?? null}, removal_note = ${why?.note ?? null}
           WHERE host_user_id = ${ctx.event.host_user_id} AND member_user_id = ${memberId} AND role = ${role} AND removed_at IS NULL RETURNING id`)
       : await rows<any>(sql`
-          UPDATE event_door_members SET removed_at = now(), removed_by_user_id = ${ctx.userId}
-          WHERE event_id = ${ctx.event.id} AND member_user_id = ${memberId} AND role = ${role} AND removed_at IS NULL RETURNING id`);
+          UPDATE event_door_members SET removed_at = now(), removed_by_user_id = ${ctx.userId},
+                 removal_reason = ${why?.reason ?? null}, removal_note = ${why?.note ?? null}
+          WHERE event_id = ${ctx.event.id} AND member_user_id = ${memberId} AND role = ${role} AND removed_at IS NULL
+            AND EXISTS (SELECT 1 FROM events e WHERE e.id = event_door_members.event_id AND e.ends_at > now())
+          RETURNING id`);
     if (!done.length) return fail(res, 404, "NOT_ON_TEAM", "That person isn't on your Event team.");
+    if (why) {
+      const [full] = await rows<any>(sql`SELECT * FROM events WHERE id = ${ctx.event.id}`);
+      const what = scope.data === "standing" ? `${(await hostIdentity(full ?? ctx.event)).publicName}'s events` : String(ctx.event.title);
+      notifyTeamRemoved({ memberUserId: memberId, hostUserId: ctx.userId, inviteId: String(done[0].id), scope: scope.data, eventId: scope.data === "event" ? String(ctx.event.id) : null,
+        label: removalLabel(why.reason, why.note), what }).catch(() => {});
+    }
     res.json({ success: true, removed: true });
   } catch (err) {
     console.error("[Door] team remove failed:", err);
@@ -781,7 +837,19 @@ router.get("/:id/team/me", hybridAuthMiddleware, teamLimiter, async (req: Reques
       SELECT 'standing', t.role, t.role_label, t.created_at FROM event_door_team t
       WHERE t.host_user_id = ${e.host_user_id} AND t.member_user_id = ${userId} AND t.removed_at IS NULL AND t.accepted_at IS NOT NULL
       ORDER BY created_at, role`);
-    if (!mine.length) return fail(res, 404, "EVENT_NOT_FOUND", "Event not found.");
+    const ended = new Date(e.ends_at).getTime() <= Date.now();
+    // Step 4b-2 (call 21): whoever worked it keeps one view of the event after it ends: their own pay and whether it
+    // was sent or settled, even if they left the standing team since. Nothing else.
+    const payout = await myTeamPayout(String(e.id), userId).catch((err) => { console.error("[Door] own team payout failed:", err); return null; });
+    if (!mine.length) {
+      if (!ended || !payout) return fail(res, 404, "EVENT_NOT_FOUND", "Event not found.");
+      return res.json({
+        success: true,
+        event: { id: String(e.id), slug: e.slug, title: e.title, startsAt: iso(e.starts_at), endsAt: iso(e.ends_at), timezone: e.timezone },
+        host: { name: (await hostIdentity(e)).publicName },
+        roles: [], promoter: null, payTotalCents: payout.amountCents, payout, payoutSetup: null,
+      });
+    }
     const times = await schedulesFor(e.id);
     const seen = new Set<string>();
     const roles = [];
@@ -821,6 +889,19 @@ router.get("/:id/team/me", hybridAuthMiddleware, teamLimiter, async (req: Reques
         console.error("[Door] promoter link failed (team view sent without it):", err);
       }
     }
+    // Step 4b-2 (call 22): before the pay is worked out, a paid member sees whether they still need payout setup and
+    // the deadline. Null for people with no pay and once the pay is worked out (then `payout` tells the rest).
+    let payoutSetup: { needed: boolean; deadline: string | null } | null = null;
+    try {
+      const paid = (roles as any[]).some((r) => r.pay && (r.pay.payType !== "none" || r.pay.commissionPercent));
+      if (paid && !e.team_pay_fixed_at && !payout) {
+        const [rd] = await rows<any>(sql`SELECT ${memberReadySql(userId)} AS ready`);
+        const ready = rd?.ready === true || rd?.ready === "t";
+        payoutSetup = { needed: !ready, deadline: iso(new Date(new Date(e.ends_at).getTime() + 3 * 24 * 3600_000)) };
+      }
+    } catch (err) {
+      console.error("[Door] payout setup check failed (team view sent without it):", err);
+    }
     res.json({
       success: true,
       event: { id: String(e.id), slug: e.slug, title: e.title, startsAt: iso(e.starts_at), endsAt: iso(e.ends_at), timezone: e.timezone },
@@ -828,12 +909,64 @@ router.get("/:id/team/me", hybridAuthMiddleware, teamLimiter, async (req: Reques
       roles,
       promoter,
       payTotalCents,
+      payout,
+      payoutSetup,
     });
   } catch (err) {
     console.error("[Door] team me failed:", err);
     fail(res, 500, "SERVER_ERROR", "Could not load your Event team roles.");
   }
 });
+
+// ─── Team pay after the event (p4-team step 4b-2, calls 22 and 23) ──────────
+
+const settled = (res: Response, out: { payout: any } | SettleError) =>
+  "payout" in out ? res.json({ success: true, payout: out.payout }) : fail(res, out.status, out.code, out.message);
+
+/** Everyone's pay for this event once it is worked out: who Outsyde pays and who the host pays directly. Host and co-hosts. */
+router.get("/:id/team-payouts", hybridAuthMiddleware, teamLimiter, async (req: Request, res: Response) => {
+  try {
+    const ctx = await teamManager(req, res);
+    if (!ctx) return;
+    res.json({ success: true, payouts: await teamPayoutsForHost(String(ctx.event.id)) });
+  } catch (err) {
+    console.error("[Door] team payouts failed:", err);
+    fail(res, 500, "SERVER_ERROR", "Could not load team pay.");
+  }
+});
+
+/** I paid them (the host only: it is the host's own money). DELETE undoes it until the member taps Got it. */
+for (const method of ["post", "delete"] as const) {
+  router[method]("/:id/team-payouts/:userId/paid", hybridAuthMiddleware, teamLimiter, async (req: Request, res: Response) => {
+    try {
+      const ctx = await teamManager(req, res, false);
+      if (!ctx) return;
+      const memberId = String(req.params.userId);
+      if (!validId(memberId)) return fail(res, 404, "NOT_FOUND", "No pay for that person at this event.");
+      settled(res, method === "post" ? await markPaid(ctx.event, memberId, ctx.userId) : await undoPaid(ctx.event, memberId));
+    } catch (err) {
+      console.error("[Door] team pay settle failed:", err);
+      fail(res, 500, "SERVER_ERROR", "Could not save that.");
+    }
+  });
+}
+
+/** The member answers I paid them: Got it (final) or Not yet. */
+for (const [path, answer] of [["got-it", "got_it"], ["not-yet", "not_yet"]] as const) {
+  router.post(`/:id/team/me/payout/${path}`, hybridAuthMiddleware, teamLimiter, async (req: Request, res: Response) => {
+    try {
+      const userId = getUserIdFromRequest(req);
+      if (!userId) return fail(res, 401, "UNAUTHORIZED", "Sign in to continue.");
+      const eventId = String(req.params.id);
+      const [e] = validId(eventId) ? await rows<any>(sql`SELECT * FROM events WHERE id = ${eventId}`) : [];
+      if (!e) return fail(res, 404, "EVENT_NOT_FOUND", "Event not found.");
+      settled(res, await memberAnswer(e, userId, answer));
+    } catch (err) {
+      console.error("[Door] team pay answer failed:", err);
+      fail(res, 500, "SERVER_ERROR", "Could not save that.");
+    }
+  });
+}
 
 // ─── Check in, undo, guest list (Task 3) ────────────────────────────────────
 

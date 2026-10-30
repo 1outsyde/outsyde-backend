@@ -2537,6 +2537,37 @@ export function renderEventOwedReminder(params: EventOwedReminderParams): { subj
   return { subject: `You owe Outsyde ${amount} from an earlier event`, html };
 }
 
+/** p4-team step 4b-2 (Legend 2026-10-30, call 22): the day of the event and the day after, to a paid member without payout setup. No dashes. */
+export type TeamSetupReminderParams = {
+  userId: string; toEmail: string; firstName: string | null; amountCents: number; eventTitle: string; deadlineText: string;
+  /** The day after the event: last email before the deadline. */
+  final: boolean;
+};
+
+export function renderTeamSetupReminder(params: TeamSetupReminderParams): { subject: string; html: string } {
+  const amount = `$${(params.amountCents / 100).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+  const title = escapeHtml(params.eventTitle);
+  const day = escapeHtml(params.deadlineText);
+  const pay = params.amountCents > 0 ? `Your ${amount}` : 'Your pay';
+  const heading = params.firstName ? `Hi ${escapeHtml(params.firstName)}, set up payouts to get paid` : 'Set up payouts to get paid';
+  const p = (t: string, color = '#CCCCCC') => `<p style="color:${color};font-size:15px;line-height:1.6;margin:0 0 14px 0;">${t}</p>`;
+  const html = wrapEmail(`
+    ${emailHeader(heading, params.final ? 'Last reminder' : title)}
+    <tr><td style="background:#1A1A1A;padding:0 32px 8px;">
+      ${p(`${pay} for ${title} goes to the host if payouts aren't set up by ${day}.`)}
+      ${p('Open the Outsyde app, go to the event in My Events and tap Set up payouts. It takes a few minutes with Stripe.')}
+      ${p('If your share goes to the host, the host pays you directly instead of Outsyde.', '#888888')}
+    </td></tr>
+    ${emailFooter()}
+  `);
+  return { subject: `${params.final ? 'Last reminder: s' : 'S'}et up payouts to get your pay for ${params.eventTitle}`, html };
+}
+
+export async function sendTeamSetupReminderEmail(params: TeamSetupReminderParams): Promise<void> {
+  const { subject, html } = renderTeamSetupReminder(params);
+  await sendBrandedEmail(params.toEmail, subject, html, { kind: 'ticket', label: 'Event team payout setup reminder' });
+}
+
 export async function sendEventOwedReminderEmail(params: EventOwedReminderParams): Promise<void> {
   const { subject, html } = renderEventOwedReminder(params);
   await sendBrandedEmail(params.toEmail, subject, html, { kind: 'ticket', label: 'Event payout owed reminder' });

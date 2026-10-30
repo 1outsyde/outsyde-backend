@@ -20,7 +20,7 @@ import {
   retryPayout, resolveRecovery, loadHostEmailTarget, isHostIssue, claimHostEmail, releaseHostEmail, hostEmailCopy, RECOVERY_ACTIONS,
 } from "./adminEventsActions";
 import {
-  listAdminEvents, listAttention, totalsOf, loadAdminEventRow, loadTicketTypes, loadRecoveries, loadActivity,
+  listAdminEvents, listAttention, listTeamAttention, totalsOf, loadAdminEventRow, loadTicketTypes, loadRecoveries, loadActivity,
   payoutDetailOf, maskAccount, payoutSetupOf,
 } from "./adminEventsQueries";
 
@@ -67,11 +67,15 @@ adminEventsRouter.get("/", async (req, res) => {
   const to = parsed.data.to ? new Date(parsed.data.to).toISOString() : null;
   try {
     const [events, attention] = await Promise.all([listAdminEvents({ from, to }), listAttention()]);
+    // Step 4b-2: team pay items in their own field (today's page reads only `attention`). Its own try: never fails the list.
+    let teamAttention: Awaited<ReturnType<typeof listTeamAttention>> = [];
+    try { teamAttention = await listTeamAttention(); } catch (err) { console.error("[AdminEvents] team attention failed (list sent without it):", err); }
     res.json({
       success: true,
       range: { from, to, default: !from && !to },
       totals: totalsOf(events),
       attention,
+      teamAttention,
       events,
     });
   } catch (err) {
@@ -112,6 +116,16 @@ adminEventsRouter.get("/:id", async (req, res) => {
       checkIns: { checkedIn: Number(raw.checked_in ?? 0), validTickets: event.ticketsValid },
       payout: payoutDetailOf(raw, event.payoutDueAt),
       recoveries,
+      // Step 4b-2: each team member's pay for this event (additive; today's page doesn't read it).
+      teamPayouts: await (async () => {
+        try {
+          const { teamPayoutsForHost } = await import("./teamSend");
+          return (await teamPayoutsForHost(id)).map((t) => ({ ...t, breakdown: undefined }));
+        } catch (err) {
+          console.error("[AdminEvents] team payouts failed (detail sent without them):", err);
+          return [];
+        }
+      })(),
       host: {
         ...event.host,
         payoutReady: setup === "ready", payoutSetup: setup,

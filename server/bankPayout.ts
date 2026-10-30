@@ -40,6 +40,8 @@ export type Gates = {
   openIssueRows: number;
   eventPayoutsWaitingBalance: number;
   referralPayoutsWaitingBalance: number;
+  /** Step 4b-2: team pay waiting for platform balance (the bank payout must not take that money). */
+  teamPayoutsWaitingBalance: number;
 };
 
 export async function computeHeld(): Promise<{ breakdown: HeldBreakdown; total: number; gates: Gates }> {
@@ -70,7 +72,8 @@ SELECT
  (SELECT count(*) FROM event_payouts WHERE status='pending' AND last_error ILIKE '%insufficient%')::int AS event_payouts_waiting_balance,
  (SELECT COALESCE(SUM(amount_cents),0) FROM referral_payouts WHERE status IN ('pending','held','review'))::bigint AS referral_payouts_open,
  (SELECT count(*) FROM referral_payouts WHERE status='pending' AND last_error ILIKE '%insufficient%')::int AS referral_payouts_waiting_balance,
- (SELECT COALESCE(SUM(amount_cents),0) FROM event_team_payouts WHERE status IN ('pending','held','review'))::bigint AS team_payouts_open
+ (SELECT COALESCE(SUM(amount_cents),0) FROM event_team_payouts WHERE status IN ('pending','held','review'))::bigint AS team_payouts_open,
+ (SELECT count(*) FROM event_team_payouts WHERE status='pending' AND last_error ILIKE '%insufficient%')::int AS team_payouts_waiting_balance
 `));
   const n = (v: unknown) => Number(v ?? 0);
   const breakdown: HeldBreakdown = {
@@ -94,6 +97,7 @@ SELECT
     openIssueRows: n(r.open_issue_rows),
     eventPayoutsWaitingBalance: n(r.event_payouts_waiting_balance),
     referralPayoutsWaitingBalance: n(r.referral_payouts_waiting_balance),
+    teamPayoutsWaitingBalance: n(r.team_payouts_waiting_balance),
   };
   const total = Object.values(breakdown).reduce((a, b) => a + b, 0);
   return { breakdown, total, gates };
@@ -430,6 +434,7 @@ export async function runBankPayoutJob(now: Date = new Date(), s?: BankStripe): 
     if (held.gates.openIssueRows > 0) return await skip("open_booking_payout_issues", { held: held.total, breakdown: held.breakdown });
     if (held.gates.eventPayoutsWaitingBalance > 0) return await skip("event_payout_waiting_balance", { held: held.total, breakdown: held.breakdown });
     if (held.gates.referralPayoutsWaitingBalance > 0) return await skip("referral_payout_waiting_balance", { held: held.total, breakdown: held.breakdown });
+    if (held.gates.teamPayoutsWaitingBalance > 0) return await skip("team_payout_waiting_balance", { held: held.total, breakdown: held.breakdown });
 
     const bal = await st.getAvailableUsdBalance(STRIPE_CALL_BOUND);
     const available = Number(bal.usdCents);

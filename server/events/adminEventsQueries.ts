@@ -265,6 +265,34 @@ export async function listAttention() {
   }));
 }
 
+/**
+ * Step 4b-2: team pay that needs a look, in its own list so today's admin page (which only knows the three kinds
+ * above) is unchanged: sending in review, sending held, and a Not yet open for 3 days (call 23). One statement.
+ */
+export async function listTeamAttention() {
+  const { NOT_RECEIVED_FLAG_DAYS } = await import("./teamSend");
+  const found = await rows<any>(sql`
+    SELECT CASE WHEN r.status = 'review' THEN 'team_review'
+                WHEN r.status = 'held' THEN 'team_held'
+                ELSE 'team_not_received' END AS kind,
+           r.id, r.event_id, r.member_user_id, r.amount_cents, r.status, r.hold_reason, r.last_error,
+           CASE WHEN r.status IN ('review', 'held') THEN r.updated_at ELSE r.member_not_yet_at END AS since,
+           e.title, u.username, u.first_name
+    FROM event_team_payouts r JOIN events e ON e.id = r.event_id JOIN users u ON u.id = r.member_user_id
+    WHERE r.status IN ('review', 'held')
+       OR (r.member_not_yet_at IS NOT NULL AND r.member_confirmed_at IS NULL
+           AND r.member_not_yet_at <= now() - make_interval(days => ${NOT_RECEIVED_FLAG_DAYS}::int))
+    ORDER BY CASE WHEN r.status = 'review' THEN 0 WHEN r.status = 'held' THEN 1 ELSE 2 END, since, r.id`);
+  return found.map((r) => ({
+    kind: r.kind as "team_review" | "team_held" | "team_not_received",
+    teamPayoutId: String(r.id), eventId: String(r.event_id), eventTitle: r.title as string,
+    memberUserId: String(r.member_user_id), member: { username: r.username ?? null, firstName: r.first_name ?? null },
+    amountCents: num(r.amount_cents),
+    reason: r.kind === "team_held" ? (r.hold_reason ?? null) : r.kind === "team_review" ? maskText(r.last_error) : null,
+    since: iso(r.since),
+  }));
+}
+
 // ─── Detail ─────────────────────────────────────────────────────────────────
 
 export async function loadAdminEventRow(id: string): Promise<{ raw: any; event: AdminEventRow } | null> {
