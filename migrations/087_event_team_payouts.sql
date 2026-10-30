@@ -19,6 +19,19 @@ ALTER TABLE events ADD COLUMN IF NOT EXISTS team_pay_fixed_at TIMESTAMPTZ;
 ALTER TABLE event_payouts ADD COLUMN IF NOT EXISTS team_cents INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE event_payouts DROP CONSTRAINT IF EXISTS event_payouts_amount_positive;
 ALTER TABLE event_payouts DROP CONSTRAINT IF EXISTS event_payouts_amount_matches;
+-- The old two checks may carry other names on a database built another way (see 071): drop any check on
+-- amount_cents that isn't one of the new ones below, by its definition.
+DO $$
+DECLARE c record;
+BEGIN
+  FOR c IN SELECT conname FROM pg_constraint
+           WHERE conrelid = 'event_payouts'::regclass AND contype = 'c'
+             AND pg_get_constraintdef(oid) ILIKE '%amount_cents%'
+             AND conname NOT IN ('event_payouts_amount_nonneg', 'event_payouts_amount_matches')
+  LOOP
+    EXECUTE format('ALTER TABLE event_payouts DROP CONSTRAINT %I', c.conname);
+  END LOOP;
+END $$;
 ALTER TABLE event_payouts DROP CONSTRAINT IF EXISTS event_payouts_amount_nonneg;
 ALTER TABLE event_payouts DROP CONSTRAINT IF EXISTS event_payouts_team_valid;
 ALTER TABLE event_payouts ADD CONSTRAINT event_payouts_amount_nonneg CHECK (amount_cents >= 0);
@@ -56,6 +69,11 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_event_team_payouts_member ON event_team_pay
 CREATE INDEX IF NOT EXISTS idx_event_team_payouts_open ON event_team_payouts (next_attempt_at) WHERE status IN ('pending', 'held', 'review');
 
 ALTER TABLE event_payout_recoveries ADD COLUMN IF NOT EXISTS host_reminded_at TIMESTAMPTZ;
+
+-- An event paid out before this migration is done: mark it, so the job never visits it and the host summary shows it
+-- as worked out. Production has 0 event payouts today.
+UPDATE events SET team_pay_fixed_at = p.created_at
+FROM event_payouts p WHERE p.event_id = events.id AND events.team_pay_fixed_at IS NULL;
 
 -- Verify (read-only):
 -- SELECT column_name FROM information_schema.columns WHERE table_name = 'events' AND column_name = 'team_pay_fixed_at';

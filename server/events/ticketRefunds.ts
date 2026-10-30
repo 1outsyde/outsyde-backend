@@ -73,9 +73,18 @@ export async function requestOrderRefund(orderId: string, actorUserId: string, b
           AND NOT EXISTS (SELECT 1 FROM tickets t WHERE t.order_id = o.id AND t.checked_in_at IS NOT NULL)`
     // Step 4b-1 (Legend 2026-10-30): no host refunds once the payout is worked out, 3 days after the event.
     : sql`e.host_user_id = ${actorUserId} AND e.status = 'published' AND e.team_pay_fixed_at IS NULL
-          AND NOT EXISTS (SELECT 1 FROM event_payouts p WHERE p.event_id = e.id)`;
+          AND NOT EXISTS (SELECT 1 FROM event_payouts p WHERE p.event_id = e.id)
+          AND NOT EXISTS (SELECT 1 FROM lk WHERE lk.team_pay_fixed_at IS NOT NULL)`;
   const [r] = await withDeadlockRetry(() => rows<any>(sql`
-    WITH o AS (
+    WITH lk AS (
+      -- Step 4b-1: an event that has ended may be getting its payout worked out right now. Wait for that statement
+      -- (it holds the event row) and read the event as it is after it: once the payout is worked out, no host refund.
+      -- Live events aren't locked (their refunds update the event row below).
+      SELECT e.id, e.team_pay_fixed_at FROM events e
+      WHERE e.id = (SELECT event_id FROM ticket_orders WHERE id = ${orderId}) AND e.ends_at <= now()
+      FOR SHARE
+    ),
+    o AS (
       UPDATE ticket_orders o SET status = 'refunding', refund_reason = ${by},
              refund_amount_cents = LEAST(o.total_cents - o.refunded_cents, GREATEST(0, o.subtotal_cents + o.tax_cents - o.discount_cents)),
              refund_requested_at = now(), refund_requested_by = ${actorUserId}, refund_attempts = 0,

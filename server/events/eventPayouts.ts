@@ -446,13 +446,23 @@ export async function openRecoveries(limit = 50): Promise<number> {
   // Step 4b-1: a $0 host payout (Outsyde and the team took everything) is paid with no transfer, so there is nothing
   // to reverse: its refunds are owed by the host straight away and come back from their next event payout.
   const made = await rows<any>(sql`
+    -- A $0 payout for a host who had no payout account yet has no account on record: the debt is tied to the account
+    -- the host has now (same rule as the payout destination), so it comes out of their next payout. No account yet:
+    -- it waits, and is opened on the first run after they set up payouts.
     INSERT INTO event_payout_recoveries (ticket_id, payout_id, connected_account_id, amount_cents, status, last_error)
-    SELECT t.id, p.id, p.connected_account_id, t.host_net_cents,
+    SELECT t.id, p.id, COALESCE(p.connected_account_id, cur.acct), t.host_net_cents,
            CASE WHEN p.transfer_id IS NULL THEN 'owed' ELSE 'pending' END,
            CASE WHEN p.transfer_id IS NULL THEN 'the payout was $0, so there is no transfer to take it back from' END
     FROM tickets t JOIN event_payouts p ON p.id = t.payout_id
-    WHERE t.status = 'refunded' AND p.status = 'paid' AND p.connected_account_id IS NOT NULL
-      AND (p.transfer_id IS NOT NULL OR p.amount_cents = 0)
+    JOIN events e ON e.id = p.event_id
+    LEFT JOIN LATERAL (
+      SELECT CASE WHEN e.host_type = 'business' AND e.host_business_id IS NOT NULL THEN (SELECT b.stripe_account_id FROM businesses b WHERE b.id = e.host_business_id)
+                  WHEN e.host_type = 'photographer' AND e.host_photographer_id IS NOT NULL THEN (SELECT ph.stripe_account_id FROM photographers ph WHERE ph.id = e.host_photographer_id)
+                  ELSE (SELECT u.stripe_account_id FROM user_payout_accounts u WHERE u.user_id = e.host_user_id) END AS acct
+    ) cur ON true
+    WHERE t.status = 'refunded' AND p.status = 'paid'
+      AND ((p.transfer_id IS NOT NULL AND p.connected_account_id IS NOT NULL)
+        OR (p.transfer_id IS NULL AND p.amount_cents = 0 AND COALESCE(p.connected_account_id, cur.acct) IS NOT NULL))
       AND t.host_net_cents > 0
       AND NOT EXISTS (SELECT 1 FROM event_payout_recoveries r WHERE r.ticket_id = t.id)
     ORDER BY t.refunded_at NULLS LAST, t.id
@@ -638,13 +648,15 @@ export function owedReminderCopy(totalCents: number): { title: string; body: str
 export async function remindOwedHosts(limit = 100): Promise<number> {
   const due = await rows<any>(sql`
     WITH owed AS (
-      SELECT r.id, e.host_user_id, r.amount_cents, r.host_reminded_at
+      -- Last time this host was told about this debt: the weekly reminder, else the one-time owed notice
+      -- (bookingRecoveries notifyOwedSellers, seller_notified_at), else when it was opened. Day one is that notice.
+      SELECT r.id, e.host_user_id, r.amount_cents, COALESCE(r.host_reminded_at, r.seller_notified_at, r.created_at) AS last_told
       FROM event_payout_recoveries r JOIN event_payouts p ON p.id = r.payout_id JOIN events e ON e.id = p.event_id
       WHERE r.status = 'owed'
     ),
     hosts AS (
       SELECT host_user_id FROM owed GROUP BY host_user_id
-      HAVING max(host_reminded_at) IS NULL OR max(host_reminded_at) <= now() - make_interval(days => ${OWED_REMIND_DAYS}::int)
+      HAVING max(last_told) <= now() - make_interval(days => ${OWED_REMIND_DAYS}::int)
       ORDER BY host_user_id LIMIT ${limit}
     ),
     claimed AS (
@@ -652,7 +664,7 @@ export async function remindOwedHosts(limit = 100): Promise<number> {
       FROM owed JOIN hosts ON hosts.host_user_id = owed.host_user_id
       WHERE r.id = owed.id AND r.status = 'owed'
         -- Re-checked under the row lock: a run that claimed this host a moment ago wins, this one sends nothing.
-        AND (r.host_reminded_at IS NULL OR r.host_reminded_at <= now() - make_interval(days => ${OWED_REMIND_DAYS}::int))
+        AND COALESCE(r.host_reminded_at, r.seller_notified_at, r.created_at) <= now() - make_interval(days => ${OWED_REMIND_DAYS}::int)
       RETURNING owed.host_user_id, r.amount_cents
     )
     SELECT c.host_user_id, sum(c.amount_cents)::int AS total, u.email, u.first_name
