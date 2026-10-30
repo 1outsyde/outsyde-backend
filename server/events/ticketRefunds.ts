@@ -407,11 +407,17 @@ router.get("/:id/summary", hybridAuthMiddleware, async (req: Request, res: Respo
     // Same as the payout job: published events only, paying valid tickets of completed orders with host_net_cents > 0.
     // p4-team step 3: per promoter breakdown for the host and co-hosts (Legend 2026-10-30). Every promoter has a
     // link; removed promoters stay listed with their past sales, marked not active. No buyer details.
-    await ensurePromoterLinks(String(e.id));
-    const promoters = (await promoterLinkStats(String(e.id))).map((l) => ({
-      userId: l.userId, username: l.username, firstName: l.firstName, code: l.code,
-      rsvps: l.rsvps, ticketsSold: l.ticketsSold, salesCents: l.salesCents, active: l.active,
-    }));
+    // Its own try: a failure here sends an empty list and never fails the summary old app builds read.
+    let promoters: Array<Record<string, unknown>> = [];
+    try {
+      await ensurePromoterLinks(String(e.id));
+      promoters = (await promoterLinkStats(String(e.id))).map((l) => ({
+        userId: l.userId, username: l.username, firstName: l.firstName, code: l.code,
+        rsvps: l.rsvps, ticketsSold: l.ticketsSold, salesCents: l.salesCents, active: l.active,
+      }));
+    } catch (err) {
+      console.error("[Tickets] promoter breakdown failed (summary sent without it):", err);
+    }
     const payable = Number(tot?.host_net ?? 0) > 0;
     const expectedAt = e.status === "published" && payable && e.ends_at
       ? new Date(new Date(e.ends_at).getTime() + HOST_PAYOUT_DELAY_DAYS * 86400000).toISOString() : null;

@@ -50,6 +50,8 @@ function isActivePromoter(eventId: SQL, hostUserId: SQL, userId: SQL): SQL {
  * The link id an order should record, as a SQL expression for the order's own INSERT (so it is decided in the
  * same statement as the sale). NULL when the code is missing, unknown, for another event, the buyer's own, or
  * belongs to someone who is no longer an active promoter on an active account.
+ * Paid checkout decides this when the seats are held, so a promoter removed during the 10 minute hold still gets
+ * that sale once it is paid (the buyer started through their link while it counted).
  */
 export function promoterLinkIdSql(code: string | null, eventId: string, buyerUserId: string): SQL {
   if (!code) return sql`NULL::varchar`;
@@ -109,14 +111,15 @@ export async function promoterLinkStats(eventId: string, onlyUserId?: string): P
            count(t.id) FILTER (WHERE t.price_cents = 0)::int AS rsvp_count,
            count(t.id) FILTER (WHERE t.price_cents > 0)::int AS sold_count,
            COALESCE(sum(t.price_cents) FILTER (WHERE t.price_cents > 0), 0)::int AS sales_total,
-           ${isActivePromoter(sql`l.event_id`, sql`le.host_user_id`, sql`l.promoter_user_id`)} AS is_active_promoter
+           (${isActivePromoter(sql`l.event_id`, sql`le.host_user_id`, sql`l.promoter_user_id`)}
+             AND pu.is_active = true AND COALESCE(pu.deletion_status, 'active') = 'active') AS is_active_promoter
     FROM event_promoter_links l
     JOIN events le ON le.id = l.event_id
     JOIN users pu ON pu.id = l.promoter_user_id
     LEFT JOIN ticket_orders o ON o.promoter_link_id = l.id AND o.status = 'completed'
     LEFT JOIN tickets t ON t.order_id = o.id AND t.status = 'valid'
     WHERE l.event_id = ${eventId} AND (${onlyUserId ?? null}::text IS NULL OR l.promoter_user_id = ${onlyUserId ?? null}::text)
-    GROUP BY l.id, le.host_user_id, pu.username, pu.first_name
+    GROUP BY l.id, le.host_user_id, pu.username, pu.first_name, pu.is_active, pu.deletion_status
     ORDER BY sales_total DESC, sold_count DESC, rsvp_count DESC, l.created_at`);
   return list.map((r) => ({
     linkId: String(r.link_id), code: String(r.link_code), userId: String(r.promoter_id),

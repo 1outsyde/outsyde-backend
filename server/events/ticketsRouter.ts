@@ -270,7 +270,7 @@ const rsvpSchema = z.object({
   quantity: z.number().int().min(1).max(MAX_PER_ORDER).optional(),
   idempotencyKey: z.string().trim().min(8).max(100).optional(),
   // p4-team step 3: the promoter link the guest came through. Anything that isn't a live link is ignored, never refused.
-  linkCode: z.string().max(200).nullable().optional(),
+  linkCode: z.unknown().optional(),
 }).strict();
 
 /** A repeated key returns the earlier RSVP only when it was for the same thing and is still active. */

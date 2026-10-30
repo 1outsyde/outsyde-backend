@@ -694,11 +694,16 @@ router.get("/:id/team/me", hybridAuthMiddleware, teamLimiter, async (req: Reques
     }
     // p4-team step 3: promoters get their own link and only their own numbers. Everyone else: null.
     let promoter: { code: string; url: string; rsvps: number; ticketsSold: number; salesCents: number } | null = null;
+    // Its own try: a failure here leaves `promoter` null and never fails the roles old app builds read.
     if (seen.has(PROMOTER_ROLE)) {
-      await ensurePromoterLinks(String(e.id), userId);
-      const [mine1] = await promoterLinkStats(String(e.id), userId);
-      if (mine1) {
-        promoter = { code: mine1.code, url: promoterLinkUrl(e.slug, mine1.code), rsvps: mine1.rsvps, ticketsSold: mine1.ticketsSold, salesCents: mine1.salesCents };
+      try {
+        await ensurePromoterLinks(String(e.id), userId);
+        const [mine1] = await promoterLinkStats(String(e.id), userId);
+        if (mine1) {
+          promoter = { code: mine1.code, url: promoterLinkUrl(e.slug, mine1.code), rsvps: mine1.rsvps, ticketsSold: mine1.ticketsSold, salesCents: mine1.salesCents };
+        }
+      } catch (err) {
+        console.error("[Door] promoter link failed (team view sent without it):", err);
       }
     }
     res.json({

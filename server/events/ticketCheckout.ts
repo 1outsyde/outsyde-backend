@@ -280,7 +280,7 @@ const checkoutSchema = z.object({
   // The app opens Stripe's payment sheet: answer with a customer session too (p4-applepay).
   paymentSheet: z.boolean().optional(),
   // p4-team step 3: the promoter link the buyer came through. Anything that isn't a live link is ignored, never refused.
-  linkCode: z.string().max(200).nullable().optional(),
+  linkCode: z.unknown().optional(),
 }).strict();
 
 function moneyJson(o: any) {

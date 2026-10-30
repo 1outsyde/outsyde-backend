@@ -29,6 +29,10 @@
  *    on purpose; dropping both makes "cancelled RSVP drops" and "refund drops the sale" fail.
  *  - the `seen.has(PROMOTER_ROLE)` check in /team/me is backed by the role filter in ensurePromoterLinks, so
  *    loosening it alone still passes on purpose (covered by the mutation above).
+ *  - drop `lu.is_active = true` from the link lookup → "turned off account: link stops counting" fails.
+ *  - drop the account check from `active` in the counts → "turned off account shows as not active" fails.
+ *  - put back `linkCode: z.string().max(200)` (RSVP or checkout) → the "bad link codes never block the sale" checks fail.
+ *  - rethrow in the promoter try/catch (summary or /team/me) → "still answers when the promoter part fails" fails.
  */
 import http from "http";
 
@@ -130,11 +134,12 @@ function callAt(base: string, method: string, path: string, o: { token?: string;
   const pA = await mkUser("pa");       // promoter, this event
   const pS = await mkUser("ps");       // standing promoter (every event of the host)
   const pR = await mkUser("pr");       // promoter, removed part way through
+  const pD = await mkUser("pd");       // promoter whose account gets turned off
   const door = await mkUser("door");   // Admissions
   const coT = await mkUser("cot");     // co-host, team level
   const stranger = await mkUser("str");
   const buyers: Array<{ id: string; username: string }> = [];
-  for (let i = 0; i < 12; i++) buyers.push(await mkUser(`b${i}`));
+  for (let i = 0; i < 16; i++) buyers.push(await mkUser(`b${i}`));
   const ht = tok(host.id);
 
   const mkEvent = async (slug: string) => (await q(
@@ -159,6 +164,7 @@ function callAt(base: string, method: string, path: string, o: { token?: string;
   await invite(pA, "event", "host");
   await invite(pS, "standing", "host");
   await invite(pR, "event", "host");
+  await invite(pD, "event", "host");
   await invite(door, "event", "door");
   await invite(coT, "event", "cohost");
   await q(`UPDATE event_door_members SET accepted_at = now() WHERE event_id = $1 AND accepted_at IS NULL`, [ev.id]);
@@ -196,6 +202,7 @@ function callAt(base: string, method: string, path: string, o: { token?: string;
     assert(r.status === 200 && CODE_RE.test(codeS2 ?? "") && codeS2 !== codeS, "standing promoter: a different link for each event", r.body?.promoter);
     r = await me(pR);
     const codeR = r.body?.promoter?.code;
+    const codeD = (await me(pD)).body?.promoter?.code;
     assert(CODE_RE.test(codeR ?? ""), "second event promoter gets a link", r.body?.promoter);
     r = await me(door);
     assert(r.status === 200 && r.body?.promoter === null, "Admissions: no link", r.body);
@@ -204,7 +211,7 @@ function callAt(base: string, method: string, path: string, o: { token?: string;
     assert((await me(stranger)).status === 404, "stranger: still 404");
 
     console.log("\nRSVPs through a link");
-    const [b0, b1, b2, b3, b4, b5, b6, b7, b8, b9, b10, b11] = buyers;
+    const [b0, b1, b2, b3, b4, b5, b6, b7, b8, b9, b10, b11, b12, b13, b14, b15] = buyers;
     r = await rsvp(b0, { linkCode: codeA });
     assert(r.status === 201 && (await countsFor(r.body.order.id, pA)), "RSVP through A's link counts for A", r.body);
     r = await rsvp(b1, { linkCode: (codeA ?? "").toLowerCase(), quantity: 2 });
@@ -270,6 +277,21 @@ function callAt(base: string, method: string, path: string, o: { token?: string;
     assert(CODE_RE.test(codeR ?? "") && r.status === 201 && (await countsForNobody(r.body.order.id)), "removed promoter: new sales don't count, the RSVP still goes through", r.body);
     assert((await me(pR)).status === 404, "removed promoter loses their team view");
 
+    console.log("\nbad link codes never block the sale");
+    r = await rsvp(b12, { linkCode: 123 });
+    assert(r.status === 201 && (await countsForNobody(r.body?.order?.id)), "a number as the code: RSVP goes through", r.body);
+    r = await rsvp(b13, { linkCode: "A".repeat(500) });
+    assert(r.status === 201 && (await countsForNobody(r.body?.order?.id)), "a 500 character code: RSVP goes through", r.body);
+    r = await checkout(b14, { quantity: 1, linkCode: { a: 1 } });
+    assert(r.status === 201 && (await countsForNobody(r.body?.orderId)), "an object as the code: checkout goes through", r.body);
+    r = await checkout(pA, { quantity: 1, linkCode: codeA });
+    assert(CODE_RE.test(codeA ?? "") && r.status === 201 && (await countsForNobody(r.body?.orderId)), "own link doesn't count on paid checkout either", r.body);
+
+    console.log("\npromoter account turned off");
+    await q(`UPDATE users SET is_active = false WHERE id = $1`, [pD.id]);
+    r = await rsvp(b15, { linkCode: codeD });
+    assert(CODE_RE.test(codeD ?? "") && r.status === 201 && (await countsForNobody(r.body?.order?.id)), "turned off account: link stops counting, RSVP goes through", r.body);
+
     console.log("\nhost and co-host breakdown");
     r = await call("GET", `/api/events/${ev.id}/summary`, { token: ht });
     const list: any[] = r.body?.promoters ?? [];
@@ -278,13 +300,26 @@ function callAt(base: string, method: string, path: string, o: { token?: string;
     assert(row(pA)?.code === codeA && row(pA)?.rsvps === 2 && row(pA)?.ticketsSold === 0 && row(pA)?.salesCents === 0 && row(pA)?.active === true, "A's row", row(pA));
     assert(row(pS)?.rsvps === 1 && row(pS)?.active === true, "standing promoter's row", row(pS));
     assert(row(pR)?.rsvps === 1 && row(pR)?.active === false, "removed promoter keeps past sales, marked not active", row(pR));
-    assert(list.length === 3 && !list.some((x) => x.username === door.username || x.username === coT.username), "only promoters are listed", list);
+    assert(row(pD) !== undefined && row(pD)?.active === false, "turned off account shows as not active", row(pD));
+    assert(list.length === 4 && !list.some((x) => x.username === door.username || x.username === coT.username), "only promoters are listed", list);
     assert(list.length > 0 && list.every((x) => Object.keys(x).sort().join(",") === "active,code,firstName,rsvps,salesCents,ticketsSold,userId,username"), "no buyer or money internals in rows", list[0]);
     r = await call("GET", `/api/events/${ev.id}/summary`, { token: tok(coT.id) });
     assert(r.status === 200 && list.length > 0 && (r.body?.promoters ?? []).length === list.length, "co-host sees the same breakdown", r.body?.promoters);
     assert((await call("GET", `/api/events/${ev.id}/summary`, { token: tok(pA.id) })).status === 404, "promoter can't open the host summary");
     r = await call("GET", `/api/events/${ev2.id}/summary`, { token: ht });
     assert(r.status === 200 && (r.body?.promoters ?? []).length === 1 && r.body.promoters[0].username === pS.username, "other event lists only its own promoters", r.body?.promoters);
+
+    console.log("\nthe promoter part can't break the old responses");
+    await q(`ALTER TABLE event_promoter_links RENAME TO event_promoter_links_off`);
+    try {
+      r = await call("GET", `/api/events/${ev.id}/summary`, { token: ht });
+      assert(r.status === 200 && Array.isArray(r.body?.promoters) && r.body.promoters.length === 0 && typeof r.body?.totals?.sold === "number",
+        "summary still answers (no breakdown) when the promoter part fails", { status: r.status, body: r.body });
+      r = await me(pA);
+      assert(r.status === 200 && r.body?.promoter === null && Array.isArray(r.body?.roles), "team view still answers (no link) when the promoter part fails", { status: r.status, body: r.body });
+    } finally {
+      await q(`ALTER TABLE event_promoter_links_off RENAME TO event_promoter_links`);
+    }
   } finally {
     const ids = [ev.id, ev2.id];
     const clean = async (t: string, p: unknown[]) => { try { await q(t, p); } catch (err) { console.error(`  cleanup: ${(err as Error).message}`); } };
