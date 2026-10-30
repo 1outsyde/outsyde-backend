@@ -25,6 +25,7 @@ import { makeTicketCode, paidEventsEnabled, wouldCreateUnlockLoop, holderCanSeeA
 import { qrUrlFor } from "./ticketQr";
 import { walletUrlFor } from "./walletPass";
 import { notifyRsvpConfirmed } from "./ticketNotices";
+import { normalizeLinkCode, promoterLinkIdSql } from "./promoterLinks";
 
 const router = Router();
 
@@ -268,6 +269,8 @@ const rsvpSchema = z.object({
   ticketTypeId: z.string().min(1).max(64),
   quantity: z.number().int().min(1).max(MAX_PER_ORDER).optional(),
   idempotencyKey: z.string().trim().min(8).max(100).optional(),
+  // p4-team step 3: the promoter link the guest came through. Anything that isn't a live link is ignored, never refused.
+  linkCode: z.string().max(200).nullable().optional(),
 }).strict();
 
 /** A repeated key returns the earlier RSVP only when it was for the same thing and is still active. */
@@ -344,6 +347,7 @@ router.post("/:id/rsvp", hybridAuthMiddleware, async (req: Request, res: Respons
 
     const codes = Array.from({ length: quantity }, () => makeTicketCode());
     const codesLiteral = `{${codes.join(",")}}`; // A-Z and 2-9 only: safe as a Postgres array literal
+    const promoterLink = promoterLinkIdSql(normalizeLinkCode(parsed.data.linkCode), eventId, userId);
     try {
       // One statement: bump the ticket type, then the event, then the per-account count (each guarded by
       // a CHECK), then write the order, its line and one ticket per guest. Ends with a guard: if the type
@@ -380,8 +384,8 @@ router.post("/:id/rsvp", hybridAuthMiddleware, async (req: Request, res: Respons
           RETURNING 1
         ),
         o AS (
-          INSERT INTO ticket_orders (event_id, buyer_user_id, status, ticket_count, fee_model_version, idempotency_key, completed_at)
-          SELECT ${eventId}, ${userId}, 'completed', ${quantity}, 'events-free-v1', ${idempotencyKey}, now() FROM ac
+          INSERT INTO ticket_orders (event_id, buyer_user_id, status, ticket_count, fee_model_version, idempotency_key, completed_at, promoter_link_id)
+          SELECT ${eventId}, ${userId}, 'completed', ${quantity}, 'events-free-v1', ${idempotencyKey}, now(), ${promoterLink} FROM ac
           RETURNING id
         ),
         it AS (

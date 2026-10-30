@@ -28,6 +28,7 @@ import { rows, pgError, iso, fail, zodError, loadActiveUser } from "./eventsRout
 import { guardCode, withDeadlockRetry, orderWithTickets, whyNotClaimable } from "./ticketsRouter";
 import { makeTicketCode } from "./eventRules";
 import { paymentSheetFields } from "../payments/savedCards";
+import { normalizeLinkCode, promoterLinkIdSql } from "./promoterLinks";
 
 const router = Router();
 
@@ -278,6 +279,8 @@ const checkoutSchema = z.object({
   idempotencyKey: z.string().trim().min(8).max(100).optional(),
   // The app opens Stripe's payment sheet: answer with a customer session too (p4-applepay).
   paymentSheet: z.boolean().optional(),
+  // p4-team step 3: the promoter link the buyer came through. Anything that isn't a live link is ignored, never refused.
+  linkCode: z.string().max(200).nullable().optional(),
 }).strict();
 
 function moneyJson(o: any) {
@@ -340,6 +343,7 @@ router.post("/:id/checkout", hybridAuthMiddleware, async (req: Request, res: Res
       return fail(res, why.status, why.code, why.message);
     }
     const fees = calculateTicketFees(Number(t.price_cents), quantity);
+    const promoterLink = promoterLinkIdSql(normalizeLinkCode(parsed.data.linkCode), eventId, userId);
 
     let orderId: string | null = null;
     try {
@@ -378,10 +382,10 @@ router.post("/:id/checkout", hybridAuthMiddleware, async (req: Request, res: Res
         o AS (
           INSERT INTO ticket_orders (event_id, buyer_user_id, status, ticket_count, subtotal_cents, service_fee_cents,
                                      per_ticket_fee_cents, platform_fee_cents, host_net_cents, total_cents,
-                                     fee_model_version, idempotency_key, expires_at)
+                                     fee_model_version, idempotency_key, expires_at, promoter_link_id)
           SELECT ${eventId}, ${userId}, 'pending', ${quantity}, ${fees.subtotalCents}, ${fees.serviceFeeCents},
                  ${fees.perTicketFeeCents}, ${fees.platformFeeCents}, ${fees.hostNetCents}, ${fees.totalCents},
-                 ${fees.feeModelVersion}, ${idempotencyKey}, now() + make_interval(mins => ${TICKET_HOLD_MINUTES})
+                 ${fees.feeModelVersion}, ${idempotencyKey}, now() + make_interval(mins => ${TICKET_HOLD_MINUTES}), ${promoterLink}
           FROM ac
           RETURNING id
         ),
