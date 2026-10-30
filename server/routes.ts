@@ -21337,6 +21337,15 @@ export async function registerRoutes(
         return res.status(400).json({ error: "Tracking number and carrier are required to mark an order as shipped." });
       }
 
+      // A pending order is an unpaid checkout: nothing to refund, and if the customer finishes
+      // paying, the webhook (claimOrderPaid) sets it to paid again. Vendors cancel paid orders only.
+      if (status === 'cancelled' && existingOrder.status === 'pending') {
+        return res.status(409).json({
+          error: "This order hasn't been paid yet, so it can't be cancelled.",
+          code: 'ORDER_NOT_PAID',
+        });
+      }
+
       // --- Refund gate: paid → cancelled requires Stripe refund BEFORE status change ---
       // Order status must NOT change to 'cancelled' if the Stripe call throws.
       let refundResult: { refund: any; transferReversal: any } | null = null;
@@ -21355,6 +21364,9 @@ export async function registerRoutes(
           paymentIntentId: piId,
           refundAmountCents,
           vendorReclaimCents,
+          orderId,
+          orderGroupId: existingOrder.orderGroupId ?? null,
+          vendorAccountId: business.stripeAccountId ?? null,
           metadata: {
             orderId,
             reason: 'order_cancelled_by_business',

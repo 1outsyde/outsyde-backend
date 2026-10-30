@@ -11,6 +11,29 @@ function idempotencyKey(prefix: string): string {
   return `${prefix}_${randomUUID()}`;
 }
 
+/**
+ * The vendor's own transfer for one order of a multi-vendor cart (transferToVendor).
+ * Matches metadata.orderId AND destination, so an influencer commission transfer on the
+ * same order (same orderId, different destination) is never picked. Returns null when
+ * there is none or more than one match (left for manual reconciliation, as before).
+ */
+export async function findVendorOrderTransfer(
+  stripe: { transfers: { list: (p: { transfer_group: string; limit: number }) => Promise<{ data: any[] }> } },
+  p: { transferGroup: string; orderId: string; vendorAccountId: string },
+): Promise<{ id: string; reversibleCents: number } | null> {
+  const list = await stripe.transfers.list({ transfer_group: p.transferGroup, limit: 100 });
+  const matches = (list.data || []).filter((t: any) => {
+    const dest = typeof t.destination === 'string' ? t.destination : t.destination?.id;
+    return t.metadata?.orderId === p.orderId && dest === p.vendorAccountId;
+  });
+  if (matches.length !== 1) {
+    if (matches.length > 1) console.error(`[Refund] ${matches.length} vendor transfers match order ${p.orderId} in ${p.transferGroup}; reversal skipped, needs manual reconciliation`);
+    return null;
+  }
+  const t = matches[0];
+  return { id: t.id, reversibleCents: Math.max(0, (t.amount ?? 0) - (t.amount_reversed ?? 0)) };
+}
+
 /** Per-request bound for the event payout job's Stripe calls (only the fields given are set). */
 function eventPayoutRequestOptions(o: { timeoutMs?: number; maxNetworkRetries?: number }): { timeout?: number; maxNetworkRetries?: number } {
   return {
@@ -1116,6 +1139,14 @@ export class StripeService {
     refundAmountCents: number;  // order.totalAmount — full customer refund
     vendorReclaimCents: number; // order.vendorNet  — exact amount to pull back from vendor
     metadata: Record<string, string>;
+    // Fixed (not random) idempotency keys are built from this, so a repeated cancel
+    // request can never refund or reverse twice.
+    orderId: string;
+    // Multi-vendor carts pay each vendor with a separate transfer (transferToVendor,
+    // transfer_group order_group_<id>), so the charge has no transfer of its own.
+    // With these, the vendor's transfer is found by orderId AND destination.
+    orderGroupId?: string | null;
+    vendorAccountId?: string | null;
   }) {
     const stripe = await getUncachableStripeClient();
 
@@ -1141,7 +1172,7 @@ export class StripeService {
       refund_application_fee: false,
       reason: 'requested_by_customer',
       metadata: params.metadata,
-    });
+    }, { idempotencyKey: `order_cancel_refund_${params.orderId}` });
 
     // Step 2: retrieve the auto-created transfer and reverse exactly vendorReclaimCents
     const paymentIntent = await stripe.paymentIntents.retrieve(
@@ -1153,11 +1184,30 @@ export class StripeService {
     const transferId = typeof transfer === 'string' ? transfer : transfer?.id;
 
     let transferReversal = null;
-    if (transferId) {
-      transferReversal = await stripe.transfers.createReversal(transferId, {
-        amount: params.vendorReclaimCents,
-        metadata: params.metadata,
+    let reverseTransferId: string | null = transferId ?? null;
+    let reverseAmountCents = params.vendorReclaimCents;
+
+    // Multi-vendor cart: no transfer on the charge. Find this vendor's own transfer in the
+    // cart's group. Match orderId AND destination: an influencer commission transfer
+    // (influencerPayoutService) carries the same orderId but a different destination.
+    if (!reverseTransferId && params.orderGroupId && params.vendorAccountId) {
+      const found = await findVendorOrderTransfer(stripe, {
+        transferGroup: `order_group_${params.orderGroupId}`,
+        orderId: params.orderId,
+        vendorAccountId: params.vendorAccountId,
       });
+      if (found) {
+        reverseTransferId = found.id;
+        // Never ask Stripe to reverse more than is left on that transfer.
+        reverseAmountCents = Math.min(params.vendorReclaimCents, found.reversibleCents);
+      }
+    }
+
+    if (reverseTransferId && reverseAmountCents > 0) {
+      transferReversal = await stripe.transfers.createReversal(reverseTransferId, {
+        amount: reverseAmountCents,
+        metadata: params.metadata,
+      }, { idempotencyKey: `order_cancel_reversal_${params.orderId}` });
     } else {
       console.error(
         `[Refund] No transfer found for PaymentIntent ${params.paymentIntentId} — ` +
