@@ -7,6 +7,7 @@
  *   DELETE /api/events/:id/door/team/:userId     (auth, host) ?scope=standing|event, soft remove (also cancels an invite)
  *   PUT    /api/events/:id/door/team/:userId/schedule  (auth, host) ?role= this person's times and notes for this event
  *   GET    /api/events/:id/team/me               (auth)       my accepted Event team roles at this event, with times
+ *   PUT    /api/events/:id/door/team/:userId/pay?role=  (auth, host only) one person's pay for one role (step 4a)
  *   PUT    /api/events/:id/door/team/:userId/cohost-level  (auth, host) { scope, level } a co-host's level (team | edit)
  *   GET    /api/events/cohosting                 (auth)       events I co-host (accepted), with my level
  * Co-hosts (step 2b) use the team routes like the host, for this event only: never the standing team, never other
@@ -32,10 +33,11 @@ import { getUserIdFromRequest, hybridAuthMiddleware } from "../auth";
 import { rows, iso, fail, pgError, hostIdentity, hostEventJson } from "./eventsRouter";
 import { loadEventForDoor, isWithinScanWindow } from "./doorAccess";
 import { TEAM_ROLES, duplicateMessage, parseRoleLabel, roleInfo, type TeamRole } from "./teamRoles";
-import { notifyDoorInvite, notifyDoorAccepted } from "./ticketNotices";
+import { notifyDoorInvite, notifyDoorAccepted, notifyTeamPayChanged } from "./ticketNotices";
 import { ticketIdFromQrToken, qrPng } from "./ticketQr";
 import { ticketIdFromWalletToken, walletConfig, cachedTicketPass } from "./walletPass";
-import { PROMOTER_ROLE, ensurePromoterLinks, promoterLinkStats, promoterLinkUrl } from "./promoterLinks";
+import { ensurePromoterLinks, promoterLinkStats, promoterLinkUrl } from "./promoterLinks";
+import { LINK_ROLES, eventPay, parsePay, rolePayJson, settingOf } from "./teamPay";
 
 const router = Router();
 
@@ -452,8 +454,19 @@ router.get("/:id/door/team", hybridAuthMiddleware, async (req: Request, res: Res
       FROM event_door_members m JOIN users u ON u.id = m.member_user_id
       WHERE m.event_id = ${ctx.event.id} AND m.removed_at IS NULL ${mRole} ORDER BY m.created_at, u.id, m.role`);
     const times = await schedulesFor(ctx.event.id);
-    const withTimes = (m: any) => memberJson({ ...m, schedule: times.get(`${m.user_id}:${m.role ?? "door"}`) ?? null });
-    res.json({ success: true, standing: standing.map(withTimes), event: event.map(withTimes) });
+    // Step 4a: each row's pay at this event and the totals (host and co-hosts only reach this route). Its own try:
+    // a failure here sends the team list without pay, never an error to old clients.
+    let pay: Awaited<ReturnType<typeof eventPay>> | null = null;
+    try { pay = await eventPay(ctx.event); } catch (err) { console.error("[Door] team pay failed (team list sent without it):", err); }
+    const withTimes = (m: any) => ({
+      ...memberJson({ ...m, schedule: times.get(`${m.user_id}:${m.role ?? "door"}`) ?? null }),
+      pay: pay ? rolePayJson(pay.byRole.get(`${m.user_id}:${m.role ?? "door"}`)) : null,
+    });
+    res.json({
+      success: true, standing: standing.map(withTimes), event: event.map(withTimes),
+      payTotals: pay ? { teamCents: pay.teamTotalCents, hostEarningsCents: pay.hostEarningsCents, covered: pay.covered,
+        teamPaidCents: pay.teamPaidCents, hostTakeHomeCents: pay.hostTakeHomeCents } : null,
+    });
   } catch (err) {
     console.error("[Door] team list failed:", err);
     fail(res, 500, "SERVER_ERROR", "Could not load the Event team.");
@@ -606,6 +619,64 @@ router.put("/:id/door/team/:userId/schedule", hybridAuthMiddleware, teamLimiter,
   }
 });
 
+// ─── Pay (p4-team step 4a, migration 086) ───────────────────────────────────
+
+/**
+ * The host sets one person's pay for one role at this event (co-hosts can see it, never change it). Allowed until the
+ * event ends, for anyone on the team in that role (pending invites too: they see the pay offered). The person gets a
+ * push when it changes, once they've accepted. No money moves: step 4b pays it 3 days after the event.
+ */
+router.put("/:id/door/team/:userId/pay", hybridAuthMiddleware, teamLimiter, async (req: Request, res: Response) => {
+  try {
+    const ctx = await teamManager(req, res);
+    if (!ctx) return;
+    if (ctx.as !== "host") return fail(res, 403, "HOST_ONLY", "Only the host can set pay.");
+    const roleParsed = roleSchema.safeParse(req.query.role);
+    if (!roleParsed.success) return fail(res, 400, "INVALID_REQUEST", ROLE_CHOICES);
+    const role = roleParsed.data;
+    const parsed = parsePay(role, req.body ?? {});
+    if (!parsed.ok) return fail(res, 400, "INVALID_REQUEST", parsed.message);
+    if (ctx.event.status === "cancelled" || new Date(ctx.event.ends_at).getTime() <= Date.now()) {
+      return fail(res, 409, "EVENT_ENDED", "This event is over, so pay can't be changed.");
+    }
+    const memberId = String(req.params.userId);
+    if (!validId(memberId) || !(await onTeam(ctx.event, memberId, role))) {
+      return fail(res, 404, "NOT_ON_TEAM", "That person isn't on your Event team in that role.");
+    }
+    const v = parsed.value;
+    const [before] = await rows<any>(sql`
+      SELECT pay_type, fixed_cents, hourly_cents, commission_bps FROM event_team_pay
+      WHERE event_id = ${ctx.event.id} AND member_user_id = ${memberId} AND role = ${role}`);
+    await rows(sql`
+      INSERT INTO event_team_pay (event_id, member_user_id, role, pay_type, fixed_cents, hourly_cents, commission_bps, updated_by_user_id)
+      VALUES (${ctx.event.id}, ${memberId}, ${role}, ${v.payType}, ${v.fixedCents}, ${v.hourlyCents}, ${v.commissionBps}, ${ctx.userId})
+      ON CONFLICT (event_id, member_user_id, role) DO UPDATE SET
+        pay_type = EXCLUDED.pay_type, fixed_cents = EXCLUDED.fixed_cents, hourly_cents = EXCLUDED.hourly_cents,
+        commission_bps = EXCLUDED.commission_bps, updated_by_user_id = EXCLUDED.updated_by_user_id, updated_at = now()`);
+    const changed = JSON.stringify(settingOf(before)) !== JSON.stringify(v);
+    if (changed && (await onTeamAccepted(ctx.event, memberId, role))) {
+      void notifyTeamPayChanged({ memberUserId: memberId, eventId: String(ctx.event.id), eventTitle: String(ctx.event.title ?? "your event") });
+    }
+    const pay = await eventPay(ctx.event);
+    res.json({ success: true, role, pay: rolePayJson(pay.byRole.get(`${memberId}:${role}`)) });
+  } catch (err) {
+    console.error("[Door] pay save failed:", err);
+    fail(res, 500, "SERVER_ERROR", "Could not save the pay.");
+  }
+});
+
+/** Accepted (not just invited) in this role, at this event or on the host's standing team. */
+async function onTeamAccepted(event: any, memberId: string, role: TeamRole): Promise<boolean> {
+  const r = await rows<any>(sql`
+    SELECT 1 AS x FROM event_door_members m
+    WHERE m.event_id = ${event.id} AND m.member_user_id = ${memberId} AND m.role = ${role} AND m.removed_at IS NULL AND m.accepted_at IS NOT NULL
+    UNION ALL
+    SELECT 1 FROM event_door_team t
+    WHERE t.host_user_id = ${event.host_user_id} AND t.member_user_id = ${memberId} AND t.role = ${role} AND t.removed_at IS NULL AND t.accepted_at IS NOT NULL
+    LIMIT 1`);
+  return r.length > 0;
+}
+
 // ─── Co-hosts (p4-team step 2b, migration 084) ──────────────────────────────
 
 const levelBodySchema = z.object({ scope: scopeSchema, level: levelSchema }).strict();
@@ -692,10 +763,24 @@ router.get("/:id/team/me", hybridAuthMiddleware, teamLimiter, async (req: Reques
         schedule: times.get(`${userId}:${r.role}`) ?? null,
       });
     }
+    // Step 4a: their own pay for each role, nothing about anyone else. Its own try, like the link below.
+    let payTotalCents: number | null = null;
+    try {
+      const pay = await eventPay(e);
+      payTotalCents = 0;
+      for (const r of roles as any[]) {
+        const rp = pay.byRole.get(`${userId}:${r.role}`);
+        r.pay = rolePayJson(rp);
+        payTotalCents += rp?.totalCents ?? 0;
+      }
+    } catch (err) {
+      console.error("[Door] own pay failed (team view sent without it):", err);
+      for (const r of roles as any[]) r.pay = null;
+    }
     // p4-team step 3: promoters get their own link and only their own numbers. Everyone else: null.
     let promoter: { code: string; url: string; rsvps: number; ticketsSold: number; salesCents: number } | null = null;
     // Its own try: a failure here leaves `promoter` null and never fails the roles old app builds read.
-    if (seen.has(PROMOTER_ROLE)) {
+    if (LINK_ROLES.some((r) => seen.has(r))) {
       try {
         await ensurePromoterLinks(String(e.id), userId);
         const [mine1] = await promoterLinkStats(String(e.id), userId);
@@ -712,6 +797,7 @@ router.get("/:id/team/me", hybridAuthMiddleware, teamLimiter, async (req: Reques
       host: { name: (await hostIdentity(e)).publicName },
       roles,
       promoter,
+      payTotalCents,
     });
   } catch (err) {
     console.error("[Door] team me failed:", err);
