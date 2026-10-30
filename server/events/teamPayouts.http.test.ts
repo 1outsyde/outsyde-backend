@@ -305,6 +305,28 @@ function callAt(base: string, method: string, path: string, o: { token?: string;
       "$0 payout: debt taken in full, recorded as paid, nothing sent", p);
     assert((await payouts.sendPayout(p.id)) === "not_due" && stripeCalls.length === 0, "the send step never picks up a $0 payout", stripeCalls);
 
+    console.log("\ntwo debts: the first takes everything, the second waits for the next payout");
+    const h6b = await user("h6b");
+    const acct6b = `acct_${P}h6b`;
+    await q(`INSERT INTO user_payout_accounts (user_id, stripe_account_id, onboarding_complete) VALUES ($1, $2, true)`, [h6b.id, acct6b]);
+    const old6b = await event(h6b, "old6b", { ended: "40 days" });
+    const tOld6b = await mkType(old6b.id);
+    const oldOrd6b = await mkOrder(old6b.id, tOld6b, buyer.id, 2);
+    const oldPay6b = (await q(`INSERT INTO event_payouts (event_id, destination_type, connected_account_id, gross_cents, deducted_cents, amount_cents, status, transfer_id, paid_at)
+      VALUES ($1, 'user', $2, 3920, 0, 3920, 'paid', 'tr_old6b', now() - interval '35 days') RETURNING id`, [old6b.id, acct6b]))[0].id;
+    await q(`UPDATE events SET team_pay_fixed_at = now() - interval '35 days' WHERE id = $1`, [old6b.id]);
+    await q(`UPDATE tickets SET payout_id = $1, status = 'refunded', refunded_at = now() - interval '30 days' WHERE id = ANY($2)`, [oldPay6b, oldOrd6b.ticketIds]);
+    await q(`INSERT INTO event_payout_recoveries (ticket_id, payout_id, connected_account_id, amount_cents, status, created_at) VALUES ($1, $2, $3, 1960, 'owed', now() - interval '30 days')`, [oldOrd6b.ticketIds[0], oldPay6b, acct6b]);
+    await q(`INSERT INTO event_payout_recoveries (ticket_id, payout_id, connected_account_id, amount_cents, status, created_at) VALUES ($1, $2, $3, 500, 'owed', now() - interval '29 days')`, [oldOrd6b.ticketIds[1], oldPay6b, acct6b]);
+    const e6b = await event(h6b, "debttwo");
+    const t6b = await mkType(e6b.id);
+    await mkOrder(e6b.id, t6b, buyer.id, 1); // $19.60
+    await runCreate();
+    p = await payoutOf(e6b.id);
+    const left6b = await q(`SELECT amount_cents, status FROM event_payout_recoveries WHERE connected_account_id = $1 ORDER BY amount_cents`, [acct6b]);
+    assert(p && Number(p.deducted_cents) === 1960 && Number(p.amount_cents) === 0 && left6b[0]?.status === "owed" && left6b[1]?.status === "recovered",
+      "oldest $19.60 taken in full; the $5 debt stays owed (never below $0)", { p, left6b });
+
     console.log("\nteam takes everything: host $0, team covered");
     const h7 = await user("h7"); const sec7 = await user("s7");
     const e7 = await event(h7, "exact");
@@ -355,6 +377,20 @@ function callAt(base: string, method: string, path: string, o: { token?: string;
     p = await payoutOf(e9.id);
     assert(p && Number(p.gross_cents) === 9 * 1960 && Number(p.team_cents) === 1000, "next run: worked out on the new earnings", p);
 
+    console.log("\nevent paused while the job works it out: nothing written");
+    const h9b = await user("h9b"); const sec9b = await user("s9b");
+    const e9b = await event(h9b, "pausemid");
+    const t9b = await mkType(e9b.id);
+    await mkOrder(e9b.id, t9b, buyer.id, 2);
+    await addMember(e9b.id, h9b, sec9b, "security");
+    await setPay(e9b.id, sec9b, "security", h9b, { type: "fixed", fixed: 1000 });
+    payouts.setPayoutHooksForTest({ afterTeamCompute: async (eventId: string) => {
+      if (eventId === e9b.id) await q(`UPDATE events SET status = 'paused' WHERE id = $1`, [e9b.id]);
+    } });
+    await payouts.createDuePayouts();
+    payouts.setPayoutHooksForTest(null);
+    assert(!(await payoutOf(e9b.id)) && (await teamOf(e9b.id)).length === 0 && !(await fixedAt(e9b.id)), "paused mid-way: no payout, no team rows, not fixed");
+
     // ── 10. End time locked once the event is over (call 16) ──
     console.log("\nend time locked once the event is over");
     const h10 = await user("h10");
@@ -376,6 +412,7 @@ function callAt(base: string, method: string, path: string, o: { token?: string;
     const owedCopy = `${pushH7[0]?.title ?? ""} ${pushH7[0]?.body ?? ""}`;
     assert(/\$19\.60/.test(owedCopy) && !/[\u2013\u2014]/.test(owedCopy) && !/ - /.test(owedCopy), "push names $19.60, no dashes", owedCopy);
     assert(pushes.filter((x) => x.userId === h5.id || x.userId === h6.id).length === 0, "hosts whose debt came back from the next payout: no reminder");
+    assert(pushes.filter((x) => x.userId === h6b.id).length === 1 && /\$5\.00/.test(pushes.find((x) => x.userId === h6b.id)?.body ?? ""), "host still owing $5 is reminded of $5.00", pushes);
     pushes.length = 0; owedEmails.length = 0;
     await payouts.remindOwedHosts();
     assert(pushes.filter((x) => x.userId === h7.id).length === 0, "again within 7 days: nothing");
