@@ -1130,18 +1130,20 @@ async function getNoFollow(path: string): Promise<{ status: number; location: st
       call("POST", `/api/events/${e12.id}/orders/${oR}/refund`, { token: tok(h12.u) }),
       createDuePayouts(),
     ]);
-    assert(rr.status === 200, "refund accepted", rr);
+    // p4-team 4b-1: a refund that comes in after the payout is worked out is refused (PAYOUT_CREATED), tickets untouched.
+    assert(rr.status === 200 || (rr.status === 409 && rr.body?.error?.code === "PAYOUT_CREATED"), "refund accepted, or refused because the payout came first", rr);
     await createDuePayouts(); // the refunding order may have blocked the first one
     pr = await payoutOf(e12.id);
     tk = await tix(e12.id);
     const refundedTix = tk.filter((t) => t.order_id === oR);
     const stampedTix = tk.filter((t) => t.payout_id === pr[0]?.id);
     const stampedSum = stampedTix.reduce((n, t) => n + Number(t.host_net_cents), 0);
-    const branch = refundedTix.every((t) => t.payout_id === null) ? "refund first" : refundedTix.every((t) => t.payout_id === pr[0]?.id) ? "payout first" : "mixed";
+    const branch = rr.status === 409 ? "refused" : refundedTix.every((t) => t.payout_id === null) ? "refund first" : refundedTix.every((t) => t.payout_id === pr[0]?.id) ? "payout first" : "mixed";
     console.log(`    (race went: ${branch})`);
-    assert(pr.length === 1 && pr[0].gross_cents === stampedSum && refundedTix.every((t) => t.status === "refunded"), "gross = stamped host_net, refunded order's tickets refunded", { pr, tk });
-    assert((branch === "refund first" && pr[0]?.gross_cents === 1960) || (branch === "payout first" && pr[0]?.gross_cents === 5880),
-      "either not stamped and excluded, or stamped and refunded (Task 7 recovery covers it)", { branch, pr, tk });
+    assert(pr.length === 1 && pr[0].gross_cents === stampedSum && refundedTix.every((t) => t.status === (branch === "refused" ? "valid" : "refunded")),
+      "gross = stamped host_net; refunded order's tickets refunded, or still valid when refused", { pr, tk });
+    assert((branch === "refund first" && pr[0]?.gross_cents === 1960) || ((branch === "payout first" || branch === "refused") && pr[0]?.gross_cents === 5880),
+      "either not stamped and excluded, stamped and refunded (Task 7 recovery covers it), or refused and paid out", { branch, pr, tk });
     // Same race with the create started a little later, so the other orderings get a chance too.
     for (const delay of [15, 40, 80]) {
       const hx = await mkReadyHost(`jr${delay}`);
@@ -1158,10 +1160,13 @@ async function getNoFollow(path: string): Promise<{ status: number; location: st
       const tx = await tix(ex.id);
       const rt = tx.filter((t) => t.order_id === oX);
       const sum = tx.filter((t) => t.payout_id === px[0]?.id).reduce((n, t) => n + Number(t.host_net_cents), 0);
-      const bx = rt.every((t) => t.payout_id === null) ? "refund first" : rt.every((t) => t.payout_id === px[0]?.id) ? "payout first" : "mixed";
+      const bx = rx.status === 409 && rx.body?.error?.code === "PAYOUT_CREATED" ? "refused"
+        : rt.every((t) => t.payout_id === null) ? "refund first" : rt.every((t) => t.payout_id === px[0]?.id) ? "payout first" : "mixed";
       console.log(`    (race +${delay}ms went: ${bx})`);
-      assert(rx.status === 200 && px.length === 1 && px[0].gross_cents === sum && rt.every((t) => t.status === "refunded")
-        && ((bx === "refund first" && sum === 1960) || (bx === "payout first" && sum === 5880)), `race +${delay}ms: invariant holds`, { bx, px, tx });
+      assert(px.length === 1 && px[0].gross_cents === sum
+        && ((bx === "refund first" && rx.status === 200 && sum === 1960 && rt.every((t) => t.status === "refunded"))
+          || (bx === "payout first" && rx.status === 200 && sum === 5880 && rt.every((t) => t.status === "refunded"))
+          || (bx === "refused" && sum === 5880 && rt.every((t) => t.status === "valid"))), `race +${delay}ms: invariant holds`, { bx, rx, px, tx });
     }
 
     // ── Task 7: recoveries (refund after the host was paid) and the deduction from the next event payout ──
@@ -1170,9 +1175,19 @@ async function getNoFollow(path: string): Promise<{ status: number; location: st
     const recOf = async (ticketId: string) => q(`SELECT *, extract(epoch from (next_attempt_at - now()))::int AS due_in FROM event_payout_recoveries WHERE ticket_id = $1`, [ticketId]);
     const advanceRec = (id: string) => q(`UPDATE event_payout_recoveries SET next_attempt_at = now() - interval '1 second' WHERE id = $1`, [id]);
     const ticketOf = async (orderId: string) => (await q(`SELECT id FROM tickets WHERE order_id = $1 ORDER BY item_index LIMIT 1`, [orderId]))[0].id as string;
+    // p4-team 4b-1 (Legend 2026-10-30): hosts can't refund once the payout is worked out. What's left after that is a
+    // refund Outsyde has to give (chargeback, fraud, the law), done outside the host routes: the order ends up refunded
+    // like any refund, which is all the recovery steps read.
     const refundOrder = async (eventId: string, host: string, orderId: string) => {
-      const x = await call("POST", `/api/events/${eventId}/orders/${orderId}/refund`, { token: tok(host) });
-      if (x.status !== 200 || x.body?.order?.status !== "refunded") throw new Error("refund failed " + JSON.stringify(x));
+      const blocked = await call("POST", `/api/events/${eventId}/orders/${orderId}/refund`, { token: tok(host) });
+      if (blocked.status !== 409 || blocked.body?.error?.code !== "PAYOUT_CREATED") throw new Error("host refund after payout should be refused " + JSON.stringify(blocked));
+      const done = await q(`
+        WITH o AS (
+          UPDATE ticket_orders SET status = 'refunded', refund_reason = 'host', refunded_cents = subtotal_cents, refund_amount_cents = 0,
+                 refund_requested_at = now(), refunded_at = now(), updated_at = now()
+          WHERE id = $1 AND event_id = $2 AND status = 'completed' RETURNING id)
+        UPDATE tickets t SET status = 'refunded', refunded_at = now() FROM o WHERE t.order_id = o.id AND t.status = 'valid' RETURNING t.id`, [orderId, eventId]);
+      if (!done.length) throw new Error("refund failed " + orderId);
     };
     /** An ended event with `n` one-ticket orders (1960 host net each), already paid out to the host. */
     const paidOut = async (h: { u: string; a: string }, title: string, n = 2) => {

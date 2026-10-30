@@ -119,7 +119,7 @@ function eventRowsSql(where: SQL): SQL {
            od.completed AS orders_completed, od.refunded AS orders_refunded, od.refunding AS orders_refunding, od.flagged AS orders_flagged,
            rc.owed_n, rc.owed_cents,
            ep.id AS ep_id, ep.status AS ep_status, ep.hold_reason AS ep_hold_reason, ep.destination_type AS ep_destination_type,
-           ep.connected_account_id AS ep_acct, ep.gross_cents AS ep_gross, ep.deducted_cents AS ep_deducted, ep.amount_cents AS ep_amount,
+           ep.connected_account_id AS ep_acct, ep.gross_cents AS ep_gross, ep.deducted_cents AS ep_deducted, ep.amount_cents AS ep_amount, ep.team_cents AS ep_team,
            ep.attempts AS ep_attempts, ep.next_attempt_at AS ep_next_attempt_at, ep.last_error AS ep_last_error,
            ep.alerted_at AS ep_alerted_at, ep.transfer_id AS ep_transfer_id, ep.paid_at AS ep_paid_at,
            ep.created_at AS ep_created_at, ep.updated_at AS ep_updated_at
@@ -163,6 +163,8 @@ function payoutOf(r: any, dueAt: string) {
   return {
     id: r.ep_id as string, status: r.ep_status as string, dueAt, paidAt: iso(r.ep_paid_at),
     grossCents: num(r.ep_gross), amountCents: num(r.ep_amount), deductedCents: num(r.ep_deducted),
+    // Step 4b-1: team pay taken from this payout (amount = gross - deducted - team).
+    teamCents: num(r.ep_team),
     attempts: num(r.ep_attempts), lastError: maskText(r.ep_last_error), holdReason: (r.ep_hold_reason ?? null) as string | null,
   };
 }

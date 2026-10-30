@@ -26,6 +26,8 @@ export type NoticeDeps = {
   /** Activity (notifications table) row. Optional so older test fakes keep compiling; missing = not recorded. */
   createActivity?: (p: ActivityItem) => Promise<void>;
   sendDoorInvite?: (p: Parameters<typeof import("../emailService").sendDoorTeamInviteEmail>[0]) => Promise<void>;
+  /** Step 4b-1: weekly email to a host who owes Outsyde. Optional so older test fakes keep compiling. */
+  sendOwedReminder?: (p: Parameters<typeof import("../emailService").sendEventOwedReminderEmail>[0]) => Promise<void>;
 };
 
 export type ActivityItem = {
@@ -59,6 +61,7 @@ export async function noticeDeps(): Promise<NoticeDeps> {
       await storage.createNotification(p as any);
     },
     sendDoorInvite: email.sendDoorTeamInviteEmail,
+    sendOwedReminder: email.sendEventOwedReminderEmail,
   };
 }
 

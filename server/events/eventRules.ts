@@ -180,6 +180,8 @@ export function checkTimes(
   if (endsAt <= startsAt) return "The event has to end after it starts.";
   if (endsAt.getTime() - startsAt.getTime() > MAX_EVENT_LENGTH_MS) return "An event can last 30 days at most.";
   if (startsAt.getTime() - now.getTime() > MAX_START_AHEAD_MS) return "An event can start at most 2 years from now.";
+  // p4-team 4b-1 (Legend 2026-10-30): once it's over, the end time is locked (it sets team pay and payout day).
+  if (savedEndsAt && savedEndsAt <= now && endsAt.getTime() !== savedEndsAt.getTime()) return "This event is over, so its end time can't change.";
   if (started && savedEndsAt && endsAt < savedEndsAt) return "Once the event has started, the end time can only move later.";
   return null;
 }

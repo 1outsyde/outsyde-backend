@@ -63,12 +63,15 @@ const STRIPE_CALL_BOUND = { timeoutMs: 30000, maxNetworkRetries: 1 };
 /** Test seam only: lets a test hold a run right after its claim (a slow DB read in real life). Never set in production. */
 let afterClaimHook: ((payoutId: string) => Promise<void>) | null = null;
 let afterRecoveryClaimHook: ((recoveryId: string) => Promise<void>) | null = null;
+let afterTeamComputeHook: ((eventId: string) => Promise<void>) | null = null;
 export function setPayoutHooksForTest(h: {
   afterClaim?: (payoutId: string) => Promise<void>;
   afterRecoveryClaim?: (recoveryId: string) => Promise<void>;
+  afterTeamCompute?: (eventId: string) => Promise<void>;
 } | null): void {
   afterClaimHook = h?.afterClaim ?? null;
   afterRecoveryClaimHook = h?.afterRecoveryClaim ?? null;
+  afterTeamComputeHook = h?.afterTeamCompute ?? null;
 }
 
 async function realStripe(): Promise<PayoutStripe & RecoveryStripe> {
@@ -98,29 +101,70 @@ async function balanceText(s?: PayoutStripe): Promise<string> {
 
 // ─── Step 1: create the payout (one statement per event) ───────────────────
 
-/** Creates payouts for up to `limit` due events. Returns the new payout ids as a comma list ("" when none). */
+/** One team member's fixed pay at payout time (4b-1): their total and how it was worked out, per role. */
+export type TeamLine = { userId: string; amountCents: number; breakdown: Record<string, unknown> };
+
+/**
+ * Step 4b-1: everyone's pay worked out from the pay the host set, as the team stood when the event ended (Legend
+ * 2026-10-30, call 15), and the host earnings it was worked out on. The statement in createDuePayouts checks those
+ * earnings again under its locks and stops (guard) if they changed, so pay and payout always use the same tickets.
+ */
+export async function teamLinesFor(e: { id: string; host_user_id: string; ends_at: Date | string }): Promise<{ lines: TeamLine[]; earningsCents: number }> {
+  const { eventPay, rolePayJson } = await import("./teamPay");
+  const pay = await eventPay(e, { asOf: e.ends_at });
+  const lines: TeamLine[] = [];
+  for (const m of pay.members) {
+    if (m.totalCents <= 0) continue; // nothing owed (e.g. hourly with no shift): no row
+    const roles = m.roles.map((role) => ({ role, ...rolePayJson(pay.byRole.get(`${m.userId}:${role}`)) }));
+    const sum = (k: "fixedCents" | "hourlyCents" | "commissionCents") => roles.reduce((n, r) => n + Number((r as any)[k] ?? 0), 0);
+    lines.push({
+      userId: m.userId, amountCents: m.totalCents,
+      breakdown: {
+        roles, fixedCents: sum("fixedCents"), hourlyCents: sum("hourlyCents"), commissionCents: sum("commissionCents"),
+        hours: roles.reduce((n, r) => n + Number(r.hours ?? 0), 0),
+      },
+    });
+  }
+  return { lines, earningsCents: pay.hostEarningsCents };
+}
+
+/**
+ * Creates payouts for up to `limit` due events. Returns the new host payout ids as a comma list ("" when none).
+ *
+ * Step 4b-1 (Legend 2026-10-30): in ONE statement per event, from the host earnings: (1) what the host owes Outsyde
+ * from earlier events, oldest first, as long as the running total stays within the earnings (it may take all of it,
+ * call 17); (2) team pay, all or nothing against what is left; (3) the host gets the rest, $0 included (recorded as
+ * paid, nothing to send). Team rows are written for covered ('pending', sent in 4b-2) and uncovered or free events
+ * ('host_to_pay'). events.team_pay_fixed_at marks the event done, so free events with team pay are visited once.
+ */
 export async function createDuePayouts(limit = PAYOUT_JOB_LIMIT): Promise<string> {
-  // Candidates only: the statement below checks every rule again. Events with nothing to pay (free, or every
-  // ticket refunded) are skipped here, so they never crowd out paid ones.
+  // Candidates only: the statement below checks every rule again. Events with nothing to pay and no team pay set are
+  // skipped here, so they never crowd out paid ones.
   const due = await rows<any>(sql`
-    SELECT e.id, e.host_type, e.host_user_id, e.host_business_id, e.host_photographer_id
+    SELECT e.id, e.host_type, e.host_user_id, e.host_business_id, e.host_photographer_id, e.ends_at
     FROM events e
-    WHERE e.status = 'published' AND e.ends_at + interval '3 days' <= now()
+    WHERE e.status = 'published' AND e.ends_at + interval '3 days' <= now() AND e.team_pay_fixed_at IS NULL
       AND NOT EXISTS (SELECT 1 FROM event_payouts p WHERE p.event_id = e.id)
       AND NOT EXISTS (SELECT 1 FROM ticket_orders o WHERE o.event_id = e.id AND o.status IN ('pending', 'refunding') AND o.needs_review_at IS NULL)
-      AND EXISTS (SELECT 1 FROM tickets t JOIN ticket_orders o ON o.id = t.order_id
-                  WHERE t.event_id = e.id AND t.status = 'valid' AND o.status = 'completed' AND t.payout_id IS NULL AND t.host_net_cents > 0)
+      AND (EXISTS (SELECT 1 FROM tickets t JOIN ticket_orders o ON o.id = t.order_id
+                   WHERE t.event_id = e.id AND t.status = 'valid' AND o.status = 'completed' AND t.payout_id IS NULL AND t.host_net_cents > 0)
+           OR EXISTS (SELECT 1 FROM event_team_pay tp WHERE tp.event_id = e.id AND (tp.pay_type <> 'none' OR tp.commission_bps IS NOT NULL)))
     ORDER BY e.ends_at
     LIMIT ${limit}`);
   const made: string[] = [];
   for (const e of due) {
     try {
+      const { lines, earningsCents } = await teamLinesFor(e);
+      if (afterTeamComputeHook) await afterTeamComputeHook(String(e.id));
+      const teamTotal = lines.reduce((n, l) => n + l.amountCents, 0);
+      const linesJson = JSON.stringify(lines.map((l) => ({ member_user_id: l.userId, amount_cents: l.amountCents, breakdown: l.breakdown })));
       const [r] = await withDeadlockRetry(() => rows<any>(sql`
         WITH RECURSIVE ev AS (
           SELECT e.id FROM events e
-          WHERE e.id = ${e.id} AND e.status = 'published' AND e.ends_at + interval '3 days' <= now()
+          WHERE e.id = ${e.id} AND e.status = 'published' AND e.ends_at + interval '3 days' <= now() AND e.team_pay_fixed_at IS NULL
             AND NOT EXISTS (SELECT 1 FROM event_payouts p WHERE p.event_id = e.id)
             AND NOT EXISTS (SELECT 1 FROM ticket_orders o WHERE o.event_id = e.id AND o.status IN ('pending', 'refunding') AND o.needs_review_at IS NULL)
+          FOR UPDATE OF e
         ),
         tk AS (
           -- Locked: a refund running right now either finishes first (its tickets are then 'refunded' and
@@ -146,7 +190,8 @@ export async function createDuePayouts(limit = PAYOUT_JOB_LIMIT): Promise<string
           WHERE e.id IN (SELECT id FROM ev)
         ),
         -- Owed recoveries for that account, oldest first (no account: none). Each one is taken only if the running
-        -- total of the ones taken stays below gross, so the payout stays above 0; one too big is skipped and stays owed.
+        -- total of the ones taken stays within gross (Outsyde is paid first, so it may take all of it); one too big is
+        -- skipped and stays owed.
         ow AS (
           SELECT r.id, r.amount_cents, row_number() OVER (ORDER BY r.created_at, r.id) AS n
           FROM event_payout_recoveries r JOIN dst ON r.connected_account_id = dst.acct
@@ -156,18 +201,43 @@ export async function createDuePayouts(limit = PAYOUT_JOB_LIMIT): Promise<string
           SELECT 0::bigint, NULL::varchar, 0, 0::bigint, false
           UNION ALL
           SELECT o.n, o.id::varchar, o.amount_cents,
-                 CASE WHEN w.total + o.amount_cents < g.gross THEN w.total + o.amount_cents ELSE w.total END,
-                 (w.total + o.amount_cents < g.gross)
+                 CASE WHEN w.total + o.amount_cents <= g.gross THEN w.total + o.amount_cents ELSE w.total END,
+                 (w.total + o.amount_cents <= g.gross)
           FROM walk w JOIN ow o ON o.n = w.n + 1 CROSS JOIN g
         ),
         pick AS (SELECT id, amount FROM walk WHERE took),
         d AS (SELECT COALESCE(sum(amount), 0)::int AS ded FROM pick),
+        -- Team pay, all or nothing against what is left after the debt. A free event (gross 0) covers nothing.
+        tl AS (
+          SELECT m.member_user_id, m.amount_cents, m.breakdown
+          FROM jsonb_to_recordset(${linesJson}::jsonb) AS m(member_user_id varchar, amount_cents int, breakdown jsonb)
+        ),
+        cov AS (
+          SELECT (g.gross > 0 AND ${teamTotal}::int > 0 AND ${teamTotal}::int <= g.gross - d.ded) AS covered FROM g, d
+        ),
         ins AS (
-          INSERT INTO event_payouts (event_id, destination_type, connected_account_id, gross_cents, deducted_cents, amount_cents, status)
-          SELECT ev.id, dst.dtype, dst.acct, g.gross, d.ded, g.gross - d.ded, 'pending'
-          FROM ev, dst, g, d WHERE g.gross > 0
+          INSERT INTO event_payouts (event_id, destination_type, connected_account_id, gross_cents, deducted_cents, team_cents, amount_cents, status, paid_at)
+          SELECT ev.id, dst.dtype, dst.acct, g.gross, d.ded,
+                 CASE WHEN cov.covered THEN ${teamTotal}::int ELSE 0 END,
+                 g.gross - d.ded - CASE WHEN cov.covered THEN ${teamTotal}::int ELSE 0 END,
+                 -- Nothing left for the host: recorded as paid, never sent (Stripe can't send $0).
+                 CASE WHEN g.gross - d.ded - CASE WHEN cov.covered THEN ${teamTotal}::int ELSE 0 END = 0 THEN 'paid' ELSE 'pending' END,
+                 CASE WHEN g.gross - d.ded - CASE WHEN cov.covered THEN ${teamTotal}::int ELSE 0 END = 0 THEN now() END
+          FROM ev, dst, g, d, cov WHERE g.gross > 0
           ON CONFLICT (event_id) DO NOTHING
           RETURNING id
+        ),
+        tins AS (
+          INSERT INTO event_team_payouts (event_id, member_user_id, payout_id, amount_cents, breakdown, outcome, status)
+          SELECT ev.id, tl.member_user_id, (SELECT id FROM ins), tl.amount_cents, tl.breakdown,
+                 CASE WHEN cov.covered THEN 'covered' ELSE 'not_covered' END,
+                 CASE WHEN cov.covered THEN 'pending' ELSE 'host_to_pay' END
+          FROM ev, tl, cov
+          ON CONFLICT (event_id, member_user_id) DO NOTHING
+          RETURNING id, amount_cents
+        ),
+        fx AS (
+          UPDATE events SET team_pay_fixed_at = now() WHERE id IN (SELECT id FROM ev) AND team_pay_fixed_at IS NULL RETURNING id
         ),
         -- Still 'owed' when this runs: a payout created at the same time for the same account that took one first
         -- makes the counts differ, and the guard below undoes this whole statement (the next run tries again).
@@ -183,7 +253,7 @@ export async function createDuePayouts(limit = PAYOUT_JOB_LIMIT): Promise<string
           WHERE t.id = tk.id AND t.payout_id IS NULL AND t.status = 'valid'
           RETURNING t.id, t.host_net_cents
         )
-        SELECT (SELECT id FROM ins) AS payout_id,
+        SELECT (SELECT id FROM ins) AS payout_id, EXISTS (SELECT 1 FROM fx) AS fixed,
                CASE WHEN EXISTS (SELECT 1 FROM ins) AND (
                       (SELECT count(*) FROM st) <> (SELECT count(*) FROM tk)
                    OR (SELECT COALESCE(sum(host_net_cents), 0) FROM st) <> (SELECT gross FROM g))
@@ -191,7 +261,12 @@ export async function createDuePayouts(limit = PAYOUT_JOB_LIMIT): Promise<string
                CASE WHEN EXISTS (SELECT 1 FROM ins) AND (
                       (SELECT count(*) FROM rec) <> (SELECT count(*) FROM pick)
                    OR (SELECT COALESCE(sum(amount_cents), 0) FROM rec) <> (SELECT ded FROM d))
-                 THEN ('GUARD_PAYOUT_DEDUCT:' || (SELECT count(*) FROM rec))::int END AS guard_deduct`));
+                 THEN ('GUARD_PAYOUT_DEDUCT:' || (SELECT count(*) FROM rec))::int END AS guard_deduct,
+               -- Pay was worked out on these earnings: if a ticket changed since, nothing is written, the next run redoes it.
+               CASE WHEN EXISTS (SELECT 1 FROM ev) AND (SELECT gross FROM g) <> ${earningsCents}::int
+                 THEN ('GUARD_TEAM_EARNINGS:' || (SELECT gross FROM g))::int END AS guard_earnings,
+               CASE WHEN EXISTS (SELECT 1 FROM fx) AND (SELECT count(*) FROM tins) <> (SELECT count(*) FROM tl)
+                 THEN ('GUARD_TEAM_ROWS:' || (SELECT count(*) FROM tins))::int END AS guard_team`));
       if (r?.payout_id) made.push(String(r.payout_id));
     } catch (err) {
       // A guard means something changed mid-statement (nothing was written): the next run tries again.
@@ -368,11 +443,16 @@ export async function sendPayout(payoutId: string, s?: PayoutStripe): Promise<Se
  * A ticket with no host share (free) is skipped. Returns how many were opened.
  */
 export async function openRecoveries(limit = 50): Promise<number> {
+  // Step 4b-1: a $0 host payout (Outsyde and the team took everything) is paid with no transfer, so there is nothing
+  // to reverse: its refunds are owed by the host straight away and come back from their next event payout.
   const made = await rows<any>(sql`
-    INSERT INTO event_payout_recoveries (ticket_id, payout_id, connected_account_id, amount_cents, status)
-    SELECT t.id, p.id, p.connected_account_id, t.host_net_cents, 'pending'
+    INSERT INTO event_payout_recoveries (ticket_id, payout_id, connected_account_id, amount_cents, status, last_error)
+    SELECT t.id, p.id, p.connected_account_id, t.host_net_cents,
+           CASE WHEN p.transfer_id IS NULL THEN 'owed' ELSE 'pending' END,
+           CASE WHEN p.transfer_id IS NULL THEN 'the payout was $0, so there is no transfer to take it back from' END
     FROM tickets t JOIN event_payouts p ON p.id = t.payout_id
-    WHERE t.status = 'refunded' AND p.status = 'paid' AND p.transfer_id IS NOT NULL AND p.connected_account_id IS NOT NULL
+    WHERE t.status = 'refunded' AND p.status = 'paid' AND p.connected_account_id IS NOT NULL
+      AND (p.transfer_id IS NOT NULL OR p.amount_cents = 0)
       AND t.host_net_cents > 0
       AND NOT EXISTS (SELECT 1 FROM event_payout_recoveries r WHERE r.ticket_id = t.id)
     ORDER BY t.refunded_at NULLS LAST, t.id
@@ -535,6 +615,75 @@ export async function alertOldOwed(): Promise<number> {
   return old.length;
 }
 
+/** Hosts who owe Outsyde from earlier events get a reminder this often until it's paid back, collected or written off. */
+export const OWED_REMIND_DAYS = 7;
+/** Shared New York day budget of email_log rows (same ceiling as door invites and the day-of address email). */
+export const OWED_REMIND_EMAIL_CEILING = 70;
+
+const usd = (cents: number) => `$${(cents / 100).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+
+/** Push and email copy for the owed reminder (Legend 2026-10-30, call 18). No dashes. */
+export function owedReminderCopy(totalCents: number): { title: string; body: string } {
+  return {
+    title: "Payment owed to Outsyde",
+    body: `You owe Outsyde ${usd(totalCents)} from an earlier event. It will come out of your next event payout. To pay it sooner, contact support.`,
+  };
+}
+
+/**
+ * Step 4b-1 (Legend 2026-10-30, call 18): every 7 days, each host with an owed recovery gets one push and one email
+ * with the total. One statement claims the hosts (host_reminded_at on every owed row of theirs), so two runs can't
+ * both remind. updated_at is left alone on purpose: it is the recovery's ownership tag. Never throws per host.
+ */
+export async function remindOwedHosts(limit = 100): Promise<number> {
+  const due = await rows<any>(sql`
+    WITH owed AS (
+      SELECT r.id, e.host_user_id, r.amount_cents, r.host_reminded_at
+      FROM event_payout_recoveries r JOIN event_payouts p ON p.id = r.payout_id JOIN events e ON e.id = p.event_id
+      WHERE r.status = 'owed'
+    ),
+    hosts AS (
+      SELECT host_user_id FROM owed GROUP BY host_user_id
+      HAVING max(host_reminded_at) IS NULL OR max(host_reminded_at) <= now() - make_interval(days => ${OWED_REMIND_DAYS}::int)
+      ORDER BY host_user_id LIMIT ${limit}
+    ),
+    claimed AS (
+      UPDATE event_payout_recoveries r SET host_reminded_at = now()
+      FROM owed JOIN hosts ON hosts.host_user_id = owed.host_user_id
+      WHERE r.id = owed.id AND r.status = 'owed'
+        -- Re-checked under the row lock: a run that claimed this host a moment ago wins, this one sends nothing.
+        AND (r.host_reminded_at IS NULL OR r.host_reminded_at <= now() - make_interval(days => ${OWED_REMIND_DAYS}::int))
+      RETURNING owed.host_user_id, r.amount_cents
+    )
+    SELECT c.host_user_id, sum(c.amount_cents)::int AS total, u.email, u.first_name
+    FROM claimed c JOIN users u ON u.id = c.host_user_id
+    GROUP BY c.host_user_id, u.email, u.first_name`);
+  if (!due.length) return 0;
+  const { noticeDeps } = await import("./ticketNotices");
+  const { startOfNewYorkDay } = await import("../emailHistory");
+  const d = await noticeDeps();
+  let sent = 0;
+  for (const h of due) {
+    const copy = owedReminderCopy(Number(h.total));
+    try {
+      await d.sendPush({ userId: h.host_user_id, title: copy.title, body: copy.body, data: { type: "event_payout_owed", amountCents: Number(h.total) } });
+    } catch (err) {
+      console.error(`[Events] owed reminder push failed for host ${h.host_user_id}:`, (err as Error)?.message ?? err);
+    }
+    try {
+      const nyDayStart = startOfNewYorkDay(new Date()).toISOString();
+      const [c] = await rows<any>(sql`SELECT count(*)::int AS n FROM email_log WHERE created_at >= ${nyDayStart}::timestamptz AND created_at < ${nyDayStart}::timestamptz + interval '1 day'`);
+      if (h.email && d.sendOwedReminder && Number(c?.n ?? 0) < OWED_REMIND_EMAIL_CEILING) {
+        await d.sendOwedReminder({ userId: h.host_user_id, toEmail: h.email, firstName: h.first_name ?? null, amountCents: Number(h.total) });
+      }
+    } catch (err) {
+      console.error(`[Events] owed reminder email failed for host ${h.host_user_id}:`, (err as Error)?.message ?? err);
+    }
+    sent++;
+  }
+  return sent;
+}
+
 /**
  * Pending at max tries and opened over 24 hours ago (so its lookups have kept failing for about a day): one admin
  * email listing them, each once (alerted_at). updated_at is left alone on purpose: it is the ownership tag, and a run
@@ -564,9 +713,9 @@ export async function alertStuckRecoveries(): Promise<number> {
  * reverse up to 20 due ones and report old owed and stuck ones. Each step has its own try/catch, so one can't starve the others.
  */
 export async function runEventPayoutJob(s?: PayoutStripe & RecoveryStripe): Promise<{
-  created: number; paid: number; held: number; review: number; opened: number; reversed: number; owed: number; alerted: number; stuck: number;
+  created: number; paid: number; held: number; review: number; opened: number; reversed: number; owed: number; alerted: number; stuck: number; reminded: number;
 }> {
-  const out = { created: 0, paid: 0, held: 0, review: 0, opened: 0, reversed: 0, owed: 0, alerted: 0, stuck: 0 };
+  const out = { created: 0, paid: 0, held: 0, review: 0, opened: 0, reversed: 0, owed: 0, alerted: 0, stuck: 0, reminded: 0 };
   try {
     const ids = await createDuePayouts();
     out.created = ids ? ids.split(",").length : 0;
@@ -625,9 +774,14 @@ export async function runEventPayoutJob(s?: PayoutStripe & RecoveryStripe): Prom
   } catch (err) {
     console.error("[Events] stuck recovery alert step failed:", (err as Error)?.message ?? err);
   }
+  try {
+    out.reminded = await remindOwedHosts();
+  } catch (err) {
+    console.error("[Events] owed reminder step failed:", (err as Error)?.message ?? err);
+  }
   if (Object.values(out).some((n) => n > 0)) {
     console.log(`[Events] payout job: created ${out.created}, paid ${out.paid}, held ${out.held}, review ${out.review}, ` +
-      `recoveries opened ${out.opened}, reversed ${out.reversed}, owed ${out.owed}, owed alerts ${out.alerted}, stuck alerts ${out.stuck}`);
+      `recoveries opened ${out.opened}, reversed ${out.reversed}, owed ${out.owed}, owed alerts ${out.alerted}, stuck alerts ${out.stuck}, owed reminders ${out.reminded}`);
   }
   return out;
 }

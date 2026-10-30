@@ -35,6 +35,16 @@ eq([r.needsShift, r.hourlyCents, r.totalCents], [true, 0, 0], "hourly without sh
 r = computeRolePay({ payType: "hourly", fixedCents: null, hourlyCents: 5000, commissionBps: null }, { startsAt: "2026-11-07T03:00:00.000Z", endsAt: null }, 0);
 eq([r.needsShift, r.totalCents], [true, 0], "hourly with only a start: flagged");
 
+console.log("hourly cap (Legend 2026-10-30: $10,000 per role, same as fixed)");
+r = computeRolePay({ payType: "hourly", fixedCents: null, hourlyCents: 100000, commissionBps: null }, shift(20), 0);
+eq([r.hourlyCents, r.totalCents, r.hourlyCapped], [1000000, 1000000, true], "$1,000 x 20 h = $20,000, capped at $10,000");
+r = computeRolePay({ payType: "hourly", fixedCents: null, hourlyCents: 100000, commissionBps: null }, shift(10), 0);
+eq([r.hourlyCents, r.hourlyCapped], [1000000, false], "exactly $10,000: not flagged");
+r = computeRolePay({ payType: "hourly", fixedCents: null, hourlyCents: 100000, commissionBps: 1000 }, shift(12), 50000);
+eq([r.hourlyCents, r.commissionCents, r.totalCents, r.hourlyCapped], [1000000, 5000, 1005000, true], "cap is on the hourly part only, commission on top");
+r = computeRolePay({ payType: "fixed", fixedCents: 16000, hourlyCents: null, commissionBps: null }, null, 0);
+eq(r.hourlyCapped, false, "fixed pay: never flagged");
+
 console.log("commission");
 r = computeRolePay({ payType: "none", fixedCents: null, hourlyCents: null, commissionBps: 1000 }, null, 30000);
 eq([r.commissionPercent, r.commissionCents, r.totalCents], [10, 3000, 3000], "10% of $300 through the link = $30");

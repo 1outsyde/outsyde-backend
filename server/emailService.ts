@@ -2517,3 +2517,27 @@ export async function sendDoorTeamInviteEmail(params: DoorTeamInviteParams): Pro
   const { subject, html } = renderDoorTeamInvite(params);
   await sendBrandedEmail(params.toEmail, subject, html, { kind: 'ticket', label: 'Event team invite' });
 }
+
+/** Event payouts step 4b-1 (Legend 2026-10-30, call 18): weekly reminder to a host who owes Outsyde. No dashes. */
+export type EventOwedReminderParams = { userId: string; toEmail: string; firstName: string | null; amountCents: number };
+
+export function renderEventOwedReminder(params: EventOwedReminderParams): { subject: string; html: string } {
+  const amount = `$${(params.amountCents / 100).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+  const heading = params.firstName ? `Hi ${escapeHtml(params.firstName)}, you owe Outsyde ${amount}` : `You owe Outsyde ${amount}`;
+  const p = (t: string, color = '#CCCCCC') => `<p style="color:${color};font-size:15px;line-height:1.6;margin:0 0 14px 0;">${t}</p>`;
+  const html = wrapEmail(`
+    ${emailHeader(heading, 'From an earlier event')}
+    <tr><td style="background:#1A1A1A;padding:0 32px 8px;">
+      ${p(`You owe Outsyde ${amount} from an earlier event. It will come out of your next event payout.`)}
+      ${p('To pay it sooner, contact support.')}
+      ${p('We will remind you every 7 days until it is paid.', '#888888')}
+    </td></tr>
+    ${emailFooter()}
+  `);
+  return { subject: `You owe Outsyde ${amount} from an earlier event`, html };
+}
+
+export async function sendEventOwedReminderEmail(params: EventOwedReminderParams): Promise<void> {
+  const { subject, html } = renderEventOwedReminder(params);
+  await sendBrandedEmail(params.toEmail, subject, html, { kind: 'ticket', label: 'Event payout owed reminder' });
+}
