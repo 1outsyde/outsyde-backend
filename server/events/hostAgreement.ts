@@ -18,7 +18,7 @@ import { getUserIdFromRequest, hybridAuthMiddleware } from "../auth";
 import { rows, iso, fail, loadActiveUser } from "./eventsRouter";
 import { HOST_AGREEMENT_MARKDOWN } from "./hostAgreementText";
 
-export const HOST_AGREEMENT_VERSION = "2026-10-23-draft";
+export const HOST_AGREEMENT_VERSION = "2026-10-30";
 export const HOST_AGREEMENT_TITLE = "Outsyde Event Host Agreement";
 export const HOST_AGREEMENT_TEXT = HOST_AGREEMENT_MARKDOWN.replace("\\[VERSION\\]", HOST_AGREEMENT_VERSION);
 
