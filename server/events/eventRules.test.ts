@@ -139,6 +139,18 @@ assert(!wouldCreateUnlockLoop("c", null, parents), "clearing the unlock is fine"
   assert(!/[-\u2013\u2014]/.test(START_MSG), "start copy has no dashes");
 }
 
+// p4-team 4b-1 (Legend 2026-10-30, call 16): once the event is over, its end time is locked.
+{
+  const now = new Date("2026-11-01T12:00:00Z");
+  const starts = new Date("2026-10-31T22:00:00Z");
+  const saved = new Date("2026-11-01T02:00:00Z"); // ended 10 hours ago
+  const ENDED_MSG = "This event is over, so its end time can't change.";
+  assert(checkTimes(starts, new Date("2026-11-02T02:00:00Z"), now, false, saved, true) === ENDED_MSG, "end moved later after the event ended refused");
+  assert(checkTimes(starts, saved, now, false, saved, true) === null, "end sent unchanged after the event ended ok (edit forms send the whole form)");
+  assert(checkTimes(starts, new Date("2026-11-01T03:00:00Z"), new Date("2026-11-01T01:00:00Z"), false, saved, true) === null, "before it ends, the end can still move later");
+  assert(!/[-\u2013\u2014]/.test(ENDED_MSG), "ended copy has no dashes");
+}
+
 // Paid events switch
 {
   const prev = process.env.PAID_EVENTS_ENABLED;

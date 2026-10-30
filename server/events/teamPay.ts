@@ -19,6 +19,8 @@ import { sql } from "drizzle-orm";
 export const LINK_ROLES: readonly string[] = ["host", "entertainment"];
 
 export const PAY_LIMITS = { fixedMaxCents: 1_000_000, hourlyMaxCents: 100_000, commissionMinBps: 100, commissionMaxBps: 5000 };
+/** Step 4b-1 (Legend 2026-10-30): hourly pay for one role is capped at $10,000, the same as fixed. */
+export const HOURLY_ROLE_CAP_CENTS = 1_000_000;
 
 export type PayType = "none" | "fixed" | "hourly";
 export type PaySetting = { payType: PayType; fixedCents: number | null; hourlyCents: number | null; commissionBps: number | null };
@@ -34,6 +36,8 @@ export type RolePay = {
   commissionCents: number;
   totalCents: number;
   needsShift: boolean;
+  /** Step 4b-1: the shift times the rate came to more than $10,000, so the hourly part was capped there. */
+  hourlyCapped: boolean;
 };
 
 /** Hours to two decimals, for showing (the pay itself uses the exact length). */
@@ -45,12 +49,14 @@ export function computeRolePay(p: PaySetting, shift: Shift, linkSalesCents: numb
   let hours: number | null = null;
   let hourlyCents = 0;
   let needsShift = false;
+  let hourlyCapped = false;
   if (p.payType === "hourly") {
     const start = shift?.startsAt ? new Date(shift.startsAt).getTime() : NaN;
     const end = shift?.endsAt ? new Date(shift.endsAt).getTime() : NaN;
     if (Number.isFinite(start) && Number.isFinite(end) && end > start) {
       hours = hoursShown(end - start);
       hourlyCents = Math.round(((end - start) * Number(p.hourlyCents ?? 0)) / 3600000);
+      if (hourlyCents > HOURLY_ROLE_CAP_CENTS) { hourlyCents = HOURLY_ROLE_CAP_CENTS; hourlyCapped = true; }
     } else {
       needsShift = true;
     }
@@ -64,6 +70,7 @@ export function computeRolePay(p: PaySetting, shift: Shift, linkSalesCents: numb
     commissionCents,
     totalCents: fixedCents + hourlyCents + commissionCents,
     needsShift,
+    hourlyCapped,
   };
 }
 
@@ -123,7 +130,7 @@ export type EventPay = {
   /** "memberId:role" -> that role's pay (every pay row, pending invites included). */
   byRole: Map<string, RolePay>;
   /** Accepted, not removed people only. */
-  members: Array<{ userId: string; username: string | null; firstName: string | null; totalCents: number; needsShift: boolean }>;
+  members: Array<{ userId: string; username: string | null; firstName: string | null; totalCents: number; needsShift: boolean; roles: string[] }>;
   teamTotalCents: number;
   hostEarningsCents: number;
 } & ReturnType<typeof coverage>;
@@ -132,8 +139,14 @@ export type EventPay = {
  * Everyone's pay at this event with what it adds up to. Shifts come from event_team_schedules, link sales from the
  * promoter link counts. Team members are accepted, not removed rows of this event or the host's standing team.
  */
-export async function eventPay(event: { id: string; host_user_id: string }): Promise<EventPay> {
+export async function eventPay(event: { id: string; host_user_id: string }, opts: { asOf?: Date | string | null } = {}): Promise<EventPay> {
   const eventId = String(event.id);
+  // Step 4b-1 (Legend 2026-10-30, call 15): at payout time the team is whoever was on it when the event ended, so a
+  // removal (or leave) after the end changes nothing, and someone who joined after it ended isn't counted.
+  const asOf = opts.asOf ? new Date(opts.asOf).toISOString() : null;
+  const onTeam = (a: string) => asOf
+    ? sql`${sql.raw(a)}.accepted_at IS NOT NULL AND ${sql.raw(a)}.accepted_at <= ${asOf}::timestamptz AND (${sql.raw(a)}.removed_at IS NULL OR ${sql.raw(a)}.removed_at > ${asOf}::timestamptz)`
+    : sql`${sql.raw(a)}.removed_at IS NULL AND ${sql.raw(a)}.accepted_at IS NOT NULL`;
   // Loaded here so the pure helpers above stay importable without a database (teamPay.test.ts).
   const { rows } = await import("./eventsRouter");
   const { promoterLinkStats } = await import("./promoterLinks");
@@ -144,10 +157,10 @@ export async function eventPay(event: { id: string; host_user_id: string }): Pro
       SELECT a.member_user_id AS member_id, a.role AS member_role, u.username AS member_username, u.first_name AS member_first_name
       FROM (
         SELECT m.member_user_id, m.role FROM event_door_members m
-        WHERE m.event_id = ${eventId} AND m.removed_at IS NULL AND m.accepted_at IS NOT NULL
+        WHERE m.event_id = ${eventId} AND ${onTeam("m")}
         UNION
         SELECT t.member_user_id, t.role FROM event_door_team t
-        WHERE t.host_user_id = ${event.host_user_id} AND t.removed_at IS NULL AND t.accepted_at IS NOT NULL
+        WHERE t.host_user_id = ${event.host_user_id} AND ${onTeam("t")}
       ) a JOIN users u ON u.id = a.member_user_id`),
     promoterLinkStats(eventId),
     rows<any>(sql`
@@ -173,11 +186,12 @@ export async function eventPay(event: { id: string; host_user_id: string }): Pro
     const sales = commissionRoleOf.get(memberId) === role ? salesOf.get(memberId) ?? 0 : 0;
     byRole.set(key, computeRolePay(setting, shiftOf.get(key) ?? null, sales));
   }
-  const people = new Map<string, { userId: string; username: string | null; firstName: string | null; totalCents: number; needsShift: boolean; hasPay: boolean }>();
+  const people = new Map<string, { userId: string; username: string | null; firstName: string | null; totalCents: number; needsShift: boolean; roles: string[]; hasPay: boolean }>();
   for (const a of active) {
     const id = String(a.member_id);
     const key = `${id}:${a.member_role}`;
-    const person = people.get(id) ?? { userId: id, username: a.member_username ?? null, firstName: a.member_first_name ?? null, totalCents: 0, needsShift: false, hasPay: false };
+    const person = people.get(id) ?? { userId: id, username: a.member_username ?? null, firstName: a.member_first_name ?? null, totalCents: 0, needsShift: false, roles: [] as string[], hasPay: false };
+    if (!person.roles.includes(String(a.member_role))) person.roles.push(String(a.member_role));
     const rp = byRole.get(key);
     const s = settingFor.get(key);
     person.totalCents += rp?.totalCents ?? 0;
@@ -205,5 +219,6 @@ export function rolePayJson(p: RolePay | undefined) {
     commissionCents: r.commissionPercent ? r.commissionCents : null,
     earnedCents: r.totalCents,
     needsShift: r.needsShift,
+    hourlyCapped: r.hourlyCapped,
   };
 }

@@ -30,6 +30,8 @@ export type HeldBreakdown = {
   bookingRefundCover: number;
   /** Business referral cash (072) owed to referrers and not sent yet: pending, held or review. */
   referralPayoutsOpen: number;
+  /** Event team pay (087) Outsyde owes team members and hasn't sent yet: pending, held or review. */
+  teamPayoutsOpen: number;
 };
 
 /** Counts that block or flag the payout; not money, so never part of total. */
@@ -67,7 +69,8 @@ SELECT
  (SELECT count(*) FROM booking_payout_issues WHERE status='open')::int AS open_issue_rows,
  (SELECT count(*) FROM event_payouts WHERE status='pending' AND last_error ILIKE '%insufficient%')::int AS event_payouts_waiting_balance,
  (SELECT COALESCE(SUM(amount_cents),0) FROM referral_payouts WHERE status IN ('pending','held','review'))::bigint AS referral_payouts_open,
- (SELECT count(*) FROM referral_payouts WHERE status='pending' AND last_error ILIKE '%insufficient%')::int AS referral_payouts_waiting_balance
+ (SELECT count(*) FROM referral_payouts WHERE status='pending' AND last_error ILIKE '%insufficient%')::int AS referral_payouts_waiting_balance,
+ (SELECT COALESCE(SUM(amount_cents),0) FROM event_team_payouts WHERE status IN ('pending','held','review'))::bigint AS team_payouts_open
 `));
   const n = (v: unknown) => Number(v ?? 0);
   const breakdown: HeldBreakdown = {
@@ -84,6 +87,7 @@ SELECT
     influencerOwed: n(r.influencer_owed),
     bookingRefundCover: n(r.booking_refund_cover),
     referralPayoutsOpen: n(r.referral_payouts_open),
+    teamPayoutsOpen: n(r.team_payouts_open),
   };
   const gates: Gates = {
     recentTopups: n(r.recent_topups),

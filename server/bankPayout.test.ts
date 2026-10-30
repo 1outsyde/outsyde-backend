@@ -40,7 +40,7 @@ const ymd = (iso: string) => iso.slice(0, 10);
 
   // Children first. tickets before event_payouts (tickets.payout_id) and before ticket_order_items.
   const cleanup = async () => {
-    for (const t of ["referral_payouts", "business_referrals", "event_payout_recoveries", "tickets", "ticket_order_items", "ticket_orders", "ticket_types", "event_payouts", "events",
+    for (const t of ["referral_payouts", "business_referrals", "event_payout_recoveries", "event_team_payouts", "tickets", "ticket_order_items", "ticket_orders", "ticket_types", "event_payouts", "events",
       "booking_payout_issues", "appointments", "shoot_bookings", "orders", "refund_requests", "influencer_earning_ledger",
       "influencer_profiles", "photographers", "businesses", "users"]) {
       await q(`DELETE FROM ${t} WHERE id LIKE 'bp-test-%'`);
@@ -194,6 +194,22 @@ const ymd = (iso: string) => iso.slice(0, 10);
       await seedEvent({ status: "paused", starts: ago(10), ends: ago(9) });
       await ins("event_payouts", { id: "bp-test-payout", event_id: "bp-test-event", gross_cents: 600, amount_cents: 600, status: "pending", last_error: "Insufficient funds in Stripe account" });
     }, { eventPayoutsWaitingBalance: 1 });
+    // Event team pay (087, p4-team 4b-1): Outsyde owes the team member until it is sent (4b-2).
+    for (const st of ["pending", "held", "review"]) {
+      await expectPart(`team payout ${st} is held`, "teamPayoutsOpen", 4000, async () => {
+        await seedEvent({ status: "cancelled", starts: ago(10), ends: ago(9) });
+        await ins("event_payouts", { id: "bp-test-payout", event_id: "bp-test-event", gross_cents: 4000, deducted_cents: 0, team_cents: 4000, amount_cents: 0, status: "paid" });
+        await ins("event_team_payouts", { id: "bp-test-tpay", event_id: "bp-test-event", member_user_id: "bp-test-user", payout_id: "bp-test-payout", amount_cents: 4000, breakdown: "{}", outcome: "covered", status: st });
+      });
+    }
+    for (const [st, outcome] of [["paid", "covered"], ["host_to_pay", "not_covered"]]) {
+      await expectPart(`team payout ${st} is not held`, null, 0, async () => {
+        await seedEvent({ status: "cancelled", starts: ago(10), ends: ago(9) });
+        const covered = outcome === "covered";
+        if (covered) await ins("event_payouts", { id: "bp-test-payout", event_id: "bp-test-event", gross_cents: 4000, deducted_cents: 0, team_cents: 4000, amount_cents: 0, status: "paid" });
+        await ins("event_team_payouts", { id: "bp-test-tpay", event_id: "bp-test-event", member_user_id: "bp-test-user", payout_id: covered ? "bp-test-payout" : null, amount_cents: 4000, breakdown: "{}", outcome, status: st });
+      });
+    }
     // Business referral cash (072): $25 owed to a referrer stays on the platform until it is sent.
     const seedReferral = async () => {
       await baseParents();

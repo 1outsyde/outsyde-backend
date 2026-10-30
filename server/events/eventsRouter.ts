@@ -557,6 +557,8 @@ router.patch("/:id", hybridAuthMiddleware, async (req: Request, res: Response) =
             AND refund_cutoff_hours IS NOT DISTINCT FROM ${e.refund_cutoff_hours == null ? null : Number(e.refund_cutoff_hours)}::int
             AND (starts_at > now() OR ${b.endsAt === undefined} OR ${newEndsAt}::timestamptz >= date_trunc('milliseconds', ends_at))
             AND (starts_at > now() OR ${b.startsAt === undefined} OR ${newStartsAt}::timestamptz = date_trunc('milliseconds', starts_at))
+            -- Step 4b-1 (call 16): an event that ended after the check above keeps its end time.
+            AND (ends_at > now() OR ${b.endsAt === undefined} OR ${newEndsAt}::timestamptz = date_trunc('milliseconds', ends_at))
           RETURNING *
         ),
         reminders AS (

@@ -71,7 +71,9 @@ export async function requestOrderRefund(orderId: string, actorUserId: string, b
           AND e.refund_policy = 'until_cutoff' AND e.refund_cutoff_hours IS NOT NULL
           AND now() < e.starts_at - make_interval(hours => e.refund_cutoff_hours)
           AND NOT EXISTS (SELECT 1 FROM tickets t WHERE t.order_id = o.id AND t.checked_in_at IS NOT NULL)`
-    : sql`e.host_user_id = ${actorUserId} AND e.status = 'published'`;
+    // Step 4b-1 (Legend 2026-10-30): no host refunds once the payout is worked out, 3 days after the event.
+    : sql`e.host_user_id = ${actorUserId} AND e.status = 'published' AND e.team_pay_fixed_at IS NULL
+          AND NOT EXISTS (SELECT 1 FROM event_payouts p WHERE p.event_id = e.id)`;
   const [r] = await withDeadlockRetry(() => rows<any>(sql`
     WITH o AS (
       UPDATE ticket_orders o SET status = 'refunding', refund_reason = ${by},
@@ -404,7 +406,7 @@ router.get("/:id/summary", hybridAuthMiddleware, async (req: Request, res: Respo
       FROM tickets t JOIN ticket_orders o ON o.id = t.order_id
       WHERE t.event_id = ${e.id}`);
     const [p] = await rows<any>(sql`
-      SELECT status, hold_reason, amount_cents, deducted_cents, paid_at FROM event_payouts WHERE event_id = ${e.id}`);
+      SELECT status, hold_reason, amount_cents, deducted_cents, team_cents, paid_at FROM event_payouts WHERE event_id = ${e.id}`);
     // Same as the payout job: published events only, paying valid tickets of completed orders with host_net_cents > 0.
     // p4-team step 3: per promoter breakdown for the host and co-hosts (Legend 2026-10-30). Every promoter has a
     // link; removed promoters stay listed with their past sales, marked not active. No buyer details.
@@ -423,9 +425,22 @@ router.get("/:id/summary", hybridAuthMiddleware, async (req: Request, res: Respo
     // the event. Its own try: a failure sends the summary without it.
     let teamPay: Record<string, unknown> | null = null;
     try {
-      const pay = await eventPay(e);
-      teamPay = { totalCents: pay.teamTotalCents, covered: pay.covered, teamPaidCents: pay.teamPaidCents, hostTakeHomeCents: pay.hostTakeHomeCents,
-        members: pay.members.map((m) => ({ userId: m.userId, username: m.username, firstName: m.firstName, totalCents: m.totalCents, needsShift: m.needsShift })) };
+      if (e.team_pay_fixed_at) {
+        // Step 4b-1: worked out 3 days after the event. From then on the summary shows what was fixed, not an estimate.
+        const fixedRows = await rows<any>(sql`
+          SELECT tp.member_user_id, tp.amount_cents, tp.outcome, u.username, u.first_name
+          FROM event_team_payouts tp JOIN users u ON u.id = tp.member_user_id
+          WHERE tp.event_id = ${e.id} ORDER BY tp.amount_cents DESC, tp.member_user_id`);
+        const total = fixedRows.reduce((n, x) => n + Number(x.amount_cents), 0);
+        const covered = fixedRows.length === 0 || fixedRows.every((x) => x.outcome === "covered");
+        teamPay = { fixed: true, totalCents: total, covered, teamPaidCents: p ? Number(p.team_cents) : 0,
+          hostTakeHomeCents: p ? Number(p.amount_cents) : 0,
+          members: fixedRows.map((m) => ({ userId: m.member_user_id, username: m.username ?? null, firstName: m.first_name ?? null, totalCents: Number(m.amount_cents), needsShift: false })) };
+      } else {
+        const pay = await eventPay(e);
+        teamPay = { fixed: false, totalCents: pay.teamTotalCents, covered: pay.covered, teamPaidCents: pay.teamPaidCents, hostTakeHomeCents: pay.hostTakeHomeCents,
+          members: pay.members.map((m) => ({ userId: m.userId, username: m.username, firstName: m.firstName, totalCents: m.totalCents, needsShift: m.needsShift })) };
+      }
     } catch (err) {
       console.error("[Tickets] team pay failed (summary sent without it):", err);
     }
@@ -445,6 +460,7 @@ router.get("/:id/summary", hybridAuthMiddleware, async (req: Request, res: Respo
       payout: {
         expectedAt, status: payoutStatusFor(p, { eventStatus: e.status, payable, expectedAt }),
         amountCents: p ? Number(p.amount_cents) : null, deductedCents: p ? Number(p.deducted_cents) : null,
+        teamCents: p ? Number(p.team_cents) : null,
         paidAt: p ? iso(p.paid_at) : null,
       },
       promoters,
@@ -477,6 +493,11 @@ router.post("/:id/orders/:orderId/refund", hybridAuthMiddleware, async (req: Req
     if (e.status === "cancelled") return fail(res, 409, "EVENT_CANCELLED", "This event is cancelled. Everyone is refunded automatically.");
     if (e.status === "paused") return fail(res, 409, "EVENT_PAUSED", "This event is paused by Outsyde. Contact support.");
     if (e.status !== "published") return fail(res, 409, "EVENT_NOT_PUBLISHED", "This event isn't live.");
+    const [done] = await rows<any>(sql`
+      SELECT (e.team_pay_fixed_at IS NOT NULL OR EXISTS (SELECT 1 FROM event_payouts p WHERE p.event_id = e.id)) AS fixed FROM events e WHERE e.id = ${e.id}`);
+    if (done?.fixed) {
+      return fail(res, 409, "PAYOUT_CREATED", "Your payout for this event has been worked out, so orders can no longer be refunded. Contact support if a guest needs help.");
+    }
     return fail(res, 409, "ORDER_NOT_REFUNDABLE", "This order can't be refunded.");
   } catch (err) {
     if (refundGuardMessage(res, err)) return;
