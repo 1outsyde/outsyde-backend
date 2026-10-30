@@ -21,7 +21,7 @@
 import { Router, type Request, type Response } from "express";
 import { sql } from "drizzle-orm";
 import { getUserIdFromRequest, hybridAuthMiddleware } from "../auth";
-import { rows, iso, fail, loadActiveUser, loadEventForHost } from "./eventsRouter";
+import { rows, iso, fail, loadActiveUser, loadEventForHost, loadEventAccess } from "./eventsRouter";
 import { guardCode, withDeadlockRetry, orderWithTickets } from "./ticketsRouter";
 import { flagForReview, releasePendingTicketOrder } from "./ticketCheckout";
 import { HOST_PAYOUT_DELAY_DAYS } from "./payoutTiming";
@@ -340,7 +340,8 @@ router.get("/:id/orders", hybridAuthMiddleware, async (req: Request, res: Respon
   const userId = getUserIdFromRequest(req);
   if (!userId) return fail(res, 401, "NO_AUTH", "Sign in to see orders.");
   try {
-    const e = await loadEventForHost(String(req.params.id), userId);
+    // Host or co-host (step 2b): co-hosts see everything for the event.
+    const e = (await loadEventAccess(String(req.params.id), userId))?.event;
     if (!e) return fail(res, 404, "EVENT_NOT_FOUND", "Event not found.");
     const list = await rows<any>(sql`
       SELECT o.id, o.status, o.ticket_count, o.subtotal_cents, o.tax_cents, o.discount_cents, o.host_net_cents,
@@ -375,7 +376,8 @@ router.get("/:id/summary", hybridAuthMiddleware, async (req: Request, res: Respo
   if (!userId) return fail(res, 401, "NO_AUTH", "Sign in to see sales.");
   try {
     if (!(await loadActiveUser(userId))) return fail(res, 403, "ACCOUNT_INACTIVE", "This account can't host events.");
-    const e = await loadEventForHost(String(req.params.id), userId);
+    // Host or co-host (step 2b): the full summary, earnings, payout and deductions included (Legend, 2026-10-29).
+    const e = (await loadEventAccess(String(req.params.id), userId))?.event;
     if (!e) return fail(res, 404, "EVENT_NOT_FOUND", "Event not found.");
     const types = await rows<any>(sql`
       SELECT tt.id, tt.name, tt.price_cents, (tt.status = 'archived') AS archived,

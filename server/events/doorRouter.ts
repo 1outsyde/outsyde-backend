@@ -7,6 +7,10 @@
  *   DELETE /api/events/:id/door/team/:userId     (auth, host) ?scope=standing|event, soft remove (also cancels an invite)
  *   PUT    /api/events/:id/door/team/:userId/schedule  (auth, host) ?role= this person's times and notes for this event
  *   GET    /api/events/:id/team/me               (auth)       my accepted Event team roles at this event, with times
+ *   PUT    /api/events/:id/door/team/:userId/cohost-level  (auth, host) { scope, level } a co-host's level (team | edit)
+ *   GET    /api/events/cohosting                 (auth)       events I co-host (accepted), with my level
+ * Co-hosts (step 2b) use the team routes like the host, for this event only: never the standing team, never other
+ * co-hosts. Every row they write is saved under the event's host.
  *
  *   GET    /api/events/door/invites              (auth)       my open door team invites
  *   GET    /api/events/door/invites/:inviteId    (auth, invitee) one invite: invited | accepted | declined | gone
@@ -25,7 +29,7 @@ import rateLimit from "express-rate-limit";
 import { sql } from "drizzle-orm";
 import { z } from "zod";
 import { getUserIdFromRequest, hybridAuthMiddleware } from "../auth";
-import { rows, iso, fail, pgError, hostIdentity } from "./eventsRouter";
+import { rows, iso, fail, pgError, hostIdentity, hostEventJson } from "./eventsRouter";
 import { loadEventForDoor, isWithinScanWindow } from "./doorAccess";
 import { TEAM_ROLES, duplicateMessage, parseRoleLabel, roleInfo, type TeamRole } from "./teamRoles";
 import { notifyDoorInvite, notifyDoorAccepted } from "./ticketNotices";
@@ -38,9 +42,11 @@ const scopeSchema = z.enum(["standing", "event"]);
 // role (p4-team): door = Admissions, host = Promoter, see teamRoles.ts. Missing = door (old app builds, today's site).
 const roleSchema = z.enum(TEAM_ROLES);
 const ROLE_CHOICES = "role: choose door, security, host, entertainment, media, cohost or other.";
+const levelSchema = z.enum(["team", "edit"]);
 const addSchema = z.object({
   username: z.string().trim().min(1).max(40), scope: scopeSchema, role: roleSchema.optional(),
   roleLabel: z.string().max(200).nullable().optional(),
+  cohostLevel: levelSchema.optional(),
 }).strict();
 const validId = (v: string) => v.length > 0 && v.length <= 36;
 
@@ -57,6 +63,8 @@ const memberJson = (r: any) => ({
   roleLabel: r.role_label ?? null,
   roleInfo: roleInfo((r.role ?? "door") as TeamRole, r.role_label ?? null),
   schedule: r.schedule ?? null,
+  // Step 2b: a co-host's level (team | edit); null for every other role.
+  cohostLevel: r.role === "cohost" ? (r.cohost_level ?? "team") : null,
 });
 
 /** One event_team_schedules row as JSON (ISO times, null when unset). */
@@ -81,10 +89,11 @@ const doorKey = (scope: Scope, hostUserId: string, eventId: string, memberId: st
  * Sends (or re-sends after a decline) an invite. Pending and accepted rows are never touched: the caller answers
  * 409 ALREADY_INVITED / ALREADY_ON_TEAM. Returns the row (id, created_at, invited_at) or that code.
  */
-async function inviteRow(scope: Scope, hostUserId: string, eventId: string, memberId: string, role: TeamRole, label: string | null): Promise<{ row: any } | { code: "ALREADY_INVITED" | "ALREADY_ON_TEAM" }> {
+/** hostUserId = the event's host (the team's owner); addedBy = who sent it (the host or a co-host). */
+async function inviteRow(scope: Scope, hostUserId: string, eventId: string, memberId: string, role: TeamRole, label: string | null, level: string | null, addedBy: string): Promise<{ row: any } | { code: "ALREADY_INVITED" | "ALREADY_ON_TEAM" }> {
   const key = doorKey(scope, hostUserId, eventId, memberId, role);
   const [reopened] = await rows<any>(sql`
-    UPDATE ${doorTable(scope)} SET declined_at = NULL, invited_at = now(), added_by_user_id = ${hostUserId}, role_label = ${label}
+    UPDATE ${doorTable(scope)} SET declined_at = NULL, invited_at = now(), added_by_user_id = ${addedBy}, role_label = ${label}, cohost_level = ${level}
     WHERE ${key} AND removed_at IS NULL AND declined_at IS NOT NULL
     RETURNING id, created_at, invited_at`);
   if (reopened) return { row: reopened };
@@ -92,13 +101,13 @@ async function inviteRow(scope: Scope, hostUserId: string, eventId: string, memb
   try {
     [inserted] = scope === "standing"
       ? await rows<any>(sql`
-          INSERT INTO event_door_team (host_user_id, member_user_id, added_by_user_id, role, role_label)
-          VALUES (${hostUserId}, ${memberId}, ${hostUserId}, ${role}, ${label})
+          INSERT INTO event_door_team (host_user_id, member_user_id, added_by_user_id, role, role_label, cohost_level)
+          VALUES (${hostUserId}, ${memberId}, ${addedBy}, ${role}, ${label}, ${level})
           ON CONFLICT (host_user_id, member_user_id, role) WHERE removed_at IS NULL DO NOTHING
           RETURNING id, created_at, invited_at`)
       : await rows<any>(sql`
-          INSERT INTO event_door_members (event_id, member_user_id, added_by_user_id, role, role_label)
-          VALUES (${eventId}, ${memberId}, ${hostUserId}, ${role}, ${label})
+          INSERT INTO event_door_members (event_id, member_user_id, added_by_user_id, role, role_label, cohost_level)
+          VALUES (${eventId}, ${memberId}, ${addedBy}, ${role}, ${label}, ${level})
           ON CONFLICT (event_id, member_user_id, role) WHERE removed_at IS NULL DO NOTHING
           RETURNING id, created_at, invited_at`);
   } catch (err) {
@@ -109,14 +118,28 @@ async function inviteRow(scope: Scope, hostUserId: string, eventId: string, memb
   return { code: existing?.accepted_at ? "ALREADY_ON_TEAM" : "ALREADY_INVITED" };
 }
 
-/** The host of this event, or null (and the caller answers 404 EVENT_NOT_FOUND). */
-async function hostOnly(req: Request, res: Response): Promise<{ userId: string; event: any } | null> {
+type TeamCtx = { userId: string; event: any; as: "host" | "cohost" };
+
+/**
+ * The host of this event, or (step 2b) an accepted co-host when `cohosts` is true; null after answering 401 / 404
+ * EVENT_NOT_FOUND. event.host_user_id is the team's owner: write rows under it, never under the caller.
+ */
+async function teamManager(req: Request, res: Response, cohosts = true): Promise<TeamCtx | null> {
   const userId = getUserIdFromRequest(req);
   const eventId = String(req.params.id);
   if (!userId) { fail(res, 401, "UNAUTHORIZED", "Sign in to continue."); return null; }
   const access = validId(eventId) ? await loadEventForDoor(eventId, userId) : null;
-  if (!access || access.role !== "host") { fail(res, 404, "EVENT_NOT_FOUND", "Event not found."); return null; }
-  return { userId, event: access.event };
+  if (!access || !(access.role === "host" || (cohosts && access.role === "cohost"))) { fail(res, 404, "EVENT_NOT_FOUND", "Event not found."); return null; }
+  return { userId, event: access.event, as: access.role === "host" ? "host" : "cohost" };
+}
+const hostOnly = (req: Request, res: Response) => teamManager(req, res, false);
+
+/** A co-host never changes the standing team or co-host spots. Answers 403 HOST_ONLY when refused. */
+function cohostCantTouch(res: Response, ctx: TeamCtx, scope: Scope, role: TeamRole): boolean {
+  if (ctx.as === "host") return false;
+  if (scope === "standing") { fail(res, 403, "HOST_ONLY", "Only the host can change the team for all their events."); return true; }
+  if (role === "cohost") { fail(res, 403, "HOST_ONLY", "Only the host can add or remove co-hosts."); return true; }
+  return false;
 }
 
 /** 120 per minute per signed in user (never per IP: a whole door team can share one venue wifi address). */
@@ -261,7 +284,7 @@ router.get("/door/mine", hybridAuthMiddleware, async (req: Request, res: Respons
 
 type InviteRow = {
   scope: Scope; id: string; host_user_id: string; event_id: string | null; member_user_id: string;
-  accepted_at: any; declined_at: any; removed_at: any; invited_at: any; role: string; role_label: string | null;
+  accepted_at: any; declined_at: any; removed_at: any; invited_at: any; role: string; role_label: string | null; cohost_level: string | null;
   e_title: string | null; e_starts_at: any; e_ends_at: any; e_timezone: string | null; e_status: string | null;
 };
 
@@ -270,12 +293,12 @@ async function loadInvite(inviteId: string): Promise<InviteRow | null> {
   if (!validId(inviteId)) return null;
   const [r] = await rows<any>(sql`
     SELECT 'standing' AS scope, t.id, t.host_user_id, NULL::varchar AS event_id, t.member_user_id, t.accepted_at, t.declined_at,
-      t.removed_at, t.invited_at, t.role, t.role_label, NULL AS e_title, NULL::timestamptz AS e_starts_at, NULL::timestamptz AS e_ends_at,
+      t.removed_at, t.invited_at, t.role, t.role_label, t.cohost_level, NULL AS e_title, NULL::timestamptz AS e_starts_at, NULL::timestamptz AS e_ends_at,
       NULL AS e_timezone, NULL AS e_status
     FROM event_door_team t WHERE t.id = ${inviteId}
     UNION ALL
     SELECT 'event', m.id, e.host_user_id, m.event_id, m.member_user_id, m.accepted_at, m.declined_at,
-      m.removed_at, m.invited_at, m.role, m.role_label, e.title, e.starts_at, e.ends_at, e.timezone, e.status
+      m.removed_at, m.invited_at, m.role, m.role_label, m.cohost_level, e.title, e.starts_at, e.ends_at, e.timezone, e.status
     FROM event_door_members m JOIN events e ON e.id = m.event_id WHERE m.id = ${inviteId}`);
   return (r as InviteRow) ?? null;
 }
@@ -303,6 +326,7 @@ async function inviteJson(r: InviteRow) {
   return {
     id: String(r.id), scope: r.scope, role: r.role, status: inviteStatus(r), invitedAt: iso(r.invited_at),
     roleLabel: r.role_label ?? null, roleInfo: roleInfo((r.role ?? "door") as TeamRole, r.role_label ?? null),
+    cohostLevel: r.role === "cohost" ? (r.cohost_level ?? "team") : null,
     host: { name: await hostNameFor(r.host_user_id, r.event_id) },
     event: r.scope === "event"
       ? { id: String(r.event_id), title: r.e_title, startsAt: iso(r.e_starts_at), endsAt: iso(r.e_ends_at), timezone: r.e_timezone }
@@ -411,7 +435,7 @@ router.post("/door/invites/:inviteId/leave", hybridAuthMiddleware, doorLimiter, 
 
 router.get("/:id/door/team", hybridAuthMiddleware, async (req: Request, res: Response) => {
   try {
-    const ctx = await hostOnly(req, res);
+    const ctx = await teamManager(req, res);
     if (!ctx) return;
     // p4-team: ?roles=all lists every role (new clients). Without it, door only, as old clients expect.
     const allRoles = req.query.roles === "all";
@@ -419,12 +443,12 @@ router.get("/:id/door/team", hybridAuthMiddleware, async (req: Request, res: Res
     const mRole = allRoles ? sql`` : sql`AND m.role = 'door'`;
     const standing = await rows<any>(sql`
       SELECT u.id AS user_id, u.first_name, u.username, t.created_at AS added_at,
-        t.id AS invite_id, t.accepted_at, t.declined_at, t.invited_at, t.role, t.role_label
+        t.id AS invite_id, t.accepted_at, t.declined_at, t.invited_at, t.role, t.role_label, t.cohost_level
       FROM event_door_team t JOIN users u ON u.id = t.member_user_id
-      WHERE t.host_user_id = ${ctx.userId} AND t.removed_at IS NULL ${tRole} ORDER BY t.created_at, u.id, t.role`);
+      WHERE t.host_user_id = ${ctx.event.host_user_id} AND t.removed_at IS NULL ${tRole} ORDER BY t.created_at, u.id, t.role`);
     const event = await rows<any>(sql`
       SELECT u.id AS user_id, u.first_name, u.username, m.created_at AS added_at,
-        m.id AS invite_id, m.accepted_at, m.declined_at, m.invited_at, m.role, m.role_label
+        m.id AS invite_id, m.accepted_at, m.declined_at, m.invited_at, m.role, m.role_label, m.cohost_level
       FROM event_door_members m JOIN users u ON u.id = m.member_user_id
       WHERE m.event_id = ${ctx.event.id} AND m.removed_at IS NULL ${mRole} ORDER BY m.created_at, u.id, m.role`);
     const times = await schedulesFor(ctx.event.id);
@@ -438,7 +462,7 @@ router.get("/:id/door/team", hybridAuthMiddleware, async (req: Request, res: Res
 
 router.post("/:id/door/team", hybridAuthMiddleware, inviteLimiter, async (req: Request, res: Response) => {
   try {
-    const ctx = await hostOnly(req, res);
+    const ctx = await teamManager(req, res);
     if (!ctx) return;
     const parsed = addSchema.safeParse(req.body ?? {});
     if (!parsed.success) {
@@ -449,6 +473,9 @@ router.post("/:id/door/team", hybridAuthMiddleware, inviteLimiter, async (req: R
     const role: TeamRole = parsed.data.role ?? "door";
     const label = parseRoleLabel(role, parsed.data.roleLabel);
     if (!label.ok) return fail(res, 400, "INVALID_REQUEST", label.message);
+    if (parsed.data.cohostLevel !== undefined && role !== "cohost") return fail(res, 400, "INVALID_REQUEST", "cohostLevel: only for co-hosts.");
+    const level = role === "cohost" ? parsed.data.cohostLevel ?? "team" : null;
+    if (cohostCantTouch(res, ctx, scope, role)) return;
     if (scope === "event" && (ctx.event.status === "cancelled" || new Date(ctx.event.ends_at).getTime() <= Date.now())) {
       return fail(res, 409, "EVENT_ENDED", "This event is over, so no one can be added to its Event team.");
     }
@@ -457,16 +484,19 @@ router.post("/:id/door/team", hybridAuthMiddleware, inviteLimiter, async (req: R
       WHERE LOWER(username) = LOWER(${username}) AND is_active = true AND COALESCE(deletion_status, 'active') = 'active'`);
     if (!target) return fail(res, 404, "USER_NOT_FOUND", "No active account has that username.");
     if (target.id === ctx.userId) return fail(res, 400, "CANNOT_ADD_SELF", "You already have full access to your own events.");
-    const out = await inviteRow(scope, ctx.userId, ctx.event.id, target.id, role, label.label);
+    if (target.id === ctx.event.host_user_id) return fail(res, 400, "CANNOT_ADD_HOST", "That's the host. They already have full access.");
+    const hostUserId = String(ctx.event.host_user_id);
+    const out = await inviteRow(scope, hostUserId, ctx.event.id, target.id, role, label.label, level, ctx.userId);
     if ("code" in out) {
       return fail(res, 409, out.code, duplicateMessage(role, out.code, label.label));
     }
-    notifyDoorInvite({ inviteId: String(out.row.id), scope, eventId: ctx.event.id, memberUserId: target.id, hostUserId: ctx.userId, role, roleLabel: label.label }).catch(() => {});
+    notifyDoorInvite({ inviteId: String(out.row.id), scope, eventId: ctx.event.id, memberUserId: target.id, hostUserId, role, roleLabel: label.label }).catch(() => {});
     res.status(201).json({
       success: true, scope,
       member: memberJson({
         user_id: target.id, first_name: target.first_name, username: target.username, added_at: out.row.created_at,
         invite_id: out.row.id, accepted_at: null, declined_at: null, invited_at: out.row.invited_at, role, role_label: label.label,
+        cohost_level: level,
       }),
     });
   } catch (err) {
@@ -477,7 +507,7 @@ router.post("/:id/door/team", hybridAuthMiddleware, inviteLimiter, async (req: R
 
 router.delete("/:id/door/team/:userId", hybridAuthMiddleware, async (req: Request, res: Response) => {
   try {
-    const ctx = await hostOnly(req, res);
+    const ctx = await teamManager(req, res);
     if (!ctx) return;
     const scope = scopeSchema.safeParse(req.query.scope);
     if (!scope.success) return fail(res, 400, "INVALID_REQUEST", "scope: choose standing or event.");
@@ -485,12 +515,13 @@ router.delete("/:id/door/team/:userId", hybridAuthMiddleware, async (req: Reques
     const roleParsed = roleSchema.safeParse(req.query.role ?? "door");
     if (!roleParsed.success) return fail(res, 400, "INVALID_REQUEST", ROLE_CHOICES);
     const role = roleParsed.data;
+    if (cohostCantTouch(res, ctx, scope.data, role)) return;
     const memberId = String(req.params.userId);
     if (!validId(memberId)) return fail(res, 404, "NOT_ON_TEAM", "That person isn't on your Event team.");
     const done = scope.data === "standing"
       ? await rows<any>(sql`
           UPDATE event_door_team SET removed_at = now(), removed_by_user_id = ${ctx.userId}
-          WHERE host_user_id = ${ctx.userId} AND member_user_id = ${memberId} AND role = ${role} AND removed_at IS NULL RETURNING id`)
+          WHERE host_user_id = ${ctx.event.host_user_id} AND member_user_id = ${memberId} AND role = ${role} AND removed_at IS NULL RETURNING id`)
       : await rows<any>(sql`
           UPDATE event_door_members SET removed_at = now(), removed_by_user_id = ${ctx.userId}
           WHERE event_id = ${ctx.event.id} AND member_user_id = ${memberId} AND role = ${role} AND removed_at IS NULL RETURNING id`);
@@ -529,11 +560,12 @@ async function onTeam(event: any, memberId: string, role: TeamRole): Promise<boo
 /** Saves the whole set: a field left out or null is cleared. Every field is optional for every role. */
 router.put("/:id/door/team/:userId/schedule", hybridAuthMiddleware, teamLimiter, async (req: Request, res: Response) => {
   try {
-    const ctx = await hostOnly(req, res);
+    const ctx = await teamManager(req, res);
     if (!ctx) return;
     const roleParsed = roleSchema.safeParse(req.query.role);
     if (!roleParsed.success) return fail(res, 400, "INVALID_REQUEST", ROLE_CHOICES);
     const role = roleParsed.data;
+    if (cohostCantTouch(res, ctx, "event", role)) return;
     const parsed = scheduleSchema.safeParse(req.body ?? {});
     if (!parsed.success) {
       const first = parsed.error.issues[0];
@@ -569,6 +601,60 @@ router.put("/:id/door/team/:userId/schedule", hybridAuthMiddleware, teamLimiter,
   } catch (err) {
     console.error("[Door] schedule save failed:", err);
     fail(res, 500, "SERVER_ERROR", "Could not save the times.");
+  }
+});
+
+// ─── Co-hosts (p4-team step 2b, migration 084) ──────────────────────────────
+
+const levelBodySchema = z.object({ scope: scopeSchema, level: levelSchema }).strict();
+
+/** The host sets a co-host's level. Co-hosts get 403 HOST_ONLY. */
+router.put("/:id/door/team/:userId/cohost-level", hybridAuthMiddleware, teamLimiter, async (req: Request, res: Response) => {
+  try {
+    const ctx = await teamManager(req, res);
+    if (!ctx) return;
+    if (ctx.as !== "host") return fail(res, 403, "HOST_ONLY", "Only the host can change what a co-host can do.");
+    const parsed = levelBodySchema.safeParse(req.body ?? {});
+    if (!parsed.success) {
+      const first = parsed.error.issues[0];
+      return fail(res, 400, "INVALID_REQUEST", `${first?.path.join(".") || "body"}: ${first?.message ?? "invalid"}`);
+    }
+    const memberId = String(req.params.userId);
+    const { scope, level } = parsed.data;
+    const done = !validId(memberId) ? [] : scope === "standing"
+      ? await rows<any>(sql`UPDATE event_door_team SET cohost_level = ${level}
+          WHERE host_user_id = ${ctx.event.host_user_id} AND member_user_id = ${memberId} AND role = 'cohost' AND removed_at IS NULL RETURNING id`)
+      : await rows<any>(sql`UPDATE event_door_members SET cohost_level = ${level}
+          WHERE event_id = ${ctx.event.id} AND member_user_id = ${memberId} AND role = 'cohost' AND removed_at IS NULL RETURNING id`);
+    if (!done.length) return fail(res, 404, "NOT_ON_TEAM", "That person isn't a co-host on your Event team.");
+    res.json({ success: true, cohostLevel: level });
+  } catch (err) {
+    console.error("[Door] co-host level failed:", err);
+    fail(res, 500, "SERVER_ERROR", "Could not change what they can do.");
+  }
+});
+
+/** Events I co-host (accepted, not removed): this-event rows and every event of a host whose standing co-host I am. */
+router.get("/cohosting", hybridAuthMiddleware, teamLimiter, async (req: Request, res: Response) => {
+  try {
+    const userId = getUserIdFromRequest(req);
+    if (!userId) return fail(res, 401, "UNAUTHORIZED", "Sign in to continue.");
+    const list = await rows<any>(sql`
+      SELECT e.*, x.lvl AS cohost_access_level FROM events e
+      JOIN LATERAL (
+        SELECT COALESCE(m.cohost_level, 'team') AS lvl FROM event_door_members m
+        WHERE m.event_id = e.id AND m.member_user_id = ${userId} AND m.role = 'cohost' AND m.removed_at IS NULL AND m.accepted_at IS NOT NULL
+        UNION ALL
+        SELECT COALESCE(t.cohost_level, 'team') FROM event_door_team t
+        WHERE t.host_user_id = e.host_user_id AND t.member_user_id = ${userId} AND t.role = 'cohost' AND t.removed_at IS NULL AND t.accepted_at IS NOT NULL
+        ORDER BY 1 LIMIT 1
+      ) x ON true
+      WHERE e.host_user_id <> ${userId} AND e.status <> 'paused'
+      ORDER BY e.starts_at DESC LIMIT 200`);
+    res.json({ success: true, events: list.map((e) => ({ ...hostEventJson(e), cohostLevel: e.cohost_access_level === "edit" ? "edit" : "team" })) });
+  } catch (err) {
+    console.error("[Door] cohosting failed:", err);
+    fail(res, 500, "SERVER_ERROR", "Could not load the events you co-host.");
   }
 });
 
@@ -646,7 +732,8 @@ async function doorUser(req: Request, res: Response, hostRequired = false): Prom
   const eventId = String(req.params.id);
   if (!userId) { fail(res, 401, "UNAUTHORIZED", "Sign in to continue."); return null; }
   const access = validId(eventId) ? await loadEventForDoor(eventId, userId) : null;
-  if (!access || (hostRequired && access.role !== "host")) { fail(res, 404, "EVENT_NOT_FOUND", "Event not found."); return null; }
+  // hostRequired (undo): the host or a co-host (step 2b).
+  if (!access || (hostRequired && access.role !== "host" && access.role !== "cohost")) { fail(res, 404, "EVENT_NOT_FOUND", "Event not found."); return null; }
   return { userId, event: access.event, role: access.role };
 }
 
