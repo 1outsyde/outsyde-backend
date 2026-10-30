@@ -164,13 +164,13 @@ export async function loadEventAccess(eventId: string, userId: string): Promise<
   const [e] = await rows<any>(sql`
     SELECT e.*, x.lvl AS cohost_access_level FROM events e
     JOIN users u ON u.id = ${userId} AND u.is_active = true AND COALESCE(u.deletion_status, 'active') = 'active'
-    JOIN LATERAL (
+    JOIN LATERAL (SELECT lvl FROM (
       SELECT COALESCE(m.cohost_level, 'team') AS lvl FROM event_door_members m
       WHERE m.event_id = e.id AND m.member_user_id = u.id AND m.role = 'cohost' AND m.removed_at IS NULL AND m.accepted_at IS NOT NULL
       UNION ALL
       SELECT COALESCE(t.cohost_level, 'team') FROM event_door_team t
       WHERE t.host_user_id = e.host_user_id AND t.member_user_id = u.id AND t.role = 'cohost' AND t.removed_at IS NULL AND t.accepted_at IS NOT NULL
-      ORDER BY 1 LIMIT 1
+      ) cohost_rows ORDER BY (lvl = 'edit') DESC LIMIT 1
     ) x ON true
     WHERE e.id = ${eventId}`);
   if (!e) return null;
@@ -489,9 +489,15 @@ router.patch("/:id", hybridAuthMiddleware, async (req: Request, res: Response) =
     const access = await loadEventAccess(req.params.id, userId);
     if (!access) return fail(res, 404, "EVENT_NOT_FOUND", "Event not found.");
     if (cohostBlocked(res, access, "edit")) return;
-    // The refund policy decides who gets money back: the host's call only.
-    if ((b.refundPolicy !== undefined || b.refundCutoffHours !== undefined) && cohostBlocked(res, access, "host")) return;
     const e = access.event;
+    // The refund policy decides who gets money back: the host's call only. Edit screens send the whole form, so a
+    // co-host is refused only when the policy or cutoff actually changes (no_refunds always has no cutoff).
+    if (access.as === "cohost" && (b.refundPolicy !== undefined || b.refundCutoffHours !== undefined)) {
+      const policy = b.refundPolicy ?? e.refund_policy;
+      const oldCutoff = e.refund_policy === "no_refunds" || e.refund_cutoff_hours == null ? null : Number(e.refund_cutoff_hours);
+      const cutoff = policy === "no_refunds" ? null : b.refundCutoffHours !== undefined ? b.refundCutoffHours : oldCutoff;
+      if ((policy !== e.refund_policy || cutoff !== oldCutoff) && cohostBlocked(res, access, "host")) return;
+    }
     if (e.status === "cancelled") return fail(res, 409, "EVENT_CANCELLED", "A cancelled event can't be edited.");
     if (e.status === "paused") return fail(res, 409, "EVENT_PAUSED", "This event is paused by Outsyde. Contact support.");
 

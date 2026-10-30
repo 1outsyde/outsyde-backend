@@ -132,7 +132,6 @@ async function teamManager(req: Request, res: Response, cohosts = true): Promise
   if (!access || !(access.role === "host" || (cohosts && access.role === "cohost"))) { fail(res, 404, "EVENT_NOT_FOUND", "Event not found."); return null; }
   return { userId, event: access.event, as: access.role === "host" ? "host" : "cohost" };
 }
-const hostOnly = (req: Request, res: Response) => teamManager(req, res, false);
 
 /** A co-host never changes the standing team or co-host spots. Answers 403 HOST_ONLY when refused. */
 function cohostCantTouch(res: Response, ctx: TeamCtx, scope: Scope, role: TeamRole): boolean {
@@ -483,7 +482,9 @@ router.post("/:id/door/team", hybridAuthMiddleware, inviteLimiter, async (req: R
       SELECT id, first_name, username FROM users
       WHERE LOWER(username) = LOWER(${username}) AND is_active = true AND COALESCE(deletion_status, 'active') = 'active'`);
     if (!target) return fail(res, 404, "USER_NOT_FOUND", "No active account has that username.");
-    if (target.id === ctx.userId) return fail(res, 400, "CANNOT_ADD_SELF", "You already have full access to your own events.");
+    if (target.id === ctx.userId) {
+      return fail(res, 400, "CANNOT_ADD_SELF", ctx.as === "host" ? "You already have full access to your own events." : "You're already a co-host of this event.");
+    }
     if (target.id === ctx.event.host_user_id) return fail(res, 400, "CANNOT_ADD_HOST", "That's the host. They already have full access.");
     const hostUserId = String(ctx.event.host_user_id);
     const out = await inviteRow(scope, hostUserId, ctx.event.id, target.id, role, label.label, level, ctx.userId);
@@ -639,17 +640,22 @@ router.get("/cohosting", hybridAuthMiddleware, teamLimiter, async (req: Request,
   try {
     const userId = getUserIdFromRequest(req);
     if (!userId) return fail(res, 401, "UNAUTHORIZED", "Sign in to continue.");
+    // Starts from my co-host rows (indexed by member), never from every event on the platform.
     const list = await rows<any>(sql`
       SELECT e.*, x.lvl AS cohost_access_level FROM events e
-      JOIN LATERAL (
+      JOIN LATERAL (SELECT lvl FROM (
         SELECT COALESCE(m.cohost_level, 'team') AS lvl FROM event_door_members m
         WHERE m.event_id = e.id AND m.member_user_id = ${userId} AND m.role = 'cohost' AND m.removed_at IS NULL AND m.accepted_at IS NOT NULL
         UNION ALL
         SELECT COALESCE(t.cohost_level, 'team') FROM event_door_team t
         WHERE t.host_user_id = e.host_user_id AND t.member_user_id = ${userId} AND t.role = 'cohost' AND t.removed_at IS NULL AND t.accepted_at IS NOT NULL
-        ORDER BY 1 LIMIT 1
+        ) cohost_rows ORDER BY (lvl = 'edit') DESC LIMIT 1
       ) x ON true
       WHERE e.host_user_id <> ${userId} AND e.status <> 'paused'
+        AND (e.id IN (SELECT m.event_id FROM event_door_members m
+                      WHERE m.member_user_id = ${userId} AND m.role = 'cohost' AND m.removed_at IS NULL AND m.accepted_at IS NOT NULL)
+          OR e.host_user_id IN (SELECT t.host_user_id FROM event_door_team t
+                      WHERE t.member_user_id = ${userId} AND t.role = 'cohost' AND t.removed_at IS NULL AND t.accepted_at IS NOT NULL))
       ORDER BY e.starts_at DESC LIMIT 200`);
     res.json({ success: true, events: list.map((e) => ({ ...hostEventJson(e), cohostLevel: e.cohost_access_level === "edit" ? "edit" : "team" })) });
   } catch (err) {
