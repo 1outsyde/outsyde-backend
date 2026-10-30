@@ -113,7 +113,7 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
     assert(r.status === 201 && r.body?.member?.role === "security", "security invite answers 201 with role", r.body);
     assert((await q(`SELECT role FROM event_door_members WHERE event_id = $1 AND member_user_id = $2 AND removed_at IS NULL`, [ev, sec.id]))[0]?.role === "security", "security invite stored as security");
     await sleep(200);
-    assert(pushes[0]?.title?.endsWith("invited you to their Security team"), "security invite push says Security", pushes[0]);
+    assert(pushes[0]?.title?.endsWith("invited you to their Event team for Security"), "security invite push says Security", pushes[0]);
     assert(emails[0]?.role === "security", "security invite email gets the role", emails[0]);
     r = await invite(promo.username, "event", "host");
     assert(r.status === 201 && r.body?.member?.role === "host", "host / promoter invite", r.body);
@@ -141,14 +141,14 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
       assert(r.status === 201 && r.body?.member?.role === "host", "same person, second role at the same event", r.body);
       await sleep(300);
       const bothPushes = pushes.filter((p) => p.userId === both.id);
-      assert(bothPushes.length === 2 && bothPushes[1].title.endsWith("host and promote with them"), "second role gets its own push (quiet window is per role)", bothPushes);
+      assert(bothPushes.length === 2 && bothPushes[1].title.endsWith("Event team as a Promoter"), "second role gets its own push (quiet window is per role)", bothPushes);
       assert(emails.filter((e) => e.toEmail.startsWith(`${P}-both`)).length === 2, "second role gets its own email (daily email is per role)", emails.map((e) => e.role));
     }
     r = await invite(both.username, "event", "host");
     assert(r.status === 409 && r.body?.error?.code === "ALREADY_INVITED", "same person, same role again: ALREADY_INVITED", r.body);
-    assert(r.body?.error?.message === "You already invited them for that role.", "duplicate message for a non-door role", r.body);
+    assert(r.body?.error?.message === "You already invited them as a Promoter.", "duplicate message for a non-door role", r.body);
     r = await invite(door.username, "event");
-    assert(r.body?.error?.message === "You already invited them. They can scan once they accept.", "door duplicate message unchanged", r.body);
+    assert(r.body?.error?.message === "You already invited them for Admissions.", "door duplicate message says Admissions", r.body);
 
     console.log("\nold clients never see security or host invites as door invites");
     const myInvites = async (m: string, all = false) => ((await call("GET", `/api/events/door/invites${all ? "?roles=all" : ""}`, { token: tok(m) })).body?.invites ?? []);
@@ -219,7 +219,7 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
     r = await call("POST", `/api/events/door/invites/${inviteId}/accept?roles=all`, { token: tok(late.id) });
     await sleep(200);
     assert(r.status === 200 && r.body?.invite?.role === "security", "accept answers with the role", r.body);
-    assert(pushes.some((p) => p.userId === host.id && p.title.endsWith("joined your Security team") && p.data?.type === "team_accepted"), "host push says Security, type team_accepted", pushes);
+    assert(pushes.some((p) => p.userId === host.id && p.title.endsWith("joined your Event team for Security") && p.data?.type === "team_accepted"), "host push says Security, type team_accepted", pushes);
   } finally {
     await q(`DELETE FROM event_door_members WHERE event_id = $1`, [ev]);
     await q(`DELETE FROM event_door_team WHERE host_user_id = $1`, [host.id]);

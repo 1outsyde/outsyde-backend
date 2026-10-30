@@ -1,10 +1,12 @@
 /**
- * Events door check-in: door team management (Task 2).
+ * Events door check-in and the Event team (door = Admissions; p4-team adds every other section, see teamRoles.ts).
  *
  *   GET    /api/events/door/mine                 (auth)       events I can scan: published, not ended, accepted invites only
  *   GET    /api/events/:id/door/team             (auth, host) standing + this event's door team
  *   POST   /api/events/:id/door/team             (auth, host) invite by username, scope standing | event (30 an hour)
  *   DELETE /api/events/:id/door/team/:userId     (auth, host) ?scope=standing|event, soft remove (also cancels an invite)
+ *   PUT    /api/events/:id/door/team/:userId/schedule  (auth, host) ?role= this person's times and notes for this event
+ *   GET    /api/events/:id/team/me               (auth)       my accepted Event team roles at this event, with times
  *
  *   GET    /api/events/door/invites              (auth)       my open door team invites
  *   GET    /api/events/door/invites/:inviteId    (auth, invitee) one invite: invited | accepted | declined | gone
@@ -25,7 +27,7 @@ import { z } from "zod";
 import { getUserIdFromRequest, hybridAuthMiddleware } from "../auth";
 import { rows, iso, fail, pgError, hostIdentity } from "./eventsRouter";
 import { loadEventForDoor, isWithinScanWindow } from "./doorAccess";
-import { TEAM_ROLES, duplicateMessage, type TeamRole } from "./teamRoles";
+import { TEAM_ROLES, duplicateMessage, parseRoleLabel, roleInfo, type TeamRole } from "./teamRoles";
 import { notifyDoorInvite, notifyDoorAccepted } from "./ticketNotices";
 import { ticketIdFromQrToken, qrPng } from "./ticketQr";
 import { ticketIdFromWalletToken, walletConfig, cachedTicketPass } from "./walletPass";
@@ -33,9 +35,13 @@ import { ticketIdFromWalletToken, walletConfig, cachedTicketPass } from "./walle
 const router = Router();
 
 const scopeSchema = z.enum(["standing", "event"]);
-// role (p4-team): door = Admissions, security, host = host / promoter. Missing = door (old app builds, today's site).
+// role (p4-team): door = Admissions, host = Promoter, see teamRoles.ts. Missing = door (old app builds, today's site).
 const roleSchema = z.enum(TEAM_ROLES);
-const addSchema = z.object({ username: z.string().trim().min(1).max(40), scope: scopeSchema, role: roleSchema.optional() }).strict();
+const ROLE_CHOICES = "role: choose door, security, host, entertainment, media, cohost or other.";
+const addSchema = z.object({
+  username: z.string().trim().min(1).max(40), scope: scopeSchema, role: roleSchema.optional(),
+  roleLabel: z.string().max(200).nullable().optional(),
+}).strict();
 const validId = (v: string) => v.length > 0 && v.length <= 36;
 
 export type InviteStatus = "invited" | "accepted" | "declined";
@@ -45,9 +51,25 @@ const statusOf = (r: any): InviteStatus => (r.accepted_at ? "accepted" : r.decli
 const memberJson = (r: any) => ({
   userId: String(r.user_id), firstName: r.first_name ?? null, username: r.username ?? null, addedAt: iso(r.added_at),
   inviteId: String(r.invite_id), status: statusOf(r), invitedAt: iso(r.invited_at),
-  // Additive (p4-team): which role this row is. Old clients ignore it.
+  // Additive (p4-team): which role this row is, its name and what it gives them (step 2), and this event's times.
+  // Old clients ignore these keys.
   role: (r.role ?? "door") as TeamRole,
+  roleLabel: r.role_label ?? null,
+  roleInfo: roleInfo((r.role ?? "door") as TeamRole, r.role_label ?? null),
+  schedule: r.schedule ?? null,
 });
+
+/** One event_team_schedules row as JSON (ISO times, null when unset). */
+const scheduleJson = (s: any) => ({
+  startsAt: iso(s.starts_at), endsAt: iso(s.ends_at), callAt: iso(s.call_at), loadInAt: iso(s.load_in_at),
+  placeNote: s.place_note ?? null, hostNote: s.host_note ?? null, updatedAt: iso(s.updated_at),
+});
+
+/** This event's times for every person and role, keyed "memberId:role". */
+async function schedulesFor(eventId: string): Promise<Map<string, any>> {
+  const list = await rows<any>(sql`SELECT * FROM event_team_schedules WHERE event_id = ${eventId}`);
+  return new Map(list.map((x) => [`${x.member_user_id}:${x.role}`, scheduleJson(x)]));
+}
 
 type Scope = "standing" | "event";
 const doorTable = (scope: Scope) => sql.raw(scope === "standing" ? "event_door_team" : "event_door_members");
@@ -59,10 +81,10 @@ const doorKey = (scope: Scope, hostUserId: string, eventId: string, memberId: st
  * Sends (or re-sends after a decline) an invite. Pending and accepted rows are never touched: the caller answers
  * 409 ALREADY_INVITED / ALREADY_ON_TEAM. Returns the row (id, created_at, invited_at) or that code.
  */
-async function inviteRow(scope: Scope, hostUserId: string, eventId: string, memberId: string, role: TeamRole): Promise<{ row: any } | { code: "ALREADY_INVITED" | "ALREADY_ON_TEAM" }> {
+async function inviteRow(scope: Scope, hostUserId: string, eventId: string, memberId: string, role: TeamRole, label: string | null): Promise<{ row: any } | { code: "ALREADY_INVITED" | "ALREADY_ON_TEAM" }> {
   const key = doorKey(scope, hostUserId, eventId, memberId, role);
   const [reopened] = await rows<any>(sql`
-    UPDATE ${doorTable(scope)} SET declined_at = NULL, invited_at = now(), added_by_user_id = ${hostUserId}
+    UPDATE ${doorTable(scope)} SET declined_at = NULL, invited_at = now(), added_by_user_id = ${hostUserId}, role_label = ${label}
     WHERE ${key} AND removed_at IS NULL AND declined_at IS NOT NULL
     RETURNING id, created_at, invited_at`);
   if (reopened) return { row: reopened };
@@ -70,13 +92,13 @@ async function inviteRow(scope: Scope, hostUserId: string, eventId: string, memb
   try {
     [inserted] = scope === "standing"
       ? await rows<any>(sql`
-          INSERT INTO event_door_team (host_user_id, member_user_id, added_by_user_id, role)
-          VALUES (${hostUserId}, ${memberId}, ${hostUserId}, ${role})
+          INSERT INTO event_door_team (host_user_id, member_user_id, added_by_user_id, role, role_label)
+          VALUES (${hostUserId}, ${memberId}, ${hostUserId}, ${role}, ${label})
           ON CONFLICT (host_user_id, member_user_id, role) WHERE removed_at IS NULL DO NOTHING
           RETURNING id, created_at, invited_at`)
       : await rows<any>(sql`
-          INSERT INTO event_door_members (event_id, member_user_id, added_by_user_id, role)
-          VALUES (${eventId}, ${memberId}, ${hostUserId}, ${role})
+          INSERT INTO event_door_members (event_id, member_user_id, added_by_user_id, role, role_label)
+          VALUES (${eventId}, ${memberId}, ${hostUserId}, ${role}, ${label})
           ON CONFLICT (event_id, member_user_id, role) WHERE removed_at IS NULL DO NOTHING
           RETURNING id, created_at, invited_at`);
   } catch (err) {
@@ -115,6 +137,14 @@ const inviteLimiter = rateLimit({
   keyGenerator: (req) => getUserIdFromRequest(req as Request) ?? "anonymous",
   validate: { keyGeneratorIpFallback: false },
   handler: (_req, res) => { fail(res, 429, "RATE_LIMITED", "Too many invites. Try again in an hour."); },
+});
+
+/** Times and the member's team view: 120 a minute per signed in user. */
+const teamLimiter = rateLimit({
+  windowMs: 60 * 1000, limit: 120, standardHeaders: true, legacyHeaders: false,
+  keyGenerator: (req) => getUserIdFromRequest(req as Request) ?? "anonymous",
+  validate: { keyGeneratorIpFallback: false },
+  handler: (_req, res) => { fail(res, 429, "RATE_LIMITED", "Too many requests. Wait a moment and try again."); },
 });
 
 const qrLimiter = rateLimit({
@@ -231,7 +261,7 @@ router.get("/door/mine", hybridAuthMiddleware, async (req: Request, res: Respons
 
 type InviteRow = {
   scope: Scope; id: string; host_user_id: string; event_id: string | null; member_user_id: string;
-  accepted_at: any; declined_at: any; removed_at: any; invited_at: any; role: string;
+  accepted_at: any; declined_at: any; removed_at: any; invited_at: any; role: string; role_label: string | null;
   e_title: string | null; e_starts_at: any; e_ends_at: any; e_timezone: string | null; e_status: string | null;
 };
 
@@ -240,12 +270,12 @@ async function loadInvite(inviteId: string): Promise<InviteRow | null> {
   if (!validId(inviteId)) return null;
   const [r] = await rows<any>(sql`
     SELECT 'standing' AS scope, t.id, t.host_user_id, NULL::varchar AS event_id, t.member_user_id, t.accepted_at, t.declined_at,
-      t.removed_at, t.invited_at, t.role, NULL AS e_title, NULL::timestamptz AS e_starts_at, NULL::timestamptz AS e_ends_at,
+      t.removed_at, t.invited_at, t.role, t.role_label, NULL AS e_title, NULL::timestamptz AS e_starts_at, NULL::timestamptz AS e_ends_at,
       NULL AS e_timezone, NULL AS e_status
     FROM event_door_team t WHERE t.id = ${inviteId}
     UNION ALL
     SELECT 'event', m.id, e.host_user_id, m.event_id, m.member_user_id, m.accepted_at, m.declined_at,
-      m.removed_at, m.invited_at, m.role, e.title, e.starts_at, e.ends_at, e.timezone, e.status
+      m.removed_at, m.invited_at, m.role, m.role_label, e.title, e.starts_at, e.ends_at, e.timezone, e.status
     FROM event_door_members m JOIN events e ON e.id = m.event_id WHERE m.id = ${inviteId}`);
   return (r as InviteRow) ?? null;
 }
@@ -272,6 +302,7 @@ async function inviteJson(r: InviteRow) {
     : [];
   return {
     id: String(r.id), scope: r.scope, role: r.role, status: inviteStatus(r), invitedAt: iso(r.invited_at),
+    roleLabel: r.role_label ?? null, roleInfo: roleInfo((r.role ?? "door") as TeamRole, r.role_label ?? null),
     host: { name: await hostNameFor(r.host_user_id, r.event_id) },
     event: r.scope === "event"
       ? { id: String(r.event_id), title: r.e_title, startsAt: iso(r.e_starts_at), endsAt: iso(r.e_ends_at), timezone: r.e_timezone }
@@ -350,7 +381,7 @@ for (const answer of ["accept", "decline"] as const) {
       if (!ctx) return;
       if (!(await answerInvite(ctx.invite, ctx.userId, answer))) return fail(res, 409, "INVITE_CLOSED", "This invite is no longer open.");
       if (answer === "accept") {
-        notifyDoorAccepted({ hostUserId: ctx.invite.host_user_id, memberUserId: ctx.userId, scope: ctx.invite.scope, eventId: ctx.invite.event_id, role: (ctx.invite.role ?? "door") as TeamRole }).catch(() => {});
+        notifyDoorAccepted({ hostUserId: ctx.invite.host_user_id, memberUserId: ctx.userId, scope: ctx.invite.scope, eventId: ctx.invite.event_id, role: (ctx.invite.role ?? "door") as TeamRole, roleLabel: ctx.invite.role_label ?? null }).catch(() => {});
       }
       const fresh = await loadInvite(ctx.invite.id);
       res.json({ success: true, invite: await inviteJson(fresh!) });
@@ -369,12 +400,12 @@ router.post("/door/invites/:inviteId/leave", hybridAuthMiddleware, doorLimiter, 
       UPDATE ${doorTable(ctx.invite.scope)} SET removed_at = now(), removed_by_user_id = ${ctx.userId}
       WHERE id = ${ctx.invite.id} AND member_user_id = ${ctx.userId} AND removed_at IS NULL AND accepted_at IS NOT NULL
       RETURNING id`);
-    if (!done.length) return fail(res, 409, "NOT_ON_TEAM", "You aren't on this door team.");
+    if (!done.length) return fail(res, 409, "NOT_ON_TEAM", "You aren't on this Event team.");
     const fresh = await loadInvite(ctx.invite.id);
     res.json({ success: true, invite: await inviteJson(fresh!) });
   } catch (err) {
     console.error("[Door] leave failed:", err);
-    fail(res, 500, "SERVER_ERROR", "Could not leave the door team.");
+    fail(res, 500, "SERVER_ERROR", "Could not leave the Event team.");
   }
 });
 
@@ -388,18 +419,20 @@ router.get("/:id/door/team", hybridAuthMiddleware, async (req: Request, res: Res
     const mRole = allRoles ? sql`` : sql`AND m.role = 'door'`;
     const standing = await rows<any>(sql`
       SELECT u.id AS user_id, u.first_name, u.username, t.created_at AS added_at,
-        t.id AS invite_id, t.accepted_at, t.declined_at, t.invited_at, t.role
+        t.id AS invite_id, t.accepted_at, t.declined_at, t.invited_at, t.role, t.role_label
       FROM event_door_team t JOIN users u ON u.id = t.member_user_id
       WHERE t.host_user_id = ${ctx.userId} AND t.removed_at IS NULL ${tRole} ORDER BY t.created_at, u.id, t.role`);
     const event = await rows<any>(sql`
       SELECT u.id AS user_id, u.first_name, u.username, m.created_at AS added_at,
-        m.id AS invite_id, m.accepted_at, m.declined_at, m.invited_at, m.role
+        m.id AS invite_id, m.accepted_at, m.declined_at, m.invited_at, m.role, m.role_label
       FROM event_door_members m JOIN users u ON u.id = m.member_user_id
       WHERE m.event_id = ${ctx.event.id} AND m.removed_at IS NULL ${mRole} ORDER BY m.created_at, u.id, m.role`);
-    res.json({ success: true, standing: standing.map(memberJson), event: event.map(memberJson) });
+    const times = await schedulesFor(ctx.event.id);
+    const withTimes = (m: any) => memberJson({ ...m, schedule: times.get(`${m.user_id}:${m.role ?? "door"}`) ?? null });
+    res.json({ success: true, standing: standing.map(withTimes), event: event.map(withTimes) });
   } catch (err) {
     console.error("[Door] team list failed:", err);
-    fail(res, 500, "SERVER_ERROR", "Could not load the door team.");
+    fail(res, 500, "SERVER_ERROR", "Could not load the Event team.");
   }
 });
 
@@ -414,24 +447,26 @@ router.post("/:id/door/team", hybridAuthMiddleware, inviteLimiter, async (req: R
     }
     const { username, scope } = parsed.data;
     const role: TeamRole = parsed.data.role ?? "door";
+    const label = parseRoleLabel(role, parsed.data.roleLabel);
+    if (!label.ok) return fail(res, 400, "INVALID_REQUEST", label.message);
     if (scope === "event" && (ctx.event.status === "cancelled" || new Date(ctx.event.ends_at).getTime() <= Date.now())) {
-      return fail(res, 409, "EVENT_ENDED", "This event is over, so no one can be added to its door team.");
+      return fail(res, 409, "EVENT_ENDED", "This event is over, so no one can be added to its Event team.");
     }
     const [target] = await rows<any>(sql`
       SELECT id, first_name, username FROM users
       WHERE LOWER(username) = LOWER(${username}) AND is_active = true AND COALESCE(deletion_status, 'active') = 'active'`);
     if (!target) return fail(res, 404, "USER_NOT_FOUND", "No active account has that username.");
     if (target.id === ctx.userId) return fail(res, 400, "CANNOT_ADD_SELF", "You already have full access to your own events.");
-    const out = await inviteRow(scope, ctx.userId, ctx.event.id, target.id, role);
+    const out = await inviteRow(scope, ctx.userId, ctx.event.id, target.id, role, label.label);
     if ("code" in out) {
-      return fail(res, 409, out.code, duplicateMessage(role, out.code));
+      return fail(res, 409, out.code, duplicateMessage(role, out.code, label.label));
     }
-    notifyDoorInvite({ inviteId: String(out.row.id), scope, eventId: ctx.event.id, memberUserId: target.id, hostUserId: ctx.userId, role }).catch(() => {});
+    notifyDoorInvite({ inviteId: String(out.row.id), scope, eventId: ctx.event.id, memberUserId: target.id, hostUserId: ctx.userId, role, roleLabel: label.label }).catch(() => {});
     res.status(201).json({
       success: true, scope,
       member: memberJson({
         user_id: target.id, first_name: target.first_name, username: target.username, added_at: out.row.created_at,
-        invite_id: out.row.id, accepted_at: null, declined_at: null, invited_at: out.row.invited_at, role,
+        invite_id: out.row.id, accepted_at: null, declined_at: null, invited_at: out.row.invited_at, role, role_label: label.label,
       }),
     });
   } catch (err) {
@@ -448,10 +483,10 @@ router.delete("/:id/door/team/:userId", hybridAuthMiddleware, async (req: Reques
     if (!scope.success) return fail(res, 400, "INVALID_REQUEST", "scope: choose standing or event.");
     // p4-team: ?role= picks which spot to remove. Missing = door, the only spot old clients know about.
     const roleParsed = roleSchema.safeParse(req.query.role ?? "door");
-    if (!roleParsed.success) return fail(res, 400, "INVALID_REQUEST", "role: choose door, security or host.");
+    if (!roleParsed.success) return fail(res, 400, "INVALID_REQUEST", ROLE_CHOICES);
     const role = roleParsed.data;
     const memberId = String(req.params.userId);
-    if (!validId(memberId)) return fail(res, 404, "NOT_ON_TEAM", "That person isn't on your door team.");
+    if (!validId(memberId)) return fail(res, 404, "NOT_ON_TEAM", "That person isn't on your Event team.");
     const done = scope.data === "standing"
       ? await rows<any>(sql`
           UPDATE event_door_team SET removed_at = now(), removed_by_user_id = ${ctx.userId}
@@ -459,11 +494,120 @@ router.delete("/:id/door/team/:userId", hybridAuthMiddleware, async (req: Reques
       : await rows<any>(sql`
           UPDATE event_door_members SET removed_at = now(), removed_by_user_id = ${ctx.userId}
           WHERE event_id = ${ctx.event.id} AND member_user_id = ${memberId} AND role = ${role} AND removed_at IS NULL RETURNING id`);
-    if (!done.length) return fail(res, 404, "NOT_ON_TEAM", "That person isn't on your door team.");
+    if (!done.length) return fail(res, 404, "NOT_ON_TEAM", "That person isn't on your Event team.");
     res.json({ success: true, removed: true });
   } catch (err) {
     console.error("[Door] team remove failed:", err);
-    fail(res, 500, "SERVER_ERROR", "Could not remove from the door team.");
+    fail(res, 500, "SERVER_ERROR", "Could not remove from the Event team.");
+  }
+});
+
+// ─── Times and notes per person, per role, per event (p4-team step 2, migration 083) ──
+
+const timeField = z.string().datetime({ offset: true }).nullable().optional();
+const scheduleSchema = z.object({
+  startsAt: timeField, endsAt: timeField, callAt: timeField, loadInAt: timeField,
+  placeNote: z.string().trim().max(300).nullable().optional(),
+  hostNote: z.string().trim().max(500).nullable().optional(),
+}).strict();
+/** Times must sit near the event: from a day before it starts to 12 hours after it ends. */
+const SCHEDULE_BEFORE_MS = 24 * 3600_000;
+const SCHEDULE_AFTER_MS = 12 * 3600_000;
+
+/** Is this person on the event's team in this role (pending or accepted; not declined, not removed)? Standing rows count. */
+async function onTeam(event: any, memberId: string, role: TeamRole): Promise<boolean> {
+  const r = await rows<any>(sql`
+    SELECT 1 AS x FROM event_door_members m
+    WHERE m.event_id = ${event.id} AND m.member_user_id = ${memberId} AND m.role = ${role} AND m.removed_at IS NULL AND m.declined_at IS NULL
+    UNION ALL
+    SELECT 1 FROM event_door_team t
+    WHERE t.host_user_id = ${event.host_user_id} AND t.member_user_id = ${memberId} AND t.role = ${role} AND t.removed_at IS NULL AND t.declined_at IS NULL
+    LIMIT 1`);
+  return r.length > 0;
+}
+
+/** Saves the whole set: a field left out or null is cleared. Every field is optional for every role. */
+router.put("/:id/door/team/:userId/schedule", hybridAuthMiddleware, teamLimiter, async (req: Request, res: Response) => {
+  try {
+    const ctx = await hostOnly(req, res);
+    if (!ctx) return;
+    const roleParsed = roleSchema.safeParse(req.query.role);
+    if (!roleParsed.success) return fail(res, 400, "INVALID_REQUEST", ROLE_CHOICES);
+    const role = roleParsed.data;
+    const parsed = scheduleSchema.safeParse(req.body ?? {});
+    if (!parsed.success) {
+      const first = parsed.error.issues[0];
+      return fail(res, 400, "INVALID_REQUEST", `${first?.path.join(".") || "body"}: ${first?.message ?? "invalid"}`);
+    }
+    const b = parsed.data;
+    const ms = (v: string | null | undefined) => (v ? new Date(v).getTime() : null);
+    const [st, en, ca, li] = [ms(b.startsAt), ms(b.endsAt), ms(b.callAt), ms(b.loadInAt)];
+    if (st !== null && en !== null && en <= st) return fail(res, 400, "INVALID_REQUEST", "endsAt: the end has to be after the start.");
+    const from = new Date(ctx.event.starts_at).getTime() - SCHEDULE_BEFORE_MS;
+    const to = new Date(ctx.event.ends_at).getTime() + SCHEDULE_AFTER_MS;
+    if ([st, en, ca, li].some((t) => t !== null && (t < from || t > to))) {
+      return fail(res, 400, "TIME_OUT_OF_RANGE", "Times have to be within a day before the event starts and 12 hours after it ends.");
+    }
+    if (ctx.event.status === "cancelled" || new Date(ctx.event.ends_at).getTime() <= Date.now()) {
+      return fail(res, 409, "EVENT_ENDED", "This event is over, so times can't be changed.");
+    }
+    const memberId = String(req.params.userId);
+    if (!validId(memberId) || !(await onTeam(ctx.event, memberId, role))) {
+      return fail(res, 404, "NOT_ON_TEAM", "That person isn't on your Event team in that role.");
+    }
+    const v = (x: string | null | undefined) => (x ? new Date(x).toISOString() : null);
+    const note = (x: string | null | undefined) => (x && x.trim() ? x.trim() : null);
+    const [saved] = await rows<any>(sql`
+      INSERT INTO event_team_schedules (event_id, member_user_id, role, starts_at, ends_at, call_at, load_in_at, place_note, host_note, updated_by_user_id)
+      VALUES (${ctx.event.id}, ${memberId}, ${role}, ${v(b.startsAt)}::timestamptz, ${v(b.endsAt)}::timestamptz, ${v(b.callAt)}::timestamptz,
+        ${v(b.loadInAt)}::timestamptz, ${note(b.placeNote)}, ${note(b.hostNote)}, ${ctx.userId})
+      ON CONFLICT (event_id, member_user_id, role) DO UPDATE SET
+        starts_at = EXCLUDED.starts_at, ends_at = EXCLUDED.ends_at, call_at = EXCLUDED.call_at, load_in_at = EXCLUDED.load_in_at,
+        place_note = EXCLUDED.place_note, host_note = EXCLUDED.host_note, updated_by_user_id = EXCLUDED.updated_by_user_id, updated_at = now()
+      RETURNING *`);
+    res.json({ success: true, role, schedule: scheduleJson(saved) });
+  } catch (err) {
+    console.error("[Door] schedule save failed:", err);
+    fail(res, 500, "SERVER_ERROR", "Could not save the times.");
+  }
+});
+
+/** The member's side: their accepted roles at this event (standing ones too) with this event's times. */
+router.get("/:id/team/me", hybridAuthMiddleware, teamLimiter, async (req: Request, res: Response) => {
+  try {
+    const userId = getUserIdFromRequest(req);
+    if (!userId) return fail(res, 401, "UNAUTHORIZED", "Sign in to continue.");
+    const eventId = String(req.params.id);
+    const [e] = validId(eventId) ? await rows<any>(sql`SELECT * FROM events WHERE id = ${eventId} AND status <> 'cancelled'`) : [];
+    if (!e) return fail(res, 404, "EVENT_NOT_FOUND", "Event not found.");
+    const mine = await rows<any>(sql`
+      SELECT 'event' AS scope, m.role, m.role_label, m.created_at FROM event_door_members m
+      WHERE m.event_id = ${e.id} AND m.member_user_id = ${userId} AND m.removed_at IS NULL AND m.accepted_at IS NOT NULL
+      UNION ALL
+      SELECT 'standing', t.role, t.role_label, t.created_at FROM event_door_team t
+      WHERE t.host_user_id = ${e.host_user_id} AND t.member_user_id = ${userId} AND t.removed_at IS NULL AND t.accepted_at IS NOT NULL
+      ORDER BY created_at, role`);
+    if (!mine.length) return fail(res, 404, "EVENT_NOT_FOUND", "Event not found.");
+    const times = await schedulesFor(e.id);
+    const seen = new Set<string>();
+    const roles = [];
+    for (const r of mine) {
+      if (seen.has(r.role)) continue; // a role held both ways shows once
+      seen.add(r.role);
+      roles.push({
+        role: r.role, roleLabel: r.role_label ?? null, roleInfo: roleInfo(r.role as TeamRole, r.role_label ?? null), scope: r.scope,
+        schedule: times.get(`${userId}:${r.role}`) ?? null,
+      });
+    }
+    res.json({
+      success: true,
+      event: { id: String(e.id), slug: e.slug, title: e.title, startsAt: iso(e.starts_at), endsAt: iso(e.ends_at), timezone: e.timezone },
+      host: { name: (await hostIdentity(e)).publicName },
+      roles,
+    });
+  } catch (err) {
+    console.error("[Door] team me failed:", err);
+    fail(res, 500, "SERVER_ERROR", "Could not load your Event team roles.");
   }
 });
 

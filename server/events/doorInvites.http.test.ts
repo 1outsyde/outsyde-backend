@@ -145,7 +145,7 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
     assert(await scans(ana.id, evA), "after accepting: can scan the host's events");
     r = await mine(ana.id);
     assert(r.body.events.some((e: any) => e.id === evA && e.role === "standing"), "/door/mine lists the host's event", r.body);
-    assert(pushes.length === 1 && pushes[0].userId === host.id && pushes[0].title === "Ana joined your door team" && pushes[0].body === "They can scan tickets for all your events.", "host gets one push on accept", pushes);
+    assert(pushes.length === 1 && pushes[0].userId === host.id && pushes[0].title === "Ana joined your Event team for Admissions" && pushes[0].body === "They can scan tickets for all your events.", "host gets one push on accept", pushes);
     assert(pushes[0]?.data?.type === "door_team_accepted" && pushes[0].data.eventId === null, "standing accept push data", pushes[0]?.data);
     r = await call("POST", `/api/events/door/invites/${anaStanding}/accept`, { token: tok(ana.id) });
     assert(r.status === 409 && r.body.error.code === "INVITE_CLOSED" && r.body.error.message === "This invite is no longer open.", "accept again is 409 INVITE_CLOSED", r.body);
@@ -165,7 +165,7 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
     await sleep(300);
     const codes = both.map((x) => x.status).sort();
     assert(codes.join() === "200,409", "double accept: exactly one 200", codes);
-    assert(pushes.length === 1 && pushes[0].title === `@${bo.username} joined your door team`, "one host push, named by @username without a first name", pushes);
+    assert(pushes.length === 1 && pushes[0].title === `@${bo.username} joined your Event team for Admissions`, "one host push, named by @username without a first name", pushes);
 
     console.log("\ndecline");
     const cyEvent = await invite(evA, cy.username, "event");
