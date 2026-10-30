@@ -19,7 +19,7 @@ import { z } from "zod";
 import { sql, type SQL } from "drizzle-orm";
 import { getUserIdFromRequest, hybridAuthMiddleware } from "../auth";
 import {
-  rows, pgError, iso, fail, zodError, optionalText, loadActiveUser, loadEventForHost, loadTicketTypes, hostTicketTypeJson,
+  rows, pgError, iso, fail, zodError, optionalText, loadActiveUser, loadEventAccess, cohostBlocked, loadTicketTypes, hostTicketTypeJson,
 } from "./eventsRouter";
 import { makeTicketCode, paidEventsEnabled, wouldCreateUnlockLoop, holderCanSeeAddress, visibleAddress, addressRevealAt } from "./eventRules";
 import { qrUrlFor } from "./ticketQr";
@@ -111,13 +111,15 @@ function typeConstraintError(res: Response, err: unknown) {
   return null;
 }
 
-/** Host's event that can still be changed. */
+/** Host's event that can still be changed. Co-hosts need the edit level (step 2b). */
 async function editableEvent(req: Request, res: Response): Promise<{ userId: string; e: any } | null> {
   const userId = getUserIdFromRequest(req);
   if (!userId) { fail(res, 401, "NO_AUTH", "Sign in to manage tickets."); return null; }
   if (!(await loadActiveUser(userId))) { fail(res, 403, "ACCOUNT_INACTIVE", "This account can't host events."); return null; }
-  const e = await loadEventForHost(req.params.id, userId);
-  if (!e) { fail(res, 404, "EVENT_NOT_FOUND", "Event not found."); return null; }
+  const a = await loadEventAccess(req.params.id, userId);
+  if (!a) { fail(res, 404, "EVENT_NOT_FOUND", "Event not found."); return null; }
+  if (cohostBlocked(res, a, "edit")) return null;
+  const e = a.event;
   if (e.status === "cancelled") { fail(res, 409, "EVENT_CANCELLED", "A cancelled event can't be changed."); return null; }
   if (e.status === "paused") { fail(res, 409, "EVENT_PAUSED", "This event is paused by Outsyde. Contact support."); return null; }
   return { userId, e };
@@ -142,7 +144,7 @@ router.post("/:id/ticket-types", hybridAuthMiddleware, async (req: Request, res:
   try {
     const ctx = await editableEvent(req, res);
     if (!ctx) return;
-    const { userId, e } = ctx;
+    const { e } = ctx;
     const paidOnPublished = b.priceCents > 0 && e.status !== "draft";
     if (paidOnPublished && !(await paidOnPublishedAllowed(res, e))) return;
     if (!(await checkUnlock(res, e.id, null, b.unlockAfterTicketTypeId))) return;
@@ -163,7 +165,7 @@ router.post("/:id/ticket-types", hybridAuthMiddleware, async (req: Request, res:
         SELECT ${e.id}, ${b.name}, ${b.description ?? null}, ${b.priceCents}, ${b.quantity}, ${b.salesStartAt ?? null},
                ${b.salesEndAt ?? null}, ${b.unlockAfterTicketTypeId ?? null}, ${minPer}, ${maxPer}, ${perAccount},
                ${b.hidden ?? false}, ${b.sortOrder ?? 0}
-        FROM events WHERE id = ${e.id} AND host_user_id = ${userId} AND status IN ('draft', 'published')
+        FROM events WHERE id = ${e.id} AND host_user_id = ${e.host_user_id} AND status IN ('draft', 'published')
           AND (${b.priceCents} = 0 OR status = 'draft' OR ${paidOnPublished})
         RETURNING *`);
       if (!created) return fail(res, 409, "EVENT_CHANGED", "This event just changed. Reload and try again.");

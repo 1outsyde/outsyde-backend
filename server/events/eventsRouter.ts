@@ -150,6 +150,42 @@ export async function loadEventForHost(eventId: string, userId: string): Promise
   return e ?? null;
 }
 
+export type CohostLevel = "team" | "edit";
+export type EventAccess = { event: any; as: "host" | "cohost"; level: CohostLevel | null };
+
+/**
+ * The host, or an accepted co-host (p4-team step 2b, migration 084): a co-host row for this event, or a standing
+ * co-host row for this host. Active accounts only for co-hosts. Edit wins when someone holds both levels; a NULL
+ * level reads as team. Money routes (publish, cancel, refunds, payouts) keep loadEventForHost: host only.
+ */
+export async function loadEventAccess(eventId: string, userId: string): Promise<EventAccess | null> {
+  const own = await loadEventForHost(eventId, userId);
+  if (own) return { event: own, as: "host", level: null };
+  const [e] = await rows<any>(sql`
+    SELECT e.*, x.lvl AS cohost_access_level FROM events e
+    JOIN users u ON u.id = ${userId} AND u.is_active = true AND COALESCE(u.deletion_status, 'active') = 'active'
+    JOIN LATERAL (SELECT lvl FROM (
+      SELECT COALESCE(m.cohost_level, 'team') AS lvl FROM event_door_members m
+      WHERE m.event_id = e.id AND m.member_user_id = u.id AND m.role = 'cohost' AND m.removed_at IS NULL AND m.accepted_at IS NOT NULL
+      UNION ALL
+      SELECT COALESCE(t.cohost_level, 'team') FROM event_door_team t
+      WHERE t.host_user_id = e.host_user_id AND t.member_user_id = u.id AND t.role = 'cohost' AND t.removed_at IS NULL AND t.accepted_at IS NOT NULL
+      ) cohost_rows ORDER BY (lvl = 'edit') DESC LIMIT 1
+    ) x ON true
+    WHERE e.id = ${eventId}`);
+  if (!e) return null;
+  const { cohost_access_level, ...event } = e;
+  return { event, as: "cohost", level: cohost_access_level === "edit" ? "edit" : "team" };
+}
+
+/** 403 for a co-host who can't do this, else null. `edit` = the co-host needs the edit level. */
+export function cohostBlocked(res: Response, a: EventAccess, need: "edit" | "host"): boolean {
+  if (a.as === "host") return false;
+  if (need === "host") { fail(res, 403, "HOST_ONLY", "Only the host can do that."); return true; }
+  if (a.level !== "edit") { fail(res, 403, "COHOST_EDIT_OFF", "The host hasn't given you edit access for this event."); return true; }
+  return false;
+}
+
 export async function loadTicketTypes(eventId: string): Promise<any[]> {
   return rows(sql`SELECT * FROM ticket_types WHERE event_id = ${eventId} ORDER BY sort_order, created_at`);
 }
@@ -209,7 +245,7 @@ export function hostTicketTypeJson(t: any) {
   };
 }
 
-function hostEventJson(e: any) {
+export function hostEventJson(e: any) {
   return {
     id: e.id, slug: e.slug, status: e.status, hostType: e.host_type,
     hostBusinessId: e.host_business_id ?? null, hostPhotographerId: e.host_photographer_id ?? null,
@@ -350,8 +386,10 @@ router.get("/slug/:slug", async (req: Request, res: Response) => {
       WHERE ev.slug = ${slug} AND u.is_active = true AND COALESCE(u.deletion_status, 'active') = 'active'`);
     const viewerId = getUserIdFromRequest(req);
     const viewerIsHost = !!e && !!viewerId && viewerId === e.host_user_id;
-    // Drafts are visible to their host only (preview); admin-paused events to nobody.
-    if (!e || e.status === "paused" || (e.status === "draft" && !viewerIsHost)) {
+    // Co-hosts (step 2b) preview drafts and see the address like the host.
+    const viewerIsCohost = !!e && !!viewerId && !viewerIsHost && (await loadEventAccess(e.id, viewerId))?.as === "cohost";
+    // Drafts are visible to their host and co-hosts only (preview); admin-paused events to nobody.
+    if (!e || e.status === "paused" || (e.status === "draft" && !viewerIsHost && !viewerIsCohost)) {
       return fail(res, 404, "EVENT_NOT_FOUND", "Event not found.");
     }
 
@@ -395,7 +433,7 @@ router.get("/slug/:slug", async (req: Request, res: Response) => {
         latitude: e.latitude == null ? null : Number(e.latitude), longitude: e.longitude == null ? null : Number(e.longitude),
       },
       {
-        addressVisibility: e.address_visibility, viewerIsHost, viewerHasTicket,
+        addressVisibility: e.address_visibility, viewerIsHost: viewerIsHost || viewerIsCohost, viewerHasTicket,
         holderRevealed: holderCanSeeAddress(e.address_visibility, new Date(e.starts_at), e.timezone, new Date()),
       },
     );
@@ -412,7 +450,7 @@ router.get("/slug/:slug", async (req: Request, res: Response) => {
         visibility: e.visibility,
         soldOut: remainingAtEvent === 0,
         host: { name: host.publicName, avatarUrl: host.avatarUrl, kind: e.host_type, followId: host.followId },
-        viewerIsHost, viewerHasTicket,
+        viewerIsHost, viewerIsCohost, viewerHasTicket,
       },
       ticketTypes,
     });
@@ -426,10 +464,12 @@ router.get("/:id/manage", hybridAuthMiddleware, async (req: Request, res: Respon
   const userId = getUserIdFromRequest(req);
   if (!userId) return fail(res, 401, "NO_AUTH", "Sign in to manage this event.");
   try {
-    const e = await loadEventForHost(req.params.id, userId);
-    if (!e) return fail(res, 404, "EVENT_NOT_FOUND", "Event not found.");
+    const a = await loadEventAccess(req.params.id, userId);
+    if (!a) return fail(res, 404, "EVENT_NOT_FOUND", "Event not found.");
+    const e = a.event;
     const types = await loadTicketTypes(e.id);
-    return res.json({ success: true, event: hostEventJson(e), ticketTypes: types.map(hostTicketTypeJson) });
+    // access (additive, step 2b): host, or co-host with its level, so screens can hide what a co-host can't do.
+    return res.json({ success: true, event: hostEventJson(e), ticketTypes: types.map(hostTicketTypeJson), access: { as: a.as, level: a.level } });
   } catch (err) {
     console.error("[Events] manage read failed:", err);
     return fail(res, 500, "SERVER_ERROR", "Couldn't load the event.");
@@ -446,8 +486,18 @@ router.patch("/:id", hybridAuthMiddleware, async (req: Request, res: Response) =
 
   try {
     if (!(await loadActiveUser(userId))) return fail(res, 403, "ACCOUNT_INACTIVE", "This account can't host events.");
-    const e = await loadEventForHost(req.params.id, userId);
-    if (!e) return fail(res, 404, "EVENT_NOT_FOUND", "Event not found.");
+    const access = await loadEventAccess(req.params.id, userId);
+    if (!access) return fail(res, 404, "EVENT_NOT_FOUND", "Event not found.");
+    if (cohostBlocked(res, access, "edit")) return;
+    const e = access.event;
+    // The refund policy decides who gets money back: the host's call only. Edit screens send the whole form, so a
+    // co-host is refused only when the policy or cutoff actually changes (no_refunds always has no cutoff).
+    if (access.as === "cohost" && (b.refundPolicy !== undefined || b.refundCutoffHours !== undefined)) {
+      const policy = b.refundPolicy ?? e.refund_policy;
+      const oldCutoff = e.refund_policy === "no_refunds" || e.refund_cutoff_hours == null ? null : Number(e.refund_cutoff_hours);
+      const cutoff = policy === "no_refunds" ? null : b.refundCutoffHours !== undefined ? b.refundCutoffHours : oldCutoff;
+      if ((policy !== e.refund_policy || cutoff !== oldCutoff) && cohostBlocked(res, access, "host")) return;
+    }
     if (e.status === "cancelled") return fail(res, 409, "EVENT_CANCELLED", "A cancelled event can't be edited.");
     if (e.status === "paused") return fail(res, 409, "EVENT_PAUSED", "This event is paused by Outsyde. Contact support.");
 
@@ -502,7 +552,7 @@ router.patch("/:id", hybridAuthMiddleware, async (req: Request, res: Response) =
       const [updated] = await rows(sql`
         WITH u AS (
           UPDATE events SET ${sql.join(sets, sql`, `)}
-          WHERE id = ${e.id} AND host_user_id = ${userId} AND status = ${e.status}
+          WHERE id = ${e.id} AND host_user_id = ${e.host_user_id} AND status = ${e.status}
             AND refund_policy = ${e.refund_policy}
             AND refund_cutoff_hours IS NOT DISTINCT FROM ${e.refund_cutoff_hours == null ? null : Number(e.refund_cutoff_hours)}::int
             AND (starts_at > now() OR ${b.endsAt === undefined} OR ${newEndsAt}::timestamptz >= date_trunc('milliseconds', ends_at))
