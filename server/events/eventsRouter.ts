@@ -545,7 +545,7 @@ router.patch("/:id", hybridAuthMiddleware, async (req: Request, res: Response) =
     // A new start time means new reminder moments: clear the host's and every guest's reminder stamps
     // (eventReminders.ts) in this same statement, so the job can't claim against the old time in between.
     const startMoved = newStartsAt !== null && new Date(newStartsAt).getTime() !== new Date(e.starts_at).getTime();
-    if (startMoved) sets.push(sql`host_reminder_at = NULL`);
+    if (startMoved) sets.push(sql`host_reminder_at = NULL`, sql`host_reminder_week_at = NULL`, sql`host_reminder_soon_at = NULL`, sql`host_reminder_start_at = NULL`);
     sets.push(sql`updated_at = now()`);
 
     try {
@@ -562,9 +562,14 @@ router.patch("/:id", hybridAuthMiddleware, async (req: Request, res: Response) =
           RETURNING *
         ),
         reminders AS (
-          UPDATE tickets SET reminder_day_before_at = NULL, reminder_soon_at = NULL
+          UPDATE tickets SET reminder_day_before_at = NULL, reminder_soon_at = NULL, reminder_week_at = NULL, reminder_start_at = NULL
           WHERE ${startMoved} AND event_id IN (SELECT id FROM u)
-            AND (reminder_day_before_at IS NOT NULL OR reminder_soon_at IS NOT NULL)
+            AND (reminder_day_before_at IS NOT NULL OR reminder_soon_at IS NOT NULL OR reminder_week_at IS NOT NULL OR reminder_start_at IS NOT NULL)
+          RETURNING 1
+        ),
+        -- p4-team step 6: the team's reminders follow the new start too.
+        team_reminders AS (
+          DELETE FROM event_team_reminders WHERE ${startMoved} AND event_id IN (SELECT id FROM u)
           RETURNING 1
         )
         SELECT * FROM u`);

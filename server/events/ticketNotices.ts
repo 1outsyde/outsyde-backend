@@ -406,3 +406,36 @@ export async function notifyTeamPayChanged(p: { memberUserId: string; eventId: s
     console.error(`[Door] pay change push failed for ${p.memberUserId}:`, (err as Error)?.message ?? err);
   }
 }
+
+/**
+ * p4-team step 6 (call 38, screen 54): the host moved a time this person already had. Accepted members only; one push
+ * plus an Activity item: "Call time moved to 9:00 PM", "[Host] changed your call time for [Event]." Never throws.
+ */
+export async function notifyTeamTimeMoved(p: { eventId: string; memberUserId: string; hostUserId: string; byUserId: string; role: string; field: "starts_at" | "call_at" | "load_in_at"; at: Date }): Promise<void> {
+  try {
+    const [e] = await rows<any>(sql`SELECT * FROM events WHERE id = ${p.eventId}`);
+    if (!e) return;
+    const [on] = await rows<any>(sql`
+      SELECT 1 AS x FROM event_door_members WHERE event_id = ${p.eventId} AND member_user_id = ${p.memberUserId} AND removed_at IS NULL AND accepted_at IS NOT NULL
+      UNION ALL
+      SELECT 1 FROM event_door_team WHERE host_user_id = ${p.hostUserId} AND member_user_id = ${p.memberUserId} AND removed_at IS NULL AND accepted_at IS NOT NULL
+      LIMIT 1`);
+    if (!on) return;
+    const label = p.field === "call_at" ? "call time" : p.field === "load_in_at" ? "load in" : p.role === "entertainment" ? "set time" : "shift";
+    const tz = (() => { try { new Intl.DateTimeFormat("en-US", { timeZone: e.timezone }).format(0); return e.timezone; } catch { return "America/New_York"; } })();
+    const time = new Intl.DateTimeFormat("en-US", { timeZone: tz, hour: "numeric", minute: "2-digit" }).format(p.at);
+    const host = (await hostIdentity(e)).publicName;
+    const title = `${label.charAt(0).toUpperCase()}${label.slice(1)} moved to ${time}`;
+    const body = `${host} changed your ${label} for ${String(e.title)}.`;
+    const d = await noticeDeps();
+    await d.sendPush({ userId: p.memberUserId, title, body, data: { type: "team_time_changed", eventId: p.eventId } });
+    if (d.createActivity) {
+      await d.createActivity({
+        userId: p.memberUserId, type: "team_time_changed", title, message: body, referenceType: "event", referenceId: p.eventId,
+        metadata: { eventId: p.eventId, role: p.role }, triggeredByUserId: p.byUserId,
+      });
+    }
+  } catch (err) {
+    console.error(`[Door] time moved push failed for ${p.memberUserId}:`, (err as Error)?.message ?? err);
+  }
+}

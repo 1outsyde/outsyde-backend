@@ -33,7 +33,7 @@ import { getUserIdFromRequest, hybridAuthMiddleware } from "../auth";
 import { rows, iso, fail, pgError, hostIdentity, hostEventJson } from "./eventsRouter";
 import { loadEventForDoor, isWithinScanWindow } from "./doorAccess";
 import { TEAM_ROLES, duplicateMessage, parseRoleLabel, roleInfo, type TeamRole } from "./teamRoles";
-import { notifyDoorInvite, notifyDoorAccepted, notifyTeamPayChanged } from "./ticketNotices";
+import { notifyDoorInvite, notifyDoorAccepted, notifyTeamPayChanged, notifyTeamTimeMoved } from "./ticketNotices";
 import { ticketIdFromQrToken, qrPng } from "./ticketQr";
 import { ticketIdFromWalletToken, walletConfig, cachedTicketPass } from "./walletPass";
 import { ensurePromoterLinks, promoterLinkStats, promoterLinkUrl } from "./promoterLinks";
@@ -674,6 +674,7 @@ router.put("/:id/door/team/:userId/schedule", hybridAuthMiddleware, teamLimiter,
     }
     const v = (x: string | null | undefined) => (x ? new Date(x).toISOString() : null);
     const note = (x: string | null | undefined) => (x && x.trim() ? x.trim() : null);
+    const [before] = await rows<any>(sql`SELECT starts_at, call_at, load_in_at FROM event_team_schedules WHERE event_id = ${ctx.event.id} AND member_user_id = ${memberId} AND role = ${role}`);
     const [saved] = await rows<any>(sql`
       INSERT INTO event_team_schedules (event_id, member_user_id, role, starts_at, ends_at, call_at, load_in_at, place_note, host_note, updated_by_user_id)
       VALUES (${ctx.event.id}, ${memberId}, ${role}, ${v(b.startsAt)}::timestamptz, ${v(b.endsAt)}::timestamptz, ${v(b.callAt)}::timestamptz,
@@ -682,6 +683,23 @@ router.put("/:id/door/team/:userId/schedule", hybridAuthMiddleware, teamLimiter,
         starts_at = EXCLUDED.starts_at, ends_at = EXCLUDED.ends_at, call_at = EXCLUDED.call_at, load_in_at = EXCLUDED.load_in_at,
         place_note = EXCLUDED.place_note, host_note = EXCLUDED.host_note, updated_by_user_id = EXCLUDED.updated_by_user_id, updated_at = now()
       RETURNING *`);
+    // Step 6 (call 38): a new shift, call time or load in means new reminder moments for this person, and one push
+    // when a time they already had moved.
+    try {
+      const t = (x: any) => (x ? new Date(x).getTime() : null);
+      const changed = (["starts_at", "call_at", "load_in_at"] as const).filter((k) => t(before?.[k]) !== t(saved[k]));
+      if (changed.length) {
+        await rows(sql`DELETE FROM event_team_reminders WHERE event_id = ${ctx.event.id} AND member_user_id = ${memberId} AND kind <> 'start'`);
+        const moved = changed.filter((k) => before?.[k] && saved[k]);
+        if (moved.length) {
+          const prefer = role === "security" ? "call_at" : role === "entertainment" ? "load_in_at" : "starts_at";
+          const field = moved.includes(prefer) ? prefer : moved[0];
+          notifyTeamTimeMoved({ eventId: String(ctx.event.id), memberUserId: memberId, hostUserId: String(ctx.event.host_user_id), byUserId: ctx.userId, role, field, at: new Date(saved[field]) }).catch(() => {});
+        }
+      }
+    } catch (err) {
+      console.error("[Door] schedule reminder reset failed (times saved):", err);
+    }
     res.json({ success: true, role, schedule: scheduleJson(saved) });
   } catch (err) {
     console.error("[Door] schedule save failed:", err);
