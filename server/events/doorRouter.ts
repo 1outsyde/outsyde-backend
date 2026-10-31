@@ -39,7 +39,7 @@ import { ticketIdFromWalletToken, walletConfig, cachedTicketPass } from "./walle
 import { ensurePromoterLinks, promoterLinkStats, promoterLinkUrl } from "./promoterLinks";
 import { LINK_ROLES, eventPay, parsePay, rolePayJson, settingOf } from "./teamPay";
 import { teamAnchor, teamKindsToReset, type TeamTimes } from "./eventReminderRules";
-import { askStayLonger, answerStayLonger, setStayLongerAmount, listStayLonger, myStayLonger } from "./teamExtensions";
+import { askStayLonger, answerStayLonger, setStayLongerAmount, listStayLonger, myStayLonger, lockedByStayLonger, closeStayLongerOffTeam } from "./teamExtensions";
 import {
   notifySetupOnAccept, notifyTeamRemoved, parseRemoval, removalLabel, memberReadySql,
   teamPayoutsForHost, myTeamPayout, markPaid, undoPaid, memberAnswer, type SettleError,
@@ -479,6 +479,7 @@ router.post("/door/invites/:inviteId/leave", hybridAuthMiddleware, doorLimiter, 
       WHERE id = ${ctx.invite.id} AND member_user_id = ${ctx.userId} AND removed_at IS NULL AND accepted_at IS NOT NULL
       RETURNING id`);
     if (!done.length) return fail(res, 409, "NOT_ON_TEAM", "You aren't on this Event team.");
+    await closeStayLongerOffTeam(ctx.userId);
     const fresh = await loadInvite(ctx.invite.id);
     res.json({ success: true, invite: await inviteJson(fresh!) });
   } catch (err) {
@@ -607,6 +608,7 @@ router.delete("/:id/door/team/:userId", hybridAuthMiddleware, async (req: Reques
             AND EXISTS (SELECT 1 FROM events e WHERE e.id = event_door_members.event_id AND e.ends_at > now())
           RETURNING id`);
     if (!done.length) return fail(res, 404, "NOT_ON_TEAM", "That person isn't on your Event team.");
+    await closeStayLongerOffTeam(memberId);
     if (why) {
       const [full] = await rows<any>(sql`SELECT * FROM events WHERE id = ${ctx.event.id}`);
       const what = scope.data === "standing" ? `${(await hostIdentity(full ?? ctx.event)).publicName}'s events` : String(ctx.event.title);
@@ -677,6 +679,11 @@ router.put("/:id/door/team/:userId/schedule", hybridAuthMiddleware, teamLimiter,
     const v = (x: string | null | undefined) => (x ? new Date(x).toISOString() : null);
     const note = (x: string | null | undefined) => (x && x.trim() ? x.trim() : null);
     const [before] = await rows<any>(sql`SELECT starts_at, ends_at, call_at, load_in_at FROM event_team_schedules WHERE event_id = ${ctx.event.id} AND member_user_id = ${memberId} AND role = ${role}`);
+    // Step 7: once they were asked to stay longer, their end comes from that (an hourly shift would otherwise pay twice).
+    if ((before?.ends_at ? new Date(before.ends_at).getTime() : null) !== en) {
+      const locked = await lockedByStayLonger({ eventId: String(ctx.event.id), memberId, role });
+      if (locked) return fail(res, 409, locked.code, locked.message);
+    }
     const [saved] = await rows<any>(sql`
       INSERT INTO event_team_schedules (event_id, member_user_id, role, starts_at, ends_at, call_at, load_in_at, place_note, host_note, updated_by_user_id)
       VALUES (${ctx.event.id}, ${memberId}, ${role}, ${v(b.startsAt)}::timestamptz, ${v(b.endsAt)}::timestamptz, ${v(b.callAt)}::timestamptz,
@@ -745,6 +752,8 @@ router.put("/:id/door/team/:userId/pay", hybridAuthMiddleware, teamLimiter, asyn
       return fail(res, 404, "NOT_ON_TEAM", "That person isn't on your Event team in that role.");
     }
     const v = parsed.value;
+    const locked = await lockedByStayLonger({ eventId: String(ctx.event.id), memberId, role, nextPay: v });
+    if (locked) return fail(res, 409, locked.code, locked.message);
     if (v.commissionBps) {
       // One link per person per event: its sales earn commission on one role only.
       const [other] = await rows<any>(sql`

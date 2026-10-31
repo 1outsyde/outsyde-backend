@@ -155,6 +155,22 @@ function callAt(base: string, method: string, path: string, o: { token?: string;
     assert(m?.stayLonger?.find((x: any) => x.id === req1.id)?.newEndAt === req1.newEndAt, "their new end time", m?.stayLonger);
     r = await answer(e.id, sec, req1.id, "decline");
     assert(r.status === 409, "can't answer twice", r.body);
+    assert(to(sec).some((p) => p.data?.type === "team_payout_setup"), "a paying extra with no payout setup: they're told to set it up", to(sec));
+
+    console.log("\nwhat they agreed to stays fixed");
+    const putPay = (body: unknown) => call("PUT", `/api/events/${e.id}/door/team/${sec.id}/pay?role=security`, { token: tok(host.id), body });
+    r = await putPay({ payType: "hourly", hourlyCents: 3000 });
+    assert(r.status === 409 && r.body?.error?.code === "STAY_LONGER_SET" && !DASH.test(r.body?.error?.message ?? ""), "can't switch to hourly after they agreed to stay", r.body);
+    r = await putPay({ payType: "fixed", fixedCents: 999000 });
+    assert(r.status === 409 && r.body?.error?.code === "OVER_ROLE_CAP", "can't push the role past $10,000 with the extra", r.body);
+    r = await putPay({ payType: "fixed", fixedCents: 16000 });
+    assert(r.status === 200, "other pay changes still fine", r.body);
+    const sh = (await q(`SELECT starts_at, ends_at FROM event_team_schedules WHERE event_id = $1 AND member_user_id = $2`, [e.id, sec.id]))[0];
+    const putShift = (endsAt: string) => call("PUT", `/api/events/${e.id}/door/team/${sec.id}/schedule?role=security`, { token: tok(host.id), body: { startsAt: new Date(sh.starts_at).toISOString(), endsAt } });
+    r = await putShift(new Date(new Date(sh.ends_at).getTime() + H).toISOString());
+    assert(r.status === 409 && r.body?.error?.code === "STAY_LONGER_SET", "their end can't be moved by hand any more", r.body);
+    r = await putShift(new Date(sh.ends_at).toISOString());
+    assert(r.status === 200, "the rest of their times still save", r.body);
 
     console.log("\nasking again starts from the new end");
     r = await ask(e.id, host, sec, "security", { minutes: 30, pay: "none" });
@@ -258,6 +274,13 @@ function callAt(base: string, method: string, path: string, o: { token?: string;
     assert(to(host).filter((p) => p.data?.type === "team_stay_longer_expired").length === before5, "told once");
     r = await ask(e.id, host, s5, "security", { minutes: 30, pay: "none" });
     assert(r.status === 201, "the host can ask again after it expired", r.body);
+    const reqS5b = r.body.request;
+    pushes.length = 0;
+    r = await call("DELETE", `/api/events/${e.id}/door/team/${s5.id}?scope=event&role=security`, { token: tok(host.id) });
+    assert(r.status === 200, "taken off the team", r.body);
+    assert((await q(`SELECT status FROM event_team_extensions WHERE id = $1`, [reqS5b.id]))[0].status === "expired", "their open request closes with it", null);
+    await ext.expireStayLonger();
+    assert(!to(host).some((p) => p.data?.type === "team_stay_longer_expired"), "quietly: no 'didn't answer' push", to(host));
 
     console.log("\nTo be discussed (call 47)");
     r = await answer(e.id, med, reqMed.id, "accept");
@@ -276,6 +299,11 @@ function callAt(base: string, method: string, path: string, o: { token?: string;
     medPay = m?.roles?.find((x: any) => x.role === "media")?.pay;
     assert(medPay?.extraCents === 9000 && medPay?.earnedCents === 9000, "now in their pay", medPay);
 
+    pushes.length = 0;
+    const teamSend = await import("./teamSend");
+    await teamSend.remindTeamSetup();
+    assert(to(med).some((p) => p.data?.type === "team_payout_setup"), "their only pay is the extra: still reminded to set up payouts", to(med));
+
     console.log("\nTo be discussed reminders to the host, then the deadline");
     const ended = await event(host, "ended", 10 * H, -5 * H); // ended 5 hours ago
     const s6 = await user("s6"); await member(ended.id, host, s6, "security"); await pay(ended.id, s6, "security", host, { type: "fixed", fixed: 10000 });
@@ -285,6 +313,11 @@ function callAt(base: string, method: string, path: string, o: { token?: string;
     const nyHour = (d: Date) => Number(new Intl.DateTimeFormat("en-US", { timeZone: "America/New_York", hour: "numeric", hour12: false }).format(d));
     // A moment the next morning in New York (10:00 AM the day after it ended).
     const nextMorning = new Date(endAt.getTime() + DAY - (nyHour(endAt) - 10) * H);
+    // Someone still working at that time (asked after the end, until later that morning): not reminded yet.
+    const s6c = await user("s6c"); await member(ended.id, host, s6c, "door");
+    await q(`INSERT INTO event_team_extensions (event_id, member_user_id, role, requested_by_user_id, extra_minutes, from_end_at, new_end_at, pay_kind, status, expires_at, answered_at)
+             VALUES ($1, $2, 'door', $3, 60, $4::timestamptz, $4::timestamptz + interval '1 hour', 'tbd', 'accepted', $4::timestamptz, $4::timestamptz)`,
+      [ended.id, s6c.id, host.id, new Date(nextMorning.getTime() + H).toISOString()]);
     pushes.length = 0;
     await ext.remindStayLongerAmounts(new Date(endAt.getTime() + 30 * MIN));
     assert(!to(host).some((p) => p.data?.type === "team_stay_longer_amount"), "not right after the event");
@@ -294,7 +327,7 @@ function callAt(base: string, method: string, path: string, o: { token?: string;
     await ext.remindStayLongerAmounts(new Date(nextMorning.getTime() + MIN));
     assert(to(host).filter((p) => p.data?.type === "team_stay_longer_amount").length === 1, "once");
     await ext.remindStayLongerAmounts(new Date(endAt.getTime() + 2 * DAY + MIN));
-    assert(to(host).filter((p) => p.data?.type === "team_stay_longer_amount").length === 2, "and the day before payout day");
+    assert(to(host).filter((p) => p.data?.type === "team_stay_longer_amount" && p.body.includes("Firsts6 ")).length === 2, "and the day before payout day");
     // Not entered by payout time: $0, the rest pays on time.
     await q(`UPDATE events SET starts_at = starts_at - interval '4 days', ends_at = ends_at - interval '4 days' WHERE id = $1`, [ended.id]);
     await q(`INSERT INTO user_payout_accounts (user_id, stripe_account_id, onboarding_complete) VALUES ($1, $2, true) ON CONFLICT (user_id) DO NOTHING`, [s6.id, `acct_${P}_s6`]);
@@ -321,6 +354,12 @@ function callAt(base: string, method: string, path: string, o: { token?: string;
     assert(r.status === 409 && r.body?.error?.code === "PAY_FIXED", "payout time has come", r.body);
     await q(`UPDATE events SET status = 'cancelled' WHERE id = $1`, [late.id]); // keep it out of the payout run below
 
+    console.log("\na free event where the only pay is an extra is still recorded");
+    const free = await event(host, "free", 4 * DAY + 6 * H, -4 * DAY);
+    const s10 = await user("s10"); await member(free.id, host, s10, "security");
+    await q(`INSERT INTO event_team_extensions (event_id, member_user_id, role, requested_by_user_id, extra_minutes, from_end_at, new_end_at, pay_kind, fixed_cents, status, expires_at, answered_at)
+             SELECT id, $2, 'security', $3, 60, ends_at, ends_at + interval '1 hour', 'fixed', 3000, 'accepted', ends_at, ends_at - interval '1 hour' FROM events WHERE id = $1`, [free.id, s10.id, host.id]);
+
     console.log("\nextras are paid with the rest");
     const e7 = await event(host, "paid", 4 * DAY + 6 * H, -4 * DAY);
     const s7 = await user("s7"); await member(e7.id, host, s7, "security"); await pay(e7.id, s7, "security", host, { type: "fixed", fixed: 16000 });
@@ -342,6 +381,8 @@ function callAt(base: string, method: string, path: string, o: { token?: string;
     const tp7 = (await q(`SELECT amount_cents, breakdown FROM event_team_payouts WHERE event_id = $1 AND member_user_id = $2`, [e7.id, s7.id]))[0];
     const po7 = (await q(`SELECT team_cents, amount_cents FROM event_payouts WHERE event_id = $1`, [e7.id]))[0];
     assert(Number(tp7?.amount_cents) === 21000 && tp7?.breakdown?.extraCents === 5000, "$160 + $50 extra = $210 to them, the extra on record", tp7);
+    const tp10 = (await q(`SELECT amount_cents, outcome FROM event_team_payouts WHERE event_id = $1 AND member_user_id = $2`, [free.id, s10.id]))[0];
+    assert(Number(tp10?.amount_cents) === 3000 && tp10?.outcome !== "covered", "the $30 is on record for the host to pay", tp10);
     const tp8 = (await q(`SELECT amount_cents FROM event_team_payouts WHERE event_id = $1 AND member_user_id = $2`, [e7.id, s8.id]))[0];
     assert(Number(tp8?.amount_cents) === 4000, "no pay set, stayed for $40: paid $40", tp8);
     assert(Number(po7?.team_cents) === 25000 && Number(po7?.amount_cents) === 49000 - 25000, "taken from the host payout ($490 earned, $240 to the host)", po7);

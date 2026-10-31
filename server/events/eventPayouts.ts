@@ -152,7 +152,10 @@ export async function createDuePayouts(limit = PAYOUT_JOB_LIMIT): Promise<string
       AND NOT EXISTS (SELECT 1 FROM ticket_orders o WHERE o.event_id = e.id AND o.status IN ('pending', 'refunding') AND o.needs_review_at IS NULL)
       AND (EXISTS (SELECT 1 FROM tickets t JOIN ticket_orders o ON o.id = t.order_id
                    WHERE t.event_id = e.id AND t.status = 'valid' AND o.status = 'completed' AND t.payout_id IS NULL AND t.host_net_cents > 0)
-           OR EXISTS (SELECT 1 FROM event_team_pay tp WHERE tp.event_id = e.id AND (tp.pay_type <> 'none' OR tp.commission_bps IS NOT NULL)))
+           OR EXISTS (SELECT 1 FROM event_team_pay tp WHERE tp.event_id = e.id AND (tp.pay_type <> 'none' OR tp.commission_bps IS NOT NULL))
+           -- Step 7: someone whose only pay is a stay longer extra is still recorded (host_to_pay when it can't be covered).
+           OR EXISTS (SELECT 1 FROM event_team_extensions x WHERE x.event_id = e.id AND x.status = 'accepted'
+                      AND (x.pay_kind IN ('fixed', 'hourly') OR COALESCE(x.final_cents, 0) > 0)))
     ORDER BY e.ends_at
     LIMIT ${limit}`);
   const made: string[] = [];

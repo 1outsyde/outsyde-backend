@@ -48,8 +48,9 @@ CREATE TABLE IF NOT EXISTS event_team_extensions (
 CREATE UNIQUE INDEX IF NOT EXISTS uq_event_team_extensions_open ON event_team_extensions (event_id, member_user_id) WHERE status = 'open';
 CREATE INDEX IF NOT EXISTS idx_event_team_extensions_event ON event_team_extensions (event_id, member_user_id, status);
 CREATE INDEX IF NOT EXISTS idx_event_team_extensions_open_expiry ON event_team_extensions (expires_at) WHERE status = 'open';
+CREATE INDEX IF NOT EXISTS idx_event_team_extensions_tbd_due ON event_team_extensions (event_id) WHERE pay_kind = 'tbd' AND status = 'accepted' AND final_cents IS NULL;
 
 -- Verify (read-only):
 -- SELECT count(*) FROM information_schema.columns WHERE table_name = 'event_team_extensions';  -- 20
 -- SELECT conname FROM pg_constraint WHERE conrelid = 'event_team_extensions'::regclass AND contype = 'c' ORDER BY conname;  -- 11
--- SELECT indexname FROM pg_indexes WHERE tablename = 'event_team_extensions';  -- 4 with the primary key
+-- SELECT indexname FROM pg_indexes WHERE tablename = 'event_team_extensions';  -- 5 with the primary key

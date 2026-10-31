@@ -223,13 +223,15 @@ export async function askStayLonger(p: { event: any; hostUserId: string; memberI
     if ((err?.code ?? err?.cause?.code) === "23505") return no(409, "REQUEST_OPEN", "You already asked them. Wait for their answer.");
     throw err;
   }
-  const host = (await hostIdentity(e)).publicName;
+  // The full row: loadEventForDoor leaves out the business or photographer a host can post as.
+  const [full] = await rows<any>(sql`SELECT * FROM events WHERE id = ${e.id}`);
+  const host = (await hostIdentity(full ?? e)).publicName;
   const copy = {
     title: `${host} asked you to stay ${durationText(minutes)}`,
     body: `Until ${clockText(new Date(saved.new_end_at), e.timezone)}, ${payText(b.pay, b.fixedCents)}. Tap to accept or decline.`,
   };
   await tell(p.memberId, copy, { type: "team_stay_longer", eventId: String(e.id), requestId: String(saved.id) },
-    { message: `${copy.body.replace(" Tap to accept or decline.", "")} at ${String(e.title)}. Waiting for your answer.`, eventId: String(e.id), by: p.hostUserId });
+    { message: `${String(e.title)}: until ${clockText(new Date(saved.new_end_at), e.timezone)}, ${payText(b.pay, b.fixedCents)}. Waiting for your answer.`, eventId: String(e.id), by: p.hostUserId });
   return { ok: true, request: requestJson(saved) };
 }
 
@@ -263,6 +265,10 @@ export async function answerStayLonger(p: { eventId: string; userId: string; req
       ? { title: `${name} will stay ${durationText(Number(saved.extra_minutes))}`, body: `Until ${until} at ${String(x.title)}.` }
       : { title: `${name} can't stay longer`, body: `Their time at ${String(x.title)} stays the same.` };
     await tell(String(x.host_user_id), copy, { type: "team_stay_longer_answer", eventId: String(x.event_id), requestId: String(saved.id), answer: status }, null);
+    if (status === "accepted" && (saved.pay_kind === "fixed" || saved.pay_kind === "hourly")) {
+      const { notifySetupForExtra } = await import("./teamSend");
+      await notifySetupForExtra({ eventId: String(x.event_id), memberUserId: p.userId, hostUserId: String(x.host_user_id) });
+    }
   })().catch(() => {});
   return { ok: true, request: requestJson(saved) };
 }
@@ -295,7 +301,7 @@ export async function setStayLongerAmount(p: { event: any; requestId: string; bo
   const [saved] = await rows<any>(sql`
     UPDATE event_team_extensions x SET final_cents = ${cents}, amount_set_at = now(), updated_at = now()
     WHERE x.id = ${p.requestId} AND x.pay_kind = 'tbd' AND x.status = 'accepted'
-      AND EXISTS (SELECT 1 FROM events e WHERE e.id = x.event_id AND e.team_pay_fixed_at IS NULL)
+      AND EXISTS (SELECT 1 FROM events e WHERE e.id = x.event_id AND e.team_pay_fixed_at IS NULL AND e.ends_at + interval '3 days' > now())
     RETURNING x.*`);
   if (!saved) return no(409, "PAY_FIXED", "The payout is already worked out, so this can't change.");
   const { notifyTeamPayChanged } = await import("./ticketNotices");
@@ -318,6 +324,54 @@ export async function myStayLonger(eventId: string, userId: string) {
   const list = await rows<any>(sql`
     SELECT * FROM event_team_extensions WHERE event_id = ${eventId} AND member_user_id = ${userId} ORDER BY created_at DESC LIMIT 50`);
   return list.map(requestJson);
+}
+
+/**
+ * Step 7: what's already promised for this role is fixed. While a request is open or accepted, the host can't switch the
+ * role between hourly and other pay (call 43 would no longer hold), take the role past $10,000 with its extras, or
+ * move their end (the extra already covers that time, so hourly would pay twice). Null = allowed.
+ */
+export async function lockedByStayLonger(p: { eventId: string; memberId: string; role: string; nextPay?: { payType: string; fixedCents: number | null; hourlyCents: number | null } }):
+  Promise<{ code: string; message: string } | null> {
+  const { rows } = await db();
+  const list = await rows<any>(sql`
+    SELECT status, pay_kind, extra_minutes, fixed_cents, final_cents FROM event_team_extensions
+    WHERE event_id = ${p.eventId} AND member_user_id = ${p.memberId} AND role = ${p.role} AND status IN ('open', 'accepted')`);
+  if (!list.length) return null;
+  if (!p.nextPay) return { code: "STAY_LONGER_SET", message: "They agreed to stay longer, so their end time is set by that. Ask them to stay longer again instead." };
+  const [cur] = await rows<any>(sql`SELECT pay_type FROM event_team_pay WHERE event_id = ${p.eventId} AND member_user_id = ${p.memberId} AND role = ${p.role}`);
+  const wasHourly = cur?.pay_type === "hourly";
+  if (wasHourly !== (p.nextPay.payType === "hourly")) {
+    return { code: "STAY_LONGER_SET", message: "They were asked to stay longer on this pay, so it can't switch between hourly and other pay now." };
+  }
+  if (p.nextPay.payType === "fixed") {
+    const extras = list.reduce((n, x) => n + (x.pay_kind === "fixed" ? Number(x.fixed_cents) : x.pay_kind === "tbd" ? Number(x.final_cents ?? 0) : 0), 0);
+    if (Number(p.nextPay.fixedCents ?? 0) + extras > STAY_LIMITS_ROLE_CAP) {
+      return { code: "OVER_ROLE_CAP", message: `With what they get for staying longer, this role would pass $10,000. Set up to ${moneyText(Math.max(0, STAY_LIMITS_ROLE_CAP - extras))}.` };
+    }
+  }
+  return null;
+}
+const STAY_LIMITS_ROLE_CAP = 1_000_000;
+
+/**
+ * After someone is taken off the team or leaves: their open requests close quietly (no "didn't answer" push to the
+ * host, and the host can ask again if they're added back). Accepted ones stay: that time was worked.
+ */
+export async function closeStayLongerOffTeam(memberId: string): Promise<void> {
+  try {
+    const { rows } = await db();
+    await rows(sql`
+      UPDATE event_team_extensions x SET status = 'expired', answered_at = now(), host_notified_at = now(), updated_at = now()
+      FROM events e
+      WHERE e.id = x.event_id AND x.member_user_id = ${memberId} AND x.status = 'open'
+        AND NOT EXISTS (SELECT 1 FROM event_door_members m WHERE m.event_id = x.event_id AND m.member_user_id = x.member_user_id AND m.role = x.role
+                          AND m.removed_at IS NULL AND m.accepted_at IS NOT NULL)
+        AND NOT EXISTS (SELECT 1 FROM event_door_team t WHERE t.host_user_id = e.host_user_id AND t.member_user_id = x.member_user_id AND t.role = x.role
+                          AND t.removed_at IS NULL AND t.accepted_at IS NOT NULL)`);
+  } catch (err) {
+    console.error(`[StayLonger] closing open requests failed for ${memberId}:`, (err as Error)?.message ?? err);
+  }
 }
 
 /** Job (every minute): open requests past their time expire, and the host is told once. Returns how many. */
@@ -351,7 +405,7 @@ export async function remindStayLongerAmounts(now: Date = new Date()): Promise<n
     SELECT x.id, x.event_id, x.extra_minutes, x.tbd_morning_reminded_at, x.tbd_eve_reminded_at,
            e.title, e.timezone, e.ends_at, e.host_user_id, u.first_name, u.username
     FROM event_team_extensions x JOIN events e ON e.id = x.event_id JOIN users u ON u.id = x.member_user_id
-    WHERE x.pay_kind = 'tbd' AND x.status = 'accepted' AND x.final_cents IS NULL
+    WHERE x.pay_kind = 'tbd' AND x.status = 'accepted' AND x.final_cents IS NULL AND x.new_end_at <= ${nowIso}::timestamptz
       AND (x.tbd_morning_reminded_at IS NULL OR x.tbd_eve_reminded_at IS NULL)
       AND e.team_pay_fixed_at IS NULL AND e.status <> 'cancelled'
       AND e.ends_at <= ${nowIso}::timestamptz AND e.ends_at > ${nowIso}::timestamptz - interval '3 days'
