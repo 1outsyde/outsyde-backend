@@ -39,6 +39,7 @@ import { ticketIdFromWalletToken, walletConfig, cachedTicketPass } from "./walle
 import { ensurePromoterLinks, promoterLinkStats, promoterLinkUrl } from "./promoterLinks";
 import { LINK_ROLES, eventPay, parsePay, rolePayJson, settingOf } from "./teamPay";
 import { teamAnchor, teamKindsToReset, type TeamTimes } from "./eventReminderRules";
+import { askStayLonger, answerStayLonger, setStayLongerAmount, listStayLonger, myStayLonger, lockedByStayLonger, closeStayLongerOffTeam } from "./teamExtensions";
 import {
   notifySetupOnAccept, notifyTeamRemoved, parseRemoval, removalLabel, memberReadySql,
   teamPayoutsForHost, myTeamPayout, markPaid, undoPaid, memberAnswer, type SettleError,
@@ -478,6 +479,7 @@ router.post("/door/invites/:inviteId/leave", hybridAuthMiddleware, doorLimiter, 
       WHERE id = ${ctx.invite.id} AND member_user_id = ${ctx.userId} AND removed_at IS NULL AND accepted_at IS NOT NULL
       RETURNING id`);
     if (!done.length) return fail(res, 409, "NOT_ON_TEAM", "You aren't on this Event team.");
+    await closeStayLongerOffTeam(ctx.userId);
     const fresh = await loadInvite(ctx.invite.id);
     res.json({ success: true, invite: await inviteJson(fresh!) });
   } catch (err) {
@@ -606,6 +608,7 @@ router.delete("/:id/door/team/:userId", hybridAuthMiddleware, async (req: Reques
             AND EXISTS (SELECT 1 FROM events e WHERE e.id = event_door_members.event_id AND e.ends_at > now())
           RETURNING id`);
     if (!done.length) return fail(res, 404, "NOT_ON_TEAM", "That person isn't on your Event team.");
+    await closeStayLongerOffTeam(memberId);
     if (why) {
       const [full] = await rows<any>(sql`SELECT * FROM events WHERE id = ${ctx.event.id}`);
       const what = scope.data === "standing" ? `${(await hostIdentity(full ?? ctx.event)).publicName}'s events` : String(ctx.event.title);
@@ -676,6 +679,11 @@ router.put("/:id/door/team/:userId/schedule", hybridAuthMiddleware, teamLimiter,
     const v = (x: string | null | undefined) => (x ? new Date(x).toISOString() : null);
     const note = (x: string | null | undefined) => (x && x.trim() ? x.trim() : null);
     const [before] = await rows<any>(sql`SELECT starts_at, ends_at, call_at, load_in_at FROM event_team_schedules WHERE event_id = ${ctx.event.id} AND member_user_id = ${memberId} AND role = ${role}`);
+    // Step 7: once they were asked to stay longer, their end comes from that (an hourly shift would otherwise pay twice).
+    if ((before?.ends_at ? new Date(before.ends_at).getTime() : null) !== en) {
+      const locked = await lockedByStayLonger({ eventId: String(ctx.event.id), memberId, role });
+      if (locked) return fail(res, 409, locked.code, locked.message);
+    }
     const [saved] = await rows<any>(sql`
       INSERT INTO event_team_schedules (event_id, member_user_id, role, starts_at, ends_at, call_at, load_in_at, place_note, host_note, updated_by_user_id)
       VALUES (${ctx.event.id}, ${memberId}, ${role}, ${v(b.startsAt)}::timestamptz, ${v(b.endsAt)}::timestamptz, ${v(b.callAt)}::timestamptz,
@@ -744,6 +752,8 @@ router.put("/:id/door/team/:userId/pay", hybridAuthMiddleware, teamLimiter, asyn
       return fail(res, 404, "NOT_ON_TEAM", "That person isn't on your Event team in that role.");
     }
     const v = parsed.value;
+    const locked = await lockedByStayLonger({ eventId: String(ctx.event.id), memberId, role, nextPay: v });
+    if (locked) return fail(res, 409, locked.code, locked.message);
     if (v.commissionBps) {
       // One link per person per event: its sales earn commission on one role only.
       const [other] = await rows<any>(sql`
@@ -792,6 +802,72 @@ async function onTeamAccepted(event: any, memberId: string, role: TeamRole): Pro
     WHERE t.host_user_id = ${event.host_user_id} AND t.member_user_id = ${memberId} AND t.role = ${role} AND t.removed_at IS NULL AND t.accepted_at IS NOT NULL
     LIMIT 1`);
   return r.length > 0;
+}
+
+// ─── Stay longer (p4-team step 7, migration 091) ────────────────────────────
+
+const sendResult = (res: Response, r: { ok: true; request: unknown } | { ok: false; status: number; code: string; message: string }, okStatus = 200) =>
+  r.ok ? res.status(okStatus).json({ success: true, request: r.request }) : fail(res, r.status, r.code, r.message);
+
+/** The host asks one person to stay longer in one role (calls 41 to 46). Co-hosts and members get 404. */
+router.post("/:id/door/team/:userId/stay-longer", hybridAuthMiddleware, teamLimiter, async (req: Request, res: Response) => {
+  try {
+    const ctx = await teamManager(req, res, false);
+    if (!ctx) return;
+    const roleParsed = roleSchema.safeParse(req.query.role);
+    if (!roleParsed.success) return fail(res, 400, "INVALID_REQUEST", ROLE_CHOICES);
+    const role = roleParsed.data;
+    const memberId = String(req.params.userId);
+    if (!validId(memberId)) return fail(res, 404, "NOT_ON_TEAM", "That person isn't on your Event team in that role.");
+    const r = await askStayLonger({ event: ctx.event, hostUserId: ctx.userId, memberId, role, body: req.body ?? {}, isOnTeam: () => onTeamAccepted(ctx.event, memberId, role) });
+    sendResult(res, r, 201);
+  } catch (err) {
+    console.error("[Door] stay longer ask failed:", err);
+    fail(res, 500, "SERVER_ERROR", "Could not send the request.");
+  }
+});
+
+/** The host and co-hosts see every request at the event. */
+router.get("/:id/team/stay-longer", hybridAuthMiddleware, teamLimiter, async (req: Request, res: Response) => {
+  try {
+    const ctx = await teamManager(req, res);
+    if (!ctx) return;
+    res.json({ success: true, requests: await listStayLonger(String(ctx.event.id)) });
+  } catch (err) {
+    console.error("[Door] stay longer list failed:", err);
+    fail(res, 500, "SERVER_ERROR", "Could not load the requests.");
+  }
+});
+
+/** Call 47: the host enters a To be discussed amount. */
+router.put("/:id/team/stay-longer/:requestId/amount", hybridAuthMiddleware, teamLimiter, async (req: Request, res: Response) => {
+  try {
+    const ctx = await teamManager(req, res, false);
+    if (!ctx) return;
+    const requestId = String(req.params.requestId);
+    if (!validId(requestId)) return fail(res, 404, "NOT_FOUND", "Request not found.");
+    sendResult(res, await setStayLongerAmount({ event: ctx.event, requestId, body: req.body ?? {} }));
+  } catch (err) {
+    console.error("[Door] stay longer amount failed:", err);
+    fail(res, 500, "SERVER_ERROR", "Could not save the amount.");
+  }
+});
+
+for (const answer of ["accept", "decline"] as const) {
+  /** Call 48: the member answers their own request. */
+  router.post(`/:id/team/me/stay-longer/:requestId/${answer}`, hybridAuthMiddleware, teamLimiter, async (req: Request, res: Response) => {
+    try {
+      const userId = getUserIdFromRequest(req);
+      if (!userId) return fail(res, 401, "UNAUTHORIZED", "Sign in to continue.");
+      const eventId = String(req.params.id);
+      const requestId = String(req.params.requestId);
+      if (!validId(eventId) || !validId(requestId)) return fail(res, 404, "NOT_FOUND", "Request not found.");
+      sendResult(res, await answerStayLonger({ eventId, userId, requestId, answer, isOnTeam: (e, role) => onTeamAccepted(e, userId, role as TeamRole) }));
+    } catch (err) {
+      console.error(`[Door] stay longer ${answer} failed:`, err);
+      fail(res, 500, "SERVER_ERROR", "Could not save your answer.");
+    }
+  });
 }
 
 // ─── Co-hosts (p4-team step 2b, migration 084) ──────────────────────────────
@@ -945,6 +1021,8 @@ router.get("/:id/team/me", hybridAuthMiddleware, teamLimiter, async (req: Reques
       payoutSetup,
       // Step 5: messages the host or a co-host sent them for this event, newest first. Its own catch.
       fromHost: await fromHostFor(e, userId).catch((err) => { console.error("[Door] from the host failed (team view sent without it):", err); return []; }),
+      // Step 7: the host's requests to stay longer, newest first (open ones are answered here). Its own catch.
+      stayLonger: await myStayLonger(String(e.id), userId).catch((err) => { console.error("[Door] stay longer failed (team view sent without it):", err); return []; }),
     });
   } catch (err) {
     console.error("[Door] team me failed:", err);

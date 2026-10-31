@@ -327,6 +327,15 @@ export async function notifyNoSetupMembers(limit = 100): Promise<number> {
 
 /** Pay set for this person at this event (any role), as the setup reminders read it. */
 const PAID_SPOT = sql`(p.pay_type <> 'none' OR p.commission_bps IS NOT NULL)`;
+/**
+ * Paid spots: a role with pay set, or (step 7) an accepted request to stay longer that pays (Fixed, hourly, or a To be
+ * discussed amount above $0), so someone whose only pay is an extra is reminded to set up payouts too.
+ */
+const PAID_SPOTS = sql`(
+  SELECT p.event_id, p.member_user_id, p.role FROM event_team_pay p WHERE ${PAID_SPOT}
+  UNION
+  SELECT x.event_id, x.member_user_id, x.role FROM event_team_extensions x
+  WHERE x.status = 'accepted' AND (x.pay_kind IN ('fixed', 'hourly') OR (x.pay_kind = 'tbd' AND COALESCE(x.final_cents, 0) > 0)))`;
 
 /**
  * On the team, in a role with pay, this event or the host's standing team. Before the end: accepted and not removed.
@@ -372,9 +381,9 @@ export async function remindTeamSetup(limit = 200): Promise<number> {
   const cand = await rows<any>(sql`
     SELECT DISTINCT e.id, e.title, e.host_user_id, e.timezone, e.starts_at, e.ends_at, p.member_user_id,
            ${LOCAL_DAY(0)} AS is_day_of, ${LOCAL_DAY(1)} AS is_day_after
-    FROM event_team_pay p JOIN events e ON e.id = p.event_id
+    FROM ${PAID_SPOTS} p JOIN events e ON e.id = p.event_id
     LEFT JOIN event_team_setup_notices n ON n.event_id = e.id AND n.member_user_id = p.member_user_id
-    WHERE ${PAID_SPOT} AND ${BEFORE_DEADLINE} AND ${ON_TEAM_IN_ROLE} AND NOT ${memberReadySql(sql`p.member_user_id`)}
+    WHERE ${BEFORE_DEADLINE} AND ${ON_TEAM_IN_ROLE} AND NOT ${memberReadySql(sql`p.member_user_id`)}
       -- Only people with something due, so nobody is starved behind ones already told today.
       AND (n.last_push_at IS NULL OR n.last_push_at <= now() - interval '1 day'
            OR (${LOCAL_DAY(0)} AND n.day_of_email_at IS NULL) OR (${LOCAL_DAY(1)} AND n.day_after_email_at IS NULL))
@@ -454,6 +463,23 @@ export async function notifySetupOnAccept(p: { scope: "standing" | "event"; even
     }
   } catch (err) {
     console.error(`[TeamPay] setup push on accept failed for ${p.memberUserId}:`, (err as Error)?.message ?? err);
+  }
+}
+
+/** Step 7: they accepted a paying extra at this event and have no payout setup: the same one push a day. Never throws. */
+export async function notifySetupForExtra(p: { eventId: string; memberUserId: string; hostUserId: string }): Promise<void> {
+  try {
+    const [e] = await rows<any>(sql`
+      SELECT e.id, e.title FROM events e WHERE e.id = ${p.eventId} AND ${BEFORE_DEADLINE} AND NOT ${memberReadySql(p.memberUserId)}`);
+    if (!e) return;
+    const [claimed] = await rows<any>(sql`
+      INSERT INTO event_team_setup_notices (event_id, member_user_id, last_push_at) VALUES (${e.id}, ${p.memberUserId}, now())
+      ON CONFLICT (event_id, member_user_id) DO UPDATE SET last_push_at = now()
+        WHERE event_team_setup_notices.last_push_at IS NULL OR event_team_setup_notices.last_push_at <= now() - interval '1 day'
+      RETURNING 1 AS x`);
+    if (claimed) await tell(p.memberUserId, teamCopy.setup(String(e.title)), "team_payout_setup", String(e.id), { eventId: String(e.id) }, p.hostUserId, "event");
+  } catch (err) {
+    console.error(`[TeamPay] setup push for an extra failed for ${p.memberUserId}:`, (err as Error)?.message ?? err);
   }
 }
 

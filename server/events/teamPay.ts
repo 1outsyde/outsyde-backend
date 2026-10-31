@@ -38,13 +38,35 @@ export type RolePay = {
   needsShift: boolean;
   /** Step 4b-1: the shift times the rate came to more than $10,000, so the hourly part was capped there. */
   hourlyCapped: boolean;
+  /** Step 7: what accepted "stay longer" requests add (inside the role's $10,000 with the fixed or hourly pay). */
+  extraCents: number;
+  extras: ExtraLine[];
+  /** Step 7: the extras would have taken the role past $10,000, so they were cut there. */
+  extraCapped: boolean;
 };
+
+/** Step 7: one accepted request to stay longer, as it adds to the pay. */
+export type Extra = { id: string; minutes: number; payKind: "fixed" | "none" | "tbd" | "hourly"; fixedCents: number | null; finalCents: number | null };
+/** `cents` null = To be discussed and not entered yet (counts as $0). */
+export type ExtraLine = { id: string; minutes: number; payKind: Extra["payKind"]; cents: number | null; tbd: boolean };
+
+/**
+ * Step 7 (Legend 2026-10-30, calls 43 and 47): Fixed = its amount; No extra pay = $0; To be discussed = what the host
+ * entered, $0 until then; At their hourly rate = the rate x the extra time, only while their pay is hourly.
+ */
+export function extraLine(p: PaySetting, x: Extra): ExtraLine {
+  const cents = x.payKind === "fixed" ? Number(x.fixedCents ?? 0)
+    : x.payKind === "tbd" ? (x.finalCents === null || x.finalCents === undefined ? null : Number(x.finalCents))
+    : x.payKind === "hourly" ? (p.payType === "hourly" ? Math.round((Number(p.hourlyCents ?? 0) * x.minutes) / 60) : 0)
+    : 0;
+  return { id: x.id, minutes: x.minutes, payKind: x.payKind, cents, tbd: x.payKind === "tbd" };
+}
 
 /** Hours to two decimals, for showing (the pay itself uses the exact length). */
 const hoursShown = (ms: number) => Math.round((ms / 3600000) * 100) / 100;
 
 /** What one role pays, from its setting, its shift and the ticket price sold through the person's link. */
-export function computeRolePay(p: PaySetting, shift: Shift, linkSalesCents: number): RolePay {
+export function computeRolePay(p: PaySetting, shift: Shift, linkSalesCents: number, extrasIn: Extra[] = []): RolePay {
   const fixedCents = p.payType === "fixed" ? Number(p.fixedCents ?? 0) : 0;
   let hours: number | null = null;
   let hourlyCents = 0;
@@ -62,15 +84,23 @@ export function computeRolePay(p: PaySetting, shift: Shift, linkSalesCents: numb
     }
   }
   const commissionCents = p.commissionBps ? Math.round((Math.max(0, linkSalesCents) * p.commissionBps) / 10000) : 0;
+  // Step 7 (call 46): the role's fixed or hourly pay and its extras stay within $10,000 together (commission on top).
+  const extras = extrasIn.map((x) => extraLine(p, x));
+  const extrasWanted = extras.reduce((n, x) => n + (x.cents ?? 0), 0);
+  const extraRoom = Math.max(0, HOURLY_ROLE_CAP_CENTS - fixedCents - hourlyCents);
+  const extraCents = Math.min(extrasWanted, extraRoom);
   return {
     payType: p.payType, fixedCents,
     hourlyRateCents: p.payType === "hourly" ? Number(p.hourlyCents ?? 0) : null,
     hours, hourlyCents,
     commissionPercent: p.commissionBps ? p.commissionBps / 100 : null,
     commissionCents,
-    totalCents: fixedCents + hourlyCents + commissionCents,
+    totalCents: fixedCents + hourlyCents + commissionCents + extraCents,
     needsShift,
     hourlyCapped,
+    extraCents,
+    extras,
+    extraCapped: extrasWanted > extraRoom,
   };
 }
 
@@ -150,7 +180,7 @@ export async function eventPay(event: { id: string; host_user_id: string }, opts
   // Loaded here so the pure helpers above stay importable without a database (teamPay.test.ts).
   const { rows } = await import("./eventsRouter");
   const { promoterLinkStats } = await import("./promoterLinks");
-  const [pays, shifts, active, links, earned] = await Promise.all([
+  const [pays, shifts, active, links, earned, accepted] = await Promise.all([
     rows<any>(sql`SELECT member_user_id, role, pay_type, fixed_cents, hourly_cents, commission_bps FROM event_team_pay WHERE event_id = ${eventId}`),
     rows<any>(sql`SELECT member_user_id, role, starts_at, ends_at FROM event_team_schedules WHERE event_id = ${eventId}`),
     rows<any>(sql`
@@ -166,7 +196,18 @@ export async function eventPay(event: { id: string; host_user_id: string }, opts
     rows<any>(sql`
       SELECT COALESCE(sum(t.host_net_cents), 0)::int AS host_net FROM tickets t JOIN ticket_orders o ON o.id = t.order_id
       WHERE t.event_id = ${eventId} AND t.status = 'valid' AND o.status = 'completed'`),
+    // Step 7: accepted requests to stay longer (migration 091).
+    rows<any>(sql`
+      SELECT id, member_user_id, role, extra_minutes, pay_kind, fixed_cents, final_cents FROM event_team_extensions
+      WHERE event_id = ${eventId} AND status = 'accepted' ORDER BY answered_at, id`),
   ]);
+  const extrasOf = new Map<string, Extra[]>();
+  for (const x of accepted) {
+    const k = `${x.member_user_id}:${x.role}`;
+    const list = extrasOf.get(k) ?? [];
+    list.push({ id: String(x.id), minutes: Number(x.extra_minutes), payKind: x.pay_kind, fixedCents: x.fixed_cents ?? null, finalCents: x.final_cents ?? null });
+    extrasOf.set(k, list);
+  }
   const shiftOf = new Map(shifts.map((s) => [`${s.member_user_id}:${s.role}`, { startsAt: s.starts_at, endsAt: s.ends_at }]));
   const salesOf = new Map(links.map((l) => [l.userId, l.salesCents]));
   const settingFor = new Map(pays.map((p) => [`${p.member_user_id}:${p.role}`, settingOf(p)]));
@@ -184,7 +225,7 @@ export async function eventPay(event: { id: string; host_user_id: string }, opts
     const [memberId, role] = key.split(":");
     const setting = settingFor.get(key) ?? NO_PAY;
     const sales = commissionRoleOf.get(memberId) === role ? salesOf.get(memberId) ?? 0 : 0;
-    byRole.set(key, computeRolePay(setting, shiftOf.get(key) ?? null, sales));
+    byRole.set(key, computeRolePay(setting, shiftOf.get(key) ?? null, sales, extrasOf.get(key) ?? []));
   }
   const people = new Map<string, { userId: string; username: string | null; firstName: string | null; totalCents: number; needsShift: boolean; roles: string[]; hasPay: boolean }>();
   for (const a of active) {
@@ -196,10 +237,11 @@ export async function eventPay(event: { id: string; host_user_id: string }, opts
     const s = settingFor.get(key);
     person.totalCents += rp?.totalCents ?? 0;
     person.needsShift = person.needsShift || !!rp?.needsShift;
-    person.hasPay = person.hasPay || (!!s && (s.payType !== "none" || !!s.commissionBps));
+    person.hasPay = person.hasPay || (!!s && (s.payType !== "none" || !!s.commissionBps)) || (rp?.extraCents ?? 0) > 0;
     people.set(id, person);
   }
-  // Everyone the host has set pay for (a $0 hourly still waiting for a shift too), not people with no pay at all.
+  // Everyone the host has set pay for (a $0 hourly still waiting for a shift too), or who earned a stay longer extra,
+  // not people with no pay at all.
   const members = Array.from(people.values()).filter((m) => m.hasPay).map(({ hasPay: _h, ...m }) => m);
   const teamTotalCents = members.reduce((n, m) => n + m.totalCents, 0);
   const hostEarningsCents = Number(earned[0]?.host_net ?? 0);
@@ -220,5 +262,8 @@ export function rolePayJson(p: RolePay | undefined) {
     earnedCents: r.totalCents,
     needsShift: r.needsShift,
     hourlyCapped: r.hourlyCapped,
+    extraCents: r.extraCents,
+    extras: r.extras,
+    extraCapped: r.extraCapped,
   };
 }
