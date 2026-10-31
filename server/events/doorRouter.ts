@@ -42,6 +42,7 @@ import {
   notifySetupOnAccept, notifyTeamRemoved, parseRemoval, removalLabel, memberReadySql,
   teamPayoutsForHost, myTeamPayout, markPaid, undoPaid, memberAnswer, type SettleError,
 } from "./teamSend";
+import { parseTeamMessage, sendTeamMessage, sentTeamMessages, fromHostFor } from "./teamMessages";
 
 const router = Router();
 
@@ -848,6 +849,7 @@ router.get("/:id/team/me", hybridAuthMiddleware, teamLimiter, async (req: Reques
         event: { id: String(e.id), slug: e.slug, title: e.title, startsAt: iso(e.starts_at), endsAt: iso(e.ends_at), timezone: e.timezone },
         host: { name: (await hostIdentity(e)).publicName },
         roles: [], promoter: null, payTotalCents: payout.amountCents, payout, payoutSetup: null,
+        fromHost: await fromHostFor(e, userId).catch(() => []),
       });
     }
     const times = await schedulesFor(e.id);
@@ -911,10 +913,42 @@ router.get("/:id/team/me", hybridAuthMiddleware, teamLimiter, async (req: Reques
       payTotalCents,
       payout,
       payoutSetup,
+      // Step 5: messages the host or a co-host sent them for this event, newest first. Its own catch.
+      fromHost: await fromHostFor(e, userId).catch((err) => { console.error("[Door] from the host failed (team view sent without it):", err); return []; }),
     });
   } catch (err) {
     console.error("[Door] team me failed:", err);
     fail(res, 500, "SERVER_ERROR", "Could not load your Event team roles.");
+  }
+});
+
+// ─── Messages to the team (p4-team step 5, personal messages only) ─────────
+
+/** Send to the whole team, one role, or one person. Host and co-hosts. */
+router.post("/:id/team/messages", hybridAuthMiddleware, teamLimiter, async (req: Request, res: Response) => {
+  try {
+    const ctx = await teamManager(req, res);
+    if (!ctx) return;
+    const parsed = parseTeamMessage(req.body);
+    if (!parsed.ok) return fail(res, 400, "INVALID_REQUEST", parsed.message);
+    const out = await sendTeamMessage(ctx.event, ctx.userId, parsed.value);
+    if ("status" in out) return fail(res, out.status, out.code, out.message);
+    res.status(201).json({ success: true, message: out.message });
+  } catch (err) {
+    console.error("[Door] team message failed:", err);
+    fail(res, 500, "SERVER_ERROR", "Could not send the message.");
+  }
+});
+
+/** Everything sent to this event's team. Host and co-hosts. */
+router.get("/:id/team/messages", hybridAuthMiddleware, teamLimiter, async (req: Request, res: Response) => {
+  try {
+    const ctx = await teamManager(req, res);
+    if (!ctx) return;
+    res.json({ success: true, messages: await sentTeamMessages(ctx.event, ctx.userId) });
+  } catch (err) {
+    console.error("[Door] team messages list failed:", err);
+    fail(res, 500, "SERVER_ERROR", "Could not load the messages.");
   }
 });
 
