@@ -52,5 +52,5 @@ CREATE INDEX IF NOT EXISTS idx_event_team_extensions_tbd_due ON event_team_exten
 
 -- Verify (read-only):
 -- SELECT count(*) FROM information_schema.columns WHERE table_name = 'event_team_extensions';  -- 20
--- SELECT conname FROM pg_constraint WHERE conrelid = 'event_team_extensions'::regclass AND contype = 'c' ORDER BY conname;  -- 11
+-- SELECT conname FROM pg_constraint WHERE conrelid = 'event_team_extensions'::regclass AND contype = 'c' ORDER BY conname;  -- 10
 -- SELECT indexname FROM pg_indexes WHERE tablename = 'event_team_extensions';  -- 5 with the primary key
