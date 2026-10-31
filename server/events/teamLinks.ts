@@ -32,7 +32,7 @@ export function newLinkCode(pick: (n: number) => number = randomInt): string {
 export function normalizeCode(raw: unknown): string | null {
   if (typeof raw !== "string") return null;
   const c = raw.trim().toUpperCase();
-  return c.length === LINK_CODE_LENGTH && [...c].every((ch) => LINK_ALPHABET.includes(ch)) ? c : null;
+  return c.length === LINK_CODE_LENGTH && c.split("").every((ch) => LINK_ALPHABET.includes(ch)) ? c : null;
 }
 
 /** This event: when the event ends. All my events: 7 days after it was made. */
@@ -93,13 +93,24 @@ export function parseLinkBody(body: unknown): { ok: true; value: LinkInput } | {
 
 export type LinkStatus = "open" | "accepted" | "cancelled" | "expired";
 
-/** Open until expires_at; a This event link is also over once its event is cancelled. */
-export function linkStatus(r: { status: string; scope: string; expires_at: string | Date; e_status?: string | null }, now: Date = new Date()): LinkStatus {
+/**
+ * All my events: open until expires_at (7 days). This event: open until the event itself ends or is cancelled, read
+ * from the event (e_ends_at) so a link follows the event when the host moves it. expires_at is only the fallback.
+ */
+export function linkStatus(r: { status: string; scope: string; expires_at: string | Date; e_status?: string | null; e_ends_at?: string | Date | null }, now: Date = new Date()): LinkStatus {
   if (r.status === "accepted") return "accepted";
   if (r.status === "cancelled") return "cancelled";
-  if (new Date(r.expires_at).getTime() <= now.getTime()) return "expired";
-  if (r.scope === "event" && r.e_status === "cancelled") return "expired";
-  return "open";
+  if (r.scope === "event") {
+    if (r.e_status === "cancelled") return "expired";
+    const end = r.e_ends_at ?? r.expires_at;
+    return new Date(end).getTime() <= now.getTime() ? "expired" : "open";
+  }
+  return new Date(r.expires_at).getTime() <= now.getTime() ? "expired" : "open";
+}
+
+/** When a link ends, as screens show it: the event's end for This event, else expires_at. */
+export function linkEndsAt(r: { scope: string; expires_at: string | Date; e_ends_at?: string | Date | null }): Date {
+  return new Date(r.scope === "event" && r.e_ends_at ? r.e_ends_at : r.expires_at);
 }
 
 /** goutsyde.com/team/CODE (call 70): opens the link page with quick sign up. */

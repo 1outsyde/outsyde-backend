@@ -235,7 +235,7 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
     assert(r.status === 200, "and someone else can still take it", r.body);
 
     console.log("\nthe same person, two links for one role at once");
-    let stuck = 0, rowsOk = true;
+    let stuck = 0, rowsOk = true, openLeft = 0;
     for (let i = 0; i < 8; i++) {
       // Its own host, so these 16 links don't use up the first host's 30 invites an hour.
       const ev = await mkEvent(24 + i, 30 + i, `${P} Race ${i}`, "published", host2.id);
@@ -243,11 +243,13 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
       const b = (await make(ev.id, { scope: "event", role: "entertainment" }, tok(host2.id))).body.link;
       await Promise.all([a, b].map((x) => call("POST", `/api/events/team-links/${x.code}/accept`, { token: tok(di.id) })));
       stuck += Number((await q(`SELECT count(*)::int AS n FROM event_team_links WHERE id = ANY($1) AND status = 'accepted' AND accepted_invite_id IS NULL`, [[a.id, b.id]]))[0].n);
+      openLeft += Number((await q(`SELECT count(*)::int AS n FROM event_team_links WHERE id = ANY($1) AND status = 'open'`, [[a.id, b.id]]))[0].n);
       const n = (await q(`SELECT 1 FROM event_door_members WHERE event_id = $1 AND member_user_id = $2 AND role = 'entertainment' AND removed_at IS NULL`, [ev.id, di.id])).length;
       if (n !== 1) rowsOk = false;
     }
     assert(stuck === 0, "no link is ever left taken without a spot behind it (the loser reopens)", stuck);
     assert(rowsOk, "and they hold exactly one spot each time");
+    assert(openLeft === 8, "one of the two links stays open every time (one person never uses up two)", openLeft);
 
     console.log("\na pending invite in the same role");
     r = await call("POST", `/api/events/${evB.id}/door/team`, { token: ht, body: { username: bo.username, scope: "event", role: "media" } });
@@ -263,9 +265,11 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
     assert(r.status === 200 && r.body.invite.scope === "standing" && !!st?.accepted_at, "joins the standing team (being on one event's Admissions doesn't block it)", { r: r.body, st });
 
     console.log("\nends and cancels");
-    r = await make(evA.id, { scope: "event", role: "security" });
+    const evEnds = await mkEvent(24, 26, `${P} Ends`);
+    r = await make(evEnds.id, { scope: "event", role: "security" });
     const late = r.body.link;
-    await q(`UPDATE event_team_links SET expires_at = now() - interval '1 minute' WHERE id = $1`, [late.id]);
+    // A This event link ends with its event (it follows the event's own end, call 69 and review fix 4).
+    await q(`UPDATE events SET starts_at = now() - interval '3 hours', ends_at = now() - interval '1 minute' WHERE id = $1`, [evEnds.id]);
     r = await call("POST", `/api/events/team-links/${late.code}/accept`, { token: tok(bo.id) });
     assert(r.status === 409 && r.body.error.code === "LINK_CLOSED", "an expired link can't be taken", r.body);
     r = await call("GET", `/api/events/team-links/${late.code}`);
@@ -278,6 +282,51 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
     r = await call("POST", `/api/events/team-links/${cancelledEvent.code}/accept`, { token: tok(cy.id) });
     assert(r.status === 409 && r.body.error.code === "LINK_CLOSED", "a cancelled event's link can't be taken", r.body);
     await q(`UPDATE events SET status = 'published' WHERE id = $1`, [evB.id]);
+
+    console.log("\nreview fixes");
+    // Bug 1: a retry after a half finished accept finishes it and never reopens the link.
+    r = await make(evA.id, { scope: "event", role: "media", pay: { payType: "fixed", fixedCents: 9000 } });
+    const half = r.body.link;
+    await q(`UPDATE event_team_links SET status = 'accepted', accepted_at = now(), accepted_by_user_id = $2 WHERE id = $1`, [half.id, cy.id]);
+    const [cyRow] = await q(`INSERT INTO event_door_members (event_id, member_user_id, added_by_user_id, role, accepted_at) VALUES ($1, $2, $3, 'media', now()) RETURNING id`, [evA.id, cy.id, host.id]);
+    r = await call("POST", `/api/events/team-links/${half.code}/accept`, { token: tok(cy.id) });
+    const [halfRow] = await q(`SELECT status, accepted_by_user_id, accepted_invite_id FROM event_team_links WHERE id = $1`, [half.id]);
+    assert(r.status === 200 && r.body.invite?.status === "accepted" && halfRow.status === "accepted" && halfRow.accepted_invite_id === cyRow.id, "a retry after a half finished accept finishes it (never reopens)", { r: r.body, halfRow });
+    r = await call("POST", `/api/events/team-links/${half.code}/accept`, { token: tok(bo.id) });
+    assert(r.status === 409 && r.body.error.code === "LINK_CLOSED", "and nobody else can take it", r.body);
+    // Bug 4: a This event link follows the event's own end time.
+    const evMove = await mkEvent(24, 26, `${P} Moves`);
+    r = await make(evMove.id, { scope: "event", role: "security" });
+    const mv = r.body.link;
+    await q(`UPDATE events SET ends_at = now() + interval '40 hours' WHERE id = $1`, [evMove.id]);
+    await q(`UPDATE event_team_links SET expires_at = now() - interval '1 minute' WHERE id = $1`, [mv.id]);
+    r = await call("GET", `/api/events/team-links/${mv.code}`);
+    assert(r.body.link.status === "open", "the event moved later: its link is still open", r.body);
+    r = await call("GET", `/api/events/${evMove.id}/team/links`, { token: ht });
+    assert(r.body.links.some((x: any) => x.id === mv.id && new Date(x.expiresAt).getTime() > Date.now() + 39 * 3600_000), "and listed with the event's new end", r.body);
+    r = await call("POST", `/api/events/team-links/${mv.code}/accept`, { token: tok(bo.id) });
+    assert(r.status === 200, "and can be taken", r.body);
+    // Bug 5: a co-host can't take a link they made.
+    r = await make(evA.id, { scope: "event", role: "security" }, tok(co.id));
+    const own = r.body.link;
+    r = await call("POST", `/api/events/team-links/${own.code}/accept`, { token: tok(co.id) });
+    assert(r.status === 400 && r.body.error.code === "CANNOT_ADD_SELF", "whoever made a link can't take it", r.body);
+    const [ownRow] = await q(`SELECT status FROM event_team_links WHERE id = $1`, [own.id]);
+    assert(ownRow.status === "open", "and it stays open", ownRow);
+    // Review 7: a closed link's page shows no event or pay to strangers.
+    r = await call("GET", `/api/events/team-links/${l1.code}`, { token: tok(bo.id) });
+    assert(r.body.link.status === "accepted" && r.body.link.event === null && r.body.link.pay === null && r.body.link.upcoming.length === 0, "a taken link shows no event or pay to someone else", r.body);
+    r = await call("GET", `/api/events/team-links/${l1.code}`, { token: tok(ana.id) });
+    assert(r.body.link.event?.id === evA.id && r.body.link.pay?.fixedCents === 16000, "but the person who took it still sees theirs", r.body);
+    // Review 9: All my events links can be made from an ended event's page (same as username invites).
+    r = await make(evOver.id, { scope: "standing", role: "door" });
+    assert(r.status === 201 && r.body.link.scope === "standing", "an All my events link from an ended event's page", r.body);
+    const { renderDoorTeamInvite } = await import("../emailService");
+    const mail = renderDoorTeamInvite({ toEmail: "x@y.co", firstName: null, hostName: "Hosty", scope: "event", eventTitle: "T", whenText: null, doorUrl: "https://goutsyde.test/team/AAAAAAAAAAAA", role: "door", newcomer: true });
+    const plain = renderDoorTeamInvite({ toEmail: "x@y.co", firstName: null, hostName: "Hosty", scope: "event", eventTitle: "T", whenText: null, doorUrl: "https://goutsyde.test/events/door", role: "door" });
+    assert(/See the invite/.test(mail.html) && /New to Outsyde\?/.test(mail.html) && !/Accept or decline/.test(mail.html), "a link email says See the invite and welcomes someone new", null);
+    assert(/Accept or decline/.test(plain.html) && !/New to Outsyde/.test(plain.html), "a username invite email is unchanged", null);
+    assert(!/[\u2013\u2014]/.test(mail.html) && !/ - /.test(mail.html.replace(/<[^>]+>/g, "")), "no dashes in the email copy", null);
 
     console.log("\nemail (67b)");
     emails.length = 0;
