@@ -3,7 +3,7 @@
  * Pure, no database. Run: npx tsx server/events/teamReminderRules.test.ts
  */
 import {
-  dueAnchored, doorsDue, momentOfKind, teamAnchor, guestWeekCopy, guestStartCopy, hostCopy, teamReminderCopy,
+  dueAnchored, doorsDue, momentOfKind, teamAnchor, guestWeekCopy, guestStartCopy, hostCopy, teamReminderCopy, teamKindsToReset,
   WEEK_MS, START_LATE_MS,
 } from "./eventReminderRules";
 
@@ -118,6 +118,22 @@ eq(ctx("media", "soon", media), { title: "Media at Rooftop Night in 2 hours", bo
 eq(ctx("other", "week", media, { roleLabel: "Bartender" }).title, "Bartender at Rooftop Night next Saturday", "Other uses the host's name for the role");
 eq(ctx("media", "start", media), { title: "Doors just opened", body: "Guests are arriving." }, "doors open");
 eq(ctx("media", "day_before", media, { venueName: null }).body, "8:30 PM.", "no venue name");
+
+console.log("review fixes");
+const A = t("2026-10-25T00:00:00Z");
+eq(teamKindsToReset(A, A, at(A, -10 * DAY)), [], "same time: nothing resets");
+eq(teamKindsToReset(A, at(A, -H), at(A, -10 * DAY)), ["week", "day_before", "soon"], "moved, all ahead: all reset");
+eq(teamKindsToReset(A, at(A, H), at(A, -3 * DAY)), ["day_before", "soon"], "inside the week window: the 7 day one isn't sent twice");
+eq(teamKindsToReset(A, at(A, H), at(A, -H - MIN)), ["soon"], "inside the day before window: only the 2 hour one");
+eq(teamKindsToReset(A, at(A, -H), at(A, -H)), [], "all moments passed: nothing");
+eq(ctx("security", "week", { startsAt: t("2026-10-25T00:00:00Z"), endsAt: null, callAt: null, loadInAt: null, placeNote: null }),
+  { title: "Security at Rooftop Night next Saturday", body: "Your time is 8:00 PM." }, "Security with no call time: never says Call time");
+eq(ctx("door", "soon", { startsAt: null, endsAt: null, callAt: t("2026-10-25T00:00:00Z"), loadInAt: null, placeNote: null }).title,
+  "Admissions at Rooftop Night in 2 hours", "Admissions with only a call time: plain wording");
+eq(ctx("host", "week", null, { linkSold: 0, linkRsvps: 12 }).body, "12 RSVPs through your link so far. Keep sharing.", "free event: RSVPs, not tickets sold");
+eq(ctx("host", "week", null, { linkSold: 0, linkRsvps: 1 }).body, "1 RSVP through your link so far. Keep sharing.", "one RSVP");
+const late = { startsAt: t("2026-10-25T05:00:00Z"), endsAt: null, callAt: null, loadInAt: t("2026-10-25T04:30:00Z"), placeNote: null }; // 1:00 AM Sunday
+eq(ctx("entertainment", "week", late).title, "Your set at Rooftop Night is next Saturday", "a time after midnight still names the event's day");
 
 console.log("no dashes anywhere");
 const roles = ["door", "security", "host", "entertainment", "media", "other"] as const;

@@ -143,7 +143,7 @@ function callAt(base: string, method: string, path: string, o: { token?: string;
     assert(to(guest).length === 1 && to(guest)[0].title === `${e.title} is one week away` && to(guest)[0].data?.kind === "week", "ticket holder: one week away", to(guest));
     assert(to(host).length === 1 && to(host)[0].title === `${e.title} is one week away` && to(host)[0].data?.kind === "host_week" && /going/.test(to(host)[0].body), "host", to(host));
     assert(to(co).length === 1 && to(co)[0].title === `${e.title} is one week away`, "co-host gets the host's", to(co));
-    assert(to(pro).length === 1 && /sold through your link/.test(to(pro)[0].body), "promoter: link sales", to(pro));
+    assert(to(pro).length === 1 && to(pro)[0].body === "0 tickets sold through your link so far. Keep sharing.", "promoter: real link sales (none yet)", to(pro));
     assert(to(media).length === 1 && to(media)[0].title === `Media at ${e.title} next ${new Date(e.start).toLocaleDateString("en-US", { weekday: "long", timeZone: "America/New_York" })}`, "media: generic", to(media));
     // Team anchors are earlier than the start, so their week window opened before this time too.
     assert(to(sec).length === 1 && to(sec)[0].title.startsWith("Security at") && to(sec)[0].data?.type === "event_reminder" && to(sec)[0].data?.kind === "team_week",
@@ -189,6 +189,13 @@ function callAt(base: string, method: string, path: string, o: { token?: string;
     await run(e2.at(31 * MIN));
     assert(to(g2).length === 0, "more than 30 minutes late: skipped (call 37)", to(g2));
 
+    console.log("\na team time after the start (review fix)");
+    const eL = await event(host, "after");
+    const lateDj = await user("latedj");
+    await member(eL.id, host, lateDj, "entertainment"); await times(eL.id, lateDj, "entertainment", host, { startsAt: 4 * H, loadInAt: 3 * H });
+    await run(eL.at(H + MIN)); // load in at +3 h: its 2 hour push is after the event started
+    assert(to(lateDj).some((p) => p.title === "Load in is in 2 hours"), "still reminded", to(lateDj));
+
     console.log("\ntimes that change (call 38)");
     const e3 = await event(host, "moves");
     const s3 = await user("s3");
@@ -226,7 +233,23 @@ function callAt(base: string, method: string, path: string, o: { token?: string;
     const stamps = (await q(`SELECT reminder_week_at, reminder_start_at FROM tickets WHERE event_id = $1`, [e3.id]))[0];
     const ev3 = (await q(`SELECT host_reminder_week_at, host_reminder_soon_at, host_reminder_start_at FROM events WHERE id = $1`, [e3.id]))[0];
     const team3 = (await q(`SELECT count(*)::int AS n FROM event_team_reminders WHERE event_id = $1`, [e3.id]))[0].n;
-    assert(stamps.reminder_week_at === null && ev3.host_reminder_week_at === null && team3 === 0, "every reminder resets", { stamps, ev3, team3 });
+    assert(stamps.reminder_week_at === null && ev3.host_reminder_week_at === null && team3 === 0, "every reminder resets (all their moments are still ahead)", { stamps, ev3, team3 });
+
+    console.log("\nmoving an event never re-sends a reminder whose moment has passed (review fix)");
+    // Starts in 2 days for real: its 7 day moment has passed, its day before hasn't.
+    const eR = (await q(`INSERT INTO events (host_user_id, slug, title, status, starts_at, ends_at, timezone, published_at)
+      VALUES ($1, $2, $3, 'published', now() + interval '2 days', now() + interval '2 days 5 hours', 'America/New_York', now() - interval '10 days')
+      RETURNING id`, [host.id, `${P}-real`, `${P} real`]))[0];
+    allEvents.push(eR.id);
+    const gR = await user("gr"); await ticket(eR.id, gR);
+    await q(`UPDATE tickets SET reminder_week_at = now(), reminder_day_before_at = now() WHERE event_id = $1`, [eR.id]);
+    await q(`UPDATE events SET host_reminder_week_at = now() WHERE id = $1`, [eR.id]);
+    r = await call("PATCH", `/api/events/${eR.id}`, { token: tok(host.id), body: {
+      startsAt: new Date(Date.now() + 3 * DAY).toISOString(), endsAt: new Date(Date.now() + 3 * DAY + 5 * H).toISOString() } });
+    const sR = (await q(`SELECT reminder_week_at, reminder_day_before_at FROM tickets WHERE event_id = $1`, [eR.id]))[0];
+    const hR = (await q(`SELECT host_reminder_week_at FROM events WHERE id = $1`, [eR.id]))[0];
+    assert(r.status === 200 && sR.reminder_week_at !== null && hR.host_reminder_week_at !== null && sR.reminder_day_before_at === null,
+      "the 7 day ones stay sent; the day before goes again for the new day", { s: r.status, sR, hR });
   } catch (err) {
     failed++;
     console.error("  ❌ crashed:", err);

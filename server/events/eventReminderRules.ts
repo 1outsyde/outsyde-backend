@@ -121,6 +121,16 @@ export function momentOfKind(kind: AnyReminderKind, anchor: Date, eventStart: Da
   return new Date(anchor.getTime() - back);
 }
 
+/**
+ * After a team member's time changes: which of their sent reminders to clear so they follow the new time. Nothing if
+ * the time their reminders count from didn't change; otherwise only the ones whose new moment is still ahead (a
+ * reminder whose moment has already passed is never sent twice).
+ */
+export function teamKindsToReset(oldAnchor: Date, newAnchor: Date, now: Date): Array<"week" | "day_before" | "soon"> {
+  if (oldAnchor.getTime() === newAnchor.getTime()) return [];
+  return (["week", "day_before", "soon"] as const).filter((k) => momentOfKind(k, newAnchor, newAnchor).getTime() > now.getTime());
+}
+
 export type TeamTimes = { startsAt: Date | null; endsAt: Date | null; callAt: Date | null; loadInAt: Date | null; placeNote: string | null };
 
 /**
@@ -175,6 +185,8 @@ export function hostCopy(kind: AnyReminderKind, e: { title: string; starts_at: D
 export type TeamCopyContext = {
   title: string; timezone: string; eventStart: Date; anchor: Date; venueName: string | null; roleLabel: string | null;
   schedule: TeamTimes | null; linkSold: number | null; now: Date;
+  /** RSVPs through a promoter's link (free tickets), worded apart from tickets sold. */
+  linkRsvps?: number | null;
 };
 
 /** One team member's reminder, worded for their role (screen 58; call 34 for Entertainment, Media and Other). */
@@ -187,33 +199,43 @@ export function teamReminderCopy(kind: AnyReminderKind, role: string, c: TeamCop
   const venue = c.venueName && c.venueName.trim() ? c.venueName.trim() : null;
   const atVenue = (time: string) => `${time}${venue ? ` at ${venue}` : ""}.`;
   const place = s?.placeNote && s.placeNote.trim() ? ` ${sentence(s.placeNote)}` : "";
-  const nextDay = `next ${fmt(c.anchor, tz, { weekday: "long" })}`;
+  // The event's own day, even for a time after midnight (a Saturday night event stays "next Saturday").
+  const nextDay = `next ${fmt(c.eventStart, tz, { weekday: "long" })}`;
   const day = dayWord(c.now, c.anchor, tz);
   const soon = isSoon(c.anchor, c.now);
   const doors = { title: "Doors just opened", body: "Guests are arriving." };
+  // The role's own time missing: plain wording with the time actually used, never "Call time" for another time.
+  const ownTime = role === "door" ? s?.startsAt : role === "security" ? s?.callAt : role === "entertainment" ? (s?.loadInAt ?? s?.startsAt) : null;
+  const plain = (role === "door" || role === "security" || role === "entertainment") && !ownTime && kind !== "start";
 
-  if (role === "door") {
+  if (role === "door" && !plain) {
     const range = s?.startsAt && s?.endsAt ? `${clock(s.startsAt)} to ${clock(s.endsAt)}` : null;
     if (kind === "week") return { title: `Admissions at ${title} ${nextDay}`, body: range ? `Your shift is ${range}.` : `Your shift starts at ${at}.` };
     if (kind === "day_before") return { title: `${day}: Admissions at ${title}`, body: range ? `Shift ${range}${venue ? ` at ${venue}` : ""}.` : `Shift starts ${atVenue(at)}` };
     if (kind === "soon") return { title: soon ? "Your shift starts soon" : "Your shift starts in 2 hours", body: `${atVenue(at)} Tap to open the scanner.` };
     return { title: doors.title, body: "Guests are arriving. Tap to open the scanner." };
   }
-  if (role === "security") {
+  if (role === "security" && !plain) {
     if (kind === "week") return { title: `Security at ${title} ${nextDay}`, body: `Call time ${at}.` };
     if (kind === "day_before") return { title: `${day}: Security at ${title}`, body: `Call time ${at}.${place}` };
     if (kind === "soon") return { title: soon ? "Call time soon" : "Call time in 2 hours", body: `${atVenue(at)}${place}` };
     return { title: doors.title, body: "Guests are arriving. Check From the host for any changes." };
   }
+  if (role === "door" && kind === "start") return { title: doors.title, body: "Guests are arriving. Tap to open the scanner." };
+  if (role === "security" && kind === "start") return { title: doors.title, body: "Guests are arriving. Check From the host for any changes." };
   if (role === "host") {
     const n = Math.max(0, Number(c.linkSold ?? 0));
-    const sold = `${n} ${n === 1 ? "ticket" : "tickets"} sold through your link`;
+    const r = Math.max(0, Number(c.linkRsvps ?? 0));
+    // Free RSVPs are never called tickets sold.
+    const sold = n === 0 && r > 0
+      ? `${r} ${r === 1 ? "RSVP" : "RSVPs"} through your link`
+      : `${n} ${n === 1 ? "ticket" : "tickets"} sold through your link`;
     if (kind === "week") return { title: `${title} is one week away`, body: `${sold} so far. Keep sharing.` };
     if (kind === "day_before") return { title: `${title} is ${day === "Tomorrow" ? "tomorrow" : day === "Today" ? "today" : `on ${day}`}`, body: `${sold}. Last day to share it.` };
     if (kind === "soon") return { title: soon ? `${title} starts soon` : `${title} starts in 2 hours`, body: "Tickets are still on sale. Share your link." };
     return { title: doors.title, body: `${sold}. Thank you for promoting.` };
   }
-  if (role === "entertainment") {
+  if (role === "entertainment" && !plain) {
     const set = s?.startsAt ? (s.endsAt ? `${clock(s.startsAt)} to ${clock(s.endsAt)}` : `Starts at ${clock(s.startsAt)}`) : null;
     const loadIn = s?.loadInAt ? `Load in ${clock(s.loadInAt)}.` : "";
     if (kind === "week") return { title: `Your set at ${title} is ${nextDay}`, body: set ? `${set}.` : `Your time is ${at}.` };
@@ -225,7 +247,8 @@ export function teamReminderCopy(kind: AnyReminderKind, role: string, c: TeamCop
     return { title: doors.title, body: s?.startsAt ? `Your set starts at ${clock(s.startsAt)}.` : doors.body };
   }
   // Media, Other, and any role added later: their name for the role and their own time.
-  const name = role === "media" ? "Media" : c.roleLabel && c.roleLabel.trim() ? c.roleLabel.trim() : "Event team";
+  const name = role === "media" ? "Media" : role === "door" ? "Admissions" : role === "security" ? "Security" : role === "entertainment" ? "Entertainment"
+    : c.roleLabel && c.roleLabel.trim() ? c.roleLabel.trim() : "Event team";
   if (kind === "week") return { title: `${name} at ${title} ${nextDay}`, body: `Your time is ${at}.` };
   if (kind === "day_before") return { title: `${day}: ${name} at ${title}`, body: `${atVenue(at)}${place}` };
   if (kind === "soon") return { title: soon ? `${name} at ${title} soon` : `${name} at ${title} in 2 hours`, body: `${atVenue(at)}${place}` };

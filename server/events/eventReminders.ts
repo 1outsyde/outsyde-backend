@@ -34,11 +34,12 @@ export async function runEventReminderJob(now: Date = new Date(), opts: Reminder
     // Step 6: from 30 minutes after the start (doors open) to 8 days out (a team time can be up to a day before the
     // start, and its 7 day reminder counts from that time).
     const events = await rows<any>(sql`
-      SELECT id, title, host_user_id, starts_at, timezone, city, state, venue_name, published_at, host_reminder_at,
+      SELECT id, title, host_user_id, starts_at, ends_at, timezone, city, state, venue_name, published_at, host_reminder_at,
              host_reminder_week_at, host_reminder_soon_at, host_reminder_start_at
       FROM events
       WHERE status = 'published'
-        AND starts_at >= ${nowIso}::timestamptz - make_interval(secs => ${START_LATE_MS / 1000}::int)
+        -- Team times can be up to 12 hours after the end (doorRouter SCHEDULE_AFTER_MS), so those events stay in.
+        AND COALESCE(ends_at, starts_at) + interval '12 hours' >= ${nowIso}::timestamptz
         AND starts_at <= ${nowIso}::timestamptz + make_interval(secs => ${(WEEK_MS + DAY_BEFORE_MS) / 1000}::int)
         AND host_user_id IN (SELECT id FROM users WHERE is_active = true AND COALESCE(deletion_status, 'active') = 'active')`);
     for (const e of events) {
@@ -161,14 +162,15 @@ async function remindGuestsExtra(e: any, kind: "week" | "start", now: Date, opts
   }
 }
 
-/** Accepted team members, a count for the host's 2 hour push. */
+/** Accepted team members, a count for the host's 2 hour push (same people as teamSpots: active, not the host). */
 async function teamSize(e: any): Promise<number> {
   const [n] = await rows<any>(sql`
-    SELECT count(DISTINCT member_user_id)::int AS n FROM (
+    SELECT count(DISTINCT a.member_user_id)::int AS n FROM (
       SELECT member_user_id FROM event_door_members WHERE event_id = ${e.id} AND removed_at IS NULL AND accepted_at IS NOT NULL
       UNION ALL
       SELECT member_user_id FROM event_door_team WHERE host_user_id = ${e.host_user_id} AND removed_at IS NULL AND accepted_at IS NOT NULL
-    ) a`);
+    ) a JOIN users u ON u.id = a.member_user_id AND u.is_active = true AND COALESCE(u.deletion_status, 'active') = 'active'
+    WHERE a.member_user_id <> ${e.host_user_id}`);
   return Number(n?.n ?? 0);
 }
 
@@ -229,15 +231,19 @@ async function remindTeam(e: any, now: Date, stats: Stats): Promise<void> {
   const start = new Date(e.starts_at);
   const spots = await teamSpots(e);
   if (!spots.length) return;
+  // What was already sent, read once: most minutes nothing is due and no claim is tried.
+  const sent = new Set((await rows<any>(sql`SELECT member_user_id, kind FROM event_team_reminders WHERE event_id = ${e.id}`))
+    .map((r) => `${r.member_user_id}:${r.kind}`));
   const d = await noticeDeps();
   let going: number | null = null, size: number | null = null;
-  let links: Map<string, number> | null = null;
+  let links: Map<string, { tickets: number; rsvps: number }> | null = null;
   for (const sp of spots) {
     const kinds: AnyReminderKind[] = [];
     const k = dueAnchored(sp.anchor, now);
     if (k) kinds.push(k);
     if (doorsDue(start, now)) kinds.push("start");
     for (const kind of kinds) {
+      if (sent.has(`${sp.userId}:${kind}`)) continue;
       try {
         const moment = momentOfKind(kind, sp.anchor, start);
         if (sp.acceptedAt.getTime() >= moment.getTime()) continue; // joined after this reminder's moment (call 36)
@@ -253,12 +259,13 @@ async function remindTeam(e: any, now: Date, stats: Stats): Promise<void> {
         } else {
           if (sp.role === "host" && !links) {
             const { promoterLinkStats } = await import("./promoterLinks");
-            links = new Map((await promoterLinkStats(String(e.id))).map((l: any) => [String(l.userId), Number(l.ticketsSold ?? 0) + Number(l.rsvps ?? 0)]));
+            links = new Map((await promoterLinkStats(String(e.id))).map((l: any) => [String(l.userId), { tickets: Number(l.ticketsSold ?? 0), rsvps: Number(l.rsvps ?? 0) }]));
           }
           copy = teamReminderCopy(kind, sp.role, {
             title: e.title, timezone: e.timezone, eventStart: start, anchor: kind === "start" ? start : sp.anchor,
             venueName: e.venue_name ?? null, roleLabel: sp.roleLabel, schedule: sp.times,
-            linkSold: sp.role === "host" ? links?.get(sp.userId) ?? 0 : null, now,
+            linkSold: sp.role === "host" ? links?.get(sp.userId)?.tickets ?? 0 : null,
+            linkRsvps: sp.role === "host" ? links?.get(sp.userId)?.rsvps ?? 0 : null, now,
           });
         }
         stats.teamPushes = (stats.teamPushes ?? 0) + 1;

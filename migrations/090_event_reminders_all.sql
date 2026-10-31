@@ -23,8 +23,9 @@ ALTER TABLE events  ADD COLUMN IF NOT EXISTS host_reminder_soon_at  TIMESTAMPTZ;
 ALTER TABLE events  ADD COLUMN IF NOT EXISTS host_reminder_start_at TIMESTAMPTZ;
 
 CREATE TABLE IF NOT EXISTS event_team_reminders (
-  event_id        VARCHAR(36) NOT NULL REFERENCES events(id),
-  member_user_id  VARCHAR(36) NOT NULL REFERENCES users(id),
+  -- Only stamps of what was sent: they go with their event or person.
+  event_id        VARCHAR(36) NOT NULL REFERENCES events(id) ON DELETE CASCADE,
+  member_user_id  VARCHAR(36) NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   kind            TEXT        NOT NULL,
   role            TEXT        NOT NULL,
   sent_at         TIMESTAMPTZ NOT NULL DEFAULT now(),

@@ -38,6 +38,7 @@ import { ticketIdFromQrToken, qrPng } from "./ticketQr";
 import { ticketIdFromWalletToken, walletConfig, cachedTicketPass } from "./walletPass";
 import { ensurePromoterLinks, promoterLinkStats, promoterLinkUrl } from "./promoterLinks";
 import { LINK_ROLES, eventPay, parsePay, rolePayJson, settingOf } from "./teamPay";
+import { teamAnchor, teamKindsToReset, type TeamTimes } from "./eventReminderRules";
 import {
   notifySetupOnAccept, notifyTeamRemoved, parseRemoval, removalLabel, memberReadySql,
   teamPayoutsForHost, myTeamPayout, markPaid, undoPaid, memberAnswer, type SettleError,
@@ -674,7 +675,7 @@ router.put("/:id/door/team/:userId/schedule", hybridAuthMiddleware, teamLimiter,
     }
     const v = (x: string | null | undefined) => (x ? new Date(x).toISOString() : null);
     const note = (x: string | null | undefined) => (x && x.trim() ? x.trim() : null);
-    const [before] = await rows<any>(sql`SELECT starts_at, call_at, load_in_at FROM event_team_schedules WHERE event_id = ${ctx.event.id} AND member_user_id = ${memberId} AND role = ${role}`);
+    const [before] = await rows<any>(sql`SELECT starts_at, ends_at, call_at, load_in_at FROM event_team_schedules WHERE event_id = ${ctx.event.id} AND member_user_id = ${memberId} AND role = ${role}`);
     const [saved] = await rows<any>(sql`
       INSERT INTO event_team_schedules (event_id, member_user_id, role, starts_at, ends_at, call_at, load_in_at, place_note, host_note, updated_by_user_id)
       VALUES (${ctx.event.id}, ${memberId}, ${role}, ${v(b.startsAt)}::timestamptz, ${v(b.endsAt)}::timestamptz, ${v(b.callAt)}::timestamptz,
@@ -689,12 +690,23 @@ router.put("/:id/door/team/:userId/schedule", hybridAuthMiddleware, teamLimiter,
       const t = (x: any) => (x ? new Date(x).getTime() : null);
       const changed = (["starts_at", "call_at", "load_in_at"] as const).filter((k) => t(before?.[k]) !== t(saved[k]));
       if (changed.length) {
-        await rows(sql`DELETE FROM event_team_reminders WHERE event_id = ${ctx.event.id} AND member_user_id = ${memberId} AND kind <> 'start'`);
+        // Only the reminders that count from this time and whose new moment is still ahead (never one sent twice).
+        const timesOf = (r: any): TeamTimes | null => r ? {
+          startsAt: r.starts_at ? new Date(r.starts_at) : null, endsAt: r.ends_at ? new Date(r.ends_at) : null,
+          callAt: r.call_at ? new Date(r.call_at) : null, loadInAt: r.load_in_at ? new Date(r.load_in_at) : null, placeNote: null,
+        } : null;
+        const evStart = new Date(ctx.event.starts_at);
+        const reset = teamKindsToReset(teamAnchor(role, timesOf(before), evStart), teamAnchor(role, timesOf(saved), evStart), new Date());
+        if (reset.length) {
+          await rows(sql`DELETE FROM event_team_reminders WHERE event_id = ${ctx.event.id} AND member_user_id = ${memberId}
+            AND kind IN (SELECT unnest(string_to_array(${reset.join(",")}, ',')))`);
+        }
         const moved = changed.filter((k) => before?.[k] && saved[k]);
         if (moved.length) {
           const prefer = role === "security" ? "call_at" : role === "entertainment" ? "load_in_at" : "starts_at";
           const field = moved.includes(prefer) ? prefer : moved[0];
-          notifyTeamTimeMoved({ eventId: String(ctx.event.id), memberUserId: memberId, hostUserId: String(ctx.event.host_user_id), byUserId: ctx.userId, role, field, at: new Date(saved[field]) }).catch(() => {});
+          notifyTeamTimeMoved({ eventId: String(ctx.event.id), memberUserId: memberId, hostUserId: String(ctx.event.host_user_id), byUserId: ctx.userId, role, field,
+            at: new Date(saved[field]), was: new Date(before[field]) }).catch(() => {});
         }
       }
     } catch (err) {

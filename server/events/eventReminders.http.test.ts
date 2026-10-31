@@ -149,7 +149,9 @@ const H = 3600e3;
       reset();
       await runEventReminderJob(e.at(0));
       // p4-team step 6 (decision 11): "Doors just opened" at the start, nothing else.
-      assert(mine(e.title).length > 0 && mine(e.title).every((p) => p.data?.kind === "start" || p.data?.kind === "host_start"), "at the start: only doors open", mine(e.title).map((p) => p.data?.kind));
+      const atStart = pushes.filter((p: any) => p.data?.eventId === e.ev.id);
+      assert(atStart.length > 0 && atStart.every((p: any) => p.data?.kind === "start" || p.data?.kind === "host_start") && atStart.some((p: any) => p.userId === host && p.data?.kind === "host_start"),
+        "at the start: only doors open (the host's too)", atStart.map((p: any) => p.data?.kind));
     }
 
     console.log("Two runs at once");
