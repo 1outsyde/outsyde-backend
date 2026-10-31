@@ -137,6 +137,8 @@ function callAt(base: string, method: string, path: string, o: { token?: string;
     await member(e.id, host, both, "security"); await times(e.id, both, "security", host, { callAt: -H });
     const link = (await q(`INSERT INTO event_promoter_links (event_id, promoter_user_id, code) VALUES ($1, $2, $3) RETURNING id`, [e.id, pro.id, Array.from({ length: 8 }, () => "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"[Math.floor(Math.random() * 32)]).join("")]))[0].id;
     void link;
+    // Call 55 (Legend 2026-10-31): team members holding a ticket get the team version only.
+    await ticket(e.id, sec); await ticket(e.id, late);
 
     console.log("\n7 days before");
     await run(e.at(-7 * DAY + MIN));
@@ -150,7 +152,7 @@ function callAt(base: string, method: string, path: string, o: { token?: string;
       "security: their own wording", to(sec));
     assert(to(adm).length === 1 && to(adm)[0].title.startsWith("Admissions at"), "admissions", to(adm));
     assert(to(both).length === 1 && to(both)[0].title.startsWith("Admissions at"), "two roles: the one that starts first", to(both));
-    assert(to(late).length === 0, "joined after the moment: nothing (call 36)", to(late));
+    assert(to(late).length === 1 && to(late)[0].data?.kind === "week", "joined after the team moment: no team reminder (call 36), so their ticket's one goes", to(late));
     assert(to(pend).length === 0, "pending invite: nothing", to(pend));
     assert(activity.some((a) => a.userId === sec.id && a.type === "event_reminder") && !activity.some((a) => a.userId === guest.id || a.userId === host.id),
       "team reminders in Activity; guests and the host push only (call 39)", activity.map((a) => a.userId));
@@ -167,7 +169,8 @@ function callAt(base: string, method: string, path: string, o: { token?: string;
     assert(to(guest).length === 1 && to(guest)[0].data?.kind === "day_before", "ticket holder: day before (as before)", to(guest));
     assert(to(host).length === 1 && to(host)[0].data?.kind === "host_day_before", "host: day before (as before)", to(host));
     assert(to(co).length === 1 && to(co)[0].title.startsWith("Your event is"), "co-host too", to(co));
-    assert(to(sec).length === 0, "security not twice", to(sec));
+    assert(to(sec).length === 0, "security not twice, not even for their ticket (call 55)", to(sec));
+    assert(to(late).length === 1 && to(late)[0].data?.kind === "team_day_before", "on the team in time: the team version only", to(late));
 
     console.log("\n2 hours before");
     await run(e.at(-3 * H + MIN)); // security call -1 h: 2 hours before it
@@ -180,6 +183,7 @@ function callAt(base: string, method: string, path: string, o: { token?: string;
 
     console.log("\ndoors open");
     await run(e.at(MIN));
+    assert(to(sec).length === 1 && to(sec)[0].data?.kind === "team_start", "doors open: one push for a team member with a ticket", to(sec));
     const doorsTitles = new Set(pushes.map((p) => p.title));
     assert(to(guest)[0]?.title === `Doors just opened at ${e.title}` && to(host)[0]?.title === "Doors just opened" && to(adm)[0]?.body.includes("scanner") && to(dj)[0]?.body.startsWith("Your set starts at"),
       "everyone, worded for them", pushes.map((p) => [p.userId === guest.id ? "guest" : p.userId === host.id ? "host" : "?", p.title, p.body]));

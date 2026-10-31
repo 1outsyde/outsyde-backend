@@ -101,7 +101,9 @@ async function remindGuests(e: any, kind: ReminderKind, now: Date, opts: Reminde
       RETURNING holder_user_id`);
     if (!claimed.length) break;
     const holderIds = Array.from(new Set(claimed.map((r) => String(r.holder_user_id))));
+    const team = await teamCovers(e, kind);
     for (const id of holderIds) {
+      if (team.has(id)) continue; // call 55: they get the team version
       stats.guestPushes++;
       await d.sendPush({ userId: id, title: copy.title, body: copy.body, data: { type: "event_reminder", kind, eventId: e.id } })
         .catch((err) => console.error(`[EventReminders] push failed for event ${e.id}:`, (err as Error)?.message ?? err));
@@ -161,13 +163,29 @@ async function remindGuestsExtra(e: any, kind: "week" | "start", now: Date, opts
       RETURNING holder_user_id`);
     if (!claimed.length) break;
     const holderIds = Array.from(new Set(claimed.map((r) => String(r.holder_user_id))));
+    const team = await teamCovers(e, kind);
     for (const id of holderIds) {
+      if (team.has(id)) continue; // call 55: they get the team version
       stats.guestPushes++;
       await d.sendPush({ userId: id, title: copy.title, body: copy.body, data: { type: "event_reminder", kind, eventId: e.id } })
         .catch((err) => console.error(`[EventReminders] push failed for event ${e.id}:`, (err as Error)?.message ?? err));
     }
     if (holderIds.length < batchSize) break;
   }
+}
+
+/**
+ * Call 55 (Legend 2026-10-31): team members holding a ticket get the team version of a reminder only. Covered = their
+ * team reminder of this kind was sent, or they were on the team before its moment (so the team job sends it, call 36).
+ * Someone who joined after the team moment still gets their ticket's reminder.
+ */
+async function teamCovers(e: any, kind: AnyReminderKind): Promise<Set<string>> {
+  const start = new Date(e.starts_at);
+  const spots = await teamSpots(e);
+  if (!spots.length) return new Set();
+  const sent = new Set((await rows<any>(sql`SELECT member_user_id FROM event_team_reminders WHERE event_id = ${e.id} AND kind = ${kind}`))
+    .map((r) => String(r.member_user_id)));
+  return new Set(spots.filter((sp) => sent.has(sp.userId) || sp.acceptedAt.getTime() < momentOfKind(kind, sp.anchor, start).getTime()).map((sp) => sp.userId));
 }
 
 /** Accepted team members, a count for the host's 2 hour push (same people as teamSpots: active, not the host). */
