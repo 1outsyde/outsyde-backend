@@ -138,7 +138,7 @@ function callAt(base: string, method: string, path: string, o: { token?: string;
     const link = (await q(`INSERT INTO event_promoter_links (event_id, promoter_user_id, code) VALUES ($1, $2, $3) RETURNING id`, [e.id, pro.id, Array.from({ length: 8 }, () => "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"[Math.floor(Math.random() * 32)]).join("")]))[0].id;
     void link;
     // Call 55 (Legend 2026-10-31): team members holding a ticket get the team version only.
-    await ticket(e.id, sec); await ticket(e.id, late);
+    await ticket(e.id, sec); await ticket(e.id, late); await ticket(e.id, dj);
 
     console.log("\n7 days before");
     await run(e.at(-7 * DAY + MIN));
@@ -178,6 +178,7 @@ function callAt(base: string, method: string, path: string, o: { token?: string;
     await run(e.at(-2 * H + MIN));
     assert(to(host).length === 1 && to(host)[0].title === `${e.title} starts in 2 hours` && /Your team of \d+ has the call times/.test(to(host)[0].body), "host: team call times", to(host));
     assert(to(guest).length === 1 && to(guest)[0].data?.kind === "soon", "ticket holder: 2 hours (as before)", to(guest));
+    assert(to(dj).length === 1 && to(dj)[0].data?.kind === "soon", "DJ with a ticket: their team time is later, so the ticket's one goes now (never none)", to(dj));
     await run(e.at(-H + MIN)); // DJ load in at +1 h: its 2 hours
     assert(to(dj).length === 1 && to(dj)[0].title === "Load in is in 2 hours", "DJ: from load in", to(dj));
 

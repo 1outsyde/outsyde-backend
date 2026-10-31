@@ -64,6 +64,8 @@ const isLocal = (u: string) => ["localhost", "127.0.0.1", "::1", "[::1]"].includ
     const gone = await event(other, "gone", "5 days", "5 days 5 hours"); // removed: not listed
     const cx = await event(other, "cx", "6 days", "6 days 5 hours", "cancelled");
     const mine = await event(me, "mine", "1 day", "1 day 5 hours");     // I host it
+    const host2 = await user("host2");
+    const before = await event(host2, "before", "-3 days", "-3 days 5 hours"); // ended before I joined host2's team: not listed
     await member(a, host, me, "security"); await member(a, host, me, "door");
     await standing(host, me, "host");
     await member(c, other, me, "media", { pending: true });
@@ -71,6 +73,8 @@ const isLocal = (u: string) => ["localhost", "127.0.0.1", "::1", "[::1]"].includ
     await member(old, other, me, "other", { label: "Coat check" });
     await member(gone, other, me, "security", { removed: true });
     await member(cx, other, me, "security");
+    await q(`INSERT INTO event_door_team (host_user_id, member_user_id, added_by_user_id, role, invited_at, accepted_at)
+       VALUES ($1, $2, $1, 'security', now() - interval '2 days', now() - interval '1 day')`, [host2, me]);
 
     console.log("\nwithout ?roles=all: exactly as before");
     let r = await get("/api/events/door/mine", me);
@@ -93,6 +97,7 @@ const isLocal = (u: string) => ["localhost", "127.0.0.1", "::1", "[::1]"].includ
     const em: any = by.get(mine);
     assert(em?.role === "host" && em.team.length === 0 && em.canScan === true, "my own event", em);
     assert(!by.has(c) && !by.has(old) && !by.has(gone) && !by.has(cx), "not pending, long ended, removed or cancelled", null);
+    assert(!by.has(before), "a standing spot doesn't reach events that ended before I joined (review M14)", null);
   } catch (err) {
     failed++; console.error("  ❌ crashed:", err);
   } finally {

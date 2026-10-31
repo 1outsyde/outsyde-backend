@@ -315,25 +315,32 @@ router.get("/door/mine", hybridAuthMiddleware, async (req: Request, res: Respons
 
 /** Step 8: my events as host or as an accepted team member in any role, upcoming or ended in the last 14 days. */
 async function myTeamEvents(userId: string) {
+  // Starts from my own rows (indexed by member) and the events I host, never from every event on the platform.
+  // A standing spot covers that host's events that ended after I joined (not ones from before).
   const list = await rows<any>(sql`
     WITH mine AS (
-      SELECT m.event_id, NULL::varchar AS host_user_id, m.id AS invite_id, m.role, m.role_label, 'event' AS scope, m.created_at
-      FROM event_door_members m WHERE m.member_user_id = ${userId} AND m.removed_at IS NULL AND m.accepted_at IS NOT NULL
+      SELECT m.event_id, m.id AS invite_id, m.role, m.role_label, 'event' AS scope, m.created_at
+      FROM event_door_members m JOIN events e ON e.id = m.event_id
+      WHERE m.member_user_id = ${userId} AND m.removed_at IS NULL AND m.accepted_at IS NOT NULL
+        AND e.host_user_id <> ${userId} AND e.status = 'published' AND e.ends_at > now() - interval '14 days'
       UNION ALL
-      SELECT NULL, t.host_user_id, t.id, t.role, t.role_label, 'standing', t.created_at
-      FROM event_door_team t WHERE t.member_user_id = ${userId} AND t.removed_at IS NULL AND t.accepted_at IS NOT NULL
+      SELECT e.id, t.id, t.role, t.role_label, 'standing', t.created_at
+      FROM event_door_team t JOIN events e ON e.host_user_id = t.host_user_id
+      WHERE t.member_user_id = ${userId} AND t.removed_at IS NULL AND t.accepted_at IS NOT NULL
+        AND e.host_user_id <> ${userId} AND e.status = 'published' AND e.ends_at > now() - interval '14 days'
+        AND e.ends_at > t.accepted_at
+      UNION ALL
+      SELECT e.id, NULL, NULL, NULL, NULL, NULL FROM events e
+      WHERE e.host_user_id = ${userId} AND e.status = 'published' AND e.ends_at > now() - interval '14 days'
     )
     SELECT e.id, e.slug, e.title, e.starts_at, e.ends_at, e.timezone, (e.host_user_id = ${userId}) AS is_host,
       COALESCE(json_agg(json_build_object('role', x.role, 'roleLabel', x.role_label, 'scope', x.scope, 'inviteId', x.invite_id)
         ORDER BY x.created_at, x.role) FILTER (WHERE x.role IS NOT NULL), '[]'::json) AS team
-    FROM events e
+    FROM mine x JOIN events e ON e.id = x.event_id
     JOIN users u ON u.id = ${userId} AND u.is_active = true AND COALESCE(u.deletion_status, 'active') = 'active'
-    LEFT JOIN mine x ON (x.event_id = e.id OR x.host_user_id = e.host_user_id) AND e.host_user_id <> ${userId}
-    WHERE e.status = 'published' AND e.ends_at > now() - interval '14 days'
-      AND (e.host_user_id = ${userId} OR x.role IS NOT NULL)
     GROUP BY e.id
     ORDER BY e.starts_at, e.id
-    LIMIT 200`);
+    LIMIT 300`);
   const now = Date.now();
   return list.map((e) => {
     const team = (e.team as any[]).map((t) => ({ role: t.role, roleLabel: t.roleLabel ?? null, scope: t.scope, inviteId: String(t.inviteId) }));

@@ -87,6 +87,8 @@ async function remindGuests(e: any, kind: ReminderKind, now: Date, opts: Reminde
   const col = kind === "day_before" ? sql.raw("reminder_day_before_at") : sql.raw("reminder_soon_at");
   const copy = guestReminderCopy(kind, e, now);
   const batchSize = opts.batchSize ?? CLAIM_BATCH;
+  // Call 55: worked out before anything is claimed, so a failure here never marks tickets reminded without a push.
+  const team = await teamCovers(e, kind);
   for (let batch = 0; batch < MAX_BATCHES_PER_EVENT; batch++) {
     const claimed = await rows<any>(sql`
       UPDATE tickets SET ${col} = now()
@@ -101,7 +103,6 @@ async function remindGuests(e: any, kind: ReminderKind, now: Date, opts: Reminde
       RETURNING holder_user_id`);
     if (!claimed.length) break;
     const holderIds = Array.from(new Set(claimed.map((r) => String(r.holder_user_id))));
-    const team = await teamCovers(e, kind);
     for (const id of holderIds) {
       if (team.has(id)) continue; // call 55: they get the team version
       stats.guestPushes++;
@@ -149,6 +150,8 @@ async function remindGuestsExtra(e: any, kind: "week" | "start", now: Date, opts
   const col = kind === "week" ? sql.raw("reminder_week_at") : sql.raw("reminder_start_at");
   const copy = kind === "week" ? guestWeekCopy(e, now) : guestStartCopy(e);
   const batchSize = opts.batchSize ?? CLAIM_BATCH;
+  // Call 55: worked out before anything is claimed, so a failure here never marks tickets reminded without a push.
+  const team = await teamCovers(e, kind);
   for (let batch = 0; batch < MAX_BATCHES_PER_EVENT; batch++) {
     const claimed = await rows<any>(sql`
       UPDATE tickets SET ${col} = now()
@@ -163,7 +166,6 @@ async function remindGuestsExtra(e: any, kind: "week" | "start", now: Date, opts
       RETURNING holder_user_id`);
     if (!claimed.length) break;
     const holderIds = Array.from(new Set(claimed.map((r) => String(r.holder_user_id))));
-    const team = await teamCovers(e, kind);
     for (const id of holderIds) {
       if (team.has(id)) continue; // call 55: they get the team version
       stats.guestPushes++;
@@ -176,8 +178,9 @@ async function remindGuestsExtra(e: any, kind: "week" | "start", now: Date, opts
 
 /**
  * Call 55 (Legend 2026-10-31): team members holding a ticket get the team version of a reminder only. Covered = their
- * team reminder of this kind was sent, or they were on the team before its moment (so the team job sends it, call 36).
- * Someone who joined after the team moment still gets their ticket's reminder.
+ * team reminder of this kind was sent, or it's due no later than the ticket's one and they were on the team before it
+ * (so the team job sends it, call 36). Someone who joined after the team moment, or whose team time is later than the
+ * ticket's (a DJ set after the start), still gets their ticket's reminder: never left with none.
  */
 async function teamCovers(e: any, kind: AnyReminderKind): Promise<Set<string>> {
   const start = new Date(e.starts_at);
@@ -185,7 +188,12 @@ async function teamCovers(e: any, kind: AnyReminderKind): Promise<Set<string>> {
   if (!spots.length) return new Set();
   const sent = new Set((await rows<any>(sql`SELECT member_user_id FROM event_team_reminders WHERE event_id = ${e.id} AND kind = ${kind}`))
     .map((r) => String(r.member_user_id)));
-  return new Set(spots.filter((sp) => sent.has(sp.userId) || sp.acceptedAt.getTime() < momentOfKind(kind, sp.anchor, start).getTime()).map((sp) => sp.userId));
+  const guestMoment = momentOfKind(kind, start, start).getTime();
+  return new Set(spots.filter((sp) => {
+    if (sent.has(sp.userId)) return true;
+    const teamMoment = momentOfKind(kind, sp.anchor, start).getTime();
+    return teamMoment <= guestMoment && sp.acceptedAt.getTime() < teamMoment;
+  }).map((sp) => sp.userId));
 }
 
 /** Accepted team members, a count for the host's 2 hour push (same people as teamSpots: active, not the host). */
