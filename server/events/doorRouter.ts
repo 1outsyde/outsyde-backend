@@ -279,6 +279,9 @@ router.get("/door/mine", hybridAuthMiddleware, async (req: Request, res: Respons
   try {
     const userId = getUserIdFromRequest(req);
     if (!userId) return fail(res, 401, "UNAUTHORIZED", "Sign in to continue.");
+    // p4-team step 8: ?roles=all is the website's Event team page: every role, with my roles at each event, and
+    // events that ended in the last 14 days (their pay is worked out 3 days after). Without it: as before.
+    if (req.query.roles === "all") return res.json({ success: true, events: await myTeamEvents(userId) });
     const list = await rows<any>(sql`
       SELECT e.id, e.slug, e.title, e.starts_at, e.ends_at, e.timezone,
         CASE WHEN e.host_user_id = u.id THEN 'host'
@@ -309,6 +312,47 @@ router.get("/door/mine", hybridAuthMiddleware, async (req: Request, res: Respons
     fail(res, 500, "SERVER_ERROR", "Could not load your door events.");
   }
 });
+
+/** Step 8: my events as host or as an accepted team member in any role, upcoming or ended in the last 14 days. */
+async function myTeamEvents(userId: string) {
+  // Starts from my own rows (indexed by member) and the events I host, never from every event on the platform.
+  // A standing spot covers that host's events that ended after I joined (not ones from before).
+  const list = await rows<any>(sql`
+    WITH mine AS (
+      SELECT m.event_id, m.id AS invite_id, m.role, m.role_label, 'event' AS scope, m.created_at
+      FROM event_door_members m JOIN events e ON e.id = m.event_id
+      WHERE m.member_user_id = ${userId} AND m.removed_at IS NULL AND m.accepted_at IS NOT NULL
+        AND e.host_user_id <> ${userId} AND e.status = 'published' AND e.ends_at > now() - interval '14 days'
+      UNION ALL
+      SELECT e.id, t.id, t.role, t.role_label, 'standing', t.created_at
+      FROM event_door_team t JOIN events e ON e.host_user_id = t.host_user_id
+      WHERE t.member_user_id = ${userId} AND t.removed_at IS NULL AND t.accepted_at IS NOT NULL
+        AND e.host_user_id <> ${userId} AND e.status = 'published' AND e.ends_at > now() - interval '14 days'
+        AND e.ends_at > t.accepted_at
+      UNION ALL
+      SELECT e.id, NULL, NULL, NULL, NULL, NULL FROM events e
+      WHERE e.host_user_id = ${userId} AND e.status = 'published' AND e.ends_at > now() - interval '14 days'
+    )
+    SELECT e.id, e.slug, e.title, e.starts_at, e.ends_at, e.timezone, (e.host_user_id = ${userId}) AS is_host,
+      COALESCE(json_agg(json_build_object('role', x.role, 'roleLabel', x.role_label, 'scope', x.scope, 'inviteId', x.invite_id)
+        ORDER BY x.created_at, x.role) FILTER (WHERE x.role IS NOT NULL), '[]'::json) AS team
+    FROM mine x JOIN events e ON e.id = x.event_id
+    JOIN users u ON u.id = ${userId} AND u.is_active = true AND COALESCE(u.deletion_status, 'active') = 'active'
+    GROUP BY e.id
+    ORDER BY e.starts_at, e.id
+    LIMIT 300`);
+  const now = Date.now();
+  return list.map((e) => {
+    const team = (e.team as any[]).map((t) => ({ role: t.role, roleLabel: t.roleLabel ?? null, scope: t.scope, inviteId: String(t.inviteId) }));
+    const isHost = e.is_host === true || e.is_host === "t";
+    return {
+      id: String(e.id), slug: e.slug, title: e.title, startsAt: iso(e.starts_at), endsAt: iso(e.ends_at), timezone: e.timezone,
+      role: isHost ? "host" : team.some((t) => t.scope === "standing") ? "standing" : "event",
+      team, canScan: isHost || team.some((t) => t.role === "door" || t.role === "cohost"),
+      ended: new Date(e.ends_at).getTime() <= now,
+    };
+  });
+}
 
 // ─── The invitee's side (p4-scanner, migration 075) ─────────────────────────
 
