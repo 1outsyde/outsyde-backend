@@ -13,6 +13,12 @@
  * Co-hosts (step 2b) use the team routes like the host, for this event only: never the standing team, never other
  * co-hosts. Every row they write is saved under the event's host.
  *
+ *   POST   /api/events/:id/team/links            (auth, host or co-host) a one person invite link (step 9-0, 092)
+ *   GET    /api/events/:id/team/links            (auth, host or co-host) open links
+ *   DELETE /api/events/:id/team/links/:linkId    (auth, host or co-host) cancel an open link
+ *   GET    /api/events/team-links/:code          (public)     what a link is (never the email it was sent to)
+ *   POST   /api/events/team-links/:code/accept   (auth)       take the spot
+ *
  *   GET    /api/events/door/invites              (auth)       my open door team invites
  *   GET    /api/events/door/invites/:inviteId    (auth, invitee) one invite: invited | accepted | declined | gone
  *   POST   /api/events/door/invites/:inviteId/accept|decline|leave   (auth, invitee)
@@ -33,7 +39,8 @@ import { getUserIdFromRequest, hybridAuthMiddleware } from "../auth";
 import { rows, iso, fail, pgError, hostIdentity, hostEventJson } from "./eventsRouter";
 import { loadEventForDoor, isWithinScanWindow } from "./doorAccess";
 import { TEAM_ROLES, duplicateMessage, parseRoleLabel, roleInfo, type TeamRole } from "./teamRoles";
-import { notifyDoorInvite, notifyDoorAccepted, notifyTeamPayChanged, notifyTeamTimeMoved } from "./ticketNotices";
+import { notifyDoorInvite, notifyDoorAccepted, notifyTeamPayChanged, notifyTeamTimeMoved, notifyTeamLinkEmail } from "./ticketNotices";
+import { newLinkCode, normalizeCode, linkExpiry, parseLinkBody, linkStatus, linkUrl, linkPayJson } from "./teamLinks";
 import { ticketIdFromQrToken, qrPng } from "./ticketQr";
 import { ticketIdFromWalletToken, walletConfig, cachedTicketPass } from "./walletPass";
 import { ensurePromoterLinks, promoterLinkStats, promoterLinkUrl } from "./promoterLinks";
@@ -529,6 +536,232 @@ router.post("/door/invites/:inviteId/leave", hybridAuthMiddleware, doorLimiter, 
   } catch (err) {
     console.error("[Door] leave failed:", err);
     fail(res, 500, "SERVER_ERROR", "Could not leave the Event team.");
+  }
+});
+
+// ─── Invite links (p4-team step 9-0, migration 092, calls 66 to 71 and 67b) ─────────────────────────────
+
+/** The link page is public: 60 a minute per address, so codes can't be guessed in bulk (60 bits each anyway). */
+const linkPageLimiter = rateLimit({
+  windowMs: 60_000, limit: 60, standardHeaders: true, legacyHeaders: false,
+  handler: (_req, res) => { fail(res, 429, "RATE_LIMITED", "Too many requests. Try again in a minute."); },
+});
+
+/** What the host and co-hosts see: the code and address to share, and who it was emailed to. */
+const hostLinkJson = (r: any) => ({
+  id: String(r.id), code: r.code, url: linkUrl(r.code), scope: r.scope, role: r.role as TeamRole, roleLabel: r.role_label ?? null,
+  roleInfo: roleInfo(r.role as TeamRole, r.role_label ?? null), cohostLevel: r.role === "cohost" ? (r.cohost_level ?? "team") : null,
+  pay: linkPayJson(r), sentToEmail: r.sent_to_email ?? null, emailSentAt: iso(r.email_sent_at),
+  status: linkStatus(r), expiresAt: iso(r.expires_at), createdAt: iso(r.created_at),
+});
+
+/** The member's own words (duplicateMessage is the host's). */
+const alreadyMine = (role: TeamRole, label: string | null) => `You're already on this Event team as ${roleInfo(role, label).name}.`;
+
+async function loadLinkByCode(code: string): Promise<any | null> {
+  const [r] = await rows<any>(sql`
+    SELECT l.*, e.status AS e_status, e.ends_at AS e_ends_at, e.title AS e_title, e.starts_at AS e_starts_at, e.timezone AS e_timezone
+    FROM event_team_links l JOIN events e ON e.id = l.event_id WHERE l.code = ${code}`);
+  return r ?? null;
+}
+
+/** The host makes a link. Co-hosts too, for this event only, never for co-hosts, never with pay (only the host sets pay). */
+router.post("/:id/team/links", hybridAuthMiddleware, inviteLimiter, async (req: Request, res: Response) => {
+  try {
+    const ctx = await teamManager(req, res);
+    if (!ctx) return;
+    const parsed = parseLinkBody(req.body ?? {});
+    if (!parsed.ok) return fail(res, 400, "INVALID_REQUEST", parsed.message);
+    const v = parsed.value;
+    if (cohostCantTouch(res, ctx, v.scope, v.role)) return;
+    if (ctx.as !== "host" && v.pay) return fail(res, 403, "HOST_ONLY", "Only the host can set pay.");
+    if (ctx.event.status === "cancelled" || new Date(ctx.event.ends_at).getTime() <= Date.now()) {
+      return fail(res, 409, "EVENT_ENDED", "This event is over, so no one can be added to its Event team.");
+    }
+    const hostUserId = String(ctx.event.host_user_id);
+    const expires = linkExpiry(v.scope, ctx.event.ends_at).toISOString();
+    let saved: any = null;
+    for (let tries = 0; tries < 3 && !saved; tries++) {
+      try {
+        [saved] = await rows<any>(sql`
+          INSERT INTO event_team_links (code, host_user_id, event_id, scope, role, role_label, cohost_level, pay_type, fixed_cents,
+            hourly_cents, commission_bps, sent_to_email, created_by_user_id, expires_at)
+          VALUES (${newLinkCode()}, ${hostUserId}, ${ctx.event.id}, ${v.scope}, ${v.role}, ${v.roleLabel}, ${v.cohostLevel},
+            ${v.pay?.payType ?? null}, ${v.pay?.fixedCents ?? null}, ${v.pay?.hourlyCents ?? null}, ${v.pay?.commissionBps ?? null},
+            ${v.email}, ${ctx.userId}, ${expires}::timestamptz)
+          RETURNING *`);
+      } catch (err) {
+        if (pgError(err).code !== "23505") throw err; // a code that's taken: try a new one
+      }
+    }
+    if (!saved) return fail(res, 500, "SERVER_ERROR", "Could not make the link.");
+    let emailed: boolean | null = null;
+    if (v.email) {
+      emailed = await notifyTeamLinkEmail({
+        linkId: String(saved.id), hostUserId, eventId: String(ctx.event.id), email: v.email, scope: v.scope, role: v.role,
+        roleLabel: v.roleLabel, url: linkUrl(saved.code),
+      });
+      const [fresh] = await rows<any>(sql`SELECT * FROM event_team_links WHERE id = ${saved.id}`);
+      if (fresh) saved = fresh;
+    }
+    res.status(201).json({ success: true, link: hostLinkJson({ ...saved, e_status: ctx.event.status }), emailed });
+  } catch (err) {
+    console.error("[Door] link create failed:", err);
+    fail(res, 500, "SERVER_ERROR", "Could not make the link.");
+  }
+});
+
+/** Open links: this event's, and for the host their All my events links too. */
+router.get("/:id/team/links", hybridAuthMiddleware, teamLimiter, async (req: Request, res: Response) => {
+  try {
+    const ctx = await teamManager(req, res);
+    if (!ctx) return;
+    const standing = ctx.as === "host" ? sql`OR (l.scope = 'standing' AND l.host_user_id = ${ctx.event.host_user_id})` : sql``;
+    const list = await rows<any>(sql`
+      SELECT l.* FROM event_team_links l
+      WHERE l.status = 'open' AND l.expires_at > now() AND ((l.scope = 'event' AND l.event_id = ${ctx.event.id}) ${standing})
+      ORDER BY l.created_at DESC, l.id LIMIT 100`);
+    res.json({ success: true, links: list.map((r) => hostLinkJson({ ...r, e_status: ctx.event.status })) });
+  } catch (err) {
+    console.error("[Door] links list failed:", err);
+    fail(res, 500, "SERVER_ERROR", "Could not load the links.");
+  }
+});
+
+router.delete("/:id/team/links/:linkId", hybridAuthMiddleware, teamLimiter, async (req: Request, res: Response) => {
+  try {
+    const ctx = await teamManager(req, res);
+    if (!ctx) return;
+    const linkId = String(req.params.linkId);
+    const [l] = validId(linkId) ? await rows<any>(sql`
+      SELECT * FROM event_team_links WHERE id = ${linkId}
+        AND ((scope = 'event' AND event_id = ${ctx.event.id}) OR (scope = 'standing' AND host_user_id = ${ctx.event.host_user_id}))`) : [];
+    if (!l) return fail(res, 404, "LINK_NOT_FOUND", "Link not found.");
+    if (cohostCantTouch(res, ctx, l.scope, l.role as TeamRole)) return;
+    const [done] = await rows<any>(sql`
+      UPDATE event_team_links SET status = 'cancelled', cancelled_at = now(), cancelled_by_user_id = ${ctx.userId}, updated_at = now()
+      WHERE id = ${l.id} AND status = 'open' RETURNING *`);
+    if (!done) return fail(res, 409, "LINK_CLOSED", "This link is no longer open.");
+    res.json({ success: true, link: hostLinkJson({ ...done, e_status: ctx.event.status }) });
+  } catch (err) {
+    console.error("[Door] link cancel failed:", err);
+    fail(res, 500, "SERVER_ERROR", "Could not cancel the link.");
+  }
+});
+
+/** The link page: what the spot is, who's hosting and the pay. Never the code's owner details or the email. */
+router.get("/team-links/:code", linkPageLimiter, async (req: Request, res: Response) => {
+  try {
+    const code = normalizeCode(req.params.code);
+    const l = code ? await loadLinkByCode(code) : null;
+    if (!l) return fail(res, 404, "LINK_NOT_FOUND", "This link doesn't exist. Ask the host for a new one.");
+    const viewer = getUserIdFromRequest(req);
+    const upcoming = l.scope === "standing"
+      ? await rows<any>(sql`SELECT id, title, starts_at, timezone FROM events
+          WHERE host_user_id = ${l.host_user_id} AND status = 'published' AND ends_at > now() ORDER BY starts_at, id LIMIT 5`)
+      : [];
+    res.json({
+      success: true,
+      link: {
+        status: linkStatus(l), scope: l.scope, role: l.role, roleLabel: l.role_label ?? null,
+        roleInfo: roleInfo(l.role as TeamRole, l.role_label ?? null), cohostLevel: l.role === "cohost" ? (l.cohost_level ?? "team") : null,
+        host: { name: await hostNameFor(l.host_user_id, l.event_id) },
+        event: l.scope === "event"
+          ? { id: String(l.event_id), title: l.e_title, startsAt: iso(l.e_starts_at), endsAt: iso(l.e_ends_at), timezone: l.e_timezone }
+          : null,
+        upcoming: upcoming.map((e) => ({ id: String(e.id), title: e.title, startsAt: iso(e.starts_at), timezone: e.timezone })),
+        pay: linkPayJson(l), expiresAt: iso(l.expires_at),
+        yours: !!viewer && l.accepted_by_user_id === viewer,
+        isHost: !!viewer && l.host_user_id === viewer,
+      },
+    });
+  } catch (err) {
+    console.error("[Door] link page failed:", err);
+    fail(res, 500, "SERVER_ERROR", "Could not load the link.");
+  }
+});
+
+/**
+ * Take the spot. No transactions (neon http), so every step is one atomic statement and safe to repeat:
+ * claim the link (first one wins), make or reopen their team row, accept it, save the link's pay, then notify.
+ * Refused before claiming (and the link stays open) when they're the host or already on the team in that role.
+ */
+router.post("/team-links/:code/accept", hybridAuthMiddleware, doorLimiter, async (req: Request, res: Response) => {
+  try {
+    const userId = getUserIdFromRequest(req);
+    if (!userId) return fail(res, 401, "UNAUTHORIZED", "Sign in to continue.");
+    const code = normalizeCode(req.params.code);
+    const l = code ? await loadLinkByCode(code) : null;
+    if (!l) return fail(res, 404, "LINK_NOT_FOUND", "This link doesn't exist. Ask the host for a new one.");
+    const role = l.role as TeamRole;
+    const scope = l.scope as Scope;
+    const event = { id: String(l.event_id), host_user_id: String(l.host_user_id) };
+    const mineAlready = l.status === "accepted" && l.accepted_by_user_id === userId;
+    if (!mineAlready) {
+      if (linkStatus(l) !== "open") return fail(res, 409, "LINK_CLOSED", "This link is no longer open. Ask the host for a new one.");
+      if (l.host_user_id === userId) return fail(res, 400, "CANNOT_ADD_HOST", "That's your own link. You already have full access.");
+      // All my events: only the standing team counts (being on one event's team doesn't). This event: either does.
+      const onAlready = scope === "standing"
+        ? (await rows<any>(sql`SELECT 1 AS x FROM event_door_team WHERE host_user_id = ${event.host_user_id} AND member_user_id = ${userId}
+            AND role = ${role} AND removed_at IS NULL AND accepted_at IS NOT NULL LIMIT 1`)).length > 0
+        : await onTeamAccepted(event, userId, role);
+      if (onAlready) return fail(res, 409, "ALREADY_ON_TEAM", alreadyMine(role, l.role_label ?? null));
+      if (l.commission_bps) {
+        const [other] = await rows<any>(sql`
+          SELECT 1 AS x FROM event_team_pay WHERE event_id = ${l.event_id} AND member_user_id = ${userId} AND role <> ${role} AND commission_bps IS NOT NULL LIMIT 1`);
+        if (other) return fail(res, 409, "COMMISSION_ON_OTHER_ROLE", "You already earn commission on another role at this event. Ask the host to change it first.");
+      }
+      const [claimed] = await rows<any>(sql`
+        UPDATE event_team_links SET status = 'accepted', accepted_at = now(), accepted_by_user_id = ${userId}, updated_at = now()
+        WHERE id = ${l.id} AND status = 'open' AND expires_at > now()
+          AND (scope = 'standing' OR EXISTS (SELECT 1 FROM events e WHERE e.id = event_team_links.event_id AND e.status <> 'cancelled' AND e.ends_at > now()))
+        RETURNING id`);
+      if (!claimed) return fail(res, 409, "LINK_CLOSED", "This link is no longer open. Ask the host for a new one.");
+    }
+    const reopen = async () => {
+      await rows(sql`UPDATE event_team_links SET status = 'open', accepted_at = NULL, accepted_by_user_id = NULL, updated_at = now()
+        WHERE id = ${l.id} AND status = 'accepted' AND accepted_by_user_id = ${userId} AND accepted_invite_id IS NULL`);
+    };
+    let inviteId: string | null = l.accepted_invite_id ?? null;
+    if (!inviteId) {
+      const out = await inviteRow(scope, event.host_user_id, event.id, userId, role, l.role_label ?? null, role === "cohost" ? (l.cohost_level ?? "team") : null, String(l.created_by_user_id));
+      if ("code" in out && out.code === "ALREADY_ON_TEAM") {
+        await reopen();
+        return fail(res, 409, "ALREADY_ON_TEAM", alreadyMine(role, l.role_label ?? null));
+      }
+      if ("code" in out) {
+        // ALREADY_INVITED: they had a pending invite in this role. The link accepts that one.
+        const [pending] = await rows<any>(sql`SELECT id FROM ${doorTable(scope)} WHERE ${doorKey(scope, event.host_user_id, event.id, userId, role)} AND removed_at IS NULL`);
+        if (!pending) { await reopen(); return fail(res, 409, "LINK_CLOSED", "This link is no longer open. Ask the host for a new one."); }
+        inviteId = String(pending.id);
+      } else inviteId = String(out.row.id);
+      const accepted = scope === "standing"
+        ? await rows<any>(sql`UPDATE event_door_team SET accepted_at = COALESCE(accepted_at, now()), declined_at = NULL
+            WHERE id = ${inviteId} AND member_user_id = ${userId} AND removed_at IS NULL RETURNING id`)
+        : await rows<any>(sql`UPDATE event_door_members SET accepted_at = COALESCE(accepted_at, now()), declined_at = NULL
+            WHERE id = ${inviteId} AND member_user_id = ${userId} AND removed_at IS NULL
+              AND EXISTS (SELECT 1 FROM events e WHERE e.id = event_door_members.event_id AND e.status <> 'cancelled' AND e.ends_at > now())
+            RETURNING id`);
+      if (!accepted.length) { await reopen(); return fail(res, 409, "LINK_CLOSED", "This link is no longer open. Ask the host for a new one."); }
+      if (l.pay_type && scope === "event") {
+        await rows(sql`
+          INSERT INTO event_team_pay (event_id, member_user_id, role, pay_type, fixed_cents, hourly_cents, commission_bps, updated_by_user_id)
+          VALUES (${l.event_id}, ${userId}, ${role}, ${l.pay_type}, ${l.fixed_cents}, ${l.hourly_cents}, ${l.commission_bps}, ${l.host_user_id})
+          ON CONFLICT (event_id, member_user_id, role) DO UPDATE SET
+            pay_type = EXCLUDED.pay_type, fixed_cents = EXCLUDED.fixed_cents, hourly_cents = EXCLUDED.hourly_cents,
+            commission_bps = EXCLUDED.commission_bps, updated_by_user_id = EXCLUDED.updated_by_user_id, updated_at = now()`);
+      }
+      await rows(sql`UPDATE event_team_links SET accepted_invite_id = ${inviteId}, updated_at = now()
+        WHERE id = ${l.id} AND accepted_by_user_id = ${userId} AND accepted_invite_id IS NULL`);
+      notifyDoorAccepted({ hostUserId: event.host_user_id, memberUserId: userId, scope, eventId: scope === "event" ? event.id : null, role, roleLabel: l.role_label ?? null }).catch(() => {});
+      notifySetupOnAccept({ scope, eventId: scope === "event" ? event.id : null, hostUserId: event.host_user_id, memberUserId: userId, role }).catch(() => {});
+    }
+    const fresh = await loadInvite(inviteId);
+    if (!fresh) return fail(res, 500, "SERVER_ERROR", "Could not load your spot.");
+    res.json({ success: true, invite: await inviteJson(fresh) });
+  } catch (err) {
+    console.error("[Door] link accept failed:", err);
+    fail(res, 500, "SERVER_ERROR", "Could not accept the link.");
   }
 });
 

@@ -307,7 +307,8 @@ async function claimInviteEmail(p: InvitePair): Promise<boolean> {
       AND NOT EXISTS (SELECT 1 FROM ${doorTable(p.scope)} x WHERE ${pairKey(p)} AND x.invite_emailed_at > now() - interval '24 hours')
       AND (SELECT count(*) FROM event_door_team t WHERE t.host_user_id = ${p.hostUserId} AND t.invite_emailed_at >= ${nyDayStart}::timestamptz)
         + (SELECT count(*) FROM event_door_members m JOIN events e ON e.id = m.event_id
-           WHERE e.host_user_id = ${p.hostUserId} AND m.invite_emailed_at >= ${nyDayStart}::timestamptz) < ${DOOR_INVITE_EMAILS_PER_HOST_DAY}
+           WHERE e.host_user_id = ${p.hostUserId} AND m.invite_emailed_at >= ${nyDayStart}::timestamptz)
+        + (SELECT count(*) FROM event_team_links l WHERE l.host_user_id = ${p.hostUserId} AND l.email_sent_at >= ${nyDayStart}::timestamptz) < ${DOOR_INVITE_EMAILS_PER_HOST_DAY}
       AND (SELECT count(*) FROM email_log WHERE created_at >= ${nyDayStart}::timestamptz
              AND created_at < ${nyDayStart}::timestamptz + interval '1 day') < ${DOOR_INVITE_EMAIL_CEILING}
     RETURNING id`);
@@ -361,6 +362,45 @@ export async function notifyDoorInvite(p: { inviteId: string; scope: "standing" 
     }
   } catch (err) {
     console.error(`[Door] invite notices failed for ${p.inviteId}:`, (err as Error)?.message ?? err);
+  }
+}
+
+/**
+ * p4-team step 9-0 (67b): emails a link to an address. No account is matched: the email holds that person's own link.
+ * Shares the host's 10 invite emails a New York day with username invites (and the 70 a day ceiling), and one address
+ * gets at most one link email from a host per 24 hours. True when sent. Never throws.
+ */
+export async function notifyTeamLinkEmail(p: { linkId: string; hostUserId: string; eventId: string; email: string; scope: "standing" | "event"; role: TeamRole; roleLabel: string | null; url: string }): Promise<boolean> {
+  try {
+    const d = await noticeDeps();
+    if (!d.sendDoorInvite) return false;
+    const nyDayStart = startOfNewYorkDay(new Date()).toISOString();
+    const claimed = await rows<any>(sql`
+      UPDATE event_team_links SET email_sent_at = now(), updated_at = now()
+      WHERE id = ${p.linkId} AND email_sent_at IS NULL
+        AND NOT EXISTS (SELECT 1 FROM event_team_links x WHERE x.host_user_id = ${p.hostUserId} AND x.sent_to_email = ${p.email}
+                          AND x.email_sent_at > now() - interval '24 hours')
+        AND (SELECT count(*) FROM event_door_team t WHERE t.host_user_id = ${p.hostUserId} AND t.invite_emailed_at >= ${nyDayStart}::timestamptz)
+          + (SELECT count(*) FROM event_door_members m JOIN events e ON e.id = m.event_id
+             WHERE e.host_user_id = ${p.hostUserId} AND m.invite_emailed_at >= ${nyDayStart}::timestamptz)
+          + (SELECT count(*) FROM event_team_links l WHERE l.host_user_id = ${p.hostUserId} AND l.email_sent_at >= ${nyDayStart}::timestamptz) < ${DOOR_INVITE_EMAILS_PER_HOST_DAY}
+        AND (SELECT count(*) FROM email_log WHERE created_at >= ${nyDayStart}::timestamptz
+               AND created_at < ${nyDayStart}::timestamptz + interval '1 day') < ${DOOR_INVITE_EMAIL_CEILING}
+      RETURNING id`);
+    if (!claimed.length) return false;
+    const [e] = await rows<any>(sql`SELECT * FROM events WHERE id = ${p.eventId}`);
+    if (!e) return false;
+    const hostName = (await hostIdentity(e)).publicName;
+    await d.sendDoorInvite({
+      toEmail: p.email, firstName: null, hostName, scope: p.scope,
+      eventTitle: p.scope === "event" ? String(e.title) : null,
+      whenText: p.scope === "event" ? formatEventWhen(e.starts_at, e.timezone) : null,
+      doorUrl: p.url, role: p.role, roleLabel: p.role === "other" ? p.roleLabel : null, newcomer: true,
+    });
+    return true;
+  } catch (err) {
+    console.error(`[Door] link email failed for ${p.linkId}:`, (err as Error)?.message ?? err);
+    return false;
   }
 }
 
