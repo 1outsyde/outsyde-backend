@@ -70,6 +70,14 @@ export async function runEventReminderJob(now: Date = new Date(), opts: Reminder
   } catch (err) {
     console.error("[EventReminders] job failed:", (err as Error)?.message ?? err);
   }
+  // Step 7: requests to stay longer that ran out, and To be discussed amounts still to enter. Their own catch.
+  try {
+    const ext = await import("./teamExtensions");
+    await ext.expireStayLonger(now);
+    await ext.remindStayLongerAmounts(now);
+  } catch (err) {
+    console.error("[EventReminders] stay longer job failed:", (err as Error)?.message ?? err);
+  }
   return stats;
 }
 

@@ -119,11 +119,11 @@ export async function teamLinesFor(e: { id: string; host_user_id: string; ends_a
   for (const m of pay.members) {
     if (m.totalCents <= 0) continue; // nothing owed (e.g. hourly with no shift): no row
     const roles = m.roles.map((role) => ({ role, ...rolePayJson(pay.byRole.get(`${m.userId}:${role}`)) }));
-    const sum = (k: "fixedCents" | "hourlyCents" | "commissionCents") => roles.reduce((n, r) => n + Number((r as any)[k] ?? 0), 0);
+    const sum = (k: "fixedCents" | "hourlyCents" | "commissionCents" | "extraCents") => roles.reduce((n, r) => n + Number((r as any)[k] ?? 0), 0);
     lines.push({
       userId: m.userId, amountCents: m.totalCents, ready: ready.has(m.userId),
       breakdown: {
-        roles, fixedCents: sum("fixedCents"), hourlyCents: sum("hourlyCents"), commissionCents: sum("commissionCents"),
+        roles, fixedCents: sum("fixedCents"), hourlyCents: sum("hourlyCents"), commissionCents: sum("commissionCents"), extraCents: sum("extraCents"),
         hours: roles.reduce((n, r) => n + Number(r.hours ?? 0), 0),
       },
     });
