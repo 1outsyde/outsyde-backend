@@ -945,7 +945,7 @@ router.get("/:id/team/messages", hybridAuthMiddleware, teamLimiter, async (req: 
   try {
     const ctx = await teamManager(req, res);
     if (!ctx) return;
-    res.json({ success: true, messages: await sentTeamMessages(ctx.event) });
+    res.json({ success: true, messages: await sentTeamMessages(ctx.event, ctx.userId) });
   } catch (err) {
     console.error("[Door] team messages list failed:", err);
     fail(res, 500, "SERVER_ERROR", "Could not load the messages.");

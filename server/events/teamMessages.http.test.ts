@@ -107,7 +107,13 @@ function callAt(base: string, method: string, path: string, o: { token?: string;
   const standing = (host: { id: string }, u: { id: string }, role: string) =>
     q(`INSERT INTO event_door_team (host_user_id, member_user_id, added_by_user_id, role, invited_at, accepted_at)
        VALUES ($1, $2, $1, $3, now() - interval '2 days', now() - interval '1 day')`, [host.id, u.id, role]);
-  const send = (eventId: string, as: { id: string }, body: unknown) => call("POST", `/api/events/${eventId}/team/messages`, { token: tok(as.id), body });
+  const tmMod = await import("./teamMessages");
+  /** Sends, then waits for the pushes and Activity items (they go out after the reply). */
+  const send = async (eventId: string, as: { id: string }, body: unknown) => {
+    const r = await call("POST", `/api/events/${eventId}/team/messages`, { token: tok(as.id), body });
+    await tmMod.waitForTeamMessageNotices();
+    return r;
+  };
   /** The Messages thread between two people (either order) and its messages. */
   const thread = async (a: string, b: string) => {
     const [c] = await q(`SELECT * FROM conversations WHERE (participant1_id = $1 AND participant2_id = $2) OR (participant1_id = $2 AND participant2_id = $1)`, [a, b]);
@@ -179,7 +185,7 @@ function callAt(base: string, method: string, path: string, o: { token?: string;
     r = await send(e1.id, host, { to: "person", userId: pend.id, text: "Hello?" });
     assert(r.status === 404 && r.body?.error?.code === "NOT_ON_TEAM", "someone who hasn't accepted: not on the team", r.body);
     r = await send(e1.id, host, { to: "person", userId: blk.id, text: "Hello?" });
-    assert(r.status === 409 && r.body?.error?.code === "NO_RECIPIENTS", "blocked: nobody to send to", r.body);
+    assert(r.status === 404 && r.body?.error?.code === "NOT_ON_TEAM", "blocked: answered like someone not on the team (the block isn't revealed)", r.body);
     r = await send(e1.id, host, { to: "person", text: "x" });
     assert(r.status === 400, "userId needed", r.body);
 
@@ -195,6 +201,22 @@ function callAt(base: string, method: string, path: string, o: { token?: string;
     assert(r.status === 404, "nor can a stranger", r.status);
     r = await call("POST", `/api/events/${e1.id}/team/messages`, { body: { to: "team", text: "x" } });
     assert(r.status === 401, "signed in only", r.status);
+
+    console.log("\nblocks both ways, removed co-hosts, the duplicate rule");
+    await q(`INSERT INTO user_blocks (blocker_id, blocked_id) VALUES ($1, $2)`, [host.id, sec2.id]);
+    pushes.length = 0;
+    r = await send(e1.id, host, { to: "role", role: "security", text: "Security: second note." });
+    assert(r.status === 201 && r.body?.message?.recipientCount === 1 && pushesTo(sec2.id).length === 0, "the sender blocked someone: they get nothing", r.body);
+    await q(`DELETE FROM user_blocks WHERE blocker_id = $1 AND blocked_id = $2`, [host.id, sec2.id]);
+    r = await send(e1.id, host, { to: "role", role: "entertainment", text: "Security: second note." });
+    assert(r.status === 201, "same text to different people: fine", r.body);
+    r = await send(e1.id, host, { to: "role", role: "security", text: "Security: second note." });
+    assert(r.status === 201, "A, then B, then A again: fine (only twice in a row is refused)", r.body);
+    const co2 = await user("co2"); await member(e1.id, host, co2, "cohost", { state: "removed" });
+    r = await send(e1.id, co2, { to: "team", text: "I was a co-host." });
+    assert(r.status === 404, "a co-host taken off can't send", r.status);
+    r = await send(e1.id, host, { to: "team", text: "https://a.co https://b.co https://c.co https://d.co https://e.co https://f.co" });
+    assert(r.status === 400, "more than 5 links refused, like every message", r.body);
 
     console.log("\nwhat a message can hold (call 33)");
     r = await send(e1.id, host, { to: "team", text: "   " });
@@ -221,24 +243,38 @@ function callAt(base: string, method: string, path: string, o: { token?: string;
     const m4 = await user("m4"); await member(e4.id, host, m4, "security");
     r = await send(e4.id, host, { to: "team", text: "Early note." });
     assert(r.status === 409 && r.body?.error?.code === "MESSAGES_CLOSED", "not published yet: closed", r.body);
+    const e6 = await event(host, "paused", { status: "paused" });
+    const m6 = await user("m6"); await member(e6.id, host, m6, "security");
+    r = await send(e6.id, host, { to: "team", text: "We're paused for now." });
+    assert(r.status === 201, "paused by Outsyde: the team can still be told", r.body);
     const e5 = await event(host, "cancelled", { status: "cancelled" });
     const m5 = await user("m5"); await member(e5.id, host, m5, "security");
     r = await send(e5.id, host, { to: "team", text: "Sorry." });
     assert(r.status === 409 && r.body?.error?.code === "MESSAGES_CLOSED", "cancelled: closed", r.body);
 
+    console.log("\nat most 20 messages an hour per event");
+    const e7 = await event(host, "burst");
+    const m7 = await user("m7"); await member(e7.id, host, m7, "security");
+    let last = 0;
+    for (let i = 1; i <= 20; i++) last = (await send(e7.id, host, { to: "team", text: `Note ${i}` })).status;
+    r = await send(e7.id, host, { to: "team", text: "Note 21" });
+    assert(last === 201 && r.status === 429 && r.body?.error?.code === "TOO_MANY_MESSAGES" && !DASH.test(r.body?.error?.message ?? ""), "the 21st in an hour waits", r.body);
+
     console.log("\nwhat each side sees");
     r = await call("GET", `/api/events/${e1.id}/team/messages`, { token: tok(host.id) });
     const sent = r.body?.messages ?? [];
-    assert(r.status === 200 && sent.length === 5 && sent[0].text.startsWith("y") && sent.some((m: any) => m.audience === "role" && m.role === "security" && m.recipientCount === 2)
+    assert(r.status === 200 && sent.length === 8 && sent[0].text.startsWith("y") && sent.some((m: any) => m.audience === "role" && m.role === "security" && m.recipientCount === 2)
       && sent.some((m: any) => m.audience === "person" && m.to?.userId === dj.id) && sent.some((m: any) => m.from?.userId === co.id),
       "host: every message sent for the event, newest first, with who it went to", sent);
     r = await call("GET", `/api/events/${e1.id}/team/messages`, { token: tok(co.id) });
-    assert(r.status === 200 && (r.body?.messages ?? []).length === 5, "co-host sees them too", r.status);
+    const coSees = r.body?.messages ?? [];
+    assert(r.status === 200 && coSees.length === 7 && !coSees.some((m: any) => m.audience === "person"),
+      "co-host sees team and role messages, not the host's messages to one person", coSees.map((m: any) => m.audience));
     r = await call("GET", `/api/events/${e1.id}/team/messages`, { token: tok(sec1.id) });
     assert(r.status === 404, "a member can't see the sent list", r.status);
     r = await call("GET", `/api/events/${e1.id}/team/me`, { token: tok(sec1.id) });
     const fh = r.body?.fromHost ?? [];
-    assert(r.status === 200 && fh.length === 4 && fh[0].text.startsWith("y") && fh.some((m: any) => m.text.startsWith("Front door")) && !fh.some((m: any) => m.text.startsWith("Load in"))
+    assert(r.status === 200 && fh.length === 6 && fh[0].text.startsWith("y") && fh.filter((m: any) => m.text === "Security: second note.").length === 2 && fh.some((m: any) => m.text.startsWith("Front door")) && !fh.some((m: any) => m.text.startsWith("Load in"))
       && fh.every((m: any) => typeof m.at === "string" && m.from?.name), "Security: From the host lists only what was sent to them, newest first", fh);
     r = await call("GET", `/api/events/${e1.id}/team/me`, { token: tok(dj.id) });
     assert((r.body?.fromHost ?? []).some((m: any) => m.text.startsWith("Load in")) && !(r.body?.fromHost ?? []).some((m: any) => m.text.startsWith("Front door")), "the DJ sees theirs", r.body?.fromHost);
@@ -250,6 +286,7 @@ function callAt(base: string, method: string, path: string, o: { token?: string;
       const ev = allEvents, us = allUsers;
       await q(`DELETE FROM event_team_message_recipients WHERE team_message_id IN (SELECT id FROM event_team_messages WHERE event_id = ANY($1))`, [ev]);
       await q(`DELETE FROM event_team_messages WHERE event_id = ANY($1)`, [ev]);
+      await q(`DELETE FROM event_team_message_senders WHERE event_id = ANY($1)`, [ev]);
       await q(`DELETE FROM messages WHERE conversation_id IN (SELECT id FROM conversations WHERE participant1_id = ANY($1) OR participant2_id = ANY($1))`, [us]);
       await q(`DELETE FROM conversations WHERE participant1_id = ANY($1) OR participant2_id = ANY($1)`, [us]);
       await q(`DELETE FROM user_blocks WHERE blocker_id = ANY($1) OR blocked_id = ANY($1)`, [us]);

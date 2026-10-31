@@ -12,6 +12,7 @@
 -- Safe to run twice. New tables only: today's code never reads or writes them.
 --
 -- Rollback (nothing else depends on these):
+--   DROP TABLE IF EXISTS event_team_message_senders;
 --   DROP TABLE IF EXISTS event_team_message_recipients;
 --   DROP TABLE IF EXISTS event_team_messages;
 
@@ -44,8 +45,19 @@ CREATE TABLE IF NOT EXISTS event_team_message_recipients (
 );
 CREATE INDEX IF NOT EXISTS idx_event_team_message_recipients_member ON event_team_message_recipients (member_user_id, created_at DESC);
 
+-- 3. event_team_message_senders: the last message each sender sent for an event (a fingerprint), so "the same text
+--    to the same people twice in a row" is refused in one atomic step even on a double tap.
+CREATE TABLE IF NOT EXISTS event_team_message_senders (
+  event_id          VARCHAR(36) NOT NULL REFERENCES events(id),
+  sender_user_id    VARCHAR(36) NOT NULL REFERENCES users(id),
+  last_fingerprint  TEXT        NOT NULL,
+  updated_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (event_id, sender_user_id)
+);
+
 -- Verify (read-only):
 -- SELECT count(*) FROM information_schema.columns WHERE table_name = 'event_team_messages';            -- 9
 -- SELECT count(*) FROM information_schema.columns WHERE table_name = 'event_team_message_recipients';  -- 5
+-- SELECT count(*) FROM information_schema.columns WHERE table_name = 'event_team_message_senders';     -- 4
 -- SELECT conname FROM pg_constraint WHERE conrelid = 'event_team_messages'::regclass ORDER BY conname;
 -- SELECT indexname FROM pg_indexes WHERE tablename IN ('event_team_messages', 'event_team_message_recipients');
