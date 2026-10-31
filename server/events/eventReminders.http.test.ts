@@ -148,7 +148,10 @@ const H = 3600e3;
       assert(mine(e.title).filter((p) => p.userId === users[0]).length === 0, "2 hour push sent once");
       reset();
       await runEventReminderJob(e.at(0));
-      assert(mine(e.title).length === 0, "nothing at the start");
+      // p4-team step 6 (decision 11): "Doors just opened" at the start, nothing else.
+      const atStart = pushes.filter((p: any) => p.data?.eventId === e.ev.id);
+      assert(atStart.length > 0 && atStart.every((p: any) => p.data?.kind === "start" || p.data?.kind === "host_start") && atStart.some((p: any) => p.userId === host && p.data?.kind === "host_start"),
+        "at the start: only doors open (the host's too)", atStart.map((p: any) => p.data?.kind));
     }
 
     console.log("Two runs at once");
@@ -233,8 +236,11 @@ const H = 3600e3;
       assert(r.hostPushes >= 1, "job counts host pushes", r);
       reset();
       await runEventReminderJob(e.at(20));
+      assert(!mine(e.title).some((p) => p.userId === host), "host's day before told once");
+      // p4-team step 6 (decision 11): the host now also gets a 2 hour push, with its own kind.
       await runEventReminderJob(e.at(2));
-      assert(!mine(e.title).some((p) => p.userId === host), "host told once, and not at 2 hours");
+      const h2 = mine(e.title).filter((p) => p.userId === host);
+      assert(h2.length === 1 && h2[0].data?.kind === "host_soon", "host gets the 2 hour push once", h2.map((p) => p.data?.kind));
       const stamped = (await q(`SELECT host_reminder_at FROM events WHERE id = $1`, [e.ev.id]))[0].host_reminder_at;
       assert(!!stamped, "event stamped");
 

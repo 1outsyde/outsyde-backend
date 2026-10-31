@@ -545,7 +545,15 @@ router.patch("/:id", hybridAuthMiddleware, async (req: Request, res: Response) =
     // A new start time means new reminder moments: clear the host's and every guest's reminder stamps
     // (eventReminders.ts) in this same statement, so the job can't claim against the old time in between.
     const startMoved = newStartsAt !== null && new Date(newStartsAt).getTime() !== new Date(e.starts_at).getTime();
-    if (startMoved) sets.push(sql`host_reminder_at = NULL`);
+    // p4-team step 6: only reminders whose new moment is still ahead are cleared, so none is sent twice.
+    const ahead = (back: string) => sql`${newStartsAt}::timestamptz - ${back}::interval > now()`;
+    if (startMoved) {
+      sets.push(
+        sql`host_reminder_at = CASE WHEN ${ahead("24 hours")} THEN NULL ELSE host_reminder_at END`,
+        sql`host_reminder_week_at = CASE WHEN ${ahead("7 days")} THEN NULL ELSE host_reminder_week_at END`,
+        sql`host_reminder_soon_at = CASE WHEN ${ahead("2 hours")} THEN NULL ELSE host_reminder_soon_at END`,
+        sql`host_reminder_start_at = CASE WHEN ${ahead("0 seconds")} THEN NULL ELSE host_reminder_start_at END`);
+    }
     sets.push(sql`updated_at = now()`);
 
     try {
@@ -562,9 +570,21 @@ router.patch("/:id", hybridAuthMiddleware, async (req: Request, res: Response) =
           RETURNING *
         ),
         reminders AS (
-          UPDATE tickets SET reminder_day_before_at = NULL, reminder_soon_at = NULL
+          UPDATE tickets SET
+            reminder_day_before_at = CASE WHEN ${ahead("24 hours")} THEN NULL ELSE reminder_day_before_at END,
+            reminder_soon_at = CASE WHEN ${ahead("2 hours")} THEN NULL ELSE reminder_soon_at END,
+            reminder_week_at = CASE WHEN ${ahead("7 days")} THEN NULL ELSE reminder_week_at END,
+            reminder_start_at = CASE WHEN ${ahead("0 seconds")} THEN NULL ELSE reminder_start_at END
           WHERE ${startMoved} AND event_id IN (SELECT id FROM u)
-            AND (reminder_day_before_at IS NOT NULL OR reminder_soon_at IS NOT NULL)
+            AND (reminder_day_before_at IS NOT NULL OR reminder_soon_at IS NOT NULL OR reminder_week_at IS NOT NULL OR reminder_start_at IS NOT NULL)
+          RETURNING 1
+        ),
+        -- p4-team step 6: the team's reminders follow the new start too (same rule, from the new start).
+        team_reminders AS (
+          DELETE FROM event_team_reminders
+          WHERE ${startMoved} AND event_id IN (SELECT id FROM u)
+            AND ((kind = 'week' AND ${ahead("7 days")}) OR (kind = 'day_before' AND ${ahead("24 hours")})
+              OR (kind = 'soon' AND ${ahead("2 hours")}) OR (kind = 'start' AND ${ahead("0 seconds")}))
           RETURNING 1
         )
         SELECT * FROM u`);
