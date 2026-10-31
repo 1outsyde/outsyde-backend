@@ -318,6 +318,14 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
     assert(r.body.link.status === "accepted" && r.body.link.event === null && r.body.link.pay === null && r.body.link.upcoming.length === 0, "a taken link shows no event or pay to someone else", r.body);
     r = await call("GET", `/api/events/team-links/${l1.code}`, { token: tok(ana.id) });
     assert(r.body.link.event?.id === evA.id && r.body.link.pay?.fixedCents === 16000, "but the person who took it still sees theirs", r.body);
+    // Second review: a double tap gets the spot on both answers; someone taken off later isn't told they're on.
+    r = await make(evA.id, { scope: "event", role: "media" });
+    const tap = r.body.link;
+    const taps = await Promise.all([1, 2].map(() => call("POST", `/api/events/team-links/${tap.code}/accept`, { token: tok(ana.id) })));
+    assert(taps.every((x) => x.status === 200 && x.body.invite?.status === "accepted"), "a double tap: both answers say they're on the team", taps.map((x) => x.body));
+    await q(`UPDATE event_door_members SET removed_at = now(), removed_by_user_id = $3 WHERE event_id = $1 AND member_user_id = $2 AND role = 'media'`, [evA.id, ana.id, host.id]);
+    r = await call("POST", `/api/events/team-links/${tap.code}/accept`, { token: tok(ana.id) });
+    assert(r.status === 409 && r.body.error.code === "NOT_ON_TEAM", "taken off after joining: the link doesn't say they're on", r.body);
     // Review 9: All my events links can be made from an ended event's page (same as username invites).
     r = await make(evOver.id, { scope: "standing", role: "door" });
     assert(r.status === 201 && r.body.link.scope === "standing", "an All my events link from an ended event's page", r.body);

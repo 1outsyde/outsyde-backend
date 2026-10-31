@@ -770,62 +770,79 @@ async function myAcceptedRowFor(l: any, userId: string): Promise<string | null> 
   return r ? String(r.id) : null;
 }
 
+/**
+ * Already theirs (a retry, a double tap, or an answer that never arrived): nothing is redone, only the record of their
+ * spot is filled in if it's missing. Null means they don't hold a spot from it any more (answered by the caller).
+ */
+async function heldFromLink(l: any, userId: string): Promise<InviteRow | "removed" | null> {
+  const inviteId = l.accepted_invite_id ? String(l.accepted_invite_id) : await myAcceptedRowFor(l, userId);
+  if (!inviteId) return null;
+  if (!l.accepted_invite_id) {
+    await rows(sql`UPDATE event_team_links SET accepted_invite_id = ${inviteId}, updated_at = now()
+      WHERE id = ${l.id} AND accepted_by_user_id = ${userId} AND accepted_invite_id IS NULL`);
+  }
+  const inv = await loadInvite(inviteId);
+  if (!inv) return null;
+  return inv.removed_at ? "removed" : inv;
+}
+
 /** Take the spot. Safe to repeat: a retry by the same person only finishes what's left, and never reopens the link. */
 router.post("/team-links/:code/accept", hybridAuthMiddleware, doorLimiter, async (req: Request, res: Response) => {
   try {
     const userId = getUserIdFromRequest(req);
     if (!userId) return fail(res, 401, "UNAUTHORIZED", "Sign in to continue.");
     const code = normalizeCode(req.params.code);
-    const l = code ? await loadLinkByCode(code) : null;
+    let l = code ? await loadLinkByCode(code) : null;
     if (!l) return fail(res, 404, "LINK_NOT_FOUND", "This link doesn't exist. Ask the host for a new one.");
     const role = l.role as TeamRole;
     const scope = l.scope as Scope;
     const event = { id: String(l.event_id), host_user_id: String(l.host_user_id) };
-    let inviteId: string | null = null;
-    if (l.status === "accepted" && l.accepted_by_user_id === userId) {
-      // Already theirs: a retry. Nothing is redone; only the record of their spot is filled in if it's missing.
-      inviteId = l.accepted_invite_id ? String(l.accepted_invite_id) : await myAcceptedRowFor(l, userId);
-      if (!inviteId) return fail(res, 409, "LINK_CLOSED", LINK_CLOSED_MSG);
-      if (!l.accepted_invite_id) {
-        await rows(sql`UPDATE event_team_links SET accepted_invite_id = ${inviteId}, updated_at = now()
-          WHERE id = ${l.id} AND accepted_by_user_id = ${userId} AND accepted_invite_id IS NULL`);
-      }
-    } else {
-      if (linkStatus(l) !== "open") return fail(res, 409, "LINK_CLOSED", LINK_CLOSED_MSG);
-      if (l.host_user_id === userId) return fail(res, 400, "CANNOT_ADD_HOST", "That's your own link. You already have full access.");
-      if (l.created_by_user_id === userId) return fail(res, 400, "CANNOT_ADD_SELF", "You made this link. Share it with the person you're inviting.");
-      // All my events: only the standing team counts (being on one event's team doesn't). This event: either does.
-      const onAlready = scope === "standing"
-        ? (await rows<any>(sql`SELECT 1 AS x FROM event_door_team WHERE host_user_id = ${event.host_user_id} AND member_user_id = ${userId}
-            AND role = ${role} AND removed_at IS NULL AND accepted_at IS NOT NULL LIMIT 1`)).length > 0
-        : await onTeamAccepted(event, userId, role);
-      if (onAlready) return fail(res, 409, "ALREADY_ON_TEAM", alreadyMine(role, l.role_label ?? null));
-      if (l.commission_bps) {
-        const [other] = await rows<any>(sql`
-          SELECT 1 AS x FROM event_team_pay WHERE event_id = ${l.event_id} AND member_user_id = ${userId} AND role <> ${role} AND commission_bps IS NOT NULL LIMIT 1`);
-        if (other) return fail(res, 409, "COMMISSION_ON_OTHER_ROLE", "You already earn commission on another role at this event. Ask the host to change it first.");
-      }
-      let out: any;
+    const answerHeld = async (link: any) => {
+      const held = await heldFromLink(link, userId);
+      if (held === "removed") return fail(res, 409, "NOT_ON_TEAM", "You're no longer on this Event team. Ask the host if you think that's a mistake.");
+      if (!held) return fail(res, 409, "LINK_CLOSED", LINK_CLOSED_MSG);
+      return res.json({ success: true, invite: await inviteJson(held) });
+    };
+    if (l.status === "accepted" && l.accepted_by_user_id === userId) return answerHeld(l);
+    if (linkStatus(l) !== "open") return fail(res, 409, "LINK_CLOSED", LINK_CLOSED_MSG);
+    if (l.host_user_id === userId) return fail(res, 400, "CANNOT_ADD_HOST", "That's your own link. You already have full access.");
+    if (l.created_by_user_id === userId) return fail(res, 400, "CANNOT_ADD_SELF", "You made this link. Share it with the person you're inviting.");
+    // All my events: only the standing team counts (being on one event's team doesn't). This event: either does.
+    const onAlready = async () => scope === "standing" ? !!(await myAcceptedRowFor(l, userId)) : await onTeamAccepted(event, userId, role);
+    if (await onAlready()) return fail(res, 409, "ALREADY_ON_TEAM", alreadyMine(role, l.role_label ?? null));
+    if (l.commission_bps) {
+      const [other] = await rows<any>(sql`
+        SELECT 1 AS x FROM event_team_pay WHERE event_id = ${l.event_id} AND member_user_id = ${userId} AND role <> ${role} AND commission_bps IS NOT NULL LIMIT 1`);
+      if (other) return fail(res, 409, "COMMISSION_ON_OTHER_ROLE", "You already earn commission on another role at this event. Ask the host to change it first.");
+    }
+    // At most two tries: a lost race against a host's invite or removal leaves the link open, so one more try is fair.
+    for (let attempt = 0; attempt < 2; attempt++) {
+      let out: any = null;
+      let raced = false;
       try {
         [out] = await rows<any>(acceptLinkSql(String(l.id), userId, scope));
       } catch (err) {
         if (pgError(err).code !== "22012") throw err;
-        // Another accept got there first (theirs, or the same person on another link): nothing was saved.
-        const now = await loadLinkByCode(code!);
-        const onNow = scope === "standing" ? !!(await myAcceptedRowFor(l, userId)) : await onTeamAccepted(event, userId, role);
-        if (onNow && (!now || now.accepted_by_user_id !== userId)) return fail(res, 409, "ALREADY_ON_TEAM", alreadyMine(role, l.role_label ?? null));
-        return fail(res, 409, "LINK_CLOSED", LINK_CLOSED_MSG);
+        raced = true; // nothing was saved
       }
-      if (!out || out.claimed !== 1 || !out.invite_id) return fail(res, 409, "LINK_CLOSED", LINK_CLOSED_MSG);
-      inviteId = String(out.invite_id);
-      await rows(sql`UPDATE event_team_links SET accepted_invite_id = ${inviteId}, updated_at = now()
-        WHERE id = ${l.id} AND accepted_by_user_id = ${userId} AND accepted_invite_id IS NULL`);
-      notifyDoorAccepted({ hostUserId: event.host_user_id, memberUserId: userId, scope, eventId: scope === "event" ? event.id : null, role, roleLabel: l.role_label ?? null }).catch(() => {});
-      notifySetupOnAccept({ scope, eventId: scope === "event" ? event.id : null, hostUserId: event.host_user_id, memberUserId: userId, role }).catch(() => {});
+      if (out && out.claimed === 1 && out.invite_id) {
+        const inviteId = String(out.invite_id);
+        await rows(sql`UPDATE event_team_links SET accepted_invite_id = ${inviteId}, updated_at = now()
+          WHERE id = ${l.id} AND accepted_by_user_id = ${userId} AND accepted_invite_id IS NULL`);
+        notifyDoorAccepted({ hostUserId: event.host_user_id, memberUserId: userId, scope, eventId: scope === "event" ? event.id : null, role, roleLabel: l.role_label ?? null }).catch(() => {});
+        notifySetupOnAccept({ scope, eventId: scope === "event" ? event.id : null, hostUserId: event.host_user_id, memberUserId: userId, role }).catch(() => {});
+        const fresh = await loadInvite(inviteId);
+        if (!fresh) return fail(res, 500, "SERVER_ERROR", "Could not load your spot.");
+        return res.json({ success: true, invite: await inviteJson(fresh) });
+      }
+      // Not claimed, or the statement was undone: look again.
+      l = await loadLinkByCode(code!);
+      if (!l) return fail(res, 409, "LINK_CLOSED", LINK_CLOSED_MSG);
+      if (l.status === "accepted" && l.accepted_by_user_id === userId) return answerHeld(l); // a double tap: the other one got it
+      if (await onAlready()) return fail(res, 409, "ALREADY_ON_TEAM", alreadyMine(role, l.role_label ?? null));
+      if (!raced || linkStatus(l) !== "open") return fail(res, 409, "LINK_CLOSED", LINK_CLOSED_MSG);
     }
-    const fresh = await loadInvite(inviteId);
-    if (!fresh) return fail(res, 500, "SERVER_ERROR", "Could not load your spot.");
-    res.json({ success: true, invite: await inviteJson(fresh) });
+    return fail(res, 409, "TRY_AGAIN", "Something changed on this team just now. Try again in a moment.");
   } catch (err) {
     console.error("[Door] link accept failed:", err);
     fail(res, 500, "SERVER_ERROR", "Could not accept the link.");
