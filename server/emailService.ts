@@ -2486,6 +2486,8 @@ export type DoorTeamInviteParams = {
   role?: TeamRole;
   /** The host's name for an "other" role (plain text; escaped here). */
   roleLabel?: string | null;
+  /** p4-team step 9-0: sent to an email address with its own invite link (67b), so it may be someone new to Outsyde. */
+  newcomer?: boolean;
 };
 
 export function renderDoorTeamInvite(params: DoorTeamInviteParams): { subject: string; html: string } {
@@ -2504,8 +2506,9 @@ export function renderDoorTeamInvite(params: DoorTeamInviteParams): { subject: s
       ${p(copy.lines[0])}
       ${p(copy.lines[1])}
       <p style="text-align:center;margin:18px 0 14px 0;">
-        <a href="${escapeHtml(params.doorUrl)}" style="background:#E8B930;color:#111111;padding:12px 30px;text-decoration:none;border-radius:6px;font-weight:bold;display:inline-block;">Accept or decline</a>
+        <a href="${escapeHtml(params.doorUrl)}" style="background:#E8B930;color:#111111;padding:12px 30px;text-decoration:none;border-radius:6px;font-weight:bold;display:inline-block;">${params.newcomer ? 'See the invite' : 'Accept or decline'}</a>
       </p>
+      ${params.newcomer ? p('New to Outsyde? The button lets you join in a minute, then accept. This invite is just for you, so please don\'t forward it.', '#888888') : ''}
       ${p('Not expecting this? You can ignore this email. Nothing changes unless you accept.', '#888888')}
     </td></tr>
     ${emailFooter()}
