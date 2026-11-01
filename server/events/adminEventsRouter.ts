@@ -84,6 +84,74 @@ adminEventsRouter.get("/", async (req, res) => {
   }
 });
 
+// ─── p5-safety (Legend's calls T7, T8): reports and moderation ──────────────
+// Registered before GET /:id so "reports" and "hosts" are never read as an event id.
+
+const reportsQuerySchema = z.object({ type: z.enum(["event", "post"]).default("event") });
+
+/** Pending reports grouped by event (default) or by post, most reported first. */
+adminEventsRouter.get("/reports", async (req, res) => {
+  const parsed = reportsQuerySchema.safeParse(req.query ?? {});
+  if (!parsed.success) return fail(res, 400, "INVALID_INPUT", "type must be event or post.");
+  try {
+    const { listReports } = await import("./eventModeration");
+    const items = await listReports(parsed.data.type);
+    res.json({ success: true, type: parsed.data.type, items });
+  } catch (err) {
+    console.error("[AdminEvents] reports failed:", err);
+    fail(res, 500, "SERVER_ERROR", "Couldn't load reports.");
+  }
+});
+
+const moderationReasonSchema = z.object({ reason: z.string().trim().min(1, "Add a reason.").max(500) }).strict();
+const MODERATION_MESSAGES: Record<string, [number, string]> = {
+  EVENT_NOT_FOUND: [404, "Event not found."],
+  NOT_PUBLISHED: [409, "Only a live event can be paused. Reload to see where it is."],
+  NOT_PAUSED: [409, "Only a paused event can be released. Reload to see where it is."],
+  NOT_CANCELLABLE: [409, "Only a live or paused event can be cancelled here. Reload to see where it is."],
+  HOST_NOT_FOUND: [404, "Host not found."],
+};
+
+for (const [path, fn] of [
+  ["pause", "pauseEvent"], ["release", "releaseEvent"], ["cancel", "cancelEventByAdmin"], ["reports/dismiss", "dismissEventReports"],
+] as const) {
+  adminEventsRouter.post(`/:id/${path}`, async (req, res) => {
+    const id = String(req.params.id);
+    if (!ID_RE.test(id)) return fail(res, 404, "EVENT_NOT_FOUND", "Event not found.");
+    const parsed = moderationReasonSchema.safeParse(req.body ?? {});
+    if (!parsed.success) return fail(res, 400, "INVALID_INPUT", parsed.error.errors[0]?.message ?? "Add a reason.");
+    try {
+      const mod = await import("./eventModeration");
+      const r = await (mod as any)[fn](id, adminIdOf(req), parsed.data.reason);
+      if (r.ok) return res.json({ success: true, ...(r.status ? { status: r.status } : {}), ...(r.dismissed !== undefined ? { dismissed: r.dismissed } : {}) });
+      const [status, message] = MODERATION_MESSAGES[r.code] ?? [409, "That didn't work. Reload and try again."];
+      return fail(res, status, r.code, message);
+    } catch (err) {
+      console.error(`[AdminEvents] ${path} failed:`, err);
+      fail(res, 500, "SERVER_ERROR", "Couldn't do that. Try again.");
+    }
+  });
+}
+
+const trustSchema = z.object({ trusted: z.boolean(), note: z.string().trim().max(500).optional() }).strict();
+
+/** Trusted host on or off: first event limits don't apply to a trusted personal host. */
+adminEventsRouter.post("/hosts/:userId/trust", async (req, res) => {
+  const id = String(req.params.userId);
+  if (!ID_RE.test(id)) return fail(res, 404, "HOST_NOT_FOUND", "Host not found.");
+  const parsed = trustSchema.safeParse(req.body ?? {});
+  if (!parsed.success) return fail(res, 400, "INVALID_INPUT", "trusted must be true or false.");
+  try {
+    const { setHostTrust } = await import("./eventModeration");
+    const r = await setHostTrust(id, adminIdOf(req), parsed.data.trusted, parsed.data.note || null);
+    if (!r.ok) return fail(res, 404, "HOST_NOT_FOUND", "Host not found.");
+    res.json({ success: true, trusted: r.trusted });
+  } catch (err) {
+    console.error("[AdminEvents] trust failed:", err);
+    fail(res, 500, "SERVER_ERROR", "Couldn't change this host.");
+  }
+});
+
 adminEventsRouter.get("/:id", async (req, res) => {
   const id = String(req.params.id);
   if (!ID_RE.test(id)) return fail(res, 404, "EVENT_NOT_FOUND", "Event not found.");
@@ -132,6 +200,16 @@ adminEventsRouter.get("/:id", async (req, res) => {
         destinationType: dest.destinationType, connectedAccount: maskAccount(dest.accountId),
       },
       activity,
+      // p5-safety (additive): pending reports and whether the host is under the first event limits / trusted.
+      moderation: await (async () => {
+        try {
+          const { moderationSummary } = await import("./eventModeration");
+          return await moderationSummary(id);
+        } catch (err) {
+          console.error("[AdminEvents] moderation summary failed (detail sent without it):", err);
+          return null;
+        }
+      })(),
     });
   } catch (err) {
     console.error("[AdminEvents] detail failed:", err);

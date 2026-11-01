@@ -26,6 +26,11 @@ import { qrUrlFor } from "./ticketQr";
 import { walletUrlFor } from "./walletPass";
 import { notifyRsvpConfirmed } from "./ticketNotices";
 import { normalizeLinkCode, promoterLinkIdSql } from "./promoterLinks";
+import { newHostLimitError, newHostLimitOkSql } from "./eventModeration";
+
+/** p5-safety T6: the first event limits check for a write's WHERE; free types and non price/size edits are never limited. */
+const limitOk = (alias: ReturnType<typeof sql.raw>, change: { typeId: string | null; priceCents: number; quantity: number } | null) =>
+  change && change.priceCents > 0 ? newHostLimitOkSql(alias, change) : sql`true`;
 
 const router = Router();
 
@@ -149,6 +154,11 @@ router.post("/:id/ticket-types", hybridAuthMiddleware, async (req: Request, res:
     const paidOnPublished = b.priceCents > 0 && e.status !== "draft";
     if (paidOnPublished && !(await paidOnPublishedAllowed(res, e))) return;
     if (!(await checkUnlock(res, e.id, null, b.unlockAfterTicketTypeId))) return;
+    // p5-safety T6: first event limits for new personal hosts (paid types only).
+    if (b.priceCents > 0) {
+      const limit = await newHostLimitError(e.id, { typeId: null, priceCents: b.priceCents, quantity: b.quantity });
+      if (limit) return fail(res, 409, "NEW_HOST_LIMIT", limit);
+    }
     const free = b.priceCents === 0;
     // Free RSVP defaults: 1 per order and 1 per account (the host can raise both).
     const minPer = b.minPerOrder ?? 1;
@@ -168,8 +178,13 @@ router.post("/:id/ticket-types", hybridAuthMiddleware, async (req: Request, res:
                ${b.hidden ?? false}, ${b.sortOrder ?? 0}
         FROM events WHERE id = ${e.id} AND host_user_id = ${e.host_user_id} AND status IN ('draft', 'published')
           AND (${b.priceCents} = 0 OR status = 'draft' OR ${paidOnPublished})
+          AND ${limitOk(sql.raw("events"), { typeId: null, priceCents: b.priceCents, quantity: b.quantity })}
         RETURNING *`);
-      if (!created) return fail(res, 409, "EVENT_CHANGED", "This event just changed. Reload and try again.");
+      if (!created) {
+        const limit = b.priceCents > 0 ? await newHostLimitError(e.id, { typeId: null, priceCents: b.priceCents, quantity: b.quantity }) : null;
+        if (limit) return fail(res, 409, "NEW_HOST_LIMIT", limit);
+        return fail(res, 409, "EVENT_CHANGED", "This event just changed. Reload and try again.");
+      }
       return res.status(201).json({ success: true, ticketType: hostTicketTypeJson(created) });
     } catch (err) {
       if (typeConstraintError(res, err)) return;
@@ -204,6 +219,15 @@ router.patch("/:id/ticket-types/:typeId", hybridAuthMiddleware, async (req: Requ
       }
     }
     if (b.unlockAfterTicketTypeId !== undefined && !(await checkUnlock(res, e.id, t.id, b.unlockAfterTicketTypeId))) return;
+    // p5-safety T6: first event limits, on the type as it would be after this change (paid only).
+    const nextPrice = b.priceCents ?? Number(t.price_cents);
+    // Checked here for the message and again inside the UPDATE below (limitChange null = not a paid price or size change).
+    const limitChange = nextPrice > 0 && (b.priceCents !== undefined || b.quantity !== undefined)
+      ? { typeId: t.id as string, priceCents: nextPrice, quantity: b.quantity ?? Number(t.quantity) } : null;
+    if (limitChange) {
+      const limit = await newHostLimitError(e.id, limitChange);
+      if (limit) return fail(res, 409, "NEW_HOST_LIMIT", limit);
+    }
     const nextMax = b.maxPerOrder ?? Number(t.max_per_order);
     const nextLimit = b.perAccountLimit !== undefined ? b.perAccountLimit : t.per_account_limit == null ? null : Number(t.per_account_limit);
     if (nextLimit != null && nextMax > nextLimit) {
@@ -222,7 +246,8 @@ router.patch("/:id/ticket-types/:typeId", hybridAuthMiddleware, async (req: Requ
           AND (${b.priceCents === undefined} OR reserved_count = 0 OR price_cents = ${b.priceCents ?? 0})
           AND EXISTS (SELECT 1 FROM events ev WHERE ev.id = ${e.id} AND ev.status IN ('draft', 'published')
                       AND (ev.status = 'draft' OR ${patchPaidAllowed} OR ${b.priceCents === undefined ? Number(t.price_cents) : b.priceCents} = 0
-                           OR (${priceUnchanged} AND ticket_types.price_cents = ${Number(t.price_cents)})))
+                           OR (${priceUnchanged} AND ticket_types.price_cents = ${Number(t.price_cents)}))
+                      AND ${limitOk(sql.raw("ev"), limitChange)})
         RETURNING *`);
       if (!updated) return fail(res, 409, "TICKET_TYPE_CHANGED", "This ticket type just changed. Reload and try again.");
       return res.json({ success: true, ticketType: hostTicketTypeJson(updated) });

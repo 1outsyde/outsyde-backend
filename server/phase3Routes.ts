@@ -431,7 +431,7 @@ export function registerPhase3Routes(app: Express, requireAdmin: (req: Request, 
           targetId: data.targetId,
           targetType: data.targetType,
           reason: data.reason,
-        });
+        }).onConflictDoNothing(); // 095: one report per person; a double tap at the same moment is not an error
       }
 
       res.json({ success: true, message: 'Report submitted' });

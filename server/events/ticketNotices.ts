@@ -30,6 +30,8 @@ export type NoticeDeps = {
   sendOwedReminder?: (p: Parameters<typeof import("../emailService").sendEventOwedReminderEmail>[0]) => Promise<void>;
   /** Step 4b-2: day of / day after email to a paid team member without payout setup. Optional like the ones above. */
   sendTeamSetupReminder?: (p: Parameters<typeof import("../emailService").sendTeamSetupReminderEmail>[0]) => Promise<void>;
+  /** p5-safety T9: Outsyde paused, released or cancelled a host's event. Optional like the ones above. */
+  sendModeration?: (p: Parameters<typeof import("../emailService").sendEventModerationEmail>[0]) => Promise<void>;
 };
 
 export type ActivityItem = {
@@ -65,6 +67,7 @@ export async function noticeDeps(): Promise<NoticeDeps> {
     sendDoorInvite: email.sendDoorTeamInviteEmail,
     sendOwedReminder: email.sendEventOwedReminderEmail,
     sendTeamSetupReminder: email.sendTeamSetupReminderEmail,
+    sendModeration: email.sendEventModerationEmail,
   };
 }
 
@@ -119,6 +122,8 @@ async function loadOrder(orderId: string) {
     SELECT o.*, u.email AS buyer_email, u.first_name AS buyer_first_name,
            e.title, e.starts_at, e.timezone, e.address_visibility, e.venue_name, e.address_line1, e.address_line2, e.city, e.state, e.postal_code,
            e.status AS event_status, e.host_user_id, e.cancel_reason,
+           -- p5-safety: an admin cancel writes this audit row in the same statement as the cancel.
+           EXISTS (SELECT 1 FROM audit_logs a WHERE a.target_type = 'event' AND a.target_id = e.id AND a.action = 'event.cancel') AS cancelled_by_outsyde,
            (SELECT tt.name FROM ticket_order_items i JOIN ticket_types tt ON tt.id = i.ticket_type_id
              WHERE i.order_id = o.id ORDER BY i.created_at LIMIT 1) AS ticket_type_name
     FROM ticket_orders o JOIN users u ON u.id = o.buyer_user_id JOIN events e ON e.id = o.event_id
@@ -227,6 +232,7 @@ export async function notifyOrderRefunded(orderId: string, reason: "buyer" | "ho
     await paced(() => d.sendRefund({
       toEmail: o.buyer_email, firstName: o.buyer_first_name ?? null, event: emailEvent(o), reason, refundCents,
       keptFeeCents: kept, cancelReason: reason === "event_cancelled" ? o.cancel_reason ?? null : null,
+      cancelledByOutsyde: reason === "event_cancelled" && o.cancelled_by_outsyde === true,
     }));
   } catch (err) {
     console.error(`[Tickets] refund email failed for order ${orderId}:`, (err as Error)?.message ?? err);
@@ -242,7 +248,7 @@ export async function notifyFreeOrdersCancelled(orderIds: string[]): Promise<voi
     try {
       const o = await loadOrder(id);
       if (!o || !o.buyer_email) continue;
-      await paced(() => d.sendCancelled({ toEmail: o.buyer_email, firstName: o.buyer_first_name ?? null, event: emailEvent(o), cancelReason: o.cancel_reason ?? null }));
+      await paced(() => d.sendCancelled({ toEmail: o.buyer_email, firstName: o.buyer_first_name ?? null, event: emailEvent(o), cancelReason: o.cancel_reason ?? null, cancelledByOutsyde: o.cancelled_by_outsyde === true }));
     } catch (err) {
       console.error(`[Tickets] cancel email failed for order ${id}:`, (err as Error)?.message ?? err);
     }

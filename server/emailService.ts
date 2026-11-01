@@ -2413,13 +2413,15 @@ export type TicketRefundParams = {
   /** Service fee Outsyde kept on this refund (0 when everything came back). */
   keptFeeCents: number;
   cancelReason?: string | null;
+  /** p5-safety: Outsyde (an admin) cancelled the event, not the host. */
+  cancelledByOutsyde?: boolean;
 };
 
 export function renderTicketRefund(params: TicketRefundParams): { subject: string; html: string } {
   const name = params.firstName ? `Hi ${escapeHtml(params.firstName)}, ` : '';
   const heading = params.reason === 'event_cancelled' ? 'This event was cancelled' : 'Your refund is on its way';
   const lead = params.reason === 'event_cancelled'
-    ? `${name}the host cancelled this event, so your full payment is coming back to you.`
+    ? `${name}${params.cancelledByOutsyde ? 'Outsyde' : 'the host'} cancelled this event, so your full payment is coming back to you.`
     : params.reason === 'host'
       ? `${name}the host refunded your tickets.`
       : `${name}your tickets were cancelled and refunded.`;
@@ -2450,12 +2452,14 @@ export type EventCancelledParams = {
   firstName: string | null;
   event: TicketEmailEvent;
   cancelReason?: string | null;
+  /** p5-safety: Outsyde (an admin) cancelled the event, not the host. */
+  cancelledByOutsyde?: boolean;
 };
 
 export function renderEventCancelled(params: EventCancelledParams): { subject: string; html: string } {
   const name = params.firstName ? `Hi ${escapeHtml(params.firstName)}, ` : '';
   const html = wrapEmail(`
-    ${emailHeader('This event was cancelled', `${name}the host cancelled this event, so your RSVP is cancelled too.`)}
+    ${emailHeader('This event was cancelled', `${name}${params.cancelledByOutsyde ? 'Outsyde' : 'the host'} cancelled this event, so your RSVP is cancelled too.`)}
     <tr><td style="background:#1A1A1A;padding:0 32px 8px;">
       <table width="100%" cellpadding="0" cellspacing="0" style="border-radius:6px;overflow:hidden;border:1px solid #2A2A2A;">
         ${ticketEventRows(params.event)}
@@ -2587,4 +2591,50 @@ export async function sendTeamSetupReminderEmail(params: TeamSetupReminderParams
 export async function sendEventOwedReminderEmail(params: EventOwedReminderParams): Promise<void> {
   const { subject, html } = renderEventOwedReminder(params);
   await sendBrandedEmail(params.toEmail, subject, html, { kind: 'ticket', label: 'Event payout owed reminder' });
+}
+
+/**
+ * p5-safety T9 (wording approved by Legend 2026-11-01): Outsyde paused, released or cancelled a host's event. The reason is
+ * the one the admin typed. No dashes, no fee percentages. Event title and reason are escaped.
+ */
+export type EventModerationKind = 'pause' | 'release' | 'cancel';
+export type EventModerationParams = { userId: string; toEmail: string; firstName: string | null; kind: EventModerationKind; eventTitle: string; reason: string };
+
+export function renderEventModerationEmail(params: EventModerationParams): { subject: string; html: string } {
+  const hi = params.firstName ? `Hi ${escapeHtml(params.firstName)}` : 'Hi';
+  const title = escapeHtml(params.eventTitle);
+  const reasonRaw = params.reason.trim();
+  const reason = escapeHtml(/[.!?]$/.test(reasonRaw) ? reasonRaw : `${reasonRaw}.`);
+  const p = (t: string, color = '#CCCCCC') => `<p style="color:${color};font-size:15px;line-height:1.6;margin:0 0 14px 0;">${t}</p>`;
+  const questions = p('Questions? Email info@goutsyde.com.', '#888888');
+  const copy: Record<EventModerationKind, { subject: string; body: string }> = {
+    pause: {
+      subject: 'Your event is on hold',
+      body: p(`${hi}, we've put ${title} on hold while we review it.`) + p(`Reason: ${reason}`)
+        + p("While it's on hold the event is hidden, ticket sales are stopped and payouts for it are held. Guests keep their tickets.") + questions,
+    },
+    release: {
+      subject: 'Your event is live again',
+      body: p(`${hi}, ${title} is live again. Ticket sales are open and payouts follow the usual schedule.`) + p(`Note from Outsyde: ${reason}`),
+    },
+    cancel: {
+      subject: 'Outsyde cancelled your event',
+      body: p(`${hi}, Outsyde cancelled ${title}.`) + p(`Reason: ${reason}`)
+        + p('Every guest is refunded in full and gets an email about it. If a refund comes after your payout, that amount is taken back as the Host Agreement explains.') + questions,
+    },
+  };
+  const c = copy[params.kind];
+  const html = wrapEmail(`
+    ${emailHeader(c.subject, title)}
+    <tr><td style="background:#1A1A1A;padding:0 32px 8px;">
+      ${c.body}
+    </td></tr>
+    ${emailFooter()}
+  `);
+  return { subject: c.subject, html };
+}
+
+export async function sendEventModerationEmail(params: EventModerationParams): Promise<void> {
+  const { subject, html } = renderEventModerationEmail(params);
+  await sendBrandedEmail(params.toEmail, subject, html, { kind: 'ticket', label: `Event ${params.kind === 'pause' ? 'on hold' : params.kind === 'release' ? 'live again' : 'cancelled by Outsyde'} notice` });
 }

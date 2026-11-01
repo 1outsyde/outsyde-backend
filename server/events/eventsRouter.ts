@@ -388,8 +388,8 @@ router.get("/slug/:slug", async (req: Request, res: Response) => {
     const viewerIsHost = !!e && !!viewerId && viewerId === e.host_user_id;
     // Co-hosts (step 2b) preview drafts and see the address like the host.
     const viewerIsCohost = !!e && !!viewerId && !viewerIsHost && (await loadEventAccess(e.id, viewerId))?.as === "cohost";
-    // Drafts are visible to their host and co-hosts only (preview); admin-paused events to nobody.
-    if (!e || e.status === "paused" || (e.status === "draft" && !viewerIsHost && !viewerIsCohost)) {
+    // Drafts are visible to their host and co-hosts only (preview).
+    if (!e || (e.status === "draft" && !viewerIsHost && !viewerIsCohost)) {
       return fail(res, 404, "EVENT_NOT_FOUND", "Event not found.");
     }
 
@@ -398,6 +398,12 @@ router.get("/slug/:slug", async (req: Request, res: Response) => {
       const [t] = await rows(sql`
         SELECT 1 FROM tickets WHERE event_id = ${e.id} AND holder_user_id = ${viewerId} AND status = 'valid' LIMIT 1`);
       viewerHasTicket = !!t;
+    }
+    // p5-safety T10: an event Outsyde paused is shown only to its host, co-hosts and ticket holders, as on hold
+    // (onHold below, nothing on sale). Everyone else: not found, as before.
+    const onHold = e.status === "paused";
+    if (onHold && !viewerIsHost && !viewerIsCohost && !viewerHasTicket) {
+      return fail(res, 404, "EVENT_NOT_FOUND", "Event not found.");
     }
 
     // Sales status is worked out over every active type (a hidden type can still be what unlocks
@@ -409,7 +415,7 @@ router.get("/slug/:slug", async (req: Request, res: Response) => {
     const now = new Date();
     const remainingAtEvent = eventRemaining(e);
     const ticketTypes = types.map((t, i) => {
-      const s = e.status === "cancelled"
+      const s = e.status === "cancelled" || onHold
         ? { status: "ended" as const, remaining: 0 }
         : ticketSalesStatus(forSale[i], allForSale, remainingAtEvent, now);
       // Same math checkout uses for one ticket. Free types have nothing to preview.
@@ -451,6 +457,8 @@ router.get("/slug/:slug", async (req: Request, res: Response) => {
         soldOut: remainingAtEvent === 0,
         host: { name: host.publicName, avatarUrl: host.avatarUrl, kind: e.host_type, followId: host.followId },
         viewerIsHost, viewerIsCohost, viewerHasTicket,
+        // p5-safety T10 (additive): paused by Outsyde while it reviews the event.
+        onHold,
       },
       ticketTypes,
     });
@@ -624,8 +632,12 @@ router.post("/:id/publish", hybridAuthMiddleware, async (req: Request, res: Resp
     const { hostPayoutDestination, isHostReady } = await import("./hostPayouts");
     let payoutsSetUp = false;
     let paidAllowed = false;
+    // p5-safety T6: first event limits for new personal hosts (checked here for the message, and again inside the UPDATE).
+    let limitMessage: string | null = null;
+    const { newHostLimitError, newHostLimitOkSql } = await import("./eventModeration");
     const ev = await loadEventForHost(req.params.id, userId);
     if (ev && ev.status === "draft") {
+      limitMessage = await newHostLimitError(ev.id);
       const dest = await hostPayoutDestination(ev);
       payoutsSetUp = !!dest.accountId && dest.localReady;
       if (paidEventsEnabled()) {
@@ -638,6 +650,7 @@ router.post("/:id/publish", hybridAuthMiddleware, async (req: Request, res: Resp
       WHERE id = ${req.params.id} AND host_user_id = ${userId} AND status = 'draft' AND starts_at > now()
         AND ${acceptedCurrentVersionSql(userId)}
         AND ${payoutsSetUp}
+        AND ${newHostLimitOkSql(sql.raw("events"))}
         AND EXISTS (SELECT 1 FROM ticket_types t WHERE t.event_id = events.id AND t.status = 'active' AND t.hidden = false)
         AND (NOT EXISTS (SELECT 1 FROM ticket_types t WHERE t.event_id = events.id AND t.status = 'active' AND t.price_cents > 0)
              OR ${paidAllowed})
@@ -655,6 +668,7 @@ router.post("/:id/publish", hybridAuthMiddleware, async (req: Request, res: Resp
     const types = (await loadTicketTypes(e.id)).filter((t) => t.status === "active");
     if (types.length === 0) return fail(res, 409, "NO_TICKET_TYPES", "Add at least one ticket type first.");
     if (!types.some((t) => !t.hidden)) return fail(res, 409, "NO_VISIBLE_TICKET_TYPES", "At least one ticket type has to be visible to guests.");
+    if (limitMessage) return fail(res, 409, "NEW_HOST_LIMIT", limitMessage);
     if (types.some((t) => Number(t.price_cents) > 0) && !paidAllowed) {
       if (!paidEventsEnabled()) return fail(res, 409, "PAID_TICKETS_NOT_AVAILABLE", "Paid tickets aren't available yet. Use free tickets for now.");
       return fail(res, 409, "PAYOUTS_NOT_SET_UP", "Set up payouts before selling paid tickets.");
