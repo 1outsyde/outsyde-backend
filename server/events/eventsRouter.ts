@@ -632,14 +632,12 @@ router.post("/:id/publish", hybridAuthMiddleware, async (req: Request, res: Resp
     const { hostPayoutDestination, isHostReady } = await import("./hostPayouts");
     let payoutsSetUp = false;
     let paidAllowed = false;
-    // p5-safety T6: first event limits for new personal hosts (checked here and inside the UPDATE below).
-    let withinLimits = true;
+    // p5-safety T6: first event limits for new personal hosts (checked here for the message, and again inside the UPDATE).
     let limitMessage: string | null = null;
+    const { newHostLimitError, newHostLimitOkSql } = await import("./eventModeration");
     const ev = await loadEventForHost(req.params.id, userId);
     if (ev && ev.status === "draft") {
-      const { newHostLimitError } = await import("./eventModeration");
       limitMessage = await newHostLimitError(ev.id);
-      withinLimits = !limitMessage;
       const dest = await hostPayoutDestination(ev);
       payoutsSetUp = !!dest.accountId && dest.localReady;
       if (paidEventsEnabled()) {
@@ -652,7 +650,7 @@ router.post("/:id/publish", hybridAuthMiddleware, async (req: Request, res: Resp
       WHERE id = ${req.params.id} AND host_user_id = ${userId} AND status = 'draft' AND starts_at > now()
         AND ${acceptedCurrentVersionSql(userId)}
         AND ${payoutsSetUp}
-        AND ${withinLimits}
+        AND ${newHostLimitOkSql(sql.raw("events"))}
         AND EXISTS (SELECT 1 FROM ticket_types t WHERE t.event_id = events.id AND t.status = 'active' AND t.hidden = false)
         AND (NOT EXISTS (SELECT 1 FROM ticket_types t WHERE t.event_id = events.id AND t.status = 'active' AND t.price_cents > 0)
              OR ${paidAllowed})

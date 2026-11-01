@@ -319,6 +319,12 @@ router.post("/:id/checkout", hybridAuthMiddleware, async (req: Request, res: Res
           return res.json({ success: true, order: await orderWithTickets(prev.id, userId), repeated: true });
         }
         if (prev.status !== "pending") return fail(res, 409, "CHECKOUT_CLOSED", "That checkout has closed. Start a new one.");
+        // Paused or cancelled since this checkout opened: don't hand the payment back (the pause/cancel closes it).
+        const [evNow] = await rows<any>(sql`SELECT status FROM events WHERE id = ${eventId}`);
+        if (evNow?.status !== "published") {
+          const pi0 = prev.stripe_payment_intent_id ? await s.getPaymentIntent(prev.stripe_payment_intent_id) : null;
+          if (pi0?.status !== "succeeded") return fail(res, 409, "CHECKOUT_CLOSED", "That checkout has closed. Start a new one.");
+        }
         if (!prev.stripe_payment_intent_id) return fail(res, 409, "TRY_AGAIN", "This checkout is already being set up. Try again in a moment.");
         const pi = await s.getPaymentIntent(prev.stripe_payment_intent_id);
         if (pi.status === "succeeded") {

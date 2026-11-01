@@ -26,7 +26,7 @@ import { Router, type Request, type Response } from "express";
 import { z } from "zod";
 import { sql } from "drizzle-orm";
 import { getUserIdFromRequest, hybridAuthMiddleware } from "../auth";
-import { rows } from "./eventsRouter";
+import { loadActiveUser, rows } from "./eventsRouter";
 
 export const REPORT_REASONS = {
   scam: "Scam or fake event",
@@ -84,6 +84,7 @@ eventReportsRouter.post("/:id/report", hybridAuthMiddleware, async (req: Request
   if (!ID_RE.test(id)) return fail(res, 404, "EVENT_NOT_FOUND", "Event not found.");
   const note = parsed.data.note ? parsed.data.note : null;
   try {
+    if (!(await loadActiveUser(userId))) return fail(res, 403, "ACCOUNT_INACTIVE", "This account can't send reports.");
     const [r] = await rows<any>(sql`
       WITH e AS (
         SELECT ev.id, ev.title, ev.host_user_id FROM events ev
@@ -107,15 +108,15 @@ eventReportsRouter.post("/:id/report", hybridAuthMiddleware, async (req: Request
         RETURNING id
       )
       SELECT (SELECT count(*) FROM e)::int AS found, (SELECT title FROM e) AS title, EXISTS (SELECT 1 FROM part) AS own,
-             (SELECT id FROM ins) AS inserted`);
+             (SELECT id FROM ins) AS inserted,
+             -- Counted in the same statement: other people's pending reports, plus this one. Two reports at the same
+             -- moment can both count the same number (an extra alert), never skip one.
+             (SELECT count(DISTINCT q.reporter_id) FROM moderation_queue q
+              WHERE q.target_type = 'event' AND q.target_id = ${id} AND q.status = 'pending' AND q.reporter_id <> ${userId})::int + 1 AS reporters`);
     if (!r?.found) return fail(res, 404, "EVENT_NOT_FOUND", "Event not found.");
     if (r.own) return fail(res, 403, "CANT_REPORT_OWN", "You can't report an event you host or work on.");
     if (r.inserted) {
-      // Counted after the insert (its own statement sees it): pending reports from different people.
-      const [c] = await rows<any>(sql`
-        SELECT count(DISTINCT reporter_id)::int AS n FROM moderation_queue
-        WHERE target_type = 'event' AND target_id = ${id} AND status = 'pending'`);
-      const n = Number(c?.n ?? 0);
+      const n = Number(r.reporters ?? 1);
       if (n === 1 || n === REPORT_ALERT_AT) {
         await alert(n === 1 ? `Event reported: ${r.title}` : `Event reported by ${n} people: ${r.title}`,
           `Event ${id} ("${r.title}") was reported (${REPORT_REASONS[parsed.data.reason]}${note ? `: ${note}` : ""}). ` +
@@ -143,6 +144,7 @@ postReportsRouter.post("/:postId/report", hybridAuthMiddleware, async (req: Requ
   const id = String(req.params.postId);
   if (!ID_RE.test(id)) return fail(res, 404, "POST_NOT_FOUND", "Post not found.");
   try {
+    if (!(await loadActiveUser(userId))) return fail(res, 403, "ACCOUNT_INACTIVE", "This account can't send reports.");
     const [r] = await rows<any>(sql`
       WITH p AS (SELECT id, author_id FROM feed_posts WHERE id = ${id} AND COALESCE(is_active, true) = true),
       ins AS (
@@ -180,23 +182,39 @@ export async function isLimitedHost(eventId: string): Promise<boolean> {
   return !!r?.limited;
 }
 
+type LimitChange = { typeId?: string | null; priceCents: number; quantity: number };
+
+/**
+ * SQL: paid ticket count and top price for the event without the edited type (e = an events row alias). Active paid
+ * types count at their quantity; removed (archived) paid types at the tickets they still hold or sold, so removing a
+ * sold out type and adding a new one can't get past the limit.
+ */
+const limitTotals = (e: ReturnType<typeof sql.raw>, change?: LimitChange) => sql`
+  COALESCE((SELECT sum(CASE WHEN t.status = 'active' THEN t.quantity ELSE t.reserved_count END) FROM ticket_types t
+            WHERE t.event_id = ${e}.id AND t.price_cents > 0 AND t.id IS DISTINCT FROM ${change?.typeId ?? null}), 0)::int AS qty,
+  COALESCE((SELECT max(t.price_cents) FROM ticket_types t WHERE t.event_id = ${e}.id AND t.status = 'active' AND t.price_cents > 0
+            AND t.id IS DISTINCT FROM ${change?.typeId ?? null}), 0)::int AS top`;
+
+/**
+ * SQL boolean for a write statement's WHERE: the event (alias e) is within the first event limits after this change
+ * (or as it is), or its host isn't limited. Evaluated at write time, so the write rechecks against the latest saved rows.
+ */
+export function newHostLimitOkSql(e: ReturnType<typeof sql.raw>, change?: LimitChange) {
+  const addQty = change && change.priceCents > 0 ? change.quantity : 0;
+  const addTop = change && change.priceCents > 0 ? change.priceCents : 0;
+  return sql`(NOT COALESCE(${LIMITED_HOST(e)}, false) OR (SELECT lt.qty + ${addQty} <= ${NEW_HOST_MAX_PAID_TICKETS} AND GREATEST(lt.top, ${addTop}) <= ${NEW_HOST_MAX_PRICE_CENTS}
+              FROM (SELECT ${limitTotals(e, change)}) lt))`;
+}
+
 /**
  * The limit error for this event as it would be after one ticket type change (or as it is, with no change), or null when
  * it is within the limits or the host isn't limited. change.typeId: the type being edited (its saved values are replaced
  * by the change); no typeId = a new type.
  */
-export async function newHostLimitError(eventId: string, change?: { typeId?: string | null; priceCents: number; quantity: number }): Promise<string | null> {
+export async function newHostLimitError(eventId: string, change?: LimitChange): Promise<string | null> {
   const [r] = await rows<any>(sql`
-    SELECT ${LIMITED_HOST(sql.raw("e"))} AS limited,
-           COALESCE((SELECT sum(t.quantity) FROM ticket_types t WHERE t.event_id = e.id AND t.status = 'active' AND t.price_cents > 0
-                     AND t.id IS DISTINCT FROM ${change?.typeId ?? null}), 0)::int AS qty,
-           COALESCE((SELECT max(t.price_cents) FROM ticket_types t WHERE t.event_id = e.id AND t.status = 'active' AND t.price_cents > 0
-                     AND t.id IS DISTINCT FROM ${change?.typeId ?? null}), 0)::int AS top
-    FROM events e WHERE e.id = ${eventId}`);
-  if (!r?.limited) return null;
-  let qty = Number(r.qty), top = Number(r.top);
-  if (change && change.priceCents > 0) { qty += change.quantity; top = Math.max(top, change.priceCents); }
-  return qty > NEW_HOST_MAX_PAID_TICKETS || top > NEW_HOST_MAX_PRICE_CENTS ? NEW_HOST_LIMIT_MESSAGE : null;
+    SELECT ${newHostLimitOkSql(sql.raw("e"), change)} AS ok FROM events e WHERE e.id = ${eventId}`);
+  return r && r.ok === false ? NEW_HOST_LIMIT_MESSAGE : null;
 }
 
 // ─── T8: admin actions ──────────────────────────────────────────────────────
@@ -234,7 +252,14 @@ export async function pauseEvent(eventId: string, adminId: string, reason: strin
   const r = await changeStatus(eventId, adminId, ["published"], "paused", "event.pause", reason, "pause");
   if (!r.found) return { ok: false, code: "EVENT_NOT_FOUND" };
   if (!r.changed) return { ok: false, code: "NOT_PUBLISHED" };
-  await notifyHostModeration(eventId, "pause", reason);
+  // Open checkouts are closed (holds released, payments cancelled), as on cancel, so nothing sells while it's on hold.
+  // A payment that already went through settles and keeps its tickets; the payout stays held.
+  setImmediate(() => {
+    import("./ticketRefunds")
+      .then((m) => m.closePendingCheckouts(eventId))
+      .catch((err) => console.error("[Reports] closing checkouts on pause failed:", err));
+  });
+  await notifyCapped(eventId, "pause", reason);
   return { ok: true, status: "paused" };
 }
 
@@ -242,7 +267,7 @@ export async function releaseEvent(eventId: string, adminId: string, reason: str
   const r = await changeStatus(eventId, adminId, ["paused"], "published", "event.release", reason, null);
   if (!r.found) return { ok: false, code: "EVENT_NOT_FOUND" };
   if (!r.changed) return { ok: false, code: "NOT_PAUSED" };
-  await notifyHostModeration(eventId, "release", reason);
+  await notifyCapped(eventId, "release", reason);
   return { ok: true, status: "published" };
 }
 
@@ -291,7 +316,7 @@ export async function cancelEventByAdmin(eventId: string, adminId: string, reaso
       .then((m) => m.closePendingCheckouts(eventId))
       .catch((err) => console.error("[Reports] closing checkouts failed:", err));
   });
-  await notifyHostModeration(eventId, "cancel", reason);
+  await notifyCapped(eventId, "cancel", reason);
   return { ok: true, status: "cancelled" };
 }
 
@@ -398,6 +423,11 @@ const PUSH: Record<"pause" | "release" | "cancel", { title: string; body: (t: st
 };
 
 /** Email + push to the host. Never throws (the action already happened). */
+/** The admin action waits for the host notice at most 8 seconds; a slow email or push provider keeps sending after. */
+function notifyCapped(eventId: string, kind: "pause" | "release" | "cancel", reason: string): Promise<void> {
+  return Promise.race([notifyHostModeration(eventId, kind, reason), new Promise<void>((r) => setTimeout(r, 8000).unref?.())]);
+}
+
 export async function notifyHostModeration(eventId: string, kind: "pause" | "release" | "cancel", reason: string): Promise<void> {
   try {
     const { noticeDeps } = await import("./ticketNotices");

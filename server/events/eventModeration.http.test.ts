@@ -74,8 +74,10 @@ function callAt(base: string, method: string, path: string, o: { token?: string;
     req.on("end", () => {
       stripeCalls.push(`${req.method} ${req.url}`);
       const u = new URL(req.url || "/", "http://127.0.0.1");
-      res.writeHead(u.pathname.startsWith("/v1/accounts/") ? 200 : 500, { "content-type": "application/json" });
+      const pi = u.pathname.match(/^\/v1\/payment_intents\/([^/]+)(\/cancel)?$/);
+      res.writeHead(u.pathname.startsWith("/v1/accounts/") || pi ? 200 : 500, { "content-type": "application/json" });
       if (u.pathname.startsWith("/v1/accounts/")) res.end(JSON.stringify({ id: u.pathname.split("/").pop(), object: "account", charges_enabled: true, payouts_enabled: true, details_submitted: true }));
+      else if (pi) res.end(JSON.stringify({ id: pi[1], object: "payment_intent", status: pi[2] ? "canceled" : "requires_payment_method", client_secret: `${pi[1]}_secret`, amount: 2000, amount_received: 0, customer: null }));
       else res.end(JSON.stringify({ error: { type: "api_error", message: "stub: not used here" } }));
     });
   });
@@ -103,6 +105,7 @@ function callAt(base: string, method: string, path: string, o: { token?: string;
   app.use("/api/admin/events", (await import("./adminEventsRouter")).adminEventsRouter);
   app.use("/api/events", (await import("./eventsRouter")).default);
   app.use("/api/events", (await import("./ticketsRouter")).default);
+  app.use("/api/events", (await import("./ticketCheckout")).default);
   app.use("/api/events", mod.eventReportsRouter);
   app.use("/api/feed", mod.postReportsRouter);
   const srv: http.Server = await new Promise((r) => { const s = app.listen(0, "127.0.0.1", () => r(s)); });
@@ -167,6 +170,20 @@ function callAt(base: string, method: string, path: string, o: { token?: string;
     }
     return oid;
   };
+  /** An open checkout: pending order with a held item and the type's hold counted. */
+  const mkPending = async (eventId: string, typeId: string, buyer: string, key: string, pi: string) => {
+    const oid = (await q(
+      `INSERT INTO ticket_orders (event_id, buyer_user_id, status, ticket_count, subtotal_cents, platform_fee_cents, host_net_cents, total_cents, expires_at, stripe_payment_intent_id, idempotency_key)
+       VALUES ($1, $2, 'pending', 1, 2000, 40, 1960, 2000, now() + interval '10 minutes', $3, $4) RETURNING id`, [eventId, buyer, pi, key],
+    ))[0].id as string;
+    await q(`INSERT INTO ticket_order_items (order_id, event_id, ticket_type_id, buyer_user_id, quantity, unit_price_cents, status, expires_at)
+             VALUES ($1, $2, $3, $4, 1, 2000, 'held', now() + interval '10 minutes')`, [oid, eventId, typeId, buyer]);
+    await q(`UPDATE ticket_types SET reserved_count = reserved_count + 1 WHERE id = $1`, [typeId]);
+    await q(`UPDATE events SET reserved_count = reserved_count + 1 WHERE id = $1`, [eventId]);
+    await q(`INSERT INTO ticket_account_counts (ticket_type_id, user_id, count) VALUES ($1, $2, 1)
+             ON CONFLICT (ticket_type_id, user_id) DO UPDATE SET count = ticket_account_counts.count + 1`, [typeId, buyer]);
+    return oid;
+  };
   const reportRows = (eventId: string) => q(`SELECT reporter_id, reason, details, status, admin_action FROM moderation_queue WHERE target_type = 'event' AND target_id = $1 ORDER BY created_at`, [eventId]);
   const auditFor = (targetId: string) => q(`SELECT action, target_type, metadata FROM audit_logs WHERE target_id = $1 ORDER BY created_at`, [targetId]);
   const eventStatus = async (id: string) => (await q(`SELECT status FROM events WHERE id = $1`, [id]))[0]?.status;
@@ -216,6 +233,11 @@ function callAt(base: string, method: string, path: string, o: { token?: string;
       const d = await call("POST", `/api/events/${draft.id}/report`, { token: bad.token, body: { reason: "scam" } });
       const nf = await call("POST", `/api/events/nope-${P}/report`, { token: bad.token, body: { reason: "scam" } });
       assert(d.status === 404 && nf.status === 404, "drafts and unknown events: 404", [d.status, nf.status]);
+      const gone = await mkUser("gone");
+      await q(`UPDATE users SET is_active = false WHERE id = $1`, [gone.id]);
+      const g = await call("POST", `/api/events/${ev.id}/report`, { token: gone.token, body: { reason: "scam" } });
+      const gp = await call("POST", `/api/feed/nope-${P}/report`, { token: gone.token, body: { reason: "x" } });
+      assert(g.status === 403 && gp.status === 403 && (await reportRows(ev.id)).length === 3, "deactivated account: can't report an event or a post", [g.status, gp.status]);
     }
 
     // ════ T11: report a post ════
@@ -261,6 +283,18 @@ function callAt(base: string, method: string, path: string, o: { token?: string;
       assert(down.status === 200, "lowering it: allowed", down.status);
       const freeUp = await call("PATCH", `/api/events/${lim.id}/ticket-types/${free.body.ticketType.id}`, { token: newHost.token, body: { quantity: 2000 } });
       assert(freeUp.status === 200, "raising the free type: allowed", freeUp.status);
+      // Removing a sold type keeps its sold tickets in the count (it is archived, its tickets stay valid).
+      await q(`UPDATE ticket_types SET reserved_count = 80 WHERE id = $1`, [ok.body.ticketType.id]);
+      const del = await call("DELETE", `/api/events/${lim.id}/ticket-types/${ok.body.ticketType.id}`, { token: newHost.token });
+      assert(del.status === 200 && del.body?.removed === "archived", "removing the sold type archives it", del.body);
+      const again = await call("POST", `/api/events/${lim.id}/ticket-types`, { token: newHost.token, body: { name: "GA 2", priceCents: 2000, quantity: 30 } });
+      assert(again.status === 409 && again.body?.error?.code === "NEW_HOST_LIMIT", "80 sold on a removed type + 30 new: refused (no way past the limit by removing types)", again.status);
+      const fits = await call("POST", `/api/events/${lim.id}/ticket-types`, { token: newHost.token, body: { name: "GA 2", priceCents: 2000, quantity: 20 } });
+      assert(fits.status === 201, "80 sold + 20 new: allowed", fits.status);
+      const grow = await call("PATCH", `/api/events/${lim.id}/ticket-types/${fits.body.ticketType.id}`, { token: newHost.token, body: { quantity: 21 } });
+      assert(grow.status === 409 && grow.body?.error?.code === "NEW_HOST_LIMIT", "then raising the new type to 21: refused", grow.status);
+      const rename = await call("PATCH", `/api/events/${lim.id}/ticket-types/${fits.body.ticketType.id}`, { token: newHost.token, body: { name: "General" } });
+      assert(rename.status === 200, "renaming a paid type at the limit: allowed", rename.status);
     }
     {
       // Publish: everything else in place (agreement, payout setup, paid tickets on), limits decide.
@@ -335,6 +369,9 @@ function callAt(base: string, method: string, path: string, o: { token?: string;
 
       const noReason = await call("POST", `/api/admin/events/${ev.id}/pause`, { token: admin.token, body: {} });
       assert(noReason.status === 400, "pause needs a reason", noReason.status);
+      const paidT = await mkType(ev.id, 2000, 10);
+      const buyerA = await mkUser("buyA");
+      const pendA = await mkPending(ev.id, paidT, buyerA.id, `key_${P}_a`, `pi_${P}_a`);
       moderationEmails.length = 0; pushes.length = 0;
       let r = await call("POST", `/api/admin/events/${ev.id}/pause`, { token: admin.token, body: { reason: "Several reports of a fake venue" } });
       assert(r.status === 200 && (await eventStatus(ev.id)) === "paused", "pause: event paused", r.body);
@@ -348,6 +385,16 @@ function callAt(base: string, method: string, path: string, o: { token?: string;
       assert(!!pu && /Check your email for details\.$/.test(pu.body) && pu.data?.type === "event_moderation", "host pushed: Your event is on hold", pushes);
       const again = await call("POST", `/api/admin/events/${ev.id}/pause`, { token: admin.token, body: { reason: "again" } });
       assert(again.status === 409, "pausing a paused event: 409", again.status);
+      await new Promise((res) => setTimeout(res, 400));
+      const oa = (await q(`SELECT status FROM ticket_orders WHERE id = $1`, [pendA]))[0];
+      const ta = (await q(`SELECT reserved_count FROM ticket_types WHERE id = $1`, [paidT]))[0];
+      assert(oa.status === "cancelled" && Number(ta.reserved_count) === 0 && stripeCalls.some((c) => c.startsWith(`POST /v1/payment_intents/pi_${P}_a/cancel`)),
+        "pause closes open checkouts: payment cancelled, hold released", { oa, ta, calls: stripeCalls.filter((c) => c.includes("payment_intents")) });
+      // A checkout that opened as the pause landed: asking for it again doesn't hand back the payment.
+      const buyerB = await mkUser("buyB");
+      await mkPending(ev.id, paidT, buyerB.id, `key_${P}_b`, `pi_${P}_b`);
+      const rb = await call("POST", `/api/events/${ev.id}/checkout`, { token: buyerB.token, body: { ticketTypeId: paidT, quantity: 1, idempotencyKey: `key_${P}_b` } });
+      assert(rb.status === 409 && rb.body?.error?.code === "CHECKOUT_CLOSED" && !rb.body?.clientSecret, "paused: a repeated checkout request is refused", rb.body);
 
       // T10
       const s = await call("GET", `/api/events/slug/${ev.slug}`, { token: stranger.token });
