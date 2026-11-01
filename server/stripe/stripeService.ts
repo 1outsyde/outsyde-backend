@@ -798,6 +798,50 @@ export class StripeService {
   }
 
   /**
+   * p5-stripe-sync: refunds on a charge with their metadata (a refund Outsyde made always carries metadata; one made in
+   * the Stripe dashboard has none). Read from Stripe because newer API versions leave the list off the charge event.
+   */
+  async listChargeRefunds(chargeId: string, opts: { timeoutMs?: number; maxNetworkRetries?: number } = {}): Promise<Array<{ id: string; amount: number; created: number; status: string; metadata: Record<string, string> }>> {
+    const stripe = await getUncachableStripeClient();
+    const list = await stripe.refunds.list({ charge: chargeId, limit: 100 }, boundedPayoutOptions(opts));
+    return list.data.map(r => ({ id: r.id, amount: r.amount, created: r.created, status: r.status ?? '', metadata: (r.metadata ?? {}) as Record<string, string> }));
+  }
+
+  /** p5-stripe-sync backstop: one page of Outsyde's own Stripe events of these types created since createdGte (unix seconds). */
+  async listSyncEvents(p: { types: string[]; createdGte: number; startingAfter?: string }, opts: { timeoutMs?: number; maxNetworkRetries?: number } = {}): Promise<{ data: any[]; hasMore: boolean }> {
+    const stripe = await getUncachableStripeClient();
+    const page = await stripe.events.list({
+      types: p.types, created: { gte: p.createdGte }, limit: 100, ...(p.startingAfter ? { starting_after: p.startingAfter } : {}),
+    }, boundedPayoutOptions(opts));
+    return { data: page.data as any[], hasMore: !!page.has_more };
+  }
+
+  /** p5-stripe-sync (S4): the transfer that released a won dispute's held host share, if one was already sent (group dispute_release_<disputeId>). */
+  async findDisputeReleaseTransfer(disputeId: string, opts: { timeoutMs?: number; maxNetworkRetries?: number } = {}): Promise<{ id: string; amount: number } | null> {
+    const stripe = await getUncachableStripeClient();
+    const existing = await stripe.transfers.list({ transfer_group: `dispute_release_${disputeId}`, limit: 10 }, boundedPayoutOptions(opts));
+    const prior = existing.data.find(t => t.metadata?.disputeId === disputeId);
+    return prior ? { id: prior.id, amount: prior.amount } : null;
+  }
+
+  /** p5-stripe-sync (S4): send a won dispute's held host share to the host (the caller passes one key per try). */
+  async createDisputeReleaseTransfer(p: {
+    disputeId: string; eventId: string; payoutId: string; destination: string; amountCents: number; idempotencyKey: string;
+    timeoutMs?: number; maxNetworkRetries?: number;
+  }): Promise<{ id: string }> {
+    const stripe = await getUncachableStripeClient();
+    const transfer = await stripe.transfers.create({
+      amount: p.amountCents,
+      currency: 'usd',
+      destination: p.destination,
+      transfer_group: `dispute_release_${p.disputeId}`,
+      description: 'Outsyde event payout (held for a dispute that was won)',
+      metadata: { type: 'dispute_release', disputeId: p.disputeId, eventId: p.eventId, payoutId: p.payoutId },
+    }, { idempotencyKey: p.idempotencyKey, ...boundedPayoutOptions(p) });
+    return { id: transfer.id };
+  }
+
+  /**
    * Reversals already made on a transfer for one refund (metadata.refundId). Up to 10 pages of 100 are read; each
    * page call is bounded by opts. More than that throws (never a partial list), like findEventPayoutReversal.
    */

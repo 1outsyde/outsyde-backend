@@ -540,6 +540,17 @@ export function startBookingCleanupJob(intervalMs: number = 60000): NodeJS.Timeo
       console.error("[BookingCleanup] Error during booking refund recovery job:", error);
     }
 
+    // Stripe dashboard refunds and disputes (p5-stripe-sync): every 15 minutes read Stripe's own refund and dispute events
+    // of the last 3 days (the webhook answers before it works and Stripe never retries), every minute settle closed
+    // disputes (recoveries, held share release with claim + lock + lookup first). Each event is applied once: safe to run twice.
+    // Own try/catch, after the booking recovery step, so neither can starve the other.
+    try {
+      const { runStripeSyncJob, SYNC_EVENTS_EVERY_MINUTES } = await import("./stripe/stripeSync");
+      await runStripeSyncJob(undefined, { listEvents: new Date().getUTCMinutes() % SYNC_EVENTS_EVERY_MINUTES === 0 });
+    } catch (error) {
+      console.error("[BookingCleanup] Error during Stripe sync job:", error);
+    }
+
     // Day-of address reveal: one push and email per ticket holder once the reveal time passes (atomic claim on tickets.address_reveal_notified_at: safe to run twice).
     // Own try/catch, after the booking recovery step, so neither can starve the other.
     try {

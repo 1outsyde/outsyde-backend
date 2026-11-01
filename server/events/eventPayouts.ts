@@ -178,7 +178,7 @@ export async function createDuePayouts(limit = PAYOUT_JOB_LIMIT): Promise<string
         tk AS (
           -- Locked: a refund running right now either finishes first (its tickets are then 'refunded' and
           -- left out here) or waits for this statement (its tickets are stamped, then recovered in Task 7).
-          SELECT t.id, t.host_net_cents FROM tickets t JOIN ticket_orders o ON o.id = t.order_id
+          SELECT t.id, t.host_net_cents, t.order_id FROM tickets t JOIN ticket_orders o ON o.id = t.order_id
           WHERE t.event_id IN (SELECT id FROM ev) AND t.status = 'valid' AND o.status = 'completed' AND t.payout_id IS NULL
           FOR UPDATE OF t
         ),
@@ -224,17 +224,39 @@ export async function createDuePayouts(limit = PAYOUT_JOB_LIMIT): Promise<string
         cov AS (
           SELECT (g.gross > 0 AND ${teamTotal}::int > 0 AND ${teamTotal}::int <= g.gross - d.ded) AS covered FROM g, d
         ),
+        -- What the host would get before any dispute hold.
+        av AS (SELECT g.gross - d.ded - CASE WHEN cov.covered THEN ${readyTotal}::int ELSE 0 END AS avail FROM g, d, cov),
+        -- p5-stripe-sync S4 (Legend 2026-11-01): a disputed order (still open, or already lost) has its host share held
+        -- back from the host's part, oldest dispute first, never more than is left. Won before now: nothing held.
+        dl AS (
+          SELECT sd.id, sd.reference_id, sd.created_at FROM stripe_disputes sd
+          WHERE sd.kind = 'ticket_order' AND sd.held_payout_id IS NULL AND (sd.outcome IS NULL OR sd.outcome = 'lost')
+            AND sd.reference_id IN (SELECT o.id FROM ticket_orders o WHERE o.event_id IN (SELECT id FROM ev))
+          FOR UPDATE OF sd
+        ),
+        dsh AS (
+          SELECT dl.id, (SELECT COALESCE(sum(tk.host_net_cents), 0) FROM tk WHERE tk.order_id = dl.reference_id)::int AS share, dl.created_at FROM dl
+        ),
+        dh AS (SELECT dsh.id, dsh.share, sum(dsh.share) OVER (ORDER BY dsh.created_at, dsh.id) AS cum FROM dsh),
+        hv AS (SELECT dh.id, GREATEST(0, LEAST(dh.share, av.avail - (dh.cum - dh.share)))::int AS held FROM dh, av),
+        hs AS (SELECT COALESCE(sum(held), 0)::int AS held FROM hv),
         ins AS (
-          INSERT INTO event_payouts (event_id, destination_type, connected_account_id, gross_cents, deducted_cents, team_cents, amount_cents, status, paid_at)
+          INSERT INTO event_payouts (event_id, destination_type, connected_account_id, gross_cents, deducted_cents, team_cents, dispute_held_cents, amount_cents, status, paid_at)
           SELECT ev.id, dst.dtype, dst.acct, g.gross, d.ded,
                  CASE WHEN cov.covered THEN ${readyTotal}::int ELSE 0 END,
-                 g.gross - d.ded - CASE WHEN cov.covered THEN ${readyTotal}::int ELSE 0 END,
+                 hs.held,
+                 av.avail - hs.held,
                  -- Nothing left for the host: recorded as paid, never sent (Stripe can't send $0).
-                 CASE WHEN g.gross - d.ded - CASE WHEN cov.covered THEN ${readyTotal}::int ELSE 0 END = 0 THEN 'paid' ELSE 'pending' END,
-                 CASE WHEN g.gross - d.ded - CASE WHEN cov.covered THEN ${readyTotal}::int ELSE 0 END = 0 THEN now() END
-          FROM ev, dst, g, d, cov WHERE g.gross > 0
+                 CASE WHEN av.avail - hs.held = 0 THEN 'paid' ELSE 'pending' END,
+                 CASE WHEN av.avail - hs.held = 0 THEN now() END
+          FROM ev, dst, g, d, cov, av, hs WHERE g.gross > 0
           ON CONFLICT (event_id) DO NOTHING
           RETURNING id
+        ),
+        hupd AS (
+          UPDATE stripe_disputes sd SET held_cents = hv.held, held_payout_id = ins.id, updated_at = now()
+          FROM hv, ins WHERE sd.id = hv.id
+          RETURNING sd.id
         ),
         tins AS (
           INSERT INTO event_team_payouts (event_id, member_user_id, payout_id, amount_cents, breakdown, outcome, status)
@@ -275,7 +297,9 @@ export async function createDuePayouts(limit = PAYOUT_JOB_LIMIT): Promise<string
                CASE WHEN EXISTS (SELECT 1 FROM ev) AND (SELECT gross FROM g) <> ${earningsCents}::int
                  THEN ('GUARD_TEAM_EARNINGS:' || (SELECT gross FROM g))::int END AS guard_earnings,
                CASE WHEN EXISTS (SELECT 1 FROM fx) AND (SELECT count(*) FROM tins) <> (SELECT count(*) FROM tl)
-                 THEN ('GUARD_TEAM_ROWS:' || (SELECT count(*) FROM tins))::int END AS guard_team`));
+                 THEN ('GUARD_TEAM_ROWS:' || (SELECT count(*) FROM tins))::int END AS guard_team,
+               CASE WHEN EXISTS (SELECT 1 FROM ins) AND (SELECT count(*) FROM hupd) <> (SELECT count(*) FROM hv)
+                 THEN ('GUARD_DISPUTE_HOLD:' || (SELECT count(*) FROM hupd))::int END AS guard_dispute`));
       if (r?.payout_id) made.push(String(r.payout_id));
     } catch (err) {
       // A guard means something changed mid-statement (nothing was written): the next run tries again.

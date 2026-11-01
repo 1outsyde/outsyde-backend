@@ -459,6 +459,17 @@ export class WebhookHandlers {
       case "payment_intent.amount_capturable_updated":
         await this.handlePaymentIntentCapturableUpdated(event.data.object);
         break;
+
+      // p5-stripe-sync: refunds and disputes made in the Stripe dashboard (server/stripe/stripeSync.ts). Ignores
+      // events from a connected account; the 15 minute backstop job handles any the webhook misses.
+      case "charge.refunded":
+      case "charge.dispute.created":
+      case "charge.dispute.updated":
+      case "charge.dispute.closed": {
+        const { handleSyncEvent } = await import("./stripeSync");
+        await handleSyncEvent(event);
+        break;
+      }
     }
   }
 
