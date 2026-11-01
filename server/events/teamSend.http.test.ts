@@ -143,6 +143,8 @@ function callAt(base: string, method: string, path: string, o: { token?: string;
       [`${P}-${s}@test.local`, `Person ${s}`, `First${s}`, username],
     ))[0].id as string;
     allUsers.push(id);
+    // Step 9d: everyone in this file accepted the Event Team note, so "ready" here means payout setup, as before. teamNote.http.test.ts covers a missing note.
+    await q(`INSERT INTO event_team_note_acceptances (user_id, version) VALUES ($1, '2026-11-01') ON CONFLICT DO NOTHING`, [id]);
     return { id, username };
   };
   /** A payout account that has finished setup (the member, or a host so its own payout can go). */
@@ -771,6 +773,7 @@ function callAt(base: string, method: string, path: string, o: { token?: string;
       if (allUsers.length) {
         await q(`DELETE FROM event_door_team WHERE host_user_id = ANY($1) OR member_user_id = ANY($1)`, [allUsers]);
         await q(`DELETE FROM businesses WHERE owner_id = ANY($1)`, [allUsers]).catch(() => {});
+        await q(`DELETE FROM event_team_note_acceptances WHERE user_id = ANY($1)`, [allUsers]);
         await q(`DELETE FROM user_payout_accounts WHERE user_id = ANY($1)`, [allUsers]);
         await q(`DELETE FROM notifications WHERE user_id = ANY($1)`, [allUsers]).catch(() => {});
         await q(`DELETE FROM users WHERE id = ANY($1)`, [allUsers]).catch((e) => console.error("cleanup users:", e.message));

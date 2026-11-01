@@ -20,6 +20,7 @@ import { resumePushSends, startPushReceiptJob, startPushWatchdog } from "./push/
 import vendorAnalyticsRouter from "./routes/vendorAnalytics";
 import eventsRouter from "./events/eventsRouter";
 import hostAgreementRouter from "./events/hostAgreement";
+import teamNoteRouter from "./events/teamNote";
 import ticketsRouter from "./events/ticketsRouter";
 import ticketCheckoutRouter from "./events/ticketCheckout";
 import ticketRefundsRouter from "./events/ticketRefunds";
@@ -409,6 +410,8 @@ if (process.env.NODE_ENV === 'production') {
   app.use('/api/events', doorRouter);
   // Events: Event Host Agreement text + acceptance (publish requires it). Before eventsRouter so /host-agreement isn't read as /:id
   app.use('/api/events', hostAgreementRouter);
+  // Events: Event Team note (p4-team 9d). Before eventsRouter so /team-note isn't read as /:id
+  app.use('/api/events', teamNoteRouter);
   // Events & Ticketing (Phase 1): host create/edit/publish/cancel + public event page data
   app.use('/api/events', eventsRouter);
   // Events & Ticketing (Phase 1 PR 2): ticket types, free RSVP + cancel, my tickets

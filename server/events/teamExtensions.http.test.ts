@@ -84,6 +84,8 @@ function callAt(base: string, method: string, path: string, o: { token?: string;
       [`${P}-${s}@test.local`, `Person ${s}`, `First${s}`, `${P}${s}`.slice(0, 24)],
     ))[0].id as string;
     allUsers.push(id);
+    // Step 9d: everyone in this file accepted the Event Team note, so "ready" here means payout setup, as before. teamNote.http.test.ts covers a missing note.
+    await q(`INSERT INTO event_team_note_acceptances (user_id, version) VALUES ($1, '2026-11-01') ON CONFLICT DO NOTHING`, [id]);
     return { id };
   };
   /** Started `startedAgo` ago, ends `endsIn` from now (negative = already ended). */
@@ -412,6 +414,7 @@ function callAt(base: string, method: string, path: string, o: { token?: string;
       [`DELETE FROM event_promoter_links WHERE event_id = ANY($1)`, [ev]],
       [`DELETE FROM event_door_members WHERE event_id = ANY($1)`, [ev]],
       [`DELETE FROM events WHERE id = ANY($1)`, [ev]],
+      [`DELETE FROM event_team_note_acceptances WHERE user_id = ANY($1)`, [us]],
       [`DELETE FROM user_payout_accounts WHERE user_id = ANY($1)`, [us]],
       [`DELETE FROM notifications WHERE user_id = ANY($1)`, [us]],
       [`DELETE FROM users WHERE id = ANY($1)`, [us]],
