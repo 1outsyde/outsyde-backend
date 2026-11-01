@@ -491,6 +491,9 @@ async function getNoFollow(path: string): Promise<{ status: number; location: st
     const acctPR = `acct_pr_${P}`;
     await q(`INSERT INTO user_payout_accounts (user_id, stripe_account_id, onboarding_complete) VALUES ($1, $2, true)`, [hostReadyU, acctPR]);
     setReady(acctPR);
+    // Trusted so the paid switch checks here are not blocked by the new host limits (095).
+    // Those limits are tested in eventModeration.http.test.
+    await q(`INSERT INTO event_host_trust (user_id, note) VALUES ($1, 'test fixture') ON CONFLICT DO NOTHING`, [hostReadyU]);
     const mkEvent = async (host: string, o: { base?: string } = {}) => {
       const c = await call("POST", "/api/events", { token: tok(host), body: evBody(), ...o });
       if (c.status !== 201 && c.status !== 200) throw new Error("event create failed " + JSON.stringify(c));
@@ -1684,6 +1687,7 @@ async function getNoFollow(path: string): Promise<{ status: number; location: st
     await q(`DELETE FROM ticket_types WHERE event_id IN (SELECT id FROM events WHERE host_user_id IN (SELECT id FROM users WHERE email LIKE $1))`, [`${P}-%`]);
     await q(`DELETE FROM events WHERE host_user_id IN (SELECT id FROM users WHERE email LIKE $1)`, [`${P}-%`]);
     await q(`DELETE FROM user_payout_accounts WHERE user_id IN (SELECT id FROM users WHERE email LIKE $1)`, [`${P}-%`]);
+    await q(`DELETE FROM event_host_trust WHERE user_id IN (SELECT id FROM users WHERE email LIKE $1)`, [`${P}-%`]);
     await q(`DELETE FROM businesses WHERE owner_id IN (SELECT id FROM users WHERE email LIKE $1)`, [`${P}-%`]);
     await q(`DELETE FROM photographers WHERE user_id IN (SELECT id FROM users WHERE email LIKE $1)`, [`${P}-%`]);
     await q(`DELETE FROM host_agreement_acceptances WHERE user_id IN (SELECT id FROM users WHERE email LIKE $1)`, [`${P}-%`]);

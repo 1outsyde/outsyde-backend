@@ -149,6 +149,12 @@ router.post("/:id/ticket-types", hybridAuthMiddleware, async (req: Request, res:
     const paidOnPublished = b.priceCents > 0 && e.status !== "draft";
     if (paidOnPublished && !(await paidOnPublishedAllowed(res, e))) return;
     if (!(await checkUnlock(res, e.id, null, b.unlockAfterTicketTypeId))) return;
+    // p5-safety T6: first event limits for new personal hosts (paid types only).
+    if (b.priceCents > 0) {
+      const { newHostLimitError } = await import("./eventModeration");
+      const limit = await newHostLimitError(e.id, { typeId: null, priceCents: b.priceCents, quantity: b.quantity });
+      if (limit) return fail(res, 409, "NEW_HOST_LIMIT", limit);
+    }
     const free = b.priceCents === 0;
     // Free RSVP defaults: 1 per order and 1 per account (the host can raise both).
     const minPer = b.minPerOrder ?? 1;
@@ -204,6 +210,13 @@ router.patch("/:id/ticket-types/:typeId", hybridAuthMiddleware, async (req: Requ
       }
     }
     if (b.unlockAfterTicketTypeId !== undefined && !(await checkUnlock(res, e.id, t.id, b.unlockAfterTicketTypeId))) return;
+    // p5-safety T6: first event limits, on the type as it would be after this change (paid only).
+    const nextPrice = b.priceCents ?? Number(t.price_cents);
+    if (nextPrice > 0 && (b.priceCents !== undefined || b.quantity !== undefined)) {
+      const { newHostLimitError } = await import("./eventModeration");
+      const limit = await newHostLimitError(e.id, { typeId: t.id, priceCents: nextPrice, quantity: b.quantity ?? Number(t.quantity) });
+      if (limit) return fail(res, 409, "NEW_HOST_LIMIT", limit);
+    }
     const nextMax = b.maxPerOrder ?? Number(t.max_per_order);
     const nextLimit = b.perAccountLimit !== undefined ? b.perAccountLimit : t.per_account_limit == null ? null : Number(t.per_account_limit);
     if (nextLimit != null && nextMax > nextLimit) {

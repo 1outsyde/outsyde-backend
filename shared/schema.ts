@@ -3644,8 +3644,9 @@ export const moderationQueue = pgTable("moderation_queue", {
   id: varchar("id", { length: 36 }).primaryKey().default(sql`gen_random_uuid()`),
   reporterId: varchar("reporter_id", { length: 36 }).notNull().references(() => users.id),
   targetId: varchar("target_id", { length: 36 }).notNull(),
-  targetType: text("target_type").notNull(), // 'post' | 'user'
+  targetType: text("target_type").notNull(), // 'post' | 'user' | 'event' (095)
   reason: text("reason").notNull(),
+  details: text("details"), // migration 095: the reporter's note (event reports)
   status: text("status").default("pending").notNull(), // 'pending' | 'reviewed' | 'actioned'
   adminAction: text("admin_action"), // 'remove' | 'warn' | 'ban' | 'dismiss'
   adminNotes: text("admin_notes"),

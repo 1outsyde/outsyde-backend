@@ -30,6 +30,8 @@ export type NoticeDeps = {
   sendOwedReminder?: (p: Parameters<typeof import("../emailService").sendEventOwedReminderEmail>[0]) => Promise<void>;
   /** Step 4b-2: day of / day after email to a paid team member without payout setup. Optional like the ones above. */
   sendTeamSetupReminder?: (p: Parameters<typeof import("../emailService").sendTeamSetupReminderEmail>[0]) => Promise<void>;
+  /** p5-safety T9: Outsyde paused, released or cancelled a host's event. Optional like the ones above. */
+  sendModeration?: (p: Parameters<typeof import("../emailService").sendEventModerationEmail>[0]) => Promise<void>;
 };
 
 export type ActivityItem = {
@@ -65,6 +67,7 @@ export async function noticeDeps(): Promise<NoticeDeps> {
     sendDoorInvite: email.sendDoorTeamInviteEmail,
     sendOwedReminder: email.sendEventOwedReminderEmail,
     sendTeamSetupReminder: email.sendTeamSetupReminderEmail,
+    sendModeration: email.sendEventModerationEmail,
   };
 }
 

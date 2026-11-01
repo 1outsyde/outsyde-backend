@@ -13,6 +13,7 @@ import accountSetupRouter, { accountSetupAdminRouter } from "./routes/accountSet
 import { startAccountSetupReminderJob } from "./accountSetup/reminders";
 import { emailAdminRouter, broadcastPublicRouter } from "./routes/emailAdmin";
 import { adminEventsRouter } from "./events/adminEventsRouter";
+import { eventReportsRouter, postReportsRouter } from "./events/eventModeration";
 import { adminReferralsRouter } from "./referrals/adminReferralsRouter";
 import { resumeBroadcasts } from "./broadcasts/broadcasts";
 import { pushAdminRouter, pushPreferencesRouter } from "./routes/pushAdmin";
@@ -420,6 +421,9 @@ if (process.env.NODE_ENV === 'production') {
   app.use('/api/events', ticketCheckoutRouter);
   // Events & Ticketing (Phase 2 PR 4): refunds (buyer, host), host order list
   app.use('/api/events', ticketRefundsRouter);
+  // p5-safety: report an event (T1 to T4) and the app's Report post (T11), both into moderation_queue (migration 095)
+  app.use('/api/events', eventReportsRouter);
+  app.use('/api/feed', postReportsRouter);
   setupWebSocket(httpServer);
 
   app.use((err: any, _req: Request, res: Response, _next: NextFunction) => {
