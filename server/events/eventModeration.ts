@@ -42,8 +42,10 @@ export const REPORT_NOTE_MAX = 500;
 export const REPORT_ALERT_AT = 3;
 export const NEW_HOST_MAX_PAID_TICKETS = 100;
 export const NEW_HOST_MAX_PRICE_CENTS = 10000;
+/** Lifting the limits: a paid out event with at least this many different paying guests (not the host or their team). */
+export const NEW_HOST_LIFT_MIN_BUYERS = 5;
 export const NEW_HOST_LIMIT_MESSAGE =
-  "New hosts can sell up to 100 paid tickets per event, at up to $100 each, until their first paid event has been paid out. Free RSVPs have no limit.";
+  "New hosts can sell up to 100 paid tickets per event, at up to $100 each, until a paid event with at least 5 guests has been paid out. Free RSVPs have no limit.";
 
 function fail(res: Response, status: number, code: string, message: string) {
   return res.status(status).json({ success: false, error: { code, message } });
@@ -104,7 +106,12 @@ eventReportsRouter.post("/:id/report", hybridAuthMiddleware, async (req: Request
         INSERT INTO moderation_queue (reporter_id, target_id, target_type, reason, details)
         SELECT ${userId}, e.id, 'event', ${parsed.data.reason}, ${note} FROM e
         WHERE NOT EXISTS (SELECT 1 FROM part)
-        ON CONFLICT (target_type, target_id, reporter_id) WHERE target_type IN ('event', 'post') DO NOTHING
+        -- One open report per person: a report that was already reviewed (dismissed, or closed by a pause that was
+        -- later released) is reopened with the new reason; an open one is left as it is.
+        ON CONFLICT (target_type, target_id, reporter_id) WHERE target_type IN ('event', 'post') DO UPDATE
+          SET status = 'pending', reason = EXCLUDED.reason, details = EXCLUDED.details, flag_count = 1, created_at = now(),
+              admin_action = NULL, admin_notes = NULL, reviewed_by = NULL, reviewed_at = NULL
+          WHERE moderation_queue.status <> 'pending'
         RETURNING id
       )
       SELECT (SELECT count(*) FROM e)::int AS found, (SELECT title FROM e) AS title, EXISTS (SELECT 1 FROM part) AS own,
@@ -150,7 +157,12 @@ postReportsRouter.post("/:postId/report", hybridAuthMiddleware, async (req: Requ
       ins AS (
         INSERT INTO moderation_queue (reporter_id, target_id, target_type, reason)
         SELECT ${userId}, p.id, 'post', ${parsed.data.reason} FROM p WHERE p.author_id <> ${userId}
-        ON CONFLICT (target_type, target_id, reporter_id) WHERE target_type IN ('event', 'post') DO NOTHING
+        -- One open report per person: a report that was already reviewed (dismissed, or closed by a pause that was
+        -- later released) is reopened with the new reason; an open one is left as it is.
+        ON CONFLICT (target_type, target_id, reporter_id) WHERE target_type IN ('event', 'post') DO UPDATE
+          SET status = 'pending', reason = EXCLUDED.reason, details = EXCLUDED.details, flag_count = 1, created_at = now(),
+              admin_action = NULL, admin_notes = NULL, reviewed_by = NULL, reviewed_at = NULL
+          WHERE moderation_queue.status <> 'pending'
         RETURNING id
       )
       SELECT (SELECT count(*) FROM p)::int AS found, (SELECT author_id FROM p) AS author, (SELECT id FROM ins) AS inserted`);
@@ -166,15 +178,27 @@ postReportsRouter.post("/:postId/report", hybridAuthMiddleware, async (req: Requ
 // ─── T5 to T7: first event limits ───────────────────────────────────────────
 
 /** SQL: the event's host is a personal host still under the first event limits (e = an events row alias). */
+// Limited unless trusted, or: a personal event of theirs was paid out with at least 5 different paying guests who
+// aren't the host or their team (so buying your own ticket doesn't count), and no dispute on any of their events is
+// lost or still open.
 const LIMITED_HOST = (e: ReturnType<typeof sql.raw>) => sql`(
   ${e}.host_type = 'user'
   AND NOT EXISTS (SELECT 1 FROM event_host_trust ht WHERE ht.user_id = ${e}.host_user_id)
-  AND NOT EXISTS (
-    SELECT 1 FROM event_payouts pp JOIN events pe ON pe.id = pp.event_id
-    WHERE pe.host_type = 'user' AND pe.host_user_id = ${e}.host_user_id AND pp.status = 'paid' AND pp.gross_cents > 0
-      AND NOT EXISTS (
-        SELECT 1 FROM stripe_disputes sd JOIN ticket_orders so ON so.id = sd.reference_id
-        WHERE sd.kind = 'ticket_order' AND sd.outcome = 'lost' AND so.event_id = pe.id)))`;
+  AND (
+    NOT EXISTS (
+      SELECT 1 FROM event_payouts pp JOIN events pe ON pe.id = pp.event_id
+      WHERE pe.host_type = 'user' AND pe.host_user_id = ${e}.host_user_id AND pp.status = 'paid' AND pp.gross_cents > 0
+        AND (SELECT count(DISTINCT so.buyer_user_id) FROM ticket_orders so
+             WHERE so.event_id = pe.id AND so.status = 'completed' AND so.total_cents > 0
+               AND so.buyer_user_id <> pe.host_user_id
+               AND NOT EXISTS (SELECT 1 FROM event_door_members m WHERE m.event_id = pe.id AND m.member_user_id = so.buyer_user_id
+                               AND m.accepted_at IS NOT NULL AND m.removed_at IS NULL)
+               AND NOT EXISTS (SELECT 1 FROM event_door_team dt WHERE dt.host_user_id = pe.host_user_id AND dt.member_user_id = so.buyer_user_id
+                               AND dt.accepted_at IS NOT NULL AND dt.removed_at IS NULL)) >= ${NEW_HOST_LIFT_MIN_BUYERS})
+    OR EXISTS (
+      SELECT 1 FROM stripe_disputes sd JOIN ticket_orders so ON so.id = sd.reference_id JOIN events de ON de.id = so.event_id
+      WHERE sd.kind = 'ticket_order' AND sd.outcome IS DISTINCT FROM 'won'
+        AND de.host_type = 'user' AND de.host_user_id = ${e}.host_user_id)))`;
 
 /** Is this event's host under the first event limits? */
 export async function isLimitedHost(eventId: string): Promise<boolean> {

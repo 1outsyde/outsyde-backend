@@ -2413,13 +2413,15 @@ export type TicketRefundParams = {
   /** Service fee Outsyde kept on this refund (0 when everything came back). */
   keptFeeCents: number;
   cancelReason?: string | null;
+  /** p5-safety: Outsyde (an admin) cancelled the event, not the host. */
+  cancelledByOutsyde?: boolean;
 };
 
 export function renderTicketRefund(params: TicketRefundParams): { subject: string; html: string } {
   const name = params.firstName ? `Hi ${escapeHtml(params.firstName)}, ` : '';
   const heading = params.reason === 'event_cancelled' ? 'This event was cancelled' : 'Your refund is on its way';
   const lead = params.reason === 'event_cancelled'
-    ? `${name}the host cancelled this event, so your full payment is coming back to you.`
+    ? `${name}${params.cancelledByOutsyde ? 'Outsyde' : 'the host'} cancelled this event, so your full payment is coming back to you.`
     : params.reason === 'host'
       ? `${name}the host refunded your tickets.`
       : `${name}your tickets were cancelled and refunded.`;
@@ -2450,12 +2452,14 @@ export type EventCancelledParams = {
   firstName: string | null;
   event: TicketEmailEvent;
   cancelReason?: string | null;
+  /** p5-safety: Outsyde (an admin) cancelled the event, not the host. */
+  cancelledByOutsyde?: boolean;
 };
 
 export function renderEventCancelled(params: EventCancelledParams): { subject: string; html: string } {
   const name = params.firstName ? `Hi ${escapeHtml(params.firstName)}, ` : '';
   const html = wrapEmail(`
-    ${emailHeader('This event was cancelled', `${name}the host cancelled this event, so your RSVP is cancelled too.`)}
+    ${emailHeader('This event was cancelled', `${name}${params.cancelledByOutsyde ? 'Outsyde' : 'the host'} cancelled this event, so your RSVP is cancelled too.`)}
     <tr><td style="background:#1A1A1A;padding:0 32px 8px;">
       <table width="100%" cellpadding="0" cellspacing="0" style="border-radius:6px;overflow:hidden;border:1px solid #2A2A2A;">
         ${ticketEventRows(params.event)}

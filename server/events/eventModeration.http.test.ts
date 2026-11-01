@@ -87,8 +87,9 @@ function callAt(base: string, method: string, path: string, o: { token?: string;
   const notices = await import("./ticketNotices");
   const pushes: any[] = [];
   const moderationEmails: any[] = [];
+  const guestCancels: any[] = [];
   notices.setNoticeDepsForTest({
-    sendReceipt: async () => {}, sendRefund: async () => {}, sendCancelled: async () => {}, sendAddressReveal: async () => {},
+    sendReceipt: async () => {}, sendRefund: async () => {}, sendCancelled: async (p: any) => { guestCancels.push(p); }, sendAddressReveal: async () => {},
     sendPush: async (p: any) => { pushes.push(p); return true; }, createActivity: async () => {}, sendDoorInvite: async () => {},
     sendOwedReminder: async () => {}, sendTeamSetupReminder: async () => {},
     sendModeration: async (p: any) => { moderationEmails.push(p); },
@@ -316,19 +317,52 @@ function callAt(base: string, method: string, path: string, o: { token?: string;
       assert(r.status === 201, "approved business host: no limit", r.body);
     }
     {
-      // Lifted after the first paid payout with no lost dispute; not when a dispute on it was lost.
+      // Lifted after a paid out event with 5 different paying guests (not the host or their team) and no lost or open dispute.
       const seasoned = await mkUser("seasoned");
       const past = await mkEvent(seasoned, "past", { startsIn: "-10 days" });
+      const pt = await mkType(past.id, 2000, 20);
+      for (let i = 0; i < 5; i++) await mkOrder(past.id, pt, (await mkUser(`g${i}`)).id, 2000);
       await q(`INSERT INTO event_payouts (event_id, destination_type, connected_account_id, gross_cents, deducted_cents, team_cents, amount_cents, status, transfer_id, paid_at)
                VALUES ($1, 'user', $2, 1960, 0, 0, 1960, 'paid', $3, now() - interval '3 days')`, [past.id, `acct_${P}_s`, `tr_${P}_s`]);
       const next = await mkEvent(seasoned, "next", { status: "draft" });
       let r = await call("POST", `/api/events/${next.id}/ticket-types`, { token: seasoned.token, body: { name: "GA", priceCents: 30000, quantity: 400 } });
-      assert(r.status === 201, "host whose first paid payout went out: no limit", r.body);
+      assert(r.status === 201, "host whose paid event with 5 guests was paid out: no limit", r.body);
+
+      // Buying your own tickets (or your team buying) doesn't count: 4 real guests + host + teammate = still limited.
+      const selfie = await mkUser("selfie");
+      const sp = await mkEvent(selfie, "selfpast", { startsIn: "-10 days" });
+      const st = await mkType(sp.id, 100, 20);
+      for (let i = 0; i < 4; i++) await mkOrder(sp.id, st, (await mkUser(`s${i}`)).id, 100);
+      await mkOrder(sp.id, st, selfie.id, 100);
+      const mate = await mkUser("mate");
+      await q(`INSERT INTO event_door_team (host_user_id, member_user_id, added_by_user_id, role, invited_at, accepted_at) VALUES ($1, $2, $1, 'door', now(), now())`, [selfie.id, mate.id]);
+      await mkOrder(sp.id, st, mate.id, 100);
+      await q(`INSERT INTO event_payouts (event_id, destination_type, connected_account_id, gross_cents, deducted_cents, team_cents, amount_cents, status, transfer_id, paid_at)
+               VALUES ($1, 'user', $2, 600, 0, 0, 600, 'paid', $3, now() - interval '3 days')`, [sp.id, `acct_${P}_sf`, `tr_${P}_sf`]);
+      const sn = await mkEvent(selfie, "selfnext", { status: "draft" });
+      r = await call("POST", `/api/events/${sn.id}/ticket-types`, { token: selfie.token, body: { name: "GA", priceCents: 2000, quantity: 101 } });
+      assert(r.status === 409 && r.body?.error?.code === "NEW_HOST_LIMIT", "host and their team buying tickets don't count toward the 5 guests: still limited", r.status);
+      await mkOrder(sp.id, st, (await mkUser("s5")).id, 100);
+      r = await call("POST", `/api/events/${sn.id}/ticket-types`, { token: selfie.token, body: { name: "GA", priceCents: 2000, quantity: 101 } });
+      assert(r.status === 201, "a 5th real guest: lifted", r.status);
+
+      // A dispute still open on any of their events: limited again until it is won.
+      const other = await mkEvent(seasoned, "other", { startsIn: "-2 days" });
+      const ot = await mkType(other.id, 2000, 5);
+      const oo = await mkOrder(other.id, ot, (await mkUser("dbuyer")).id, 2000);
+      await q(`INSERT INTO stripe_disputes (dispute_id, kind, reference_id, amount_cents, status) VALUES ($1, 'ticket_order', $2, 2000, 'needs_response')`, [`dp_${P}_open`, oo]);
+      const next3 = await mkEvent(seasoned, "next3", { status: "draft" });
+      r = await call("POST", `/api/events/${next3.id}/ticket-types`, { token: seasoned.token, body: { name: "GA", priceCents: 2000, quantity: 101 } });
+      assert(r.status === 409 && r.body?.error?.code === "NEW_HOST_LIMIT", "an open dispute on another of their events: limited", r.status);
+      await q(`UPDATE stripe_disputes SET status = 'won', outcome = 'won', closed_at = now() WHERE dispute_id = $1`, [`dp_${P}_open`]);
+      r = await call("POST", `/api/events/${next3.id}/ticket-types`, { token: seasoned.token, body: { name: "GA", priceCents: 2000, quantity: 101 } });
+      assert(r.status === 201, "dispute won: lifted again", r.status);
 
       const burned = await mkUser("burned");
       const past2 = await mkEvent(burned, "past2", { startsIn: "-10 days" });
       const t2 = await mkType(past2.id, 2000, 10);
       const o2 = await mkOrder(past2.id, t2, (await mkUser("buyer2")).id, 2000);
+      for (let i = 0; i < 4; i++) await mkOrder(past2.id, t2, (await mkUser(`b${i}`)).id, 2000);
       await q(`INSERT INTO event_payouts (event_id, destination_type, connected_account_id, gross_cents, deducted_cents, team_cents, amount_cents, status, transfer_id, paid_at)
                VALUES ($1, 'user', $2, 1960, 0, 0, 1960, 'paid', $3, now() - interval '3 days')`, [past2.id, `acct_${P}_b`, `tr_${P}_b`]);
       await q(`INSERT INTO stripe_disputes (dispute_id, kind, reference_id, amount_cents, status, outcome, closed_at) VALUES ($1, 'ticket_order', $2, 2000, 'lost', 'lost', now())`, [`dp_${P}_b`, o2]);
@@ -421,6 +455,17 @@ function callAt(base: string, method: string, path: string, o: { token?: string;
       assert(r.status === 200 && r.body?.dismissed === 1 && !after.body?.items?.some((i: any) => i.eventId === ev.id) && (await eventStatus(ev.id)) === "published",
         "dismiss: report closed, event untouched, gone from the list", { r: r.body, still: after.body?.items?.some((i: any) => i.eventId === ev.id) });
       assert((await auditFor(ev.id)).some((a: any) => a.action === "event.reports_dismissed"), "dismiss in the audit log", null);
+      // One open report per person: after a dismissal (or a pause that was released) they can report again.
+      const re4 = await call("POST", `/api/events/${ev.id}/report`, { token: r4.token, body: { reason: "scam" } });
+      const re1 = await call("POST", `/api/events/${ev.id}/report`, { token: r1.token, body: { reason: "illegal" } });
+      const rr = await reportRows(ev.id);
+      const row4 = rr.find((x: any) => x.reporter_id === r4.id), row1 = rr.find((x: any) => x.reporter_id === r1.id);
+      assert(re4.body?.alreadyReported === false && re1.body?.alreadyReported === false && row4?.status === "pending" && row4?.reason === "scam" && row4?.admin_action === null
+        && row1?.status === "pending" && row1?.reason === "illegal" && rr.length === 4,
+        "reviewed reports reopen with the new reason, still one row each", rr);
+      const dup = await call("POST", `/api/events/${ev.id}/report`, { token: r1.token, body: { reason: "hate" } });
+      assert(dup.body?.alreadyReported === true && (await reportRows(ev.id)).find((x: any) => x.reporter_id === r1.id)?.reason === "illegal", "open report: a second one is not counted", dup.body);
+      await call("POST", `/api/admin/events/${ev.id}/reports/dismiss`, { token: admin.token, body: { reason: "Checked again" } });
     }
     {
       // Cancel and refund everyone, also after the event started (hosts can't do that themselves)
@@ -441,6 +486,9 @@ function callAt(base: string, method: string, path: string, o: { token?: string;
       assert((await auditFor(live.id)).some((a: any) => a.action === "event.cancel" && a.metadata?.reason === "Event was a scam"), "cancel in the audit log with the reason", null);
       const cr = (await q(`SELECT cancel_reason FROM events WHERE id = $1`, [live.id]))[0];
       assert(cr.cancel_reason === null, "guests never see the admin's reason (their emails show cancel_reason as a message from the host)", cr);
+      await new Promise((res) => setTimeout(res, 200));
+      const gc = guestCancels.find((g) => g.event?.title === `${P} started`);
+      assert(!!gc && gc.cancelledByOutsyde === true && !gc.cancelReason, "free RSVP guests' email is marked cancelled by Outsyde", guestCancels);
       const again = await call("POST", `/api/admin/events/${live.id}/cancel`, { token: admin.token, body: { reason: "x" } });
       const rel = await call("POST", `/api/admin/events/${live.id}/release`, { token: admin.token, body: { reason: "x" } });
       assert(again.status === 409 && rel.status === 409, "cancelled: can't cancel again or release", [again.status, rel.status]);
@@ -459,6 +507,16 @@ function callAt(base: string, method: string, path: string, o: { token?: string;
       // What the host reads (tags and styling removed): no dashes, no percentages.
       const visible = (h: string) => h.replace(/<style[\s\S]*?<\/style>/gi, " ").replace(/<[^>]+>/g, " ");
       assert(out.every((o: any) => !/[–—]/.test(visible(o.html) + o.subject) && !/%/.test(visible(o.html) + o.subject)), "no dashes, no percentages in what the host reads", out.map((o: any) => visible(o.html).replace(/\s+/g, " ").slice(0, 300)));
+      // Guests' cancel emails: who cancelled.
+      const es: any = await import("../emailService");
+      const evE = { title: "Rooftop", whenText: "Sat", whereText: "Brooklyn" };
+      const paidO = visible(es.renderTicketRefund({ toEmail: "g@b.test", firstName: "Sam", event: evE, reason: "event_cancelled", refundCents: 2000, keptFeeCents: 0, cancelledByOutsyde: true }).html);
+      const paidH = visible(es.renderTicketRefund({ toEmail: "g@b.test", firstName: "Sam", event: evE, reason: "event_cancelled", refundCents: 2000, keptFeeCents: 0 }).html);
+      const freeO = visible(es.renderEventCancelled({ toEmail: "g@b.test", firstName: "Sam", event: evE, cancelledByOutsyde: true }).html);
+      const freeH = visible(es.renderEventCancelled({ toEmail: "g@b.test", firstName: "Sam", event: evE }).html);
+      assert(paidO.includes("Outsyde cancelled this event, so your full payment is coming back to you.") && freeO.includes("Outsyde cancelled this event, so your RSVP is cancelled too.")
+        && paidH.includes("the host cancelled this event") && freeH.includes("the host cancelled this event") && !paidO.includes("host cancelled") && !freeO.includes("host cancelled"),
+        "guests read Outsyde cancelled for an admin cancel, the host for a host cancel", { paidO: paidO.replace(/\s+/g, " ").slice(0, 200), freeO: freeO.replace(/\s+/g, " ").slice(0, 200) });
     }
   } finally {
     await q(`UPDATE events SET status = 'draft' WHERE id = ANY($1::varchar[])`, [allEvents]).catch(() => {});
