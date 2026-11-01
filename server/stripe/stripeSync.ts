@@ -200,7 +200,8 @@ async function applyRefund(r: RefundInput, sale: { kind: Kind; id: string | null
       o AS (
         UPDATE ticket_orders SET
                status = CASE WHEN ${r.full} AND status = 'completed' THEN 'refunded' ELSE status END,
-               refunded_cents = LEAST(total_cents, refunded_cents + ${r.amount}),
+               -- never past the order total less a refund Outsyde is still sending (ticket_orders_refund_pending_valid)
+               refunded_cents = LEAST(total_cents - refund_amount_cents, refunded_cents + ${r.amount}),
                refunded_at = CASE WHEN ${r.full} AND status = 'completed' THEN now() ELSE refunded_at END,
                needs_review_at = CASE WHEN ${r.full} AND status = 'completed' THEN needs_review_at ELSE COALESCE(needs_review_at, now()) END,
                review_reason = CASE WHEN ${r.full} AND status = 'completed' THEN review_reason ELSE COALESCE(review_reason, ${reason}) END,

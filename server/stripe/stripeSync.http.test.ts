@@ -324,7 +324,8 @@ const isLocal = (u: string) => ["localhost", "127.0.0.1", "::1", "[::1]"].includ
       const piA = (await q(`SELECT stripe_payment_intent_id AS pi FROM ticket_orders WHERE id = $1`, [a.orderId]))[0].pi;
       await dashboardRefund(piA, a.totalCents, [refund(piA, `re_${piA}_1`, a.totalCents)]);
       assert((await ticketStatuses(a.orderId)).every((s) => s === "refunded"), "after the payout: tickets refunded", await ticketStatuses(a.orderId));
-      await payouts.openRecoveries();
+      // the step opens at most 50 per run, oldest first (other test data may be waiting too): run it until it is done
+      for (let i = 0; i < 50; i++) if (!(await payouts.openRecoveries())) break;
       const r = await eventRecoveries(a.orderId);
       assert(r.length === 2 && r.every((x: any) => Number(x.amount_cents) === HOST_NET && x.status === "pending"),
         "after the payout: host share recovered per ticket (existing recovery step)", r);
@@ -643,6 +644,21 @@ const isLocal = (u: string) => ["localhost", "127.0.0.1", "::1", "[::1]"].includ
       await sendDispute("created", dispute(pi, dId, 10000, "needs_response"));
       const t2 = (await q094(`SELECT (extract(epoch from updated_at) * 1000000)::bigint::text AS t FROM stripe_disputes WHERE dispute_id = $1`, [dId]))[0]?.t;
       assert(!!t1 && String(t1) === String(t2), "replayed dispute event leaves updated_at alone", { t1, t2 });
+    }
+
+    {
+      // Production check ticket_orders_refund_pending_valid: a dashboard refund while Outsyde's own refund is still being
+      // sent must not break it (the statement would fail and retry forever). Saved, capped, flagged for review.
+      const host = await mkHost("h_inflight");
+      const ev = await mkEvent(host.id, "inflight", "1 day");
+      const o = await mkTicketOrder(ev, `pi_${uid("inflight")}`, 2);
+      await q(`UPDATE ticket_orders SET status = 'refunding', refund_reason = 'host', refund_amount_cents = 3920, refund_requested_at = now() WHERE id = $1`, [o.orderId]);
+      const piO = (await q(`SELECT stripe_payment_intent_id AS pi FROM ticket_orders WHERE id = $1`, [o.orderId]))[0].pi;
+      await dashboardRefund(piO, o.totalCents, [refund(piO, `re_${piO}_1`, 1000)]);
+      const t = (await q(`SELECT status, refunded_cents, refund_amount_cents, needs_review_at FROM ticket_orders WHERE id = $1`, [o.orderId]))[0];
+      const dash = await q094(`SELECT 1 FROM stripe_dashboard_refunds WHERE refund_id = $1`, [`re_${piO}_1`]);
+      assert(t.status === "refunding" && Number(t.refunded_cents) + Number(t.refund_amount_cents) <= o.totalCents && !!t.needs_review_at && dash.length === 1 && alertsAbout(piO).length === 1,
+        "dashboard refund during an in-app refund: saved, within the order total, flagged, emailed", { t, dash: dash.length, a: alertsAbout(piO).length });
     }
 
     // ════ Backstop ════
