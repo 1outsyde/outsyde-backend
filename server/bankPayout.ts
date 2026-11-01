@@ -32,6 +32,8 @@ export type HeldBreakdown = {
   referralPayoutsOpen: number;
   /** Event team pay (087) Outsyde owes team members and hasn't sent yet: pending, held or review. */
   teamPayoutsOpen: number;
+  /** p5-stripe-sync (094): host share held from event payouts for disputes still open, or won and not sent yet. */
+  disputeHolds: number;
 };
 
 /** Counts that block or flag the payout; not money, so never part of total. */
@@ -73,6 +75,7 @@ SELECT
  (SELECT COALESCE(SUM(amount_cents),0) FROM referral_payouts WHERE status IN ('pending','held','review'))::bigint AS referral_payouts_open,
  (SELECT count(*) FROM referral_payouts WHERE status='pending' AND last_error ILIKE '%insufficient%')::int AS referral_payouts_waiting_balance,
  (SELECT COALESCE(SUM(amount_cents),0) FROM event_team_payouts WHERE status IN ('pending','held','review'))::bigint AS team_payouts_open,
+ (SELECT COALESCE(SUM(held_cents),0) FROM stripe_disputes WHERE held_payout_id IS NOT NULL AND release_transfer_id IS NULL AND (outcome IS NULL OR outcome='won'))::bigint AS dispute_holds,
  (SELECT count(*) FROM event_team_payouts WHERE status='pending' AND last_error ILIKE '%insufficient%')::int AS team_payouts_waiting_balance
 `));
   const n = (v: unknown) => Number(v ?? 0);
@@ -91,6 +94,8 @@ SELECT
     bookingRefundCover: n(r.booking_refund_cover),
     referralPayoutsOpen: n(r.referral_payouts_open),
     teamPayoutsOpen: n(r.team_payouts_open),
+    // p5-stripe-sync S4: host share held from an event payout for an open dispute, or won and not yet sent.
+    disputeHolds: n(r.dispute_holds),
   };
   const gates: Gates = {
     recentTopups: n(r.recent_topups),
