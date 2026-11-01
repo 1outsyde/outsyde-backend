@@ -57,6 +57,7 @@ function callAt(base: string, method: string, path: string, o: { token?: string;
   process.env.JWT_SECRET = process.env.JWT_SECRET || "ev-test-jwt";
   process.env.FRONTEND_URL = "https://goutsyde.test";
   delete process.env.TEAM_PAYOUTS_ENABLED;
+  process.env.TEAM_NOTE_REQUIRED = "true";
   const { generateAccessToken } = await import("../auth");
   const pgMod: any = await import("pg");
   const pg = pgMod.default ?? pgMod;
@@ -203,6 +204,15 @@ function callAt(base: string, method: string, path: string, o: { token?: string;
     assert(!(await isReady(x1)), "someone else's acceptance doesn't count");
     const st = await send.readinessOf(s1.id), nt = await send.readinessOf(n1.id), bt = await send.readinessOf(b1.id);
     assert(st.stripe && !st.note && !nt.stripe && nt.note && bt.stripe && bt.note, "readiness says what is missing", { st, nt, bt });
+
+    console.log("\nthe switch: TEAM_NOTE_REQUIRED off means payout setup only, as before 9d");
+    delete process.env.TEAM_NOTE_REQUIRED;
+    const so = await send.readinessOf(s1.id);
+    assert(await isReady(s1) && so.stripe && so.note, "off: Stripe alone is ready and nothing asks for the note", so);
+    assert(!(await isReady(n1)), "off: the note alone is still not ready");
+    const rOff = await call("GET", "/api/events/team-note", { token: tok(m1.id) });
+    assert(rOff.status === 200 && rOff.body?.note?.accepted === true, "off: the note can still be read and accepted", rOff.body);
+    process.env.TEAM_NOTE_REQUIRED = "true";
 
     console.log("\nthe payout: Stripe only means the host pays them");
     const h = await user("h"); await stripeReady(h); await accepted(h);

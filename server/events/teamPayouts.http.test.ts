@@ -165,7 +165,7 @@ function callAt(base: string, method: string, path: string, o: { token?: string;
   const allUsers: string[] = [buyer.id];
   const user = async (s: string) => { const u = await mkUser(s); allUsers.push(u.id); 
     // Step 9d: everyone in this file accepted the Event Team note, so "ready" here means payout setup, as before. teamNote.http.test.ts covers a missing note.
-    await q(`INSERT INTO event_team_note_acceptances (user_id, version) VALUES ($1, '2026-11-01') ON CONFLICT DO NOTHING`, [u.id]);
+    await q(`INSERT INTO event_team_note_acceptances (user_id, version) VALUES ($1, $2) ON CONFLICT DO NOTHING`, [u.id, (await import("./teamNote")).TEAM_NOTE_VERSION]);
     return u; };
   const event = async (h: { id: string }, slug: string, o: { ended?: string; status?: string } = {}) => { const e = await mkEvent(h, slug, o); allEvents.push(e.id); return e; };
 

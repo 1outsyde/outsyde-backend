@@ -71,12 +71,18 @@ export const stripeReadySql = (userId: ReturnType<typeof sql> | string) => sql`(
  * Step 9d (call 80): ready to be paid through Outsyde = a payout destination that finished setup AND the current Event
  * Team note (teamNote.ts). The one rule for the payout (createDuePayouts via readyMembers), the setup reminders and the
  * member's own "set up by" line. Not ready by payout day: 'no_setup', the host pays them.
+ *
+ * TEAM_NOTE_REQUIRED=true on Render turns the note part on. Off (unset): readiness is payout setup only, exactly as
+ * before 9d, so nobody stops being paid through Outsyde before goutsyde.com and the app can show the note. Turn it
+ * on once both are live. The note can be read and accepted either way.
  */
-export const memberReadySql = (userId: ReturnType<typeof sql> | string) => sql`(${stripeReadySql(userId)} AND ${noteAcceptedSql(userId)})`;
+export const teamNoteRequired = () => process.env.TEAM_NOTE_REQUIRED === "true";
+const noteCondition = (userId: ReturnType<typeof sql> | string) => (teamNoteRequired() ? noteAcceptedSql(userId) : sql`true`);
+export const memberReadySql = (userId: ReturnType<typeof sql> | string) => sql`(${stripeReadySql(userId)} AND ${noteCondition(userId)})`;
 
-/** What is still missing for one person (false = done). */
+/** What is still missing for one person (false = missing). The note counts as done while it isn't required. */
 export async function readinessOf(userId: string): Promise<{ stripe: boolean; note: boolean }> {
-  const [r] = await rows<any>(sql`SELECT ${stripeReadySql(userId)} AS stripe, ${noteAcceptedSql(userId)} AS note`);
+  const [r] = await rows<any>(sql`SELECT ${stripeReadySql(userId)} AS stripe, ${noteCondition(userId)} AS note`);
   const yes = (v: unknown) => v === true || v === "t" || v === "true";
   return { stripe: yes(r?.stripe), note: yes(r?.note) };
 }
@@ -406,7 +412,7 @@ export async function remindTeamSetup(limit = 200): Promise<number> {
   const cand = await rows<any>(sql`
     SELECT DISTINCT e.id, e.title, e.host_user_id, e.timezone, e.starts_at, e.ends_at, p.member_user_id,
            ${LOCAL_DAY(0)} AS is_day_of, ${LOCAL_DAY(1)} AS is_day_after,
-           ${stripeReadySql(sql`p.member_user_id`)} AS stripe_done, ${noteAcceptedSql(sql`p.member_user_id`)} AS note_done
+           ${stripeReadySql(sql`p.member_user_id`)} AS stripe_done, ${noteCondition(sql`p.member_user_id`)} AS note_done
     FROM ${PAID_SPOTS} p JOIN events e ON e.id = p.event_id
     LEFT JOIN event_team_setup_notices n ON n.event_id = e.id AND n.member_user_id = p.member_user_id
     WHERE ${BEFORE_DEADLINE} AND ${ON_TEAM_IN_ROLE} AND NOT ${memberReadySql(sql`p.member_user_id`)}

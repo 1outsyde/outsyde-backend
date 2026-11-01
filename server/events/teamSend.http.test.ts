@@ -144,7 +144,7 @@ function callAt(base: string, method: string, path: string, o: { token?: string;
     ))[0].id as string;
     allUsers.push(id);
     // Step 9d: everyone in this file accepted the Event Team note, so "ready" here means payout setup, as before. teamNote.http.test.ts covers a missing note.
-    await q(`INSERT INTO event_team_note_acceptances (user_id, version) VALUES ($1, '2026-11-01') ON CONFLICT DO NOTHING`, [id]);
+    await q(`INSERT INTO event_team_note_acceptances (user_id, version) VALUES ($1, $2) ON CONFLICT DO NOTHING`, [id, (await import("./teamNote")).TEAM_NOTE_VERSION]);
     return { id, username };
   };
   /** A payout account that has finished setup (the member, or a host so its own payout can go). */
