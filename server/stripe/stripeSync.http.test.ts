@@ -534,6 +534,117 @@ const isLocal = (u: string) => ["localhost", "127.0.0.1", "::1", "[::1]"].includ
       assert(alerts.length === n, "dispute on a connected account: ignored", alerts.length - n);
     }
 
+    // ════ Review fixes (independent review 2026-11-01) ════
+    console.log("\nreview fixes");
+    {
+      // 1. A lost booking dispute is actually taken back by the booking recovery job (it is not a Stripe refund to look up)
+      const pi = `pi_${uid("bdrec")}`;
+      const id = await mkAppointment(pi);
+      const dId = `dp_${uid("brec")}`;
+      await sendDispute("created", dispute(pi, dId, 10000, "needs_response"));
+      await sendDispute("closed", dispute(pi, dId, 10000, "lost"));
+      const [row] = await q(`SELECT id FROM booking_refund_recoveries WHERE refund_id = $1`, [`dispute_${dId}`]);
+      const reversals: any[] = [];
+      const fake: any = {
+        listBookingTransfers: async (group: string) => (group === `appointment_${id}` ? [{ id: `tr_${pi}`, amount: 9800, amountReversed: 0, destination: `acct_${P}_biz` }] : []),
+        listPaymentIntentRefunds: async () => { throw new Error("must not look a dispute up as a refund"); },
+        findRecoveryReversals: async () => [],
+        reverseForRecovery: async (p: any) => { reversals.push(p); return { id: `trr_${pi}` }; },
+        getPaymentIntentAmountReceived: async () => 10000,
+        isInsufficientFundsError: () => false,
+      };
+      const { processBookingRecovery } = await import("../bookingRecoveries");
+      const res = await processBookingRecovery(row.id, fake);
+      const after = (await q(`SELECT status, reference_id, reversed_cents FROM booking_refund_recoveries WHERE id = $1`, [row.id]))[0];
+      assert(res === "reversed" && reversals.length === 1 && reversals[0].transferId === `tr_${pi}` && reversals[0].refundId === `dispute_${dId}` && Number(reversals[0].amountCents) > 0
+        && after.reference_id === id && Number(after.reversed_cents) === Number(reversals[0].amountCents),
+        "lost booking dispute: recovery job takes the seller share back from the booking transfer", { res, reversals, after });
+    }
+    {
+      // 2. Full or partial comes from Stripe's live list, not the event's charge (events out of order)
+      const pi = `pi_${uid("aporder")}`;
+      const id = await mkAppointment(pi);
+      const a = refund(pi, `re_${pi}_a`, 4000, { created: NOW - 10 });
+      const b = refund(pi, `re_${pi}_b`, 6000, { created: NOW });
+      refundsByCharge.set(`ch_${pi}`, [a, b]);
+      await WebhookHandlers.handleEvent(evt("charge.refunded", charge(pi, 10000, 4000))); // A's event, handled after B happened
+      const x = await appt(id);
+      assert(x.status === "refunded" && Number(x.refund_amount) === 10000, "second refund completes the charge: booking refunded even from the older event", x);
+      const tpi = `pi_${uid("tkorder")}`;
+      const host = await mkHost("h_order");
+      const ev = await mkEvent(host.id, "order-fix", "1 day");
+      const o = await mkTicketOrder(ev, tpi, 2);
+      refundsByCharge.set(`ch_${tpi}`, [refund(tpi, `re_${tpi}_a`, 1000, { created: NOW - 10 }), refund(tpi, `re_${tpi}_b`, 3000, { created: NOW })]);
+      await WebhookHandlers.handleEvent(evt("charge.refunded", charge(tpi, 4000, 4000))); // newest charge state, both refunds listed
+      const t = await ticketOrder(o.orderId);
+      assert(t.status === "refunded" && Number(t.refunded_cents) === 4000 && (await ticketStatuses(o.orderId)).every((s) => s === "refunded"),
+        "ticket order: partial then remainder ends refunded with tickets cancelled", { t, tickets: await ticketStatuses(o.orderId) });
+    }
+    {
+      // 3. A cancelled card hold (uncaptured charge) is not a refund
+      const pi = `pi_${uid("hold")}`;
+      const id = await mkAppointment(pi);
+      refundsByCharge.set(`ch_${pi}`, [refund(pi, `re_${pi}_hold`, 10000)]);
+      const n = recs.length;
+      await WebhookHandlers.handleEvent(evt("charge.refunded", { ...charge(pi, 10000, 10000), captured: false, amount_captured: 0 }));
+      const x = await appt(id);
+      assert(x.status === "confirmed" && !x.refund_amount && alertsAbout(pi).length === 0 && recs.length === n,
+        "cancelled card hold: nothing applied, no email, Stripe not called", { x, calls: recs.length - n });
+    }
+    {
+      // 6. Won while held on a $0 payout whose row has no account: released to the host's account now
+      const host = await mkHost("h_zero");
+      const ev = await mkEvent(host.id, "zero-held");
+      const a = await mkTicketOrder(ev, `pi_${uid("zero")}`, 2);
+      const share = HOST_NET * 2;
+      const [p] = await q(`INSERT INTO event_payouts (event_id, destination_type, connected_account_id, gross_cents, deducted_cents, team_cents, dispute_held_cents, amount_cents, status, paid_at)
+                           VALUES ($1, 'user', NULL, $2, 0, 0, $2, 0, 'paid', now()) RETURNING id`, [ev.id, share]);
+      const dId = `dp_${uid("zero")}`;
+      await q(`INSERT INTO stripe_disputes (dispute_id, payment_intent_id, kind, reference_id, amount_cents, status, outcome, closed_at, held_cents, held_payout_id)
+               VALUES ($1, $2, 'ticket_order', $3, $4, 'won', 'won', now(), $5, $6)`, [dId, `pi_${uid("zeropi")}`, a.orderId, a.totalCents, share, p.id]);
+      const n = callsTo("POST", "/v1/transfers").length;
+      await sync.settleDispute(dId);
+      const sent = callsTo("POST", "/v1/transfers").slice(n);
+      assert(sent.length === 1 && sent[0].form.destination === host.acct && Number(sent[0].form.amount) === share,
+        "$0 payout with no account on the row: held share sent to the host's current account", sent.map((r) => r.form));
+    }
+    {
+      // 7. Any closing status other than lost (for example prevented) is won
+      const pi = `pi_${uid("prev")}`;
+      await mkAppointment(pi);
+      const dId = `dp_${uid("prev")}`;
+      await sendDispute("created", dispute(pi, dId, 10000, "needs_response"));
+      await sendDispute("closed", dispute(pi, dId, 10000, "prevented"));
+      const d = await disputeRow(dId);
+      assert(d?.outcome === "won" && !!d?.settled_at && (await recoveriesFor(pi)).length === 0, "closed as prevented: won, settled, nothing taken back", d);
+    }
+    {
+      // 8. A lost ticket dispute waiting on its payout is snoozed so it never blocks the settle queue
+      const host = await mkHost("h_wait");
+      const ev = await mkEvent(host.id, "wait", "1 day"); // payout not due for 2 more days
+      const a = await mkTicketOrder(ev, `pi_${uid("wait")}`, 2);
+      const piA = (await q(`SELECT stripe_payment_intent_id AS pi FROM ticket_orders WHERE id = $1`, [a.orderId]))[0].pi;
+      const dId = `dp_${uid("wait")}`;
+      await sendDispute("created", dispute(piA, dId, a.totalCents, "needs_response"));
+      await sendDispute("closed", dispute(piA, dId, a.totalCents, "lost"));
+      const d = await disputeRow(dId);
+      assert(!d?.settled_at && d?.release_next_at && new Date(d.release_next_at).getTime() > Date.now() + 10 * 60000,
+        "lost before the payout exists: not settled, looked at again in 15 minutes", d);
+      const due = await q094(`SELECT 1 FROM stripe_disputes WHERE dispute_id = $1 AND (release_next_at IS NULL OR release_next_at <= now())`, [dId]);
+      assert(due.length === 0, "out of the settle queue until then", due);
+    }
+    {
+      // 4. An event replay never changes updated_at (the release claim's ownership tag)
+      const pi = `pi_${uid("tag")}`;
+      await mkAppointment(pi);
+      const dId = `dp_${uid("tag")}`;
+      await sendDispute("created", dispute(pi, dId, 10000, "needs_response"));
+      const t1 = (await q094(`SELECT (extract(epoch from updated_at) * 1000000)::bigint::text AS t FROM stripe_disputes WHERE dispute_id = $1`, [dId]))[0]?.t;
+      await sendDispute("created", dispute(pi, dId, 10000, "needs_response"));
+      const t2 = (await q094(`SELECT (extract(epoch from updated_at) * 1000000)::bigint::text AS t FROM stripe_disputes WHERE dispute_id = $1`, [dId]))[0]?.t;
+      assert(!!t1 && String(t1) === String(t2), "replayed dispute event leaves updated_at alone", { t1, t2 });
+    }
+
     // ════ Backstop ════
     console.log("\nbackstop: the sync job handles events the webhook missed");
     {
@@ -557,6 +668,14 @@ const isLocal = (u: string) => ["localhost", "127.0.0.1", "::1", "[::1]"].includ
   } finally {
     // keep other suites' payout runs away from these events
     if (allEvents.length) await q(`UPDATE events SET status = 'draft' WHERE id = ANY($1::varchar[])`, [allEvents]).catch(() => {});
+    // and their "every due row" checks away from this run's rows (booking recovery job, backfill, settle queue)
+    const like = `pi_${P}%`;
+    await q(`DELETE FROM booking_refund_recoveries WHERE payment_intent_id LIKE $1`, [like]).catch(() => {});
+    await q(`DELETE FROM event_payout_recoveries WHERE ticket_id IN (SELECT t.id FROM tickets t JOIN ticket_orders o ON o.id = t.order_id WHERE o.stripe_payment_intent_id LIKE $1)`, [like]).catch(() => {});
+    await q094(`DELETE FROM stripe_disputes WHERE payment_intent_id LIKE $1 OR dispute_id LIKE $2`, [like, `dp_${P}%`]);
+    await q094(`DELETE FROM stripe_dashboard_refunds WHERE payment_intent_id LIKE $1`, [like]);
+    await q(`DELETE FROM appointments WHERE stripe_payment_intent_id LIKE $1`, [like]).catch(() => {});
+    await q(`UPDATE orders SET status = 'cancelled' WHERE stripe_payment_intent_id LIKE $1`, [like]).catch(() => {});
     sync.setStripeSyncAlertForTest?.(null);
     await db.end().catch(() => {});
     stub.close();

@@ -13,6 +13,9 @@ export const RECOVERY_START_UNIX = 1792540800;
 export const BACKFILL_LIMIT = 500;
 export const BACKFILL_EVERY_MINUTES = 15;
 
+/** p5-stripe-sync S6: rows for a lost dispute use refund id dispute_<Stripe dispute id> (server/stripe/stripeSync.ts). */
+export const isDisputeRecovery = (refundId: string) => typeof refundId === "string" && refundId.startsWith("dispute_");
+
 /** Record one Stripe refund as a pending recovery. Same refund twice is a no-op; older refunds are skipped. */
 export async function recordBookingRefund(p: { refundId: string; paymentIntentId: string; refundCents: number; createdUnix: number }): Promise<void> {
   if (p.createdUnix < RECOVERY_START_UNIX) return;
@@ -266,7 +269,11 @@ export async function processBookingRecovery(id: string, s?: RecoveryStripe): Pr
   try {
     if (r.reference_id == null) {
       // Act only on a refund Stripe finished. Pending: wait (try given back). Failed or canceled: nothing to take back.
-      const refund = (await st.listPaymentIntentRefunds(r.payment_intent_id, STRIPE_CALL_BOUND)).find((x) => x.id === r.refund_id);
+      // p5-stripe-sync S6: a lost dispute (refund id dispute_<id>, recorded only once Stripe closed it as lost) is not
+      // a Stripe refund and is final, so it is never looked up.
+      const refund = isDisputeRecovery(r.refund_id)
+        ? { id: r.refund_id, status: "succeeded" }
+        : (await st.listPaymentIntentRefunds(r.payment_intent_id, STRIPE_CALL_BOUND)).find((x) => x.id === r.refund_id);
       if (!refund) throw new Error(`refund ${r.refund_id} not found on Stripe`);
       if (refund.status === "failed" || refund.status === "canceled") return close("nothing_sent", `refund ${refund.status} on Stripe`);
       if (refund.status !== "succeeded") {

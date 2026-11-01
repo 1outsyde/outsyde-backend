@@ -48,6 +48,16 @@ export const SYNC_EVENTS_EVERY_MINUTES = 15;
 const SYNC_MAX_PAGES = 10;
 export const RELEASE_LOCK_MINUTES = 10;
 export const RELEASE_MAX_ATTEMPTS = 5;
+/** A closed dispute that can't settle yet (payout not sent, host without an account) is looked at again this often. */
+export const SETTLE_RETRY_MINUTES = 15;
+/**
+ * The account an event payout goes to, for payout p of event e: the one on the payout row, else the host's account
+ * now (same rule as openRecoveries: a $0 payout to a host with no account yet has none on the row).
+ */
+const HOST_ACCT = sql`COALESCE(p.connected_account_id,
+  CASE WHEN e.host_type = 'business' AND e.host_business_id IS NOT NULL THEN (SELECT b.stripe_account_id FROM businesses b WHERE b.id = e.host_business_id)
+       WHEN e.host_type = 'photographer' AND e.host_photographer_id IS NOT NULL THEN (SELECT ph.stripe_account_id FROM photographers ph WHERE ph.id = e.host_photographer_id)
+       ELSE (SELECT u.stripe_account_id FROM user_payout_accounts u WHERE u.user_id = e.host_user_id) END)`;
 const STRIPE_CALL_BOUND = { timeoutMs: 30000, maxNetworkRetries: 1 };
 
 type StripeServiceT = typeof import("./stripeService").stripeService;
@@ -105,7 +115,7 @@ export async function handleSyncEvent(event: any, s?: SyncStripe): Promise<void>
   const obj = event.data?.object;
   if (!obj) return;
   if (event.type === "charge.refunded") await syncChargeRefunds(obj, s);
-  else await syncDispute(obj, s);
+  else await syncDispute(obj, s, event.type === "charge.dispute.closed");
 }
 
 // ─── Refunds ────────────────────────────────────────────────────────────────
@@ -123,20 +133,28 @@ export async function syncChargeRefunds(charge: any, s?: SyncStripe): Promise<nu
   const chargeId = idOf(charge);
   if (!chargeId) return 0;
   const pi = idOf(charge.payment_intent);
-  const captured = Number(charge.amount_captured ?? charge.amount ?? 0);
-  const full = captured > 0 && Number(charge.amount_refunded ?? 0) >= captured;
+  // A card hold that was cancelled (declined, expired or abandoned request) shows up as a refund of an uncaptured
+  // charge. No money was taken, so there is nothing to apply.
+  const captured = Number(charge.amount_captured ?? 0);
+  if (charge.captured === false || !(captured > 0)) return 0;
   const st = s ?? (await realStripe());
-  const refunds = await st.listChargeRefunds(chargeId, STRIPE_CALL_BOUND);
-  const candidates = refunds
-    .filter((r) => r.status !== "failed" && r.status !== "canceled" && r.amount > 0 && r.created >= SYNC_START_UNIX)
-    .filter((r) => Object.keys(r.metadata ?? {}).length === 0)
+  const live = (await st.listChargeRefunds(chargeId, STRIPE_CALL_BOUND))
+    .filter((r) => r.status !== "failed" && r.status !== "canceled" && r.amount > 0)
     .sort((a, b) => a.created - b.created || a.id.localeCompare(b.id));
+  // "Full" is worked out per refund from Stripe's live list (every refund up to and including this one, oldest
+  // first), never from the event's charge, which may be older than the list (events arrive out of order, the backstop
+  // replays them newest first).
+  let running = 0;
+  const withFull = live.map((r) => { running += r.amount; return { ...r, full: running >= captured }; });
+  const candidates = withFull
+    .filter((r) => r.created >= SYNC_START_UNIX)
+    .filter((r) => Object.keys(r.metadata ?? {}).length === 0);
   if (!candidates.length) return 0;
   const sale = await findSale(pi);
   let applied = 0;
   for (const r of candidates) {
     if (await isOwnRefundId(r.id)) continue;
-    const did = await applyRefund({ refundId: r.id, chargeId, pi, amount: r.amount, createdUnix: r.created, full }, sale);
+    const did = await applyRefund({ refundId: r.id, chargeId, pi, amount: r.amount, createdUnix: r.created, full: r.full }, sale);
     if (did) {
       applied++;
       await alert(`Refund made in Stripe: ${usd(r.amount)}`,
@@ -222,20 +240,27 @@ async function applyRefund(r: RefundInput, sale: { kind: Kind; id: string | null
 
 // ─── Disputes ───────────────────────────────────────────────────────────────
 
-function outcomeOf(status: string): "won" | "lost" | null {
-  if (status === "won" || status === "warning_closed") return "won";
+/**
+ * Won or lost once Stripe has closed it. lost is the only outcome where money stays with the customer; won,
+ * warning_closed (an inquiry that never became a chargeback) and any other status Stripe closes a dispute with (for
+ * example prevented on newer API versions) mean no money was lost.
+ */
+const OPEN_STATUSES = new Set(["warning_needs_response", "warning_under_review", "needs_response", "under_review"]);
+function outcomeOf(status: string, closedEvent: boolean): "won" | "lost" | null {
   if (status === "lost") return "lost";
+  if (status === "won" || status === "warning_closed") return "won";
+  if (closedEvent && !OPEN_STATUSES.has(status)) return "won";
   return null;
 }
 
 /** Saves or updates the dispute, sends the opened and closed emails once each, then settles it if it is closed. */
-export async function syncDispute(d: any, s?: SyncStripe): Promise<void> {
+export async function syncDispute(d: any, s?: SyncStripe, closedEvent = false): Promise<void> {
   const disputeId = idOf(d);
   if (!disputeId) return;
   const pi = idOf(d.payment_intent);
   const chargeId = idOf(d.charge);
   const status = String(d.status ?? "unknown");
-  const outcome = outcomeOf(status);
+  const outcome = outcomeOf(status, closedEvent);
   const fee = Math.max(0, ...((d.balance_transactions ?? []) as any[]).filter((t) => Number(t?.amount) < 0).map((t) => Number(t?.fee ?? 0)));
   const due = Number(d.evidence_details?.due_by ?? 0) || null;
   const sale = await findSale(pi);
@@ -250,8 +275,8 @@ export async function syncDispute(d: any, s?: SyncStripe): Promise<void> {
       outcome = COALESCE(stripe_disputes.outcome, EXCLUDED.outcome),
       closed_at = COALESCE(stripe_disputes.closed_at, EXCLUDED.closed_at),
       fee_cents = GREATEST(stripe_disputes.fee_cents, EXCLUDED.fee_cents),
-      evidence_due_by = COALESCE(EXCLUDED.evidence_due_by, stripe_disputes.evidence_due_by),
-      updated_at = now()
+      evidence_due_by = COALESCE(EXCLUDED.evidence_due_by, stripe_disputes.evidence_due_by)
+      -- updated_at is left alone: it is the release claim's ownership tag, and the backstop replays every event.
     RETURNING id, kind, reference_id, amount_cents, fee_cents, outcome, evidence_due_by`);
   if (!row) return;
   const what = `${KIND_TEXT[row.kind as Kind]}${row.reference_id ? ` ${row.reference_id}` : ""}`;
@@ -291,9 +316,19 @@ export async function settleDispute(disputeId: string, s?: SyncStripe): Promise<
   }
   if (d.kind !== "ticket_order" || !d.reference_id) return settle();
 
+  // Waiting (payout not sent yet, no account yet): checked again in 15 minutes, so a dispute that can't settle yet
+  // never blocks the others in the job's queue. Leaves updated_at alone (the release claim's ownership tag).
+  const snooze = async () => {
+    await rows<any>(sql`
+      UPDATE stripe_disputes SET release_next_at = GREATEST(COALESCE(release_next_at, now()), now() + make_interval(mins => ${SETTLE_RETRY_MINUTES}::int))
+      WHERE id = ${d.id} AND settled_at IS NULL RETURNING id`);
+    return "waiting" as const;
+  };
+
   if (d.outcome === "won") {
     if (Number(d.held_cents) <= 0 || d.release_transfer_id) return settle();
-    return releaseHeld(d, s);
+    const r = await releaseHeld(d, s);
+    return r === "waiting" ? snooze() : r;
   }
 
   // Lost: the paid part of the host share plus Stripe's fee, once the event's payout has been sent (or was $0).
@@ -305,10 +340,7 @@ export async function settleDispute(disputeId: string, s?: SyncStripe): Promise<
     ),
     p AS (
       SELECT p.id, p.transfer_id, p.amount_cents,
-             COALESCE(p.connected_account_id,
-               CASE WHEN e.host_type = 'business' AND e.host_business_id IS NOT NULL THEN (SELECT b.stripe_account_id FROM businesses b WHERE b.id = e.host_business_id)
-                    WHEN e.host_type = 'photographer' AND e.host_photographer_id IS NOT NULL THEN (SELECT ph.stripe_account_id FROM photographers ph WHERE ph.id = e.host_photographer_id)
-                    ELSE (SELECT u.stripe_account_id FROM user_payout_accounts u WHERE u.user_id = e.host_user_id) END) AS acct
+             ${HOST_ACCT} AS acct
       FROM event_payouts p JOIN ticket_orders o ON o.event_id = p.event_id JOIN events e ON e.id = p.event_id
       WHERE o.id = (SELECT reference_id FROM dd) AND p.status = 'paid'
     ),
@@ -316,6 +348,8 @@ export async function settleDispute(disputeId: string, s?: SyncStripe): Promise<
       SELECT t.id, t.host_net_cents, row_number() OVER (ORDER BY t.item_index, t.id) AS n,
              sum(t.host_net_cents) OVER (ORDER BY t.item_index, t.id) AS cum
       FROM tickets t WHERE t.order_id = (SELECT reference_id FROM dd) AND t.payout_id = (SELECT id FROM p)
+        -- a ticket already being recovered (refunded after the payout) can't take a second row: its share is coming back already
+        AND NOT EXISTS (SELECT 1 FROM event_payout_recoveries r WHERE r.ticket_id = t.id)
     ),
     paid AS (SELECT GREATEST(0, COALESCE(sum(host_net_cents), 0) - (SELECT held_cents FROM dd))::int AS amt FROM tk),
     amt AS (
@@ -330,15 +364,23 @@ export async function settleDispute(disputeId: string, s?: SyncStripe): Promise<
              CASE WHEN p.transfer_id IS NULL THEN 'dispute lost; the payout was $0, so there is no transfer to take it back from' END
       FROM amt, p WHERE amt.amount > 0 AND p.acct IS NOT NULL
       ON CONFLICT (ticket_id) DO NOTHING
-      RETURNING id
+      RETURNING id, amount_cents
     ),
     st AS (
       UPDATE stripe_disputes SET settled_at = now(), updated_at = now()
       WHERE id IN (SELECT id FROM dd) AND EXISTS (SELECT 1 FROM p WHERE p.acct IS NOT NULL)
       RETURNING id
     )
-    SELECT (SELECT count(*) FROM ins)::int AS opened, EXISTS (SELECT 1 FROM st) AS settled`);
-  return made?.settled ? "settled" : "waiting";
+    SELECT (SELECT count(*) FROM ins)::int AS opened, EXISTS (SELECT 1 FROM st) AS settled,
+           (SELECT COALESCE(sum(amount_cents), 0) FROM ins)::int AS recovering,
+           ((SELECT amt FROM paid) + (SELECT fee_cents FROM dd))::int AS expected`);
+  if (!made?.settled) return snooze();
+  if (Number(made.recovering) < Number(made.expected)) {
+    await alert("Lost dispute not fully recovered",
+      `Dispute ${disputeId} on ticket order ${d.reference_id} was lost. ${usd(made.recovering)} of ${usd(made.expected)} (host share paid plus Stripe's fee) ` +
+      `is being taken back from the host; the other ${usd(Number(made.expected) - Number(made.recovering))} could not be put on a ticket (no paid ticket left without a recovery). Collect it by hand if needed.`);
+  }
+  return "settled";
 }
 
 const OWNER_TAG = sql`(extract(epoch from updated_at) * 1000000)::bigint::text`;
@@ -352,11 +394,11 @@ async function releaseHeld(d: any, s?: SyncStripe): Promise<"released" | "waitin
   const [c] = await rows<any>(sql`
     UPDATE stripe_disputes sd SET release_attempts = release_attempts + 1,
            release_next_at = now() + make_interval(mins => ${RELEASE_LOCK_MINUTES}::int), updated_at = now()
-    FROM event_payouts p
+    FROM event_payouts p JOIN events e ON e.id = p.event_id
     WHERE sd.id = ${d.id} AND sd.outcome = 'won' AND sd.held_cents > 0 AND sd.release_transfer_id IS NULL AND sd.settled_at IS NULL
       AND (sd.release_next_at IS NULL OR sd.release_next_at <= now())
-      AND p.id = sd.held_payout_id AND p.status = 'paid' AND p.connected_account_id IS NOT NULL
-    RETURNING sd.id, sd.dispute_id, sd.held_cents, sd.release_attempts, p.id AS payout_id, p.event_id, p.connected_account_id,
+      AND p.id = sd.held_payout_id AND p.status = 'paid' AND ${HOST_ACCT} IS NOT NULL
+    RETURNING sd.id, sd.dispute_id, sd.held_cents, sd.release_attempts, p.id AS payout_id, p.event_id, ${HOST_ACCT} AS connected_account_id,
               (extract(epoch from sd.updated_at) * 1000000)::bigint::text AS tag`);
   if (!c) return "waiting"; // payout not sent yet, another run holds the lock, or already released
   const st = s ?? (await realStripe());
