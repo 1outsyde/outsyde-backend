@@ -2545,6 +2545,8 @@ export type TeamSetupReminderParams = {
   userId: string; toEmail: string; firstName: string | null; amountCents: number; eventTitle: string; deadlineText: string;
   /** The day after the event: last email before the deadline. */
   final: boolean;
+  /** Step 9d: what is done (true). Missing (older callers): treated as payout setup only, as before. */
+  needs?: { stripe: boolean; note: boolean };
 };
 
 export function renderTeamSetupReminder(params: TeamSetupReminderParams): { subject: string; html: string } {
@@ -2552,18 +2554,29 @@ export function renderTeamSetupReminder(params: TeamSetupReminderParams): { subj
   const title = escapeHtml(params.eventTitle);
   const day = escapeHtml(params.deadlineText);
   const pay = params.amountCents > 0 ? `Your ${amount}` : 'Your pay';
-  const heading = params.firstName ? `Hi ${escapeHtml(params.firstName)}, set up payouts to get paid` : 'Set up payouts to get paid';
+  // Step 9d: word it for what is missing. Without `needs`, payout setup only (the wording before the note existed).
+  const noteOnly = params.needs?.stripe === true && params.needs?.note === false;
+  const both = !!params.needs && !params.needs.stripe && !params.needs.note;
+  const ask = noteOnly ? 'accept the Event Team note' : both ? 'accept the Event Team note and set up payouts' : 'set up payouts';
+  const missing = noteOnly ? "you haven't accepted the Event Team note" : both ? "you haven't accepted the Event Team note and set up payouts" : "payouts aren't set up";
+  const how = noteOnly
+    ? 'Open the Outsyde app, go to the event in My Events and accept the Event Team note. It takes a minute.'
+    : both
+      ? 'Open the Outsyde app, go to the event in My Events, accept the Event Team note and tap Set up payouts. It takes a few minutes with Stripe.'
+      : 'Open the Outsyde app, go to the event in My Events and tap Set up payouts. It takes a few minutes with Stripe.';
+  const heading = params.firstName ? `Hi ${escapeHtml(params.firstName)}, ${ask} to get paid` : `${ask.charAt(0).toUpperCase()}${ask.slice(1)} to get paid`;
   const p = (t: string, color = '#CCCCCC') => `<p style="color:${color};font-size:15px;line-height:1.6;margin:0 0 14px 0;">${t}</p>`;
   const html = wrapEmail(`
     ${emailHeader(heading, params.final ? 'Last reminder' : title)}
     <tr><td style="background:#1A1A1A;padding:0 32px 8px;">
-      ${p(`${pay} for ${title} goes to the host if payouts aren't set up by ${day}.`)}
-      ${p('Open the Outsyde app, go to the event in My Events and tap Set up payouts. It takes a few minutes with Stripe.')}
+      ${p(`${pay} for ${title} goes to the host if ${missing} by ${day}.`)}
+      ${p(how)}
       ${p('If your share goes to the host, the host pays you directly instead of Outsyde.', '#888888')}
     </td></tr>
     ${emailFooter()}
   `);
-  return { subject: `${params.final ? 'Last reminder: s' : 'S'}et up payouts to get your pay for ${params.eventTitle}`, html };
+  const subjectAsk = params.final ? ask : `${ask.charAt(0).toUpperCase()}${ask.slice(1)}`;
+  return { subject: `${params.final ? 'Last reminder: ' : ''}${subjectAsk} to get your pay for ${params.eventTitle}`, html };
 }
 
 export async function sendTeamSetupReminderEmail(params: TeamSetupReminderParams): Promise<void> {

@@ -19,6 +19,7 @@
 import { sql } from "drizzle-orm";
 import { rows, iso, hostIdentity } from "./eventsRouter";
 import { alertAdmin } from "./ticketCheckout";
+import { noteAcceptedSql } from "./teamNote";
 
 type StripeServiceT = typeof import("../stripe/stripeService").stripeService;
 export type TeamStripe = Pick<StripeServiceT, "getPayoutReadiness" | "findEventTeamPayoutTransfer" | "createEventTeamPayoutTransfer" | "isInsufficientFundsError">;
@@ -59,12 +60,32 @@ async function realStripe(): Promise<TeamStripe> {
  * their own approved business, their photographer profile, their personal payout account. Stripe itself is asked at
  * send time (an account can still be held there).
  */
-export const memberReadySql = (userId: ReturnType<typeof sql> | string) => sql`(
+export const stripeReadySql = (userId: ReturnType<typeof sql> | string) => sql`(
   EXISTS (SELECT 1 FROM businesses b WHERE b.owner_id = ${userId} AND b.stripe_account_id IS NOT NULL AND b.stripe_account_id <> ''
           AND b.approval_status = 'approved' AND COALESCE(b.stripe_onboarding_complete, false))
   OR EXISTS (SELECT 1 FROM photographers ph WHERE ph.user_id = ${userId} AND ph.stripe_account_id IS NOT NULL AND ph.stripe_account_id <> ''
           AND COALESCE(ph.stripe_onboarding_complete, false))
   OR EXISTS (SELECT 1 FROM user_payout_accounts upa WHERE upa.user_id = ${userId} AND upa.onboarding_complete))`;
+
+/**
+ * Step 9d (call 80): ready to be paid through Outsyde = a payout destination that finished setup AND the current Event
+ * Team note (teamNote.ts). The one rule for the payout (createDuePayouts via readyMembers), the setup reminders and the
+ * member's own "set up by" line. Not ready by payout day: 'no_setup', the host pays them.
+ *
+ * TEAM_NOTE_REQUIRED=true on Render turns the note part on. Off (unset): readiness is payout setup only, exactly as
+ * before 9d, so nobody stops being paid through Outsyde before goutsyde.com and the app can show the note. Turn it
+ * on once both are live. The note can be read and accepted either way.
+ */
+export const teamNoteRequired = () => process.env.TEAM_NOTE_REQUIRED === "true";
+const noteCondition = (userId: ReturnType<typeof sql> | string) => (teamNoteRequired() ? noteAcceptedSql(userId) : sql`true`);
+export const memberReadySql = (userId: ReturnType<typeof sql> | string) => sql`(${stripeReadySql(userId)} AND ${noteCondition(userId)})`;
+
+/** What is still missing for one person (false = missing). The note counts as done while it isn't required. */
+export async function readinessOf(userId: string): Promise<{ stripe: boolean; note: boolean }> {
+  const [r] = await rows<any>(sql`SELECT ${stripeReadySql(userId)} AS stripe, ${noteCondition(userId)} AS note`);
+  const yes = (v: unknown) => v === true || v === "t" || v === "true";
+  return { stripe: yes(r?.stripe), note: yes(r?.note) };
+}
 
 /** Which of these users are set up (one statement). */
 export async function readyMembers(userIds: string[]): Promise<Set<string>> {
@@ -87,17 +108,27 @@ export function deadlineText(endsAt: Date | string, timeZone: string): string {
   }
 }
 
+/** What a member still has to do to be paid through Outsyde (true = done). Missing: both, as before step 9d. */
+export type Readiness = { stripe: boolean; note: boolean };
+const NOTHING_DONE: Readiness = { stripe: false, note: false };
+
 export const teamCopy = {
-  setup: (title: string) => ({ title: "Set up payouts", body: `Set up payouts to be paid for ${title}.` }),
-  setupFirm: (title: string, cents: number, day: string) => ({
-    title: "Set up payouts",
-    body: cents > 0
-      ? `Your ${usd(cents)} for ${title} goes to the host if payouts aren't set up by ${day}.`
-      : `Your pay for ${title} goes to the host if payouts aren't set up by ${day}.`,
-  }),
+  setup: (title: string, r: Readiness = NOTHING_DONE) =>
+    r.stripe
+      ? { title: "Accept the Event Team note", body: `Accept the Event Team note to be paid for ${title}.` }
+      : r.note
+        ? { title: "Set up payouts", body: `Set up payouts to be paid for ${title}.` }
+        : { title: "Get ready to be paid", body: `Accept the Event Team note and set up payouts to be paid for ${title}.` },
+  setupFirm: (title: string, cents: number, day: string, r: Readiness = NOTHING_DONE) => {
+    const what = r.stripe ? "you haven't accepted the Event Team note" : r.note ? "payouts aren't set up" : "you haven't accepted the Event Team note and set up payouts";
+    return {
+      title: r.stripe ? "Accept the Event Team note" : r.note ? "Set up payouts" : "Get ready to be paid",
+      body: cents > 0 ? `Your ${usd(cents)} for ${title} goes to the host if ${what} by ${day}.` : `Your pay for ${title} goes to the host if ${what} by ${day}.`,
+    };
+  },
   toHost: (title: string, cents: number) => ({
     title: "Your pay goes through the host",
-    body: `Payouts weren't set up in time, so your ${usd(cents)} for ${title} went to the host. The host will pay you directly.`,
+    body: `You weren't ready to be paid through Outsyde in time, so your ${usd(cents)} for ${title} went to the host. The host will pay you directly.`,
   }),
   heldSetup: (title: string, cents: number) => ({
     title: "Finish payout setup",
@@ -380,7 +411,8 @@ const LOCAL_DAY = (offsetDays: number) => sql`
 export async function remindTeamSetup(limit = 200): Promise<number> {
   const cand = await rows<any>(sql`
     SELECT DISTINCT e.id, e.title, e.host_user_id, e.timezone, e.starts_at, e.ends_at, p.member_user_id,
-           ${LOCAL_DAY(0)} AS is_day_of, ${LOCAL_DAY(1)} AS is_day_after
+           ${LOCAL_DAY(0)} AS is_day_of, ${LOCAL_DAY(1)} AS is_day_after,
+           ${stripeReadySql(sql`p.member_user_id`)} AS stripe_done, ${noteCondition(sql`p.member_user_id`)} AS note_done
     FROM ${PAID_SPOTS} p JOIN events e ON e.id = p.event_id
     LEFT JOIN event_team_setup_notices n ON n.event_id = e.id AND n.member_user_id = p.member_user_id
     WHERE ${BEFORE_DEADLINE} AND ${ON_TEAM_IN_ROLE} AND NOT ${memberReadySql(sql`p.member_user_id`)}
@@ -418,8 +450,9 @@ export async function remindTeamSetup(limit = 200): Promise<number> {
       if (!pushed && !mailed) continue;
       const cents = firm ? await memberPayCents(c, userId, cache) : 0;
       const day = deadlineText(c.ends_at, c.timezone ?? "America/New_York");
+      const r: Readiness = { stripe: yes(c.stripe_done), note: yes(c.note_done) };
       if (pushed) {
-        const copy = firm ? teamCopy.setupFirm(String(c.title), cents, day) : teamCopy.setup(String(c.title));
+        const copy = firm ? teamCopy.setupFirm(String(c.title), cents, day, r) : teamCopy.setup(String(c.title), r);
         await tell(userId, copy, "team_payout_setup", eventId, { eventId }, null, "event");
       }
       if (mailed && d.sendTeamSetupReminder) {
@@ -427,7 +460,7 @@ export async function remindTeamSetup(limit = 200): Promise<number> {
         if (u?.email) {
           await d.sendTeamSetupReminder({
             userId, toEmail: u.email, firstName: u.first_name ?? null, amountCents: cents, eventTitle: String(c.title), deadlineText: day,
-            final: yes(c.is_day_after),
+            final: yes(c.is_day_after), needs: r,
           }).catch((err: unknown) => console.error(`[TeamPay] setup email failed for ${userId}:`, (err as Error)?.message ?? err));
         }
       }
@@ -453,13 +486,14 @@ export async function notifySetupOnAccept(p: { scope: "standing" | "event"; even
       WHERE ${where} AND p.member_user_id = ${p.memberUserId} AND p.role = ${p.role} AND ${PAID_SPOT} AND ${BEFORE_DEADLINE}
         AND NOT ${memberReadySql(p.memberUserId)}
       ORDER BY e.starts_at, e.id LIMIT 5`);
+    const r = list.length ? await readinessOf(p.memberUserId) : NOTHING_DONE;
     for (const e of list) {
       const [claimed] = await rows<any>(sql`
         INSERT INTO event_team_setup_notices (event_id, member_user_id, last_push_at) VALUES (${e.id}, ${p.memberUserId}, now())
         ON CONFLICT (event_id, member_user_id) DO UPDATE SET last_push_at = now()
           WHERE event_team_setup_notices.last_push_at IS NULL OR event_team_setup_notices.last_push_at <= now() - interval '1 day'
         RETURNING 1 AS x`);
-      if (claimed) await tell(p.memberUserId, teamCopy.setup(String(e.title)), "team_payout_setup", String(e.id), { eventId: String(e.id) }, p.hostUserId, "event");
+      if (claimed) await tell(p.memberUserId, teamCopy.setup(String(e.title), r), "team_payout_setup", String(e.id), { eventId: String(e.id) }, p.hostUserId, "event");
     }
   } catch (err) {
     console.error(`[TeamPay] setup push on accept failed for ${p.memberUserId}:`, (err as Error)?.message ?? err);
@@ -477,7 +511,7 @@ export async function notifySetupForExtra(p: { eventId: string; memberUserId: st
       ON CONFLICT (event_id, member_user_id) DO UPDATE SET last_push_at = now()
         WHERE event_team_setup_notices.last_push_at IS NULL OR event_team_setup_notices.last_push_at <= now() - interval '1 day'
       RETURNING 1 AS x`);
-    if (claimed) await tell(p.memberUserId, teamCopy.setup(String(e.title)), "team_payout_setup", String(e.id), { eventId: String(e.id) }, p.hostUserId, "event");
+    if (claimed) await tell(p.memberUserId, teamCopy.setup(String(e.title), await readinessOf(p.memberUserId)), "team_payout_setup", String(e.id), { eventId: String(e.id) }, p.hostUserId, "event");
   } catch (err) {
     console.error(`[TeamPay] setup push for an extra failed for ${p.memberUserId}:`, (err as Error)?.message ?? err);
   }

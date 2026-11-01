@@ -48,7 +48,7 @@ import { LINK_ROLES, eventPay, parsePay, rolePayJson, settingOf } from "./teamPa
 import { teamAnchor, teamKindsToReset, type TeamTimes } from "./eventReminderRules";
 import { askStayLonger, answerStayLonger, setStayLongerAmount, listStayLonger, myStayLonger, lockedByStayLonger, closeStayLongerOffTeam } from "./teamExtensions";
 import {
-  notifySetupOnAccept, notifyTeamRemoved, parseRemoval, removalLabel, memberReadySql,
+  notifySetupOnAccept, notifyTeamRemoved, parseRemoval, removalLabel, readinessOf,
   teamPayoutsForHost, myTeamPayout, markPaid, undoPaid, memberAnswer, type SettleError,
 } from "./teamSend";
 import { parseTeamMessage, sendTeamMessage, sentTeamMessages, fromHostFor } from "./teamMessages";
@@ -1360,13 +1360,17 @@ router.get("/:id/team/me", hybridAuthMiddleware, teamLimiter, async (req: Reques
     }
     // Step 4b-2 (call 22): before the pay is worked out, a paid member sees whether they still need payout setup and
     // the deadline. Null for people with no pay and once the pay is worked out (then `payout` tells the rest).
-    let payoutSetup: { needed: boolean; deadline: string | null } | null = null;
+    // Step 9d (call 80): ready = Stripe payout setup AND the Event Team note. `needed` keeps its meaning for older
+    // clients (something is still missing); stripeNeeded / noteNeeded say which (additive).
+    let payoutSetup: { needed: boolean; deadline: string | null; stripeNeeded: boolean; noteNeeded: boolean } | null = null;
     try {
       const paid = (roles as any[]).some((r) => r.pay && (r.pay.payType !== "none" || r.pay.commissionPercent));
       if (paid && !e.team_pay_fixed_at && !payout) {
-        const [rd] = await rows<any>(sql`SELECT ${memberReadySql(userId)} AS ready`);
-        const ready = rd?.ready === true || rd?.ready === "t";
-        payoutSetup = { needed: !ready, deadline: iso(new Date(new Date(e.ends_at).getTime() + 3 * 24 * 3600_000)) };
+        const rd = await readinessOf(userId);
+        payoutSetup = {
+          needed: !(rd.stripe && rd.note), deadline: iso(new Date(new Date(e.ends_at).getTime() + 3 * 24 * 3600_000)),
+          stripeNeeded: !rd.stripe, noteNeeded: !rd.note,
+        };
       }
     } catch (err) {
       console.error("[Door] payout setup check failed (team view sent without it):", err);
