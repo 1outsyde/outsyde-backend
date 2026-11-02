@@ -372,7 +372,9 @@ const HOLD_TEXT: Record<string, string> = {
  * Activity, newest first, at most 50, built from timestamps that already exist (there is no history table):
  * event created, published, cancelled, ended; order refund requested and refunded; payout created, paid, and the
  * current held or review state (at updated_at); recovery created and its current state; admin actions from
- * audit_logs (target_type event_payout or event_payout_recovery, for this event's payout and recovery ids).
+ * audit_logs (target_type event_payout or event_payout_recovery, for this event's payout and recovery ids), and the
+ * p5-safety moderation actions (pause, release, cancel, reports dismissed on this event; trusted host on or off for a
+ * personal host), with the admin's reason or note.
  */
 export async function loadActivity(eventId: string) {
   const found = await rows<any>(sql`
@@ -403,7 +405,7 @@ export async function loadActivity(eventId: string) {
            OR (al.target_type = 'event_payout_recovery' AND al.target_id IN (SELECT id FROM rec))
     )
     SELECT * FROM a WHERE at IS NOT NULL ORDER BY at DESC, kind LIMIT ${ACTIVITY_LIMIT}`);
-  return found.map((r) => {
+  const items = found.map((r) => {
     const amountCents = r.amount == null ? null : num(r.amount);
     const n = r.n == null ? null : num(r.n);
     const kind = r.kind as string;
@@ -431,5 +433,52 @@ export async function loadActivity(eventId: string) {
       default: text = kind.replace(/_/g, " ");
     }
     return { at: iso(r.at)!, kind, refId: (r.ref_id ?? null) as string | null, amountCents, detail, actorUsername: (r.actor ?? null) as string | null, text };
+  });
+  // p5-safety W6 (additive): moderation actions, merged in and cut to the same limit, newest first.
+  // A failed moderation read never takes the rest of the event page down.
+  const moderation = await loadModerationActivity(eventId).catch((err) => {
+    console.error("[AdminEvents] moderation activity failed (activity sent without it):", err);
+    return [] as Awaited<ReturnType<typeof loadModerationActivity>>;
+  });
+  const all = [...items, ...moderation];
+  all.sort((x, y) => new Date(y.at).getTime() - new Date(x.at).getTime());
+  return all.slice(0, ACTIVITY_LIMIT);
+}
+
+/** One sentence ending in a period, from free text an admin typed. */
+const sentence = (t: string) => (/[.!?]$/.test(t.trim()) ? t.trim() : `${t.trim()}.`);
+
+/** The admin's moderation actions on this event (and trusted host changes for a personal host), as activity items. */
+export async function loadModerationActivity(eventId: string) {
+  const found = await rows<any>(sql`
+    SELECT al.created_at AT TIME ZONE 'UTC' AS at, al.action, al.target_id,
+           al.metadata->>'reason' AS reason, al.metadata->>'note' AS note,
+           CASE WHEN al.metadata->>'reports_closed' ~ '^[0-9]+$' THEN (al.metadata->>'reports_closed')::int END AS closed,
+           (SELECT username FROM users WHERE id = al.actor_id) AS actor
+    FROM audit_logs al JOIN events e ON e.id = ${eventId}
+    WHERE (al.target_type = 'event' AND al.target_id = e.id
+           AND al.action IN ('event.pause', 'event.release', 'event.cancel', 'event.reports_dismissed'))
+       OR (e.host_type = 'user' AND al.target_type = 'user' AND al.target_id = e.host_user_id
+           AND al.action IN ('event_host.trust', 'event_host.untrust'))
+    ORDER BY al.created_at DESC LIMIT ${ACTIVITY_LIMIT}`);
+  return found.map((r) => {
+    const by = r.actor ? ` by @${r.actor}` : "";
+    const reason = typeof r.reason === "string" && r.reason.trim() ? ` Reason: ${sentence(r.reason)}` : "";
+    const note = typeof r.note === "string" && r.note.trim() ? ` Note: ${sentence(r.note)}` : "";
+    const closed = r.closed == null ? null : num(r.closed);
+    let text: string;
+    switch (r.action as string) {
+      case "event.pause": text = `Event put on hold${by}.${reason}`; break;
+      case "event.release": text = `Event released and live again${by}.${reason}`; break;
+      case "event.cancel": text = `Event cancelled and every guest refunded${by}.${reason}`; break;
+      case "event.reports_dismissed": text = `${closed ?? 0} ${closed === 1 ? "report" : "reports"} dismissed${by}.${reason}`; break;
+      case "event_host.trust": text = `Host marked trusted${by}, new host limits lifted.${note}`; break;
+      case "event_host.untrust": text = `Host no longer trusted${by}.${note}`; break;
+      default: text = `Admin action${by}.`;
+    }
+    return {
+      at: iso(r.at)!, kind: "admin_action", refId: (r.target_id ?? null) as string | null, amountCents: null as number | null,
+      detail: (r.action ?? null) as string | null, actorUsername: (r.actor ?? null) as string | null, text,
+    };
   });
 }

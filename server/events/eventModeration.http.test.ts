@@ -384,6 +384,11 @@ function callAt(base: string, method: string, path: string, o: { token?: string;
       assert(t.status === 200 && det2.body?.moderation?.hostTrusted === false && det2.body?.moderation?.hostLimited === true, "switch off: limited again", det2.body?.moderation);
       const bad = await call("POST", `/api/admin/events/hosts/nope-${P}/trust`, { token: admin.token, body: { trusted: true } });
       assert(bad.status === 404, "unknown host: 404", bad.status);
+      // W6: trusted host on and off show on the host's events, with the note
+      const acts2: any[] = det2.body?.activity ?? [];
+      const iOn = acts2.findIndex((a) => /^Host marked trusted( by @[^ ]+)?, new host limits lifted\. Note: Known promoter\.$/.test(a.text));
+      const iOff = acts2.findIndex((a) => /^Host no longer trusted( by @[^ ]+)?\.$/.test(a.text));
+      assert(iOn >= 0 && iOff >= 0 && iOff < iOn, "activity: trusted on and off, newest first", acts2.map((a) => a.text));
     }
 
     // ════ T8 to T10: admin actions ════
@@ -468,6 +473,21 @@ function callAt(base: string, method: string, path: string, o: { token?: string;
       await call("POST", `/api/admin/events/${ev.id}/reports/dismiss`, { token: admin.token, body: { reason: "Checked again" } });
     }
     {
+      // W6: the admin event page's activity shows each moderation action with who did it and the reason, newest first.
+      const det = await call("GET", `/api/admin/events/${ev.id}`, { token: admin.token });
+      const acts: any[] = det.body?.activity ?? [];
+      const by = "( by @[^ ]+)?";
+      const find = (re: RegExp) => acts.findIndex((a) => a.kind === "admin_action" && re.test(a.text));
+      const iPause = find(new RegExp(`^Event put on hold${by}\\. Reason: Several reports of a fake venue\\.$`));
+      const iRelease = find(new RegExp(`^Event released and live again${by}\\. Reason: Venue confirmed the booking\\.$`));
+      const iDismiss1 = find(new RegExp(`^1 report dismissed${by}\\. Reason: Details are right\\.$`));
+      const iDismiss2 = find(new RegExp(`^2 reports dismissed${by}\\. Reason: Checked again\\.$`));
+      assert(det.status === 200 && iPause >= 0 && iRelease >= 0 && iDismiss1 >= 0 && iDismiss2 >= 0, "activity: on hold, released and dismissed, each with the reason", acts.map((a) => a.text));
+      assert(iDismiss2 < iDismiss1 && iDismiss1 < iRelease && iRelease < iPause, "activity: newest first", [iDismiss2, iDismiss1, iRelease, iPause]);
+      assert(acts.filter((a) => a.detail === "event.pause").length === 1 && acts.every((a) => typeof a.at === "string" && !Number.isNaN(Date.parse(a.at))), "activity: one row per action, real times", acts.map((a) => [a.detail, a.at]));
+      assert(!acts.some((a) => /trusted/.test(a.text)), "activity: no trust rows for a host nobody changed", acts.map((a) => a.text));
+    }
+    {
       // Cancel and refund everyone, also after the event started (hosts can't do that themselves)
       const h2 = await mkUser("h2");
       const live = await mkEvent(h2, "started", { startsIn: "-1 hour" });
@@ -484,6 +504,8 @@ function callAt(base: string, method: string, path: string, o: { token?: string;
       assert(moderationEmails.some((m) => m.kind === "cancel" && m.reason === "Event was a scam") && pushes.some((p) => p.userId === h2.id && p.title === "Your event was cancelled"),
         "host told it was cancelled", { moderationEmails, pushes });
       assert((await auditFor(live.id)).some((a: any) => a.action === "event.cancel" && a.metadata?.reason === "Event was a scam"), "cancel in the audit log with the reason", null);
+      const detC = await call("GET", `/api/admin/events/${live.id}`, { token: admin.token });
+      assert((detC.body?.activity ?? []).some((a: any) => /^Event cancelled and every guest refunded( by @[^ ]+)?\. Reason: Event was a scam\.$/.test(a.text)), "activity: admin cancel with the reason", (detC.body?.activity ?? []).map((a: any) => a.text));
       const cr = (await q(`SELECT cancel_reason FROM events WHERE id = $1`, [live.id]))[0];
       assert(cr.cancel_reason === null, "guests never see the admin's reason (their emails show cancel_reason as a message from the host)", cr);
       await new Promise((res) => setTimeout(res, 200));
