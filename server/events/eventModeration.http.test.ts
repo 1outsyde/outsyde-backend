@@ -260,6 +260,7 @@ function callAt(base: string, method: string, path: string, o: { token?: string;
       const list = await call("GET", "/api/admin/events/reports?type=post", { token: admin.token });
       const item = list.body?.items?.find((i: any) => i.postId === post.id);
       assert(list.status === 200 && item && item.reportCount === 1 && item.reasons?.[0]?.reason === "Spam", "post reports listed for the admin", { status: list.status, item });
+      assert(/Z$/.test(item?.reasons?.[0]?.at ?? ""), "post reason time is UTC with Z", item?.reasons);
     }
 
     // ════ T5 to T7: first event limits ════
@@ -398,6 +399,9 @@ function callAt(base: string, method: string, path: string, o: { token?: string;
       const item = list.body?.items?.find((i: any) => i.eventId === ev.id);
       assert(list.status === 200 && item && item.reportCount === 3 && item.reasons.length === 3 && item.status === "published" && item.reasons.some((x: any) => x.note === "Venue says this party is not happening."),
         "reported event listed with count, reasons and notes", item);
+      // Each reason's time is UTC with Z (json_agg of a timestamp without time zone has no zone, and a browser reads that as its own local time).
+      const dbTimes = (await q(`SELECT extract(epoch FROM created_at AT TIME ZONE 'UTC') * 1000 AS ms FROM moderation_queue WHERE target_type = 'event' AND target_id = $1 ORDER BY created_at`, [ev.id])).map((x: any) => Math.round(Number(x.ms)));
+      assert(item.reasons.every((x: any, i: number) => /Z$/.test(x.at) && Math.abs(Date.parse(x.at) - dbTimes[i]) < 2), "reason times are UTC with Z and match the saved time", { at: item.reasons.map((x: any) => x.at), dbTimes });
       const notAdmin = await call("GET", "/api/admin/events/reports?type=event", { token: r1.token });
       assert(notAdmin.status === 403 || notAdmin.status === 401, "not an admin: refused", notAdmin.status);
 
