@@ -510,6 +510,7 @@ function callAt(base: string, method: string, path: string, o: { token?: string;
       assert((await auditFor(live.id)).some((a: any) => a.action === "event.cancel" && a.metadata?.reason === "Event was a scam"), "cancel in the audit log with the reason", null);
       const detC = await call("GET", `/api/admin/events/${live.id}`, { token: admin.token });
       assert((detC.body?.activity ?? []).some((a: any) => /^Event cancelled and every guest refunded( by @[^ ]+)?\. Reason: Event was a scam\.$/.test(a.text)), "activity: admin cancel with the reason", (detC.body?.activity ?? []).map((a: any) => a.text));
+      assert(!(detC.body?.activity ?? []).some((a: any) => a.kind === "event_cancelled"), "activity: no second plain cancelled line for an admin cancel", (detC.body?.activity ?? []).map((a: any) => a.kind));
       const cr = (await q(`SELECT cancel_reason FROM events WHERE id = $1`, [live.id]))[0];
       assert(cr.cancel_reason === null, "guests never see the admin's reason (their emails show cancel_reason as a message from the host)", cr);
       await new Promise((res) => setTimeout(res, 200));

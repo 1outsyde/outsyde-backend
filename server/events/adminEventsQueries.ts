@@ -440,7 +440,9 @@ export async function loadActivity(eventId: string) {
     console.error("[AdminEvents] moderation activity failed (activity sent without it):", err);
     return [] as Awaited<ReturnType<typeof loadModerationActivity>>;
   });
-  const all = [...items, ...moderation];
+  // An admin cancel has its own line (who and why), so the plain "Event cancelled." line is left out then.
+  const adminCancelled = moderation.some((m) => m.detail === "event.cancel");
+  const all = [...items.filter((i) => !(adminCancelled && i.kind === "event_cancelled")), ...moderation];
   all.sort((x, y) => new Date(y.at).getTime() - new Date(x.at).getTime());
   return all.slice(0, ACTIVITY_LIMIT);
 }
