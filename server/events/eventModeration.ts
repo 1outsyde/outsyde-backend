@@ -400,13 +400,16 @@ export async function moderationSummary(eventId: string): Promise<{ pendingRepor
   return { pendingReports: Number(r?.pending ?? 0), hostLimited: !!r?.limited, hostTrusted: !!r?.trusted, hostType: r?.host_type ?? null };
 }
 
+/** A report time from json_agg (UTC with an offset since the AT TIME ZONE above) as ISO with Z; null stays null. */
+const utcIso = (v: unknown): string | null => (v == null ? null : new Date(String(v)).toISOString());
+
 /** Pending reports, grouped by event or by post, most reported first. Reporter usernames only (admin page). */
 export async function listReports(type: "event" | "post"): Promise<any[]> {
   if (type === "event") {
     const list = await rows<any>(sql`
       SELECT e.id AS event_id, e.title, e.slug, e.status, e.starts_at, e.host_user_id, hu.username AS host_username, hu.first_name AS host_first_name,
              count(DISTINCT m.reporter_id)::int AS report_count, min(m.created_at) AS first_at, max(m.created_at) AS last_at,
-             json_agg(json_build_object('reason', m.reason, 'note', m.details, 'reporter', ru.username, 'at', m.created_at) ORDER BY m.created_at) AS reasons
+             json_agg(json_build_object('reason', m.reason, 'note', m.details, 'reporter', ru.username, 'at', m.created_at AT TIME ZONE 'UTC') ORDER BY m.created_at) AS reasons
       FROM moderation_queue m JOIN events e ON e.id = m.target_id
       JOIN users hu ON hu.id = e.host_user_id LEFT JOIN users ru ON ru.id = m.reporter_id
       WHERE m.target_type = 'event' AND m.status = 'pending'
@@ -417,13 +420,13 @@ export async function listReports(type: "event" | "post"): Promise<any[]> {
       eventId: x.event_id, title: x.title, slug: x.slug, status: x.status, startsAt: x.starts_at == null ? null : new Date(x.starts_at).toISOString(),
       host: { id: x.host_user_id, username: x.host_username, firstName: x.host_first_name },
       reportCount: Number(x.report_count), firstAt: new Date(x.first_at).toISOString(), lastAt: new Date(x.last_at).toISOString(),
-      reasons: (x.reasons ?? []).map((r: any) => ({ reason: r.reason, label: (REPORT_REASONS as any)[r.reason] ?? r.reason, note: r.note ?? null, reporter: r.reporter ?? null, at: r.at })),
+      reasons: (x.reasons ?? []).map((r: any) => ({ reason: r.reason, label: (REPORT_REASONS as any)[r.reason] ?? r.reason, note: r.note ?? null, reporter: r.reporter ?? null, at: utcIso(r.at) })),
     }));
   }
   const list = await rows<any>(sql`
     SELECT p.id AS post_id, left(p.content, 280) AS content, COALESCE(p.thumbnail_url, p.image_url, p.media_url) AS media, p.is_active, p.author_id, au.username AS author_username,
            count(DISTINCT m.reporter_id)::int AS report_count, sum(m.flag_count)::int AS flags, max(m.created_at) AS last_at,
-           json_agg(json_build_object('reason', m.reason, 'reporter', ru.username, 'at', m.created_at) ORDER BY m.created_at) AS reasons
+           json_agg(json_build_object('reason', m.reason, 'reporter', ru.username, 'at', m.created_at AT TIME ZONE 'UTC') ORDER BY m.created_at) AS reasons
     FROM moderation_queue m JOIN feed_posts p ON p.id = m.target_id
     LEFT JOIN users au ON au.id = p.author_id LEFT JOIN users ru ON ru.id = m.reporter_id
     WHERE m.target_type = 'post' AND m.status = 'pending'
@@ -434,7 +437,7 @@ export async function listReports(type: "event" | "post"): Promise<any[]> {
     postId: x.post_id, content: x.content, mediaUrl: x.media ?? null, active: x.is_active !== false,
     author: { id: x.author_id, username: x.author_username },
     reportCount: Number(x.report_count), flagCount: Number(x.flags), lastAt: new Date(x.last_at).toISOString(),
-    reasons: (x.reasons ?? []).map((r: any) => ({ reason: r.reason, reporter: r.reporter ?? null, at: r.at })),
+    reasons: (x.reasons ?? []).map((r: any) => ({ reason: r.reason, reporter: r.reporter ?? null, at: utcIso(r.at) })),
   }));
 }
 
