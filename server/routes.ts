@@ -212,7 +212,7 @@ import { graceEndsAt } from "./subscriptions/policy";
 import { createPlanOffer, withdrawPlanOffer, getOwnerPlanOffer, acceptPlanOffer, reconcileCheckoutSession, getLatestOfferSummaries } from "./subscriptions/planOffers";
 import { isAllowedClientOrigin, normalizeClientOrigin } from "./clientOrigins";
 import { adminOverrideBusinessId } from "./adminBusinessOverride";
-import { authorizeAndProvisionGoLive, GoLiveError } from "./services/goLiveGate";
+import { authorizeAndProvisionGoLive, authorizeGoLive, GoLiveError } from "./services/goLiveGate";
 import { ObjectStorageService, ObjectNotFoundError } from "./objectStorage";
 import { ObjectPermission } from "./objectAcl";
 import { buildInfluencerSignupDetailsPayload } from "./influencerApplicationDetails";
@@ -13225,9 +13225,48 @@ export async function registerRoutes(
           return res.status(409).json({ code: 'subscription_inactive', message: 'This product was paused because your plan payment is late. Pay your plan and it goes live again on its own.' });
         }
       }
-      
-      // Handle Stripe catalog updates for live products.
+
       let stripeUpdates: any = {};
+
+      // R34 (Legend 2026-11-03): an edit that moves the product INTO live gets the same checks as
+      // POST /api/vendor/products/:id/go-live (approved, Connect finished, active plan). Already live
+      // products, unpublish, pause and archive are not checked here.
+      if (validated.status === 'live' && product.status !== 'live') {
+        if ((business as any).approvalStatus !== 'approved') {
+          return res.status(403).json({
+            error: "Business not approved",
+            message: "Your business application must be approved before you can publish products. Please wait for admin approval.",
+            requiresApproval: true,
+          });
+        }
+        try {
+          if (product.stripeProductId) {
+            // Published before: checks only, no Stripe call (same Stripe behaviour as before the fix).
+            await authorizeGoLive(business);
+          } else {
+            // Never published: same as Publish, checks then the Stripe product + price.
+            const provisioned = await authorizeAndProvisionGoLive(
+              {
+                ...product,
+                name: validated.name ?? product.name,
+                description: validated.description !== undefined ? validated.description : product.description,
+                price: validated.price ?? product.price,
+              },
+              business,
+              'product',
+            );
+            stripeUpdates.stripeProductId = provisioned.stripeProductId;
+            stripeUpdates.stripePriceId = provisioned.stripePriceId;
+          }
+        } catch (err) {
+          if (err instanceof GoLiveError) {
+            return res.status(409).json({ code: err.code, message: err.message });
+          }
+          throw err;
+        }
+      }
+
+      // Handle Stripe catalog updates for live products.
       if (product.status === 'live' && product.stripeProductId && business.stripeAccountId) {
         // Name/description/image sync (metadata only — no provisioning, no gates).
         // The Product lives on the vendor's Connect account, so the account must be
@@ -14056,8 +14095,47 @@ export async function registerRoutes(
         if (validated.depositAmountCents !== undefined) validated.depositAmountCents = depositCheck.value;
       }
 
-      // Handle Stripe catalog updates for live services.
       let stripeUpdates: any = {};
+
+      // R34 (Legend 2026-11-03): an edit that moves the service INTO live gets the same checks as
+      // POST /api/vendor/services/:id/go-live (approved, Connect finished, active plan). Already live
+      // services, unpublish, pause and archive are not checked here.
+      if (validated.status === 'live' && service.status !== 'live') {
+        if ((business as any).approvalStatus !== 'approved') {
+          return res.status(403).json({
+            error: "Business not approved",
+            message: "Your business application must be approved before you can publish services. Please wait for admin approval.",
+            requiresApproval: true,
+          });
+        }
+        try {
+          if (service.stripeProductId) {
+            // Published before: checks only, no Stripe call (same Stripe behaviour as before the fix).
+            await authorizeGoLive(business);
+          } else {
+            // Never published: same as Publish, checks then the Stripe product + price.
+            const provisioned = await authorizeAndProvisionGoLive(
+              {
+                ...service,
+                name: validated.name ?? service.name,
+                description: validated.description !== undefined ? validated.description : service.description,
+                price: validated.price ?? service.price,
+              },
+              business,
+              'service',
+            );
+            stripeUpdates.stripeProductId = provisioned.stripeProductId;
+            stripeUpdates.stripePriceId = provisioned.stripePriceId;
+          }
+        } catch (err) {
+          if (err instanceof GoLiveError) {
+            return res.status(409).json({ code: err.code, message: err.message });
+          }
+          throw err;
+        }
+      }
+
+      // Handle Stripe catalog updates for live services.
       if (service.status === 'live' && service.stripeProductId && business.stripeAccountId) {
         // Name/description sync (metadata only — no provisioning, no gates).
         // The Product lives on the vendor's Connect account, so the account must be
