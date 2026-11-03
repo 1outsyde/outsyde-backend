@@ -161,6 +161,28 @@ async function call(method: string, path: string, o: { token?: string; body?: un
   const noPlan = await mkBiz('noplan', { plan: 'none' });
   const lapsed = await mkBiz('lapsed', { plan: 'lapsed' });
 
+  // Platform admin acting for a business (x-business-id). Services check the admin email list, products the
+  // token's isAdmin flag, so this user has both. Skipped if the local DB already has a user with that email.
+  const ADMIN_EMAIL = 'info@goutsyde.com';
+  const [adminTaken] = await q(`SELECT id FROM users WHERE lower(email) = $1`, [ADMIN_EMAIL]);
+  let adminToken: string | null = null;
+  if (!adminTaken) {
+    const aid = id('admin');
+    await q(`INSERT INTO users (id, username, email, is_admin) VALUES ($1::varchar, $1::text, $2, true)`, [aid, ADMIN_EMAIL]);
+    users.push(aid);
+    adminToken = generateAccessToken({ userId: aid, isVendor: false, isAdmin: true });
+  }
+  const adminPatch = (path: string, bizId: string, body: unknown) => new Promise<{ status: number; body: any }>((resolve, reject) => {
+    const u = new URL(path, BASE!);
+    const data = JSON.stringify(body);
+    const req = http.request({ hostname: u.hostname, port: u.port || 80, path: u.pathname, method: 'PATCH', headers: {
+      'Content-Type': 'application/json', 'Content-Length': String(Buffer.byteLength(data)),
+      'Authorization': `Bearer ${adminToken}`, 'x-business-id': bizId, 'X-Forwarded-For': '10.99.34.250' } }, (res) => {
+      let b = ''; res.on('data', (c) => (b += c)); res.on('end', () => { let json: any = null; try { json = JSON.parse(b); } catch {} resolve({ status: res.statusCode || 0, body: json }); });
+    });
+    req.on('error', reject); req.write(data); req.end();
+  });
+
   const REPUBLISH = { status: 'live', isActive: true };
   const UNPUBLISH = { status: 'draft', isActive: false };
 
@@ -180,7 +202,8 @@ async function call(method: string, path: string, o: { token?: string; body?: un
         const r = await patch(it, notApproved.token, REPUBLISH);
         assert(r.status === 403 && r.body?.requiresApproval === true && typeof r.body?.message === 'string' && r.body.message.length > 0,
           `${K.kind}: re-publish refused when business not approved (403, message)`, r);
-        assert((await K.row(it)).status === 'paused', `${K.kind}: not approved item stays paused`);
+        const naRow = await K.row(it);
+        assert(naRow.status === 'paused' && naRow.is_active === true, `${K.kind}: not approved item stays paused and keeps isActive`, naRow);
       }
       // 2. Connect unfinished (and Stripe says unfinished): 409 connect_incomplete, nothing saved.
       {
@@ -291,6 +314,57 @@ async function call(method: string, path: string, o: { token?: string; body?: un
         const it = await K.mk('other', ready.bid, { status: 'draft', product: true });
         const r = await patch(it, noPlan.token, REPUBLISH);
         assert(r.status === 404, `${K.kind}: another business's item is still 404`, r);
+      }
+
+      // ── Unchanged paths (code review: prove these by test, not only by reading the diff) ─────────────────
+      // 15. Publish route, ready vendor: live, Stripe product + price created and saved.
+      {
+        const it = await K.mk('gl', ready.bid, { status: 'draft' });
+        const before = calls.length;
+        const r = await call('POST', `${K.path}/${it}/go-live`, { token: ready.token });
+        const row = await K.row(it);
+        const made = calls.slice(before);
+        assert(r.status === 200 && row.status === 'live' && String(row.stripe_product_id).startsWith('prod_pub_') && String(row.stripe_price_id).startsWith('price_pub_'),
+          `${K.kind}: Publish route still publishes and saves Stripe ids`, { status: r.status, row });
+        assert(made.includes('POST /v1/products') && made.includes('POST /v1/prices'), `${K.kind}: Publish route still creates the Stripe product and price`, made);
+      }
+      // 16. Publish route refusals unchanged.
+      {
+        const a = await K.mk('gl-np', noPlan.bid, { status: 'draft' });
+        const r1 = await call('POST', `${K.path}/${a}/go-live`, { token: noPlan.token });
+        assert(r1.status === 409 && r1.body?.code === 'subscription_inactive', `${K.kind}: Publish route still refuses with no plan`, r1);
+        const b = await K.mk('gl-na', notApproved.bid, { status: 'draft' });
+        const r2 = await call('POST', `${K.path}/${b}/go-live`, { token: notApproved.token });
+        assert(r2.status === 403 && r2.body?.requiresApproval === true, `${K.kind}: Publish route still refuses a business not approved`, r2);
+        assert((await K.row(a)).status === 'draft' && (await K.row(b)).status === 'draft', `${K.kind}: refused Publish leaves items draft`);
+      }
+      // 17. Price change on a live item with a Stripe product: new Stripe price at the new amount.
+      {
+        const it = await K.mk('pc', ready.bid, { status: 'live', product: true });
+        const before = calls.length;
+        const r = await patch(it, ready.token, { price: 9900 });
+        const row = await K.row(it);
+        assert(r.status === 200 && String(row.stripe_price_id).startsWith('price_pub_') && prices[row.stripe_price_id] === 9900 && calls.slice(before).includes('POST /v1/prices'),
+          `${K.kind}: price change on a live item still rotates the Stripe price`, { status: r.status, row, made: calls.slice(before) });
+      }
+      // 18. Price change on a live item when the plan is gone: still refused, nothing saved.
+      {
+        const it = await K.mk('pc-np', noPlan.bid, { status: 'live', product: true });
+        const r = await patch(it, noPlan.token, { price: 9900 });
+        assert(r.status === 409 && r.body?.code === 'subscription_inactive', `${K.kind}: price change with no plan still refused`, r);
+        const [pr] = await q(`SELECT price FROM ${K.kind === 'service' ? 'vendor_services' : 'vendor_products'} WHERE id = $1`, [it]);
+        assert(pr.price === 7000, `${K.kind}: refused price change saves nothing`, pr);
+      }
+      // 19. Admin acting for a business gets the same checks.
+      if (adminToken) {
+        const a = await K.mk('adm-na', notApproved.bid, { status: 'paused', product: true });
+        const r1 = await adminPatch(`${K.path}/${a}`, notApproved.bid, REPUBLISH);
+        assert(r1.status === 403 && r1.body?.requiresApproval === true && (await K.row(a)).status === 'paused', `${K.kind}: admin re-publish for a business not approved is refused`, r1);
+        const b = await K.mk('adm-ok', ready.bid, { status: 'paused', product: true });
+        const r2 = await adminPatch(`${K.path}/${b}`, ready.bid, REPUBLISH);
+        assert(r2.status === 200 && (await K.row(b)).status === 'live', `${K.kind}: admin re-publish for a ready business works`, r2);
+      } else {
+        console.log(`  ⏭  ${K.kind}: admin cases skipped (a user with ${ADMIN_EMAIL} already exists locally)`);
       }
     }
   } finally {

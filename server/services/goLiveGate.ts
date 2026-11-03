@@ -1,15 +1,19 @@
 /**
  * Go-live authorization + Stripe provisioning chokepoint.
  *
- * Single function (authorizeAndProvisionGoLive) that:
+ * authorizeAndProvisionGoLive:
  *   1. Enforces Connect onboarding completion.
  *   2. Enforces active vendor subscription.
  *   3. Delegates Stripe Product+Price provisioning to provisionConnectedCatalogItem
  *      (server/services/connectedCatalog.ts) — the ONE place provisioning logic lives.
+ * authorizeGoLive: steps 1 and 2 only (no Stripe catalog work).
  *
- * Both go-live routes (POST /api/vendor/products/:id/go-live and
- * POST /api/vendor/services/:id/go-live) and the price-change-while-live
- * path in the two PATCH routes call this function exclusively.
+ * Callers:
+ *   - authorizeAndProvisionGoLive: both go-live routes (POST /api/vendor/products/:id/go-live and
+ *     POST /api/vendor/services/:id/go-live), the price-change-while-live path in the two PATCH
+ *     routes, and (R34) a PATCH that moves a never published item into live.
+ *   - authorizeGoLive: (R34) a PATCH that moves an item that already has a Stripe product back
+ *     into live (Legend 2026-11-03: checks only, no Stripe call).
  */
 
 import { storage } from '../storage';
