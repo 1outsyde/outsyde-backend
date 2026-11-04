@@ -357,10 +357,67 @@ export function registerQuoteRoutes(app: Express): void {
       if (!userId) return res.status(401).json({ error: "Not authenticated" });
       const q = await loadQuote(req.params.id);
       if (!q || !(await canRead(q, userId))) return res.status(404).json({ error: "Quote not found" });
-      return res.json({ quote: toQuoteJson(q, await businessName(q.businessId)) });
+      // Step 4a (additive): the balance of a paid quote (held, charged, needs a new card) and its Job complete.
+      let balance = null;
+      if (q.appointmentId) {
+        const { quoteJobFor, balanceJson } = await import("./quoteBalance");
+        balance = balanceJson(await quoteJobFor(q.appointmentId));
+      }
+      return res.json({ quote: { ...toQuoteJson(q, await businessName(q.businessId)), balance } });
     } catch (err) {
       console.error("[quotes] read failed:", err);
       return res.status(500).json({ error: "Failed to load the quote" });
+    }
+  });
+
+  // POST /api/quotes/:id/job-complete (step 4a): the owner, or the staff member who sent the quote, marks the job
+  // complete. The held balance (and its service fee) is charged, the booking moves to completed. It also runs on its
+  // own 2 h after the scheduled end (quoteBalance.runQuoteBalanceJob).
+  app.post("/api/quotes/:id/job-complete", async (req, res) => {
+    try {
+      const userId = userIdOf(req);
+      if (!userId) return res.status(401).json({ error: "Not authenticated" });
+      const q = await loadQuote(req.params.id);
+      if (!q || !(await canManage(q, userId))) return res.status(404).json({ error: "Quote not found" });
+      if (q.status !== "paid" || !q.appointmentId) return res.status(409).json({ code: "NOT_CONFIRMED", message: "Only a paid quote's booking can be marked complete." });
+      const b = await storage.getBusiness(q.businessId);
+      const via = b?.ownerId === userId ? "owner" : "staff";
+      const { completeQuoteJob } = await import("./quoteBalance");
+      const r = await completeQuoteJob(q.appointmentId, { userId, via });
+      if (!r.ok) return res.status(r.status).json({ code: r.code, message: r.message, error: r.message });
+      return res.json({ success: true, appointmentId: q.appointmentId, status: "completed", pointsAwarded: r.pointsReleased, balanceChargedCents: r.capturedCents });
+    } catch (err) {
+      console.error("[quotes] job complete failed:", err);
+      return res.status(500).json({ error: "Failed to complete the job" });
+    }
+  });
+
+  // POST /api/quotes/:id/balance/card (step 4a): the customer, after the balance hold failed ("Update your card"),
+  // pays the hold with a new card. Body { paymentSheet? }. Returns the PaymentIntent to confirm on session.
+  app.post("/api/quotes/:id/balance/card", async (req, res) => {
+    try {
+      const userId = userIdOf(req);
+      if (!userId) return res.status(401).json({ error: "Not authenticated" });
+      const q = await loadQuote(req.params.id);
+      if (!q || q.customerId !== userId || !q.appointmentId) return res.status(404).json({ error: "Quote not found" });
+      const user = await storage.getUser(userId);
+      if (!user?.stripeCustomerId) return res.status(409).json({ code: "NO_CUSTOMER", message: "Open the quote again to pay." });
+      const { startNewCardPayment } = await import("./quoteBalance");
+      const r = await startNewCardPayment(q.appointmentId, user.stripeCustomerId);
+      if (!r.ok) return res.status(r.status).json({ code: r.code, message: r.message, error: r.message });
+      const { paymentSheetFields } = await import("../payments/savedCards");
+      return res.json({
+        ...(await paymentSheetFields(r.pi.customer, req.body?.paymentSheet === true)),
+        quoteId: q.id,
+        appointmentId: q.appointmentId,
+        clientSecret: r.pi.client_secret,
+        paymentIntentId: r.pi.id,
+        captureMethod: "manual",
+        amountCents: r.pi.amount,
+      });
+    } catch (err) {
+      console.error("[quotes] new card payment failed:", err);
+      return res.status(500).json({ error: "Failed to start the payment" });
     }
   });
 

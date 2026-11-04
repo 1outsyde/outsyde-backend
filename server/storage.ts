@@ -337,6 +337,7 @@ export interface IStorage {
     addonsTotalCents: number;
     addonsDurationMinutes: number;
     customerDetails: string | null;
+    quoteId?: string | null;
     discountAmountCents: number;
     pointsRedeemed: number;
     customerPaidNowCents: number;
@@ -387,6 +388,7 @@ export interface IStorage {
     addonsTotalCents: number;
     addonsDurationMinutes: number;
     customerDetails: string | null;
+    quoteId?: string | null;
   }[]>;
   getAppointmentsByStaffMember(staffMemberId: string): Promise<Appointment[]>;
   updateAppointment(id: string, updates: Partial<Appointment>): Promise<Appointment | undefined>;
@@ -431,6 +433,7 @@ export interface IStorage {
     addons: Array<{id: string; name: string; priceCents: number; durationMinutes: number}>;
     addonsTotalCents: number;
     customerDetails: string | null;
+    quoteId?: string | null;
     depositAmountCents: number | null;
     chargedAmountCents: number;
     inPersonDueCents: number;
@@ -983,13 +986,15 @@ export interface UnifiedSearchResponse {
 // Deposit/charge amounts for an appointment list row, in integer cents. The
 // charged amount is recomputed with the same calculateBookingFees() rounding
 // the hold-based booking PaymentIntent used (no stored column exists).
-export function appointmentChargeFields(totalPrice: number, depositAmountCents: number | null) {
+export function appointmentChargeFields(totalPrice: number, depositAmountCents: number | null, quoteId: string | null = null) {
   const quote = quoteDeposit(totalPrice, depositAmountCents);
   return {
     serviceTotalCents: quote.serviceTotalCents,
     depositAmountCents: quote.depositAmountCents,
     chargedAmountCents: quote.dueNowCents,
-    dueAtAppointmentCents: quote.dueAtAppointmentCents,
+    // Quotes step 4a: a quote's balance is held and charged through Outsyde, never paid in person, so every
+    // "pay at appointment" line (they all hide at 0) disappears on quote bookings, older app builds included.
+    dueAtAppointmentCents: quoteId ? 0 : quote.dueAtAppointmentCents,
   };
 }
 
@@ -1994,6 +1999,7 @@ export class DatabaseStorage implements IStorage {
       addonsTotalCents: appointments.addonsTotalCents,
       addonsDurationMinutes: appointments.addonsDurationMinutes,
       customerDetails: appointments.customerDetails,
+      quoteId: appointments.quoteId,
     })
       .from(appointments)
       .leftJoin(users, eq(appointments.clientId, users.id))
@@ -2003,7 +2009,7 @@ export class DatabaseStorage implements IStorage {
 
     return rows.map((row) => {
       const fullName = realName(row) || "";
-      const chargeFields = appointmentChargeFields(row.totalPrice ?? 0, row.depositAmountCents);
+      const chargeFields = appointmentChargeFields(row.totalPrice ?? 0, row.depositAmountCents, row.quoteId ?? null);
       return {
         id: row.id,
         customerName: fullName || "Unknown Customer",
@@ -2112,6 +2118,7 @@ export class DatabaseStorage implements IStorage {
       addonsTotalCents: appointments.addonsTotalCents,
       addonsDurationMinutes: appointments.addonsDurationMinutes,
       customerDetails: appointments.customerDetails,
+      quoteId: appointments.quoteId,
     })
       .from(appointments)
       .leftJoin(businesses, eq(appointments.businessId, businesses.id))
@@ -2121,7 +2128,7 @@ export class DatabaseStorage implements IStorage {
       .orderBy(desc(appointments.createdAt));
 
     return rows.map((row) => {
-      const chargeFields = appointmentChargeFields(row.totalPrice, row.depositAmountCents);
+      const chargeFields = appointmentChargeFields(row.totalPrice, row.depositAmountCents, row.quoteId ?? null);
       return {
         ...row,
         ...chargeFields,

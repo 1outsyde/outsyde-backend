@@ -4,7 +4,7 @@ import { sql } from "drizzle-orm";
 import { db } from "../db";
 import type { AuthenticatedRequest } from "../auth";
 import {
-  bookedStatusSql, bookingRevenueWhereSql, bookingRevenueAmountSql, paidOrderWhereSql, orderRevenueDateSql,
+  bookedStatusSql, bookingRevenueWhereSql, bookingRevenueAmountSql, appointmentRevenueAmountSql, paidOrderWhereSql, orderRevenueDateSql,
 } from "../revenue";
 
 // Every money figure here follows server/revenue.ts: only money captured through Outsyde counts
@@ -52,7 +52,7 @@ router.get("/daily", async (req, res) => {
         SELECT
           appointment_date AS day,
           COUNT(*) FILTER (WHERE ${bookedStatusSql})::int AS booking_count,
-          COALESCE(SUM(${bookingRevenueAmountSql}) FILTER (WHERE ${bookingRevenueWhereSql}), 0)::int AS revenue_cents
+          COALESCE(SUM(${appointmentRevenueAmountSql}) FILTER (WHERE ${bookingRevenueWhereSql}), 0)::int AS revenue_cents
         FROM appointments
         WHERE business_id = ${businessId}
           AND appointment_date >= TO_CHAR(NOW()::date - 6, 'YYYY-MM-DD')
@@ -417,7 +417,7 @@ router.get("/revenue-by-service", async (req, res) => {
       SELECT
         COALESCE(service_name, 'Other') AS service,
         COUNT(*) FILTER (WHERE ${bookedStatusSql})::int AS booking_count,
-        COALESCE(SUM(${bookingRevenueAmountSql}), 0)::int AS revenue_cents
+        COALESCE(SUM(${appointmentRevenueAmountSql}), 0)::int AS revenue_cents
       FROM appointments
       WHERE business_id = ${businessId}
         AND ${bookingRevenueWhereSql}
@@ -529,7 +529,7 @@ router.get("/revenue-forecast", async (req, res) => {
     const [historicalResult, mtdResult] = await Promise.all([
       db.execute<MonthRevenueRow>(sql`
         SELECT month, COALESCE(SUM(revenue_cents), 0)::int AS revenue_cents FROM (
-          SELECT TO_CHAR(appointment_date::date, 'YYYY-MM') AS month, ${bookingRevenueAmountSql} AS revenue_cents
+          SELECT TO_CHAR(appointment_date::date, 'YYYY-MM') AS month, ${appointmentRevenueAmountSql} AS revenue_cents
           FROM appointments
           WHERE business_id = ${businessId}
             AND ${bookingRevenueWhereSql}
@@ -548,7 +548,7 @@ router.get("/revenue-forecast", async (req, res) => {
       `),
       db.execute<MtdRow>(sql`
         SELECT (
-          (SELECT COALESCE(SUM(${bookingRevenueAmountSql}), 0)
+          (SELECT COALESCE(SUM(${appointmentRevenueAmountSql}), 0)
            FROM appointments
            WHERE business_id = ${businessId}
              AND ${bookingRevenueWhereSql}
@@ -603,7 +603,7 @@ router.get("/year-over-year", async (req, res) => {
   try {
     const result = await db.execute<YoyRow>(sql`
       SELECT month, COALESCE(SUM(revenue_cents), 0)::int AS revenue_cents FROM (
-        SELECT TO_CHAR(appointment_date::date, 'YYYY-MM') AS month, ${bookingRevenueAmountSql} AS revenue_cents
+        SELECT TO_CHAR(appointment_date::date, 'YYYY-MM') AS month, ${appointmentRevenueAmountSql} AS revenue_cents
         FROM appointments
         WHERE business_id = ${businessId}
           AND ${bookingRevenueWhereSql}
@@ -675,7 +675,7 @@ router.get("/weekly", async (req, res) => {
              COALESCE(SUM(order_count), 0)::int AS order_count
       FROM (
         SELECT TO_CHAR(DATE_TRUNC('week', appointment_date::date), 'YYYY-MM-DD') AS week_start,
-               ${bookingRevenueAmountSql} AS revenue_cents,
+               ${appointmentRevenueAmountSql} AS revenue_cents,
                CASE WHEN ${bookedStatusSql} THEN 1 ELSE 0 END AS booking_count,
                0 AS order_count
         FROM appointments
@@ -745,7 +745,7 @@ router.get("/monthly", async (req, res) => {
              COALESCE(SUM(order_count), 0)::int AS order_count
       FROM (
         SELECT TO_CHAR(DATE_TRUNC('month', appointment_date::date), 'YYYY-MM-DD') AS month_start,
-               ${bookingRevenueAmountSql} AS revenue_cents,
+               ${appointmentRevenueAmountSql} AS revenue_cents,
                CASE WHEN ${bookedStatusSql} THEN 1 ELSE 0 END AS booking_count,
                0 AS order_count
         FROM appointments

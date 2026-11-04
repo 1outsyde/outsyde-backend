@@ -13,7 +13,7 @@
  * Money: same as bookings. Deposit or full price is paid now plus the service fee (fees.ts quoteDeposit, the
  * function the booking PaymentIntent uses); the balance is held later (step 4). Copy never shows the fee rate.
  */
-import { quoteDeposit } from "../fees";
+import { quoteBalanceSplit, quoteDeposit } from "../fees";
 import { wallClockToUtc, zoneOffsetMs } from "../zonedTime";
 
 export const QUOTE_VALID_DAYS = 7;
@@ -164,14 +164,19 @@ export function quoteTiming(
  */
 export function quoteAmounts(totalCents: number, depositCents: number | null): {
   totalCents: number; depositOrTotalCents: number; serviceFeeCents: number; payNowCents: number; balanceCents: number;
+  balanceServiceFeeCents: number; balanceTotalCents: number;
 } {
   const q = quoteDeposit(totalCents, depositCents);
+  // Step 4a (split rule, additive): the balance carries its own service fee, held 24 h before and charged at Job complete.
+  const b = quoteBalanceSplit(totalCents, depositCents);
   return {
     totalCents,
     depositOrTotalCents: q.chargeAmountCents,
     serviceFeeCents: q.feeBreakdown.consumerServiceFeeCents,
     payNowCents: q.dueNowCents,
     balanceCents: q.dueAtAppointmentCents,
+    balanceServiceFeeCents: b.serviceFeeCents,
+    balanceTotalCents: b.holdCents,
   };
 }
 

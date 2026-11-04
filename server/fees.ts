@@ -286,3 +286,58 @@ export function calculateTicketFees(unitPriceCents: number, quantity: number): T
     feeModelVersion: TICKET_FEE_MODEL_VERSION,
   };
 }
+
+// =====================================================
+// QUOTE BALANCE (Quotes step 4, Legend 2026-11-04: the split rule)
+// =====================================================
+// Every payment through Outsyde carries the service fee on its own amount, and Outsyde's 2% from the vendor on
+// each payment: the deposit (step 3, quoteDeposit above), the balance at Job complete and each approved extra.
+// Never twice on the same dollar, and the deposit and the balance together add up to exactly one fee on the
+// whole job: the balance's fees are the whole job's fees less the deposit's (so rounding can never add a cent).
+// A full price quote has no balance. Normal bookings with a cash remainder are unchanged (fee on the deposit only).
+
+export interface QuoteBalanceSplit {
+  /** What the vendor is owed for the rest of the job (total less deposit). 0 when paid in full. */
+  balanceCents: number;
+  /** The customer's service fee on the balance. */
+  serviceFeeCents: number;
+  /** Outsyde's 2% from the vendor on the balance. */
+  platformFeeCents: number;
+  /** The vendor's share of the balance (balance less the 2%). */
+  vendorNetCents: number;
+  /** What is held on the card 24 h before and charged at Job complete: balance + its service fee. */
+  holdCents: number;
+}
+
+export function quoteBalanceSplit(totalCents: number, depositCents: number | null | undefined): QuoteBalanceSplit {
+  if (!Number.isInteger(totalCents) || totalCents < 0) throw new Error('totalCents must be a non-negative integer');
+  const deposit = typeof depositCents === 'number' && depositCents > 0 ? depositCents : null;
+  if (deposit === null || deposit >= totalCents) {
+    return { balanceCents: 0, serviceFeeCents: 0, platformFeeCents: 0, vendorNetCents: 0, holdCents: 0 };
+  }
+  const balanceCents = totalCents - deposit;
+  const serviceFeeCents = calculateConsumerServiceFee(totalCents) - calculateConsumerServiceFee(deposit);
+  const platformFeeCents = calculateBookingFee(totalCents) - calculateBookingFee(deposit);
+  return {
+    balanceCents,
+    serviceFeeCents,
+    platformFeeCents,
+    vendorNetCents: balanceCents - platformFeeCents,
+    holdCents: balanceCents + serviceFeeCents,
+  };
+}
+
+/**
+ * One extra (Quotes step 4b): its own service fee and 2%. Extras are separate payments, so each one stands alone.
+ */
+export function quoteExtraSplit(extraCents: number): QuoteBalanceSplit {
+  if (!Number.isInteger(extraCents) || extraCents <= 0) throw new Error('extraCents must be a positive integer');
+  const fb = calculateBookingFees(extraCents);
+  return {
+    balanceCents: extraCents,
+    serviceFeeCents: fb.consumerServiceFeeCents,
+    platformFeeCents: fb.platformFeeCents,
+    vendorNetCents: fb.vendorNetCents,
+    holdCents: fb.customerTotalBeforeTaxCents,
+  };
+}

@@ -254,6 +254,17 @@ export async function transitionAppointmentState(
       console.error(`[quotes] could not free the extra days of booking ${appointmentId}:`, err);
     }
   }
+  // Quotes step 4a, safety net: a quote booking that ends before Job complete never keeps a balance hold. The
+  // cancel routes release it first (and take what is owed); this covers any path that does not. Best effort; the
+  // quote balance job also sweeps ended bookings.
+  if (appointment.quoteId && (toState === BOOKING_STATES.CANCELED || toState === BOOKING_STATES.DECLINED || toState === BOOKING_STATES.EXPIRED || toState === BOOKING_STATES.NO_SHOW)) {
+    try {
+      const { settleBalanceOnCancel } = await import("./quotes/quoteBalance");
+      await settleBalanceOnCancel(appointmentId, 0);
+    } catch (err) {
+      console.error(`[quotes] could not release the balance hold of booking ${appointmentId}:`, err);
+    }
+  }
 
   return {
     success: true, 

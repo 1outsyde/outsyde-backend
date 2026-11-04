@@ -753,6 +753,49 @@ export const quotes = pgTable("quotes", {
 }));
 export type Quote = typeof quotes.$inferSelect;
 
+// Quotes step 4a (migration 099): one row per paid service quote booking. Job completion and, for deposit quotes,
+// the balance hold and its capture (server/quotes/quoteBalance.ts). No column was added to appointments.
+export const quoteJobs = pgTable("quote_jobs", {
+  id: varchar("id", { length: 36 }).primaryKey().default(sql`gen_random_uuid()`),
+  appointmentId: varchar("appointment_id", { length: 36 }).notNull().unique().references((): AnyPgColumn => appointments.id, { onDelete: "cascade" }),
+  quoteId: varchar("quote_id", { length: 36 }).notNull().references(() => quotes.id, { onDelete: "cascade" }),
+  businessId: varchar("business_id", { length: 36 }).notNull(),
+  clientId: varchar("client_id", { length: 36 }).notNull(),
+  startsAt: timestamp("starts_at", { withTimezone: true }).notNull(),
+  durationMinutes: integer("duration_minutes").notNull(),
+  autoCompleteAt: timestamp("auto_complete_at", { withTimezone: true }).notNull(),
+  completedAt: timestamp("completed_at", { withTimezone: true }),
+  completedBy: text("completed_by"),
+  completedVia: text("completed_via").$type<"owner" | "staff" | "auto">(),
+  balanceCents: integer("balance_cents").notNull().default(0),
+  serviceFeeCents: integer("service_fee_cents").notNull().default(0),
+  platformFeeCents: integer("platform_fee_cents").notNull().default(0),
+  vendorNetCents: integer("vendor_net_cents").notNull().default(0),
+  holdCents: integer("hold_cents").notNull().default(0),
+  balanceStatus: text("balance_status").$type<"none" | "scheduled" | "holding" | "held" | "hold_failed" | "capturing" | "captured" | "releasing" | "released">().notNull().default("none"),
+  holdAt: timestamp("hold_at", { withTimezone: true }),
+  retryAt: timestamp("retry_at", { withTimezone: true }),
+  attempts: integer("attempts").notNull().default(0),
+  claimTag: text("claim_tag"),
+  stripeCustomerId: text("stripe_customer_id"),
+  paymentMethodId: text("payment_method_id"),
+  stripePaymentIntentId: text("stripe_payment_intent_id"),
+  stripeChargeId: text("stripe_charge_id"),
+  heldAt: timestamp("held_at", { withTimezone: true }),
+  capturedCents: integer("captured_cents"),
+  capturedAt: timestamp("captured_at", { withTimezone: true }),
+  releasedAt: timestamp("released_at", { withTimezone: true }),
+  refundedCents: integer("refunded_cents").notNull().default(0),
+  stripeRefundId: text("stripe_refund_id"),
+  heldNoticeAt: timestamp("held_notice_at", { withTimezone: true }),
+  failedNoticeAt: timestamp("failed_notice_at", { withTimezone: true }),
+  payoutStatus: text("payout_status").$type<"none" | "held" | "paid" | "paused" | "canceled">().notNull().default("none"),
+  lastError: text("last_error"),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+});
+export type QuoteJob = typeof quoteJobs.$inferSelect;
+
 // R39 (migration 098): one cancellation fee charge per booking. Claimed before every try, looked up at Stripe
 // first, one idempotency key per try (server/payments/cancellationFees.ts).
 export const cancellationFeeCharges = pgTable("cancellation_fee_charges", {
