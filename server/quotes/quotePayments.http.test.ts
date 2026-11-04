@@ -207,7 +207,7 @@ const holdTs = (date: string, h: number, m: number) => { const [y, mo, d] = date
   const cust = await mkUser("cust");
   const cust2 = await mkUser("cust2");
   const ownerNo = await mkUser("ownerno", "Nopay");
-  const biz = await mkBiz("a", owner.uid, { autoAccept: false, fee: ["flat", 5000] });
+  const biz = await mkBiz("a", owner.uid, { autoAccept: false, fee: ["flat", 4000] }); // business policy: $40 fee (the service's is $50)
   const bizNoPayouts = await mkBiz("np", ownerNo.uid, { onboarded: false });
   const conv = await mkConv(owner.uid, cust.uid, "a");
   const conv2 = await mkConv(owner.uid, cust2.uid, "a2");
@@ -278,7 +278,10 @@ const holdTs = (date: string, h: number, m: number) => { const [y, mo, d] = date
     assert(r.status === 200 && r.body?.paymentIntentId === pi1.id && piCreates.length === before, "tapping Pay again picks up the same payment", r);
 
     console.log("\n── Stripe confirms: the quote becomes a booking ──");
-    await WebhookHandlers.handlePaymentIntentSucceeded(succeed(pi1.id));
+    // Two confirmations at the same moment (a repeated Stripe event, or the webhook and the backstop together).
+    await q(`UPDATE appointments SET created_at = now() - interval '5 minutes' WHERE id = $1`, [a1.id]);
+    const paidNow = succeed(pi1.id);
+    await Promise.all([WebhookHandlers.handlePaymentIntentSucceeded({ ...paidNow }), WebhookHandlers.handlePaymentIntentSucceeded({ ...paidNow }), confirmMissedQuotePayments()]);
     [a1] = await apptOf(q1);
     qr = await quoteRow(q1);
     assert(a1.status === "confirmed", "booking confirmed", a1.status);
@@ -294,7 +297,7 @@ const holdTs = (date: string, h: number, m: number) => { const [y, mo, d] = date
     assert(pts.n === 1, "loyalty rewards points pending as for bookings", pts);
     await WebhookHandlers.handlePaymentIntentSucceeded(succeed(pi1.id));
     const cards2 = await q(`SELECT count(*)::int AS n FROM messages WHERE conversation_id = $1 AND kind = 'quote' AND card->>'event' = 'paid'`, [conv]);
-    assert(cards2[0].n === 1, "a repeated webhook adds nothing", cards2);
+    assert(cards2[0].n === 1, "two confirmations at once and a later repeat post one paid card", cards2);
     r = await call("POST", `/api/quotes/${q1}/pay`, { token: cust.token, body: { version: 1 } });
     assert(r.status === 409 && r.body?.code === "QUOTE_CLOSED", "a paid quote can't be paid again", r);
 
@@ -323,8 +326,27 @@ const holdTs = (date: string, h: number, m: number) => { const [y, mo, d] = date
     const [aChg] = await apptOf(qChg);
     assert(aChg.status === "canceled", "booking canceled", aChg.status);
     assert(refunds.some((x) => x.payment_intent === piChg && x.amount === piStore[piChg].amount), "everything refunded", refunds);
+    assert(aChg.refund_amount === piStore[piChg].amount && typeof aChg.stripe_refund_id === "string", "the real refund amount and id are recorded", aChg);
     assert((await quoteRow(qChg)).status === "sent", "the changed quote stays open", null);
     assert(!transfers.some((t) => t.transfer_group === `appointment_${aChg.id}`), "the vendor is never paid for it", null);
+
+    console.log("\n── an attempt that ran out is retired; an old price is never charged ──");
+    const qOld = await mkQuote({ biz, sender: owner.uid, customer: cust2.uid, conv: conv2, start: "19:00", minutes: 60 });
+    r = await call("POST", `/api/quotes/${qOld}/pay`, { token: cust2.token, body: { version: 1 } });
+    const piOld = r.body?.paymentIntentId;
+    const [aOld] = await apptOf(qOld);
+    assert(r.status === 200 && aOld.quote_version === 1, "attempt for version 1", aOld?.quote_version);
+    await q(`UPDATE appointments SET stripe_payment_intent_id = NULL WHERE id = $1`, [aOld.id]); // its PaymentIntent id was never saved
+    r = await call("POST", `/api/quotes/${qOld}/pay`, { token: cust2.token, body: { version: 1 } });
+    assert(r.status === 200 && r.body?.paymentIntentId === piOld && piStore[piOld].metadata.quoteVersion === "1", "lock still running: the same payment is rebuilt with its own version and key", r.body);
+    await q(`UPDATE quotes SET paying_until = now() - interval '1 minute' WHERE id = $1`, [qOld]); // the 15 minutes ran out
+    r = await call("PATCH", `/api/quotes/${qOld}`, { token: owner.token, body: { version: 1, title: "2 Bedroom Move", jobDate: daysFromNow(10), startTime: "19:00", durationMinutes: 60, totalCents: 70000, paymentMode: "deposit", depositCents: 20000 } });
+    assert(r.status === 200 && r.body?.quote?.version === 2, "the vendor edits the price after the lock ran out", r);
+    r = await call("POST", `/api/quotes/${qOld}/pay`, { token: cust2.token, body: { version: 2 } });
+    const piNew = r.body?.paymentIntentId;
+    const oldNow = (await q(`SELECT status FROM appointments WHERE id = $1`, [aOld.id]))[0];
+    assert(r.status === 200 && piNew !== piOld && piStore[piNew].amount === 21600 && piStore[piNew].metadata.quoteVersion === "2", "a fresh payment for the new price and version", { s: r.status, amt: piStore[piNew]?.amount });
+    assert(oldNow.status === "expired" && piStore[piOld].status === "canceled", "the old attempt is retired and its payment canceled", { oldNow, st: piStore[piOld].status });
 
     console.log("\n── full price quote, multi day job (call 6) ──");
     const qLong = await mkQuote({ biz, sender: owner.uid, customer: cust2.uid, conv: conv2, jobDate: daysFromNow(20), start: "08:00", minutes: 2 * 24 * 60, deposit: null, total: 250000, serviceId: null });
@@ -333,7 +355,7 @@ const holdTs = (date: string, h: number, m: number) => { const [y, mo, d] = date
     const piLong = r.body.paymentIntentId;
     let [aLong] = await apptOf(qLong);
     assert(aLong.deposit_amount_cents === null && aLong.appointment_end_time === "23:59", "first day booked to midnight", aLong);
-    assert(aLong.service_cancellation_fee_amount === 5000 && aLong.service_cancellation_fee_type === "flat" && aLong.service_partial_refund_percentage === 50, "no service: the business policy is saved", aLong);
+    assert(aLong.service_cancellation_fee_amount === 4000 && aLong.service_cancellation_fee_type === "flat" && aLong.service_partial_refund_percentage === 50, "no service: the business policy is saved", aLong);
     await WebhookHandlers.handlePaymentIntentSucceeded(succeed(piLong));
     const blocks = await q(`SELECT * FROM provider_blocks WHERE appointment_id = $1`, [aLong.id]);
     assert(blocks.length === 1 && blocks[0].provider_id === biz, "the extra days are blocked", blocks);
@@ -344,19 +366,19 @@ const holdTs = (date: string, h: number, m: number) => { const [y, mo, d] = date
     assert(fullCard[0]?.content === "Paid in full for 2 Bedroom Move, $2,500.00.", "full price paid card", fullCard);
 
     console.log("\n── cancelling a full price quote: the vendor's own policy, as for services ──");
-    // Business policy: no full refund, 50% back until 24 hours before, then a $50 cancellation fee on top.
+    // Business policy: no full refund, 50% back until 24 hours before, and a $40 cancellation fee on top.
     r = await call("GET", `/api/bookings/appointments/${aLong.id}/cancel-preview`, { token: cust2.token });
-    assert(r.body?.refundTier === "partial" && r.body.refundAmountCents === 125000 && r.body.feeAmountCents === 5000 && r.body.feeWouldBeCharged === true,
+    assert(r.body?.refundTier === "partial" && r.body.refundAmountCents === 125000 && r.body.feeAmountCents === 4000 && r.body.feeWouldBeCharged === true,
       "preview: the vendor's partial refund and cancellation fee", r.body);
     r = await call("POST", `/api/bookings/appointments/${aLong.id}/cancel`, { token: cust2.token });
     assert(r.status === 200 && r.body?.refundAmountCents === 125000 && r.body.feeCharged === true, "cancel refunds half and charges the fee, as for a service", r);
     assert(refunds.some((x) => x.payment_intent === piLong && x.amount === 125000), "refund amount at Stripe", refunds.slice(-1));
     const longFee = piCreates.filter((p) => p.metadata.type === "cancellation_fee" && p.metadata.appointmentId === aLong.id);
-    assert(longFee.length === 1 && longFee[0].amount === 5000 && typeof longFee[0].key === "string" && longFee[0].key.startsWith(`cancel_fee_appointment_${aLong.id}_`), "one fee charge, with an idempotency key (R39)", longFee);
+    assert(longFee.length === 1 && longFee[0].amount === 4000 && typeof longFee[0].key === "string" && longFee[0].key.startsWith(`cancel_fee_appointment_${aLong.id}_`), "one fee charge, with an idempotency key (R39)", longFee);
     const [feeRow] = await q(`SELECT * FROM cancellation_fee_charges WHERE reference_id = $1`, [aLong.id]);
     assert(feeRow?.status === "charged" && feeRow.attempts === 1, "fee recorded", feeRow);
     const feeShare = transfers.find((t) => t.transfer_group === `appointment_${aLong.id}` && t.metadata?.recipient === "business_cancel_fee");
-    assert(feeShare && feeShare.amount === 4900 && feeShare.source_transaction?.startsWith("ch_"), "the vendor gets the fee minus Outsyde's 2%, from the fee's own charge", feeShare);
+    assert(feeShare && feeShare.amount === 3920 && feeShare.source_transaction?.startsWith("ch_"), "the vendor gets the fee minus Outsyde's 2%, from the fee's own charge", feeShare);
     const [aLongC] = await q(`SELECT status, cancellation_fee_kept_cents FROM appointments WHERE id = $1`, [aLong.id]);
     assert(aLongC.status === "canceled" && aLongC.cancellation_fee_kept_cents === null, "not counted as Outsyde's kept fee", aLongC);
     assert((await q(`SELECT count(*)::int AS n FROM provider_blocks WHERE appointment_id = $1`, [aLong.id]))[0].n === 0, "extra day blocks removed", null);

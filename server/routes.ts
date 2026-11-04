@@ -6729,12 +6729,26 @@ export async function registerRoutes(
       if (!q || q.customerId !== userId) return res.status(404).json({ error: "Quote not found" });
       const now = new Date();
 
-      // A payment already started for this quote: the same customer picks it up again.
-      const live = await qp.liveQuoteAppointment(q.id);
+      // A payment already started for this quote. While its lock runs (15 minutes, edits wait), the same customer
+      // picks it up again at the version it was started for. Once the lock has run out it is retired (its unpaid
+      // PaymentIntent canceled, the booking row expired, its hold released) and a fresh attempt starts below with
+      // every check again, so an old price can never be charged against a newer quote.
+      let live = await qp.liveQuoteAppointment(q.id);
+      if (live && live.status !== BOOKING_STATES.PENDING_PAYMENT) {
+        return res.status(409).json({ code: "QUOTE_CLOSED", status: "paid", message: "This quote is already paid." });
+      }
       if (live) {
-        if (live.status === BOOKING_STATES.PENDING_PAYMENT && live.clientId === userId && live.stripePaymentIntentId) {
-          const pi: any = await stripeService.getPaymentIntent(live.stripePaymentIntentId);
-          if (['requires_payment_method', 'requires_confirmation', 'requires_action'].includes(pi?.status)) {
+        const UNPAID = ['requires_payment_method', 'requires_confirmation', 'requires_action'];
+        const pi: any = live.stripePaymentIntentId ? await stripeService.getPaymentIntent(live.stripePaymentIntentId) : null;
+        if (pi && !UNPAID.includes(pi.status) && pi.status !== 'canceled') {
+          return res.status(409).json({ code: "QUOTE_PAYING", message: "Your payment is being confirmed. Check back in a minute." });
+        }
+        const lockLive = q.status === 'sent' && !!q.payingUntil && new Date(q.payingUntil).getTime() > now.getTime();
+        if (lockLive && live.quoteVersion === q.version) {
+          if (live.clientId !== userId) {
+            return res.status(409).json({ code: "QUOTE_PAYING", message: "A payment for this quote is already in progress. Try again in a few minutes." });
+          }
+          if (pi && UNPAID.includes(pi.status)) {
             return res.json({
               ...(await paymentSheetFields(pi.customer, req.body?.paymentSheet === true)),
               quoteId: q.id,
@@ -6746,18 +6760,17 @@ export async function registerRoutes(
               ...appointmentPaymentMoneyFields(live),
             });
           }
-        }
-        // The booking row exists but its PaymentIntent was never saved (a failed or lost create): rebuild the same
-        // parameters and key, as the hold flow resume does, so a retry can never make a second charge.
-        if (live.status === BOOKING_STATES.PENDING_PAYMENT && live.clientId === userId && !live.stripePaymentIntentId) {
-          const resumeBusiness = await storage.getBusiness(live.businessId);
-          const resumeUser = await storage.getUser(userId);
-          if (resumeBusiness && resumeUser) {
+          if (!pi) {
+            // The booking row exists but its PaymentIntent was never saved (a failed or lost create): rebuild the
+            // same parameters and key, as the hold flow resume does, so a retry can never make a second charge.
+            const resumeBusiness = await storage.getBusiness(live.businessId);
+            const resumeUser = await storage.getUser(userId);
+            if (!resumeBusiness || !resumeUser) return res.status(404).json({ error: "Quote not found" });
             const resumeCustomer = await resolveBookingStripeCustomer(userId, resumeUser);
             const resumePromo = await bookingPromoFromRow(live.promoCodeUsed, live.discountAmountCents);
             const resumeParams = buildAppointmentPaymentIntentParams(live, resumeBusiness.name, resumeCustomer, resumePromo);
             resumeParams.metadata.quoteId = q.id;
-            resumeParams.metadata.quoteVersion = String(q.version);
+            resumeParams.metadata.quoteVersion = String(live.quoteVersion);
             resumeParams.description = `${q.title} at ${resumeBusiness.name}`.slice(0, 450);
             let resumed: Awaited<ReturnType<typeof stripeService.createPlatformPaymentIntent>>;
             try {
@@ -6778,10 +6791,21 @@ export async function registerRoutes(
             });
           }
         }
-        if (q.status === 'paid' || live.status !== BOOKING_STATES.PENDING_PAYMENT) {
-          return res.status(409).json({ code: "QUOTE_CLOSED", status: "paid", message: "This quote is already paid." });
+        // Retire the stale attempt. If Stripe refuses the cancel (it was paid meanwhile), the webhook or the
+        // backstop settles it; nothing else happens here.
+        if (pi && pi.status !== 'canceled') {
+          try {
+            await stripeService.cancelPaymentIntent(pi.id, 'abandoned');
+          } catch (cancelErr) {
+            console.error(`[quotes] could not retire payment ${pi.id} of quote ${q.id}:`, cancelErr);
+            return res.status(409).json({ code: "QUOTE_PAYING", message: "Your payment is being confirmed. Check back in a minute." });
+          }
         }
-        return res.status(409).json({ code: "QUOTE_PAYING", message: "A payment for this quote is already in progress. Try again in a few minutes." });
+        await transitionAppointmentState(live.id, BOOKING_STATES.EXPIRED, {
+          triggeredBy: 'system', triggerSource: 'api', metadata: { action: 'quote_payment_retired' },
+        });
+        if (live.holdId) await releaseBookingHold(live.holdId).catch(() => undefined);
+        live = undefined;
       }
 
       const status = effectiveStatus(q, now);
@@ -6832,7 +6856,13 @@ export async function registerRoutes(
       const SLOT_TAKEN = { code: "SLOT_TAKEN", message: "That time was just booked. Message the business to choose another time." };
       if (await qp.quoteTimeConflict(q)) return res.status(409).json(SLOT_TAKEN);
       const locked = await qp.lockQuoteForPayment(q, q.version, now);
-      if (!locked) return res.status(409).json({ code: "QUOTE_CHANGED", message: "This quote was changed. Check the new quote before you pay." });
+      if (!locked) {
+        const [fresh] = await db.select().from(quotesTable).where(eq(quotesTable.id, q.id));
+        if (fresh && fresh.status === 'sent' && fresh.version === q.version && fresh.payingUntil && new Date(fresh.payingUntil).getTime() > Date.now()) {
+          return res.status(409).json({ code: "QUOTE_PAYING", message: "A payment for this quote is already in progress. Try again in a few minutes." });
+        }
+        return res.status(409).json({ code: "QUOTE_CHANGED", message: "This quote was changed. Check the new quote before you pay." });
+      }
       lockedQuoteId = q.id;
       const hold = await qp.holdQuoteTime(q, userId);
       if (!hold) {
@@ -6853,6 +6883,7 @@ export async function registerRoutes(
           staffMemberId: q.staffMemberId ?? undefined,
           holdId: hold.id,
           quoteId: q.id,
+          quoteVersion: q.version,
           appointmentDate: q.jobDate,
           appointmentTime: q.startTime,
           appointmentEndTime: segs[0].endTime,
@@ -6900,7 +6931,7 @@ export async function registerRoutes(
       const stripeCustomerId = await resolveBookingStripeCustomer(userId, user);
       const params = buildAppointmentPaymentIntentParams(appointment, business.name, stripeCustomerId, promo);
       params.metadata.quoteId = q.id;
-      params.metadata.quoteVersion = String(q.version);
+      params.metadata.quoteVersion = String(appointment.quoteVersion ?? q.version);
       params.description = `${q.title} at ${business.name}`.slice(0, 450);
       let paymentIntent: Awaited<ReturnType<typeof stripeService.createPlatformPaymentIntent>>;
       try {

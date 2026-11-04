@@ -4,6 +4,8 @@
 
 -- A paid quote becomes a normal appointment. The booking remembers its quote.
 ALTER TABLE appointments ADD COLUMN IF NOT EXISTS quote_id varchar(36) REFERENCES quotes(id) ON DELETE SET NULL;
+-- The quote version this booking pays for (a resumed payment always uses it, never the quote's current version).
+ALTER TABLE appointments ADD COLUMN IF NOT EXISTS quote_version integer;
 -- At most one live payment or booking per quote. An abandoned (expired) or canceled attempt frees it.
 CREATE UNIQUE INDEX IF NOT EXISTS uq_appointments_quote_live ON appointments (quote_id)
   WHERE quote_id IS NOT NULL AND status IN ('pending_payment', 'pending_provider', 'confirmed', 'completed', 'no_show');
@@ -12,6 +14,8 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_appointments_quote_live ON appointments (qu
 ALTER TABLE quotes ADD COLUMN IF NOT EXISTS appointment_id varchar(36) REFERENCES appointments(id) ON DELETE SET NULL;
 ALTER TABLE quotes ADD COLUMN IF NOT EXISTS paid_at timestamptz;
 ALTER TABLE quotes ADD COLUMN IF NOT EXISTS paying_until timestamptz;
+-- Set once when the "paid" card is posted, so two confirmations at the same moment post one card.
+ALTER TABLE quotes ADD COLUMN IF NOT EXISTS paid_notice_at timestamptz;
 
 -- The time hold taken for a quote payment (no service hold: request only services can't be held).
 ALTER TABLE booking_holds ADD COLUMN IF NOT EXISTS quote_id varchar(36) REFERENCES quotes(id) ON DELETE SET NULL;

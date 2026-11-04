@@ -739,6 +739,7 @@ export const quotes = pgTable("quotes", {
   appointmentId: varchar("appointment_id", { length: 36 }),
   paidAt: timestamp("paid_at", { withTimezone: true }),
   payingUntil: timestamp("paying_until", { withTimezone: true }),
+  paidNoticeAt: timestamp("paid_notice_at", { withTimezone: true }),
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
 }, (table) => ({
@@ -1440,6 +1441,7 @@ export const appointments = pgTable("appointments", {
 
   // Quotes step 3 (migration 098): set when the booking was made by paying a quote.
   quoteId: varchar("quote_id", { length: 36 }),
+  quoteVersion: integer("quote_version"),
 
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),

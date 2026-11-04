@@ -139,32 +139,46 @@ export async function claimQuotePaid(appt: Appointment, paidVersion: number | nu
 
 /** The quote changed or closed before Stripe confirmed: everything goes back and the booking is canceled. */
 export async function refundUnpayableQuote(appt: Appointment, paymentIntentId: string): Promise<void> {
+  let refund: { id: string; amount: number } | null = null;
   try {
-    await stripeService.createBookingRefund({
+    const r: any = await stripeService.createBookingRefund({
       paymentIntentId,
       reason: "requested_by_customer",
       metadata: { appointmentId: appt.id, quoteId: appt.quoteId ?? "", reason: "Quote changed or closed before payment finished" },
       idempotencyKey: `quote_closed_refund_${appt.id}`,
     });
+    refund = { id: r.id, amount: Number(r.amount ?? 0) };
   } catch (err) {
     console.error(`[quotes] REFUND FAILED for unpayable quote booking ${appt.id} pi=${paymentIntentId}:`, err);
-    return; // left pending: the backstop tries again
+    return; // left pending: the backstop tries again (same refund key)
   }
+  await db.update(appointments).set({ stripePaymentIntentId: paymentIntentId, stripeRefundId: refund.id, refundAmount: refund.amount, refundedAt: new Date(), cancellationReason: "Quote changed before payment finished" })
+    .where(eq(appointments.id, appt.id)).catch((err) => console.error(`[quotes] could not record the refund on ${appt.id}:`, err));
   const { transitionAppointmentState } = await import("../bookingStateMachine");
   await transitionAppointmentState(appt.id, BOOKING_STATES.CANCELED, {
     triggeredBy: "system", triggerSource: "webhook", metadata: { action: "quote_closed_refund", stripePaymentIntentId: paymentIntentId },
   }).catch((err) => console.error(`[quotes] cancel after refund failed for ${appt.id}:`, err));
-  await db.update(appointments).set({ stripePaymentIntentId: paymentIntentId, refundAmount: appt.totalPrice, refundedAt: new Date(), cancellationReason: "Quote changed before payment finished" })
-    .where(eq(appointments.id, appt.id)).catch(() => undefined);
+  // Everything came back, so the points code does too (as for any full refund).
+  try {
+    const { restorePromoForReference } = await import("../loyaltyLedger");
+    await restorePromoForReference({ type: "appointment", id: appt.id });
+  } catch (err) {
+    console.error(`[quotes] could not give back the points code of ${appt.id}:`, err);
+  }
   if (appt.holdId) await db.update(bookingHolds).set({ status: "released", updatedAt: new Date() }).where(eq(bookingHolds.id, appt.holdId)).catch(() => undefined);
-  if (appt.quoteId) await unlockQuote(appt.quoteId).catch(() => undefined);
+  // The quote's lock is left to run out: a new attempt may already hold it.
   console.error(`[quotes] quote ${appt.quoteId} could not be paid (changed or closed); booking ${appt.id} refunded and canceled`);
 }
 
-/** After a fresh claim: the paid card, the request booked, and the extra days blocked (call 6). Best effort. */
+/**
+ * After a paid quote's booking is confirmed: the paid card (posted once, paid_notice_at), the request booked and
+ * the extra days blocked (call 6). Safe to run more than once; every confirming path runs it. Best effort.
+ */
 export async function afterQuotePaid(q: Quote, appt: Appointment): Promise<void> {
   try {
-    if (!(await storage.isUserBlockedEitherWay(q.senderId, q.customerId))) {
+    const [first] = await db.update(quotes).set({ paidNoticeAt: new Date() })
+      .where(and(eq(quotes.id, q.id), sql`${quotes.paidNoticeAt} IS NULL`)).returning({ id: quotes.id });
+    if (first && !(await storage.isUserBlockedEitherWay(q.senderId, q.customerId))) {
       const a = quoteAmounts(q.totalCents, q.depositCents ?? null);
       await postCardMessage({
         conversationId: q.conversationId,
@@ -207,7 +221,19 @@ export async function afterQuotePaid(q: Quote, appt: Appointment): Promise<void>
   }
 }
 
-/** A quote booking ended (canceled, declined, expired, no show): its extra day blocks are removed. */
+/**
+ * The paid steps for a confirmed quote booking, from any path that confirms it (webhook, a repeat or concurrent
+ * webhook, the backstop). Does nothing for bookings without a quote or quotes not paid by this booking.
+ */
+export async function runQuotePaidSteps(appointmentId: string): Promise<void> {
+  const [appt] = await db.select().from(appointments).where(eq(appointments.id, appointmentId));
+  if (!appt?.quoteId || appt.status !== BOOKING_STATES.CONFIRMED) return;
+  const [q] = await db.select().from(quotes).where(eq(quotes.id, appt.quoteId));
+  if (!q || q.status !== "paid" || q.appointmentId !== appt.id) return;
+  await afterQuotePaid(q, appt);
+}
+
+/** A quote booking ended (canceled, declined or expired): its extra day blocks are removed. */
 export async function releaseQuoteBlocks(appointmentId: string): Promise<void> {
   await db.delete(providerBlocks).where(eq(providerBlocks.appointmentId, appointmentId));
 }

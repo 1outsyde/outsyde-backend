@@ -70,12 +70,12 @@ export async function chargeCancellationFeeOnce(input: {
     ON CONFLICT (reference_type, reference_id) DO NOTHING
   `);
   const tag = randomUUID();
-  const [claimed] = await rows<{ id: string; created_at: string; attempts: number }>(sql`
+  const [claimed] = await rows<{ id: string; created_at: string; attempts: number; amount_cents: number }>(sql`
     UPDATE cancellation_fee_charges
        SET status = 'charging', attempts = attempts + 1, claim_tag = ${tag}, updated_at = now()
      WHERE reference_type = ${ref.type} AND reference_id = ${ref.id}
        AND (status IN ('pending', 'failed') OR (status = 'charging' AND updated_at < now() - make_interval(mins => ${CLAIM_MINUTES})))
-     RETURNING id, created_at, attempts
+     RETURNING id, created_at, attempts, amount_cents
   `);
   if (!claimed) {
     const [row] = await rows<{ status: string; stripe_payment_intent_id: string | null; stripe_charge_id: string | null }>(sql`
@@ -111,7 +111,7 @@ export async function chargeCancellationFeeOnce(input: {
 
   try {
     const pi = await stripe.paymentIntents.create({
-      amount: amountCents,
+      amount: claimed.amount_cents, // the amount recorded for this booking, the same on every try
       currency: "usd",
       customer: customerId,
       payment_method: input.paymentMethodId,
