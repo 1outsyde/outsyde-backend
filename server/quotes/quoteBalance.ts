@@ -133,18 +133,33 @@ async function findEarlierHold(stripe: any, customerId: string, appointmentId: s
 
 /** Marks a hold placed (or its capture done) from a PaymentIntent Stripe returned or we found. */
 async function recordHeld(jobId: string, tag: string | null, pi: any): Promise<boolean> {
+  // Only the claim that made (or found) this payment may record it, and never over a different held payment.
+  const guard = sql`(${tag}::text IS NULL OR (claim_tag = ${tag} AND balance_status IN ('holding', 'capturing', 'releasing')))
+       AND (stripe_payment_intent_id IS NULL OR stripe_payment_intent_id = ${pi.id} OR balance_status = 'holding')`;
   if (pi?.status === "succeeded") {
     const [done] = await rows(sql`
       UPDATE quote_jobs SET balance_status = 'captured', stripe_payment_intent_id = ${pi.id}, stripe_charge_id = ${chargeIdOf(pi)},
              captured_cents = ${Number(pi.amount_received ?? pi.amount)}::int, captured_at = now(), held_at = COALESCE(held_at, now()),
              payout_status = 'held', retry_at = NULL, last_error = NULL, updated_at = now()
-       WHERE id = ${jobId} AND (${tag}::text IS NULL OR claim_tag = ${tag}) RETURNING id`);
+       WHERE id = ${jobId} AND ${guard} RETURNING id`);
     return !!done;
   }
   const [done] = await rows(sql`
     UPDATE quote_jobs SET balance_status = 'held', stripe_payment_intent_id = ${pi.id}, held_at = now(), retry_at = NULL, last_error = NULL, updated_at = now()
-     WHERE id = ${jobId} AND (${tag}::text IS NULL OR claim_tag = ${tag}) RETURNING id`);
+     WHERE id = ${jobId} AND ${guard} RETURNING id`);
+  if (!done && pi?.status === "requires_capture") await letGoOfStrayHold(pi, `job ${jobId} already has another balance payment`);
   return !!done;
+}
+
+/** A held balance payment that isn't the one on the booking's record: cancel it so it never sits on the card. */
+async function letGoOfStrayHold(pi: any, why: string): Promise<void> {
+  try {
+    const stripe: any = await getUncachableStripeClient();
+    await stripe.paymentIntents.cancel(pi.id, { cancellation_reason: "duplicate" }, BOUND);
+    console.warn(`[quote balance] let go of stray hold ${pi.id}: ${why}`);
+  } catch (err) {
+    console.error(`[quote balance] COULD NOT let go of stray hold ${pi.id} (${why}):`, err);
+  }
 }
 
 /**
@@ -278,6 +293,9 @@ export async function captureBalance(appointmentId: string, amountCents?: number
     }
     if (cur?.status !== "requires_capture") {
       await back("hold_failed", `hold is ${cur?.status} at Stripe`);
+      await rows(sql`UPDATE quote_jobs SET retry_at = NULL WHERE id = ${claimed.id}`);
+      const job = await quoteJobFor(appointmentId);
+      if (job?.balanceStatus === "hold_failed") await postBalanceCard(job, "balance_failed");
       return { ok: false, code: "BALANCE_NOT_HELD", message: "The hold on the customer's card has ended, so the balance can't be charged." };
     }
   } catch (err) {
@@ -360,46 +378,74 @@ export async function settleBalanceOnCancel(appointmentId: string, owedCents = 0
 
 /** What can still be refunded, in the business's cents (the money Outsyde took at Job complete, less refunds). */
 export function refundableBalanceCents(job: QuoteJob | undefined | null): number {
-  if (!job || job.balanceStatus !== "captured") return 0;
-  const business = job.capturedCents !== null && job.capturedCents >= job.holdCents ? job.balanceCents : (job.capturedCents ?? 0);
+  if (!job || job.balanceStatus !== "captured" || job.payoutStatus === "canceled" && (job.capturedCents ?? 0) < job.holdCents) return 0;
+  const business = Math.min(job.balanceCents, job.capturedCents ?? 0);
   return Math.max(0, business - job.refundedCents);
 }
 
-/** Records a refund of the balance payment (in app or from the Stripe dashboard). Shared by both. */
+/**
+ * Records a refund of the balance payment (in app, the Stripe dashboard, or a lost dispute). Callers make it once
+ * per refund (the in app plan below, the dashboard sync's own refund record). refunded_cents is what Stripe gave
+ * back on the balance payment; once it covers the business's part, the vendor's held share is never paid (4b).
+ */
 export async function recordBalanceRefund(paymentIntentId: string, amountCents: number, refundId: string | null = null): Promise<void> {
   await rows(sql`
     UPDATE quote_jobs SET refunded_cents = refunded_cents + ${amountCents}::int, stripe_refund_id = COALESCE(${refundId}, stripe_refund_id),
-           payout_status = CASE WHEN refunded_cents + ${amountCents}::int >= COALESCE(captured_cents, 0) AND payout_status IN ('held', 'paused') THEN 'canceled' ELSE payout_status END,
+           payout_status = CASE WHEN refunded_cents + ${amountCents}::int >= balance_cents AND payout_status IN ('held', 'paused') THEN 'canceled' ELSE payout_status END,
            updated_at = now()
      WHERE stripe_payment_intent_id = ${paymentIntentId}`);
 }
 
 /**
- * Refunds up to amountCents from a quote booking: the balance payment first (the later money), then the deposit.
- * Returns how much came from each. The caller owns the booking's other bookkeeping.
+ * Refunds up to amountCents from a quote booking: the balance payment first (the later money), then the deposit
+ * (review C2). The split is planned once and saved (quote_refunds, keyed by the caller's operation key) and every
+ * try works from that saved plan with keys built from it, so a retry after a failed part finishes the same plan and
+ * can never refund more. Each part, once Stripe returns it, is recorded once (on the booking's refund total and, for
+ * the balance, on the job). A booking with an unfinished plan resumes that plan whatever amount a new call asks for.
  */
-export async function refundQuoteBooking(appt: Appointment, amountCents: number, keyPrefix: string, metadata: Record<string, string>): Promise<{ fromBalance: number; fromDeposit: number; refundIds: string[] }> {
+/** An unfinished refund plan on this booking (a part failed): the next refund call finishes it first. */
+export async function hasOpenQuoteRefund(appointmentId: string): Promise<boolean> {
+  const [r] = await rows(sql`SELECT 1 AS x FROM quote_refunds WHERE appointment_id = ${appointmentId} AND done_at IS NULL LIMIT 1`);
+  return !!r;
+}
+
+export async function refundQuoteBooking(appt: Appointment, amountCents: number, opKey: string, metadata: Record<string, string>): Promise<{ fromBalance: number; fromDeposit: number; refundIds: string[]; resumed: boolean }> {
   const { stripeService } = await import("../stripe/stripeService");
-  const job = await quoteJobFor(appt.id);
-  const fromBalance = Math.min(amountCents, refundableBalanceCents(job));
-  const fromDeposit = amountCents - fromBalance;
+  const [open] = await rows<any>(sql`SELECT * FROM quote_refunds WHERE appointment_id = ${appt.id} AND done_at IS NULL ORDER BY created_at LIMIT 1`);
+  let plan = open;
+  if (!plan) {
+    const job = await quoteJobFor(appt.id);
+    const fromBalance = Math.min(amountCents, refundableBalanceCents(job));
+    await rows(sql`
+      INSERT INTO quote_refunds (op_key, appointment_id, balance_pi, deposit_pi, balance_cents, deposit_cents)
+      VALUES (${opKey}, ${appt.id}, ${fromBalance > 0 ? job?.stripePaymentIntentId ?? null : null}, ${appt.stripePaymentIntentId ?? null}, ${fromBalance}::int, ${amountCents - fromBalance}::int)
+      ON CONFLICT (op_key) DO NOTHING`);
+    [plan] = await rows<any>(sql`SELECT * FROM quote_refunds WHERE op_key = ${opKey}`);
+  }
   const refundIds: string[] = [];
-  if (fromBalance > 0 && job?.stripePaymentIntentId) {
+  const part = async (which: "balance" | "deposit") => {
+    const cents = Number(plan[`${which}_cents`]);
+    const pi = plan[`${which}_pi`];
+    if (cents <= 0 || plan[`${which}_refund_id`]) { if (plan[`${which}_refund_id`]) refundIds.push(plan[`${which}_refund_id`]); return; }
+    if (!pi) throw new Error(`no ${which} payment to refund`);
     const r: any = await stripeService.createBookingRefund({
-      paymentIntentId: job.stripePaymentIntentId, amountCents: fromBalance, reason: "requested_by_customer",
-      metadata: { ...metadata, appointmentId: appt.id, part: "balance" }, idempotencyKey: `${keyPrefix}_balance_${appt.id}_${fromBalance}`,
+      paymentIntentId: pi, amountCents: cents, reason: "requested_by_customer",
+      metadata: { ...metadata, appointmentId: appt.id, part: which }, idempotencyKey: `${plan.op_key}_${which}`,
     });
-    await recordBalanceRefund(job.stripePaymentIntentId, Number(r.amount ?? fromBalance), r.id);
+    const got = Number(r.amount ?? cents);
+    const [first] = await rows<{ id: string }>(sql`
+      UPDATE quote_refunds SET ${sql.raw(`${which}_refund_id`)} = ${r.id}, ${sql.raw(`${which}_refunded_cents`)} = ${got}::int, updated_at = now()
+       WHERE id = ${plan.id} AND ${sql.raw(`${which}_refund_id`)} IS NULL RETURNING id`);
+    if (first) {
+      await rows(sql`UPDATE appointments SET refund_amount = COALESCE(refund_amount, 0) + ${got}::int, refunded_at = now(), stripe_refund_id = ${r.id} WHERE id = ${appt.id}`);
+      if (which === "balance") await recordBalanceRefund(pi, got, r.id);
+    }
     refundIds.push(r.id);
-  }
-  if (fromDeposit > 0 && appt.stripePaymentIntentId) {
-    const r: any = await stripeService.createBookingRefund({
-      paymentIntentId: appt.stripePaymentIntentId, amountCents: fromDeposit, reason: "requested_by_customer",
-      metadata: { ...metadata, appointmentId: appt.id, part: "deposit" }, idempotencyKey: `${keyPrefix}_deposit_${appt.id}_${fromDeposit}`,
-    });
-    refundIds.push(r.id);
-  }
-  return { fromBalance, fromDeposit, refundIds };
+  };
+  await part("balance");
+  await part("deposit");
+  await rows(sql`UPDATE quote_refunds SET done_at = now(), updated_at = now() WHERE id = ${plan.id} AND done_at IS NULL`);
+  return { fromBalance: Number(plan.balance_cents), fromDeposit: Number(plan.deposit_cents), refundIds, resumed: !!open && open.op_key !== opKey };
 }
 
 // ─── Job complete ───────────────────────────────────────────────────────────
@@ -434,7 +480,7 @@ export async function completeQuoteJob(appointmentId: string, actor: { userId: s
   if (block) return { ok: false, status: block === "NOT_CONFIRMED" ? 400 : 409, code: block, message: BLOCK_TEXT[block] };
 
   let capturedCents = 0;
-  if (job && job.balanceStatus !== "none") {
+  if (job && job.balanceStatus !== "none") { // held, a capture in doubt, or charged already: the capture reads Stripe first
     const c = await captureBalance(appointmentId);
     if (!c.ok) return { ok: false, status: c.code === "CAPTURE_FAILED" ? 502 : 409, code: c.code, message: c.message };
     capturedCents = c.capturedCents;
@@ -462,6 +508,21 @@ export async function completeQuoteJob(appointmentId: string, actor: { userId: s
   } catch (err) {
     console.error(`[quote balance] points release failed for ${appointmentId}:`, err);
   }
+  // Same aftercare email as the existing complete route (best effort).
+  try {
+    const client = await storage.getUser(appt.clientId);
+    const business = await storage.getBusiness(appt.businessId);
+    if (client?.email) {
+      const { sendAftercareEmail } = await import("../emailService");
+      const { realName } = await import("../personName");
+      await sendAftercareEmail({
+        toEmail: client.email, customerName: realName(client) ?? client.email, serviceName: appt.serviceName ?? "your service",
+        businessName: business?.name ?? "", loyaltyPointsEarned: pointsReleased || undefined,
+      });
+    }
+  } catch (err) {
+    console.error(`[quote balance] aftercare email failed for ${appointmentId}:`, err);
+  }
   return { ok: true, pointsReleased, capturedCents };
 }
 
@@ -486,6 +547,9 @@ export async function handleBalanceEvent(kind: "capturable" | "succeeded" | "can
     if (done) {
       const job = await quoteJobFor(apptId);
       if (job) await postBalanceCard(job, "balance_held");
+    } else {
+      const job = await quoteJobFor(apptId);
+      if (job?.stripePaymentIntentId !== pi.id) await letGoOfStrayHold(pi, `not the payment on booking ${apptId}`);
     }
   } else if (kind === "succeeded") {
     await rows(sql`
@@ -515,6 +579,9 @@ export async function startNewCardPayment(appointmentId: string, customerId: str
   const job = await quoteJobFor(appointmentId);
   const appt = await storage.getAppointment(appointmentId);
   if (!job || !appt || appt.status !== BOOKING_STATES.CONFIRMED) return { ok: false, status: 409, code: "NOT_CONFIRMED", message: "This booking can't take a payment now." };
+  if (job.balanceStatus === "hold_failed" && job.retryAt) {
+    return { ok: false, status: 409, code: "RETRY_PENDING", message: "We'll try your card again before the job. If that doesn't work, you can add a new card." };
+  }
   if (job.balanceStatus !== "hold_failed") {
     return { ok: false, status: 409, code: job.balanceStatus === "held" || job.balanceStatus === "captured" ? "ALREADY_HELD" : "NOT_NEEDED", message: job.balanceStatus === "held" ? "The balance is already on hold on your card." : "Nothing to pay right now." };
   }
@@ -548,6 +615,12 @@ export async function startNewCardPayment(appointmentId: string, customerId: str
 
 export async function runQuoteBalanceJob(now = new Date()): Promise<{ holds: number; completed: number; released: number }> {
   let holds = 0, completed = 0, released = 0;
+  // Review I6: a hold released for a cancel that never went through (the booking is still confirmed): hold again.
+  await rows(sql`
+    UPDATE quote_jobs j SET balance_status = 'scheduled', hold_at = ${now}, retry_at = NULL, released_at = NULL, updated_at = now()
+      FROM appointments a
+     WHERE a.id = j.appointment_id AND a.status = 'confirmed' AND j.balance_status = 'released' AND j.completed_at IS NULL
+       AND j.released_at < now() - interval '2 minutes' AND j.starts_at + make_interval(mins => j.duration_minutes) > ${now}`);
   // Holds and retries due (and stale claims), only for confirmed bookings.
   const due = await rows<{ id: string }>(sql`
     SELECT j.id FROM quote_jobs j JOIN appointments a ON a.id = j.appointment_id AND a.status = 'confirmed'
@@ -561,7 +634,8 @@ export async function runQuoteBalanceJob(now = new Date()): Promise<{ holds: num
   // Auto complete 2 h after the scheduled end (only when nothing is left to decide: paid in full or balance held).
   const ready = await rows<{ appointment_id: string }>(sql`
     SELECT j.appointment_id FROM quote_jobs j JOIN appointments a ON a.id = j.appointment_id AND a.status = 'confirmed'
-     WHERE j.completed_at IS NULL AND j.auto_complete_at <= ${now} AND j.balance_status IN ('none', 'held')
+     WHERE j.completed_at IS NULL AND j.auto_complete_at <= ${now}
+       AND (j.balance_status IN ('none', 'held', 'captured') OR (j.balance_status = 'capturing' AND j.updated_at < now() - make_interval(mins => ${CLAIM_MINUTES})))
      ORDER BY j.auto_complete_at LIMIT 25`);
   for (const r of ready) {
     try { if ((await completeQuoteJob(r.appointment_id, { userId: "system", via: "auto" }, now)).ok) completed++; }
@@ -574,7 +648,36 @@ export async function runQuoteBalanceJob(now = new Date()): Promise<{ holds: num
   for (const e of ended) {
     try { if ((await settleBalanceOnCancel(e.appointment_id, 0)).ok) released++; } catch (err) { console.error(`[quote balance] release failed for ${e.appointment_id}:`, err); }
   }
+  // Review I5: a claim that never finished (crash, lost reply) on a booking that ended: settle it from Stripe.
+  const stuck = await rows<{ id: string }>(sql`
+    SELECT j.id FROM quote_jobs j JOIN appointments a ON a.id = j.appointment_id
+     WHERE ((a.status NOT IN ('confirmed', 'completed') AND j.balance_status IN ('holding', 'releasing', 'capturing')) OR j.balance_status = 'releasing')
+       AND j.updated_at < now() - make_interval(mins => ${CLAIM_MINUTES}) LIMIT 25`);
+  for (const st of stuck) {
+    try { if (await settleStuckClaim(st.id)) released++; } catch (err) { console.error(`[quote balance] stuck claim ${st.id} failed:`, err); }
+  }
   return { holds, completed, released };
+}
+
+/** A stale hold, release or capture claim on an ended booking: read Stripe and finish it. Never charges. */
+async function settleStuckClaim(jobId: string): Promise<boolean> {
+  const tag = randomUUID();
+  const [j] = await rows<any>(sql`
+    UPDATE quote_jobs SET claim_tag = ${tag}, updated_at = now()
+     WHERE id = ${jobId} AND balance_status IN ('holding', 'releasing', 'capturing') AND updated_at < now() - make_interval(mins => ${CLAIM_MINUTES})
+     RETURNING *`);
+  if (!j) return false;
+  const stripe: any = await getUncachableStripeClient();
+  let pi: any = j.stripe_payment_intent_id ? await stripe.paymentIntents.retrieve(j.stripe_payment_intent_id, {}, BOUND) : null;
+  if (!pi && j.stripe_customer_id) pi = await findEarlierHold(stripe, j.stripe_customer_id, j.appointment_id, Math.floor(new Date(j.created_at).getTime() / 1000) - 3600);
+  if (pi?.status === "succeeded") {
+    await recordHeld(jobId, tag, pi); // charged: the refund paths take it from here
+    console.error(`[quote balance] booking ${j.appointment_id} ended but its balance was charged (${pi.id}); refund it from the booking`);
+    return true;
+  }
+  if (pi?.status === "requires_capture") await stripe.paymentIntents.cancel(pi.id, { cancellation_reason: "requested_by_customer" }, BOUND);
+  await rows(sql`UPDATE quote_jobs SET balance_status = 'released', released_at = now(), stripe_payment_intent_id = COALESCE(stripe_payment_intent_id, ${pi?.id ?? null}), updated_at = now() WHERE id = ${jobId} AND claim_tag = ${tag}`);
+  return true;
 }
 
 /** Tests: the webhook already awaits the job record and an immediate hold; nothing is left in the background. */

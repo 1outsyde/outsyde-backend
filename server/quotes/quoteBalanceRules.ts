@@ -51,7 +51,8 @@ export function jobCompleteBlocker(
   if (b.status !== "confirmed") return "NOT_CONFIRMED";
   if (b.quoteKind === "product") return "PRODUCT_QUOTE";
   if (!b.startsAt || b.startsAt.getTime() > now.getTime()) return "NOT_STARTED";
-  if (b.balanceStatus === "captured" || b.balanceStatus === "capturing") return "ALREADY_COMPLETE";
-  if (b.balanceStatus !== null && b.balanceStatus !== "held") return "BALANCE_NOT_HELD";
+  // Charged (or a charge in doubt) but the booking not completed yet: finish it. The capture reads Stripe first and
+  // never charges twice (review C1).
+  if (b.balanceStatus !== null && !["held", "capturing", "captured"].includes(b.balanceStatus)) return "BALANCE_NOT_HELD";
   return null;
 }

@@ -108,7 +108,9 @@ console.log('\n── jobCompleteBlocker ──');
   assert(jobCompleteBlocker({ ...base, startsAt: new Date('2026-12-10T17:00:00Z') }, now) === 'NOT_STARTED', 'the job has not started yet');
   assert(jobCompleteBlocker({ ...base, balanceStatus: 'hold_failed' }, now) === 'BALANCE_NOT_HELD', 'balance not held: cannot charge it');
   assert(jobCompleteBlocker({ ...base, balanceStatus: 'scheduled' }, now) === 'BALANCE_NOT_HELD', 'hold not placed yet');
-  assert(jobCompleteBlocker({ ...base, balanceStatus: 'captured' }, now) === 'ALREADY_COMPLETE', 'balance already charged');
+  assert(jobCompleteBlocker({ ...base, balanceStatus: 'captured' }, now) === null, 'charged but the booking not completed yet: finish it (review C1)');
+  assert(jobCompleteBlocker({ ...base, balanceStatus: 'capturing' }, now) === null, 'capture in doubt: let the capture look at Stripe (review C1)');
+  assert(jobCompleteBlocker({ ...base, balanceStatus: 'captured', completedAt: now }, now) === 'ALREADY_COMPLETE', 'completed: done');
 }
 
 console.log(`\n${passed} passed, ${failed} failed`);

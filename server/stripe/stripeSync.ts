@@ -336,6 +336,16 @@ export async function settleDispute(disputeId: string, s?: SyncStripe): Promise<
       const { recordBookingRefund } = await import("../bookingRecoveries");
       const closed = Math.floor(new Date(d.closed_at ?? Date.now()).getTime() / 1000);
       await recordBookingRefund({ refundId: `dispute_${disputeId}`, paymentIntentId: d.payment_intent_id, refundCents: Number(d.amount_cents), createdUnix: closed });
+      // Quotes step 4a: a lost dispute on a quote's balance payment takes it off the vendor's held share, once (the
+      // settled_at claim). A no op for any other payment.
+      if (d.kind === "appointment") {
+        const [mine] = await rows<any>(sql`UPDATE stripe_disputes SET settled_at = now(), updated_at = now() WHERE id = ${d.id} AND settled_at IS NULL RETURNING id`);
+        if (mine) {
+          const { recordBalanceRefund } = await import("../quotes/quoteBalance");
+          await recordBalanceRefund(d.payment_intent_id, Number(d.amount_cents), `dispute_${disputeId}`);
+        }
+        return "settled";
+      }
     }
     return settle();
   }

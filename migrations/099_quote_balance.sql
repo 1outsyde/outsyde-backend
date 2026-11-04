@@ -53,3 +53,23 @@ CREATE TABLE IF NOT EXISTS quote_jobs (
 CREATE UNIQUE INDEX IF NOT EXISTS uq_quote_jobs_balance_pi ON quote_jobs (stripe_payment_intent_id) WHERE stripe_payment_intent_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_quote_jobs_hold_due ON quote_jobs (balance_status, hold_at);
 CREATE INDEX IF NOT EXISTS idx_quote_jobs_auto_complete ON quote_jobs (auto_complete_at) WHERE completed_at IS NULL;
+
+-- Refunds of a quote booking after Job complete reach both payments (balance first, then the deposit). The split is
+-- planned once and saved here, so a retry after a failed part finishes the same plan and never refunds more.
+CREATE TABLE IF NOT EXISTS quote_refunds (
+  id varchar(36) PRIMARY KEY DEFAULT gen_random_uuid(),
+  op_key text NOT NULL UNIQUE,
+  appointment_id varchar(36) NOT NULL REFERENCES appointments(id) ON DELETE CASCADE,
+  balance_pi text,
+  deposit_pi text,
+  balance_cents integer NOT NULL DEFAULT 0 CHECK (balance_cents >= 0),
+  deposit_cents integer NOT NULL DEFAULT 0 CHECK (deposit_cents >= 0),
+  balance_refund_id text,
+  deposit_refund_id text,
+  balance_refunded_cents integer,
+  deposit_refunded_cents integer,
+  done_at timestamptz,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_quote_refunds_open ON quote_refunds (appointment_id) WHERE done_at IS NULL;

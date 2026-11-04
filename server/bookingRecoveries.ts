@@ -110,6 +110,10 @@ export async function backfillRefunds(limit = 50, s?: RecoveryBackfillStripe): P
       WHERE stripe_payment_intent_id IS NOT NULL
         AND (refunded_at >= now() - interval '30 days' OR (status = 'refunded' AND updated_at >= now() - interval '30 days'))
       UNION ALL
+      -- Quotes step 4a: a quote booking's balance payment, when it was refunded.
+      SELECT stripe_payment_intent_id AS pi, updated_at AS ts FROM quote_jobs
+      WHERE stripe_payment_intent_id IS NOT NULL AND refunded_cents > 0 AND updated_at >= now() - interval '30 days'
+      UNION ALL
       SELECT stripe_payment_intent_id AS pi, COALESCE(refunded_at, updated_at) AS ts FROM shoot_bookings
       WHERE stripe_payment_intent_id IS NOT NULL
         AND (refunded_at >= now() - interval '30 days' OR (status = 'refunded' AND updated_at >= now() - interval '30 days'))

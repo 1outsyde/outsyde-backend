@@ -9216,21 +9216,21 @@ export async function registerRoutes(
           const paid = (appointment.depositAmountCents ?? 0) > 0 ? appointment.depositAmountCents! : appointment.totalPrice;
           const balancePaid = job ? job.refundedCents + qb.refundableBalanceCents(job) : 0;
           const remaining = Math.max(0, paid + balancePaid - (appointment.refundAmount ?? 0));
-          const qResolved = resolveProviderRefund(req.body, { ...appointment, depositAmountCents: null, totalPrice: remaining });
+          // An earlier refund whose second part failed is finished first, whatever this call asks for.
+          const resuming = await qb.hasOpenQuoteRefund(appointmentId);
+          const qResolved = resuming
+            ? { ok: true as const, refundCents: 0, fullRefundCents: remaining, isFullRefund: false }
+            : resolveProviderRefund(req.body, { ...appointment, depositAmountCents: null, totalPrice: remaining });
           if (!qResolved.ok) {
             return res.status(400).json({ error: qResolved.error, code: qResolved.code, maxRefundCents: qResolved.maxRefundCents });
           }
-          const amount = qResolved.refundCents;
-          const done = await qb.refundQuoteBooking(appointment, amount, `provider_refund_${appointment.refundAmount ?? 0}`, {
+          // The plan records each part on the booking's refund total itself (once per Stripe refund).
+          const done = await qb.refundQuoteBooking(appointment, qResolved.refundCents, `provider_refund_${appointmentId}_${appointment.refundAmount ?? 0}_${qResolved.refundCents}`, {
             initiatedBy: userId, reason: reason || 'Provider initiated refund',
           });
-          const refundedTotal = (appointment.refundAmount ?? 0) + amount;
-          await db.update(appointments).set({
-            stripeRefundId: done.refundIds[done.refundIds.length - 1] ?? appointment.stripeRefundId,
-            refundedAt: new Date(),
-            refundAmount: refundedTotal,
-            cancellationReason: reason || 'Refunded by provider',
-          }).where(eq(appointments.id, appointmentId));
+          const amount = done.fromBalance + done.fromDeposit;
+          const refundedTotal = (await storage.getAppointment(appointmentId))?.refundAmount ?? 0;
+          await db.update(appointments).set({ cancellationReason: reason || 'Refunded by provider' }).where(eq(appointments.id, appointmentId));
           try {
             await storage.reversePointsForRefund(appointment.clientId, 'appointment', appointmentId, {
               refundFraction: paid + balancePaid > 0 ? Math.min(1, amount / (paid + balancePaid)) : 1,
@@ -9258,9 +9258,10 @@ export async function registerRoutes(
           return res.json({
             success: true,
             refundId: done.refundIds[done.refundIds.length - 1] ?? null,
-            amount,
-            refundedAmountCents: amount,
+            amount: done.fromBalance + done.fromDeposit,
+            refundedAmountCents: done.fromBalance + done.fromDeposit,
             status: 'succeeded',
+            ...(done.resumed ? { resumedEarlierRefund: true } : {}),
             balanceRefundedCents: done.fromBalance,
             depositRefundedCents: done.fromDeposit,
           });
@@ -20025,7 +20026,8 @@ export async function registerRoutes(
           // a second refund or reverse points twice.
           try {
             const appt = await storage.getAppointment(request.targetId);
-            await db.update(appointments).set({
+            // Quotes step 4a: a completed quote booking's refund plan already recorded each part on the booking.
+            if (!(appt?.quoteId && appt.status === BOOKING_STATES.COMPLETED)) await db.update(appointments).set({
               refundAmount: (appt?.refundAmount ?? 0) + request.amount,
               refundedAt: new Date(),
               ...(approvedStripeRefundId ? { stripeRefundId: approvedStripeRefundId } : {}),

@@ -71,6 +71,8 @@ const hmNY = (d: Date) => new Intl.DateTimeFormat("en-GB", { timeZone: "America/
   const transfers: any[] = [];
   let declineNextOffSession = 0;
   let loseNextBalanceReply = false;
+  let loseNextCaptureReply = false;
+  const failRefundFor = new Map<string, number>();
   const lostKeys = new Set<string>();
   const stub = http.createServer((req, res) => {
     let raw = ""; req.on("data", (c) => (raw += c));
@@ -135,6 +137,7 @@ const hmNY = (d: Date) => new Intl.DateTimeFormat("en-GB", { timeZone: "America/
         const amt = flat.amount_to_capture ? Number(flat.amount_to_capture) : pi.amount;
         captures.push({ id: pi.id, amount_to_capture: flat.amount_to_capture ? Number(flat.amount_to_capture) : null, key: req.headers["idempotency-key"] as string | undefined });
         pi.status = "succeeded"; pi.amount_received = amt; pi.amount_capturable = 0; pi.latest_charge = `ch_${pi.id}`;
+        if (loseNextCaptureReply) { loseNextCaptureReply = false; req.socket.destroy(); return; } // captured, reply lost
         return send(200, pi);
       }
       const piCancel = url.pathname.match(/^\/v1\/payment_intents\/([^/]+)\/cancel$/);
@@ -146,6 +149,8 @@ const hmNY = (d: Date) => new Intl.DateTimeFormat("en-GB", { timeZone: "America/
         return send(200, pi);
       }
       if (req.method === "POST" && url.pathname === "/v1/refunds") {
+        const fk = flat.payment_intent || "";
+        if ((failRefundFor.get(fk) ?? 0) > 0) { failRefundFor.set(fk, failRefundFor.get(fk)! - 1); req.socket.destroy(); return; } // every try of this call fails
         const pi = piStore[flat.payment_intent || ""];
         const amount = Number(flat.amount || (pi ? pi.amount_received - (pi._refunded || 0) : 0));
         if (pi) pi._refunded = (pi._refunded || 0) + amount;
@@ -481,6 +486,87 @@ const hmNY = (d: Date) => new Intl.DateTimeFormat("en-GB", { timeZone: "America/
     const jDs2 = await jobOf(aS.id);
     const aSr = await apptOf(S.qid);
     assert(jDs2.refunded_cents === 10000 && aSr.status === "completed" && aSr.refund_amount === 10000, "recorded on the balance and the booking, status untouched", { jDs2, s: aSr.status });
+
+    console.log("\n── review fixes ──");
+    // C1: the capture reply is lost. Job complete must still finish later, with one capture only.
+    const C = await mkQuote({ biz, sender: owner.uid, customer: cust.uid, conv, hoursOut: 9 });
+    const aC = await payQuote(C.qid, cust.token);
+    await shiftJob(aC.id, 17);
+    loseNextCaptureReply = true;
+    r = await call("POST", `/api/quotes/${C.qid}/job-complete`, { token: owner.token });
+    let jC = await jobOf(aC.id);
+    assert(r.status === 502 && jC.balance_status === "capturing" && (await apptOf(C.qid)).status === "confirmed", "capture reply lost: in doubt, not completed", { r, s: jC.balance_status });
+    r = await call("POST", `/api/quotes/${C.qid}/job-complete`, { token: owner.token });
+    assert(r.status === 409 && r.body?.code === "BALANCE_BUSY", "a tap right away waits (claim still fresh)", r);
+    await q(`UPDATE quote_jobs SET updated_at = now() - interval '11 minutes' WHERE id = $1`, [jC.id]);
+    const capsBefore = captures.length;
+    await qb.runQuoteBalanceJob(new Date());
+    jC = await jobOf(aC.id);
+    assert(jC.balance_status === "captured" && jC.completed_via === "auto" && (await apptOf(C.qid)).status === "completed" && captures.length === capsBefore, "the job finishes it from Stripe's state, never capturing twice", { jC, n: captures.length - capsBefore });
+
+    // C2: a refund whose deposit part fails is retried for the same plan only, never more.
+    const R2 = await mkQuote({ biz, sender: owner.uid, customer: cust.uid, conv, hoursOut: 9 });
+    const aR2 = await payQuote(R2.qid, cust.token);
+    await shiftJob(aR2.id, 13);
+    await call("POST", `/api/quotes/${R2.qid}/job-complete`, { token: owner.token });
+    const [rr2] = await q(`INSERT INTO refund_requests (id, requester_id, requester_type, target_type, target_id, reason, amount, status) VALUES ($1, $2, 'customer', 'appointment', $3, 'Late', 60000, 'pending') RETURNING id`, [id("rr2"), cust.uid, aR2.id]);
+    failRefundFor.set(aR2.stripe_payment_intent_id, 3);
+    let r3 = await call("PATCH", `/api/admin/refund-requests/${rr2.id}`, { token: admin.token, body: { status: "approved" } });
+    assert(r3.status === 402 || r3.status === 502, "deposit part failed: the approval reports it", r3);
+    r3 = await call("PATCH", `/api/admin/refund-requests/${rr2.id}`, { token: admin.token, body: { status: "approved" } });
+    const jR2 = await jobOf(aR2.id);
+    const onDeposit = refunds.filter((x) => x.payment_intent === aR2.stripe_payment_intent_id).reduce((n, x) => n + x.amount, 0);
+    const onBalance = refunds.filter((x) => x.payment_intent === jR2.stripe_payment_intent_id).reduce((n, x) => n + x.amount, 0);
+    assert(r3.status === 200 && onBalance === 55000 && onDeposit === 5000, "retry finishes the same split: $550 + $50, never $1,150", { r3: r3.status, onBalance, onDeposit });
+    assert(jR2.refunded_cents === 55000 && jR2.payout_status === "canceled", "balance fully refunded: the vendor's balance share is not paid later", jR2);
+    assert((await apptOf(R2.qid)).refund_amount === 60000, "refund total recorded once", (await apptOf(R2.qid)).refund_amount);
+
+    // C2 (provider): the vendor taps Refund again after a failed part: the unfinished plan is finished, never a new one.
+    const R3 = await mkQuote({ biz, sender: owner.uid, customer: cust.uid, conv, hoursOut: 9 });
+    const aR3 = await payQuote(R3.qid, cust.token);
+    await shiftJob(aR3.id, 17);
+    await call("POST", `/api/quotes/${R3.qid}/job-complete`, { token: owner.token });
+    failRefundFor.set(aR3.stripe_payment_intent_id, 3);
+    let r4 = await call("POST", `/api/bookings/appointments/${aR3.id}/refund`, { token: owner.token, body: { amountCents: 60000 } });
+    assert(r4.status === 500 || r4.status === 502, "deposit part failed: the refund reports it", r4);
+    r4 = await call("POST", `/api/bookings/appointments/${aR3.id}/refund`, { token: owner.token, body: { amountCents: 60000 } });
+    const jR3 = await jobOf(aR3.id);
+    const dep3 = refunds.filter((x) => x.payment_intent === aR3.stripe_payment_intent_id).reduce((n, x) => n + x.amount, 0);
+    const bal3 = refunds.filter((x) => x.payment_intent === jR3.stripe_payment_intent_id).reduce((n, x) => n + x.amount, 0);
+    assert(r4.status === 200 && bal3 === 55000 && dep3 === 5000 && (await apptOf(R3.qid)).refund_amount === 60000, "the second tap finishes the first plan: $600 in all, not $1,150", { r4: r4.status, bal3, dep3 });
+
+    // I3: no new card payment while the automatic retry is still to come.
+    const I3 = await mkQuote({ biz, sender: owner.uid, customer: cust.uid, conv, hoursOut: 72 });
+    const aI3 = await payQuote(I3.qid, cust.token);
+    await shiftJob(aI3.id, 55);
+    declineNextOffSession = 1;
+    await qb.runQuoteBalanceJob(new Date());
+    r = await call("POST", `/api/quotes/${I3.qid}/balance/card`, { token: cust.token });
+    assert(r.status === 409 && r.body?.code === "RETRY_PENDING", "Update your card waits for the automatic retry", r);
+
+    // I6: a release whose cancel never committed: the booking is still confirmed, so the balance is held again.
+    const I6 = await mkQuote({ biz, sender: owner.uid, customer: cust.uid, conv, hoursOut: 20 });
+    const aI6 = await payQuote(I6.qid, cust.token);
+    await qb.settleBalanceOnCancel(aI6.id, 0);
+    await q(`UPDATE quote_jobs SET released_at = now() - interval '5 minutes' WHERE appointment_id = $1`, [aI6.id]);
+    await qb.runQuoteBalanceJob(new Date());
+    const jI6 = await jobOf(aI6.id);
+    assert(jI6.balance_status === "held" && balancePis().filter((c) => c.metadata.appointmentId === aI6.id).length === 2, "held again on its own", jI6);
+
+    // I5: a release that crashed on an ended booking is finished by the job.
+    const I5 = await mkQuote({ biz, sender: owner.uid, customer: cust.uid, conv, hoursOut: 20 });
+    const aI5 = await payQuote(I5.qid, cust.token);
+    await q(`UPDATE quote_jobs SET balance_status = 'releasing', updated_at = now() - interval '11 minutes' WHERE appointment_id = $1`, [aI5.id]);
+    await q(`UPDATE appointments SET status = 'canceled' WHERE id = $1`, [aI5.id]);
+    await qb.runQuoteBalanceJob(new Date());
+    const jI5 = await jobOf(aI5.id);
+    assert(jI5.balance_status === "released" && piStore[jI5.stripe_payment_intent_id].status === "canceled", "stale release on an ended booking finished", jI5);
+
+    // I3b: a held balance payment that isn't the one on the booking's record is let go at once.
+    const strayId = `pi_qb_stray_${P}`;
+    piStore[strayId] = { id: strayId, object: "payment_intent", amount: 59400, amount_capturable: 59400, status: "requires_capture", capture_method: "manual", metadata: { type: "quote_balance", appointmentId: aI6.id }, customer: `cus_${cust.uid}` };
+    await WebhookHandlers.handlePaymentIntentCapturableUpdated({ ...piStore[strayId] });
+    assert(piStore[strayId].status === "canceled" && (await jobOf(aI6.id)).stripe_payment_intent_id !== strayId, "a second hold for the same booking is canceled at once", piStore[strayId].status);
   } finally {
     const ids = users;
     await q(`DELETE FROM quote_jobs WHERE business_id = ANY($1)`, [bizs]).catch(() => undefined);
@@ -503,6 +589,9 @@ const hmNY = (d: Date) => new Intl.DateTimeFormat("en-GB", { timeZone: "America/
     if (tierMade) await q(`DELETE FROM subscription_tiers WHERE id = $1`, [tier.id]).catch(() => undefined);
     await q(`DELETE FROM pending_points_transactions WHERE user_id = ANY($1)`, [ids]).catch(() => undefined);
     await q(`DELETE FROM cancellation_fee_charges WHERE customer_id = ANY($1)`, [ids.map((u) => `cus_${u}`)]).catch(() => undefined);
+    for (const t of ["point_transactions", "loyalty_balances", "notification_preferences", "push_tokens", "admin_audit_logs"]) {
+      await q(`DELETE FROM ${t} WHERE ${t === "admin_audit_logs" ? "admin_id" : "user_id"} = ANY($1)`, [ids]).catch(() => undefined);
+    }
     await q(`DELETE FROM users WHERE id = ANY($1)`, [ids]).catch((e) => console.error("cleanup users", e.message));
     await db.end();
     stub.close();
