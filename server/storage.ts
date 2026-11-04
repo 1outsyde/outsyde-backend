@@ -466,7 +466,7 @@ export interface IStorage {
   getOrCreateConversation(participant1Id: string, participant2Id: string): Promise<Conversation>;
   getConversation(id: string): Promise<Conversation | undefined>;
   getUserConversations(userId: string): Promise<(Conversation & { otherParticipant: User })[]>;
-  createMessage(data: { conversationId: string; senderId: string; content: string; mediaItems?: string[]; kind?: "text" | "request"; card?: Record<string, unknown> | null }): Promise<Message>;
+  createMessage(data: { conversationId: string; senderId: string; content: string; mediaItems?: string[]; kind?: "text" | "request" | "quote"; card?: Record<string, unknown> | null }): Promise<Message>;
   getConversationMessages(conversationId: string, limit?: number, before?: string): Promise<Message[]>;
   markMessagesAsRead(conversationId: string, userId: string): Promise<void>;
   getUnreadCount(userId: string): Promise<number>;
@@ -2330,7 +2330,7 @@ export class DatabaseStorage implements IStorage {
     return enriched.filter(c => c.otherParticipant);
   }
 
-  async createMessage(data: { conversationId: string; senderId: string; content: string; mediaItems?: string[]; kind?: "text" | "request"; card?: Record<string, unknown> | null }): Promise<Message> {
+  async createMessage(data: { conversationId: string; senderId: string; content: string; mediaItems?: string[]; kind?: "text" | "request" | "quote"; card?: Record<string, unknown> | null }): Promise<Message> {
     const id = randomUUID();
     const mediaItems = Array.isArray(data.mediaItems) ? data.mediaItems : [];
     const result = await db.insert(messages).values({

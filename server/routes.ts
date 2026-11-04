@@ -240,6 +240,7 @@ import {
 import { isHoldStillBookable, SERVICE_UNAVAILABLE_BODY } from "./bookableService";
 import { serviceCitiesInput } from "./estimates/serviceCities";
 import { registerRequestFormRoutes } from "./requests/requestFormRoutes";
+import { registerQuoteRoutes } from "./quotes/quoteRoutes";
 import { registerEstimateRequestRoutes } from "./estimates/estimateRequestRoutes";
 import {
   transitionAppointmentState,
@@ -13945,6 +13946,8 @@ export async function registerRoutes(
   registerEstimateRequestRoutes(app);
   // Request forms (migration 096, Quotes step 1). See server/requests.
   registerRequestFormRoutes(app);
+  // Quotes (migration 097, Quotes step 2). See server/quotes.
+  registerQuoteRoutes(app);
 
   // Create vendor service
   app.post("/api/vendor/services", async (req, res) => {

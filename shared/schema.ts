@@ -703,6 +703,48 @@ export const requestForms = pgTable("request_forms", {
 export type RequestForm = typeof requestForms.$inferSelect;
 
 /* =====================================================
+   QUOTES (migration 097, Quotes step 2). Rules: server/quotes/quoteRules.ts
+===================================================== */
+export const quotes = pgTable("quotes", {
+  id: varchar("id", { length: 36 }).primaryKey().default(sql`gen_random_uuid()`),
+  businessId: varchar("business_id", { length: 36 }).notNull().references(() => businesses.id, { onDelete: "cascade" }),
+  staffMemberId: varchar("staff_member_id", { length: 36 }).references((): AnyPgColumn => staffMembers.id, { onDelete: "set null" }),
+  senderId: varchar("sender_id", { length: 36 }).notNull().references(() => users.id),
+  customerId: varchar("customer_id", { length: 36 }).notNull().references(() => users.id),
+  conversationId: varchar("conversation_id", { length: 36 }).notNull().references((): AnyPgColumn => conversations.id),
+  requestId: varchar("request_id", { length: 36 }).references(() => estimateRequests.id, { onDelete: "set null" }),
+  serviceId: varchar("service_id", { length: 36 }).references(() => vendorServices.id, { onDelete: "set null" }),
+  title: text("title").notNull(),
+  details: text("details"),
+  extrasNote: text("extras_note"),
+  jobDate: text("job_date").notNull(),
+  startTime: text("start_time").notNull(),
+  durationMinutes: integer("duration_minutes").notNull(),
+  timeZone: text("time_zone").notNull(),
+  startsAt: timestamp("starts_at", { withTimezone: true }).notNull(),
+  totalCents: integer("total_cents").notNull(),
+  paymentMode: text("payment_mode").$type<"deposit" | "full">().notNull(),
+  depositCents: integer("deposit_cents"),
+  status: text("status").$type<"sent" | "withdrawn" | "declined" | "expired" | "paid">().notNull().default("sent"),
+  version: integer("version").notNull().default(1),
+  expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+  linkCode: text("link_code").notNull(),
+  messageId: varchar("message_id", { length: 36 }).references((): AnyPgColumn => messages.id, { onDelete: "set null" }),
+  declineReason: text("decline_reason"),
+  sentAt: timestamp("sent_at", { withTimezone: true }).defaultNow().notNull(),
+  withdrawnAt: timestamp("withdrawn_at", { withTimezone: true }),
+  declinedAt: timestamp("declined_at", { withTimezone: true }),
+  expiredAt: timestamp("expired_at", { withTimezone: true }),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+}, (table) => ({
+  businessIdx: index("idx_quotes_business_created").on(table.businessId, table.createdAt),
+  customerIdx: index("idx_quotes_customer_created").on(table.customerId, table.createdAt),
+  conversationIdx: index("idx_quotes_conversation").on(table.conversationId, table.createdAt),
+}));
+export type Quote = typeof quotes.$inferSelect;
+
+/* =====================================================
    SERVICE ADD-ONS (Optional extras for vendor services)
 ===================================================== */
 // Add-on library (migration 046): a vendor's add-ons, created once and attached
@@ -1669,7 +1711,7 @@ export const messages = pgTable("messages", {
   mediaItems: jsonb("media_items").$type<string[]>().notNull().default([]),
   // Migration 096: 'text' (every message so far) or 'request' (a request card, data in `card`).
   // `content` always holds readable text, so older app builds show a card as a normal message.
-  kind: text("kind").$type<"text" | "request">().notNull().default("text"),
+  kind: text("kind").$type<"text" | "request" | "quote">().notNull().default("text"),
   card: jsonb("card").$type<Record<string, unknown> | null>(),
 
   isRead: boolean("is_read").default(false).notNull(),

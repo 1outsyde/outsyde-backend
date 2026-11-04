@@ -19,6 +19,7 @@ import { resumeBroadcasts } from "./broadcasts/broadcasts";
 import { pushAdminRouter, pushPreferencesRouter } from "./routes/pushAdmin";
 import { resumePushSends, startPushReceiptJob, startPushWatchdog } from "./push/pushBroadcasts";
 import vendorAnalyticsRouter from "./routes/vendorAnalytics";
+import { startQuoteExpiryJob } from "./quotes/quoteExpiry";
 import eventsRouter from "./events/eventsRouter";
 import hostAgreementRouter from "./events/hostAgreement";
 import teamNoteRouter from "./events/teamNote";
@@ -404,6 +405,8 @@ if (process.env.NODE_ENV === 'production') {
   startPushReceiptJob();
   // Setup reminders: hourly, a no-op unless ACCOUNT_SETUP_REMINDERS_ENABLED=true
   startAccountSetupReminderJob();
+  // Quotes (migration 097): sent quotes past their expiry become expired, every 5 minutes.
+  startQuoteExpiryJob();
   app.use('/api/vendor/analytics', authMiddleware, vendorAnalyticsRouter);
   // Events & Ticketing (Phase 2 PR 5a): host payout accounts. Before eventsRouter so /payouts/* isn't read as /:id
   app.use('/api/events', hostPayoutsRouter);

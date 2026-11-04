@@ -1,0 +1,110 @@
+/**
+ * Pure tests for quotes (Quotes in Messages, step 2). No database, no network.
+ * Run with: npx tsx server/quotes/quoteRules.test.ts
+ */
+import { checkQuoteInput, quoteTiming, quoteAmounts, quoteMessageText, effectiveStatus, QUOTE_VALID_DAYS } from './quoteRules';
+
+let passed = 0;
+let failed = 0;
+function assert(cond: boolean, name: string, detail?: unknown) {
+  if (cond) { passed++; console.log(`  ✅ ${name}`); }
+  else { failed++; console.error(`  ❌ ${name}`, detail === undefined ? '' : JSON.stringify(detail)); }
+}
+
+const base = {
+  title: '  2 Bedroom Move ',
+  details: 'Crew of 3, truck, up to 5 hours',
+  extrasNote: 'Extra hours $50 each, only if you approve',
+  jobDate: '2026-11-13',
+  startTime: '09:00',
+  durationMinutes: 300,
+  totalCents: 65000,
+  paymentMode: 'deposit',
+  depositCents: 10000,
+};
+
+console.log('\n── checkQuoteInput ──');
+{
+  const r = checkQuoteInput(base);
+  assert(r.ok === true, 'a full quote passes', r);
+  if (r.ok) {
+    assert(r.value.title === '2 Bedroom Move', 'title trimmed');
+    assert(r.value.depositCents === 10000 && r.value.paymentMode === 'deposit', 'deposit kept');
+  }
+}
+{
+  const r = checkQuoteInput({ ...base, paymentMode: 'full', depositCents: undefined, details: '', extrasNote: '  ' });
+  assert(r.ok && r.value.depositCents === null && r.value.details === null && r.value.extrasNote === null, 'full payment: no deposit; blank optional text saved as empty', r);
+}
+const bad = (patch: Record<string, unknown>) => checkQuoteInput({ ...base, ...patch });
+const field = (patch: Record<string, unknown>) => { const r = bad(patch); return r.ok ? null : r.field; };
+assert(field({ title: '  ' }) === 'title', 'title required');
+assert(field({ title: 'x'.repeat(121) }) === 'title', 'title up to 120');
+assert(field({ details: 'x'.repeat(2001) }) === 'details' && bad({ details: 'x'.repeat(2000) }).ok, 'details up to 2000');
+assert(field({ extrasNote: 'x'.repeat(301) }) === 'extrasNote', 'extras note up to 300');
+assert(field({ jobDate: '11/13/2026' }) === 'jobDate' && field({ jobDate: '2026-02-30' }) === 'jobDate' && field({ jobDate: undefined }) === 'jobDate', 'date required and real');
+assert(field({ startTime: '9am' }) === 'startTime' && field({ startTime: '24:00' }) === 'startTime' && bad({ startTime: '23:59' }).ok && field({ startTime: undefined }) === 'startTime', 'start time required, HH:MM');
+assert(field({ durationMinutes: 10 }) === 'durationMinutes' && field({ durationMinutes: 4321 }) === 'durationMinutes' && field({ durationMinutes: 90.5 }) === 'durationMinutes' && bad({ durationMinutes: 15 }).ok && bad({ durationMinutes: 4320 }).ok, 'length 15 minutes to 3 days, whole minutes');
+assert(field({ totalCents: 699 }) === 'totalCents' && bad({ totalCents: 700, paymentMode: 'full', depositCents: null }).ok, 'total at least $7.00');
+assert(field({ totalCents: 10_000_001 }) === 'totalCents', 'total at most $100,000');
+assert(field({ totalCents: 650.5 }) === 'totalCents', 'total in whole cents');
+assert(field({ paymentMode: 'half' }) === 'paymentMode' && field({ paymentMode: undefined }) === 'paymentMode', 'deposit or full required');
+assert(field({ depositCents: undefined }) === 'depositCents' && field({ depositCents: null }) === 'depositCents', 'deposit mode needs a deposit');
+assert(field({ depositCents: 699 }) === 'depositCents', 'deposit at least $7.00');
+assert(field({ depositCents: 65000 }) === 'depositCents' && field({ depositCents: 70000 }) === 'depositCents', 'deposit less than the total');
+assert(field({ paymentMode: 'full', depositCents: 10000 }) === 'depositCents', 'full payment takes no deposit');
+assert(!checkQuoteInput(null).ok && !checkQuoteInput('x').ok, 'body must be an object');
+{
+  const r = bad({ title: '' });
+  assert(!r.ok && typeof r.message === 'string' && !/ - | — | – /.test(r.message), 'messages are plain words without dashes', r);
+}
+
+console.log('\n── quoteTiming ──');
+{
+  const now = new Date('2026-11-04T14:00:00Z'); // 9:00 AM New York
+  const t = quoteTiming({ jobDate: '2026-11-13', startTime: '09:00' }, 'America/New_York', now);
+  assert(t.ok && t.startsAt.toISOString() === '2026-11-13T14:00:00.000Z', 'start in the business time zone', t);
+  assert(t.ok && t.expiresAt.toISOString() === new Date(now.getTime() + QUOTE_VALID_DAYS * 86400000).toISOString(), 'expires 7 days after sending when the job is later', t);
+  const soon = quoteTiming({ jobDate: '2026-11-06', startTime: '10:00' }, 'America/New_York', now);
+  assert(soon.ok && soon.expiresAt.toISOString() === '2026-11-06T15:00:00.000Z', 'a job sooner than 7 days: expires when the job starts', soon);
+  const past = quoteTiming({ jobDate: '2026-11-04', startTime: '08:59' }, 'America/New_York', now);
+  assert(!past.ok && past.field === 'startTime', 'a start in the past is refused', past);
+  const la = quoteTiming({ jobDate: '2026-11-13', startTime: '09:00' }, 'America/Los_Angeles', now);
+  assert(la.ok && la.startsAt.toISOString() === '2026-11-13T17:00:00.000Z', 'another time zone', la);
+  const dst = quoteTiming({ jobDate: '2026-03-09', startTime: '09:00' }, 'America/New_York', new Date('2026-03-01T12:00:00Z'));
+  assert(dst.ok && dst.startsAt.toISOString() === '2026-03-09T13:00:00.000Z', 'daylight saving time handled', dst);
+}
+
+console.log('\n── quoteAmounts ──');
+{
+  const d = quoteAmounts(65000, 10000);
+  assert(d.dueNowCents === 10000 && d.balanceCents === 55000 && d.serviceFeeCents > 0 && d.chargeNowCents === d.dueNowCents + d.serviceFeeCents, 'deposit: due now, fee on what is paid now, balance', d);
+  const f = quoteAmounts(65000, null);
+  assert(f.dueNowCents === 65000 && f.balanceCents === 0 && f.chargeNowCents === 65000 + f.serviceFeeCents, 'full: everything now, no balance', f);
+  assert(quoteAmounts(10000, null).serviceFeeCents === quoteAmounts(65000, 10000).serviceFeeCents, 'the fee depends only on what is paid now');
+}
+
+console.log('\n── quoteMessageText ──');
+{
+  const s = quoteMessageText('sent', ' 2 Bedroom Move ', 65000);
+  assert(s === 'Sent a quote for 2 Bedroom Move, $650.00 total.', 'sent', s);
+  assert(quoteMessageText('updated', '2 Bedroom Move', 70050) === 'Updated the quote for 2 Bedroom Move, $700.50 total.', 'updated');
+  assert(quoteMessageText('withdrawn', '2 Bedroom Move', 65000) === 'Withdrew the quote for 2 Bedroom Move.', 'withdrawn');
+  assert(quoteMessageText('declined', '2 Bedroom Move', 65000) === 'Declined the quote for 2 Bedroom Move.', 'declined');
+  assert(quoteMessageText('expired', '2 Bedroom Move', 65000) === 'The quote for 2 Bedroom Move expired.', 'expired');
+  assert(quoteMessageText('sent', 'Big', 1234567) === 'Sent a quote for Big, $12,345.67 total.', 'thousands separator');
+  for (const e of ['sent', 'updated', 'withdrawn', 'declined', 'expired'] as const) {
+    assert(!/ - | — | – /.test(quoteMessageText(e, 'A', 700)), `no dashes (${e})`);
+  }
+}
+
+console.log('\n── effectiveStatus ──');
+{
+  const now = new Date('2026-11-04T14:00:00Z');
+  assert(effectiveStatus({ status: 'sent', expiresAt: new Date('2026-11-04T13:59:59Z') }, now) === 'expired', 'a sent quote past its expiry reads expired before the job runs');
+  assert(effectiveStatus({ status: 'sent', expiresAt: new Date('2026-11-04T14:00:01Z') }, now) === 'sent', 'still open');
+  assert(effectiveStatus({ status: 'withdrawn', expiresAt: new Date('2026-11-01T00:00:00Z') }, now) === 'withdrawn', 'other statuses unchanged');
+}
+
+console.log(`\n${passed} passed, ${failed} failed`);
+process.exit(failed > 0 ? 1 : 0);
