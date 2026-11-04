@@ -1,15 +1,19 @@
 /**
  * Go-live authorization + Stripe provisioning chokepoint.
  *
- * Single function (authorizeAndProvisionGoLive) that:
+ * authorizeAndProvisionGoLive:
  *   1. Enforces Connect onboarding completion.
  *   2. Enforces active vendor subscription.
  *   3. Delegates Stripe Product+Price provisioning to provisionConnectedCatalogItem
  *      (server/services/connectedCatalog.ts) — the ONE place provisioning logic lives.
+ * authorizeGoLive: steps 1 and 2 only (no Stripe catalog work).
  *
- * Both go-live routes (POST /api/vendor/products/:id/go-live and
- * POST /api/vendor/services/:id/go-live) and the price-change-while-live
- * path in the two PATCH routes call this function exclusively.
+ * Callers:
+ *   - authorizeAndProvisionGoLive: both go-live routes (POST /api/vendor/products/:id/go-live and
+ *     POST /api/vendor/services/:id/go-live), the price-change-while-live path in the two PATCH
+ *     routes, and (R34) a PATCH that moves a never published item into live.
+ *   - authorizeGoLive: (R34) a PATCH that moves an item that already has a Stripe product back
+ *     into live (Legend 2026-11-03: checks only, no Stripe call).
  */
 
 import { storage } from '../storage';
@@ -88,6 +92,28 @@ export async function authorizeAndProvisionGoLive(
   business: Business,
   kind: 'service' | 'product',
 ): Promise<GoLiveResult> {
+  await authorizeGoLive(business);
+
+  // ── Provision ─────────────────────────────────────────────────────────────
+  // Delegate to the shared connected-account catalog service.
+  // Cases A/B/C (create / reprice / idempotent) are handled there.
+  return provisionConnectedCatalogItem({
+    connectedAccountId: business.stripeAccountId!,
+    name: item.name,
+    description: item.description,
+    unitAmountCents: item.price,
+    existingProductId: item.stripeProductId,
+    existingPriceId: item.stripePriceId,
+  });
+}
+
+/**
+ * The two go-live gates (Connect onboarding + active subscription) without any Stripe catalog work.
+ * Used by authorizeAndProvisionGoLive above, and by the service / product edit routes when an edit
+ * puts an item that already has a Stripe product back live (R34, Legend 2026-11-03: checks only,
+ * no Stripe call). Throws GoLiveError on failure; the caller maps it to HTTP 409 { code, message }.
+ */
+export async function authorizeGoLive(business: Business): Promise<void> {
 
   // ── Gate 1: Connect onboarding ────────────────────────────────────────────
   // Authoritative: businesses.stripeAccountId (non-null) AND
@@ -122,16 +148,4 @@ export async function authorizeAndProvisionGoLive(
       `An active subscription is required to publish items (${subStatus.reason ?? 'no active subscription'}).`,
     );
   }
-
-  // ── Provision ─────────────────────────────────────────────────────────────
-  // Delegate to the shared connected-account catalog service.
-  // Cases A/B/C (create / reprice / idempotent) are handled there.
-  return provisionConnectedCatalogItem({
-    connectedAccountId: business.stripeAccountId,
-    name: item.name,
-    description: item.description,
-    unitAmountCents: item.price,
-    existingProductId: item.stripeProductId,
-    existingPriceId: item.stripePriceId,
-  });
 }
