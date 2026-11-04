@@ -19,7 +19,8 @@ export function buildQuoteEmail(p: { quote: Quote; businessName: string; busines
   const q = p.quote;
   const a = quoteAmounts(q.totalCents, q.depositCents ?? null);
   const biz = p.businessName.trim();
-  const when = `${formatDateLabel(q.jobDate)} at ${formatTimeLabel(q.startTime)}`;
+  // Step 3: date and time are optional; with none, the line is left out.
+  const when = q.jobDate && q.startTime ? `${formatDateLabel(q.jobDate)} at ${formatTimeLabel(q.startTime)}` : "";
   const lines: [string, string][] = [["Total", formatCents(a.totalCents)]];
   if (q.paymentMode === "deposit") {
     lines.push(["Deposit due now", formatCents(a.depositOrTotalCents)], ["Service fee", formatCents(a.serviceFeeCents)], ["Balance, held on your card the day before", formatCents(a.balanceCents)]);
@@ -38,13 +39,13 @@ export function buildQuoteEmail(p: { quote: Quote; businessName: string; busines
     <p>${escapeHtml(hi)}<br>${escapeHtml(intro)}</p>
     <div style="border:1px solid #E4E1D9;border-radius:10px;padding:16px 18px;">
       <div style="font-weight:800;font-size:16px;">${escapeHtml(q.title)}</div>
-      <div style="color:#4A4843;font-size:14px;line-height:1.5;">${escapeHtml(when)}${q.details ? `<br>${escapeHtml(q.details)}` : ""}${q.extrasNote ? `<br>${escapeHtml(q.extrasNote)}` : ""}</div>
+      <div style="color:#4A4843;font-size:14px;line-height:1.5;">${escapeHtml(when)}${q.details ? `${when ? "<br>" : ""}${escapeHtml(q.details)}` : ""}${q.extrasNote ? `<br>${escapeHtml(q.extrasNote)}` : ""}</div>
       <table style="width:100%;border-collapse:collapse;margin-top:10px;font-size:14px;">${rows}</table>
     </div>
     <p style="text-align:center;margin:22px 0;"><a href="${escapeHtml(p.link)}" style="background:#E2BE4B;color:#141413;padding:14px 22px;border-radius:10px;font-weight:800;text-decoration:none;display:inline-block;">${escapeHtml(pay)}</a></p>
     <p style="font-size:13px;color:#5E5B55;line-height:1.6;">${escapeHtml(footer)}</p>
   </div></div>`;
-  const text = [`${hi}`, intro, "", q.title, when, ...(q.details ? [q.details] : []), ...(q.extrasNote ? [q.extrasNote] : []), "", ...lines.map(([l, v]) => `${l}: ${v}`), "", `${pay}: ${p.link}`, "", footer].join("\n");
+  const text = [`${hi}`, intro, "", q.title, ...(when ? [when] : []), ...(q.details ? [q.details] : []), ...(q.extrasNote ? [q.extrasNote] : []), "", ...lines.map(([l, v]) => `${l}: ${v}`), "", `${pay}: ${p.link}`, "", footer].join("\n");
   return { subject, html, text };
 }
 

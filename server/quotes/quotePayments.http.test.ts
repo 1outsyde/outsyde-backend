@@ -243,6 +243,13 @@ const holdTs = (date: string, h: number, m: number) => { const [y, mo, d] = date
     r = await call("POST", `/api/quotes/${q1}/pay`, { token: cust.token, body: { version: 2 } });
     assert(r.status === 409 && r.body?.code === "QUOTE_CHANGED", "an old version can't be paid", r);
 
+    const qProd = id("qprod");
+    await q(`INSERT INTO quotes (id, business_id, sender_id, customer_id, conversation_id, kind, due_date, title, time_zone, total_cents, payment_mode, deposit_cents, expires_at, link_code)
+             VALUES ($1, $2, $3, $4, $5, 'product', $6, 'Custom wedding cake', 'America/New_York', 45000, 'full', NULL, now() + interval '6 days', $7)`, [qProd, biz, owner.uid, cust.uid, conv, daysFromNow(30), `lc${qProd}`]);
+    r = await call("POST", `/api/quotes/${qProd}/pay`, { token: cust.token, body: { version: 1 } });
+    assert(r.status === 400 && r.body?.code === "QUOTE_PRODUCT_LATER" && piCreates.length === 0, "a product quote is not paid as a booking (orders come in the products step)", r);
+    await q(`DELETE FROM quotes WHERE id = $1`, [qProd]);
+
     console.log("\n── paying a deposit quote ──");
     r = await call("POST", `/api/quotes/${q1}/pay`, { token: cust.token, body: { version: 1 } });
     assert(r.status === 200 && typeof r.body?.clientSecret === "string" && r.body?.quoteId === q1, "pay starts a payment", r);

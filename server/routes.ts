@@ -6822,6 +6822,15 @@ export async function registerRoutes(
       if (await storage.isUserBlockedEitherWay(userId, q.senderId)) {
         return res.status(403).json({ error: "Not allowed", message: "You can't pay this quote" });
       }
+      // Legend 2026-11-04: a service quote becomes a booking (date, start and length, always set for services); a
+      // product or deliverable quote becomes an order, paid in the products step of the build board.
+      if (q.kind === 'product') {
+        return res.status(400).json({ code: "QUOTE_PRODUCT_LATER", message: "Paying for custom products in Outsyde is coming soon. Message the business to arrange payment for now." });
+      }
+      if (!qp.isScheduled(q)) {
+        return res.status(400).json({ code: "QUOTE_NEEDS_TIME", message: "This quote doesn't have a date and time yet. Ask the business to add them, then pay." });
+      }
+      const sq = q;
 
       const business = await storage.getBusiness(q.businessId);
       if (!business) return res.status(404).json({ error: "Business not found" });
@@ -6854,8 +6863,8 @@ export async function registerRoutes(
       }
 
       const SLOT_TAKEN = { code: "SLOT_TAKEN", message: "That time was just booked. Message the business to choose another time." };
-      if (await qp.quoteTimeConflict(q)) return res.status(409).json(SLOT_TAKEN);
-      const locked = await qp.lockQuoteForPayment(q, q.version, now);
+      if (await qp.quoteTimeConflict(sq)) return res.status(409).json(SLOT_TAKEN);
+      const locked = await qp.lockQuoteForPayment(sq, sq.version, now);
       if (!locked) {
         const [fresh] = await db.select().from(quotesTable).where(eq(quotesTable.id, q.id));
         if (fresh && fresh.status === 'sent' && fresh.version === q.version && fresh.payingUntil && new Date(fresh.payingUntil).getTime() > Date.now()) {
@@ -6864,7 +6873,7 @@ export async function registerRoutes(
         return res.status(409).json({ code: "QUOTE_CHANGED", message: "This quote was changed. Check the new quote before you pay." });
       }
       lockedQuoteId = q.id;
-      const hold = await qp.holdQuoteTime(q, userId);
+      const hold = await qp.holdQuoteTime(sq, userId);
       if (!hold) {
         await qp.unlockQuote(q.id);
         lockedQuoteId = null;
@@ -6873,7 +6882,7 @@ export async function registerRoutes(
       heldId = hold.id;
 
       const fees = calculateBookingFees(due.chargeAmountCents);
-      const segs = jobDaySegments(q.jobDate, q.startTime, q.durationMinutes);
+      const segs = jobDaySegments(sq.jobDate, sq.startTime, sq.durationMinutes);
       let appointment: Awaited<ReturnType<typeof storage.createAppointment>>;
       try {
         appointment = await storage.createAppointment({
@@ -6884,10 +6893,10 @@ export async function registerRoutes(
           holdId: hold.id,
           quoteId: q.id,
           quoteVersion: q.version,
-          appointmentDate: q.jobDate,
-          appointmentTime: q.startTime,
+          appointmentDate: sq.jobDate,
+          appointmentTime: sq.startTime,
           appointmentEndTime: segs[0].endTime,
-          durationMinutes: q.durationMinutes,
+          durationMinutes: sq.durationMinutes,
           totalPrice: q.totalCents,
           platformFee: fees.platformFeeCents,
           vendorNet: fees.vendorNetCents,
@@ -6896,7 +6905,7 @@ export async function registerRoutes(
           captureMethod: 'automatic',
           serviceName: q.title,
           servicePriceCents: q.totalCents,
-          serviceDurationMinutes: q.durationMinutes,
+          serviceDurationMinutes: sq.durationMinutes,
           ...cancellationPolicyFor(service, business),
           depositAmountCents: q.depositCents ?? null,
           addons: [],

@@ -24,6 +24,10 @@ import { calculateBookingFees } from "../fees";
 import { stripeService } from "../stripe/stripeService";
 
 export const PAY_LOCK_MINUTES = 15;
+
+/** A quote with a date, start time and length: the only kind a service quote can be paid as (it becomes a booking). */
+export type ScheduledQuote = Quote & { jobDate: string; startTime: string; durationMinutes: number };
+export const isScheduled = (q: Quote): q is ScheduledQuote => !!q.jobDate && !!q.startTime && typeof q.durationMinutes === "number";
 const LIVE_STATES = [BOOKING_STATES.DRAFT, BOOKING_STATES.PENDING_PAYMENT, BOOKING_STATES.PENDING_PROVIDER, BOOKING_STATES.CONFIRMED];
 
 const toMin = (t: string) => { const [h, m] = t.split(":").map(Number); return h * 60 + m; };
@@ -40,7 +44,7 @@ function localTs(date: string, time: string): Date {
  * quote) and the extra days of other multi day quote bookings. Business hours and time off are not checked: the
  * vendor chose the time. Active holds are refused atomically when the quote's own hold is inserted.
  */
-export async function quoteTimeConflict(q: Quote): Promise<boolean> {
+export async function quoteTimeConflict(q: ScheduledQuote): Promise<boolean> {
   const segs = jobDaySegments(q.jobDate, q.startTime, q.durationMinutes);
   for (const seg of segs) {
     const conds = [eq(appointments.businessId, q.businessId), eq(appointments.appointmentDate, seg.date), inArray(appointments.status, LIVE_STATES)];
@@ -66,7 +70,7 @@ export async function quoteTimeConflict(q: Quote): Promise<boolean> {
 }
 
 /** The time hold for a quote payment. Returns null when an overlapping active hold exists. */
-export async function holdQuoteTime(q: Quote, customerId: string): Promise<{ id: string } | null> {
+export async function holdQuoteTime(q: ScheduledQuote, customerId: string): Promise<{ id: string } | null> {
   const segs = jobDaySegments(q.jobDate, q.startTime, q.durationMinutes);
   const startAt = localTs(q.jobDate, q.startTime);
   try {
@@ -202,8 +206,8 @@ export async function afterQuotePaid(q: Quote, appt: Appointment): Promise<void>
       .where(and(eq(estimateRequests.id, q.requestId), sql`${estimateRequests.status} IN ('new', 'called', 'quoted')`))
       .catch((err) => console.error(`[quotes] request booked failed for ${q.requestId}:`, err));
   }
-  const segs = jobDaySegments(q.jobDate, q.startTime, q.durationMinutes);
-  if (segs.length > 1) {
+  const segs = isScheduled(q) ? jobDaySegments(q.jobDate, q.startTime, q.durationMinutes) : [];
+  if (isScheduled(q) && segs.length > 1) {
     try {
       const existing = await db.select({ id: providerBlocks.id }).from(providerBlocks).where(eq(providerBlocks.appointmentId, appt.id)).limit(1);
       if (!existing.length) {

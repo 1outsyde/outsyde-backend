@@ -42,9 +42,24 @@ assert(field({ title: '  ' }) === 'title', 'title required');
 assert(field({ title: 'x'.repeat(121) }) === 'title', 'title up to 120');
 assert(field({ details: 'x'.repeat(2001) }) === 'details' && bad({ details: 'x'.repeat(2000) }).ok, 'details up to 2000');
 assert(field({ extrasNote: 'x'.repeat(301) }) === 'extrasNote', 'extras note up to 300');
-assert(field({ jobDate: '11/13/2026' }) === 'jobDate' && field({ jobDate: '2026-02-30' }) === 'jobDate' && field({ jobDate: undefined }) === 'jobDate', 'date required and real');
-assert(field({ startTime: '9am' }) === 'startTime' && field({ startTime: '24:00' }) === 'startTime' && bad({ startTime: '23:59' }).ok && field({ startTime: undefined }) === 'startTime', 'start time required, HH:MM');
-assert(field({ durationMinutes: 10 }) === 'durationMinutes' && field({ durationMinutes: 4321 }) === 'durationMinutes' && field({ durationMinutes: 90.5 }) === 'durationMinutes' && bad({ durationMinutes: 15 }).ok && bad({ durationMinutes: 4320 }).ok, 'length 15 minutes to 3 days, whole minutes');
+assert(field({ jobDate: '11/13/2026' }) === 'jobDate' && field({ jobDate: '2026-02-30' }) === 'jobDate', 'a date given must be real');
+assert(field({ startTime: '9am' }) === 'startTime' && field({ startTime: '24:00' }) === 'startTime' && bad({ startTime: '23:59' }).ok, 'a start time given must be HH:MM');
+assert(field({ durationMinutes: 10 }) === 'durationMinutes' && field({ durationMinutes: 4321 }) === 'durationMinutes' && field({ durationMinutes: 90.5 }) === 'durationMinutes' && bad({ durationMinutes: 15 }).ok && bad({ durationMinutes: 4320 }).ok, 'a length given is 15 minutes to 3 days, whole minutes');
+// Step 3 (Legend 2026-11-04): the vendor picks service (date, start and length required: it becomes a booking)
+// or product (no time slot, an optional due date: it becomes an order). Older clients send no kind: service.
+{
+  const svc = bad({});
+  assert(svc.ok && svc.value.kind === 'service' && svc.value.dueDate === null, 'no kind sent: a service quote', svc);
+  assert(field({ jobDate: undefined }) === 'jobDate' && field({ startTime: undefined }) === 'startTime' && field({ durationMinutes: undefined }) === 'durationMinutes', 'a service quote needs date, start and length');
+  const prod = bad({ kind: 'product', jobDate: undefined, startTime: undefined, durationMinutes: undefined });
+  assert(prod.ok && prod.value.kind === 'product' && prod.value.jobDate === null && prod.value.startTime === null && prod.value.durationMinutes === null && prod.value.dueDate === null, 'a product quote with no date passes', prod);
+  const due = bad({ kind: 'product', jobDate: undefined, startTime: undefined, durationMinutes: undefined, dueDate: '2026-12-20' });
+  assert(due.ok && due.value.dueDate === '2026-12-20', 'a product quote can have a due date', due);
+  assert(field({ kind: 'product', jobDate: undefined, startTime: undefined, durationMinutes: undefined, dueDate: '12/20/2026' }) === 'dueDate', 'a due date must be a real date');
+  assert(field({ kind: 'product' }) === 'jobDate', 'a product quote has no job time (use the due date)');
+  assert(field({ dueDate: '2026-12-20' }) === 'dueDate', 'a service quote has no due date');
+  assert(field({ kind: 'cake' }) === 'kind', 'kind is service or product');
+}
 assert(field({ totalCents: 699 }) === 'totalCents' && bad({ totalCents: 700, paymentMode: 'full', depositCents: null }).ok, 'total at least $7.00');
 assert(field({ totalCents: 10_000_001 }) === 'totalCents', 'total at most $100,000');
 assert(field({ totalCents: 650.5 }) === 'totalCents', 'total in whole cents');
@@ -80,6 +95,10 @@ console.log('\n── quoteTiming ──');
   assert(!gap.ok && gap.field === 'startTime' && /clock/.test(gap.message), 'a time that does not exist on clock change day is refused', gap);
   const back = quoteTiming({ jobDate: '2026-11-01', startTime: '01:30' }, 'America/New_York', new Date('2026-10-20T12:00:00Z'));
   assert(back.ok, 'a time that happens twice when clocks go back is accepted', back);
+  const undated = quoteTiming({ jobDate: null, startTime: null }, 'America/New_York', now);
+  assert(undated.ok && undated.startsAt === null && undated.expiresAt.toISOString() === new Date(now.getTime() + QUOTE_VALID_DAYS * 86400000).toISOString(), 'a product quote: no start, expires after 7 days', undated);
+  const pastDue = quoteTiming({ jobDate: null, startTime: null, dueDate: '2026-11-03' }, 'America/New_York', now);
+  assert(!pastDue.ok && pastDue.field === 'dueDate', 'a due date in the past is refused', pastDue);
   const dst = quoteTiming({ jobDate: '2026-03-09', startTime: '09:00' }, 'America/New_York', new Date('2026-03-01T12:00:00Z'));
   assert(dst.ok && dst.startsAt.toISOString() === '2026-03-09T13:00:00.000Z', 'daylight saving time handled', dst);
 }

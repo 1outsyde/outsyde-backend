@@ -26,16 +26,21 @@ const MIN_MINUTES = 15;
 const MAX_MINUTES = 3 * 24 * 60;
 
 export type QuotePaymentMode = "deposit" | "full";
+/** Step 3 (Legend 2026-11-04): a service gets a date and time and becomes a booking; a product or deliverable
+ *  (a cake, a dress) has an optional due date and becomes an order. */
+export type QuoteKind = "service" | "product";
 export type QuoteStatus = "sent" | "withdrawn" | "declined" | "expired" | "paid";
 export type QuoteEvent = "sent" | "updated" | "withdrawn" | "declined" | "expired" | "paid";
 
 export interface QuoteInput {
+  kind: QuoteKind;
+  dueDate: string | null;      // product quotes only, optional
   title: string;
   details: string | null;
   extrasNote: string | null;
-  jobDate: string;
-  startTime: string;
-  durationMinutes: number;
+  jobDate: string | null;      // service quotes: required; product quotes: none
+  startTime: string | null;
+  durationMinutes: number | null;
   totalCents: number;
   paymentMode: QuotePaymentMode;
   depositCents: number | null;
@@ -68,13 +73,26 @@ export function checkQuoteInput(raw: unknown): { ok: true; value: QuoteInput } |
   const extrasNote = text(b.extrasNote);
   if (extrasNote.length > MAX_EXTRAS) return { ok: false, field: "extrasNote", message: `The extras note can be up to ${MAX_EXTRAS} characters` };
 
+  // Step 3 (Legend 2026-11-04): the vendor picks service or product. Older clients send no kind: service.
+  const kind = b.kind === undefined || b.kind === null || b.kind === "" ? "service" : b.kind;
+  if (kind !== "service" && kind !== "product") return { ok: false, field: "kind", message: "Choose a service or a product" };
   const jobDate = text(b.jobDate);
-  if (!isRealDate(jobDate)) return { ok: false, field: "jobDate", message: "Choose the date of the job" };
   const startTime = text(b.startTime);
-  if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(startTime)) return { ok: false, field: "startTime", message: "Choose a start time" };
-  const durationMinutes = b.durationMinutes;
-  if (!isWholeCents(durationMinutes) || durationMinutes < MIN_MINUTES || durationMinutes > MAX_MINUTES) {
-    return { ok: false, field: "durationMinutes", message: "The job length must be between 15 minutes and 3 days" };
+  const rawLen = b.durationMinutes;
+  const lenGiven = rawLen !== undefined && rawLen !== null && rawLen !== "";
+  const dueDate = text(b.dueDate);
+  let durationMinutes: number | null = null;
+  if (kind === "service") {
+    if (dueDate) return { ok: false, field: "dueDate", message: "A service has a date and start time instead of a due date" };
+    if (!isRealDate(jobDate)) return { ok: false, field: "jobDate", message: "Choose the date of the job" };
+    if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(startTime)) return { ok: false, field: "startTime", message: "Choose a start time" };
+    if (!lenGiven || !isWholeCents(rawLen) || rawLen < MIN_MINUTES || rawLen > MAX_MINUTES) {
+      return { ok: false, field: "durationMinutes", message: "The job length must be between 15 minutes and 3 days" };
+    }
+    durationMinutes = rawLen;
+  } else {
+    if (jobDate || startTime || lenGiven) return { ok: false, field: jobDate ? "jobDate" : startTime ? "startTime" : "durationMinutes", message: "A product has no job time. Add a due date instead if there is one." };
+    if (dueDate && !isRealDate(dueDate)) return { ok: false, field: "dueDate", message: "Choose a real due date" };
   }
 
   const totalCents = b.totalCents;
@@ -96,16 +114,30 @@ export function checkQuoteInput(raw: unknown): { ok: true; value: QuoteInput } |
 
   return {
     ok: true,
-    value: { title, details: details || null, extrasNote: extrasNote || null, jobDate, startTime, durationMinutes, totalCents, paymentMode, depositCents },
+    value: {
+      kind, dueDate: kind === "product" && dueDate ? dueDate : null,
+      title, details: details || null, extrasNote: extrasNote || null,
+      jobDate: kind === "service" ? jobDate : null, startTime: kind === "service" ? startTime : null, durationMinutes,
+      totalCents, paymentMode, depositCents,
+    },
   };
 }
 
 /** When the job starts and when the quote expires (decision 1). The start must be in the future. */
 export function quoteTiming(
-  input: { jobDate: string; startTime: string },
+  input: { jobDate: string | null; startTime: string | null; dueDate?: string | null },
   timeZone: string,
   now: Date,
-): { ok: true; startsAt: Date; expiresAt: Date } | Fail {
+): { ok: true; startsAt: Date | null; expiresAt: Date } | Fail {
+  const sevenDaysFromNow = new Date(now.getTime() + QUOTE_VALID_DAYS * 24 * 60 * 60 * 1000);
+  if (!input.jobDate || !input.startTime) {
+    // A product quote: the due date (when there is one) must not have passed in the business's time zone.
+    if (input.dueDate) {
+      const today = new Intl.DateTimeFormat("en-CA", { timeZone, year: "numeric", month: "2-digit", day: "2-digit" }).format(now);
+      if (input.dueDate < today) return { ok: false, field: "dueDate", message: "The due date has already passed" };
+    }
+    return { ok: true, startsAt: null, expiresAt: sevenDaysFromNow };
+  }
   const startsAt = wallClockToUtc(input.jobDate, input.startTime, timeZone);
   if (!startsAt) return { ok: false, field: "jobDate", message: "Choose the date and start time of the job" };
   // On the day clocks go forward an hour is skipped (2:30 AM never happens in New York). Read the instant back as

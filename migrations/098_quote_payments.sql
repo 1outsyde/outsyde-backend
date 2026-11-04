@@ -17,6 +17,24 @@ ALTER TABLE quotes ADD COLUMN IF NOT EXISTS paying_until timestamptz;
 -- Set once when the "paid" card is posted, so two confirmations at the same moment post one card.
 ALTER TABLE quotes ADD COLUMN IF NOT EXISTS paid_notice_at timestamptz;
 
+-- Service or product (Legend 2026-11-04). A service quote has a date, start time and length and becomes a booking;
+-- a product or deliverable (a cake, a dress) has an optional due date and becomes an order (products step). So
+-- date, start time and length can be empty for product quotes. The duration check (15 to 4320) still applies.
+ALTER TABLE quotes ADD COLUMN IF NOT EXISTS kind text NOT NULL DEFAULT 'service';
+DO $$ BEGIN
+  ALTER TABLE quotes ADD CONSTRAINT quotes_kind_check CHECK (kind IN ('service', 'product'));
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+ALTER TABLE quotes ADD COLUMN IF NOT EXISTS due_date text;
+DO $$ BEGIN
+  ALTER TABLE quotes ADD CONSTRAINT quotes_kind_time_check CHECK (
+    (kind = 'service' AND job_date IS NOT NULL AND start_time IS NOT NULL AND duration_minutes IS NOT NULL AND starts_at IS NOT NULL AND due_date IS NULL)
+    OR (kind = 'product' AND job_date IS NULL AND start_time IS NULL AND duration_minutes IS NULL AND starts_at IS NULL));
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+ALTER TABLE quotes ALTER COLUMN job_date DROP NOT NULL;
+ALTER TABLE quotes ALTER COLUMN start_time DROP NOT NULL;
+ALTER TABLE quotes ALTER COLUMN duration_minutes DROP NOT NULL;
+ALTER TABLE quotes ALTER COLUMN starts_at DROP NOT NULL;
+
 -- The time hold taken for a quote payment (no service hold: request only services can't be held).
 ALTER TABLE booking_holds ADD COLUMN IF NOT EXISTS quote_id varchar(36) REFERENCES quotes(id) ON DELETE SET NULL;
 
