@@ -5,14 +5,12 @@
  *   1. A quote can only be paid when the business can take money: approved, payouts finished (not just a Stripe
  *      account id, R38), an active plan and the Vendor Agreement accepted; a staff quote also needs the staff
  *      member's payouts. The live booking and cart routes get the same check in their own R38 PR.
- *   2. Customer cancels a full price quote: the price minus the vendor's cancellation fee comes back, the service
- *      fee is kept, no second charge.
- *   3. The vendor keeps a quote's cancellation fee (paid like a booking share).
+ *   2. Customer cancels: the vendor's own cancellation policy exactly as for services (Legend 2026-11-04, replaces
+ *      the first call): refund windows, partial refund, cancellation fee; deposits non-refundable, no fee on top.
+ *   3. The vendor keeps a quote's cancellation fee (paid like a booking share, Outsyde's 2% taken).
  *   4. The quote's service policy, else the business policy, saved on the booking at payment.
  *   5. At payment only an overlap with another booking or hold refuses it (not business hours or time off).
  *   6. Jobs longer than a day block the extra days.
- *   Deposit quotes: the deposit is never refunded and the vendor's fee is charged on top. Refund windows are
- *   ignored for quotes.
  */
 
 export type QuoteGateCode =
@@ -59,31 +57,24 @@ export function cancellationPolicyFor(service: Policy | null | undefined, busine
 }
 
 /**
- * What happens when the customer cancels a paid quote booking. Reads only the policy saved on the booking.
- *   refundAmountCents  what goes back to the card (the service fee is never refunded)
- *   chargeFeeCents     what is charged on top to the saved card (deposit quotes only)
- *   feeCents           the vendor's fee, charged on top or kept from the refund
+ * The policy a quote booking is cancelled under: the one saved on it at payment, in the shape the booking cancel
+ * routes already use (routes.ts computeCancellationRefund). Same rules as services (Legend 2026-11-04): refund
+ * windows, partial refund and the cancellation fee; deposit bookings stay non-refundable with no fee on top.
  */
-export function quoteCancelOutcome(appt: {
-  totalPrice: number; depositAmountCents: number | null;
-  serviceHasCancellationFee: boolean | null; serviceCancellationFeeType: string | null; serviceCancellationFeeAmount: number | null;
-}): { refundTier: "full" | "partial" | "none"; refundAmountCents: number; chargeFeeCents: number; feeCents: number } {
-  const total = Math.max(0, appt.totalPrice);
-  let fee = 0;
-  if (appt.serviceHasCancellationFee === true && typeof appt.serviceCancellationFeeAmount === "number" && appt.serviceCancellationFeeAmount > 0) {
-    fee = appt.serviceCancellationFeeType === "percentage"
-      ? Math.round(total * (appt.serviceCancellationFeeAmount / 100))
-      : appt.serviceCancellationFeeType === "flat" ? appt.serviceCancellationFeeAmount : 0;
-  }
-  const deposit = appt.depositAmountCents ?? 0;
-  if (deposit > 0) {
-    // Deposit kept; the fee on top is never more than the balance the customer would still have owed.
-    const charge = Math.min(fee, Math.max(0, total - deposit));
-    return { refundTier: "none", refundAmountCents: 0, chargeFeeCents: charge, feeCents: charge };
-  }
-  const kept = Math.min(fee, total);
-  const refund = total - kept;
-  return { refundTier: kept === 0 ? "full" : refund > 0 ? "partial" : "none", refundAmountCents: refund, chargeFeeCents: 0, feeCents: kept };
+export function savedQuotePolicy(appt: {
+  serviceFullRefundWindow: string | null; serviceHasPartialRefund: boolean | null; servicePartialRefundWindow: string | null;
+  servicePartialRefundPercentage: number | null; serviceHasCancellationFee: boolean | null; serviceCancellationFeeType: string | null;
+  serviceCancellationFeeAmount: number | null;
+}) {
+  return {
+    fullRefundWindow: appt.serviceFullRefundWindow,
+    hasPartialRefund: appt.serviceHasPartialRefund,
+    partialRefundWindow: appt.servicePartialRefundWindow,
+    partialRefundPercentage: appt.servicePartialRefundPercentage,
+    hasCancellationFee: appt.serviceHasCancellationFee,
+    cancellationFeeType: appt.serviceCancellationFeeType,
+    cancellationFeeAmount: appt.serviceCancellationFeeAmount,
+  };
 }
 
 const pad = (n: number) => String(n).padStart(2, "0");

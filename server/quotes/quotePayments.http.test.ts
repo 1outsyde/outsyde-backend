@@ -175,8 +175,8 @@ const holdTs = (date: string, h: number, m: number) => { const [y, mo, d] = date
   const mkBiz = async (key: string, ownerId: string, o: { onboarded?: boolean; plan?: boolean; agreement?: boolean; autoAccept?: boolean; fee?: [string, number] | null } = {}) => {
     const bid = id(`b-${key}`);
     await q(`INSERT INTO businesses (id, owner_id, name, category, approval_status, time_zone, stripe_account_id, stripe_onboarding_complete, vendor_agreement_accepted, auto_accept_bookings,
-               has_cancellation_fee, cancellation_fee_type, cancellation_fee_amount)
-             VALUES ($1, $2, $3, 'home', 'approved', 'America/New_York', $4, $5, $6, $7, $8, $9, $10)`,
+               has_cancellation_fee, cancellation_fee_type, cancellation_fee_amount, full_refund_window, has_partial_refund, partial_refund_window, partial_refund_percentage)
+             VALUES ($1, $2, $3, 'home', 'approved', 'America/New_York', $4, $5, $6, $7, $8, $9, $10, 'never', true, '24_hours', 50)`,
       [bid, ownerId, `Movers ${key}`, `acct_${key}_${P}`, o.onboarded ?? true, o.agreement ?? true, o.autoAccept ?? true,
         o.fee ? true : false, o.fee ? o.fee[0] : null, o.fee ? o.fee[1] : null]);
     if (o.plan ?? true) await q(`INSERT INTO vendor_subscriptions (id, vendor_id, business_id, tier_id, status, current_period_end) VALUES ($1, $2, $3, $4, 'active', now() + interval '30 days')`, [id(`sub-${key}`), ownerId, bid, tier.id]);
@@ -333,7 +333,7 @@ const holdTs = (date: string, h: number, m: number) => { const [y, mo, d] = date
     const piLong = r.body.paymentIntentId;
     let [aLong] = await apptOf(qLong);
     assert(aLong.deposit_amount_cents === null && aLong.appointment_end_time === "23:59", "first day booked to midnight", aLong);
-    assert(aLong.service_cancellation_fee_amount === 5000 && aLong.service_cancellation_fee_type === "flat", "no service: the business policy is saved", aLong);
+    assert(aLong.service_cancellation_fee_amount === 5000 && aLong.service_cancellation_fee_type === "flat" && aLong.service_partial_refund_percentage === 50, "no service: the business policy is saved", aLong);
     await WebhookHandlers.handlePaymentIntentSucceeded(succeed(piLong));
     const blocks = await q(`SELECT * FROM provider_blocks WHERE appointment_id = $1`, [aLong.id]);
     assert(blocks.length === 1 && blocks[0].provider_id === biz, "the extra days are blocked", blocks);
@@ -343,33 +343,34 @@ const holdTs = (date: string, h: number, m: number) => { const [y, mo, d] = date
     const fullCard = await q(`SELECT content FROM messages WHERE conversation_id = $1 AND card->>'event' = 'paid' AND card->>'quoteId' = $2`, [conv2, qLong]);
     assert(fullCard[0]?.content === "Paid in full for 2 Bedroom Move, $2,500.00.", "full price paid card", fullCard);
 
-    console.log("\n── cancelling a full price quote (call 2) ──");
+    console.log("\n── cancelling a full price quote: the vendor's own policy, as for services ──");
+    // Business policy: no full refund, 50% back until 24 hours before, then a $50 cancellation fee on top.
     r = await call("GET", `/api/bookings/appointments/${aLong.id}/cancel-preview`, { token: cust2.token });
-    assert(r.body?.refundTier === "partial" && r.body.refundAmountCents === 245000 && r.body.feeAmountCents === 5000 && r.body.feeWouldBeCharged === false,
-      "preview: the price minus the vendor fee, no second charge", r.body);
-    const feeCreatesBefore = piCreates.filter((p) => p.metadata.type === "cancellation_fee").length;
+    assert(r.body?.refundTier === "partial" && r.body.refundAmountCents === 125000 && r.body.feeAmountCents === 5000 && r.body.feeWouldBeCharged === true,
+      "preview: the vendor's partial refund and cancellation fee", r.body);
     r = await call("POST", `/api/bookings/appointments/${aLong.id}/cancel`, { token: cust2.token });
-    assert(r.status === 200 && r.body?.refundAmountCents === 245000 && r.body.feeCharged === false, "cancel refunds the price minus the fee", r);
-    assert(refunds.some((x) => x.payment_intent === piLong && x.amount === 245000), "refund amount at Stripe", refunds.slice(-1));
-    assert(piCreates.filter((p) => p.metadata.type === "cancellation_fee").length === feeCreatesBefore, "no fee charge on top", null);
-    assert((await q(`SELECT count(*)::int AS n FROM provider_blocks WHERE appointment_id = $1`, [aLong.id]))[0].n === 0, "extra day blocks removed", null);
-
-    console.log("\n── cancelling a deposit quote: deposit kept, fee on top to the vendor (call 3) ──");
-    r = await call("GET", `/api/bookings/appointments/${a1.id}/cancel-preview`, { token: cust.token });
-    assert(r.body?.refundTier === "none" && r.body.refundAmountCents === 0 && r.body.feeAmountCents === 5000 && r.body.feeWouldBeCharged === true && r.body.depositNonRefundable === true,
-      "preview: deposit non-refundable and the fee applies", r.body);
-    r = await call("POST", `/api/bookings/appointments/${a1.id}/cancel`, { token: cust.token });
-    assert(r.status === 200 && r.body?.feeCharged === true && r.body.refundAmountCents === 0, "cancel keeps the deposit and charges the fee", r);
-    const feePIs = piCreates.filter((p) => p.metadata.type === "cancellation_fee" && p.metadata.appointmentId === a1.id);
-    assert(feePIs.length === 1 && feePIs[0].amount === 5000 && typeof feePIs[0].key === "string" && feePIs[0].key.startsWith(`cancel_fee_appointment_${a1.id}_`), "one fee charge, with an idempotency key (R39)", feePIs);
-    const [feeRow] = await q(`SELECT * FROM cancellation_fee_charges WHERE reference_id = $1`, [a1.id]);
+    assert(r.status === 200 && r.body?.refundAmountCents === 125000 && r.body.feeCharged === true, "cancel refunds half and charges the fee, as for a service", r);
+    assert(refunds.some((x) => x.payment_intent === piLong && x.amount === 125000), "refund amount at Stripe", refunds.slice(-1));
+    const longFee = piCreates.filter((p) => p.metadata.type === "cancellation_fee" && p.metadata.appointmentId === aLong.id);
+    assert(longFee.length === 1 && longFee[0].amount === 5000 && typeof longFee[0].key === "string" && longFee[0].key.startsWith(`cancel_fee_appointment_${aLong.id}_`), "one fee charge, with an idempotency key (R39)", longFee);
+    const [feeRow] = await q(`SELECT * FROM cancellation_fee_charges WHERE reference_id = $1`, [aLong.id]);
     assert(feeRow?.status === "charged" && feeRow.attempts === 1, "fee recorded", feeRow);
-    const feeShare = transfers.find((t) => t.transfer_group === `appointment_${a1.id}` && t.metadata?.recipient === "business_cancel_fee");
-    assert(feeShare && feeShare.amount === 4900 && feeShare.source_transaction?.startsWith("ch_"), "the vendor gets the fee minus their 2%, from the fee's own charge", feeShare);
-    const [a1c] = await q(`SELECT status, cancellation_fee_kept_cents FROM appointments WHERE id = $1`, [a1.id]);
-    assert(a1c.status === "canceled" && a1c.cancellation_fee_kept_cents === null, "not counted as Outsyde's kept fee", a1c);
+    const feeShare = transfers.find((t) => t.transfer_group === `appointment_${aLong.id}` && t.metadata?.recipient === "business_cancel_fee");
+    assert(feeShare && feeShare.amount === 4900 && feeShare.source_transaction?.startsWith("ch_"), "the vendor gets the fee minus Outsyde's 2%, from the fee's own charge", feeShare);
+    const [aLongC] = await q(`SELECT status, cancellation_fee_kept_cents FROM appointments WHERE id = $1`, [aLong.id]);
+    assert(aLongC.status === "canceled" && aLongC.cancellation_fee_kept_cents === null, "not counted as Outsyde's kept fee", aLongC);
+    assert((await q(`SELECT count(*)::int AS n FROM provider_blocks WHERE appointment_id = $1`, [aLong.id]))[0].n === 0, "extra day blocks removed", null);
+    r = await call("POST", `/api/bookings/appointments/${aLong.id}/cancel`, { token: cust2.token });
+    assert(r.status === 400 && piCreates.filter((p) => p.metadata.type === "cancellation_fee" && p.metadata.appointmentId === aLong.id).length === 1, "a second cancel charges nothing", r);
+
+    console.log("\n── cancelling a deposit quote: same as a deposit booking ──");
+    r = await call("GET", `/api/bookings/appointments/${a1.id}/cancel-preview`, { token: cust.token });
+    assert(r.body?.refundTier === "none" && r.body.refundAmountCents === 0 && r.body.feeAmountCents === 0 && r.body.feeWouldBeCharged === false && r.body.depositNonRefundable === true,
+      "preview: deposit non-refundable, no fee on top", r.body);
+    const feesBefore = piCreates.filter((p) => p.metadata.type === "cancellation_fee").length;
     r = await call("POST", `/api/bookings/appointments/${a1.id}/cancel`, { token: cust.token });
-    assert(r.status === 400 && piCreates.filter((p) => p.metadata.type === "cancellation_fee" && p.metadata.appointmentId === a1.id).length === 1, "a second cancel charges nothing", r);
+    assert(r.status === 200 && r.body?.feeCharged === false && r.body.refundAmountCents === 0, "cancel keeps the deposit, nothing else charged", r);
+    assert(piCreates.filter((p) => p.metadata.type === "cancellation_fee").length === feesBefore, "no fee charge", null);
 
     console.log("\n── R39: the fee is charged once even when a reply is lost ──");
     const refX = { type: "appointment" as const, id: id("feeX") };

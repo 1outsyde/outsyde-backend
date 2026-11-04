@@ -207,7 +207,7 @@ import { sendAppointmentReceipts, sendShootBookingReceipts } from "./stripe/webh
 import { getStripePublishableKey, getUncachableStripeClient } from "./stripe/stripeClient";
 import { listShownCards, paymentSheetFields, SAVED_CARD_SETUP_METADATA } from "./payments/savedCards";
 import { chargeCancellationFeeOnce } from "./payments/cancellationFees";
-import { quoteCancelOutcome } from "./quotes/quotePayments";
+import { savedQuotePolicy } from "./quotes/quotePayments";
 import { payQuoteCancelFeeShare } from "./quotes/quotePaid";
 import { getSubscriptionPeriod } from "./stripe/subscriptionFields";
 import { switchPaidPlan, applySwitchedPlan, SWITCH_DECLINED_MESSAGE } from "./subscriptions/planSwitch";
@@ -9422,16 +9422,12 @@ export async function registerRoutes(
 
       // Platform rule: a deposit is non-refundable when the customer cancels,
       // and no cancellation fee is charged on top of it.
-      // Quote bookings (Quotes step 3) follow the quote rules instead: deposit kept plus the vendor's fee charged
-      // on top, or the price minus the fee back for a full price quote; refund windows ignored. feeWouldBeCharged
-      // is true only when the fee is a second charge (the app adds its fee line only then).
-      const quoteOutcome = appointment.quoteId ? quoteCancelOutcome(appointment) : null;
-      const { refundTier, refundAmountCents, feeAmountCents } = quoteOutcome
-        ? { refundTier: quoteOutcome.refundTier, refundAmountCents: quoteOutcome.refundAmountCents, feeAmountCents: quoteOutcome.feeCents }
-        : hasDeposit(appointment)
+      // Quote bookings (Quotes step 3, Legend 2026-11-04): the vendor's own cancellation policy exactly as for
+      // services, read from the policy saved on the booking at payment (the quote's service, else the business).
+      const { refundTier, refundAmountCents, feeAmountCents } = hasDeposit(appointment)
         ? NON_REFUNDABLE_DEPOSIT_OUTCOME
         : computeCancellationRefund(
-            service,
+            appointment.quoteId ? savedQuotePolicy(appointment) : service,
             new Date(`${appointment.appointmentDate}T${appointment.appointmentTime}`),
             appointment.totalPrice,
             appointment.vendorNet,
@@ -9447,7 +9443,7 @@ export async function registerRoutes(
         feeAmountCents,
         // feeWouldBeCharged indicates a fee applies; actual collection method
         // (automatic vs manual) is determined at cancel time by payment method availability.
-        feeWouldBeCharged: quoteOutcome ? quoteOutcome.chargeFeeCents > 0 : feeAmountCents > 0,
+        feeWouldBeCharged: feeAmountCents > 0,
         feeNeedsManualCollection: false,
         subtotalCents: fees.subtotalCents,
         // Full service price + 8%, kept as-is for existing callers. For deposit
@@ -9566,15 +9562,12 @@ export async function registerRoutes(
       // ── Compute refund tier + cancellation fee ────────────────────────────
       // Platform rule: a deposit is non-refundable when the customer cancels,
       // and no cancellation fee is charged on top of it.
-      // Quote bookings (Quotes step 3): the quote rules. feeAmountCents is what is charged on top (deposit
-      // quotes); a full price quote keeps the fee out of the refund instead, with no second charge.
-      const quoteOutcome = appointment.quoteId ? quoteCancelOutcome(appointment) : null;
-      let { refundTier, refundAmountCents, feeAmountCents } = quoteOutcome
-        ? { refundTier: quoteOutcome.refundTier, refundAmountCents: quoteOutcome.refundAmountCents, feeAmountCents: quoteOutcome.chargeFeeCents }
-        : hasDeposit(appointment)
+      // Quote bookings (Quotes step 3, Legend 2026-11-04): the vendor's own policy exactly as for services, from
+      // the policy saved on the booking at payment (the quote's service, else the business).
+      let { refundTier, refundAmountCents, feeAmountCents } = hasDeposit(appointment)
         ? NON_REFUNDABLE_DEPOSIT_OUTCOME
         : computeCancellationRefund(
-            service,
+            appointment.quoteId ? savedQuotePolicy(appointment) : service,
             new Date(`${appointment.appointmentDate}T${appointment.appointmentTime}`),
             appointment.totalPrice,
             appointment.vendorNet,

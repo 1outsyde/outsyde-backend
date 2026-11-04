@@ -3,12 +3,11 @@
  * Run with: npx tsx server/quotes/quotePayments.test.ts
  *
  * Legend 2026-11-04 (all 12 recommended): quote payments need a business that can take money (approved, payouts
- * finished, active plan, Vendor Agreement accepted, and the sending staff member's payouts); deposit quotes keep
- * the deposit and the vendor's cancellation fee is charged on top; a full price quote refunds the price minus the
- * vendor's fee (service fee kept); the quote's service policy, else the business policy, saved at payment;
- * refund windows are ignored for quotes; jobs longer than a day block the extra days.
+ * finished, active plan, Vendor Agreement accepted, and the sending staff member's payouts); cancelling follows
+ * the vendor's own policy as for services, saved at payment (the quote's service, else the business policy);
+ * jobs longer than a day block the extra days.
  */
-import { canTakeQuotePayments, quoteCancelOutcome, jobDaySegments, cancellationPolicyFor } from './quotePayments';
+import { canTakeQuotePayments, savedQuotePolicy, jobDaySegments, cancellationPolicyFor } from './quotePayments';
 
 let passed = 0;
 let failed = 0;
@@ -52,29 +51,13 @@ console.log('\n── cancellationPolicyFor ──');
   assert(none.serviceHasCancellationFee === null && none.serviceCancellationFeeAmount === null, 'neither: nothing saved');
 }
 
-console.log('\n── quoteCancelOutcome ──');
+console.log('\n── savedQuotePolicy ──');
 {
-  const flat = { serviceHasCancellationFee: true, serviceCancellationFeeType: 'flat', serviceCancellationFeeAmount: 5000 };
-  const pct = { serviceHasCancellationFee: true, serviceCancellationFeeType: 'percentage', serviceCancellationFeeAmount: 20 };
-  const noFee = { serviceHasCancellationFee: false, serviceCancellationFeeType: null, serviceCancellationFeeAmount: null };
-
-  const d0 = quoteCancelOutcome({ totalPrice: 65000, depositAmountCents: 10000, ...noFee });
-  assert(d0.refundTier === 'none' && d0.refundAmountCents === 0 && d0.chargeFeeCents === 0 && d0.feeCents === 0, 'deposit quote, no fee: deposit kept, nothing else', d0);
-  const d1 = quoteCancelOutcome({ totalPrice: 65000, depositAmountCents: 10000, ...flat });
-  assert(d1.refundTier === 'none' && d1.refundAmountCents === 0 && d1.chargeFeeCents === 5000 && d1.feeCents === 5000, 'deposit quote: deposit kept and the vendor fee charged on top', d1);
-  const d2 = quoteCancelOutcome({ totalPrice: 65000, depositAmountCents: 10000, ...pct });
-  assert(d2.chargeFeeCents === 13000, 'a percentage fee is on the job total', d2);
-  const d3 = quoteCancelOutcome({ totalPrice: 65000, depositAmountCents: 10000, serviceHasCancellationFee: true, serviceCancellationFeeType: 'flat', serviceCancellationFeeAmount: 90000 });
-  assert(d3.chargeFeeCents === 55000, 'the fee on top is never more than the balance left', d3);
-
-  const f0 = quoteCancelOutcome({ totalPrice: 65000, depositAmountCents: null, ...noFee });
-  assert(f0.refundTier === 'full' && f0.refundAmountCents === 65000 && f0.chargeFeeCents === 0, 'full price quote, no fee: the price comes back (service fee kept)', f0);
-  const f1 = quoteCancelOutcome({ totalPrice: 65000, depositAmountCents: null, ...flat });
-  assert(f1.refundTier === 'partial' && f1.refundAmountCents === 60000 && f1.chargeFeeCents === 0 && f1.feeCents === 5000, 'full price quote: the price minus the vendor fee, no second charge', f1);
-  const f2 = quoteCancelOutcome({ totalPrice: 65000, depositAmountCents: null, serviceHasCancellationFee: true, serviceCancellationFeeType: 'flat', serviceCancellationFeeAmount: 70000 });
-  assert(f2.refundTier === 'none' && f2.refundAmountCents === 0 && f2.feeCents === 65000, 'a fee bigger than the price: nothing comes back', f2);
-  const f3 = quoteCancelOutcome({ totalPrice: 65000, depositAmountCents: null, serviceHasCancellationFee: true, serviceCancellationFeeType: 'flat', serviceCancellationFeeAmount: null });
-  assert(f3.refundTier === 'full' && f3.feeCents === 0, 'a fee switched on with no amount counts as no fee', f3);
+  // Cancelling a quote booking uses the vendor's own policy exactly as for services, read from the booking.
+  const p = savedQuotePolicy({ serviceFullRefundWindow: '24_hours', serviceHasPartialRefund: true, servicePartialRefundWindow: '1_hour', servicePartialRefundPercentage: 50,
+    serviceHasCancellationFee: true, serviceCancellationFeeType: 'flat', serviceCancellationFeeAmount: 5000 });
+  assert(p.fullRefundWindow === '24_hours' && p.hasPartialRefund === true && p.partialRefundWindow === '1_hour' && p.partialRefundPercentage === 50
+    && p.hasCancellationFee === true && p.cancellationFeeType === 'flat' && p.cancellationFeeAmount === 5000, 'the saved policy in the shape the cancel routes read', p);
 }
 
 console.log('\n── jobDaySegments ──');
