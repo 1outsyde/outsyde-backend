@@ -187,7 +187,11 @@ export async function retryOpenPayouts(): Promise<{ paid: number; dropped: numbe
   let dropped = 0;
   for (const issue of open) {
     const state = await bookingState(issue.reference_type, issue.reference_id);
-    const payable = issue.reference_type === 'appointment' ? PAYABLE_APPOINTMENT_STATES : PAYABLE_SHOOT_STATES;
+    // A quote's cancellation fee share (Quotes step 3, recipient `<who>_cancel_fee`) is owed because the booking
+    // was canceled, so canceled is its only payable state. Every other payout is unchanged.
+    const payable = issue.recipient_key.endsWith('_cancel_fee')
+      ? ['canceled']
+      : issue.reference_type === 'appointment' ? PAYABLE_APPOINTMENT_STATES : PAYABLE_SHOOT_STATES;
     if (!state.status || !payable.includes(state.status) || state.refunded) {
       await rows(sql`UPDATE booking_payout_issues SET status = 'dropped', resolved_at = now(),
                      last_error = ${`booking is ${state.status ?? 'missing'}${state.refunded ? ', refunded' : ''}; not paid`}

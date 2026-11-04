@@ -244,7 +244,18 @@ export async function transitionAppointmentState(
 
   await rejectPendingPointsOnEnd('appointment', appointmentId, toState);
 
-  return { 
+  // Quotes step 3: a multi day quote booking that ends without happening frees its extra days. Only rows
+  // tied to this booking (provider_blocks.appointment_id) are touched; plain time off is never removed.
+  if (appointment.quoteId && (toState === BOOKING_STATES.CANCELED || toState === BOOKING_STATES.DECLINED || toState === BOOKING_STATES.EXPIRED)) {
+    try {
+      const { releaseQuoteBlocks } = await import("./quotes/quotePaid");
+      await releaseQuoteBlocks(appointmentId);
+    } catch (err) {
+      console.error(`[quotes] could not free the extra days of booking ${appointmentId}:`, err);
+    }
+  }
+
+  return {
     success: true, 
     previousState: currentState, 
     newState: toState 

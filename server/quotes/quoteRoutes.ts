@@ -1,5 +1,7 @@
 /**
- * Quotes (Quotes in Messages, step 2, migration 097). Rules: ./quoteRules.ts. No payment here (step 3).
+ * Quotes (Quotes in Messages, step 2, migration 097). Rules: ./quoteRules.ts. Paying a quote (step 3) is
+ * POST /api/quotes/:id/pay in routes.ts (./quotePaid.ts); while a payment runs, edit, withdraw, decline and
+ * expiry wait (paying_until, up to 15 minutes).
  *
  *   POST  /api/quotes                       business owner, or an active staff member with a login, inside a chat
  *   PATCH /api/quotes/:id                   the business owner, or the staff member who sent it: edit (new version)
@@ -15,6 +17,7 @@
 import type { Express, Request } from "express";
 import { randomBytes } from "crypto";
 import { and, desc, eq, gt, sql } from "drizzle-orm";
+import type { SQL } from "drizzle-orm";
 import { db } from "../db";
 import { storage } from "../storage";
 import { getUserIdFromRequest } from "../auth";
@@ -60,6 +63,10 @@ export function toQuoteJson(q: Quote, businessName: string | null, now = new Dat
     linkCode: q.linkCode,
     messageId: q.messageId ?? null,
     declineReason: q.declineReason ?? null,
+    // Step 3 (additive): the booking a paid quote became, and whether a payment is running right now.
+    appointmentId: q.appointmentId ?? null,
+    paidAt: q.paidAt ?? null,
+    paying: !!q.payingUntil && new Date(q.payingUntil).getTime() > now.getTime() && q.status === "sent",
     sentAt: q.sentAt,
     updatedAt: q.updatedAt,
   };
@@ -132,6 +139,11 @@ async function loadQuote(id: string): Promise<Quote | undefined> {
   const [q] = await db.select().from(quotes).where(eq(quotes.id, id));
   return q;
 }
+
+/** Step 3: no payment is running (the pay route sets paying_until for up to 15 minutes). */
+export const notPaying = (now: Date): SQL => sql`(${quotes.payingUntil} IS NULL OR ${quotes.payingUntil} <= ${now})`;
+const PAYING_BODY = { code: "QUOTE_PAYING", message: "The customer is paying this quote right now. Try again in a few minutes." };
+const isPaying = (q: Quote, now: Date) => q.status === "sent" && !!q.payingUntil && new Date(q.payingUntil).getTime() > now.getTime();
 
 /** 409 body for a quote that can no longer change. */
 function closedBody(q: Quote) {
@@ -243,6 +255,7 @@ export function registerQuoteRoutes(app: Express): void {
       const q = await loadQuote(req.params.id);
       if (!q || !(await canManage(q, userId))) return res.status(404).json({ error: "Quote not found" });
       if (effectiveStatus(q, new Date()) !== "sent") return res.status(409).json(closedBody(q));
+      if (isPaying(q, new Date())) return res.status(409).json(PAYING_BODY);
       if (await storage.isUserBlockedEitherWay(userId, q.customerId)) {
         return res.status(403).json({ error: "You can't send quotes to this person" });
       }
@@ -270,10 +283,11 @@ export function registerQuoteRoutes(app: Express): void {
       }
       const [updated] = await db.update(quotes)
         .set({ ...input.value, serviceId, startsAt: timing.startsAt, expiresAt: timing.expiresAt, version: q.version + 1, updatedAt: now })
-        .where(and(eq(quotes.id, q.id), eq(quotes.status, "sent"), eq(quotes.version, q.version), gt(quotes.expiresAt, now)))
+        .where(and(eq(quotes.id, q.id), eq(quotes.status, "sent"), eq(quotes.version, q.version), gt(quotes.expiresAt, now), notPaying(now)))
         .returning();
       if (!updated) {
         const fresh = await loadQuote(q.id);
+        if (fresh && isPaying(fresh, new Date())) return res.status(409).json(PAYING_BODY);
         if (fresh && effectiveStatus(fresh, new Date()) !== "sent") return res.status(409).json(closedBody(fresh));
         return res.status(409).json({ code: "QUOTE_CHANGED", message: "This quote was changed in the meantime. Open it again and make your change." });
       }
@@ -295,8 +309,11 @@ export function registerQuoteRoutes(app: Express): void {
       if (!q || !(await canManage(q, userId))) return res.status(404).json({ error: "Quote not found" });
       const now = new Date();
       const [updated] = await db.update(quotes).set({ status: "withdrawn", withdrawnAt: now, updatedAt: now })
-        .where(and(eq(quotes.id, q.id), eq(quotes.status, "sent"), gt(quotes.expiresAt, now))).returning();
-      if (!updated) return res.status(409).json(closedBody((await loadQuote(q.id)) ?? q));
+        .where(and(eq(quotes.id, q.id), eq(quotes.status, "sent"), gt(quotes.expiresAt, now), notPaying(now))).returning();
+      if (!updated) {
+        const fresh = (await loadQuote(q.id)) ?? q;
+        return res.status(409).json(isPaying(fresh, new Date()) ? PAYING_BODY : closedBody(fresh));
+      }
       await postEvent(updated, "withdrawn", false);
       return res.json({ quote: toQuoteJson(updated, await businessName(updated.businessId)) });
     } catch (err) {
@@ -317,8 +334,11 @@ export function registerQuoteRoutes(app: Express): void {
       if (reason.length > MAX_REASON) return res.status(400).json({ error: "Invalid data", field: "reason", message: `The reason can be up to ${MAX_REASON} characters` });
       const now = new Date();
       const [updated] = await db.update(quotes).set({ status: "declined", declinedAt: now, declineReason: reason || null, updatedAt: now })
-        .where(and(eq(quotes.id, q.id), eq(quotes.status, "sent"), gt(quotes.expiresAt, now))).returning();
-      if (!updated) return res.status(409).json(closedBody((await loadQuote(q.id)) ?? q));
+        .where(and(eq(quotes.id, q.id), eq(quotes.status, "sent"), gt(quotes.expiresAt, now), notPaying(now))).returning();
+      if (!updated) {
+        const fresh = (await loadQuote(q.id)) ?? q;
+        return res.status(409).json(isPaying(fresh, new Date()) ? PAYING_BODY : closedBody(fresh));
+      }
       await postEvent(updated, "declined", true);
       return res.json({ quote: toQuoteJson(updated, await businessName(updated.businessId)) });
     } catch (err) {

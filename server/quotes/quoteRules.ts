@@ -2,8 +2,8 @@
  * Quotes (Quotes in Messages, step 2). Pure rules: no database, no network.
  *
  * Legend 2026-11-04 (all recommended):
- *   1. A quote expires 7 days after it is sent, or when the job starts if that comes sooner, so it can never be
- *      paid after the job has started.
+ *   1. A quote expires 7 days after it is sent, or the day before the job if that comes sooner (step 3, call 12;
+ *      a job less than 24 hours away keeps the job start), so it can never be paid after the job has started.
  *   2. Editing is allowed until it is paid; each edit is a new version and resets the 7 days.
  *   3. Staff with a login send from their own chat; the quote records the staff member (paid in step 3).
  *   4. Title, date, start time, length, total and deposit or full are required; service and extras note are not.
@@ -27,7 +27,7 @@ const MAX_MINUTES = 3 * 24 * 60;
 
 export type QuotePaymentMode = "deposit" | "full";
 export type QuoteStatus = "sent" | "withdrawn" | "declined" | "expired" | "paid";
-export type QuoteEvent = "sent" | "updated" | "withdrawn" | "declined" | "expired";
+export type QuoteEvent = "sent" | "updated" | "withdrawn" | "declined" | "expired" | "paid";
 
 export interface QuoteInput {
   title: string;
@@ -117,7 +117,12 @@ export function quoteTiming(
   }
   if (startsAt.getTime() <= now.getTime()) return { ok: false, field: "startTime", message: "The job must start in the future" };
   const sevenDays = new Date(now.getTime() + QUOTE_VALID_DAYS * 24 * 60 * 60 * 1000);
-  return { ok: true, startsAt, expiresAt: startsAt < sevenDays ? startsAt : sevenDays };
+  // Step 3 (Legend 2026-11-04, call 12): the day before the job (24 hours before it starts), so every paid quote
+  // has its full balance hold window. A job less than 24 hours away when sent keeps the job start, or a same day
+  // job could never be paid.
+  const dayBefore = new Date(startsAt.getTime() - 24 * 60 * 60 * 1000);
+  const jobLimit = dayBefore.getTime() > now.getTime() ? dayBefore : startsAt;
+  return { ok: true, startsAt, expiresAt: jobLimit < sevenDays ? jobLimit : sevenDays };
 }
 
 /**
@@ -143,7 +148,7 @@ export function formatCents(cents: number): string {
 }
 
 /** The text of a quote card. Older app builds show only this text, so it reads on its own. */
-export function quoteMessageText(event: QuoteEvent, title: string, totalCents: number): string {
+export function quoteMessageText(event: QuoteEvent, title: string, totalCents: number, paymentMode: QuotePaymentMode = "deposit"): string {
   const t = title.trim();
   switch (event) {
     case "sent": return `Sent a quote for ${t}, ${formatCents(totalCents)} total.`;
@@ -151,11 +156,14 @@ export function quoteMessageText(event: QuoteEvent, title: string, totalCents: n
     case "withdrawn": return `Withdrew the quote for ${t}.`;
     case "declined": return `Declined the quote for ${t}.`;
     case "expired": return `The quote for ${t} expired.`;
+    case "paid": return paymentMode === "full" ? `Paid in full for ${t}, ${formatCents(totalCents)}.` : `Paid the deposit for ${t}.`;
   }
 }
 
 /** A sent quote past its expiry reads as expired even before the expiry job has marked it. */
-export function effectiveStatus(q: { status: string; expiresAt: Date | string }, now: Date): QuoteStatus {
-  if (q.status === "sent" && new Date(q.expiresAt).getTime() <= now.getTime()) return "expired";
+export function effectiveStatus(q: { status: string; expiresAt: Date | string; payingUntil?: Date | string | null }, now: Date): QuoteStatus {
+  // Step 3: a payment that started before the expiry may still finish, so the quote reads open until its lock ends.
+  const paying = !!q.payingUntil && new Date(q.payingUntil).getTime() > now.getTime();
+  if (q.status === "sent" && !paying && new Date(q.expiresAt).getTime() <= now.getTime()) return "expired";
   return q.status as QuoteStatus;
 }

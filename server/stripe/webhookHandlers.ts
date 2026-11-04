@@ -827,6 +827,20 @@ export class WebhookHandlers {
           return;
         }
 
+        // Quotes step 3: a booking made by paying a quote is confirmed only while that quote is still the one
+        // that was paid (still sent, same version). Otherwise everything is refunded and the booking canceled.
+        // Bookings without a quote skip this block entirely.
+        let quotePaid: { ok: true; fresh: boolean; quote: any } | { ok: false; quote: any } | null = null;
+        if (appointment.quoteId) {
+          const quoteMod = await import('../quotes/quotePaid');
+          const paidVersion = Number(metadata.quoteVersion);
+          quotePaid = await quoteMod.claimQuotePaid(appointment, Number.isInteger(paidVersion) ? paidVersion : null);
+          if (!quotePaid.ok) {
+            await quoteMod.refundUnpayableQuote(appointment, paymentIntent.id);
+            return;
+          }
+        }
+
         {
           const result = await transitionAppointmentState(
             appointmentId,
@@ -868,6 +882,13 @@ export class WebhookHandlers {
           // Hold conversion, vendor payout, pending points and referral run
           // once per appointment, shared with the vendor Accept route.
           await settleAppointmentBooking(appointmentId);
+
+          // Quotes step 3: the paid card in Messages, the request booked, the extra days blocked. Once.
+          if (quotePaid?.ok && quotePaid.fresh) {
+            const { afterQuotePaid } = await import('../quotes/quotePaid');
+            await afterQuotePaid(quotePaid.quote, appointment).catch(err =>
+              console.error(`[Stripe] Quote paid steps failed for appointment ${appointmentId}:`, err));
+          }
 
           // Notifications (best-effort: each recipient is independently try/catch'd so
           // one failure does not prevent the others from firing or block the booking)

@@ -65,8 +65,13 @@ console.log('\n── quoteTiming ──');
   const t = quoteTiming({ jobDate: '2026-11-13', startTime: '09:00' }, 'America/New_York', now);
   assert(t.ok && t.startsAt.toISOString() === '2026-11-13T14:00:00.000Z', 'start in the business time zone', t);
   assert(t.ok && t.expiresAt.toISOString() === new Date(now.getTime() + QUOTE_VALID_DAYS * 86400000).toISOString(), 'expires 7 days after sending when the job is later', t);
+  // Step 3 (Legend 2026-11-04, call 12): the day before the job, so every paid quote has its full balance hold window.
   const soon = quoteTiming({ jobDate: '2026-11-06', startTime: '10:00' }, 'America/New_York', now);
-  assert(soon.ok && soon.expiresAt.toISOString() === '2026-11-06T15:00:00.000Z', 'a job sooner than 7 days: expires when the job starts', soon);
+  assert(soon.ok && soon.expiresAt.toISOString() === '2026-11-05T15:00:00.000Z', 'a job sooner than 7 days: expires 24 hours before the job starts', soon);
+  const edge = quoteTiming({ jobDate: '2026-11-12', startTime: '09:00' }, 'America/New_York', now);
+  assert(edge.ok && edge.expiresAt.toISOString() === '2026-11-11T14:00:00.000Z', 'a job 8 days out: 24 hours before beats 7 days', edge);
+  const tomorrow = quoteTiming({ jobDate: '2026-11-05', startTime: '08:00' }, 'America/New_York', now);
+  assert(tomorrow.ok && tomorrow.expiresAt.toISOString() === '2026-11-05T13:00:00.000Z', 'a job less than 24 hours away: expires when the job starts (same day jobs stay payable)', tomorrow);
   const past = quoteTiming({ jobDate: '2026-11-04', startTime: '08:59' }, 'America/New_York', now);
   assert(!past.ok && past.field === 'startTime', 'a start in the past is refused', past);
   const la = quoteTiming({ jobDate: '2026-11-13', startTime: '09:00' }, 'America/Los_Angeles', now);
@@ -98,7 +103,9 @@ console.log('\n── quoteMessageText ──');
   assert(quoteMessageText('declined', '2 Bedroom Move', 65000) === 'Declined the quote for 2 Bedroom Move.', 'declined');
   assert(quoteMessageText('expired', '2 Bedroom Move', 65000) === 'The quote for 2 Bedroom Move expired.', 'expired');
   assert(quoteMessageText('sent', 'Big', 1234567) === 'Sent a quote for Big, $12,345.67 total.', 'thousands separator');
-  for (const e of ['sent', 'updated', 'withdrawn', 'declined', 'expired'] as const) {
+  assert(quoteMessageText('paid', '2 Bedroom Move', 65000, 'deposit') === 'Paid the deposit for 2 Bedroom Move.', 'paid, deposit');
+  assert(quoteMessageText('paid', '2 Bedroom Move', 65000, 'full') === 'Paid in full for 2 Bedroom Move, $650.00.', 'paid, full');
+  for (const e of ['sent', 'updated', 'withdrawn', 'declined', 'expired', 'paid'] as const) {
     assert(!/ - | — | – /.test(quoteMessageText(e, 'A', 700)), `no dashes (${e})`);
   }
 }

@@ -256,7 +256,8 @@ const daysFromNow = (n: number) => { const d = new Date(); d.setUTCDate(d.getUTC
     const nySoon = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/New_York', year: 'numeric', month: '2-digit', day: '2-digit' }).format(soonDate);
     const nyTime = new Intl.DateTimeFormat('en-GB', { timeZone: 'America/New_York', hour: '2-digit', minute: '2-digit', hour12: false }).format(soonDate);
     const sSoon = await call('POST', '/api/quotes', { token: owner.token, body: quoteBody({ requestId: null, jobDate: nySoon, startTime: nyTime }) });
-    assert(sSoon.status === 201 && Math.abs(new Date(sSoon.body.quote.expiresAt).getTime() - new Date(sSoon.body.quote.startsAt).getTime()) < 1000, 'a job sooner than 7 days expires when the job starts', sSoon.body?.quote);
+    // Step 3 (call 12): the day before the job, so a job 26 hours away expires 24 hours before it starts.
+    assert(sSoon.status === 201 && Math.abs(new Date(sSoon.body.quote.startsAt).getTime() - new Date(sSoon.body.quote.expiresAt).getTime() - 24 * 3600000) < 1000, 'a job sooner than 7 days expires 24 hours before it starts', sSoon.body?.quote);
     await q(`UPDATE quotes SET expires_at = now() - interval '1 minute' WHERE id = $1`, [sSoon.body?.quote?.id]);
     const lazy = await call('GET', `/api/quotes/${sSoon.body?.quote?.id}`, { token: cust.token });
     assert(lazy.body?.quote?.status === 'expired', 'a quote past its expiry reads expired right away', lazy.body?.quote);
