@@ -24,6 +24,8 @@ import { estimateRequests, ESTIMATE_REQUEST_STATUSES, type EstimateRequest } fro
 import { sendAdminEmail, ADMIN_NOTIFICATION_EMAIL } from "../emailService";
 import { buildEstimateRequestEmail } from "./estimateEmail";
 import { cleanCityName, isBusinessCity, isServiceOfferedInCity } from "./serviceCities";
+import { checkAnswers, requestMessageText } from "../requests/requestForms";
+import { loadResolvedForm } from "../requests/serviceForm";
 
 const ADMIN_EMAILS = ["info@goutsyde.com", "jamesmeyers2304@gmail.com"];
 const MAX_DETAIL_KEYS = 20;
@@ -32,7 +34,8 @@ const MAX_DETAIL_VALUE = 2000;
 const submitSchema = z.object({
   businessId: z.string().min(1).max(64),
   serviceId: z.string().min(1).max(64).nullable().optional(),
-  city: z.string().trim().min(1).max(60),
+  // Required when the business has a city list (Royal Elite); optional otherwise (migration 096).
+  city: z.string().trim().min(1).max(60).nullable().optional(),
   name: z.string().trim().min(1).max(120),
   email: z.string().trim().email().max(200),
   phone: z.string().trim().min(7).max(40),
@@ -43,6 +46,8 @@ const submitSchema = z.object({
     .optional()
     .default({}),
   source: z.string().trim().max(60).nullable().optional(),
+  // Request form answers keyed by question id (migration 096). Checked against the service's form.
+  answers: z.record(z.string().max(40), z.unknown()).optional(),
 });
 
 const updateSchema = z
@@ -55,7 +60,7 @@ const updateSchema = z
 type Owner = { business: NonNullable<Awaited<ReturnType<typeof storage.getBusiness>>> };
 
 /** Owner of the business, or a platform admin acting on the business named in x-business-id. */
-async function resolveVendorBusiness(req: Request, res: Response): Promise<Owner | null> {
+export async function resolveVendorBusiness(req: Request, res: Response): Promise<Owner | null> {
   const userId = (req.session as any)?.userId || getUserIdFromRequest(req);
   if (!userId) {
     res.status(401).json({ error: "Not authenticated" });
@@ -95,7 +100,65 @@ function toVendorJson(r: EstimateRequest) {
     source: r.source,
     createdAt: r.createdAt,
     updatedAt: r.updatedAt,
+    // Migration 096 (additive)
+    answers: r.answers ?? [],
+    conversationId: r.conversationId ?? null,
   };
+}
+
+/**
+ * Posts the request card into the chat between the customer and the business owner and links it to the
+ * request. Returns the chat id, or null when there is no chat to open (no owner, the owner asked their own
+ * business, or either person blocked the other).
+ */
+async function postRequestCard(
+  saved: EstimateRequest,
+  business: NonNullable<Awaited<ReturnType<typeof storage.getBusiness>>>,
+): Promise<string | null> {
+  const customerId = saved.customerId;
+  const ownerId = business.ownerId;
+  if (!customerId || !ownerId || customerId === ownerId) return null;
+  if (await storage.isUserBlockedEitherWay(customerId, ownerId)) return null;
+  const conversation = await storage.getOrCreateConversation(customerId, ownerId);
+  const content = requestMessageText({ serviceName: saved.serviceName, preferredDate: saved.preferredDate });
+  const message = await storage.createMessage({
+    conversationId: conversation.id,
+    senderId: customerId,
+    content,
+    kind: "request",
+    card: {
+      type: "request",
+      requestId: saved.id,
+      businessId: saved.businessId,
+      serviceId: saved.serviceId,
+      serviceName: saved.serviceName,
+      preferredDate: saved.preferredDate,
+      city: saved.city,
+      answerCount: (saved.answers ?? []).length,
+    },
+  });
+  await db.update(estimateRequests)
+    .set({ conversationId: conversation.id, messageId: message.id })
+    .where(eq(estimateRequests.id, saved.id));
+  saved.conversationId = conversation.id;
+  saved.messageId = message.id;
+  try {
+    const { notifyNewMessageInBackground } = await import("../messaging/notifyNewMessage");
+    const { resolvePublicIdentity } = await import("../publicIdentity");
+    const sender = await storage.getUser(customerId);
+    notifyNewMessageInBackground({
+      conversationId: conversation.id,
+      messageId: message.id,
+      senderId: customerId,
+      recipientId: ownerId,
+      content,
+      mediaItems: [],
+      senderPublicName: sender ? (await resolvePublicIdentity(sender)).publicName : null,
+    });
+  } catch (err) {
+    console.error(`[estimate-requests] push for request ${saved.id} failed:`, err);
+  }
+  return conversation.id;
 }
 
 export function registerEstimateRequestRoutes(app: Express): void {
@@ -130,23 +193,37 @@ export function registerEstimateRequestRoutes(app: Express): void {
         const business = await storage.getBusiness(input.businessId);
         if (!business) return res.status(404).json({ success: false, message: "Business not found." });
 
-        const city = cleanCityName(input.city);
-        if (!isBusinessCity(business.serviceCities, city)) {
+        const hasCityList = (business.serviceCities ?? []).length > 0;
+        const city = input.city ? cleanCityName(input.city) : null;
+        if (hasCityList && !city) {
+          return res.status(400).json({ success: false, field: "city", message: "Please choose your city." });
+        }
+        if (city && !isBusinessCity(business.serviceCities, city)) {
           return res.status(400).json({ success: false, field: "city", message: "This business doesn't serve that city yet." });
         }
 
         let serviceId: string | null = null;
         let serviceName: string | null = null;
+        let service: Awaited<ReturnType<typeof storage.getVendorService>> | null = null;
         if (input.serviceId) {
           const svc = await storage.getVendorService(input.serviceId);
-          if (!svc || svc.businessId !== business.id || svc.status !== "live" || svc.isActive !== true) {
+          // Only request only services take requests (Legend 2026-11-04); bookable services are booked.
+          if (!svc || svc.businessId !== business.id || svc.status !== "live" || svc.isActive !== true || svc.requestOnly !== true) {
             return res.status(400).json({ success: false, field: "serviceId", message: "That plan isn't available. Please choose another." });
           }
-          if (!isServiceOfferedInCity(svc.serviceCities, city)) {
+          if (city && !isServiceOfferedInCity(svc.serviceCities, city)) {
             return res.status(400).json({ success: false, field: "serviceId", message: "That plan isn't offered in your city. Please choose another." });
           }
           serviceId = svc.id;
           serviceName = svc.name;
+          service = svc;
+        }
+
+        // Request form answers: checked against the service's form; a service with no form takes none.
+        const questions = service ? await loadResolvedForm(service) : [];
+        const checked = checkAnswers(questions, input.answers ?? {}, process.env.R2_PUBLIC_URL);
+        if (!checked.ok) {
+          return res.status(400).json({ success: false, field: checked.field ?? "answers", message: checked.message });
         }
 
         const details: Record<string, string> = {};
@@ -169,8 +246,18 @@ export function registerEstimateRequestRoutes(app: Express): void {
             preferredDate: input.preferredDate || null,
             details,
             source: input.source || null,
+            answers: checked.answers,
           })
           .returning();
+
+        // The request opens (or continues) a chat with the business owner, with a request card from the
+        // customer. Never decides the answer: the request is saved either way (Legend 2026-11-04).
+        let conversationId: string | null = null;
+        try {
+          conversationId = await postRequestCard(saved, business);
+        } catch (err) {
+          console.error(`[estimate-requests] request card failed for ${saved.id}:`, err);
+        }
 
         // Emails never decide the answer: the request is saved, so the business sees it either way.
         const email = buildEstimateRequestEmail({ businessName: business.name, request: saved });
@@ -202,7 +289,7 @@ export function registerEstimateRequestRoutes(app: Express): void {
           console.error(`[estimate-requests] an email failed for request ${saved.id}`);
         }
 
-        return res.status(201).json({ success: true, request: { id: saved.id, status: saved.status, createdAt: saved.createdAt } });
+        return res.status(201).json({ success: true, request: { id: saved.id, status: saved.status, createdAt: saved.createdAt, conversationId } });
       } catch (err) {
         console.error("[estimate-requests] submit failed:", err);
         return res.status(500).json({ success: false, message: "Something went wrong. Please try again or call the business." });

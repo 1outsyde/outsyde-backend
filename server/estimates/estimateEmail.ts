@@ -2,7 +2,7 @@
  * The estimate request email (migration 068), sent to the business owner and to Outsyde.
  * Pure: builds subject, html and text only (no database), so it can be tested on its own.
  */
-import type { EstimateRequest } from "@shared/schema";
+import type { EstimateRequest, RequestAnswerShape } from "@shared/schema";
 import { emailHeader, emailFooter, wrapEmail } from "../emailService";
 
 /** Labels for the known form fields, in the order the email shows them. Unknown keys follow, as sent. */
@@ -36,7 +36,10 @@ function row(label: string, value: string, odd: boolean): string {
 /** The email both the business and Outsyde receive. Plain words, no dashes (Legend's copy rule). */
 export function buildEstimateRequestEmail(p: {
   businessName: string;
-  request: Pick<EstimateRequest, "customerName" | "customerEmail" | "customerPhone" | "city" | "serviceName" | "preferredDate" | "details">;
+  request: Pick<EstimateRequest, "customerName" | "customerEmail" | "customerPhone" | "city" | "serviceName" | "preferredDate" | "details"> & {
+    /** Request form answers (migration 096), shown after the fields above, in form order. */
+    answers?: RequestAnswerShape[] | null;
+  };
 }): { subject: string; html: string; text: string } {
   const r = p.request;
   const lines: [string, string][] = [
@@ -52,6 +55,14 @@ export function buildEstimateRequestEmail(p: {
   const extra = Object.keys(details).filter((k) => !(k in DETAIL_LABELS) && details[k]);
   for (const k of known) lines.push([DETAIL_LABELS[k], details[k]]);
   for (const k of extra) lines.push([k, details[k]]);
+  for (const a of r.answers ?? []) {
+    if (a.type === "photos") {
+      const urls = Array.isArray(a.value) ? a.value : [];
+      lines.push([a.label, urls.length === 1 ? `1 photo: ${urls[0]}` : `${urls.length} photos: ${urls.join("  ")}`]);
+    } else {
+      lines.push([a.label, Array.isArray(a.value) ? a.value.join(", ") : a.value]);
+    }
+  }
   const shown = lines.filter(([, v]) => v && String(v).trim());
 
   const subject = `New estimate request from ${r.customerName}`;

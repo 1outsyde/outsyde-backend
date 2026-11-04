@@ -1,5 +1,5 @@
 import {
-  pgTable, text, varchar, boolean, integer, serial, jsonb, timestamp, index, doublePrecision, unique, uuid, uniqueIndex, primaryKey
+  pgTable, text, varchar, boolean, integer, serial, jsonb, timestamp, index, doublePrecision, unique, uuid, uniqueIndex, primaryKey, type AnyPgColumn
 } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
@@ -623,6 +623,10 @@ export const vendorServices = pgTable("vendor_services", {
   serviceCities: text("service_cities").array().notNull().default(sql`'{}'::text[]`),
   // Migration 068. true = customers request an estimate instead of booking; never held or paid for.
   requestOnly: boolean("request_only").notNull().default(false),
+  // Migration 096 (Quotes step 1): which request form this service uses. All defaults = no form.
+  requestFormId: varchar("request_form_id", { length: 36 }).references((): AnyPgColumn => requestForms.id, { onDelete: "set null" }),
+  requestFormUseBase: boolean("request_form_use_base").notNull().default(false),
+  requestQuestions: jsonb("request_questions").$type<RequestQuestionShape[]>().notNull().default(sql`'[]'::jsonb`),
 
   createdAt: timestamp("created_at").defaultNow().notNull(),
 });
@@ -650,6 +654,10 @@ export const estimateRequests = pgTable("estimate_requests", {
   status: text("status").$type<EstimateRequestStatus>().notNull().default("new"),
   vendorNotes: text("vendor_notes"),
   source: text("source"),
+  // Migration 096 (Quotes step 1): the questions as sent, with the answers; the chat the request opened.
+  answers: jsonb("answers").$type<RequestAnswerShape[]>().notNull().default(sql`'[]'::jsonb`),
+  conversationId: varchar("conversation_id", { length: 36 }),
+  messageId: varchar("message_id", { length: 36 }),
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 }, (table) => ({
@@ -659,6 +667,40 @@ export const estimateRequests = pgTable("estimate_requests", {
 
 export type EstimateRequest = typeof estimateRequests.$inferSelect;
 export type InsertEstimateRequest = typeof estimateRequests.$inferInsert;
+
+/* =====================================================
+   REQUEST FORMS (migration 096, Quotes step 1)
+   A business's form library: one base form + saved forms. Rules: server/requests/requestForms.ts
+===================================================== */
+export interface RequestQuestionShape {
+  id: string;
+  type: "short_text" | "long_text" | "choice" | "date" | "photos";
+  label: string;
+  help?: string;
+  required: boolean;
+  options?: string[];
+  multiple?: boolean;
+  maxPhotos?: number;
+}
+export interface RequestAnswerShape {
+  questionId: string;
+  label: string;
+  type: RequestQuestionShape["type"];
+  value: string | string[];
+}
+export const requestForms = pgTable("request_forms", {
+  id: varchar("id", { length: 36 }).primaryKey().default(sql`gen_random_uuid()`),
+  businessId: varchar("business_id", { length: 36 }).notNull().references(() => businesses.id, { onDelete: "cascade" }),
+  name: text("name").notNull(),
+  isBase: boolean("is_base").notNull().default(false),
+  questions: jsonb("questions").$type<RequestQuestionShape[]>().notNull().default(sql`'[]'::jsonb`),
+  isActive: boolean("is_active").notNull().default(true),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+}, (table) => ({
+  businessIdx: index("idx_request_forms_business").on(table.businessId, table.isActive, table.name),
+}));
+export type RequestForm = typeof requestForms.$inferSelect;
 
 /* =====================================================
    SERVICE ADD-ONS (Optional extras for vendor services)
@@ -1625,6 +1667,10 @@ export const messages = pgTable("messages", {
   content: text("content").notNull(),
   // Up to 10 photo URLs (R2 "messages" folder). '[]' = text only. Migration 055.
   mediaItems: jsonb("media_items").$type<string[]>().notNull().default([]),
+  // Migration 096: 'text' (every message so far) or 'request' (a request card, data in `card`).
+  // `content` always holds readable text, so older app builds show a card as a normal message.
+  kind: text("kind").$type<"text" | "request">().notNull().default("text"),
+  card: jsonb("card").$type<Record<string, unknown> | null>(),
 
   isRead: boolean("is_read").default(false).notNull(),
   readAt: timestamp("read_at"),
@@ -2428,6 +2474,10 @@ export const insertVendorProductSchema = createInsertSchema(vendorProducts).omit
 export const insertVendorServiceSchema = createInsertSchema(vendorServices).omit({
   id: true,
   createdAt: true,
+  // Migration 096: written only by PUT /api/vendor/services/:id/request-form (server/requests).
+  requestFormId: true,
+  requestFormUseBase: true,
+  requestQuestions: true,
 });
 
 export const insertBusinessAvailabilitySchema = createInsertSchema(businessAvailability).omit({

@@ -239,6 +239,7 @@ import {
 } from "./availabilityService";
 import { isHoldStillBookable, SERVICE_UNAVAILABLE_BODY } from "./bookableService";
 import { serviceCitiesInput } from "./estimates/serviceCities";
+import { registerRequestFormRoutes } from "./requests/requestFormRoutes";
 import { registerEstimateRequestRoutes } from "./estimates/estimateRequestRoutes";
 import {
   transitionAppointmentState,
@@ -13942,6 +13943,8 @@ export async function registerRoutes(
 
   // Estimate requests (migration 068): saved form + vendor dashboard list. See server/estimates.
   registerEstimateRequestRoutes(app);
+  // Request forms (migration 096, Quotes step 1). See server/requests.
+  registerRequestFormRoutes(app);
 
   // Create vendor service
   app.post("/api/vendor/services", async (req, res) => {
@@ -24328,12 +24331,13 @@ export async function registerRoutes(
     }
     const file = (req as any).file as Express.Multer.File;
     const folder = (req.body?.folder as string) || "posts";
-    const allowedFolders = ["posts", "profiles", "covers", "products", "logos", "stories", "services", "hero", "gallery", "stylist", "messages"];
+    const allowedFolders = ["posts", "profiles", "covers", "products", "logos", "stories", "services", "hero", "gallery", "stylist", "messages", "requests"];
     if (!allowedFolders.includes(folder)) {
       return res.status(400).json({ error: "Invalid folder" });
     }
     // Message photos: images only (other folders keep today's behavior).
-    if (folder === "messages" && !/^image\/(jpeg|jpg|png|webp|heic|heif|gif)$/i.test(file.mimetype || "")) {
+    // Request form photos (migration 096) follow the same rule.
+    if ((folder === "messages" || folder === "requests") && !/^image\/(jpeg|jpg|png|webp|heic|heif|gif)$/i.test(file.mimetype || "")) {
       return res.status(400).json({ error: "Only photos can be sent in messages", code: "INVALID_FILE_TYPE" });
     }
     try {
