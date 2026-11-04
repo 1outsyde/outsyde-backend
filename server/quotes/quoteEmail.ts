@@ -22,11 +22,11 @@ export function buildQuoteEmail(p: { quote: Quote; businessName: string; busines
   const when = `${formatDateLabel(q.jobDate)} at ${formatTimeLabel(q.startTime)}`;
   const lines: [string, string][] = [["Total", formatCents(a.totalCents)]];
   if (q.paymentMode === "deposit") {
-    lines.push(["Deposit due now", formatCents(a.dueNowCents)], ["Service fee", formatCents(a.serviceFeeCents)], ["Balance, held on your card the day before", formatCents(a.balanceCents)]);
+    lines.push(["Deposit due now", formatCents(a.depositOrTotalCents)], ["Service fee", formatCents(a.serviceFeeCents)], ["Balance, held on your card the day before", formatCents(a.balanceCents)]);
   } else {
     lines.push(["Service fee", formatCents(a.serviceFeeCents)]);
   }
-  const pay = `Review and pay ${formatCents(a.chargeNowCents)}`;
+  const pay = `Review and pay ${formatCents(a.payNowCents)}`;
   const hi = p.customerFirstName ? `Hi ${p.customerFirstName.trim()},` : "Hi,";
   const intro = `${biz} sent you a quote. Pay ${q.paymentMode === "deposit" ? "the deposit" : "now"} to lock in your date.`;
   const footer = `This quote is valid until it expires. You earn Outsyde loyalty rewards points on this payment.${p.businessPhone ? ` Questions? Reply in the Outsyde app or call ${biz} at ${p.businessPhone}.` : " Questions? Reply in the Outsyde app."}`;

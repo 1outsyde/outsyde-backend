@@ -119,7 +119,7 @@ const daysFromNow = (n: number) => { const d = new Date(); d.setUTCDate(d.getUTC
     const s1 = await call('POST', '/api/quotes', { token: owner.token, body: quoteBody() });
     const qa = s1.body?.quote;
     assert(s1.status === 201 && qa?.status === 'sent' && qa.version === 1 && qa.title === '2 Bedroom Move', 'owner sends a quote', s1);
-    assert(qa?.amounts?.dueNowCents === 10000 && qa.amounts.balanceCents === 55000 && qa.amounts.chargeNowCents === 10000 + qa.amounts.serviceFeeCents && qa.amounts.serviceFeeCents > 0, 'amounts: deposit now plus the fee, balance later', qa?.amounts);
+    assert(qa?.amounts?.depositOrTotalCents === 10000 && qa.amounts.balanceCents === 55000 && qa.amounts.payNowCents === 10000 + qa.amounts.serviceFeeCents && qa.amounts.serviceFeeCents > 0, 'amounts: deposit now plus the fee, balance later', qa?.amounts);
     assert(qa?.timeZone === 'America/New_York' && qa.staffMemberId === null && qa.customerId === cust.uid && qa.businessId === biz, 'New York when the business has no time zone; no staff; customer is the other person in the chat', qa);
     const sevenDays = Date.now() + 7 * 86400000;
     assert(Math.abs(new Date(qa?.expiresAt).getTime() - sevenDays) < 60000, 'expires 7 days after sending (job is later)', qa?.expiresAt);
@@ -169,6 +169,33 @@ const daysFromNow = (n: number) => { const d = new Date(); d.setUTCDate(d.getUTC
     assert(ownerSeesStaff.status === 200, "the owner can open a staff member's quote", ownerSeesStaff);
     const stEditOwner = await call('POST', `/api/quotes/${qa.id}/withdraw`, { token: staffUser.token });
     assert(stEditOwner.status === 404, "a staff member cannot change the owner's quote", stEditOwner);
+    const stQ = st.body?.quote;
+    const stEdit = await call('PATCH', `/api/quotes/${stQ?.id}`, { token: staffUser.token, body: { ...quoteBody({ conversationId: convStaff, requestId: null, serviceId: null, totalCents: 66000 }), version: 1 } });
+    assert(stEdit.status === 200 && stEdit.body.quote.version === 2, 'the staff member who sent it can edit it', stEdit);
+    const otherStaff = await mkUser('staff2', 'Kim');
+    await q(`INSERT INTO staff_members (id, business_id, user_id, display_name, role, status) VALUES ($1, $2, $3, 'Kim', 'staff', 'active')`, [id('staff2'), biz, otherStaff.uid]);
+    const osEdit = await call('PATCH', `/api/quotes/${stQ?.id}`, { token: otherStaff.token, body: { ...quoteBody({ conversationId: convStaff, requestId: null, serviceId: null }), version: 2 } });
+    const osRead = await call('GET', `/api/quotes/${stQ?.id}`, { token: otherStaff.token });
+    assert(osEdit.status === 404 && osRead.status === 404, 'another staff member of the same business cannot edit or read it', { osEdit, osRead });
+    await q(`UPDATE staff_members SET status = 'archived' WHERE id = $1`, [staffId]);
+    const exEdit = await call('PATCH', `/api/quotes/${stQ?.id}`, { token: staffUser.token, body: { ...quoteBody({ conversationId: convStaff, requestId: null, serviceId: null }), version: 2 } });
+    const exWithdraw = await call('POST', `/api/quotes/${stQ?.id}/withdraw`, { token: staffUser.token });
+    const exRead = await call('GET', `/api/quotes/${stQ?.id}`, { token: staffUser.token });
+    assert(exEdit.status === 404 && exWithdraw.status === 404 && exRead.status === 404, 'a removed staff member loses access to the quotes they sent', { exEdit, exWithdraw, exRead });
+    const ownerStill = await call('GET', `/api/quotes/${stQ?.id}`, { token: owner.token });
+    assert(ownerStill.status === 200, 'the owner still has it', ownerStill);
+    await q(`UPDATE staff_members SET status = 'active' WHERE id = $1`, [staffId]);
+
+    console.log('\n── blocks after sending ──');
+    const bq = await call('POST', '/api/quotes', { token: owner.token, body: quoteBody({ requestId: null, title: 'Block test' }) });
+    await q(`INSERT INTO user_blocks (blocker_id, blocked_id) VALUES ($1, $2)`, [cust.uid, owner.uid]);
+    const bEdit = await call('PATCH', `/api/quotes/${bq.body?.quote?.id}`, { token: owner.token, body: { ...quoteBody({ requestId: null, title: 'Block test' }), version: 1 } });
+    assert(bEdit.status === 403, 'no edits to someone who blocked you', bEdit);
+    const [cardsBefore] = await q(`SELECT count(*)::int n FROM messages WHERE conversation_id = $1`, [conv]);
+    const bWithdraw = await call('POST', `/api/quotes/${bq.body?.quote?.id}/withdraw`, { token: owner.token });
+    const [cardsAfter] = await q(`SELECT count(*)::int n FROM messages WHERE conversation_id = $1`, [conv]);
+    assert(bWithdraw.status === 200 && bWithdraw.body.quote.status === 'withdrawn' && cardsAfter.n === cardsBefore.n, 'withdraw still works but posts nothing to someone who blocked you', { bWithdraw, cardsBefore, cardsAfter });
+    await q(`DELETE FROM user_blocks WHERE blocker_id = $1 AND blocked_id = $2`, [cust.uid, owner.uid]);
 
     console.log('\n── reading quotes ──');
     const asCust = await call('GET', `/api/quotes/${qa.id}`, { token: cust.token });
@@ -177,21 +204,23 @@ const daysFromNow = (n: number) => { const d = new Date(); d.setUTCDate(d.getUTC
     const asOtherBiz = await call('GET', `/api/quotes/${qa.id}`, { token: owner2.token });
     assert(asStranger.status === 404 && asOtherBiz.status === 404, 'nobody else can open it', { asStranger, asOtherBiz });
     const inChat = await call('GET', `/api/conversations/${conv}/quotes`, { token: cust.token });
-    assert(inChat.status === 200 && inChat.body.quotes.length === 2, 'quotes in a chat, for its participants', inChat);
+    assert(inChat.status === 200 && inChat.body.quotes.length === 3, 'quotes in a chat, for its participants', inChat);
     const inChatStranger = await call('GET', `/api/conversations/${conv}/quotes`, { token: stranger.token });
     assert(inChatStranger.status === 404, 'not for anyone outside the chat', inChatStranger);
     const mine = await call('GET', '/api/me/quotes', { token: cust.token });
-    assert(mine.status === 200 && mine.body.quotes.length === 2, "customer's quotes", mine);
+    assert(mine.status === 200 && mine.body.quotes.length === 3, "customer's quotes", mine);
     const vendor = await call('GET', '/api/vendor/quotes', { token: owner.token });
-    assert(vendor.status === 200 && vendor.body.quotes.length === 3, "business's quotes, staff ones included", vendor);
+    assert(vendor.status === 200 && vendor.body.quotes.length === 4, "business's quotes, staff ones included", vendor);
     const vendorOther = await call('GET', '/api/vendor/quotes', { token: owner2.token });
     assert(vendorOther.status === 200 && vendorOther.body.quotes.length === 0, "another business sees none of them", vendorOther);
     const msgs = await call('GET', `/api/conversations/${conv}/messages`, { token: cust.token });
     const cards = (msgs.body?.messages ?? []).filter((m: any) => m.kind === 'quote');
-    assert(msgs.status === 200 && cards.length === 2 && cards.every((m: any) => m.card?.quoteId), 'the customer sees both cards in the chat', msgs.body);
+    assert(msgs.status === 200 && cards.length === 3 && cards.every((m: any) => m.card?.quoteId), 'the customer sees every card in the chat (none for the blocked withdraw)', msgs.body);
 
     console.log('\n── editing ──');
-    const e1 = await call('PATCH', `/api/quotes/${qa.id}`, { token: owner.token, body: quoteBody({ totalCents: 70050, requestId: undefined }) });
+    const noVersion = await call('PATCH', `/api/quotes/${qa.id}`, { token: owner.token, body: quoteBody({ totalCents: 70050, requestId: undefined }) });
+    assert(noVersion.status === 400 && noVersion.body?.field === 'version', 'an edit must say which version it changes', noVersion);
+    const e1 = await call('PATCH', `/api/quotes/${qa.id}`, { token: owner.token, body: { ...quoteBody({ totalCents: 70050, requestId: undefined }), version: 1 } });
     assert(e1.status === 200 && e1.body.quote.version === 2 && e1.body.quote.totalCents === 70050 && e1.body.quote.messageId !== qa.messageId, 'edit makes version 2 with a new card', e1);
     const [card2] = await q(`SELECT content, card FROM messages WHERE id = $1`, [e1.body?.quote?.messageId]);
     assert(card2?.content === 'Updated the quote for 2 Bedroom Move, $700.50 total.' && card2.card?.event === 'updated' && card2.card.version === 2, 'Updated quote card', card2);
@@ -199,9 +228,9 @@ const daysFromNow = (n: number) => { const d = new Date(); d.setUTCDate(d.getUTC
     assert(reread.body?.quote?.totalCents === 70050, 'the quote (and so every card) shows the current version', reread.body?.quote);
     const eStale = await call('PATCH', `/api/quotes/${qa.id}`, { token: owner.token, body: { ...quoteBody({ totalCents: 1000, paymentMode: 'full', depositCents: null }), version: 1 } });
     assert(eStale.status === 409 && eStale.body?.code === 'QUOTE_CHANGED', 'an edit based on an old version is refused', eStale);
-    const eCust = await call('PATCH', `/api/quotes/${qa.id}`, { token: cust.token, body: quoteBody() });
+    const eCust = await call('PATCH', `/api/quotes/${qa.id}`, { token: cust.token, body: { ...quoteBody(), version: 2 } });
     assert(eCust.status === 404, 'the customer cannot edit', eCust);
-    const eBad = await call('PATCH', `/api/quotes/${qa.id}`, { token: owner.token, body: quoteBody({ title: '' }) });
+    const eBad = await call('PATCH', `/api/quotes/${qa.id}`, { token: owner.token, body: { ...quoteBody({ title: '' }), version: 2 } });
     assert(eBad.status === 400 && eBad.body?.field === 'title', 'edit input checked like send', eBad);
 
     console.log('\n── decline and withdraw ──');
@@ -211,7 +240,7 @@ const daysFromNow = (n: number) => { const d = new Date(); d.setUTCDate(d.getUTC
     assert(dec.status === 200 && dec.body.quote.status === 'declined' && dec.body.quote.declineReason === 'Found another mover', 'customer declines with a reason', dec);
     const [decCard] = await q(`SELECT content, sender_id, card FROM messages WHERE conversation_id = $1 AND kind = 'quote' ORDER BY created_at DESC LIMIT 1`, [conv]);
     assert(decCard?.content === 'Declined the quote for 2 Bedroom Move.' && decCard.sender_id === cust.uid && decCard.card?.event === 'declined', 'decline card from the customer', decCard);
-    const eAfter = await call('PATCH', `/api/quotes/${qa.id}`, { token: owner.token, body: quoteBody() });
+    const eAfter = await call('PATCH', `/api/quotes/${qa.id}`, { token: owner.token, body: { ...quoteBody(), version: 2 } });
     assert(eAfter.status === 409 && eAfter.body?.code === 'QUOTE_CLOSED', 'a declined quote cannot be edited', eAfter);
     const wAfter = await call('POST', `/api/quotes/${qa.id}/withdraw`, { token: owner.token });
     assert(wAfter.status === 409, 'a declined quote cannot be withdrawn', wAfter);
@@ -232,7 +261,7 @@ const daysFromNow = (n: number) => { const d = new Date(); d.setUTCDate(d.getUTC
     const lazy = await call('GET', `/api/quotes/${sSoon.body?.quote?.id}`, { token: cust.token });
     assert(lazy.body?.quote?.status === 'expired', 'a quote past its expiry reads expired right away', lazy.body?.quote);
     const dExpired = await call('POST', `/api/quotes/${sSoon.body?.quote?.id}/decline`, { token: cust.token, body: {} });
-    const eExpired = await call('PATCH', `/api/quotes/${sSoon.body?.quote?.id}`, { token: owner.token, body: quoteBody({ requestId: null }) });
+    const eExpired = await call('PATCH', `/api/quotes/${sSoon.body?.quote?.id}`, { token: owner.token, body: { ...quoteBody({ requestId: null }), version: 1 } });
     assert(dExpired.status === 409 && eExpired.status === 409, 'an expired quote cannot be declined or edited', { dExpired, eExpired });
     const run = await call('POST', '/api/quotes/_run-expiry-for-tests', { token: owner.token });
     // Unknown routes: 404 in production; in development the web app answers with its HTML page (no JSON).

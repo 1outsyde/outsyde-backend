@@ -71,6 +71,10 @@ console.log('\n── quoteTiming ──');
   assert(!past.ok && past.field === 'startTime', 'a start in the past is refused', past);
   const la = quoteTiming({ jobDate: '2026-11-13', startTime: '09:00' }, 'America/Los_Angeles', now);
   assert(la.ok && la.startsAt.toISOString() === '2026-11-13T17:00:00.000Z', 'another time zone', la);
+  const gap = quoteTiming({ jobDate: '2026-03-08', startTime: '02:30' }, 'America/New_York', new Date('2026-03-01T12:00:00Z'));
+  assert(!gap.ok && gap.field === 'startTime' && /clock/.test(gap.message), 'a time that does not exist on clock change day is refused', gap);
+  const back = quoteTiming({ jobDate: '2026-11-01', startTime: '01:30' }, 'America/New_York', new Date('2026-10-20T12:00:00Z'));
+  assert(back.ok, 'a time that happens twice when clocks go back is accepted', back);
   const dst = quoteTiming({ jobDate: '2026-03-09', startTime: '09:00' }, 'America/New_York', new Date('2026-03-01T12:00:00Z'));
   assert(dst.ok && dst.startsAt.toISOString() === '2026-03-09T13:00:00.000Z', 'daylight saving time handled', dst);
 }
@@ -78,9 +82,10 @@ console.log('\n── quoteTiming ──');
 console.log('\n── quoteAmounts ──');
 {
   const d = quoteAmounts(65000, 10000);
-  assert(d.dueNowCents === 10000 && d.balanceCents === 55000 && d.serviceFeeCents > 0 && d.chargeNowCents === d.dueNowCents + d.serviceFeeCents, 'deposit: due now, fee on what is paid now, balance', d);
+  assert(d.depositOrTotalCents === 10000 && d.balanceCents === 55000 && d.serviceFeeCents > 0 && d.payNowCents === d.depositOrTotalCents + d.serviceFeeCents, 'deposit: deposit, fee on what is paid now, pay now includes the fee, balance', d);
+  assert(!('dueNowCents' in d) && !('chargeNowCents' in d), 'no ambiguous names (pay now always includes the fee)', d);
   const f = quoteAmounts(65000, null);
-  assert(f.dueNowCents === 65000 && f.balanceCents === 0 && f.chargeNowCents === 65000 + f.serviceFeeCents, 'full: everything now, no balance', f);
+  assert(f.depositOrTotalCents === 65000 && f.balanceCents === 0 && f.payNowCents === 65000 + f.serviceFeeCents, 'full: everything now, no balance', f);
   assert(quoteAmounts(10000, null).serviceFeeCents === quoteAmounts(65000, 10000).serviceFeeCents, 'the fee depends only on what is paid now');
 }
 

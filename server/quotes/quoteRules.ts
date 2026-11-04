@@ -14,7 +14,7 @@
  * function the booking PaymentIntent uses); the balance is held later (step 4). Copy never shows the fee rate.
  */
 import { quoteDeposit } from "../fees";
-import { wallClockToUtc } from "../zonedTime";
+import { wallClockToUtc, zoneOffsetMs } from "../zonedTime";
 
 export const QUOTE_VALID_DAYS = 7;
 export const QUOTE_MIN_CENTS = 700;
@@ -108,21 +108,32 @@ export function quoteTiming(
 ): { ok: true; startsAt: Date; expiresAt: Date } | Fail {
   const startsAt = wallClockToUtc(input.jobDate, input.startTime, timeZone);
   if (!startsAt) return { ok: false, field: "jobDate", message: "Choose the date and start time of the job" };
+  // On the day clocks go forward an hour is skipped (2:30 AM never happens in New York). Read the instant back as
+  // a wall clock: if it differs, the time chosen does not exist. The repeated hour when clocks go back is fine.
+  const [y, mo, d] = input.jobDate.split("-").map(Number);
+  const [h, mi] = input.startTime.split(":").map(Number);
+  if (startsAt.getTime() + zoneOffsetMs(startsAt.getTime(), timeZone) !== Date.UTC(y, mo - 1, d, h, mi)) {
+    return { ok: false, field: "startTime", message: "That time doesn't exist on that day because the clocks change. Choose another time." };
+  }
   if (startsAt.getTime() <= now.getTime()) return { ok: false, field: "startTime", message: "The job must start in the future" };
   const sevenDays = new Date(now.getTime() + QUOTE_VALID_DAYS * 24 * 60 * 60 * 1000);
   return { ok: true, startsAt, expiresAt: startsAt < sevenDays ? startsAt : sevenDays };
 }
 
-/** What the customer pays now and later. Same fee function as the booking PaymentIntent. */
+/**
+ * What the customer pays now and later. Same fee function as the booking PaymentIntent.
+ * depositOrTotalCents is the business's part (no fee); payNowCents is what the card is charged now and always
+ * includes the service fee. Step 3 charges payNowCents.
+ */
 export function quoteAmounts(totalCents: number, depositCents: number | null): {
-  totalCents: number; dueNowCents: number; serviceFeeCents: number; chargeNowCents: number; balanceCents: number;
+  totalCents: number; depositOrTotalCents: number; serviceFeeCents: number; payNowCents: number; balanceCents: number;
 } {
   const q = quoteDeposit(totalCents, depositCents);
   return {
     totalCents,
-    dueNowCents: q.chargeAmountCents,
+    depositOrTotalCents: q.chargeAmountCents,
     serviceFeeCents: q.feeBreakdown.consumerServiceFeeCents,
-    chargeNowCents: q.dueNowCents,
+    payNowCents: q.dueNowCents,
     balanceCents: q.dueAtAppointmentCents,
   };
 }

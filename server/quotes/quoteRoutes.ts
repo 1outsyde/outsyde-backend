@@ -77,8 +77,8 @@ function cardFor(q: Quote, event: QuoteEvent) {
     title: q.title,
     totalCents: q.totalCents,
     paymentMode: q.paymentMode,
-    dueNowCents: a.dueNowCents,
-    chargeNowCents: a.chargeNowCents,
+    depositOrTotalCents: a.depositOrTotalCents,
+    payNowCents: a.payNowCents,
     balanceCents: a.balanceCents,
     jobDate: q.jobDate,
     startTime: q.startTime,
@@ -113,7 +113,11 @@ async function senderSide(userId: string, wantedBusinessId: unknown): Promise<
 
 /** May this user change (edit, withdraw) the quote? The owner of its business, or the staff member who sent it. */
 async function canManage(q: Quote, userId: string): Promise<boolean> {
-  if (q.staffMemberId && q.senderId === userId) return true;
+  if (q.staffMemberId && q.senderId === userId) {
+    // Only while they are still active staff of that business: a removed staff member loses access.
+    const [s] = await db.select().from(staffMembers).where(eq(staffMembers.id, q.staffMemberId));
+    if (s && s.status === "active" && s.businessId === q.businessId && s.userId === userId) return true;
+  }
   const b = await storage.getBusiness(q.businessId);
   return !!b && b.ownerId === userId;
 }
@@ -136,8 +140,10 @@ function closedBody(q: Quote) {
   return { code: "QUOTE_CLOSED", status: st, message: `This quote ${words[st] ?? "can't be changed"}.` };
 }
 
+/** Posts the card for an event. Nothing is posted (or pushed) when either person has blocked the other. */
 export async function postEvent(q: Quote, event: QuoteEvent, fromCustomer: boolean): Promise<string | null> {
   try {
+    if (await storage.isUserBlockedEitherWay(q.senderId, q.customerId)) return null;
     const msg = await postCardMessage({
       conversationId: q.conversationId,
       senderId: fromCustomer ? q.customerId : q.senderId,
@@ -228,6 +234,8 @@ export function registerQuoteRoutes(app: Express): void {
     }
   });
 
+  // An edit replaces the whole quote: send every field, as when sending. Details or extras note left out are
+  // cleared; serviceId left out keeps the current service.
   app.patch("/api/quotes/:id", async (req, res) => {
     try {
       const userId = userIdOf(req);
@@ -235,7 +243,13 @@ export function registerQuoteRoutes(app: Express): void {
       const q = await loadQuote(req.params.id);
       if (!q || !(await canManage(q, userId))) return res.status(404).json({ error: "Quote not found" });
       if (effectiveStatus(q, new Date()) !== "sent") return res.status(409).json(closedBody(q));
-      if (req.body?.version !== undefined && req.body.version !== q.version) {
+      if (await storage.isUserBlockedEitherWay(userId, q.customerId)) {
+        return res.status(403).json({ error: "You can't send quotes to this person" });
+      }
+      if (!Number.isInteger(req.body?.version)) {
+        return res.status(400).json({ error: "Invalid data", field: "version", message: "Open the quote again and make your change." });
+      }
+      if (req.body.version !== q.version) {
         return res.status(409).json({ code: "QUOTE_CHANGED", message: "This quote was changed in the meantime. Open it again and make your change." });
       }
       const input = checkQuoteInput(req.body);
