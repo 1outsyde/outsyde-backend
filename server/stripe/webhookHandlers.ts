@@ -494,6 +494,12 @@ export class WebhookHandlers {
    */
   static async handlePaymentIntentSucceeded(paymentIntent: any) {
     const metadata = paymentIntent.metadata || {};
+    // Quotes step 4a: a balance PaymentIntent (own type) never reaches the appointment branches.
+    if (metadata.type === 'quote_balance') {
+      const { handleBalanceEvent } = await import("../quotes/quoteBalance");
+      await handleBalanceEvent('succeeded', paymentIntent).catch((err) => console.error('[quote balance] succeeded event failed:', err));
+      return;
+    }
     // Event tickets (server/events/ticketCheckout.ts) carry their own keys (ticketOrderId), never
     // bookingId/orderId, and are handled here before any other branch sees them.
     if (metadata.type === 'event_ticket') {
@@ -1443,6 +1449,11 @@ export class WebhookHandlers {
    */
   static async handlePaymentIntentCapturableUpdated(paymentIntent: any) {
     const metadata = paymentIntent.metadata || {};
+    if (metadata.type === 'quote_balance') {
+      const { handleBalanceEvent } = await import("../quotes/quoteBalance");
+      await handleBalanceEvent('capturable', paymentIntent).catch((err) => console.error('[quote balance] capturable event failed:', err));
+      return;
+    }
     const { type } = metadata;
     // Hold-flow appointments carry `appointmentId`; legacy appointments and shoots carry `bookingId`
     // (one older shoot route uses `shootBookingId`).
@@ -1485,6 +1496,11 @@ export class WebhookHandlers {
    */
   static async handlePaymentIntentCanceled(paymentIntent: any) {
     const metadata = paymentIntent.metadata || {};
+    if (metadata.type === 'quote_balance') {
+      const { handleBalanceEvent } = await import("../quotes/quoteBalance");
+      await handleBalanceEvent('canceled', paymentIntent).catch((err) => console.error('[quote balance] canceled event failed:', err));
+      return;
+    }
     if (metadata.type === 'event_ticket') {
       try {
         const { handleTicketPaymentCanceled } = await import('../events/ticketCheckout');

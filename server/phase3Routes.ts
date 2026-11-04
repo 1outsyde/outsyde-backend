@@ -23,7 +23,7 @@ import { eq, and, sql, desc, asc, gte, lte, or } from "drizzle-orm";
 import { randomUUID } from "crypto";
 import { calculateProductFee, calculateBookingFee, PRODUCT_FEE_PERCENT, BOOKING_FEE_PERCENT } from "./fees";
 import type { AuthenticatedRequest } from "./auth";
-import { bookingRevenueWhereSql, bookingRevenueAmountSql, paidOrderWhereSql, orderRevenueDateSql } from "./revenue";
+import { bookingRevenueWhereSql, bookingRevenueAmountSql, appointmentRevenueAmountSql, paidOrderWhereSql, orderRevenueDateSql } from "./revenue";
 import { optionalAuthMiddleware, getUserIdFromRequest } from "./auth";
 
 export function registerPhase3Routes(app: Express, requireAdmin: (req: Request, res: Response, next: () => void) => void) {
@@ -522,7 +522,7 @@ export function registerPhase3Routes(app: Express, requireAdmin: (req: Request, 
       `);
       const periodStartDay = periodStart.toISOString().slice(0, 10);
       const apptRes = await db.execute<{ gmv: number; fees: number; cancel_fees: number }>(sql`
-        SELECT COALESCE(SUM(${bookingRevenueAmountSql}) FILTER (WHERE ${bookingRevenueWhereSql}), 0)::int AS gmv,
+        SELECT COALESCE(SUM(${appointmentRevenueAmountSql}) FILTER (WHERE ${bookingRevenueWhereSql}), 0)::int AS gmv,
                COALESCE(SUM(platform_fee) FILTER (WHERE ${bookingRevenueWhereSql}), 0)::int AS fees,
                COALESCE(SUM(cancellation_fee_kept_cents), 0)::int AS cancel_fees
         FROM appointments WHERE appointment_date >= ${periodStartDay}

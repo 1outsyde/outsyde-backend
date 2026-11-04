@@ -201,6 +201,13 @@ export async function afterQuotePaid(q: Quote, appt: Appointment): Promise<void>
   } catch (err) {
     console.error(`[quotes] paid card failed for ${q.id}:`, err);
   }
+  // Step 4a: the job record (balance schedule, auto complete), and the hold right away when the job is near.
+  try {
+    const { ensureQuoteJob } = await import("./quoteBalance");
+    await ensureQuoteJob(q, appt);
+  } catch (err) {
+    console.error(`[quotes] job record failed for booking ${appt.id}:`, err);
+  }
   if (q.requestId) {
     await db.update(estimateRequests).set({ status: "booked", updatedAt: new Date() })
       .where(and(eq(estimateRequests.id, q.requestId), sql`${estimateRequests.status} IN ('new', 'called', 'quoted')`))

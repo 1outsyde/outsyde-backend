@@ -92,17 +92,21 @@ const idOf = (v: unknown): string | null => (typeof v === "string" ? v : v && ty
 const errText = (err: unknown) => String((err as Error)?.message ?? err).slice(0, 300);
 
 /** The sale behind a PaymentIntent: bookings first, then ticket orders, then product orders (first one on a shared cart PaymentIntent). */
-async function findSale(pi: string | null): Promise<{ kind: Kind; id: string | null }> {
+async function findSale(pi: string | null): Promise<{ kind: Kind; id: string | null; balance?: boolean }> {
   if (!pi) return { kind: "unknown", id: null };
   const [r] = await rows<any>(sql`
-    SELECT kind, id FROM (
-      SELECT 'appointment' AS kind, id::text AS id, 1 AS o FROM appointments WHERE stripe_payment_intent_id = ${pi}
-      UNION ALL SELECT 'shoot_booking', id::text, 2 FROM shoot_bookings WHERE stripe_payment_intent_id = ${pi}
-      UNION ALL SELECT 'ticket_order', id::text, 3 FROM ticket_orders WHERE stripe_payment_intent_id = ${pi}
-      UNION ALL SELECT 'order', id::text, 4 FROM orders WHERE stripe_payment_intent_id = ${pi}
+    SELECT kind, id, balance FROM (
+      SELECT 'appointment' AS kind, id::text AS id, 1 AS o, false AS balance FROM appointments WHERE stripe_payment_intent_id = ${pi}
+      -- Quotes step 4a: a quote booking's balance payment (quote_jobs) is the same sale.
+      UNION ALL SELECT 'appointment', appointment_id::text, 1, true FROM quote_jobs WHERE stripe_payment_intent_id = ${pi}
+      UNION ALL SELECT 'shoot_booking', id::text, 2, false FROM shoot_bookings WHERE stripe_payment_intent_id = ${pi}
+      UNION ALL SELECT 'ticket_order', id::text, 3, false FROM ticket_orders WHERE stripe_payment_intent_id = ${pi}
+      UNION ALL SELECT 'order', id::text, 4, false FROM orders WHERE stripe_payment_intent_id = ${pi}
     ) s ORDER BY o, id LIMIT 1`);
-  return r ? { kind: r.kind as Kind, id: r.id as string } : { kind: "unknown", id: null };
+  return r ? { kind: r.kind as Kind, id: r.id as string, ...(r.balance === true || r.balance === "t" ? { balance: true } : {}) } : { kind: "unknown", id: null };
 }
+export const findSaleForTest = findSale;
+export const applyRefundForTest = async (r: RefundInput) => applyRefund(r, await findSale(r.pi));
 
 export function isSyncEventType(type: unknown): boolean {
   return typeof type === "string" && SYNC_EVENT_TYPES.includes(type);
@@ -168,12 +172,32 @@ export async function syncChargeRefunds(charge: any, s?: SyncStripe): Promise<nu
 type RefundInput = { refundId: string; chargeId: string; pi: string | null; amount: number; createdUnix: number; full: boolean };
 
 /** One statement per sale type: records the refund and applies it, or does nothing when already recorded. Returns what Outsyde did, or null. */
-async function applyRefund(r: RefundInput, sale: { kind: Kind; id: string | null }): Promise<string | null> {
+async function applyRefund(r: RefundInput, sale: { kind: Kind; id: string | null; balance?: boolean }): Promise<string | null> {
   const ins = sql`
     INSERT INTO stripe_dashboard_refunds (refund_id, charge_id, payment_intent_id, amount_cents, full_refund, kind, reference_id, refund_created_at)
     VALUES (${r.refundId}, ${r.chargeId}, ${r.pi}, ${r.amount}, ${r.full}, ${sale.kind}, ${sale.id}, to_timestamp(${r.createdUnix}))
     ON CONFLICT (refund_id) DO NOTHING
     RETURNING id`;
+  if (sale.kind === "appointment" && sale.balance) {
+    // Quotes step 4a: a refund of the balance payment. Saved on the booking's refund total and on the balance (its
+    // held vendor share shrinks); the booking's status is left alone (the deposit payment is not refunded).
+    const [x] = await rows<any>(sql`
+      WITH ins AS (${ins}),
+      upd AS (
+        UPDATE appointments SET refund_amount = COALESCE(refund_amount, 0) + ${r.amount}, refunded_at = now(), updated_at = now()
+        WHERE id = ${sale.id} AND EXISTS (SELECT 1 FROM ins)
+        RETURNING id
+      )
+      SELECT (SELECT id FROM ins) AS ins_id`);
+    if (!x?.ins_id) return null;
+    if (r.pi) {
+      const { recordBalanceRefund } = await import("../quotes/quoteBalance");
+      await recordBalanceRefund(r.pi, r.amount, r.refundId);
+      const { recordBookingRefund } = await import("../bookingRecoveries");
+      await recordBookingRefund({ refundId: r.refundId, paymentIntentId: r.pi, refundCents: r.amount, createdUnix: r.createdUnix });
+    }
+    return "Saved on the quote booking's balance payment; the booking status is unchanged.";
+  }
   if (sale.kind === "appointment" || sale.kind === "shoot_booking") {
     const table = sale.kind === "appointment" ? sql`appointments` : sql`shoot_bookings`;
     const [x] = await rows<any>(sql`

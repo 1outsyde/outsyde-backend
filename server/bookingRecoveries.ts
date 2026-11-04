@@ -30,6 +30,8 @@ export type ResolvedBooking = {
   id: string;
   base: number;
   intendedPayout: number;
+  /** The transfer group the seller's share was sent in (a quote balance has its own, Quotes step 4a). */
+  group: string;
   recipient: "business" | "staff" | "photographer";
 };
 
@@ -46,14 +48,26 @@ export async function resolveBooking(paymentIntentId: string): Promise<ResolvedB
     SELECT 'shoot_booking' AS type, id, total_price, deposit_amount_cents, vendor_net, NULL AS staff_member_id
     FROM shoot_bookings WHERE stripe_payment_intent_id = ${paymentIntentId}
     ORDER BY type LIMIT 1`);
-  if (!r) return null;
+  if (!r) {
+    // Quotes step 4a: the balance payment of a quote booking. Its share was figured on the balance and is sent in
+    // its own transfer group (4b), so a refund of it takes back only from that.
+    const [b] = await rows<any>(sql`
+      SELECT j.appointment_id AS id, j.balance_cents, j.vendor_net_cents, a.staff_member_id
+      FROM quote_jobs j JOIN appointments a ON a.id = j.appointment_id WHERE j.stripe_payment_intent_id = ${paymentIntentId} LIMIT 1`);
+    if (!b) return null;
+    return {
+      type: "appointment", id: b.id, base: Number(b.balance_cents), intendedPayout: Number(b.vendor_net_cents),
+      group: `appointment_balance_${b.id}`, recipient: b.staff_member_id ? "staff" : "business",
+    };
+  }
   const base = Number(r.deposit_amount_cents ?? r.total_price);
   if (r.type === "shoot_booking") {
-    return { type: "shoot_booking", id: r.id, base, intendedPayout: Number(r.vendor_net ?? 0), recipient: "photographer" };
+    return { type: "shoot_booking", id: r.id, base, intendedPayout: Number(r.vendor_net ?? 0), group: `shoot_booking_${r.id}`, recipient: "photographer" };
   }
   return {
     type: "appointment", id: r.id, base,
     intendedPayout: calculateBookingFees(base).vendorNetCents,
+    group: `appointment_${r.id}`,
     recipient: r.staff_member_id ? "staff" : "business",
   };
 }
@@ -287,7 +301,7 @@ export async function processBookingRecovery(id: string, s?: RecoveryStripe): Pr
       const b = await resolveBooking(r.payment_intent_id);
       if (!b) return close("not_booking", "not an appointment or shoot booking payment");
       const ref = { type: b.type, id: b.id, recipient: b.recipient };
-      const group = b.type === "appointment" ? `appointment_${b.id}` : `shoot_booking_${b.id}`;
+      const group = b.group;
       transfers = (await st.listBookingTransfers(group, STRIPE_CALL_BOUND)).filter((t) => t.amount > 0);
       if (!transfers.length) {
         if (r.refund_settled) return close("nothing_sent", "no transfer was sent for this booking", ref);
@@ -330,7 +344,8 @@ export async function processBookingRecovery(id: string, s?: RecoveryStripe): Pr
     }
 
     if (!transfers) {
-      const group = r.reference_type === "appointment" ? `appointment_${r.reference_id}` : `shoot_booking_${r.reference_id}`;
+      const again = await resolveBooking(r.payment_intent_id);
+      const group = again?.group ?? (r.reference_type === "appointment" ? `appointment_${r.reference_id}` : `shoot_booking_${r.reference_id}`);
       transfers = (await st.listBookingTransfers(group, STRIPE_CALL_BOUND)).filter((t) => t.amount > 0);
     }
     // Largest remaining first.

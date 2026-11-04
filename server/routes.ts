@@ -336,7 +336,7 @@ import { grantToken } from "./utils/grantToken";
 import { colorInputSchema, decideColorUpdate } from "@shared/profileColor";
 import {
   bookingRevenueCents, bookingInPersonCents, bookingCountsAsRevenue, isPaidOrder, orderRevenueDate, monthKey, monthOf,
-  bookingRevenueWhereSql, bookingRevenueAmountSql, paidOrderWhereSql, orderRevenueDateSql,
+  bookingRevenueWhereSql, bookingRevenueAmountSql, appointmentRevenueAmountSql, paidOrderWhereSql, orderRevenueDateSql,
 } from "./revenue";
 import {
   clampAdminListLimit,
@@ -9202,6 +9202,71 @@ export async function registerRoutes(
         return res.status(400).json({ error: "No payment found for this booking" });
       }
 
+      // Quotes step 4a: a quote booking has two payments. Before Job complete the vendor refunding means the booking
+      // ends: the balance hold is released first (everything back). After Job complete the refund can reach the
+      // balance payment too (balance first, then the deposit) and the booking stays completed (never a cancel that
+      // fails silently out of completed).
+      if (appointment.quoteId) {
+        const qb = await import("./quotes/quoteBalance");
+        if (appointment.status === BOOKING_STATES.CONFIRMED) {
+          const bal = await qb.settleBalanceOnCancel(appointmentId, 0);
+          if (!bal.ok) return res.status(bal.code === 'BALANCE_BUSY' ? 409 : 502).json({ error: bal.message, code: bal.code });
+        } else {
+          const job = await qb.quoteJobFor(appointmentId);
+          const paid = (appointment.depositAmountCents ?? 0) > 0 ? appointment.depositAmountCents! : appointment.totalPrice;
+          const balancePaid = job ? job.refundedCents + qb.refundableBalanceCents(job) : 0;
+          const remaining = Math.max(0, paid + balancePaid - (appointment.refundAmount ?? 0));
+          const qResolved = resolveProviderRefund(req.body, { ...appointment, depositAmountCents: null, totalPrice: remaining });
+          if (!qResolved.ok) {
+            return res.status(400).json({ error: qResolved.error, code: qResolved.code, maxRefundCents: qResolved.maxRefundCents });
+          }
+          const amount = qResolved.refundCents;
+          const done = await qb.refundQuoteBooking(appointment, amount, `provider_refund_${appointment.refundAmount ?? 0}`, {
+            initiatedBy: userId, reason: reason || 'Provider initiated refund',
+          });
+          const refundedTotal = (appointment.refundAmount ?? 0) + amount;
+          await db.update(appointments).set({
+            stripeRefundId: done.refundIds[done.refundIds.length - 1] ?? appointment.stripeRefundId,
+            refundedAt: new Date(),
+            refundAmount: refundedTotal,
+            cancellationReason: reason || 'Refunded by provider',
+          }).where(eq(appointments.id, appointmentId));
+          try {
+            await storage.reversePointsForRefund(appointment.clientId, 'appointment', appointmentId, {
+              refundFraction: paid + balancePaid > 0 ? Math.min(1, amount / (paid + balancePaid)) : 1,
+              description: 'Points reversed from refund',
+            });
+          } catch (pointsError) {
+            console.error("Failed to reverse points:", pointsError);
+          }
+          if (refundedTotal >= paid + balancePaid) await giveBackPromoCode({ type: 'appointment', id: appointmentId }, 'provider full refund');
+          try {
+            const refundUser = await storage.getUser(appointment.clientId);
+            await NotificationTriggers.bookingCanceledOrRefunded({
+              consumerUserId: appointment.clientId,
+              consumerName: realName(refundUser) || refundUser?.email || 'Customer',
+              providerName: business?.name || 'Business',
+              eventType: 'appointment_refunded',
+              amountCents: amount,
+              referenceType: 'appointment',
+              referenceId: appointmentId,
+              reason: reason || 'Provider initiated refund',
+            });
+          } catch (notifyErr) {
+            console.error(`[Refund] Quad-notification failed for appointment ${appointmentId}:`, notifyErr);
+          }
+          return res.json({
+            success: true,
+            refundId: done.refundIds[done.refundIds.length - 1] ?? null,
+            amount,
+            refundedAmountCents: amount,
+            status: 'succeeded',
+            balanceRefundedCents: done.fromBalance,
+            depositRefundedCents: done.fromDeposit,
+          });
+        }
+      }
+
       // Amount: amountCents (cents) or legacy amount (dollars, from the app); none = full refund,
       // which is the deposit on deposit bookings, otherwise the service price. Fee kept.
       const resolved = resolveProviderRefund(req.body, appointment);
@@ -9317,6 +9382,13 @@ export async function registerRoutes(
           error: "Booking must be in confirmed state to cancel as no-show",
           currentStatus: appointment.status,
         });
+      }
+
+      // Quotes step 4a: the booking ends before Job complete, so the balance hold is released (nothing owed from it).
+      if (appointment.quoteId) {
+        const { settleBalanceOnCancel } = await import("./quotes/quoteBalance");
+        const bal = await settleBalanceOnCancel(appointmentId, 0);
+        if (!bal.ok) return res.status(bal.code === 'BALANCE_BUSY' ? 409 : 502).json({ error: bal.message, code: bal.code });
       }
 
       const result = await transitionAppointmentState(appointmentId, BOOKING_STATES.NO_SHOW, {
@@ -9613,6 +9685,17 @@ export async function registerRoutes(
             appointment.vendorNet,
           );
 
+      // Quotes step 4a (Legend 2026-11-04): after the balance hold, the vendor's policy first, then take only what
+      // is owed (the cancellation fee) from the hold and release the rest. A deposit quote owes nothing more (the
+      // deposit is kept), so its hold is released. Done before any refund, so a failure here changes nothing.
+      let balanceFee: { capturedCents: number; chargeId: string | null } | null = null;
+      if (appointment.quoteId) {
+        const { settleBalanceOnCancel } = await import("./quotes/quoteBalance");
+        const bal = await settleBalanceOnCancel(appointmentId, feeAmountCents);
+        if (!bal.ok) return res.status(bal.code === 'BALANCE_BUSY' ? 409 : 502).json({ error: bal.message, code: bal.code, appointmentId });
+        if (bal.capturedCents > 0) balanceFee = { capturedCents: bal.capturedCents, chargeId: bal.chargeId };
+      }
+
       const paymentIntentId = appointment.stripePaymentIntentId;
       const refundAlreadyIssued = !!appointment.stripeRefundId;
       if (refundAlreadyIssued) {
@@ -9721,7 +9804,12 @@ export async function registerRoutes(
       // ── Charge cancellation fee (best-effort, only after refund and cancel) ──
       let feeCharged = false;
       let feeNeedsManualCollection = false;
-      if (feeAmountCents > 0 && appointment.stripePaymentIntentId) {
+      if (balanceFee && appointment.quoteId) {
+        // Taken from the balance hold: the vendor's share, as for any quote cancellation fee.
+        feeCharged = true;
+        await payQuoteCancelFeeShare(appointment, balanceFee.capturedCents, balanceFee.chargeId).catch(err =>
+          console.error(`[Cancel] Quote fee payout failed for appointment ${appointmentId}:`, err));
+      } else if (feeAmountCents > 0 && appointment.stripePaymentIntentId) {
         try {
           const user = await storage.getUser(userId);
           const paymentMethodId = await stripeService.getPaymentMethodIdFromIntent(
@@ -9840,6 +9928,18 @@ export async function registerRoutes(
         return res.status(403).json({ error: "Not authorized to complete this appointment" });
       }
 
+      // Quotes step 4a: the site dashboards' Mark Complete runs the quote Job complete (charges the held balance).
+      // Same response shape (they read only success). Normal bookings unchanged below.
+      if (appointment.quoteId) {
+        const { completeQuoteJob } = await import("./quotes/quoteBalance");
+        const done = await completeQuoteJob(appointmentId, { userId, via: 'owner' });
+        if (!done.ok) {
+          if (done.code === 'ALREADY_COMPLETE') return res.status(400).json({ error: "Appointment is already completed", code: done.code });
+          return res.status(done.status).json({ error: done.message, code: done.code, currentStatus: appointment.status });
+        }
+        return res.json({ success: true, appointmentId, status: BOOKING_STATES.COMPLETED, pointsAwarded: done.pointsReleased });
+      }
+
       if (appointment.status === BOOKING_STATES.COMPLETED) {
         return res.status(400).json({ error: "Appointment is already completed" });
       }
@@ -9920,6 +10020,13 @@ export async function registerRoutes(
           error: "Appointment must be confirmed to update its outcome",
           currentStatus: appointment.status,
         });
+      }
+
+      // Quotes step 4a: the booking ends before Job complete, so the balance hold is released (nothing owed from it).
+      if (appointment.quoteId) {
+        const { settleBalanceOnCancel } = await import("./quotes/quoteBalance");
+        const bal = await settleBalanceOnCancel(appointmentId, 0);
+        if (!bal.ok) return res.status(bal.code === 'BALANCE_BUSY' ? 409 : 502).json({ error: bal.message, code: bal.code });
       }
 
       // Map outcome to a terminal booking state
@@ -19831,6 +19938,22 @@ export async function registerRoutes(
             } else if (existing.targetType === 'appointment') {
               const appointment = await storage.getAppointment(existing.targetId);
               paymentIntentId = appointment?.stripePaymentIntentId || null;
+              // Quotes step 4a: before Job complete the booking ends, so the balance hold is released first; after
+              // Job complete the refund comes from the balance payment first, then the deposit.
+              if (appointment?.quoteId) {
+                const qb = await import("./quotes/quoteBalance");
+                if (appointment.status === BOOKING_STATES.COMPLETED) {
+                  const done = await qb.refundQuoteBooking(appointment, existing.amount, `refund_req_${id}`, {
+                    refundRequestId: id, targetType: 'appointment', targetId: existing.targetId, approvedBy: adminUser.id,
+                  });
+                  stripeRefundId = done.refundIds[done.refundIds.length - 1] ?? null;
+                  approvedStripeRefundId = stripeRefundId;
+                  paymentIntentId = null; // done above
+                } else {
+                  const bal = await qb.settleBalanceOnCancel(existing.targetId, 0);
+                  if (!bal.ok) return res.status(502).json({ success: false, message: bal.message, code: bal.code });
+                }
+              }
             }
 
             if (paymentIntentId) {
@@ -21727,7 +21850,16 @@ export async function registerRoutes(
 
       const confirmedBookings = bookings.filter(b => b.status === 'confirmed' || b.status === 'completed');
       const monthBookings = bookings.filter(b => monthOf(b.appointmentDate) === thisMonth);
-      const monthlyBookingRevenue = monthBookings.reduce((sum, b) => sum + bookingRevenueCents(b), 0);
+      // Quotes step 4a: a quote's balance charged at Job complete counts too (the business's part).
+      const quoteBalances = new Map<string, number>();
+      const quoteIds = monthBookings.filter(b => b.quoteId).map(b => b.id);
+      if (quoteIds.length) {
+        const { quoteJobs } = await import("@shared/schema");
+        const jobs = await db.select({ a: quoteJobs.appointmentId, bal: quoteJobs.balanceCents, cap: quoteJobs.capturedCents, hold: quoteJobs.holdCents, st: quoteJobs.balanceStatus })
+          .from(quoteJobs).where(inArray(quoteJobs.appointmentId, quoteIds));
+        for (const j of jobs) if (j.st === 'captured' && (j.cap ?? 0) >= j.hold) quoteBalances.set(j.a, j.bal);
+      }
+      const monthlyBookingRevenue = monthBookings.reduce((sum, b) => sum + bookingRevenueCents({ ...b, quoteBalanceCapturedCents: quoteBalances.get(b.id) ?? 0 }), 0);
       const inPersonDueCents = monthBookings
         .filter(b => b.status === 'confirmed')
         .reduce((sum, b) => sum + bookingInPersonCents(b), 0);
@@ -21824,7 +21956,7 @@ export async function registerRoutes(
       // Outsyde-only cancellation fees are added here (they never go to the business).
       const totalRevenue = orders.filter(o => isPaidOrder(o)).reduce((sum, order) => sum + (order.totalAmount || 0), 0);
       const apptRevenue = await db.execute<{ revenue: number; fees: number }>(sql`
-        SELECT COALESCE(SUM(${bookingRevenueAmountSql}) FILTER (WHERE ${bookingRevenueWhereSql}), 0)::int AS revenue,
+        SELECT COALESCE(SUM(${appointmentRevenueAmountSql}) FILTER (WHERE ${bookingRevenueWhereSql}), 0)::int AS revenue,
                COALESCE(SUM(cancellation_fee_kept_cents), 0)::int AS fees
         FROM appointments
       `);
@@ -22841,7 +22973,7 @@ export async function registerRoutes(
 
       const enriched = await Promise.all(paged.map(async (appt) => {
         const client = await storage.getUser(appt.clientId);
-        const chargeFields = appointmentChargeFields(appt.totalPrice, appt.depositAmountCents);
+        const chargeFields = appointmentChargeFields(appt.totalPrice, appt.depositAmountCents, appt.quoteId ?? null);
         return {
           ...appt,
           clientEmail: client?.email,
@@ -23107,7 +23239,7 @@ export async function registerRoutes(
         platformFeesCollected += Number(orderStats.rows[0]?.fees || 0);
 
         const apptStats = await db.execute<{ revenue: number; count: number; fees: number }>(sql`
-          SELECT COALESCE(SUM(${bookingRevenueAmountSql}), 0)::int AS revenue,
+          SELECT COALESCE(SUM(${appointmentRevenueAmountSql}), 0)::int AS revenue,
                  COUNT(*) FILTER (WHERE status IN ('confirmed','completed'))::int AS count,
                  COALESCE(SUM(platform_fee), 0)::int AS fees
           FROM appointments
@@ -25335,6 +25467,16 @@ export async function registerRoutes(
 
       for (const appt of targetAppointments) {
         try {
+          // Quotes step 4a: the vendor cancels, so the balance hold is released (everything back).
+          if (appt.quoteId) {
+            const { settleBalanceOnCancel } = await import("./quotes/quoteBalance");
+            const bal = await settleBalanceOnCancel(appt.id, 0);
+            if (!bal.ok) {
+              console.error(`[BulkCancel] balance hold not released for ${appt.id}: ${bal.code}; booking left as is`);
+              failedRefunds.push(appt.id);
+              continue;
+            }
+          }
           await transitionAppointmentState(appt.id, BOOKING_STATES.CANCELED, {
             triggeredBy: userId,
             triggerSource: 'api',
@@ -25520,6 +25662,9 @@ export async function registerRoutes(
       }
       const appt = await storage.getAppointment(id);
       if (!appt) return res.status(404).json({ error: 'Appointment not found' });
+      // Quotes step 4a: a quote booking has a balance hold; this direct status write would skip it. Quote bookings
+      // use the booking routes (Job complete, cancel, refund), which charge or release the balance.
+      if (appt.quoteId) return res.status(409).json({ error: 'Quote bookings are completed or canceled from the booking routes', code: 'QUOTE_BOOKING' });
 
       const updated = await storage.updateAppointment(id, { status: status as any });
 

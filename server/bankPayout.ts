@@ -34,6 +34,10 @@ export type HeldBreakdown = {
   teamPayoutsOpen: number;
   /** p5-stripe-sync (094): host share held from event payouts for disputes still open, or won and not sent yet. */
   disputeHolds: number;
+  /** Quotes step 4a (099): a quote balance charged at Job complete and not paid to the vendor yet (4b), less refunds. */
+  quoteBalanceUnpaid: number;
+  /** Quotes step 4a: a quote balance already paid to the vendor, kept back 30 days for refunds (like bookingRefundCover). */
+  quoteBalanceRefundCover: number;
 };
 
 /** Counts that block or flag the payout; not money, so never part of total. */
@@ -76,7 +80,9 @@ SELECT
  (SELECT count(*) FROM referral_payouts WHERE status='pending' AND last_error ILIKE '%insufficient%')::int AS referral_payouts_waiting_balance,
  (SELECT COALESCE(SUM(amount_cents),0) FROM event_team_payouts WHERE status IN ('pending','held','review'))::bigint AS team_payouts_open,
  (SELECT COALESCE(SUM(held_cents),0) FROM stripe_disputes WHERE held_payout_id IS NOT NULL AND release_transfer_id IS NULL AND (outcome IS NULL OR outcome='won'))::bigint AS dispute_holds,
- (SELECT count(*) FROM event_team_payouts WHERE status='pending' AND last_error ILIKE '%insufficient%')::int AS team_payouts_waiting_balance
+ (SELECT count(*) FROM event_team_payouts WHERE status='pending' AND last_error ILIKE '%insufficient%')::int AS team_payouts_waiting_balance,
+ (SELECT COALESCE(SUM(GREATEST(COALESCE(captured_cents,0) - refunded_cents, 0)),0) FROM quote_jobs WHERE balance_status='captured' AND payout_status IN ('held','paused'))::bigint AS quote_balance_unpaid,
+ (SELECT COALESCE(SUM(GREATEST(COALESCE(captured_cents,0) - refunded_cents, 0)),0) FROM quote_jobs WHERE balance_status='captured' AND payout_status='paid' AND captured_at > now() - interval '30 days')::bigint AS quote_balance_refund_cover
 `));
   const n = (v: unknown) => Number(v ?? 0);
   const breakdown: HeldBreakdown = {
@@ -96,6 +102,8 @@ SELECT
     teamPayoutsOpen: n(r.team_payouts_open),
     // p5-stripe-sync S4: host share held from an event payout for an open dispute, or won and not yet sent.
     disputeHolds: n(r.dispute_holds),
+    quoteBalanceUnpaid: n(r.quote_balance_unpaid),
+    quoteBalanceRefundCover: n(r.quote_balance_refund_cover),
   };
   const gates: Gates = {
     recentTopups: n(r.recent_topups),

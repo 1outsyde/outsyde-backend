@@ -37,6 +37,18 @@ export const bookingRevenueAmountSql = sql.raw(
   `GREATEST(COALESCE(NULLIF(deposit_amount_cents, 0), total_price, 0) - COALESCE(refund_amount, 0), 0)`,
 );
 
+/**
+ * Quotes step 4a: appointments only (a query that reads FROM appointments, not aliased). Same as
+ * bookingRevenueAmountSql plus a quote's balance once it is charged in full at Job complete (the business's part,
+ * no service fee). Refunds of either payment are in refund_amount. Shoot bookings keep bookingRevenueAmountSql.
+ */
+export const appointmentRevenueAmountSql = sql.raw(
+  `GREATEST(COALESCE(NULLIF(deposit_amount_cents, 0), total_price, 0)` +
+  ` + COALESCE((SELECT qj.balance_cents FROM quote_jobs qj WHERE qj.appointment_id = appointments.id` +
+  ` AND qj.balance_status = 'captured' AND qj.captured_cents >= qj.hold_cents), 0)` +
+  ` - COALESCE(refund_amount, 0), 0)`,
+);
+
 /** Balance the customer pays the business in person. */
 export const bookingInPersonAmountSql = sql.raw(
   `GREATEST(COALESCE(total_price, 0) - COALESCE(NULLIF(deposit_amount_cents, 0), total_price, 0), 0)`,
@@ -51,6 +63,10 @@ export const orderRevenueDateSql = sql.raw(`COALESCE(paid_at, created_at)`);
 
 export interface RevenueBooking {
   status?: string | null;
+  /** Quotes step 4a: set on quote bookings (their balance is paid through Outsyde, never in person). */
+  quoteId?: string | null;
+  /** Quotes step 4a: the quote balance charged at Job complete (business's part), when known. */
+  quoteBalanceCapturedCents?: number | null;
   totalPrice?: number | null;
   depositAmountCents?: number | null;
   refundAmount?: number | null;
@@ -81,12 +97,13 @@ function chargedCents(b: RevenueBooking): number {
 /** Revenue cents for one booking (0 when it does not count). */
 export function bookingRevenueCents(b: RevenueBooking): number {
   if (!bookingCountsAsRevenue(b)) return 0;
-  return Math.max(chargedCents(b) - (b.refundAmount ?? 0), 0);
+  return Math.max(chargedCents(b) + (b.quoteBalanceCapturedCents ?? 0) - (b.refundAmount ?? 0), 0);
 }
 
 /** In-person balance for one booking; only confirmed and completed bookings have one. */
 export function bookingInPersonCents(b: RevenueBooking): number {
   if (b.status !== "confirmed" && b.status !== "completed") return 0;
+  if (b.quoteId) return 0;
   return Math.max((b.totalPrice ?? 0) - chargedCents(b), 0);
 }
 
