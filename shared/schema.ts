@@ -656,8 +656,8 @@ export const estimateRequests = pgTable("estimate_requests", {
   source: text("source"),
   // Migration 096 (Quotes step 1): the questions as sent, with the answers; the chat the request opened.
   answers: jsonb("answers").$type<RequestAnswerShape[]>().notNull().default(sql`'[]'::jsonb`),
-  conversationId: varchar("conversation_id", { length: 36 }),
-  messageId: varchar("message_id", { length: 36 }),
+  conversationId: varchar("conversation_id", { length: 36 }).references((): AnyPgColumn => conversations.id, { onDelete: "set null" }),
+  messageId: varchar("message_id", { length: 36 }).references((): AnyPgColumn => messages.id, { onDelete: "set null" }),
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 }, (table) => ({

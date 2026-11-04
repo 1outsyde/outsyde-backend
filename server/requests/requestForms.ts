@@ -111,7 +111,25 @@ export function normalizeQuestions(input: unknown): { ok: true; questions: Reque
     }
     out.push(q);
   }
+  const limits = checkResolvedLimits(out);
+  if (!limits.ok) return limits;
   return { ok: true, questions: out };
+}
+
+/**
+ * The limits apply to what the customer actually answers, so they are checked on the combined form too
+ * (base form plus a service's own questions): at most 25 questions, and required photo questions can't
+ * need more photos than one request can hold (each needs at least one).
+ */
+export function checkResolvedLimits(questions: RequestQuestion[]): { ok: true } | Fail {
+  if (questions.length > REQUEST_FORM_MAX_QUESTIONS) {
+    return { ok: false, message: `A form can have up to ${REQUEST_FORM_MAX_QUESTIONS} questions, counting the base form` };
+  }
+  const requiredPhotos = questions.filter((q) => q.type === "photos" && q.required).length;
+  if (requiredPhotos > REQUEST_MAX_PHOTOS_TOTAL) {
+    return { ok: false, message: `A form can require at most ${REQUEST_MAX_PHOTOS_TOTAL} photo questions, because a request holds up to ${REQUEST_MAX_PHOTOS_TOTAL} photos` };
+  }
+  return { ok: true };
 }
 
 /**
@@ -218,7 +236,10 @@ export function checkAnswers(
 
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 
-/** The text of the request card message. Older app builds show only this, so it reads on its own. */
+/**
+ * The text of the request card message. Older app builds show only this text, with no card, so it reads on
+ * its own and does not point anywhere: the business also gets every detail by email and in its requests list.
+ */
 export function requestMessageText(input: { serviceName: string | null; preferredDate: string | null }): string {
   const name = (input.serviceName ?? "").trim();
   let when = "";
@@ -227,7 +248,5 @@ export function requestMessageText(input: { serviceName: string | null; preferre
     const [y, m, day] = d.split("-").map(Number);
     when = ` (${MONTHS[m - 1]} ${day}, ${y})`;
   }
-  return name
-    ? `Sent a request for ${name}${when}. Open the chat to see the details.`
-    : "Sent a request. Open the chat to see the details.";
+  return name ? `Sent a request for ${name}${when}.` : "Sent a request.";
 }

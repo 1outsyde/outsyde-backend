@@ -6,6 +6,7 @@ import {
   normalizeQuestions,
   resolveServiceForm,
   checkAnswers,
+  checkResolvedLimits,
   requestMessageText,
   REQUEST_FORM_MAX_QUESTIONS,
   REQUEST_MAX_PHOTOS_PER_QUESTION,
@@ -60,6 +61,19 @@ assert(normalizeQuestions([]).ok, 'an empty form is allowed');
 {
   const r = normalizeQuestions([{ type: 'short_text', label: 'A', options: ['x', 'y'], multiple: true, maxPhotos: 4 }]);
   assert(r.ok && r.questions[0].options === undefined && r.questions[0].multiple === undefined && r.questions[0].maxPhotos === undefined, 'fields that do not belong to the type are dropped', r);
+}
+
+{
+  const req = (n: number) => Array.from({ length: n }, (_, i) => ({ type: 'photos', label: `P${i}`, required: true, maxPhotos: 1 }));
+  assert(normalizeQuestions(req(REQUEST_MAX_PHOTOS_TOTAL)).ok, `${REQUEST_MAX_PHOTOS_TOTAL} required photo questions allowed`);
+  assert(!normalizeQuestions(req(REQUEST_MAX_PHOTOS_TOTAL + 1)).ok, 'more required photo questions than a request can hold are refused');
+}
+
+console.log('\n── checkResolvedLimits (combined form) ──');
+{
+  const q = (i: number) => ({ id: `q${i}`, type: 'short_text' as const, label: `Q${i}`, required: false });
+  assert(checkResolvedLimits(Array.from({ length: REQUEST_FORM_MAX_QUESTIONS }, (_, i) => q(i))).ok, `${REQUEST_FORM_MAX_QUESTIONS} combined questions allowed`);
+  assert(!checkResolvedLimits(Array.from({ length: REQUEST_FORM_MAX_QUESTIONS + 1 }, (_, i) => q(i))).ok, `${REQUEST_FORM_MAX_QUESTIONS + 1} combined questions refused`);
 }
 
 console.log('\n── resolveServiceForm ──');
@@ -149,10 +163,10 @@ assert(checkAnswers([], {}, R2).ok, 'a service with no questions accepts no answ
 console.log('\n── requestMessageText ──');
 {
   const t = requestMessageText({ serviceName: 'Standard Move, Weekday ', preferredDate: '2026-12-12' });
-  assert(t === 'Sent a request for Standard Move, Weekday (Dec 12, 2026). Open the chat to see the details.', 'summary with service and date', t);
+  assert(t === 'Sent a request for Standard Move, Weekday (Dec 12, 2026).', 'summary with service and date', t);
   assert(!/ - | — | – /.test(t), 'no dashes in the summary');
   const g = requestMessageText({ serviceName: null, preferredDate: null });
-  assert(g === 'Sent a request. Open the chat to see the details.', 'summary without a service', g);
+  assert(g === 'Sent a request.', 'summary without a service', g);
 }
 
 console.log(`\n${passed} passed, ${failed} failed`);

@@ -34,8 +34,10 @@ ALTER TABLE vendor_services ADD COLUMN IF NOT EXISTS request_form_id VARCHAR(36)
 ALTER TABLE vendor_services ADD COLUMN IF NOT EXISTS request_form_use_base BOOLEAN NOT NULL DEFAULT false;
 ALTER TABLE vendor_services ADD COLUMN IF NOT EXISTS request_questions JSONB NOT NULL DEFAULT '[]'::jsonb;
 DO $$ BEGIN
-  ALTER TABLE vendor_services ADD CONSTRAINT vendor_services_request_questions_is_array CHECK (jsonb_typeof(request_questions) = 'array');
+  ALTER TABLE vendor_services ADD CONSTRAINT vendor_services_request_questions_is_array CHECK (jsonb_typeof(request_questions) = 'array') NOT VALID;
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+-- Checked in a second step so the table is not locked against writes while it is scanned.
+ALTER TABLE vendor_services VALIDATE CONSTRAINT vendor_services_request_questions_is_array;
 
 ALTER TABLE estimate_requests ADD COLUMN IF NOT EXISTS answers JSONB NOT NULL DEFAULT '[]'::jsonb;
 ALTER TABLE estimate_requests ADD COLUMN IF NOT EXISTS conversation_id VARCHAR(36) REFERENCES conversations(id) ON DELETE SET NULL;
@@ -45,5 +47,6 @@ CREATE INDEX IF NOT EXISTS idx_estimate_requests_conversation ON estimate_reques
 ALTER TABLE messages ADD COLUMN IF NOT EXISTS kind TEXT NOT NULL DEFAULT 'text';
 ALTER TABLE messages ADD COLUMN IF NOT EXISTS card JSONB;
 DO $$ BEGIN
-  ALTER TABLE messages ADD CONSTRAINT messages_kind_check CHECK (kind IN ('text', 'request'));
+  ALTER TABLE messages ADD CONSTRAINT messages_kind_check CHECK (kind IN ('text', 'request')) NOT VALID;
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+ALTER TABLE messages VALIDATE CONSTRAINT messages_kind_check;

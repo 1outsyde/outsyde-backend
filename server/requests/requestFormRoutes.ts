@@ -16,7 +16,7 @@
  */
 import type { Express } from "express";
 import { z } from "zod";
-import { and, desc, eq, inArray } from "drizzle-orm";
+import { and, desc, eq, inArray, sql } from "drizzle-orm";
 import { db } from "../db";
 import { storage } from "../storage";
 import { getUserIdFromRequest } from "../auth";
@@ -31,7 +31,7 @@ import {
 } from "@shared/schema";
 import { resolveVendorBusiness } from "../estimates/estimateRequestRoutes";
 import { isServiceOfferedInCity } from "../estimates/serviceCities";
-import { normalizeQuestions } from "./requestForms";
+import { checkResolvedLimits, normalizeQuestions, resolveServiceForm, type RequestQuestion } from "./requestForms";
 import { loadResolvedForm } from "./serviceForm";
 
 const ADMIN_EMAILS = ["info@goutsyde.com", "jamesmeyers2304@gmail.com"];
@@ -104,7 +104,8 @@ export function registerRequestFormRoutes(app: Express): void {
         return res.status(201).json({ form: toFormJson(form) });
       } catch (err: any) {
         // Two base forms created at the same moment: the unique index keeps one.
-        if (String(err?.message ?? err).includes("uq_request_forms_one_base")) {
+        const pgErr = err?.cause ?? err;
+        if (pgErr?.code === "23505" && String(pgErr?.constraint ?? pgErr?.message ?? "").includes("uq_request_forms_one_base")) {
           return res.status(409).json({ code: "BASE_EXISTS", message: "This business already has a base form. Edit it instead." });
         }
         throw err;
@@ -130,6 +131,23 @@ export function registerRequestFormRoutes(app: Express): void {
       if (req.body?.questions !== undefined) {
         const qs = normalizeQuestions(req.body.questions);
         if (!qs.ok) return res.status(400).json({ error: "Invalid data", message: qs.message, field: "questions" });
+        // The base form is combined with each service's own questions: the limits hold on the combination.
+        if (form.isBase) {
+          const users = await db.select().from(vendorServices).where(and(
+            eq(vendorServices.businessId, owner.business.id),
+            eq(vendorServices.requestFormUseBase, true),
+          ));
+          const tooBig = users.filter((svc) => !svc.requestFormId && !checkResolvedLimits(resolveServiceForm({
+            savedForm: null, base: qs.questions, useBase: true, own: (svc.requestQuestions ?? []) as RequestQuestion[],
+          })).ok);
+          if (tooBig.length > 0) {
+            return res.status(409).json({
+              code: "TOO_MANY_QUESTIONS",
+              message: "With these questions some services would go over the form limits. Remove questions from those services first.",
+              services: tooBig.map((svc) => ({ id: svc.id, name: svc.name })),
+            });
+          }
+        }
         set.questions = qs.questions;
       }
       const [updated] = await db.update(requestForms).set(set)
@@ -153,7 +171,16 @@ export function registerRequestFormRoutes(app: Express): void {
       if (using.length > 0) {
         return res.status(409).json({ code: "FORM_IN_USE", message: "Some services use this form. Choose another form for them first.", services: using });
       }
-      await db.update(requestForms).set({ isActive: false, updatedAt: new Date() }).where(eq(requestForms.id, form.id));
+      // One statement, so a service can't start using the form between the check above and the removal.
+      const removed = await db.update(requestForms).set({ isActive: false, updatedAt: new Date() })
+        .where(and(
+          eq(requestForms.id, form.id),
+          sql`NOT EXISTS (SELECT 1 FROM vendor_services s WHERE s.request_form_id = ${form.id})`,
+        ))
+        .returning({ id: requestForms.id });
+      if (removed.length === 0) {
+        return res.status(409).json({ code: "FORM_IN_USE", message: "Some services use this form. Choose another form for them first.", services: [] });
+      }
       return res.json({ success: true });
     } catch (err) {
       console.error("[request-forms] delete failed:", err);
@@ -198,6 +225,15 @@ export function registerRequestFormRoutes(app: Express): void {
           return res.status(400).json({ error: "Invalid data", message: "Choose a saved form from your library", field: "formId" });
         }
       }
+      if (formId === null) {
+        const [base] = useBase
+          ? await db.select().from(requestForms).where(and(eq(requestForms.businessId, owner.business.id), eq(requestForms.isBase, true), eq(requestForms.isActive, true)))
+          : [];
+        const limits = checkResolvedLimits(resolveServiceForm({
+          savedForm: null, base: base ? (base.questions as RequestQuestion[]) : null, useBase, own: qs.questions,
+        }));
+        if (!limits.ok) return res.status(400).json({ error: "Invalid data", message: limits.message, field: "questions" });
+      }
       const [updated] = await db.update(vendorServices)
         .set({ requestFormId: formId, requestFormUseBase: formId === null ? useBase : false, requestQuestions: formId === null ? qs.questions : [] })
         .where(and(eq(vendorServices.id, svc.id), eq(vendorServices.businessId, owner.business.id)))
@@ -223,6 +259,8 @@ export function registerRequestFormRoutes(app: Express): void {
         service: { id: svc.id, name: svc.name, description: svc.description, price: svc.price },
         business: { id: business.id, name: business.name.trim() },
         cities,
+        // A business with a city list needs a city on every request (an empty list then means none fit).
+        cityRequired: (business.serviceCities ?? []).length > 0,
         phoneRequired: true,
         questions: await loadResolvedForm(svc),
       });

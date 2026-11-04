@@ -176,15 +176,28 @@ async function call(method: string, path: string, o: { token?: string; body?: un
     const g2 = await call('GET', '/api/vendor/request-forms', { token: ownerA.token });
     assert(delOk.status === 200 && !g2.body.forms.some((f: any) => f.id === spare), 'an unused form is removed from the library', { delOk, g2 });
 
+    console.log('\n── limits count the whole form a customer sees ──');
+    const many = (n: number, t = 'short_text') => Array.from({ length: n }, (_, i) => ({ type: t, label: `Extra ${i}` }));
+    const over = await call('PUT', `/api/vendor/services/${sA}/request-form`, { token: ownerA.token, body: { formId: null, useBase: true, questions: many(24) } });
+    assert(over.status === 400 && /25 questions/.test(over.body?.message ?? ''), 'base (2) plus 24 own questions is refused', over);
+    const fits = await call('PUT', `/api/vendor/services/${sA}/request-form`, { token: ownerA.token, body: { formId: null, useBase: true, questions: many(23) } });
+    assert(fits.status === 200 && fits.body.resolved.length === 25, 'base (2) plus 23 own questions fits', fits);
+    const baseGrow = await call('PATCH', `/api/vendor/request-forms/${baseId}`, { token: ownerA.token, body: { questions: [...baseQs, { type: 'short_text', label: 'One more' }] } });
+    assert(baseGrow.status === 409 && baseGrow.body?.code === 'TOO_MANY_QUESTIONS' && baseGrow.body.services?.[0]?.id === sA, 'growing the base form past the limit for a service that uses it is refused, the service is named', baseGrow);
+    const [baseNow] = await q(`SELECT jsonb_array_length(questions) n FROM request_forms WHERE id = $1`, [baseId]);
+    assert(baseNow.n === 2, 'the refused base edit saved nothing', baseNow);
+    const restore = await call('PUT', `/api/vendor/services/${sA}/request-form`, { token: ownerA.token, body: { formId: null, useBase: true, questions: own } });
+    assert(restore.status === 200 && restore.body.resolved.length === 4, 'service form back to base plus 2', restore);
+
     console.log('\n── the form a customer sees ──');
     const pub = await call('GET', `/api/services/${sA}/request-form`);
     assert(pub.status === 200 && pub.body?.service?.id === sA && pub.body.business?.id === bizA && pub.body.questions?.length === 4 && pub.body.phoneRequired === true, 'public form for a request only service', pub);
-    assert(pub.body?.cities && Array.isArray(pub.body.cities) && pub.body.cities.length === 0, 'no cities for a business without a list', pub.body?.cities);
+    assert(pub.body?.cities && Array.isArray(pub.body.cities) && pub.body.cities.length === 0 && pub.body.cityRequired === false, 'no cities and no city needed for a business without a list', pub.body);
     const pubBook = await call('GET', `/api/services/${sBook}/request-form`);
     const pubDraft = await call('GET', `/api/services/${sDraft}/request-form`);
     assert(pubBook.status === 404 && pubDraft.status === 404, 'no public form for a bookable or draft service', { pubBook, pubDraft });
     const pubR = await call('GET', `/api/services/${sR}/request-form`);
-    assert(pubR.status === 200 && pubR.body.questions.length === 0 && JSON.stringify(pubR.body.cities) === '["Norfolk","Suffolk"]', "a service without a form has no questions, the business's cities are listed", pubR);
+    assert(pubR.status === 200 && pubR.body.questions.length === 0 && JSON.stringify(pubR.body.cities) === '["Norfolk","Suffolk"]' && pubR.body.cityRequired === true, "a service without a form has no questions, the business's cities are listed and required", pubR);
 
     console.log('\n── sending a request ──');
     const resolvedIds = pub.body.questions.map((x: any) => x.id);
@@ -197,6 +210,13 @@ async function call(method: string, path: string, o: { token?: string; body?: un
     await q(`UPDATE users SET expo_push_token = $1 WHERE id = $2`, [pushToken, ownerA.uid]);
     const fs = await import('fs');
     const pushedBefore = EXPO_FILE && fs.existsSync(EXPO_FILE) ? fs.readFileSync(EXPO_FILE, 'utf8').length : 0;
+    const WS: any = (await import('ws')).default;
+    const inbox: any[] = [];
+    const ws = new WS(BASE.replace(/^http/, 'ws') + '/ws');
+    await new Promise<void>((resolve, reject) => { ws.on('open', () => resolve()); ws.on('error', reject); });
+    ws.on('message', (d: any) => { try { inbox.push(JSON.parse(String(d))); } catch {} });
+    ws.send(JSON.stringify({ type: 'auth', payload: { token: ownerA.token } }));
+    await new Promise((r) => setTimeout(r, 500));
     const r1 = await send(custs[0], { serviceId: sA, preferredDate: '2026-12-12', answers: goodAnswers });
     assert(r1.status === 201 && r1.body?.success === true && typeof r1.body.request?.conversationId === 'string', 'request saved, chat opened', r1);
     const reqId = r1.body?.request?.id;
@@ -206,14 +226,18 @@ async function call(method: string, path: string, o: { token?: string; body?: un
     assert(saved?.city === null && saved.service_name === 'Plan a', 'no city needed when the business has none', saved);
     const [msg] = await q(`SELECT kind, card, content, sender_id FROM messages WHERE id = $1`, [saved?.message_id]);
     assert(msg?.kind === 'request' && msg.card?.requestId === reqId && msg.sender_id === custs[0].uid, 'a request card message from the customer', msg);
-    assert(msg?.content === 'Sent a request for Plan a (Dec 12, 2026). Open the chat to see the details.', 'card text reads on its own for older app builds', msg?.content);
+    assert(msg?.content === 'Sent a request for Plan a (Dec 12, 2026).', 'card text reads on its own for older app builds', msg?.content);
     const [conv] = await q(`SELECT participant1_id, participant2_id, last_message_preview FROM conversations WHERE id = $1`, [convId]);
     assert(conv && [conv.participant1_id, conv.participant2_id].sort().join() === [custs[0].uid, ownerA.uid].sort().join(), 'the chat is between the customer and the business owner', conv);
 
+    await new Promise((r) => setTimeout(r, 800));
+    const live = inbox.find((m) => m.type === 'new_message' && m.payload?.kind === 'request');
+    assert(!!live && live.payload.card?.requestId === reqId && live.payload.conversationId === convId && typeof live.payload.senderName === 'string', 'the owner with the app open gets the card live', inbox.map((m) => m.type));
+    ws.close();
     if (EXPO_FILE) {
       await new Promise((r) => setTimeout(r, 1500));
       const pushed = fs.readFileSync(EXPO_FILE, 'utf8').slice(pushedBefore);
-      assert(pushed.includes(pushToken) && pushed.includes('new_message') && pushed.includes('Sent a request for Plan a'), 'the business owner gets a message push for the request', pushed.slice(0, 400));
+      assert(pushed.includes(pushToken) && pushed.includes('new_message') && pushed.includes('Sent a request for Plan a (Dec 12, 2026).'), 'the business owner gets a message push for the request', pushed.slice(0, 400));
     } else {
       console.log('  ⏭  push check skipped (set RF_TEST_EXPO_FILE)');
     }
@@ -234,6 +258,14 @@ async function call(method: string, path: string, o: { token?: string; body?: un
     const noPhone = await call('POST', '/api/estimate-requests', { token: custs[1].token, body: { businessId: bizA, serviceId: sA, name: 'Ana', email: 'ana@rf.test', answers: goodAnswers } });
     assert(noPhone.status === 400, 'phone is always required', noPhone);
 
+    const emptyCity = await send(custs[4], { serviceId: sA, city: '', answers: goodAnswers });
+    assert(emptyCity.status === 201, 'an empty city is the same as no city for a business without a list', emptyCity);
+    await q(`INSERT INTO user_blocks (blocker_id, blocked_id) VALUES ($1, $2)`, [ownerA.uid, custs[3].uid]);
+    const blocked = await send(custs[3], { serviceId: sA, answers: goodAnswers });
+    assert(blocked.status === 201 && blocked.body?.request?.conversationId === null, 'blocked: the request is saved, no chat is opened', blocked);
+    const [bconv] = await q(`SELECT count(*)::int n FROM conversations WHERE (participant1_id = $1 AND participant2_id = $2) OR (participant1_id = $2 AND participant2_id = $1)`, [ownerA.uid, custs[3].uid]);
+    assert(bconv.n === 0, 'blocked: no conversation exists', bconv);
+
     console.log("\n── Royal Elite's current form keeps working ──");
     const legacy = { businessId: bizR, serviceId: sR, city: 'Norfolk', name: 'Ana Tester', email: 'ana@rf.test', phone: '757 555 0100', preferredDate: '2026-12-20', details: { homeSize: '2 Bedroom', fromAddress: '1 A St', notes: 'Piano' } };
     const lr = await call('POST', '/api/estimate-requests', { token: custs[2].token, body: legacy });
@@ -249,7 +281,7 @@ async function call(method: string, path: string, o: { token?: string; body?: un
     const mine = await call('GET', '/api/me/requests', { token: custs[0].token });
     const mineRow = mine.body?.requests?.find((r: any) => r.id === reqId);
     assert(mine.status === 200 && mine.body.requests.length === 2 && mineRow?.businessName === 'Movers a' && mineRow.conversationId === convId && mineRow.vendorNotes === undefined, "customer's own requests, without the business's notes", mine);
-    const other = await call('GET', '/api/me/requests', { token: custs[3].token });
+    const other = await call('GET', '/api/me/requests', { token: stranger.token });
     assert(other.status === 200 && other.body.requests.length === 0, "a customer never sees someone else's requests", other);
     const one = await call('GET', `/api/requests/${reqId}`, { token: custs[0].token });
     assert(one.status === 200 && one.body?.request?.answers?.length === 4 && one.body.request.vendorNotes === undefined, 'customer opens their request', one);
@@ -292,6 +324,7 @@ async function call(method: string, path: string, o: { token?: string; body?: un
     const plain = await call('POST', `/api/conversations/${convId}/messages`, { token: ownerA.token, body: { content: 'Thanks, I will call you today.', kind: 'request', card: { requestId: 'fake' } } });
     assert(plain.status === 200 && plain.body?.message?.kind === 'text' && (plain.body.message.card ?? null) === null, 'a client cannot send a request card through the message route', plain);
   } finally {
+    await q(`DELETE FROM user_blocks WHERE blocker_id = ANY($1) OR blocked_id = ANY($1)`, [users]).catch(() => undefined);
     await q(`DELETE FROM estimate_requests WHERE business_id = ANY($1)`, [bizs]);
     const convs = (await q(`SELECT id FROM conversations WHERE participant1_id = ANY($1) OR participant2_id = ANY($1)`, [users])).map((r) => r.id);
     await q(`DELETE FROM messages WHERE conversation_id = ANY($1)`, [convs]);

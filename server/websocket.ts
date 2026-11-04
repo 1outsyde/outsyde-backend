@@ -24,7 +24,7 @@ const clients = new Map<string, Set<AuthenticatedWebSocket>>();
 const activeConversationViewers = new Map<string, Set<string>>();
 
 // Check if user is actively viewing a conversation
-function isUserViewingConversation(userId: string, conversationId: string): boolean {
+export function isUserViewingConversation(userId: string, conversationId: string): boolean {
   const viewers = activeConversationViewers.get(conversationId);
   return viewers ? viewers.has(userId) : false;
 }
@@ -345,7 +345,7 @@ async function handleBlurConversation(ws: AuthenticatedWebSocket, payload: { con
   }
 }
 
-function sendToUser(userId: string, message: WSMessage) {
+export function sendToUser(userId: string, message: WSMessage) {
   const userClients = clients.get(userId);
   if (userClients) {
     const payload = JSON.stringify(message);

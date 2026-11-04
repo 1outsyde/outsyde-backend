@@ -35,7 +35,7 @@ const submitSchema = z.object({
   businessId: z.string().min(1).max(64),
   serviceId: z.string().min(1).max(64).nullable().optional(),
   // Required when the business has a city list (Royal Elite); optional otherwise (migration 096).
-  city: z.string().trim().min(1).max(60).nullable().optional(),
+  city: z.preprocess((v) => (typeof v === "string" && v.trim() === "" ? null : v), z.string().trim().min(1).max(60).nullable().optional()),
   name: z.string().trim().min(1).max(120),
   email: z.string().trim().email().max(200),
   phone: z.string().trim().min(7).max(40),
@@ -137,26 +137,40 @@ async function postRequestCard(
       answerCount: (saved.answers ?? []).length,
     },
   });
-  await db.update(estimateRequests)
-    .set({ conversationId: conversation.id, messageId: message.id })
-    .where(eq(estimateRequests.id, saved.id));
-  saved.conversationId = conversation.id;
-  saved.messageId = message.id;
+  // The card is in the chat from here on, so the chat id is returned even if linking it fails.
+  try {
+    await db.update(estimateRequests)
+      .set({ conversationId: conversation.id, messageId: message.id })
+      .where(eq(estimateRequests.id, saved.id));
+    saved.conversationId = conversation.id;
+    saved.messageId = message.id;
+  } catch (err) {
+    console.error(`[estimate-requests] linking request ${saved.id} to its card failed:`, err);
+  }
   try {
     const { notifyNewMessageInBackground } = await import("../messaging/notifyNewMessage");
     const { resolvePublicIdentity } = await import("../publicIdentity");
+    const { sendToUser, isUserViewingConversation } = await import("../websocket");
+    const { toClientMessage } = await import("../messaging/messageRules");
     const sender = await storage.getUser(customerId);
-    notifyNewMessageInBackground({
-      conversationId: conversation.id,
-      messageId: message.id,
-      senderId: customerId,
-      recipientId: ownerId,
-      content,
-      mediaItems: [],
-      senderPublicName: sender ? (await resolvePublicIdentity(sender)).publicName : null,
-    });
+    const senderPublicName = sender ? (await resolvePublicIdentity(sender)).publicName : null;
+    // Live delivery, the same payload a websocket send makes, to the owner and the customer's other screens.
+    const payload = { ...toClientMessage(message), senderName: senderPublicName || "Unknown" };
+    sendToUser(ownerId, { type: "new_message", payload });
+    sendToUser(customerId, { type: "new_message", payload });
+    if (!isUserViewingConversation(ownerId, conversation.id)) {
+      notifyNewMessageInBackground({
+        conversationId: conversation.id,
+        messageId: message.id,
+        senderId: customerId,
+        recipientId: ownerId,
+        content,
+        mediaItems: [],
+        senderPublicName,
+      });
+    }
   } catch (err) {
-    console.error(`[estimate-requests] push for request ${saved.id} failed:`, err);
+    console.error(`[estimate-requests] live delivery or push for request ${saved.id} failed:`, err);
   }
   return conversation.id;
 }
