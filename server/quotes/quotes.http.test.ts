@@ -256,7 +256,8 @@ const daysFromNow = (n: number) => { const d = new Date(); d.setUTCDate(d.getUTC
     const nySoon = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/New_York', year: 'numeric', month: '2-digit', day: '2-digit' }).format(soonDate);
     const nyTime = new Intl.DateTimeFormat('en-GB', { timeZone: 'America/New_York', hour: '2-digit', minute: '2-digit', hour12: false }).format(soonDate);
     const sSoon = await call('POST', '/api/quotes', { token: owner.token, body: quoteBody({ requestId: null, jobDate: nySoon, startTime: nyTime }) });
-    assert(sSoon.status === 201 && Math.abs(new Date(sSoon.body.quote.expiresAt).getTime() - new Date(sSoon.body.quote.startsAt).getTime()) < 1000, 'a job sooner than 7 days expires when the job starts', sSoon.body?.quote);
+    // Step 3 (call 12): the day before the job, so a job 26 hours away expires 24 hours before it starts.
+    assert(sSoon.status === 201 && Math.abs(new Date(sSoon.body.quote.startsAt).getTime() - new Date(sSoon.body.quote.expiresAt).getTime() - 24 * 3600000) < 1000, 'a job sooner than 7 days expires 24 hours before it starts', sSoon.body?.quote);
     await q(`UPDATE quotes SET expires_at = now() - interval '1 minute' WHERE id = $1`, [sSoon.body?.quote?.id]);
     const lazy = await call('GET', `/api/quotes/${sSoon.body?.quote?.id}`, { token: cust.token });
     assert(lazy.body?.quote?.status === 'expired', 'a quote past its expiry reads expired right away', lazy.body?.quote);
@@ -279,6 +280,19 @@ const daysFromNow = (n: number) => { const d = new Date(); d.setUTCDate(d.getUTC
     const [appts] = await q(`SELECT count(*)::int n FROM appointments WHERE business_id = $1`, [biz]);
     const [holds] = await q(`SELECT count(*)::int n FROM booking_holds WHERE provider_id = $1`, [biz]).catch(() => [{ n: 0 }]);
     assert(appts.n === 0 && holds.n === 0, 'quotes create no booking and no hold', { appts, holds });
+    console.log('\n── service or product (step 3) ──');
+    {
+      const prod = await call('POST', '/api/quotes', { token: owner.token, body: quoteBody({ requestId: null, kind: 'product', jobDate: undefined, startTime: undefined, durationMinutes: undefined, dueDate: daysFromNow(30), title: 'Custom wedding cake' }) });
+      assert(prod.status === 201 && prod.body?.quote?.kind === 'product' && prod.body.quote.dueDate === daysFromNow(30) && prod.body.quote.jobDate === null && prod.body.quote.startsAt === null, 'a product quote with a due date and no job time', prod.body);
+      const noDue = await call('POST', '/api/quotes', { token: owner.token, body: quoteBody({ requestId: null, kind: 'product', jobDate: undefined, startTime: undefined, durationMinutes: undefined, title: 'Custom dress' }) });
+      assert(noDue.status === 201 && noDue.body?.quote?.dueDate === null, 'a product quote without a due date', noDue.body);
+      const svcNoTime = await call('POST', '/api/quotes', { token: owner.token, body: quoteBody({ requestId: null, kind: 'service', startTime: undefined }) });
+      assert(svcNoTime.status === 400 && svcNoTime.body?.field === 'startTime', 'a service quote still needs its start time', svcNoTime.body);
+      const card = (await q(`SELECT card FROM messages WHERE id = $1`, [prod.body?.quote?.messageId]))[0]?.card;
+      assert(card?.kind === 'product' && card?.dueDate === daysFromNow(30), 'the card says product and its due date', card);
+      for (const r of [prod, noDue]) if (r.body?.quote?.id) await call('POST', `/api/quotes/${r.body.quote.id}/withdraw`, { token: owner.token });
+    }
+
   } finally {
     await q(`DELETE FROM user_blocks WHERE blocker_id = ANY($1) OR blocked_id = ANY($1)`, [users]).catch(() => undefined);
     await q(`DELETE FROM quotes WHERE business_id = ANY($1)`, [bizs]);

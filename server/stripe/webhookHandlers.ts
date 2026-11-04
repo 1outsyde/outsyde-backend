@@ -124,6 +124,16 @@ export async function sendTransactionReceipts(
   await Promise.allSettled(sends);
 }
 
+/** Quotes step 3: the paid steps for a confirmed quote booking. Safe to repeat; never throws. */
+async function runQuoteSteps(appointmentId: string): Promise<void> {
+  try {
+    const { runQuotePaidSteps } = await import('../quotes/quotePaid');
+    await runQuotePaidSteps(appointmentId);
+  } catch (err) {
+    console.error(`[Stripe] Quote paid steps failed for appointment ${appointmentId}:`, err);
+  }
+}
+
 function logReceiptsSkipped(txnType: string, txnId: string): void {
   console.log(`[Receipt] ${txnType} ${txnId} SKIPPED: already processed`);
 }
@@ -823,8 +833,23 @@ export class WebhookHandlers {
           // payout and points still have to happen exactly once.
           if (appointment.status === BOOKING_STATES.CONFIRMED) {
             await settleAppointmentBooking(appointmentId);
+            if (appointment.quoteId) await runQuoteSteps(appointmentId);
           }
           return;
+        }
+
+        // Quotes step 3: a booking made by paying a quote is confirmed only while that quote is still the one
+        // that was paid (still sent, same version). Otherwise everything is refunded and the booking canceled.
+        // Bookings without a quote skip this block entirely.
+        let quotePaid: { ok: true; fresh: boolean; quote: any } | { ok: false; quote: any } | null = null; // fresh: this call marked it paid
+        if (appointment.quoteId) {
+          const quoteMod = await import('../quotes/quotePaid');
+          const paidVersion = Number(metadata.quoteVersion);
+          quotePaid = await quoteMod.claimQuotePaid(appointment, Number.isInteger(paidVersion) ? paidVersion : null);
+          if (!quotePaid.ok) {
+            await quoteMod.refundUnpayableQuote(appointment, paymentIntent.id);
+            return;
+          }
         }
 
         {
@@ -845,6 +870,7 @@ export class WebhookHandlers {
             if (result.code === 'ALREADY_CONFIRMED' || result.code === 'CONCURRENT_TRANSITION') {
               logReceiptsSkipped('appointment', appointmentId);
               await settleAppointmentBooking(appointmentId);
+              if (appointment.quoteId) await runQuoteSteps(appointmentId);
             } else {
               console.error(`[Stripe] Failed to confirm appointment ${appointmentId}: ${result.error}`);
             }
@@ -868,6 +894,9 @@ export class WebhookHandlers {
           // Hold conversion, vendor payout, pending points and referral run
           // once per appointment, shared with the vendor Accept route.
           await settleAppointmentBooking(appointmentId);
+
+          // Quotes step 3: the paid card in Messages (once), the request booked, the extra days blocked.
+          if (quotePaid?.ok) await runQuoteSteps(appointmentId);
 
           // Notifications (best-effort: each recipient is independently try/catch'd so
           // one failure does not prevent the others from firing or block the booking)

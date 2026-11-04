@@ -206,6 +206,9 @@ import { namesForNewAccount, realName, publicDisplayName } from "./personName";
 import { sendAppointmentReceipts, sendShootBookingReceipts } from "./stripe/webhookHandlers";
 import { getStripePublishableKey, getUncachableStripeClient } from "./stripe/stripeClient";
 import { listShownCards, paymentSheetFields, SAVED_CARD_SETUP_METADATA } from "./payments/savedCards";
+import { chargeCancellationFeeOnce } from "./payments/cancellationFees";
+import { savedQuotePolicy } from "./quotes/quotePayments";
+import { payQuoteCancelFeeShare } from "./quotes/quotePaid";
 import { getSubscriptionPeriod } from "./stripe/subscriptionFields";
 import { switchPaidPlan, applySwitchedPlan, SWITCH_DECLINED_MESSAGE } from "./subscriptions/planSwitch";
 import { graceEndsAt } from "./subscriptions/policy";
@@ -6695,6 +6698,279 @@ export async function registerRoutes(
     }
   });
 
+  // POST /api/quotes/:id/pay — Quotes step 3 (migration 098, Legend 2026-11-04, all 12 recommended).
+  // The customer pays a quote's deposit or full price through the same booking PaymentIntent as a held booking:
+  // same builder, fees, points code rules, saved card and webhook. Checks: still sent at the version shown, the
+  // business can take money (R38 rule for quotes), the service still active, the time still free. The quote is
+  // locked (edit, withdraw, decline, expiry wait) and its time held for 15 minutes while the customer pays. The
+  // webhook marks it paid (server/quotes/quotePaid.ts claimQuotePaid). A paid quote confirms right away, even for
+  // businesses that accept bookings by hand: the vendor already agreed by sending it.
+  app.post("/api/quotes/:id/pay", async (req, res) => {
+    const userId = req.session?.userId || getUserIdFromRequest(req);
+    if (!userId) return res.status(401).json({ error: "Not authenticated" });
+    let lockedQuoteId: string | null = null;
+    let heldId: string | null = null;
+    // Nothing was charged and no booking row exists: give the time and the quote back before replying.
+    const giveBack = async () => {
+      if (heldId) await releaseBookingHold(heldId).catch(() => undefined);
+      if (lockedQuoteId) {
+        const qp = await import("./quotes/quotePaid").catch(() => null);
+        if (qp) await qp.unlockQuote(lockedQuoteId).catch(() => undefined);
+      }
+      heldId = null;
+      lockedQuoteId = null;
+    };
+    try {
+      const { quotes: quotesTable, staffMembers: staffTable } = await import("@shared/schema");
+      const qp = await import("./quotes/quotePaid");
+      const { canTakeQuotePayments, cancellationPolicyFor, jobDaySegments } = await import("./quotes/quotePayments");
+      const { effectiveStatus } = await import("./quotes/quoteRules");
+      const [q] = await db.select().from(quotesTable).where(eq(quotesTable.id, req.params.id));
+      if (!q || q.customerId !== userId) return res.status(404).json({ error: "Quote not found" });
+      const now = new Date();
+
+      // A payment already started for this quote. While its lock runs (15 minutes, edits wait), the same customer
+      // picks it up again at the version it was started for. Once the lock has run out it is retired (its unpaid
+      // PaymentIntent canceled, the booking row expired, its hold released) and a fresh attempt starts below with
+      // every check again, so an old price can never be charged against a newer quote.
+      let live = await qp.liveQuoteAppointment(q.id);
+      if (live && live.status !== BOOKING_STATES.PENDING_PAYMENT) {
+        return res.status(409).json({ code: "QUOTE_CLOSED", status: "paid", message: "This quote is already paid." });
+      }
+      if (live) {
+        const UNPAID = ['requires_payment_method', 'requires_confirmation', 'requires_action'];
+        const pi: any = live.stripePaymentIntentId ? await stripeService.getPaymentIntent(live.stripePaymentIntentId) : null;
+        if (pi && !UNPAID.includes(pi.status) && pi.status !== 'canceled') {
+          return res.status(409).json({ code: "QUOTE_PAYING", message: "Your payment is being confirmed. Check back in a minute." });
+        }
+        const lockLive = q.status === 'sent' && !!q.payingUntil && new Date(q.payingUntil).getTime() > now.getTime();
+        if (lockLive && live.quoteVersion === q.version) {
+          if (live.clientId !== userId) {
+            return res.status(409).json({ code: "QUOTE_PAYING", message: "A payment for this quote is already in progress. Try again in a few minutes." });
+          }
+          if (pi && UNPAID.includes(pi.status)) {
+            return res.json({
+              ...(await paymentSheetFields(pi.customer, req.body?.paymentSheet === true)),
+              quoteId: q.id,
+              clientSecret: pi.client_secret,
+              paymentIntentId: pi.id,
+              appointmentId: live.id,
+              bookingNumber: live.bookingNumber,
+              captureMethod: 'automatic',
+              ...appointmentPaymentMoneyFields(live),
+            });
+          }
+          if (!pi) {
+            // The booking row exists but its PaymentIntent was never saved (a failed or lost create): rebuild the
+            // same parameters and key, as the hold flow resume does, so a retry can never make a second charge.
+            const resumeBusiness = await storage.getBusiness(live.businessId);
+            const resumeUser = await storage.getUser(userId);
+            if (!resumeBusiness || !resumeUser) return res.status(404).json({ error: "Quote not found" });
+            const resumeCustomer = await resolveBookingStripeCustomer(userId, resumeUser);
+            const resumePromo = await bookingPromoFromRow(live.promoCodeUsed, live.discountAmountCents);
+            const resumeParams = buildAppointmentPaymentIntentParams(live, resumeBusiness.name, resumeCustomer, resumePromo);
+            resumeParams.metadata.quoteId = q.id;
+            resumeParams.metadata.quoteVersion = String(live.quoteVersion);
+            resumeParams.description = `${q.title} at ${resumeBusiness.name}`.slice(0, 450);
+            let resumed: Awaited<ReturnType<typeof stripeService.createPlatformPaymentIntent>>;
+            try {
+              resumed = await stripeService.createPlatformPaymentIntent(resumeParams);
+            } catch (piError) {
+              return sendPaymentIntentFailure(res, live, resumeParams.idempotencyKey, piError);
+            }
+            await db.update(appointments).set({ stripePaymentIntentId: resumed.id, updatedAt: new Date() }).where(eq(appointments.id, live.id));
+            return res.json({
+              ...(await paymentSheetFields(resumed.customer, req.body?.paymentSheet === true)),
+              quoteId: q.id,
+              clientSecret: resumed.client_secret,
+              paymentIntentId: resumed.id,
+              appointmentId: live.id,
+              bookingNumber: live.bookingNumber,
+              captureMethod: 'automatic',
+              ...appointmentPaymentMoneyFields(live),
+            });
+          }
+        }
+        // Retire the stale attempt. If Stripe refuses the cancel (it was paid meanwhile), the webhook or the
+        // backstop settles it; nothing else happens here.
+        if (pi && pi.status !== 'canceled') {
+          try {
+            await stripeService.cancelPaymentIntent(pi.id, 'abandoned');
+          } catch (cancelErr) {
+            console.error(`[quotes] could not retire payment ${pi.id} of quote ${q.id}:`, cancelErr);
+            return res.status(409).json({ code: "QUOTE_PAYING", message: "Your payment is being confirmed. Check back in a minute." });
+          }
+        }
+        await transitionAppointmentState(live.id, BOOKING_STATES.EXPIRED, {
+          triggeredBy: 'system', triggerSource: 'api', metadata: { action: 'quote_payment_retired' },
+        });
+        if (live.holdId) await releaseBookingHold(live.holdId).catch(() => undefined);
+        live = undefined;
+      }
+
+      const status = effectiveStatus(q, now);
+      if (status !== 'sent') {
+        const words: Record<string, string> = { withdrawn: "was withdrawn", declined: "was declined", expired: "has expired", paid: "is already paid" };
+        return res.status(409).json({ code: "QUOTE_CLOSED", status, message: `This quote ${words[status] ?? "can't be paid"}.` });
+      }
+      if (!Number.isInteger(req.body?.version)) {
+        return res.status(400).json({ error: "Invalid data", field: "version", message: "Open the quote again to pay it." });
+      }
+      if (req.body.version !== q.version) {
+        return res.status(409).json({ code: "QUOTE_CHANGED", message: "This quote was changed. Check the new quote before you pay." });
+      }
+      if (await storage.isUserBlockedEitherWay(userId, q.senderId)) {
+        return res.status(403).json({ error: "Not allowed", message: "You can't pay this quote" });
+      }
+      // Legend 2026-11-04: a service quote becomes a booking (date, start and length, always set for services); a
+      // product or deliverable quote becomes an order, paid in the products step of the build board.
+      if (q.kind === 'product') {
+        return res.status(400).json({ code: "QUOTE_PRODUCT_LATER", message: "Paying for custom products in Outsyde is coming soon. Message the business to arrange payment for now." });
+      }
+      if (!qp.isScheduled(q)) {
+        return res.status(400).json({ code: "QUOTE_NEEDS_TIME", message: "This quote doesn't have a date and time yet. Ask the business to add them, then pay." });
+      }
+      const sq = q;
+
+      const business = await storage.getBusiness(q.businessId);
+      if (!business) return res.status(404).json({ error: "Business not found" });
+      const plan = await storage.isBusinessSubscriptionActive(business.id);
+      let staff: { status: string | null; stripeAccountId: string | null; stripeOnboardingComplete: boolean | null } | null = null;
+      if (q.staffMemberId) {
+        const [s] = await db.select().from(staffTable).where(eq(staffTable.id, q.staffMemberId));
+        staff = s ? { status: s.status ?? null, stripeAccountId: s.stripeAccountId ?? null, stripeOnboardingComplete: s.stripeOnboardingComplete ?? null }
+          : { status: null, stripeAccountId: null, stripeOnboardingComplete: null };
+      }
+      const gate = canTakeQuotePayments(business, plan.active, staff);
+      if (!gate.ok) return res.status(400).json({ error: gate.message, code: gate.code, message: gate.message });
+
+      let service: Awaited<ReturnType<typeof storage.getVendorService>> | null = null;
+      if (q.serviceId) {
+        service = await storage.getVendorService(q.serviceId);
+        if (!service || service.businessId !== business.id || service.isActive !== true) {
+          return res.status(400).json({ ...SERVICE_UNAVAILABLE_BODY, message: "This service isn't offered any more. Message the business for a new quote." });
+        }
+      }
+
+      // Optional points code: same rules as bookings (paid online now, before the service fee, at least 10x the code).
+      const due = quoteDeposit(q.totalCents, q.depositCents ?? null);
+      const wantedPromoId = requestedPromoCodeId(req);
+      let promo: BookingPromo = null;
+      if (wantedPromoId) {
+        const checked = await checkBookingPromo(wantedPromoId, userId, due.dueNowCents);
+        if (!checked.ok) return res.status(checked.status).json(checked.body);
+        promo = checked.promo;
+      }
+
+      const SLOT_TAKEN = { code: "SLOT_TAKEN", message: "That time was just booked. Message the business to choose another time." };
+      if (await qp.quoteTimeConflict(sq)) return res.status(409).json(SLOT_TAKEN);
+      const locked = await qp.lockQuoteForPayment(sq, sq.version, now);
+      if (!locked) {
+        const [fresh] = await db.select().from(quotesTable).where(eq(quotesTable.id, q.id));
+        if (fresh && fresh.status === 'sent' && fresh.version === q.version && fresh.payingUntil && new Date(fresh.payingUntil).getTime() > Date.now()) {
+          return res.status(409).json({ code: "QUOTE_PAYING", message: "A payment for this quote is already in progress. Try again in a few minutes." });
+        }
+        return res.status(409).json({ code: "QUOTE_CHANGED", message: "This quote was changed. Check the new quote before you pay." });
+      }
+      lockedQuoteId = q.id;
+      const hold = await qp.holdQuoteTime(sq, userId);
+      if (!hold) {
+        await qp.unlockQuote(q.id);
+        lockedQuoteId = null;
+        return res.status(409).json(SLOT_TAKEN);
+      }
+      heldId = hold.id;
+
+      const fees = calculateBookingFees(due.chargeAmountCents);
+      const segs = jobDaySegments(sq.jobDate, sq.startTime, sq.durationMinutes);
+      let appointment: Awaited<ReturnType<typeof storage.createAppointment>>;
+      try {
+        appointment = await storage.createAppointment({
+          businessId: business.id,
+          clientId: userId,
+          serviceId: q.serviceId ?? undefined,
+          staffMemberId: q.staffMemberId ?? undefined,
+          holdId: hold.id,
+          quoteId: q.id,
+          quoteVersion: q.version,
+          appointmentDate: sq.jobDate,
+          appointmentTime: sq.startTime,
+          appointmentEndTime: segs[0].endTime,
+          durationMinutes: sq.durationMinutes,
+          totalPrice: q.totalCents,
+          platformFee: fees.platformFeeCents,
+          vendorNet: fees.vendorNetCents,
+          status: BOOKING_STATES.PENDING_PAYMENT,
+          paymentMethod: 'payment_intent',
+          captureMethod: 'automatic',
+          serviceName: q.title,
+          servicePriceCents: q.totalCents,
+          serviceDurationMinutes: sq.durationMinutes,
+          ...cancellationPolicyFor(service, business),
+          depositAmountCents: q.depositCents ?? null,
+          addons: [],
+          addonsTotalCents: 0,
+          addonsDurationMinutes: 0,
+          customerDetails: null,
+          promoCodeUsed: promo?.code ?? null,
+          discountAmountCents: promo?.discountCents ?? 0,
+        });
+      } catch (err: any) {
+        if ((err?.code ?? err?.cause?.code) === '23505') {
+          await giveBack();
+          return res.status(409).json({ code: "QUOTE_PAYING", message: "A payment for this quote is already in progress. Try again in a few minutes." });
+        }
+        throw err;
+      }
+      // From here a booking row exists: a failure leaves it pending, the next tap resumes it and the unpaid
+      // checkout job expires it after 15 minutes (the hold and the lock end then too).
+      lockedQuoteId = null;
+      heldId = null;
+      const apptRef: PromoRef = { type: 'appointment', id: appointment.id };
+      if (promo) {
+        const claim = await claimPromoForCheckout(promo.id, userId, apptRef);
+        if (!claim.ok) {
+          await db.update(appointments).set({ promoCodeUsed: null, discountAmountCents: 0, updatedAt: new Date() }).where(eq(appointments.id, appointment.id));
+          return res.status(claim.status).json({ error: claim.error, code: claim.code, appointmentId: appointment.id });
+        }
+      }
+
+      const user = await storage.getUser(userId);
+      if (!user) return res.status(404).json({ error: "User not found" });
+      const stripeCustomerId = await resolveBookingStripeCustomer(userId, user);
+      const params = buildAppointmentPaymentIntentParams(appointment, business.name, stripeCustomerId, promo);
+      params.metadata.quoteId = q.id;
+      params.metadata.quoteVersion = String(appointment.quoteVersion ?? q.version);
+      params.description = `${q.title} at ${business.name}`.slice(0, 450);
+      let paymentIntent: Awaited<ReturnType<typeof stripeService.createPlatformPaymentIntent>>;
+      try {
+        paymentIntent = await stripeService.createPlatformPaymentIntent(params);
+      } catch (piError) {
+        return sendPaymentIntentFailure(res, appointment, params.idempotencyKey, piError);
+      }
+      await db.update(appointments).set({ stripePaymentIntentId: paymentIntent.id, updatedAt: new Date() }).where(eq(appointments.id, appointment.id));
+      if (promo && !(await confirmPromoStillHeld(promo.id, apptRef, paymentIntent.id))) {
+        await db.update(appointments).set({ stripePaymentIntentId: null, promoCodeUsed: null, discountAmountCents: 0, updatedAt: new Date() }).where(eq(appointments.id, appointment.id));
+        return res.status(409).json({ ...PROMO_TAKEN_RESPONSE, appointmentId: appointment.id });
+      }
+      return res.json({
+        ...(await paymentSheetFields(paymentIntent.customer, req.body?.paymentSheet === true)),
+        quoteId: q.id,
+        holdExpiresAt: new Date(Date.now() + qp.PAY_LOCK_MINUTES * 60_000).toISOString(),
+        clientSecret: paymentIntent.client_secret,
+        paymentIntentId: paymentIntent.id,
+        appointmentId: appointment.id,
+        bookingNumber: appointment.bookingNumber,
+        captureMethod: 'automatic',
+        ...appointmentPaymentMoneyFields(appointment),
+      });
+    } catch (error) {
+      console.error("[quotes] pay failed:", error);
+      await giveBack();
+      return res.status(500).json({ error: "Failed to start the payment" });
+    }
+  });
+
   // DELETE /api/booking/hold/:holdId - Release a hold
   app.delete("/api/booking/hold/:holdId", async (req, res) => {
     const userId = req.session?.userId || getUserIdFromRequest(req);
@@ -9186,10 +9462,12 @@ export async function registerRoutes(
 
       // Platform rule: a deposit is non-refundable when the customer cancels,
       // and no cancellation fee is charged on top of it.
+      // Quote bookings (Quotes step 3, Legend 2026-11-04): the vendor's own cancellation policy exactly as for
+      // services, read from the policy saved on the booking at payment (the quote's service, else the business).
       const { refundTier, refundAmountCents, feeAmountCents } = hasDeposit(appointment)
         ? NON_REFUNDABLE_DEPOSIT_OUTCOME
         : computeCancellationRefund(
-            service,
+            appointment.quoteId ? savedQuotePolicy(appointment) : service,
             new Date(`${appointment.appointmentDate}T${appointment.appointmentTime}`),
             appointment.totalPrice,
             appointment.vendorNet,
@@ -9324,10 +9602,12 @@ export async function registerRoutes(
       // ── Compute refund tier + cancellation fee ────────────────────────────
       // Platform rule: a deposit is non-refundable when the customer cancels,
       // and no cancellation fee is charged on top of it.
+      // Quote bookings (Quotes step 3, Legend 2026-11-04): the vendor's own policy exactly as for services, from
+      // the policy saved on the booking at payment (the quote's service, else the business).
       let { refundTier, refundAmountCents, feeAmountCents } = hasDeposit(appointment)
         ? NON_REFUNDABLE_DEPOSIT_OUTCOME
         : computeCancellationRefund(
-            service,
+            appointment.quoteId ? savedQuotePolicy(appointment) : service,
             new Date(`${appointment.appointmentDate}T${appointment.appointmentTime}`),
             appointment.totalPrice,
             appointment.vendorNet,
@@ -9448,7 +9728,9 @@ export async function registerRoutes(
             appointment.stripePaymentIntentId,
           );
           if (user?.stripeCustomerId && paymentMethodId) {
-            await stripeService.chargeSavedPaymentMethod({
+            // R39: charged at most once per booking (claim, Stripe lookup, one key per try).
+            const fee = await chargeCancellationFeeOnce({
+              ref: { type: 'appointment', id: appointmentId },
               customerId: user.stripeCustomerId,
               paymentMethodId,
               amountCents: feeAmountCents,
@@ -9459,13 +9741,25 @@ export async function registerRoutes(
               },
               description: `Cancellation fee for appointment ${appointmentId}`,
             });
-            feeCharged = true;
-            // Record the kept fee (migration 048). Outsyde revenue only; never fail the cancel over it.
-            try {
-              await db.update(appointments).set({ cancellationFeeKeptCents: feeAmountCents })
-                .where(eq(appointments.id, appointmentId));
-            } catch (recordError) {
-              console.error(`[Cancel] Could not record kept fee for appointment ${appointmentId}:`, recordError);
+            if (fee.outcome === 'charged') {
+              feeCharged = true;
+              if (appointment.quoteId) {
+                // Quotes step 3, call 3: the vendor keeps a quote's fee (paid like a booking share), so it is not
+                // Outsyde's kept fee revenue.
+                await payQuoteCancelFeeShare(appointment, feeAmountCents, fee.chargeId).catch(err =>
+                  console.error(`[Cancel] Quote fee payout failed for appointment ${appointmentId}:`, err));
+              } else {
+                // Record the kept fee (migration 048). Outsyde revenue only; never fail the cancel over it.
+                try {
+                  await db.update(appointments).set({ cancellationFeeKeptCents: feeAmountCents })
+                    .where(eq(appointments.id, appointmentId));
+                } catch (recordError) {
+                  console.error(`[Cancel] Could not record kept fee for appointment ${appointmentId}:`, recordError);
+                }
+              }
+            } else {
+              console.error(`[Cancel] Fee not charged for appointment ${appointmentId}: ${fee.outcome}${'error' in fee ? ` ${fee.error}` : ''}`);
+              feeNeedsManualCollection = true;
             }
           } else {
             feeNeedsManualCollection = true;
@@ -9757,7 +10051,31 @@ export async function registerRoutes(
         }
       }
 
-      // ── Charge cancellation fee (best-effort) ────────────────────────────
+      // ── Transition to CANCELED via state machine ──────────────────────────
+      // R39: the cancel is saved first; the fee is charged only once it is, so two quick cancels can no longer
+      // both charge it.
+      const shootTransition = await transitionShootBookingState(bookingId, BOOKING_STATES.CANCELED, {
+        triggeredBy: userId,
+        triggerSource: 'api',
+        metadata: {
+          action: 'consumer_cancel',
+          refundTier,
+          refundAmountCents: String(refundAmountCents),
+          refundSucceeded: String(refundSucceeded),
+          feeAmountCents: String(feeAmountCents),
+          authorizationReleased: String(authorizationReleased),
+        },
+      });
+      if (!shootTransition.success) {
+        const current = await storage.getShootBooking(bookingId);
+        if (current?.status === BOOKING_STATES.CANCELED) {
+          return res.status(409).json({ error: "Shoot booking is already canceled", code: "ALREADY_CANCELED", refundIssued: refundSucceeded, authorizationReleased });
+        }
+        console.error(`[Cancel] shoot transition FAILED booking=${bookingId}: ${shootTransition.code}`);
+        return res.status(409).json({ error: shootTransition.error, code: shootTransition.code, refundIssued: refundSucceeded, authorizationReleased });
+      }
+
+      // ── Charge cancellation fee (best-effort, only after the cancel) ──────
       let feeCharged = false;
       let feeNeedsManualCollection = false;
       if (feeAmountCents > 0 && booking.stripePaymentIntentId) {
@@ -9767,7 +10085,8 @@ export async function registerRoutes(
             booking.stripePaymentIntentId,
           );
           if (user?.stripeCustomerId && paymentMethodId) {
-            await stripeService.chargeSavedPaymentMethod({
+            const fee = await chargeCancellationFeeOnce({
+              ref: { type: 'shoot_booking', id: bookingId },
               customerId: user.stripeCustomerId,
               paymentMethodId,
               amountCents: feeAmountCents,
@@ -9778,7 +10097,11 @@ export async function registerRoutes(
               },
               description: `Cancellation fee for shoot booking ${bookingId}`,
             });
-            feeCharged = true;
+            if (fee.outcome === 'charged') feeCharged = true;
+            else {
+              console.error(`[Cancel] Fee not charged for shoot booking ${bookingId}: ${fee.outcome}${'error' in fee ? ` ${fee.error}` : ''}`);
+              feeNeedsManualCollection = true;
+            }
           } else {
             feeNeedsManualCollection = true;
           }
@@ -9787,22 +10110,6 @@ export async function registerRoutes(
           feeNeedsManualCollection = true;
         }
       }
-
-      // ── Transition to CANCELED via state machine ──────────────────────────
-      await transitionShootBookingState(bookingId, BOOKING_STATES.CANCELED, {
-        triggeredBy: userId,
-        triggerSource: 'api',
-        metadata: {
-          action: 'consumer_cancel',
-          refundTier,
-          refundAmountCents: String(refundAmountCents),
-          refundSucceeded: String(refundSucceeded),
-          feeAmountCents: String(feeAmountCents),
-          feeCharged: String(feeCharged),
-          feeNeedsManualCollection: String(feeNeedsManualCollection),
-          authorizationReleased: String(authorizationReleased),
-        },
-      });
 
       await db.update(shootBookings).set({
         canceledAt: new Date(),

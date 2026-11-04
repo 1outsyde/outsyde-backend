@@ -2,8 +2,8 @@
  * Quotes (Quotes in Messages, step 2). Pure rules: no database, no network.
  *
  * Legend 2026-11-04 (all recommended):
- *   1. A quote expires 7 days after it is sent, or when the job starts if that comes sooner, so it can never be
- *      paid after the job has started.
+ *   1. A quote expires 7 days after it is sent, or the day before the job if that comes sooner (step 3, call 12;
+ *      a job less than 24 hours away keeps the job start), so it can never be paid after the job has started.
  *   2. Editing is allowed until it is paid; each edit is a new version and resets the 7 days.
  *   3. Staff with a login send from their own chat; the quote records the staff member (paid in step 3).
  *   4. Title, date, start time, length, total and deposit or full are required; service and extras note are not.
@@ -26,16 +26,21 @@ const MIN_MINUTES = 15;
 const MAX_MINUTES = 3 * 24 * 60;
 
 export type QuotePaymentMode = "deposit" | "full";
+/** Step 3 (Legend 2026-11-04): a service gets a date and time and becomes a booking; a product or deliverable
+ *  (a cake, a dress) has an optional due date and becomes an order. */
+export type QuoteKind = "service" | "product";
 export type QuoteStatus = "sent" | "withdrawn" | "declined" | "expired" | "paid";
-export type QuoteEvent = "sent" | "updated" | "withdrawn" | "declined" | "expired";
+export type QuoteEvent = "sent" | "updated" | "withdrawn" | "declined" | "expired" | "paid";
 
 export interface QuoteInput {
+  kind: QuoteKind;
+  dueDate: string | null;      // product quotes only, optional
   title: string;
   details: string | null;
   extrasNote: string | null;
-  jobDate: string;
-  startTime: string;
-  durationMinutes: number;
+  jobDate: string | null;      // service quotes: required; product quotes: none
+  startTime: string | null;
+  durationMinutes: number | null;
   totalCents: number;
   paymentMode: QuotePaymentMode;
   depositCents: number | null;
@@ -68,13 +73,26 @@ export function checkQuoteInput(raw: unknown): { ok: true; value: QuoteInput } |
   const extrasNote = text(b.extrasNote);
   if (extrasNote.length > MAX_EXTRAS) return { ok: false, field: "extrasNote", message: `The extras note can be up to ${MAX_EXTRAS} characters` };
 
+  // Step 3 (Legend 2026-11-04): the vendor picks service or product. Older clients send no kind: service.
+  const kind = b.kind === undefined || b.kind === null || b.kind === "" ? "service" : b.kind;
+  if (kind !== "service" && kind !== "product") return { ok: false, field: "kind", message: "Choose a service or a product" };
   const jobDate = text(b.jobDate);
-  if (!isRealDate(jobDate)) return { ok: false, field: "jobDate", message: "Choose the date of the job" };
   const startTime = text(b.startTime);
-  if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(startTime)) return { ok: false, field: "startTime", message: "Choose a start time" };
-  const durationMinutes = b.durationMinutes;
-  if (!isWholeCents(durationMinutes) || durationMinutes < MIN_MINUTES || durationMinutes > MAX_MINUTES) {
-    return { ok: false, field: "durationMinutes", message: "The job length must be between 15 minutes and 3 days" };
+  const rawLen = b.durationMinutes;
+  const lenGiven = rawLen !== undefined && rawLen !== null && rawLen !== "";
+  const dueDate = text(b.dueDate);
+  let durationMinutes: number | null = null;
+  if (kind === "service") {
+    if (dueDate) return { ok: false, field: "dueDate", message: "A service has a date and start time instead of a due date" };
+    if (!isRealDate(jobDate)) return { ok: false, field: "jobDate", message: "Choose the date of the job" };
+    if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(startTime)) return { ok: false, field: "startTime", message: "Choose a start time" };
+    if (!lenGiven || !isWholeCents(rawLen) || rawLen < MIN_MINUTES || rawLen > MAX_MINUTES) {
+      return { ok: false, field: "durationMinutes", message: "The job length must be between 15 minutes and 3 days" };
+    }
+    durationMinutes = rawLen;
+  } else {
+    if (jobDate || startTime || lenGiven) return { ok: false, field: jobDate ? "jobDate" : startTime ? "startTime" : "durationMinutes", message: "A product has no job time. Add a due date instead if there is one." };
+    if (dueDate && !isRealDate(dueDate)) return { ok: false, field: "dueDate", message: "Choose a real due date" };
   }
 
   const totalCents = b.totalCents;
@@ -96,16 +114,30 @@ export function checkQuoteInput(raw: unknown): { ok: true; value: QuoteInput } |
 
   return {
     ok: true,
-    value: { title, details: details || null, extrasNote: extrasNote || null, jobDate, startTime, durationMinutes, totalCents, paymentMode, depositCents },
+    value: {
+      kind, dueDate: kind === "product" && dueDate ? dueDate : null,
+      title, details: details || null, extrasNote: extrasNote || null,
+      jobDate: kind === "service" ? jobDate : null, startTime: kind === "service" ? startTime : null, durationMinutes,
+      totalCents, paymentMode, depositCents,
+    },
   };
 }
 
 /** When the job starts and when the quote expires (decision 1). The start must be in the future. */
 export function quoteTiming(
-  input: { jobDate: string; startTime: string },
+  input: { jobDate: string | null; startTime: string | null; dueDate?: string | null },
   timeZone: string,
   now: Date,
-): { ok: true; startsAt: Date; expiresAt: Date } | Fail {
+): { ok: true; startsAt: Date | null; expiresAt: Date } | Fail {
+  const sevenDaysFromNow = new Date(now.getTime() + QUOTE_VALID_DAYS * 24 * 60 * 60 * 1000);
+  if (!input.jobDate || !input.startTime) {
+    // A product quote: the due date (when there is one) must not have passed in the business's time zone.
+    if (input.dueDate) {
+      const today = new Intl.DateTimeFormat("en-CA", { timeZone, year: "numeric", month: "2-digit", day: "2-digit" }).format(now);
+      if (input.dueDate < today) return { ok: false, field: "dueDate", message: "The due date has already passed" };
+    }
+    return { ok: true, startsAt: null, expiresAt: sevenDaysFromNow };
+  }
   const startsAt = wallClockToUtc(input.jobDate, input.startTime, timeZone);
   if (!startsAt) return { ok: false, field: "jobDate", message: "Choose the date and start time of the job" };
   // On the day clocks go forward an hour is skipped (2:30 AM never happens in New York). Read the instant back as
@@ -117,7 +149,12 @@ export function quoteTiming(
   }
   if (startsAt.getTime() <= now.getTime()) return { ok: false, field: "startTime", message: "The job must start in the future" };
   const sevenDays = new Date(now.getTime() + QUOTE_VALID_DAYS * 24 * 60 * 60 * 1000);
-  return { ok: true, startsAt, expiresAt: startsAt < sevenDays ? startsAt : sevenDays };
+  // Step 3 (Legend 2026-11-04, call 12): the day before the job (24 hours before it starts), so every paid quote
+  // has its full balance hold window. A job less than 24 hours away when sent keeps the job start, or a same day
+  // job could never be paid.
+  const dayBefore = new Date(startsAt.getTime() - 24 * 60 * 60 * 1000);
+  const jobLimit = dayBefore.getTime() > now.getTime() ? dayBefore : startsAt;
+  return { ok: true, startsAt, expiresAt: jobLimit < sevenDays ? jobLimit : sevenDays };
 }
 
 /**
@@ -143,7 +180,7 @@ export function formatCents(cents: number): string {
 }
 
 /** The text of a quote card. Older app builds show only this text, so it reads on its own. */
-export function quoteMessageText(event: QuoteEvent, title: string, totalCents: number): string {
+export function quoteMessageText(event: QuoteEvent, title: string, totalCents: number, paymentMode: QuotePaymentMode = "deposit"): string {
   const t = title.trim();
   switch (event) {
     case "sent": return `Sent a quote for ${t}, ${formatCents(totalCents)} total.`;
@@ -151,11 +188,14 @@ export function quoteMessageText(event: QuoteEvent, title: string, totalCents: n
     case "withdrawn": return `Withdrew the quote for ${t}.`;
     case "declined": return `Declined the quote for ${t}.`;
     case "expired": return `The quote for ${t} expired.`;
+    case "paid": return paymentMode === "full" ? `Paid in full for ${t}, ${formatCents(totalCents)}.` : `Paid the deposit for ${t}.`;
   }
 }
 
 /** A sent quote past its expiry reads as expired even before the expiry job has marked it. */
-export function effectiveStatus(q: { status: string; expiresAt: Date | string }, now: Date): QuoteStatus {
-  if (q.status === "sent" && new Date(q.expiresAt).getTime() <= now.getTime()) return "expired";
+export function effectiveStatus(q: { status: string; expiresAt: Date | string; payingUntil?: Date | string | null }, now: Date): QuoteStatus {
+  // Step 3: a payment that started before the expiry may still finish, so the quote reads open until its lock ends.
+  const paying = !!q.payingUntil && new Date(q.payingUntil).getTime() > now.getTime();
+  if (q.status === "sent" && !paying && new Date(q.expiresAt).getTime() <= now.getTime()) return "expired";
   return q.status as QuoteStatus;
 }

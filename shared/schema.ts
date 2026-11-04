@@ -717,11 +717,15 @@ export const quotes = pgTable("quotes", {
   title: text("title").notNull(),
   details: text("details"),
   extrasNote: text("extras_note"),
-  jobDate: text("job_date").notNull(),
-  startTime: text("start_time").notNull(),
-  durationMinutes: integer("duration_minutes").notNull(),
+  // Step 3 (migration 098): service (date, start and length; becomes a booking) or product (optional due date;
+  // becomes an order). Product quotes have no job date, time or length.
+  kind: text("kind").$type<"service" | "product">().notNull().default("service"),
+  dueDate: text("due_date"),
+  jobDate: text("job_date"),
+  startTime: text("start_time"),
+  durationMinutes: integer("duration_minutes"),
   timeZone: text("time_zone").notNull(),
-  startsAt: timestamp("starts_at", { withTimezone: true }).notNull(),
+  startsAt: timestamp("starts_at", { withTimezone: true }),
   totalCents: integer("total_cents").notNull(),
   paymentMode: text("payment_mode").$type<"deposit" | "full">().notNull(),
   depositCents: integer("deposit_cents"),
@@ -735,6 +739,11 @@ export const quotes = pgTable("quotes", {
   withdrawnAt: timestamp("withdrawn_at", { withTimezone: true }),
   declinedAt: timestamp("declined_at", { withTimezone: true }),
   expiredAt: timestamp("expired_at", { withTimezone: true }),
+  // Step 3 (migration 098): the booking a paid quote became, when it was paid, and the payment lock.
+  appointmentId: varchar("appointment_id", { length: 36 }),
+  paidAt: timestamp("paid_at", { withTimezone: true }),
+  payingUntil: timestamp("paying_until", { withTimezone: true }),
+  paidNoticeAt: timestamp("paid_notice_at", { withTimezone: true }),
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
 }, (table) => ({
@@ -743,6 +752,27 @@ export const quotes = pgTable("quotes", {
   conversationIdx: index("idx_quotes_conversation").on(table.conversationId, table.createdAt),
 }));
 export type Quote = typeof quotes.$inferSelect;
+
+// R39 (migration 098): one cancellation fee charge per booking. Claimed before every try, looked up at Stripe
+// first, one idempotency key per try (server/payments/cancellationFees.ts).
+export const cancellationFeeCharges = pgTable("cancellation_fee_charges", {
+  id: varchar("id", { length: 36 }).primaryKey().default(sql`gen_random_uuid()`),
+  referenceType: text("reference_type").$type<"appointment" | "shoot_booking">().notNull(),
+  referenceId: varchar("reference_id", { length: 36 }).notNull(),
+  customerId: text("customer_id").notNull(),
+  amountCents: integer("amount_cents").notNull(),
+  status: text("status").$type<"pending" | "charging" | "charged" | "failed">().notNull().default("pending"),
+  attempts: integer("attempts").notNull().default(0),
+  claimTag: text("claim_tag"),
+  stripePaymentIntentId: text("stripe_payment_intent_id"),
+  stripeChargeId: text("stripe_charge_id"),
+  lastError: text("last_error"),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+}, (table) => ({
+  refUnique: unique("cancellation_fee_charges_reference_type_reference_id_key").on(table.referenceType, table.referenceId),
+}));
+export type CancellationFeeCharge = typeof cancellationFeeCharges.$inferSelect;
 
 /* =====================================================
    SERVICE ADD-ONS (Optional extras for vendor services)
@@ -1412,6 +1442,10 @@ export const appointments = pgTable("appointments", {
   promoCodeUsed: text("promo_code_used"),
   discountAmountCents: integer("discount_amount_cents").default(0),
   pointsRedeemed: integer("points_redeemed").default(0),
+
+  // Quotes step 3 (migration 098): set when the booking was made by paying a quote.
+  quoteId: varchar("quote_id", { length: 36 }),
+  quoteVersion: integer("quote_version"),
 
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
@@ -2137,6 +2171,9 @@ export const providerBlocks = pgTable("provider_blocks", {
   reason: text("reason"), // "Vacation", "Personal", "Holiday", etc.
   title: text("title"), // Display title for the block
 
+  // Quotes step 3 (migration 098): extra days of a multi day quote booking; removed when the booking ends.
+  appointmentId: varchar("appointment_id", { length: 36 }),
+
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 }, (table) => ({
@@ -2189,6 +2226,10 @@ export const bookingHolds = pgTable("booking_holds", {
   // If converted to a booking, store the reference
   convertedToBookingId: varchar("converted_to_booking_id", { length: 36 }),
   convertedToBookingType: text("converted_to_booking_type"), // "appointment" | "shoot_booking"
+
+  // Quotes step 3 (migration 098): a hold taken while a quote is being paid. serviceId then holds the quote's
+  // service, or the quote id when the quote has no service (the column has no foreign key).
+  quoteId: varchar("quote_id", { length: 36 }),
 
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
