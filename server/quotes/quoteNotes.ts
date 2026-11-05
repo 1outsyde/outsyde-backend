@@ -95,7 +95,8 @@ export async function runQuoteNoteEmails(now = new Date()): Promise<{ sent: numb
          ORDER BY m.created_at`);
       const [q] = await db.select().from(quotes).where(eq(quotes.id, d.quote_id));
       const recipient = await storage.getUser(d.recipient_id);
-      if (!q || !recipient?.email || !notes.length || (await storage.isUserBlockedEitherWay(d.sender_id, d.recipient_id))) continue;
+      // Nothing to send after all: give the claim back so it never holds up the next note.
+      if (!q || !recipient?.email || !notes.length || (await storage.isUserBlockedEitherWay(d.sender_id, d.recipient_id))) { await putBack(); continue; }
       // The business side writes as the business; the customer as their public name.
       let senderName = "";
       if (d.sender_id === q.customerId) {
