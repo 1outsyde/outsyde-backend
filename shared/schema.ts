@@ -728,6 +728,8 @@ export const quotes = pgTable("quotes", {
   startsAt: timestamp("starts_at", { withTimezone: true }),
   totalCents: integer("total_cents").notNull(),
   paymentMode: text("payment_mode").$type<"deposit" | "full">().notNull(),
+  // Step 4b-2a (B15, migration 101): how the rest of a deposit quote is paid. outside = directly to the business.
+  restPaid: text("rest_paid").$type<"outsyde" | "outside">().notNull().default("outsyde"),
   depositCents: integer("deposit_cents"),
   status: text("status").$type<"sent" | "withdrawn" | "declined" | "expired" | "paid">().notNull().default("sent"),
   version: integer("version").notNull().default(1),

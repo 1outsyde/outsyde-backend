@@ -65,6 +65,8 @@ export interface RevenueBooking {
   status?: string | null;
   /** Quotes step 4a: set on quote bookings (their balance is paid through Outsyde, never in person). */
   quoteId?: string | null;
+  /** Step 4b-2a (B15): 'outside' when the quote's rest is paid to the business directly. */
+  quoteRestPaid?: string | null;
   /** Quotes step 4a: the quote balance charged at Job complete (business's part), when known. */
   quoteBalanceCapturedCents?: number | null;
   totalPrice?: number | null;
@@ -103,7 +105,7 @@ export function bookingRevenueCents(b: RevenueBooking): number {
 /** In-person balance for one booking; only confirmed and completed bookings have one. */
 export function bookingInPersonCents(b: RevenueBooking): number {
   if (b.status !== "confirmed" && b.status !== "completed") return 0;
-  if (b.quoteId) return 0;
+  if (b.quoteId && b.quoteRestPaid !== "outside") return 0;
   return Math.max((b.totalPrice ?? 0) - chargedCents(b), 0);
 }
 

@@ -85,7 +85,8 @@ async function postBalanceCard(job: QuoteJob, event: "balance_held" | "balance_f
 export async function ensureQuoteJob(q: Quote, appt: Appointment, now = new Date()): Promise<QuoteJob | undefined> {
   if (q.kind !== "service" || !q.startsAt || !q.durationMinutes) return undefined;
   const startsAt = new Date(q.startsAt);
-  const split = quoteBalanceSplit(q.totalCents, q.paymentMode === "deposit" ? q.depositCents ?? null : null);
+  // Step 4b-2a (B15): the rest paid to the business directly is never held or charged here.
+  const split = quoteBalanceSplit(q.totalCents, q.paymentMode === "deposit" && q.restPaid !== "outside" ? q.depositCents ?? null : null);
   const times = balanceHoldTimes(startsAt, q.paidAt ? new Date(q.paidAt) : now);
   await db.insert(quoteJobs).values({
     appointmentId: appt.id,

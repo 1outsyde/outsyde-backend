@@ -183,7 +183,7 @@ export async function afterQuotePaid(q: Quote, appt: Appointment): Promise<void>
     const [first] = await db.update(quotes).set({ paidNoticeAt: new Date() })
       .where(and(eq(quotes.id, q.id), sql`${quotes.paidNoticeAt} IS NULL`)).returning({ id: quotes.id });
     if (first && !(await storage.isUserBlockedEitherWay(q.senderId, q.customerId))) {
-      const a = quoteAmounts(q.totalCents, q.depositCents ?? null);
+      const a = quoteAmounts(q.totalCents, q.depositCents ?? null, q.restPaid ?? "outsyde");
       await postCardMessage({
         conversationId: q.conversationId,
         senderId: q.customerId,
@@ -192,7 +192,8 @@ export async function afterQuotePaid(q: Quote, appt: Appointment): Promise<void>
         card: {
           type: "quote", event: "paid", quoteId: q.id, version: q.version, businessId: q.businessId, appointmentId: appt.id,
           title: q.title, totalCents: q.totalCents, paymentMode: q.paymentMode, depositOrTotalCents: a.depositOrTotalCents,
-          payNowCents: a.payNowCents, balanceCents: a.balanceCents, jobDate: q.jobDate, startTime: q.startTime,
+          payNowCents: a.payNowCents, balanceCents: a.balanceCents, restPaid: a.restPaid, paidDirectlyCents: a.paidDirectlyCents,
+          jobDate: q.jobDate, startTime: q.startTime,
           durationMinutes: q.durationMinutes, timeZone: q.timeZone,
         },
         content: quoteMessageText("paid", q.title, q.totalCents, q.paymentMode),

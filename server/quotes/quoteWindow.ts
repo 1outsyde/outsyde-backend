@@ -67,10 +67,14 @@ async function adminAlert(subject: string, text: string): Promise<boolean> {
 export type WindowCardEvent = "job_complete" | "job_confirmed" | "problem_reported" | "report_decided";
 
 /** Card text reads on its own (older app builds show only this). No dashes, never the fee rate. */
-export function windowCardText(event: WindowCardEvent, o: { businessName: string; title: string; outcome?: ReportOutcome; refundCents?: number }): string {
+export function windowCardText(event: WindowCardEvent, o: { businessName: string; title: string; outcome?: ReportOutcome; refundCents?: number; charged?: boolean }): string {
   const name = o.businessName || "The business";
   switch (event) {
-    case "job_complete": return `The job is marked complete and the balance was charged. If something went wrong, report a problem within 6 hours. Otherwise ${name} is paid.`;
+    case "job_complete":
+      // Step 4b-2a: nothing is charged at Job complete when the quote was paid in full or the rest is paid directly.
+      return o.charged === false
+        ? "The job is marked complete. If something went wrong, report a problem within 6 hours."
+        : `The job is marked complete and the balance was charged. If something went wrong, report a problem within 6 hours. Otherwise ${name} is paid.`;
     case "job_confirmed": return "The customer confirmed the job. Your payout is on its way to your Stripe balance.";
     case "problem_reported": return "The customer reported a problem. Your payout for this job is paused while Outsyde reviews it.";
     case "report_decided":
@@ -81,7 +85,7 @@ export function windowCardText(event: WindowCardEvent, o: { businessName: string
 }
 
 /** Posts a window card. fromCustomer: sent by the customer to the quote's sender (the vendor side). Best effort. */
-async function postWindowCard(q: Quote, job: QuoteJob, event: WindowCardEvent, fromCustomer: boolean, extra: { outcome?: ReportOutcome; refundCents?: number } = {}): Promise<void> {
+async function postWindowCard(q: Quote, job: QuoteJob, event: WindowCardEvent, fromCustomer: boolean, extra: { outcome?: ReportOutcome; refundCents?: number; charged?: boolean } = {}): Promise<void> {
   try {
     if (await storage.isUserBlockedEitherWay(q.senderId, q.customerId)) return;
     const business = await storage.getBusiness(q.businessId);
@@ -108,7 +112,7 @@ export async function afterJobComplete(appointmentId: string): Promise<void> {
   if (!first) return;
   const job = await quoteJobFor(appointmentId);
   const [q] = job ? await db.select().from(quotes).where(eq(quotes.id, job.quoteId)) : [];
-  if (job && q) await postWindowCard(q, job, "job_complete", false);
+  if (job && q) await postWindowCard(q, job, "job_complete", false, { charged: job.balanceStatus === "captured" });
 }
 
 // ─── Money still paid ───────────────────────────────────────────────────────

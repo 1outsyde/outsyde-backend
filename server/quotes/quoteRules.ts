@@ -26,6 +26,10 @@ const MIN_MINUTES = 15;
 const MAX_MINUTES = 3 * 24 * 60;
 
 export type QuotePaymentMode = "deposit" | "full";
+/** Step 4b-2a (B15, Legend 2026-11-05): how the rest of a deposit quote is paid. Through Outsyde (held the day before,
+ *  charged at Job complete) or outside Outsyde (usually cash on the day: no service fee, no points, no Report
+ *  protection on that part). New quotes and older senders: through Outsyde (E5). */
+export type QuoteRestPaid = "outsyde" | "outside";
 /** Step 3 (Legend 2026-11-04): a service gets a date and time and becomes a booking; a product or deliverable
  *  (a cake, a dress) has an optional due date and becomes an order. */
 export type QuoteKind = "service" | "product";
@@ -44,6 +48,7 @@ export interface QuoteInput {
   totalCents: number;
   paymentMode: QuotePaymentMode;
   depositCents: number | null;
+  restPaid: QuoteRestPaid;
 }
 
 type Fail = { ok: false; field: string; message: string };
@@ -111,6 +116,10 @@ export function checkQuoteInput(raw: unknown): { ok: true; value: QuoteInput } |
   } else if (b.depositCents !== undefined && b.depositCents !== null) {
     return { ok: false, field: "depositCents", message: "A full payment quote has no deposit" };
   }
+  const restRaw = b.restPaid === undefined || b.restPaid === null || b.restPaid === "" ? "outsyde" : b.restPaid;
+  if (restRaw !== "outsyde" && restRaw !== "outside") return { ok: false, field: "restPaid", message: "Choose how the rest is paid: through Outsyde or directly to you" };
+  if (restRaw === "outside" && paymentMode !== "deposit") return { ok: false, field: "restPaid", message: "A full payment quote has nothing left to pay" };
+  const restPaid: QuoteRestPaid = restRaw;
 
   return {
     ok: true,
@@ -118,7 +127,7 @@ export function checkQuoteInput(raw: unknown): { ok: true; value: QuoteInput } |
       kind, dueDate: kind === "product" && dueDate ? dueDate : null,
       title, details: details || null, extrasNote: extrasNote || null,
       jobDate: kind === "service" ? jobDate : null, startTime: kind === "service" ? startTime : null, durationMinutes,
-      totalCents, paymentMode, depositCents,
+      totalCents, paymentMode, depositCents, restPaid,
     },
   };
 }
@@ -162,13 +171,15 @@ export function quoteTiming(
  * depositOrTotalCents is the business's part (no fee); payNowCents is what the card is charged now and always
  * includes the service fee. Step 3 charges payNowCents.
  */
-export function quoteAmounts(totalCents: number, depositCents: number | null): {
+export function quoteAmounts(totalCents: number, depositCents: number | null, restPaid: QuoteRestPaid = "outsyde"): {
   totalCents: number; depositOrTotalCents: number; serviceFeeCents: number; payNowCents: number; balanceCents: number;
-  balanceServiceFeeCents: number; balanceTotalCents: number;
+  balanceServiceFeeCents: number; balanceTotalCents: number; restPaid: QuoteRestPaid; paidDirectlyCents: number;
 } {
   const q = quoteDeposit(totalCents, depositCents);
   // Step 4a (split rule, additive): the balance carries its own service fee, held 24 h before and charged at Job complete.
-  const b = quoteBalanceSplit(totalCents, depositCents);
+  // Step 4b-2a (B15, additive): paid outside Outsyde, the rest carries no fee and nothing is held.
+  const outside = restPaid === "outside" && q.dueAtAppointmentCents > 0;
+  const b = outside ? { serviceFeeCents: 0, holdCents: 0 } : quoteBalanceSplit(totalCents, depositCents);
   return {
     totalCents,
     depositOrTotalCents: q.chargeAmountCents,
@@ -177,6 +188,8 @@ export function quoteAmounts(totalCents: number, depositCents: number | null): {
     balanceCents: q.dueAtAppointmentCents,
     balanceServiceFeeCents: b.serviceFeeCents,
     balanceTotalCents: b.holdCents,
+    restPaid: outside ? "outside" : "outsyde",
+    paidDirectlyCents: outside ? q.dueAtAppointmentCents : 0,
   };
 }
 
