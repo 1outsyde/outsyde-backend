@@ -358,6 +358,30 @@ export function registerQuoteRoutes(app: Express): void {
     }
   });
 
+  // GET /api/quotes/link/:code (step 5a): opens a quote from its link (goutsyde.com/q/<code>). Signed out: a preview
+  // (business look, title, date, price), nothing about the customer. The customer, the business (owner or the
+  // sending staff member) or Outsyde admin: the quote id to load. Anyone else: OTHER_ACCOUNT with no details.
+  app.get("/api/quotes/link/:code", async (req, res) => {
+    try {
+      const { quoteByLinkCode } = await import("./quoteNotes");
+      const { quotePreviewJson } = await import("./quoteNotesRules");
+      const q = await quoteByLinkCode(req.params.code);
+      if (!q) return res.status(404).json({ code: "NOT_FOUND", message: "This quote link isn't valid." });
+      const userId = userIdOf(req);
+      const biz = await storage.getBusiness(q.businessId);
+      if (!biz) return res.status(404).json({ code: "NOT_FOUND", message: "This quote link isn't valid." });
+      const preview = quotePreviewJson(q, biz);
+      if (!userId) return res.json({ access: "preview", preview });
+      if (q.customerId === userId) return res.json({ access: "customer", quoteId: q.id, preview });
+      if (await canManage(q, userId)) return res.json({ access: "vendor", quoteId: q.id, preview });
+      if (await canRead(q, userId)) return res.json({ access: "admin", quoteId: q.id, preview });
+      return res.status(403).json({ code: "OTHER_ACCOUNT", message: "This quote was sent to another Outsyde account. Sign in with the email it was sent to." });
+    } catch (err) {
+      console.error("[quotes] link failed:", err);
+      return res.status(500).json({ error: "Failed to open the quote" });
+    }
+  });
+
   app.get("/api/quotes/:id", async (req, res) => {
     try {
       const userId = userIdOf(req);
@@ -382,7 +406,10 @@ export function registerQuoteRoutes(app: Express): void {
         const { extrasJson } = await import("./quoteExtras");
         extras = await extrasJson(q, userId, q.customerId !== userId && (await canManage(q, userId)));
       }
-      return res.json({ quote: { ...toQuoteJson(q, await businessName(q.businessId)), balance, ...win, ...extras } });
+      // Step 5a (additive): the business's look for the goutsyde.com quote page.
+      const { businessLookJson } = await import("./quoteNotesRules");
+      const biz = await storage.getBusiness(q.businessId);
+      return res.json({ quote: { ...toQuoteJson(q, await businessName(q.businessId)), balance, ...win, ...extras, business: biz ? businessLookJson(biz) : null } });
     } catch (err) {
       console.error("[quotes] read failed:", err);
       return res.status(500).json({ error: "Failed to load the quote" });

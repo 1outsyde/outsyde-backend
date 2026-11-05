@@ -911,6 +911,17 @@ export const quoteExtrasPayments = pgTable("quote_extras_payments", {
 });
 export type QuoteExtrasPayment = typeof quoteExtrasPayments.$inferSelect;
 
+// Step 5a (migration 103): note emails for quote chats, at most one every 10 minutes per chat and person.
+export const quoteChatEmails = pgTable("quote_chat_emails", {
+  conversationId: varchar("conversation_id", { length: 36 }).notNull().references(() => conversations.id, { onDelete: "cascade" }),
+  recipientId: varchar("recipient_id", { length: 36 }).notNull(),
+  lastSentAt: timestamp("last_sent_at", { withTimezone: true }),
+  lastMessageAt: timestamp("last_message_at", { withTimezone: true }),
+  failedCount: integer("failed_count").notNull().default(0),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+}, (t) => ({ pk: primaryKey({ columns: [t.conversationId, t.recipientId] }) }));
+
 // R39 (migration 098): one cancellation fee charge per booking. Claimed before every try, looked up at Stripe
 // first, one idempotency key per try (server/payments/cancellationFees.ts).
 export const cancellationFeeCharges = pgTable("cancellation_fee_charges", {
