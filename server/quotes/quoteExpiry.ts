@@ -34,6 +34,8 @@ export function startQuoteExpiryJob(intervalMs = 5 * 60 * 1000): void {
     import("./quoteWindow").then((m) => m.runQuoteWindowJob()).catch((err) => console.error("[quote window] job failed:", err));
     // Step 4b-2b: far out extras holds and retries, charges in doubt, releases, unpaid reminders.
     import("./quoteExtras").then((m) => m.runQuoteExtrasJob()).catch((err) => console.error("[quote extras] job failed:", err));
+    // Step 5a: note emails for quote chats (off until QUOTE_EMAILS_ENABLED=true).
+    import("./quoteNotes").then((m) => m.runQuoteNoteEmails()).catch((err) => console.error("[quote notes] job failed:", err));
   };
   timer = setInterval(run, intervalMs);
   setTimeout(run, 30 * 1000);
