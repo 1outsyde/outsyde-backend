@@ -87,9 +87,6 @@ const daysFromNow = (n: number) => { const d = new Date(); d.setUTCDate(d.getUTC
   let failNext = 0, tries = 0;
   qn.setQuoteNoteMailerForTest(async (m) => { tries++; if (failNext > 0) { failNext--; return false; } sent.push(m); return true; });
 
-  // Review I1: an unread note from long before the quote is never part of a quote email.
-  await call('POST', `/api/conversations/${conv}/messages`, { token: cust.token, body: { content: 'Old note from last month' } });
-  await q(`UPDATE messages SET created_at = created_at - interval '5 days' WHERE conversation_id = $1`, [conv]);
   try {
     const made = await call('POST', '/api/quotes', { token: owner.token, body: { conversationId: conv, title: '2 Bedroom Move', details: 'Crew of 3, gate code needed', jobDate: daysFromNow(10), startTime: '09:00', durationMinutes: 180, totalCents: 65000, paymentMode: 'deposit', depositCents: 10000 } });
     const quote = made.body?.quote;
@@ -154,7 +151,6 @@ const daysFromNow = (n: number) => { const d = new Date(); d.setUTCDate(d.getUTC
     await backdate(3);
     await qn.runQuoteNoteEmails(new Date());
     assert(sent.length === 3 && sent[2].to === `${owner.uid}@qn.test` && sent[2].subject === 'New note from Ana about 2 Bedroom Move', 'the business is emailed the customer\'s unread note', sent[2]);
-    assert(!sent[2]?.text.includes('Old note from last month'), 'a note from before the quote is never in it (review I1)', sent[2]?.text);
 
     console.log('\n── a send that fails is tried again after 10 minutes, not every run (review I2) ──');
     await q(`UPDATE quote_chat_emails SET last_sent_at = last_sent_at - interval '11 minutes' WHERE conversation_id = $1`, [conv]);
@@ -180,6 +176,19 @@ const daysFromNow = (n: number) => { const d = new Date(); d.setUTCDate(d.getUTC
     await q(`UPDATE quote_chat_emails SET last_sent_at = last_sent_at - interval '11 minutes' WHERE conversation_id = $1`, [conv]);
     await qn.runQuoteNoteEmails(new Date());
     assert(sent.length === 4, 'a withdrawn quote: the chat is a normal chat again', sent.length);
+
+    console.log('\n── only notes sent after the quote (review I1) ──');
+    const conv2 = await mkConv(owner.uid, other.uid);
+    await call('POST', `/api/conversations/${conv2}/messages`, { token: other.token, body: { content: 'Old note from last month' } });
+    await q(`UPDATE messages SET created_at = created_at - interval '5 days' WHERE conversation_id = $1`, [conv2]);
+    const q2 = (await call('POST', '/api/quotes', { token: owner.token, body: { conversationId: conv2, title: 'Studio Move', jobDate: daysFromNow(12), startTime: '10:00', durationMinutes: 120, totalCents: 40000, paymentMode: 'full' } })).body?.quote;
+    await q(`UPDATE quotes SET sent_at = sent_at - interval '30 minutes' WHERE id = $1`, [q2.id]);
+    await call('POST', `/api/conversations/${conv2}/messages`, { token: other.token, body: { content: 'Can we start at 11?' } });
+    await q(`UPDATE messages SET created_at = created_at - interval '3 minutes' WHERE conversation_id = $1`, [conv2]);
+    const before = sent.length;
+    await qn.runQuoteNoteEmails(new Date());
+    const m2 = sent.slice(before);
+    assert(m2.length === 1 && m2[0].to === `${owner.uid}@qn.test` && m2[0].text.includes('Can we start at 11?') && !m2[0].text.includes('Old note from last month'), 'the old unread note stays out', m2.map((m) => m.text));
   } finally {
     qn.setQuoteNoteMailerForTest(null);
     await q(`DELETE FROM quote_chat_emails WHERE recipient_id = ANY($1)`, [users]).catch(() => undefined);
