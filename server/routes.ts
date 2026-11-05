@@ -9231,14 +9231,8 @@ export async function registerRoutes(
           const amount = done.fromBalance + done.fromDeposit;
           const refundedTotal = (await storage.getAppointment(appointmentId))?.refundAmount ?? 0;
           await db.update(appointments).set({ cancellationReason: reason || 'Refunded by provider' }).where(eq(appointments.id, appointmentId));
-          try {
-            await storage.reversePointsForRefund(appointment.clientId, 'appointment', appointmentId, {
-              refundFraction: paid + balancePaid > 0 ? Math.min(1, amount / (paid + balancePaid)) : 1,
-              description: 'Points reversed from refund',
-            });
-          } catch (pointsError) {
-            console.error("Failed to reverse points:", pointsError);
-          }
+          // Step 4b-1: points follow the money in the quote job (quoteWindow.ts settles the deposit and balance points
+          // on what stays paid, again after every refund), so nothing is reversed here.
           if (refundedTotal >= paid + balancePaid) await giveBackPromoCode({ type: 'appointment', id: appointmentId }, 'provider full refund');
           try {
             const refundUser = await storage.getUser(appointment.clientId);
@@ -9859,8 +9853,9 @@ export async function registerRoutes(
         }
       }
 
-      // Clawback points proportional to refund (no refund = no clawback; full = full; partial = partial)
-      if (refundAmountCents > 0) {
+      // Clawback points proportional to refund (no refund = no clawback; full = full; partial = partial).
+      // Quotes step 4b-1: a quote booking's points follow the money in the quote job (quoteWindow.ts) instead.
+      if (refundAmountCents > 0 && !appointment.quoteId) {
         try {
           const refundFraction = refundTier === 'full' ? 1 : refundAmountCents / appointment.totalPrice;
           await storage.reversePointsForRefund(userId, 'appointment', appointmentId, {
@@ -19831,6 +19826,10 @@ export async function registerRoutes(
       });
 
       const data = schema.parse(req.body);
+      // Quotes step 4b-1 (B12): a quote booking is reported with Report a problem, which pauses the vendor's payout.
+      const { refundRequestBlocker } = await import("./quotes/quoteWindow");
+      const blocked = await refundRequestBlocker(data.targetType, data.targetId);
+      if (blocked) return res.status(409).json({ error: blocked.message, code: blocked.code });
       const user = await storage.getUser(userId);
       
       // Determine requester type
@@ -19877,7 +19876,10 @@ export async function registerRoutes(
   app.get("/api/admin/refund-requests", requireAdmin, async (req, res) => {
     try {
       const requests = await storage.getAllPendingRefundRequests();
-      res.json({ requests });
+      // Quotes step 4b-1 (additive): a quote report's photos, the most it can refund and its three outcomes.
+      const { adminReportFields } = await import("./quotes/quoteWindow");
+      const extra = await adminReportFields(requests.filter((r: any) => r.targetType === 'appointment').map((r: any) => r.id));
+      res.json({ requests: requests.map((r: any) => (extra.has(r.id) ? { ...r, quoteReport: extra.get(r.id) } : r)) });
     } catch (error) {
       console.error("Get pending refund requests error:", error);
       res.status(500).json({ error: "Failed to get refund requests" });
@@ -19891,10 +19893,37 @@ export async function registerRoutes(
       const schema = z.object({
         status: z.enum(['approved', 'rejected', 'pending']),
         adminNotes: z.string().optional(),
+        // Quotes step 4b-1 (additive, quote reports only): the outcome and, for a partial refund, the amount.
+        outcome: z.enum(['pay_full', 'partial_refund', 'full_refund']).optional(),
+        amountCents: z.number().optional(),
       });
 
       const data = schema.parse(req.body);
       const adminUser = (req as any).adminUser;
+
+      // Quotes step 4b-1: a quote report is decided once (B13), with its own refund and payout rules (B6, B7).
+      // Today's page sends approved (a full refund) or rejected (pay the vendor in full).
+      {
+        const qw = await import("./quotes/quoteWindow");
+        const report = await qw.reportForRefundRequest(req.params.id);
+        if (report) {
+          const { legacyDecision } = await import("./quotes/quoteWindowRules");
+          const outcome = data.status === 'pending' ? null : legacyDecision(data.status, data.outcome);
+          if (!outcome) return res.status(400).json({ error: "Choose pay in full, partial refund or full refund.", code: "OUTCOME_INVALID" });
+          if ((outcome === 'pay_full') !== (data.status === 'rejected')) {
+            return res.status(400).json({ error: "Pay in full is sent as rejected; refunds as approved.", code: "OUTCOME_INVALID" });
+          }
+          const d = await qw.decideQuoteReport(report.id, outcome, data.amountCents, adminUser.id, data.adminNotes ?? null);
+          if (!d.ok) return res.status(d.status).json({ success: false, error: d.message, message: d.message, code: d.code });
+          if (d.outcome === 'full_refund') await giveBackPromoCode({ type: 'appointment', id: report.appointment_id }, 'quote report full refund');
+          await storage.createAuditLog({
+            actorId: adminUser.id, actorType: 'admin', action: 'quote_report_decided', targetType: 'refund_request', targetId: req.params.id,
+            metadata: { outcome: d.outcome, refundCents: d.refundCents, appointmentId: report.appointment_id, adminNotes: data.adminNotes },
+          }).catch((err: any) => console.error('[refund-requests] audit log failed:', err));
+          const request = await storage.getRefundRequest(req.params.id);
+          return res.json({ success: true, request, outcome: d.outcome, refundCents: d.refundCents });
+        }
+      }
 
       const updates: any = {
         status: data.status,
@@ -20055,14 +20084,17 @@ export async function registerRoutes(
         }
 
         // Bookings: points are still pending until the booking is final, so reject them.
-        if ((request.targetType === 'appointment' || request.targetType === 'shoot_booking') && request.targetId) {
+        // Quotes step 4b-1: a quote booking's points follow the money in the quote job instead (quoteWindow.ts).
+        const quoteBooking = request.targetType === 'appointment' && request.targetId
+          ? !!(await storage.getAppointment(request.targetId))?.quoteId : false;
+        if (!quoteBooking && (request.targetType === 'appointment' || request.targetType === 'shoot_booking') && request.targetId) {
           await rejectPendingForReference(request.targetType, request.targetId, 'Refund approved')
             .catch(err => console.error('[refund-requests] Failed to reject pending points:', err));
         }
 
         // Reverse loyalty points earned from this transaction (full reversal for admin-approved refunds).
         // Product orders earn under reference type 'cart_order' (see webhookHandlers.ts).
-        const pointReversal = await storage.reversePointsForRefund(
+        const pointReversal = quoteBooking ? { reversed: false, pointsReversed: 0, shortfall: 0 } : await storage.reversePointsForRefund(
           request.requesterId,
           request.targetType === 'order' ? 'cart_order' : (request.targetType || 'refund'),
           request.targetId || id,

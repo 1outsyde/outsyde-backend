@@ -464,8 +464,8 @@ const BLOCK_TEXT: Record<JobCompleteBlock, string> = {
 
 /**
  * Job complete for a quote booking: charges the held balance (balance + its fee), then moves the booking to
- * completed and releases the deposit's pending points (as the existing complete route does). The vendor's share of
- * the balance stays with Outsyde (4b pays it). The caller checks who may do it.
+ * completed and opens the 6 hour Confirm or Report window (4b-1). The vendor's share of the balance stays with
+ * Outsyde until the window decides it (quoteWindow.ts); the points wait too. The caller checks who may do it.
  */
 export async function completeQuoteJob(appointmentId: string, actor: { userId: string; via: "owner" | "staff" | "auto" }, now = new Date()): Promise<CompleteResult> {
   const appt = await storage.getAppointment(appointmentId);
@@ -496,18 +496,8 @@ export async function completeQuoteJob(appointmentId: string, actor: { userId: s
       return { ok: false, status: 409, code: "NOT_CONFIRMED", message: BLOCK_TEXT.NOT_CONFIRMED };
     }
   }
-  if (job) {
-    await db.update(quoteJobs).set({ completedAt: now, completedBy: actor.userId, completedVia: actor.via, updatedAt: now })
-      .where(and(eq(quoteJobs.id, job.id), sql`${quoteJobs.completedAt} IS NULL`));
-  }
-  let pointsReleased = 0;
-  try {
-    const { releasePendingForReference } = await import("../loyaltyLedger");
-    const released: any = await releasePendingForReference("appointment", appointmentId, actor.userId);
-    pointsReleased = released?.pointsEarned ?? 0;
-  } catch (err) {
-    console.error(`[quote balance] points release failed for ${appointmentId}:`, err);
-  }
+  const pointsReleased = 0;
+  if (job) await finishJobComplete(appt, job, capturedCents, actor, now);
   // Same aftercare email as the existing complete route (best effort).
   try {
     const client = await storage.getUser(appt.clientId);
@@ -524,6 +514,30 @@ export async function completeQuoteJob(appointmentId: string, actor: { userId: s
     console.error(`[quote balance] aftercare email failed for ${appointmentId}:`, err);
   }
   return { ok: true, pointsReleased, capturedCents };
+}
+
+/**
+ * After the booking moved to completed: the Job complete time and the 6 hour window, the balance's points (pending,
+ * on what was charged; B8: the deposit's points wait too) and the customer's card. Safe to run again: the window
+ * job repairs a booking that moved to completed while these steps never ran (review I4).
+ */
+export async function finishJobComplete(appt: Appointment, job: QuoteJob, capturedCents: number, actor: { userId: string; via: "owner" | "staff" | "auto" }, now = new Date()): Promise<void> {
+  const { windowEndsAt } = await import("./quoteWindowRules");
+  await db.update(quoteJobs).set({ completedAt: now, completedBy: actor.userId, completedVia: actor.via, windowEndsAt: windowEndsAt(now), updatedAt: now })
+    .where(and(eq(quoteJobs.id, job.id), sql`${quoteJobs.completedAt} IS NULL`));
+  if (capturedCents > 0) {
+    try {
+      const { createPending, pointsForGrossCents } = await import("../loyaltyLedger");
+      await createPending({
+        userId: appt.clientId, points: pointsForGrossCents(capturedCents), dollarAmountCents: capturedCents, transactionType: "business_transaction",
+        referenceType: "quote_balance", referenceId: job.id, releaseAfter: null, businessId: appt.businessId, description: "Points earned on your balance",
+      });
+    } catch (err) {
+      console.error(`[quote balance] balance points failed for ${appt.id}:`, err);
+    }
+  }
+  const { afterJobComplete } = await import("./quoteWindow");
+  await afterJobComplete(appt.id).catch((err) => console.error(`[quote balance] job complete card failed for ${appt.id}:`, err));
 }
 
 // ─── Webhook ────────────────────────────────────────────────────────────────
