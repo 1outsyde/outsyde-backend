@@ -17,13 +17,15 @@ export function quoteLink(q: Pick<Quote, "linkCode">, frontendUrl = process.env.
 
 export function buildQuoteEmail(p: { quote: Quote; businessName: string; businessPhone: string | null; customerFirstName: string | null; link: string }): { subject: string; html: string; text: string } {
   const q = p.quote;
-  const a = quoteAmounts(q.totalCents, q.depositCents ?? null);
+  const a = quoteAmounts(q.totalCents, q.depositCents ?? null, q.restPaid ?? "outsyde");
   const biz = p.businessName.trim();
   // Step 3: date and time are optional; with none, the line is left out.
   const when = q.jobDate && q.startTime ? `${formatDateLabel(q.jobDate)} at ${formatTimeLabel(q.startTime)}` : "";
   const lines: [string, string][] = [["Total", formatCents(a.totalCents)]];
   if (q.paymentMode === "deposit") {
-    lines.push(["Deposit due now", formatCents(a.depositOrTotalCents)], ["Service fee", formatCents(a.serviceFeeCents)], ["Balance, held on your card the day before", formatCents(a.balanceCents)]);
+    // Step 4b-2a (B15): the rest paid to the business directly reads as such, with no hold.
+    lines.push(["Deposit due now", formatCents(a.depositOrTotalCents)], ["Service fee", formatCents(a.serviceFeeCents)],
+      a.restPaid === "outside" ? ["Remainder, paid to the business directly", formatCents(a.balanceCents)] : ["Balance, held on your card the day before", formatCents(a.balanceCents)]);
   } else {
     lines.push(["Service fee", formatCents(a.serviceFeeCents)]);
   }

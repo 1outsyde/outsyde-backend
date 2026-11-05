@@ -172,6 +172,7 @@ import {
   isValidOrderTransition,
   isValidBookingTransition,
   promoCodes,
+  quotes,
 } from "@shared/schema";
 import { interestMatchProfile } from "@shared/customerInterests";
 import { db } from "./db";
@@ -986,7 +987,7 @@ export interface UnifiedSearchResponse {
 // Deposit/charge amounts for an appointment list row, in integer cents. The
 // charged amount is recomputed with the same calculateBookingFees() rounding
 // the hold-based booking PaymentIntent used (no stored column exists).
-export function appointmentChargeFields(totalPrice: number, depositAmountCents: number | null, quoteId: string | null = null) {
+export function appointmentChargeFields(totalPrice: number, depositAmountCents: number | null, quoteId: string | null = null, quoteRestPaid: string | null = null) {
   const quote = quoteDeposit(totalPrice, depositAmountCents);
   return {
     serviceTotalCents: quote.serviceTotalCents,
@@ -994,8 +995,19 @@ export function appointmentChargeFields(totalPrice: number, depositAmountCents: 
     chargedAmountCents: quote.dueNowCents,
     // Quotes step 4a: a quote's balance is held and charged through Outsyde, never paid in person, so every
     // "pay at appointment" line (they all hide at 0) disappears on quote bookings, older app builds included.
-    dueAtAppointmentCents: quoteId ? 0 : quote.dueAtAppointmentCents,
+    // Step 4b-2a (B15): a quote whose rest is paid to the business directly shows it again, like a deposit booking.
+    dueAtAppointmentCents: quoteId && quoteRestPaid !== "outside" ? 0 : quote.dueAtAppointmentCents,
   };
+}
+
+/** Step 4b-2a (B15): how the rest is paid on each quote booking's quote, for lists built from full appointment rows. */
+export async function quoteRestPaidFor(quoteIds: (string | null | undefined)[]): Promise<Map<string, string>> {
+  const ids = Array.from(new Set(quoteIds.filter((x): x is string => !!x)));
+  const out = new Map<string, string>();
+  if (!ids.length) return out;
+  const list = await db.select({ id: quotes.id, restPaid: quotes.restPaid }).from(quotes).where(inArray(quotes.id, ids));
+  for (const r of list) out.set(r.id, r.restPaid);
+  return out;
 }
 
 export class DatabaseStorage implements IStorage {
@@ -2000,16 +2012,18 @@ export class DatabaseStorage implements IStorage {
       addonsDurationMinutes: appointments.addonsDurationMinutes,
       customerDetails: appointments.customerDetails,
       quoteId: appointments.quoteId,
+      quoteRestPaid: quotes.restPaid,
     })
       .from(appointments)
       .leftJoin(users, eq(appointments.clientId, users.id))
       .leftJoin(vendorServices, eq(appointments.serviceId, vendorServices.id))
+      .leftJoin(quotes, eq(appointments.quoteId, quotes.id))
       .where(eq(appointments.businessId, businessId))
       .orderBy(desc(appointments.createdAt));
 
     return rows.map((row) => {
       const fullName = realName(row) || "";
-      const chargeFields = appointmentChargeFields(row.totalPrice ?? 0, row.depositAmountCents, row.quoteId ?? null);
+      const chargeFields = appointmentChargeFields(row.totalPrice ?? 0, row.depositAmountCents, row.quoteId ?? null, row.quoteRestPaid ?? null);
       return {
         id: row.id,
         customerName: fullName || "Unknown Customer",
@@ -2119,8 +2133,10 @@ export class DatabaseStorage implements IStorage {
       addonsDurationMinutes: appointments.addonsDurationMinutes,
       customerDetails: appointments.customerDetails,
       quoteId: appointments.quoteId,
+      quoteRestPaid: quotes.restPaid,
     })
       .from(appointments)
+      .leftJoin(quotes, eq(appointments.quoteId, quotes.id))
       .leftJoin(businesses, eq(appointments.businessId, businesses.id))
       .leftJoin(vendorServices, eq(appointments.serviceId, vendorServices.id))
       .leftJoin(staffMembers, eq(appointments.staffMemberId, staffMembers.id))
@@ -2128,7 +2144,7 @@ export class DatabaseStorage implements IStorage {
       .orderBy(desc(appointments.createdAt));
 
     return rows.map((row) => {
-      const chargeFields = appointmentChargeFields(row.totalPrice, row.depositAmountCents, row.quoteId ?? null);
+      const chargeFields = appointmentChargeFields(row.totalPrice, row.depositAmountCents, row.quoteId ?? null, row.quoteRestPaid ?? null);
       return {
         ...row,
         ...chargeFields,

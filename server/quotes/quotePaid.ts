@@ -183,7 +183,7 @@ export async function afterQuotePaid(q: Quote, appt: Appointment): Promise<void>
     const [first] = await db.update(quotes).set({ paidNoticeAt: new Date() })
       .where(and(eq(quotes.id, q.id), sql`${quotes.paidNoticeAt} IS NULL`)).returning({ id: quotes.id });
     if (first && !(await storage.isUserBlockedEitherWay(q.senderId, q.customerId))) {
-      const a = quoteAmounts(q.totalCents, q.depositCents ?? null);
+      const a = quoteAmounts(q.totalCents, q.depositCents ?? null, q.restPaid ?? "outsyde");
       await postCardMessage({
         conversationId: q.conversationId,
         senderId: q.customerId,

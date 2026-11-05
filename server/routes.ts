@@ -21894,12 +21894,16 @@ export async function registerRoutes(
         for (const j of jobs) if (j.st === 'captured' && (j.cap ?? 0) >= j.hold) quoteBalances.set(j.a, j.bal);
       }
       const monthlyBookingRevenue = monthBookings.reduce((sum, b) => sum + bookingRevenueCents({ ...b, quoteBalanceCapturedCents: quoteBalances.get(b.id) ?? 0 }), 0);
+      // Step 4b-2a (B15): quotes whose rest is paid to the business directly count as in person, like deposit bookings.
+      const { quoteRestPaidFor } = await import("./storage");
+      const restPaid = await quoteRestPaidFor(monthBookings.map(b => b.quoteId));
+      const withRest = (b: any) => ({ ...b, quoteRestPaid: b.quoteId ? restPaid.get(b.quoteId) ?? null : null });
       const inPersonDueCents = monthBookings
         .filter(b => b.status === 'confirmed')
-        .reduce((sum, b) => sum + bookingInPersonCents(b), 0);
+        .reduce((sum, b) => sum + bookingInPersonCents(withRest(b)), 0);
       const inPersonCollectedCents = monthBookings
         .filter(b => b.status === 'completed')
-        .reduce((sum, b) => sum + bookingInPersonCents(b), 0);
+        .reduce((sum, b) => sum + bookingInPersonCents(withRest(b)), 0);
 
       res.json({
         stats: {
@@ -23005,9 +23009,11 @@ export async function registerRoutes(
       const start = (pageNum - 1) * pageSize;
       const paged = appts.slice(start, start + pageSize);
 
+      const { quoteRestPaidFor } = await import("./storage");
+      const pagedRest = await quoteRestPaidFor(paged.map(a => a.quoteId));
       const enriched = await Promise.all(paged.map(async (appt) => {
         const client = await storage.getUser(appt.clientId);
-        const chargeFields = appointmentChargeFields(appt.totalPrice, appt.depositAmountCents, appt.quoteId ?? null);
+        const chargeFields = appointmentChargeFields(appt.totalPrice, appt.depositAmountCents, appt.quoteId ?? null, appt.quoteId ? pagedRest.get(appt.quoteId) ?? null : null);
         return {
           ...appt,
           clientEmail: client?.email,

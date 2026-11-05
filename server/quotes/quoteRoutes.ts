@@ -60,7 +60,9 @@ export function toQuoteJson(q: Quote, businessName: string | null, now = new Dat
     totalCents: q.totalCents,
     paymentMode: q.paymentMode,
     depositCents: q.depositCents ?? null,
-    amounts: quoteAmounts(q.totalCents, q.depositCents ?? null),
+    // Step 4b-2a (additive): how the rest is paid; amounts.paidDirectlyCents is what the business collects itself.
+    restPaid: q.restPaid ?? "outsyde",
+    amounts: quoteAmounts(q.totalCents, q.depositCents ?? null, q.restPaid ?? "outsyde"),
     expiresAt: q.expiresAt,
     linkCode: q.linkCode,
     messageId: q.messageId ?? null,
@@ -76,7 +78,7 @@ export function toQuoteJson(q: Quote, businessName: string | null, now = new Dat
 
 /** The card data saved on the message. Clients read the live quote with GET /api/quotes/:id. */
 function cardFor(q: Quote, event: QuoteEvent) {
-  const a = quoteAmounts(q.totalCents, q.depositCents ?? null);
+  const a = quoteAmounts(q.totalCents, q.depositCents ?? null, q.restPaid ?? "outsyde");
   return {
     type: "quote",
     event,
@@ -91,6 +93,8 @@ function cardFor(q: Quote, event: QuoteEvent) {
     depositOrTotalCents: a.depositOrTotalCents,
     payNowCents: a.payNowCents,
     balanceCents: a.balanceCents,
+    restPaid: a.restPaid,
+    paidDirectlyCents: a.paidDirectlyCents,
     jobDate: q.jobDate,
     startTime: q.startTime,
     durationMinutes: q.durationMinutes,
@@ -269,7 +273,9 @@ export function registerQuoteRoutes(app: Express): void {
       if (req.body.version !== q.version) {
         return res.status(409).json({ code: "QUOTE_CHANGED", message: "This quote was changed in the meantime. Open it again and make your change." });
       }
-      const input = checkQuoteInput(req.body);
+      // Step 4b-2a: an edit that leaves out how the rest is paid keeps it (a full payment quote has none).
+      const body = req.body?.restPaid === undefined && req.body?.paymentMode === "deposit" ? { ...req.body, restPaid: q.restPaid } : req.body;
+      const input = checkQuoteInput(body);
       if (!input.ok) return res.status(400).json({ error: "Invalid data", field: input.field, message: input.message });
       const now = new Date();
       const timing = quoteTiming(input.value, q.timeZone, now);
