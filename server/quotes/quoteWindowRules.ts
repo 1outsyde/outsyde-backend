@@ -7,8 +7,8 @@
  *   - A report covers everything still held. Reason 10 to 1,000 characters, up to 5 photos (our uploads only),
  *     one report per booking.
  *   - Outcomes: pay in full, partial refund (an amount), full refund (everything the business was paid). The
- *     service fee is never refunded (Legend 2026-11-05). Refunds come from the balance first, then the deposit
- *     (extras come first once 4b-2 adds them).
+ *     service fee is never refunded (Legend 2026-11-05). Refunds come from the extras first (4b-2b), then the
+ *     balance, then the deposit.
  *     Today's admin Approve button means full refund and Reject means pay in full. Decided reports are final.
  *   - Points follow the money: points on the business's part that stays paid, released at Confirm, the end of the
  *     window or the decision.
@@ -99,15 +99,18 @@ export function payoutEligible(j: WindowJob, report: { outcome: ReportOutcome | 
   return now.getTime() >= j.windowEndsAt.getTime();
 }
 
-export type MoneyLeft = { balanceLeft: number; depositLeft: number };
+/** The business's part still paid on each payment. extrasLeft: step 4b-2b (none before). */
+export type MoneyLeft = { extrasLeft?: number; balanceLeft: number; depositLeft: number };
+const leftTotal = (l: MoneyLeft) => Math.max(0, l.extrasLeft ?? 0) + Math.max(0, l.balanceLeft) + Math.max(0, l.depositLeft);
 
-/** A refund for a report: the balance payment first, then the deposit. Amounts are the business's part (no fee). */
-export function splitReportRefund(amountCents: number, left: MoneyLeft): { ok: true; fromBalance: number; fromDeposit: number } | { ok: false; message: string } {
-  const total = Math.max(0, left.balanceLeft) + Math.max(0, left.depositLeft);
+/** A refund for a report: the extras first, then the balance, then the deposit. The business's part (no fee). */
+export function splitReportRefund(amountCents: number, left: MoneyLeft): { ok: true; fromExtras: number; fromBalance: number; fromDeposit: number } | { ok: false; message: string } {
+  const total = leftTotal(left);
   if (!Number.isInteger(amountCents) || amountCents <= 0) return { ok: false, message: "The refund must be more than $0." };
   if (amountCents > total) return { ok: false, message: "The refund can't be more than the customer paid." };
-  const fromBalance = Math.min(amountCents, Math.max(0, left.balanceLeft));
-  return { ok: true, fromBalance, fromDeposit: amountCents - fromBalance };
+  const fromExtras = Math.min(amountCents, Math.max(0, left.extrasLeft ?? 0));
+  const fromBalance = Math.min(amountCents - fromExtras, Math.max(0, left.balanceLeft));
+  return { ok: true, fromExtras, fromBalance, fromDeposit: amountCents - fromExtras - fromBalance };
 }
 
 export type OutcomeResult =
@@ -117,7 +120,7 @@ export type OutcomeResult =
 /** Your decision on a report, checked against what is still paid. */
 export function resolveOutcome(outcome: unknown, amountCents: unknown, left: MoneyLeft): OutcomeResult {
   if (!OUTCOMES.includes(outcome as ReportOutcome)) return { ok: false, code: "OUTCOME_INVALID", message: "Choose pay in full, partial refund or full refund." };
-  const total = Math.max(0, left.balanceLeft) + Math.max(0, left.depositLeft);
+  const total = leftTotal(left);
   if (outcome === "pay_full") return { ok: true, outcome, refundCents: 0 };
   if (total <= 0) return { ok: false, code: "NOTHING_TO_REFUND", message: "Nothing is left to refund on this booking." };
   if (outcome === "full_refund") return { ok: true, outcome, refundCents: total };

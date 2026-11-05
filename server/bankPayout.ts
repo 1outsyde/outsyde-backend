@@ -38,6 +38,10 @@ export type HeldBreakdown = {
   quoteBalanceUnpaid: number;
   /** Quotes step 4a: a quote balance already paid to the vendor, kept back 30 days for refunds (like bookingRefundCover). */
   quoteBalanceRefundCover: number;
+  /** Quotes step 4b-2b (102): extras charged at Job complete and not paid to the vendor yet, less refunds. */
+  quoteExtrasUnpaid: number;
+  /** Quotes step 4b-2b: extras already paid to the vendor, kept back 30 days for refunds. */
+  quoteExtrasRefundCover: number;
 };
 
 /** Counts that block or flag the payout; not money, so never part of total. */
@@ -82,7 +86,9 @@ SELECT
  (SELECT COALESCE(SUM(held_cents),0) FROM stripe_disputes WHERE held_payout_id IS NOT NULL AND release_transfer_id IS NULL AND (outcome IS NULL OR outcome='won'))::bigint AS dispute_holds,
  (SELECT count(*) FROM event_team_payouts WHERE status='pending' AND last_error ILIKE '%insufficient%')::int AS team_payouts_waiting_balance,
  (SELECT COALESCE(SUM(GREATEST(COALESCE(captured_cents,0) - refunded_cents, 0)),0) FROM quote_jobs WHERE balance_status='captured' AND payout_status IN ('held','paused'))::bigint AS quote_balance_unpaid,
- (SELECT COALESCE(SUM(GREATEST(COALESCE(captured_cents,0) - refunded_cents, 0)),0) FROM quote_jobs WHERE balance_status='captured' AND payout_status='paid' AND captured_at > now() - interval '30 days')::bigint AS quote_balance_refund_cover
+ (SELECT COALESCE(SUM(GREATEST(COALESCE(captured_cents,0) - refunded_cents, 0)),0) FROM quote_jobs WHERE balance_status='captured' AND payout_status='paid' AND captured_at > now() - interval '30 days')::bigint AS quote_balance_refund_cover,
+ (SELECT COALESCE(SUM(GREATEST(COALESCE(captured_cents,0) - refunded_cents, 0)),0) FROM quote_extras_payments WHERE status='captured' AND payout_status IN ('held','paused'))::bigint AS quote_extras_unpaid,
+ (SELECT COALESCE(SUM(GREATEST(COALESCE(captured_cents,0) - refunded_cents, 0)),0) FROM quote_extras_payments WHERE status='captured' AND payout_status='paid' AND captured_at > now() - interval '30 days')::bigint AS quote_extras_refund_cover
 `));
   const n = (v: unknown) => Number(v ?? 0);
   const breakdown: HeldBreakdown = {
@@ -104,6 +110,8 @@ SELECT
     disputeHolds: n(r.dispute_holds),
     quoteBalanceUnpaid: n(r.quote_balance_unpaid),
     quoteBalanceRefundCover: n(r.quote_balance_refund_cover),
+    quoteExtrasUnpaid: n(r.quote_extras_unpaid),
+    quoteExtrasRefundCover: n(r.quote_extras_refund_cover),
   };
   const gates: Gates = {
     recentTopups: n(r.recent_topups),

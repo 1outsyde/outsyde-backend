@@ -99,6 +99,8 @@ async function findSale(pi: string | null): Promise<{ kind: Kind; id: string | n
       SELECT 'appointment' AS kind, id::text AS id, 1 AS o, false AS balance FROM appointments WHERE stripe_payment_intent_id = ${pi}
       -- Quotes step 4a: a quote booking's balance payment (quote_jobs) is the same sale.
       UNION ALL SELECT 'appointment', appointment_id::text, 1, true FROM quote_jobs WHERE stripe_payment_intent_id = ${pi}
+      -- Step 4b-2b: and its extras payment (recorded the same way: recordBalanceRefund reaches quote_extras_payments).
+      UNION ALL SELECT 'appointment', appointment_id::text, 1, true FROM quote_extras_payments WHERE stripe_payment_intent_id = ${pi}
       UNION ALL SELECT 'shoot_booking', id::text, 2, false FROM shoot_bookings WHERE stripe_payment_intent_id = ${pi}
       UNION ALL SELECT 'ticket_order', id::text, 3, false FROM ticket_orders WHERE stripe_payment_intent_id = ${pi}
       UNION ALL SELECT 'order', id::text, 4, false FROM orders WHERE stripe_payment_intent_id = ${pi}

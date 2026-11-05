@@ -376,7 +376,13 @@ export function registerQuoteRoutes(app: Express): void {
         const { windowJson } = await import("./quoteWindow");
         win = await windowJson(q, job, userId, q.customerId !== userId && (await canManage(q, userId)));
       }
-      return res.json({ quote: { ...toQuoteJson(q, await businessName(q.businessId)), balance, ...win } });
+      // Step 4b-2b (additive): the extras the vendor sent and the one extras payment.
+      let extras: { extras: unknown[]; extrasPayment: unknown } = { extras: [], extrasPayment: null };
+      if (q.appointmentId) {
+        const { extrasJson } = await import("./quoteExtras");
+        extras = await extrasJson(q, userId, q.customerId !== userId && (await canManage(q, userId)));
+      }
+      return res.json({ quote: { ...toQuoteJson(q, await businessName(q.businessId)), balance, ...win, ...extras } });
     } catch (err) {
       console.error("[quotes] read failed:", err);
       return res.status(500).json({ error: "Failed to load the quote" });
@@ -398,7 +404,7 @@ export function registerQuoteRoutes(app: Express): void {
       const { completeQuoteJob } = await import("./quoteBalance");
       const r = await completeQuoteJob(q.appointmentId, { userId, via });
       if (!r.ok) return res.status(r.status).json({ code: r.code, message: r.message, error: r.message });
-      return res.json({ success: true, appointmentId: q.appointmentId, status: "completed", pointsAwarded: r.pointsReleased, balanceChargedCents: r.capturedCents });
+      return res.json({ success: true, appointmentId: q.appointmentId, status: "completed", pointsAwarded: r.pointsReleased, balanceChargedCents: r.capturedCents, extrasChargedCents: r.extrasCapturedCents });
     } catch (err) {
       console.error("[quotes] job complete failed:", err);
       return res.status(500).json({ error: "Failed to complete the job" });
@@ -466,6 +472,113 @@ export function registerQuoteRoutes(app: Express): void {
       });
     } catch (err) {
       console.error("[quotes] new card payment failed:", err);
+      return res.status(500).json({ error: "Failed to start the payment" });
+    }
+  });
+
+  // ─── Step 4b-2b: extras ───────────────────────────────────────────────────
+  const extrasError = (res: any, r: { status: number; code: string; message: string; field?: string }) =>
+    res.status(r.status).json({ code: r.code, message: r.message, error: r.message, ...(r.field ? { field: r.field } : {}) });
+
+  // POST /api/quotes/:id/extras: the owner, or the staff member who sent the quote, sends an extra. Body
+  // { description, amountCents }. From payment until Job complete; only the customer's Approve adds it.
+  app.post("/api/quotes/:id/extras", async (req, res) => {
+    try {
+      const userId = userIdOf(req);
+      if (!userId) return res.status(401).json({ error: "Not authenticated" });
+      const q = await loadQuote(req.params.id);
+      if (!q || !(await canManage(q, userId))) return res.status(404).json({ error: "Quote not found" });
+      const { proposeExtra, extraJson } = await import("./quoteExtras");
+      const r = await proposeExtra(q, userId, req.body);
+      if (!r.ok) return extrasError(res, r);
+      return res.status(201).json({ extra: extraJson(r.extra, { isCustomer: false, canManage: true }, true) });
+    } catch (err) {
+      console.error("[quotes] extra failed:", err);
+      return res.status(500).json({ error: "Failed to send the extra" });
+    }
+  });
+
+  // POST /api/quotes/:id/extras/:extraId/withdraw: the vendor takes back an extra the customer hasn't answered.
+  app.post("/api/quotes/:id/extras/:extraId/withdraw", async (req, res) => {
+    try {
+      const userId = userIdOf(req);
+      if (!userId) return res.status(401).json({ error: "Not authenticated" });
+      const q = await loadQuote(req.params.id);
+      if (!q || !(await canManage(q, userId))) return res.status(404).json({ error: "Quote not found" });
+      const { withdrawExtra, extraJson } = await import("./quoteExtras");
+      const r = await withdrawExtra(q, req.params.extraId);
+      if (!r.ok) return extrasError(res, r);
+      return res.json({ extra: extraJson(r.extra, { isCustomer: false, canManage: true }, true) });
+    } catch (err) {
+      console.error("[quotes] withdraw extra failed:", err);
+      return res.status(500).json({ error: "Failed to withdraw the extra" });
+    }
+  });
+
+  // POST /api/quotes/:id/extras/:extraId/decline: the customer declines. Nothing is added.
+  app.post("/api/quotes/:id/extras/:extraId/decline", async (req, res) => {
+    try {
+      const userId = userIdOf(req);
+      if (!userId) return res.status(401).json({ error: "Not authenticated" });
+      const q = await loadQuote(req.params.id);
+      if (!q || q.customerId !== userId) return res.status(404).json({ error: "Quote not found" });
+      const { declineExtra, extraJson } = await import("./quoteExtras");
+      const r = await declineExtra(q, req.params.extraId);
+      if (!r.ok) return extrasError(res, r);
+      return res.json({ extra: extraJson(r.extra, { isCustomer: true, canManage: false }, true) });
+    } catch (err) {
+      console.error("[quotes] decline extra failed:", err);
+      return res.status(500).json({ error: "Failed to decline the extra" });
+    }
+  });
+
+  // POST /api/quotes/:id/extras/:extraId/approve: the customer approves. Body { newCard?, paymentSheet? }. Held on
+  // the card at once (far out: the card is checked). status needs_action: finish clientSecret in the app (a
+  // PaymentIntent or a SetupIntent, intentType), then call this again.
+  app.post("/api/quotes/:id/extras/:extraId/approve", async (req, res) => {
+    try {
+      const userId = userIdOf(req);
+      if (!userId) return res.status(401).json({ error: "Not authenticated" });
+      const q = await loadQuote(req.params.id);
+      if (!q || q.customerId !== userId) return res.status(404).json({ error: "Quote not found" });
+      const { approveExtra, extraJson } = await import("./quoteExtras");
+      const r = await approveExtra(q, req.params.extraId, { newCard: req.body?.newCard === true });
+      if (!r.ok) return extrasError(res, r);
+      const extra = extraJson(r.extra, { isCustomer: true, canManage: false }, true);
+      if (r.status === "approved") return res.json({ status: "approved", extra });
+      // The payment sheet keys are for the intent's own customer (the deposit's), never a different one.
+      const { paymentSheetFields } = await import("../payments/savedCards");
+      return res.json({
+        status: "needs_action", extra, intentType: r.intentType, clientSecret: r.clientSecret, intentId: r.intentId,
+        ...(r.customerId ? await paymentSheetFields(r.customerId, req.body?.paymentSheet === true) : {}),
+      });
+    } catch (err) {
+      console.error("[quotes] approve extra failed:", err);
+      return res.status(500).json({ error: "Failed to approve the extra" });
+    }
+  });
+
+  // POST /api/quotes/:id/extras/card: the customer pays the extras with a new card: Update your card (a far out
+  // hold that failed, held now) or Pay for extras (couldn't be charged at Job complete, charged now).
+  app.post("/api/quotes/:id/extras/card", async (req, res) => {
+    try {
+      const userId = userIdOf(req);
+      if (!userId) return res.status(401).json({ error: "Not authenticated" });
+      const q = await loadQuote(req.params.id);
+      if (!q || q.customerId !== userId || !q.appointmentId) return res.status(404).json({ error: "Quote not found" });
+      const user = await storage.getUser(userId);
+      if (!user?.stripeCustomerId) return res.status(409).json({ code: "NO_CUSTOMER", message: "Open the quote again to pay." });
+      const { startExtrasCardPayment } = await import("./quoteExtras");
+      const r = await startExtrasCardPayment(q.appointmentId, user.stripeCustomerId);
+      if (!r.ok) return extrasError(res, r);
+      const { paymentSheetFields } = await import("../payments/savedCards");
+      return res.json({
+        ...(await paymentSheetFields(r.pi.customer, req.body?.paymentSheet === true)),
+        quoteId: q.id, appointmentId: q.appointmentId, clientSecret: r.pi.client_secret, paymentIntentId: r.pi.id,
+        captureMethod: r.captureMethod, amountCents: r.pi.amount,
+      });
+    } catch (err) {
+      console.error("[quotes] extras card payment failed:", err);
       return res.status(500).json({ error: "Failed to start the payment" });
     }
   });
