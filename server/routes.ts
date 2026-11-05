@@ -19908,7 +19908,7 @@ export async function registerRoutes(
         const report = await qw.reportForRefundRequest(req.params.id);
         if (report) {
           const { legacyDecision } = await import("./quotes/quoteWindowRules");
-          const outcome = legacyDecision(data.status, data.outcome);
+          const outcome = data.status === 'pending' ? null : legacyDecision(data.status, data.outcome);
           if (!outcome) return res.status(400).json({ error: "Choose pay in full, partial refund or full refund.", code: "OUTCOME_INVALID" });
           if ((outcome === 'pay_full') !== (data.status === 'rejected')) {
             return res.status(400).json({ error: "Pay in full is sent as rejected; refunds as approved.", code: "OUTCOME_INVALID" });

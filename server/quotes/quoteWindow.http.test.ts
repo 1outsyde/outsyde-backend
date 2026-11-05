@@ -439,6 +439,8 @@ const hmNY = (d: Date) => new Intl.DateTimeFormat("en-GB", { timeZone: "America/
     assert(r.status === 401 || r.status === 403, "only an admin", r.status);
     r = await call("PATCH", `/api/admin/refund-requests/${rr.id}`, { token: admin.token, body: { status: "approved", outcome: "partial_refund" } });
     assert(r.status === 400 && r.body?.code === "AMOUNT_REQUIRED", "partial needs an amount", r);
+    r = await call("PATCH", `/api/admin/refund-requests/${rr.id}`, { token: admin.token, body: { status: "pending", outcome: "partial_refund", amountCents: 25000 } });
+    assert(r.status === 400 && (await q(`SELECT status FROM quote_reports WHERE id = $1`, [rep.id]))[0].status === "open", "pending decides nothing (review M5)", r);
     r = await call("PATCH", `/api/admin/refund-requests/${rr.id}`, { token: admin.token, body: { status: "approved", outcome: "partial_refund", amountCents: BAL_GROSS + DEP_GROSS } });
     assert(r.status === 400 && r.body?.code === "USE_FULL_REFUND", "everything is a full refund", r);
     const refundsBefore = refunds.length;
@@ -450,7 +452,17 @@ const hmNY = (d: Date) => new Intl.DateTimeFormat("en-GB", { timeZone: "America/
     assert(newRefunds.length === 1 && newRefunds[0].amount === 25000 && newRefunds[0].payment_intent === j.stripe_payment_intent_id, "refunded from the balance payment first", newRefunds);
     assert((await q(`SELECT status FROM refund_requests WHERE id = $1`, [rr.id]))[0].status === "approved", "the request is approved");
     bt = balanceTransfers(E.a.id);
-    assert(bt.length === 1 && bt[0].amount === 53900 - Math.round(53900 * 25000 / 55000) && j.payout_status === "paid", "the vendor is paid the rest of their share", { bt, s: j.payout_status });
+    // Review C1: refund recovery is still checking the refund; paying now would let it take the vendor's part twice.
+    const recs = await q(`SELECT * FROM booking_refund_recoveries WHERE payment_intent_id = $1`, [j.stripe_payment_intent_id]);
+    assert(bt.length === 0 && j.payout_status === "held" && recs.length === 1 && recs[0].status === "pending", "the payout waits while refund recovery checks the refund", { bt, s: j.payout_status, recs: recs.map((x: any) => x.status) });
+    await q(`UPDATE booking_refund_recoveries SET refund_created_at = now() - interval '20 minutes', next_attempt_at = now() - interval '1 minute' WHERE id = $1`, [recs[0].id]);
+    const { processBookingRecovery } = await import("../bookingRecoveries");
+    const recRes = await processBookingRecovery(recs[0].id);
+    assert(recRes === "nothing_sent", "recovery closes it: nothing was sent yet", recRes);
+    await qw.runQuoteWindowJob(new Date());
+    j = await jobOf(E.a.id);
+    bt = balanceTransfers(E.a.id);
+    assert(bt.length === 1 && bt[0].amount === 53900 - Math.round(53900 * 25000 / 55000) && j.payout_status === "paid", "then the vendor is paid the rest of their share, taken off once", { bt, s: j.payout_status });
     assert(await earned("quote_balance", j.id) === pointsForGrossCents(BAL_GROSS - 25000) && await earned("appointment", E.a.id) === pointsForGrossCents(DEP_GROSS), "points on what stays paid", { b: await earned("quote_balance", j.id), d: await earned("appointment", E.a.id) });
     assert((await apptOf(E.qid)).status === "completed", "the booking stays completed");
     r = await call("PATCH", `/api/admin/refund-requests/${rr.id}`, { token: admin.token, body: { status: "approved", outcome: "full_refund" } });
@@ -488,6 +500,49 @@ const hmNY = (d: Date) => new Intl.DateTimeFormat("en-GB", { timeZone: "America/
     j = await jobOf(G.a.id);
     assert(r.status === 200 && refunds.length === rb1 && balanceTransfers(G.a.id).length === 1 && balanceTransfers(G.a.id)[0].amount === 53900 && j.payout_status === "paid", "the vendor is paid in full, nothing refunded", { r, s: j.payout_status });
     assert(await earned("quote_balance", j.id) === pointsForGrossCents(BAL_GROSS), "points released");
+
+    console.log("\n── a decision whose refund fails is finished exactly as chosen (review I2) ──");
+    const H2 = await completed();
+    await call("POST", `/api/quotes/${H2.qid}/report`, { token: cust.token, body: { reason: "Crew damaged the stairs" } });
+    const repH = (await q(`SELECT * FROM quote_reports WHERE appointment_id = $1`, [H2.a.id]))[0];
+    const jH = await jobOf(H2.a.id);
+    failRefundFor.set(H2.a.stripe_payment_intent_id, 3); // the deposit part fails (every try of the call)
+    const rbH = refunds.length;
+    r = await call("PATCH", `/api/admin/refund-requests/${repH.refund_request_id}`, { token: admin.token, body: { status: "approved", outcome: "full_refund" } });
+    let repH2 = (await q(`SELECT * FROM quote_reports WHERE id = $1`, [repH.id]))[0];
+    assert(r.status === 402 && repH2.status === "open" && repH2.pending_outcome === "full_refund" && refunds.slice(rbH).length === 1, "the balance part went through, the deposit part failed: still open, the decision saved", { r, repH2 });
+    r = await call("PATCH", `/api/admin/refund-requests/${repH.refund_request_id}`, { token: admin.token, body: { status: "rejected" } });
+    repH2 = (await q(`SELECT * FROM quote_reports WHERE id = $1`, [repH.id]))[0];
+    const hr = refunds.slice(rbH);
+    assert(r.status === 200 && repH2.outcome === "full_refund" && repH2.refund_cents === BAL_GROSS + DEP_GROSS, "the retry finishes the saved full refund, whatever is sent", { r: r.body, repH2 });
+    assert(hr.length === 2 && hr.reduce((n, x) => n + x.amount, 0) === BAL_GROSS + DEP_GROSS && balanceTransfers(H2.a.id).length === 0, "every dollar back once, no payout", hr);
+    assert((await q(`SELECT status FROM refund_requests WHERE id = $1`, [repH.refund_request_id]))[0].status === "approved", "recorded as approved");
+    void jH;
+
+    console.log("\n── another unfinished refund is finished first (review I1) ──");
+    const I = await completed();
+    await call("POST", `/api/quotes/${I.qid}/report`, { token: cust.token, body: { reason: "Two boxes were lost" } });
+    const repI = (await q(`SELECT * FROM quote_reports WHERE appointment_id = $1`, [I.a.id]))[0];
+    failRefundFor.set(I.a.stripe_payment_intent_id, 3);
+    r = await call("POST", `/api/bookings/appointments/${I.a.id}/refund`, { token: owner.token, body: { amountCents: 60000, reason: "Lost boxes" } });
+    assert(r.status >= 400, "the vendor's refund fails on its deposit part", r.status);
+    const rbI = refunds.length;
+    r = await call("PATCH", `/api/admin/refund-requests/${repI.refund_request_id}`, { token: admin.token, body: { status: "approved", outcome: "full_refund" } });
+    const repI2 = (await q(`SELECT * FROM quote_reports WHERE id = $1`, [repI.id]))[0];
+    assert(r.status === 409 && r.body?.code === "EARLIER_REFUND_FINISHED" && repI2.status === "open" && repI2.pending_outcome === null, "the vendor's refund is finished first, decide again", { r, repI2 });
+    assert(refunds.slice(rbI).length === 1 && (await q(`SELECT count(*)::int AS n FROM quote_refunds WHERE appointment_id = $1 AND done_at IS NULL`, [I.a.id]))[0].n === 0, "only the unfinished part was sent", refunds.slice(rbI));
+    r = await call("PATCH", `/api/admin/refund-requests/${repI.refund_request_id}`, { token: admin.token, body: { status: "approved", outcome: "full_refund" } });
+    const paidBackI = refunds.filter((x) => x.payment_intent === I.a.stripe_payment_intent_id || x.payment_intent === I.job.stripe_payment_intent_id).reduce((n, x) => n + x.amount, 0);
+    assert(r.status === 200 && paidBackI === BAL_GROSS + DEP_GROSS, "then the full refund returns the rest: every dollar back, never more", { r: r.body, paidBackI });
+
+    console.log("\n── a booking completed without its Job complete steps is repaired (review I4) ──");
+    const U = await completed();
+    await q(`UPDATE quote_jobs SET completed_at = NULL, window_ends_at = NULL, complete_notice_at = NULL WHERE appointment_id = $1`, [U.a.id]);
+    await q(`DELETE FROM pending_points_transactions WHERE reference_type = 'quote_balance' AND reference_id = $1`, [U.job.id]);
+    await q(`UPDATE appointments SET updated_at = now() - interval '5 minutes' WHERE id = $1`, [U.a.id]);
+    await qw.runQuoteWindowJob(new Date());
+    const jU = await jobOf(U.a.id);
+    assert(!!jU.completed_at && !!jU.window_ends_at && jU.completed_via === "auto" && (await pending("quote_balance", jU.id))?.points_earned === pointsForGrossCents(BAL_GROSS), "window, points and card repaired", jU);
 
     console.log("\n── points follow the money on cancels (B8) ──");
     const K = await mkQuote({ biz, sender: owner.uid, customer: cust.uid, conv, hoursOut: 72, minutes: 180 });

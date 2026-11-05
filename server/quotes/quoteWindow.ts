@@ -114,13 +114,16 @@ export async function afterJobComplete(appointmentId: string): Promise<void> {
 /** What the customer still has paid on each payment (money, fees included), for a report's refund. */
 export async function moneyLeft(appt: Appointment, job: QuoteJob | undefined | null): Promise<MoneyLeft> {
   const balanceLeft = job && job.balanceStatus === "captured" ? Math.max(0, (job.capturedCents ?? 0) - job.refundedCents) : 0;
-  let depositLeft = 0;
-  if (appt.stripePaymentIntentId) {
-    const { stripeService } = await import("../stripe/stripeService");
-    const c = await stripeService.getPaymentIntentCharge(appt.stripePaymentIntentId);
-    depositLeft = Math.max(0, c.amountReceived - c.amountRefunded);
-  }
-  return { balanceLeft, depositLeft };
+  const d = appt.stripePaymentIntentId ? await depositMoney(appt.stripePaymentIntentId) : { received: 0, refunded: 0 };
+  return { balanceLeft, depositLeft: Math.max(0, d.received - d.refunded) };
+}
+
+/** What the deposit (or full) payment took and what Stripe gave back on it. Bounded (review M6). */
+async function depositMoney(paymentIntentId: string): Promise<{ received: number; refunded: number }> {
+  const stripe: any = await getUncachableStripeClient();
+  const pi: any = await stripe.paymentIntents.retrieve(paymentIntentId, { expand: ["latest_charge"] }, BOUND);
+  const charge = pi?.latest_charge && typeof pi.latest_charge === "object" ? pi.latest_charge : null;
+  return { received: Number(pi?.amount_received ?? 0), refunded: Number(charge?.amount_refunded ?? 0) };
 }
 
 // ─── The vendor's balance payout ────────────────────────────────────────────
@@ -131,7 +134,11 @@ const PAYABLE = sql.raw(`
   AND (j.confirmed_at IS NOT NULL
        OR (j.reported_at IS NULL AND j.window_ends_at <= now())
        OR EXISTS (SELECT 1 FROM quote_reports r WHERE r.appointment_id = j.appointment_id AND r.status = 'decided' AND r.outcome IN ('pay_full', 'partial_refund')))
-  AND NOT EXISTS (SELECT 1 FROM stripe_disputes d WHERE d.payment_intent_id = j.stripe_payment_intent_id AND d.outcome IS NULL)`);
+  AND NOT EXISTS (SELECT 1 FROM stripe_disputes d WHERE d.payment_intent_id = j.stripe_payment_intent_id AND d.outcome IS NULL)
+  AND NOT EXISTS (SELECT 1 FROM booking_refund_recoveries rr WHERE rr.payment_intent_id = j.stripe_payment_intent_id AND rr.status = 'pending')`);
+// Review C1: the payout is the share less the vendor's part of any refund already made. A refund still waiting in
+// refund recovery would take that part again from the new transfer, so the payout waits until recovery has closed
+// it (nothing sent, about 15 minutes); a refund after the payout is taken back by recovery alone.
 
 export type PayoutOutcome = "paid" | "nothing" | "not_due" | "busy" | "failed";
 
@@ -224,7 +231,10 @@ async function settleRecord(userId: string, rec: PointsRecord, keep: boolean): P
   if (p?.status === "pending") {
     const target = keep ? Math.min(Number(p.points_earned), pointsTarget(Number(p.dollar_amount_cents), rec.refundedCents)) : 0;
     if (target <= 0) { await rejectPendingForReference(rec.type, rec.ref, "Refunded or ended"); return; }
-    await rows(sql`UPDATE pending_points_transactions SET points_earned = ${target}::int, outsyde_revenue_cents = ${pointsValueCents(target)}::int, updated_at = now()
+    // The kept amount too, so the referral check at release sees what stayed paid (review M1).
+    const kept = Math.max(0, Number(p.dollar_amount_cents) - Math.max(0, rec.refundedCents));
+    await rows(sql`UPDATE pending_points_transactions SET points_earned = ${target}::int, outsyde_revenue_cents = ${pointsValueCents(target)}::int,
+                    dollar_amount_cents = ${kept}::int, updated_at = now()
                     WHERE id = ${p.id} AND status = 'pending'`);
     await releasePendingForReference(rec.type, rec.ref, "system");
     return;
@@ -252,7 +262,8 @@ export async function settleQuotePoints(appointmentId: string): Promise<void> {
   if (!appt || !job) return;
   const keep = appt.status === "completed" || (appt.status === "canceled" && appt.canceledBy === appt.clientId);
   const balanceRefunded = job.refundedCents;
-  const depositRefunded = Math.max(0, (appt.refundAmount ?? 0) - balanceRefunded);
+  // Read from Stripe (review M2): a lost dispute on the balance is on the job but not on the booking's refund total.
+  const depositRefunded = appt.stripePaymentIntentId ? (await depositMoney(appt.stripePaymentIntentId)).refunded : 0;
   await settleRecord(appt.clientId, { type: "appointment", ref: appt.id, refundedCents: depositRefunded }, keep);
   await settleRecord(appt.clientId, { type: "quote_balance", ref: job.id, refundedCents: balanceRefunded }, keep);
 }
@@ -261,10 +272,12 @@ const fingerprint = sql.raw(`(COALESCE(a.refund_amount, 0) + j.refunded_cents)`)
 
 async function settlePointsAndStamp(jobId: string, appointmentId: string): Promise<void> {
   try {
+    // Read the refund fingerprint first (review M8): a refund landing during the settle is seen by the next run.
+    const [fp] = await rows<{ v: number }>(sql`SELECT ${fingerprint}::int AS v FROM quote_jobs j JOIN appointments a ON a.id = j.appointment_id WHERE j.id = ${jobId}`);
     await settleQuotePoints(appointmentId);
     await rows(sql`
-      UPDATE quote_jobs j SET points_settled_at = COALESCE(j.points_settled_at, now()), points_refund_seen_cents = ${fingerprint}, updated_at = now()
-        FROM appointments a WHERE a.id = j.appointment_id AND j.id = ${jobId}`);
+      UPDATE quote_jobs SET points_settled_at = COALESCE(points_settled_at, now()), points_refund_seen_cents = ${Number(fp?.v ?? 0)}::int, updated_at = now()
+       WHERE id = ${jobId}`);
   } catch (err) {
     console.error(`[quote window] points for ${appointmentId} failed:`, err);
   }
@@ -385,23 +398,49 @@ export async function decideQuoteReport(reportId: string, outcome: ReportOutcome
   const appt = await storage.getAppointment(rep.appointment_id);
   const job = await quoteJobFor(rep.appointment_id);
   if (!appt || !job) { await reopen(); return { ok: false, status: 404, code: "NOT_FOUND", message: "Booking not found" }; }
+  const opKey = `quote_report_${reportId}`;
+  const meta = { quoteReportId: reportId, refundRequestId: rep.refund_request_id, approvedBy: adminId };
+  // Review I1: another refund on this booking that didn't finish (a vendor refund whose second part failed) would be
+  // finished instead of this one. Finish it now, then ask for the decision again on the new amounts.
+  const [other] = await rows<{ op_key: string }>(sql`
+    SELECT op_key FROM quote_refunds WHERE appointment_id = ${appt.id} AND done_at IS NULL AND op_key <> ${opKey} LIMIT 1`);
+  if (other) {
+    try { await refundQuoteBooking(appt, 0, other.op_key, meta); } catch (err) { console.error(`[quote window] earlier refund ${other.op_key} still failing:`, err); }
+    await reopen();
+    return { ok: false, status: 409, code: "EARLIER_REFUND_FINISHED", message: "An earlier refund on this booking hadn't finished, so it was finished first. Refresh, check the amounts and decide again." };
+  }
   let left: MoneyLeft;
   try { left = await moneyLeft(appt, job); } catch (err) {
     await reopen();
     return { ok: false, status: 502, code: "TRY_AGAIN", message: `Couldn't read the payments: ${errMsg(err)}` };
   }
-  const res = resolveOutcome(outcome, amountCents, left);
-  if (!res.ok) { await reopen(); return { ok: false, status: 400, code: res.code, message: res.message }; }
+  // Review I2: a decision already under way (saved before its refund) is finished exactly as chosen, whatever this
+  // call asks for: its money may already have moved.
+  let res: { outcome: ReportOutcome; refundCents: number };
+  if (rep.pending_outcome) {
+    res = { outcome: rep.pending_outcome, refundCents: Number(rep.pending_refund_cents ?? 0) };
+  } else {
+    const r = resolveOutcome(outcome, amountCents, left);
+    if (!r.ok) { await reopen(); return { ok: false, status: 400, code: r.code, message: r.message }; }
+    res = { outcome: r.outcome, refundCents: r.refundCents };
+    const [saved] = await rows<{ id: string }>(sql`
+      UPDATE quote_reports SET pending_outcome = ${res.outcome}, pending_refund_cents = ${res.refundCents}::int, updated_at = now()
+       WHERE id = ${reportId} AND decide_tag = ${tag} AND pending_outcome IS NULL RETURNING id`);
+    if (!saved) return { ok: false, status: 409, code: "BUSY", message: "This report is being decided right now. Refresh in a minute." };
+  }
   let refundIds: string[] = [];
   if (res.refundCents > 0) {
     try {
-      const done = await refundQuoteBooking(appt, res.refundCents, `quote_report_${reportId}`, { quoteReportId: reportId, refundRequestId: rep.refund_request_id, approvedBy: adminId },
-        { balanceCapCents: left.balanceLeft });
+      const done = await refundQuoteBooking(appt, res.refundCents, opKey, meta, { balanceCapCents: left.balanceLeft });
+      if (done.resumed) {
+        await reopen();
+        return { ok: false, status: 409, code: "EARLIER_REFUND_FINISHED", message: "An earlier refund on this booking was finished first. Refresh and decide again." };
+      }
       refundIds = done.refundIds;
     } catch (err) {
-      // The saved plan finishes on the next try (same key); nothing is refunded twice.
+      // The saved plan and the saved decision finish on the next try (same key); nothing is refunded twice.
       await reopen();
-      return { ok: false, status: 402, code: "REFUND_FAILED", message: `Stripe refund failed: ${errMsg(err)}` };
+      return { ok: false, status: 402, code: "REFUND_FAILED", message: `Stripe refund failed: ${errMsg(err)}. Try the same decision again; nothing is refunded twice.` };
     }
   }
   const [decided] = await rows<{ id: string }>(sql`
@@ -478,6 +517,18 @@ export async function windowJson(q: Quote, job: QuoteJob | undefined | null, vie
 
 export async function runQuoteWindowJob(now = new Date()): Promise<{ paid: number; points: number; reminders: number }> {
   let paid = 0, points = 0, reminders = 0;
+  // Review I4: a booking that moved to completed while the Job complete steps never ran (a crash in between).
+  const unfinished = await rows<{ appointment_id: string }>(sql`
+    SELECT j.appointment_id FROM quote_jobs j JOIN appointments a ON a.id = j.appointment_id
+     WHERE a.status = 'completed' AND j.completed_at IS NULL AND COALESCE(a.updated_at, a.created_at) < ${now}::timestamptz - make_interval(mins => ${ENDED_SETTLE_MINUTES}) LIMIT 25`);
+  for (const u of unfinished) {
+    try {
+      const { finishJobComplete } = await import("./quoteBalance");
+      const appt = await storage.getAppointment(u.appointment_id);
+      const job = await quoteJobFor(u.appointment_id);
+      if (appt && job) await finishJobComplete(appt, job, job.balanceStatus === "captured" ? job.capturedCents ?? 0 : 0, { userId: "system", via: "auto" }, now);
+    } catch (err) { console.error(`[quote window] repair of ${u.appointment_id} failed:`, err); }
+  }
   // Balance payouts due: confirmed, window over with no report, or a report decided pay in full or partial.
   const due = await rows<{ id: string }>(sql`
     SELECT j.id FROM quote_jobs j WHERE ${PAYABLE}

@@ -827,6 +827,8 @@ export const quoteReports = pgTable("quote_reports", {
   heldCents: integer("held_cents").notNull().default(0),
   status: text("status").$type<"open" | "deciding" | "decided">().notNull().default("open"),
   decideTag: text("decide_tag"),
+  pendingOutcome: text("pending_outcome").$type<"pay_full" | "partial_refund" | "full_refund">(),
+  pendingRefundCents: integer("pending_refund_cents"),
   outcome: text("outcome").$type<"pay_full" | "partial_refund" | "full_refund">(),
   refundCents: integer("refund_cents"),
   decidedBy: varchar("decided_by", { length: 36 }),

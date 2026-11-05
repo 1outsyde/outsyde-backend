@@ -40,6 +40,10 @@ CREATE TABLE IF NOT EXISTS quote_reports (
   held_cents integer NOT NULL DEFAULT 0 CHECK (held_cents >= 0),         -- refundable money when reported
   status text NOT NULL DEFAULT 'open' CHECK (status IN ('open', 'deciding', 'decided')),
   decide_tag text,
+  -- The decision being carried out (saved before any refund): a retry after a crash or a failed refund finishes
+  -- exactly this one and records what was refunded (review I2).
+  pending_outcome text CHECK (pending_outcome IS NULL OR pending_outcome IN ('pay_full', 'partial_refund', 'full_refund')),
+  pending_refund_cents integer CHECK (pending_refund_cents IS NULL OR pending_refund_cents >= 0),
   outcome text CHECK (outcome IS NULL OR outcome IN ('pay_full', 'partial_refund', 'full_refund')),
   refund_cents integer CHECK (refund_cents IS NULL OR refund_cents >= 0),
   decided_by varchar(36),
@@ -52,3 +56,7 @@ CREATE TABLE IF NOT EXISTS quote_reports (
   CONSTRAINT quote_reports_decided CHECK ((status = 'decided') = (outcome IS NOT NULL))
 );
 CREATE INDEX IF NOT EXISTS idx_quote_reports_open ON quote_reports (created_at) WHERE status <> 'decided';
+
+-- Jobs marked complete under 4a (before this ran) get their window from their Job complete time (review I3).
+-- Neon had none on 2026-11-05; this keeps any made before the deploy from staying held forever.
+UPDATE quote_jobs SET window_ends_at = completed_at + interval '6 hours' WHERE completed_at IS NOT NULL AND window_ends_at IS NULL;
