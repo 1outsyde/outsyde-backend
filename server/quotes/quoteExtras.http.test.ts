@@ -390,7 +390,10 @@ const hmNY = (d: Date) => new Intl.DateTimeFormat("en-GB", { timeZone: "America/
     const ac = (await cardsOf(conv, "extra_approved")).pop();
     assert(ac?.content === "Approved: 2 extra hours, $100.00. It is held on the card and charged when the job is complete." && ac.sender_id === cust.uid, "the vendor is told", ac && { c: ac.content, s: ac.sender_id });
     r = await approve(E.qid, x1.id);
-    assert(r.status === 409 && r.body?.code === "NOT_OPEN" && extrasPis().length === 1, "a second tap does nothing", r);
+    assert(r.status === 200 && r.body?.status === "approved" && extrasPis().length === 1, "a second tap answers approved and holds nothing more", r);
+    // Review C1: Stripe's event for the hold Approve just recorded never lets it go.
+    await WebhookHandlers.handlePaymentIntentCapturableUpdated({ ...piStore[firstPi] });
+    assert(piStore[firstPi].status === "requires_capture" && (await payOf(E.a.id)).status === "held", "the event for the hold on record changes nothing", piStore[firstPi].status);
 
     console.log("\n── a new approval replaces the hold with one for the new total ──");
     const x4 = (await propose(E.qid, "Mattress bag", 5000)).body?.extra;
@@ -424,6 +427,19 @@ const hmNY = (d: Date) => new Intl.DateTimeFormat("en-GB", { timeZone: "America/
     assert(piStore[firstPi].status === "canceled" && cancels.length >= 2, "and the one before is let go", cancels);
     await WebhookHandlers.handlePaymentIntentCapturableUpdated({ ...piStore[actionPi] });
     assert((await cardsOf(conv, "extra_approved")).length === 3, "one approved card each, even when Stripe repeats the event");
+    // Review C1: the app calls Approve again after 3D Secure, after the event already finished it.
+    r = await approve(E.qid, x5.id);
+    assert(r.status === 200 && r.body?.status === "approved" && piStore[actionPi].status === "requires_capture" && (await payOf(E.a.id)).stripe_payment_intent_id === actionPi, "the call after 3D Secure answers approved and keeps the hold", { r, s: piStore[actionPi].status });
+    // An event arriving while an Approve holds the claim never lets that Approve's hold go.
+    const xr = (await propose(E.qid, "Race test", 500)).body?.extra;
+    const racePi = `pi_qb_race_${Date.now()}`;
+    piStore[racePi] = { id: racePi, object: "payment_intent", amount: 18360 + 540, amount_capturable: 18360 + 540, status: "requires_capture", capture_method: "manual", metadata: { type: "quote_extras", appointmentId: E.a.id, extraId: xr.id }, customer: `cus_${cust.uid}` };
+    await q(`UPDATE quote_extras_payments SET approve_claim_tag = 'race', approve_claimed_at = now() WHERE appointment_id = $1`, [E.a.id]);
+    await WebhookHandlers.handlePaymentIntentCapturableUpdated({ ...piStore[racePi] });
+    assert(piStore[racePi].status === "requires_capture", "an event during a live Approve leaves its hold alone", piStore[racePi].status);
+    await q(`UPDATE quote_extras_payments SET approve_claim_tag = NULL, approve_claimed_at = NULL WHERE appointment_id = $1`, [E.a.id]);
+    piStore[racePi].status = "canceled";
+    await call("POST", `/api/quotes/${E.qid}/extras/${xr.id}/withdraw`, { token: owner.token });
 
     console.log("\n── Job complete charges the extras once and lapses open ones (B1, B2) ──");
     const x6 = (await propose(E.qid, "Shelf mounting", 1500)).body?.extra;
@@ -532,8 +548,17 @@ const hmNY = (d: Date) => new Intl.DateTimeFormat("en-GB", { timeZone: "America/
     r = await call("POST", `/api/quotes/${U.qid}/extras/card`, { token: cust.token });
     const payNow = piStore[r.body?.paymentIntentId];
     assert(r.status === 200 && r.body?.captureMethod === "automatic" && payNow?.amount === 10800 && payNow.capture_method !== "manual", "Pay for extras charges now", r);
+    payNow.status = "processing";
+    const piCount = extrasPis().length;
+    r = await call("POST", `/api/quotes/${U.qid}/extras/card`, { token: cust.token });
+    assert(r.status === 409 && r.body?.code === "PROCESSING" && extrasPis().length === piCount && (await payOf(U.a.id)).stripe_payment_intent_id === payNow.id, "a second tap while it is processing never starts another payment (review I4)", r);
     await WebhookHandlers.handlePaymentIntentSucceeded(succeed(payNow.id));
     p = await payOf(U.a.id);
+    const strayPaid = `pi_qb_stray_${Date.now()}`;
+    piStore[strayPaid] = { id: strayPaid, object: "payment_intent", amount: 10800, amount_received: 10800, status: "succeeded", metadata: { type: "quote_extras", appointmentId: U.a.id }, customer: `cus_${cust.uid}` };
+    const alertsBefore = alerts.length;
+    await WebhookHandlers.handlePaymentIntentSucceeded({ ...piStore[strayPaid] });
+    assert(alerts.length === alertsBefore + 1 && /not on record/.test(alerts[alerts.length - 1].subject) && (await payOf(U.a.id)).stripe_payment_intent_id === payNow.id, "a payment that isn't on record is flagged to Outsyde, never recorded over the real one", alerts.slice(alertsBefore));
     assert(p.status === "captured" && p.captured_cents === 10800 && p.payout_status === "held", "paid", p);
     await qw.runQuoteWindowJob(new Date());
     et = extrasTransfers(U.a.id);
@@ -551,6 +576,29 @@ const hmNY = (d: Date) => new Intl.DateTimeFormat("en-GB", { timeZone: "America/
     p = await payOf(C.a.id);
     assert(r.status === 200 && piStore[cPi].status === "canceled" && p.status === "released", "the vendor cancels: the extras hold is released", { r: r.status, p });
     assert((await extraOf(c2.id)).status === "canceled" && (await extraOf(c1.id)).status === "approved", "an open extra is closed", [await extraOf(c2.id), await extraOf(c1.id)].map((x: any) => x.status));
+
+    console.log("\n── a cancel that doesn't go through holds the extras again (review I2) ──");
+    const K = await paidQuote();
+    await approve(K.qid, (await propose(K.qid, "Hauling", 3000)).body?.extra.id);
+    const kPi = (await payOf(K.a.id)).stripe_payment_intent_id;
+    await qb.settleBalanceOnCancel(K.a.id, 0); // the cancel's refund then fails: the booking stays confirmed
+    p = await payOf(K.a.id);
+    assert(p.status === "released" && piStore[kPi].status === "canceled" && (await apptOf(K.qid)).status === "confirmed", "released for the cancel", p.status);
+    await q(`UPDATE quote_extras_payments SET released_at = now() - interval '3 minutes' WHERE id = $1`, [p.id]);
+    await qx.runQuoteExtrasJob(new Date());
+    p = await payOf(K.a.id);
+    assert(p.status === "held" && p.stripe_payment_intent_id !== kPi && piStore[p.stripe_payment_intent_id]?.amount === 3240 && piStore[p.stripe_payment_intent_id]?.off_session === "true", "the job holds them again off session", p);
+
+    console.log("\n── a stuck extras claim never holds up the balance (review I3) ──");
+    await q(`UPDATE quote_extras_payments SET status = 'holding', updated_at = now() WHERE id = $1`, [p.id]);
+    r = await call("POST", `/api/bookings/appointments/${K.a.id}/refund`, { token: owner.token, body: {} });
+    const jK = await jobOf(K.a.id);
+    assert(r.status === 200 && (await apptOf(K.qid)).status === "canceled" && jK.balance_status === "released", "the vendor cancels: the balance is released even though the extras are busy", { r: r.status, b: jK.balance_status });
+    await q(`UPDATE quote_extras_payments SET updated_at = now() - interval '15 minutes' WHERE id = $1`, [p.id]);
+    const heldPi = p.stripe_payment_intent_id;
+    await qx.runQuoteExtrasJob(new Date());
+    p = await payOf(K.a.id);
+    assert(p.status === "released" && piStore[heldPi].status === "canceled", "the job takes the stale claim over and lets every extras hold go", { s: p.status, pi: piStore[heldPi].status });
 
     console.log("\n── refunds come from the extras first, never the fee (B6) ──");
     const R = await paidQuote();

@@ -546,11 +546,11 @@ export function registerQuoteRoutes(app: Express): void {
       if (!r.ok) return extrasError(res, r);
       const extra = extraJson(r.extra, { isCustomer: true, canManage: false }, true);
       if (r.status === "approved") return res.json({ status: "approved", extra });
-      const user = await storage.getUser(userId);
+      // The payment sheet keys are for the intent's own customer (the deposit's), never a different one.
       const { paymentSheetFields } = await import("../payments/savedCards");
       return res.json({
         status: "needs_action", extra, intentType: r.intentType, clientSecret: r.clientSecret, intentId: r.intentId,
-        ...(user?.stripeCustomerId ? await paymentSheetFields(user.stripeCustomerId, req.body?.paymentSheet === true) : {}),
+        ...(r.customerId ? await paymentSheetFields(r.customerId, req.body?.paymentSheet === true) : {}),
       });
     } catch (err) {
       console.error("[quotes] approve extra failed:", err);

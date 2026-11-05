@@ -34,7 +34,7 @@ CREATE TABLE IF NOT EXISTS quote_extras_payments (
   platform_fee_cents integer NOT NULL DEFAULT 0 CHECK (platform_fee_cents >= 0),
   vendor_net_cents integer NOT NULL DEFAULT 0 CHECK (vendor_net_cents >= 0),
   hold_cents integer NOT NULL DEFAULT 0 CHECK (hold_cents = approved_cents + fee_cents),
-  status text NOT NULL DEFAULT 'none' CHECK (status IN ('none', 'scheduled', 'holding', 'held', 'hold_failed', 'capturing', 'captured', 'unpaid', 'released')),
+  status text NOT NULL DEFAULT 'none' CHECK (status IN ('none', 'scheduled', 'holding', 'held', 'hold_failed', 'capturing', 'captured', 'unpaid', 'releasing', 'released')),
   approve_claim_tag text,
   approve_claimed_at timestamptz,
   hold_at timestamptz,

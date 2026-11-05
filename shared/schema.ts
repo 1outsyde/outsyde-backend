@@ -874,7 +874,7 @@ export const quoteExtrasPayments = pgTable("quote_extras_payments", {
   platformFeeCents: integer("platform_fee_cents").notNull().default(0),
   vendorNetCents: integer("vendor_net_cents").notNull().default(0),
   holdCents: integer("hold_cents").notNull().default(0),
-  status: text("status").$type<"none" | "scheduled" | "holding" | "held" | "hold_failed" | "capturing" | "captured" | "unpaid" | "released">().notNull().default("none"),
+  status: text("status").$type<"none" | "scheduled" | "holding" | "held" | "hold_failed" | "capturing" | "captured" | "unpaid" | "releasing" | "released">().notNull().default("none"),
   approveClaimTag: text("approve_claim_tag"),
   approveClaimedAt: timestamp("approve_claimed_at", { withTimezone: true }),
   holdAt: timestamp("hold_at", { withTimezone: true }),

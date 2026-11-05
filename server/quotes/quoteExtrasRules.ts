@@ -80,7 +80,7 @@ export const EXTRAS_CLAIM_MINUTES = 10;
 export function extrasCompleteBlocker(p: { status: string; approvedCents: number; approveClaimedAt: Date | null } | null | undefined, now: Date): null | "EXTRAS_NOT_HELD" | "EXTRAS_BUSY" {
   if (!p) return null;
   if (p.approveClaimedAt && now.getTime() - p.approveClaimedAt.getTime() < EXTRAS_CLAIM_MINUTES * 60_000) return "EXTRAS_BUSY";
-  if (p.status === "holding") return "EXTRAS_BUSY";
+  if (p.status === "holding" || p.status === "releasing") return "EXTRAS_BUSY";
   if (p.approvedCents > 0 && (p.status === "scheduled" || p.status === "hold_failed")) return "EXTRAS_NOT_HELD";
   return null;
 }

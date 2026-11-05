@@ -224,32 +224,63 @@ async function findApproveIntent(stripe: any, customerId: string, extraId: strin
 
 export type ApproveResult =
   | { ok: true; status: "approved"; extra: QuoteExtra }
-  | { ok: true; status: "needs_action"; extra: QuoteExtra; intentType: "payment" | "setup"; clientSecret: string; intentId: string }
+  | { ok: true; status: "needs_action"; extra: QuoteExtra; intentType: "payment" | "setup"; clientSecret: string; intentId: string; customerId: string | null }
   | { ok: false; status: number; code: string; message: string };
 
 const BUSY = { ok: false as const, status: 409, code: "BUSY", message: "We're still checking your card. Try again in a few minutes." };
 const DECLINED = { ok: false as const, status: 402, code: "CARD_DECLINED", message: "Your card was declined, so the extra wasn't added. Try again with another card." };
+const TRY_AGAIN = { ok: false as const, status: 409, code: "TRY_AGAIN", message: "Something changed while you approved. Approve the extra again." };
+const STRIPE_DOWN = { ok: false as const, status: 502, code: "TRY_AGAIN", message: "We couldn't reach the card network. Try again in a minute." };
+
+/**
+ * The extras payment's one lock (review C1, C2): every Approve finish, Update your card and Pay for extras runs
+ * under it, and the far out hold, the Job complete charge and the cancel release refuse to start while it is live
+ * (they each move the status out of the set this claim accepts, so the two never overlap).
+ */
+async function claimPayment(appointmentId: string, statuses: readonly string[]): Promise<{ tag: string; row: any } | null> {
+  const tag = randomUUID();
+  const [row] = await rows<any>(sql`
+    UPDATE quote_extras_payments SET approve_claim_tag = ${tag}, approve_claimed_at = now(), updated_at = now()
+     WHERE appointment_id = ${appointmentId} AND status IN (${sql.join(statuses.map((s) => sql`${s}`), sql`, `)})
+       AND (approve_claimed_at IS NULL OR approve_claimed_at < now() - make_interval(mins => ${CLAIM_MINUTES}))
+     RETURNING *`);
+  return row ? { tag, row } : null;
+}
+async function unclaimPayment(appointmentId: string, tag: string): Promise<void> {
+  await rows(sql`UPDATE quote_extras_payments SET approve_claim_tag = NULL, approve_claimed_at = NULL WHERE appointment_id = ${appointmentId} AND approve_claim_tag = ${tag}`);
+}
+const APPROVABLE = ["none", "scheduled", "held", "hold_failed"] as const;
+
+type Finish = "approved" | "gone" | "retry";
+const isSetupIntent = (i: any) => i?.object === "setup_intent" || String(i?.id ?? "").startsWith("seti_");
 
 /**
  * Makes an approval stand from an intent that went through (requires_capture for a hold, succeeded for a card
- * check). One statement: the extra and the payment's new totals change together, only while the extra is still
- * waiting and the payment can take it. The hold it replaces is let go after. Returns false (and lets the intent go)
- * when the extra can no longer be approved.
+ * check). Runs only under the payment claim `tag`. One statement: the extra and the payment's new totals change
+ * together, only while the claim is ours and the payment can take it. The hold it replaces is let go after.
+ *   approved: it stands (or already stood on this same intent: nothing is let go).
+ *   retry: the intent was for an old total; let go, the extra is open again.
+ *   gone: the extra can no longer be approved; the intent was let go.
  */
-async function finishApproval(extraId: string, intent: any): Promise<boolean> {
+async function finishApproval(extraId: string, intent: any, tag: string): Promise<Finish> {
   const extra = await extraById(extraId);
-  if (!extra || !["proposed", "approving"].includes(extra.status)) {
-    await letGoOfIntent(intent.id, `extra ${extraId} is ${extra?.status ?? "gone"}`);
-    return false;
-  }
+  if (!extra) { await letGoOfIntent(intent.id, `extra ${extraId} is gone`); return "gone"; }
+  const p0 = await extrasPaymentFor(extra.appointmentId);
+  if (extra.status === "approved" && (isSetupIntent(intent) || p0?.stripePaymentIntentId === intent.id)) return "approved";
+  if (!["proposed", "approving"].includes(extra.status)) { await letGoOfIntent(intent.id, `extra ${extraId} is ${extra.status}`); return "gone"; }
   const approved = (await extrasFor(extra.appointmentId)).filter((x) => x.status === "approved" && x.id !== extraId).map((x) => x.amountCents);
   const t = extrasTotals([...approved, extra.amountCents]);
-  const isSetup = intent.object === "setup_intent" || String(intent.id).startsWith("seti_");
+  const isSetup = isSetupIntent(intent);
+  if (isSetup && p0?.status === "held") {
+    // A card check can't raise a hold already on the card (the total would pass what is held): approve again.
+    await letGoOfIntent(intent.id, "a card check while the extras are held");
+    await rows(sql`UPDATE quote_extras SET status = 'proposed', approve_intent_id = NULL, updated_at = now() WHERE id = ${extraId} AND status = 'approving'`);
+    return "retry";
+  }
   if (!isSetup && Number(intent.amount) !== t.holdCents) {
-    // Another approval landed meanwhile: this hold is for an old total. Let it go; the customer approves again.
     await letGoOfIntent(intent.id, `amount ${intent.amount} is not the new total ${t.holdCents}`);
     await rows(sql`UPDATE quote_extras SET status = 'proposed', approve_intent_id = NULL, updated_at = now() WHERE id = ${extraId} AND status = 'approving'`);
-    return false;
+    return "retry";
   }
   let holdAt: Date | null = null, retryAt: Date | null = null;
   if (isSetup) {
@@ -264,66 +295,80 @@ async function finishApproval(extraId: string, intent: any): Promise<boolean> {
     WITH e AS (
       UPDATE quote_extras SET status = 'approved', answered_at = now(), approve_intent_id = NULL, updated_at = now()
        WHERE id = ${extraId} AND status IN ('proposed', 'approving')
-         AND EXISTS (SELECT 1 FROM quote_extras_payments WHERE appointment_id = ${extra.appointmentId} AND status IN ('none', 'scheduled', 'held', 'hold_failed'))
+         AND EXISTS (SELECT 1 FROM quote_extras_payments WHERE appointment_id = ${extra.appointmentId} AND approve_claim_tag = ${tag} AND status IN ('none', 'scheduled', 'held', 'hold_failed'))
       RETURNING appointment_id)
     UPDATE quote_extras_payments p SET
       approved_cents = ${t.approvedCents}::int, fee_cents = ${t.feeCents}::int, platform_fee_cents = ${t.platformFeeCents}::int,
       vendor_net_cents = ${t.vendorNetCents}::int, hold_cents = ${t.holdCents}::int,
-      status = CASE WHEN ${isSetup} THEN (CASE WHEN p.status = 'held' THEN 'held' ELSE 'scheduled' END) ELSE 'held' END,
+      status = CASE WHEN ${isSetup} THEN 'scheduled' ELSE 'held' END,
       release_pi = CASE WHEN NOT ${isSetup} AND p.stripe_payment_intent_id IS NOT NULL AND p.stripe_payment_intent_id <> ${intent.id} THEN p.stripe_payment_intent_id ELSE p.release_pi END,
       stripe_payment_intent_id = CASE WHEN ${isSetup} THEN p.stripe_payment_intent_id ELSE ${intent.id} END,
       held_cents = CASE WHEN ${isSetup} THEN p.held_cents ELSE ${t.holdCents}::int END,
       held_at = CASE WHEN ${isSetup} THEN p.held_at ELSE now() END,
-      hold_at = CASE WHEN ${isSetup} AND p.status <> 'held' THEN ${holdAt}::timestamptz ELSE NULL END,
-      retry_at = CASE WHEN ${isSetup} AND p.status <> 'held' THEN ${retryAt}::timestamptz ELSE NULL END,
+      hold_at = CASE WHEN ${isSetup} THEN ${holdAt}::timestamptz ELSE NULL END,
+      retry_at = CASE WHEN ${isSetup} THEN ${retryAt}::timestamptz ELSE NULL END,
       stripe_customer_id = COALESCE(${cus}, p.stripe_customer_id), payment_method_id = COALESCE(${pm}, p.payment_method_id),
-      failed_notice_at = NULL, last_error = NULL, approve_claim_tag = NULL, approve_claimed_at = NULL, updated_at = now()
-      FROM e WHERE p.appointment_id = e.appointment_id
+      failed_notice_at = NULL, last_error = NULL, updated_at = now()
+      FROM e WHERE p.appointment_id = e.appointment_id AND p.approve_claim_tag = ${tag} AND p.status IN ('none', 'scheduled', 'held', 'hold_failed')
     RETURNING p.id`);
   if (!done) {
     await letGoOfIntent(intent.id, `extra ${extraId} could not be added now`);
-    return false;
+    await rows(sql`UPDATE quote_extras SET status = 'proposed', approve_intent_id = NULL, updated_at = now() WHERE id = ${extraId} AND status = 'approving'`);
+    return "gone";
   }
   await releaseReplaced(done.id);
   const fresh = (await extraById(extraId))!;
   const q = await quoteOf(fresh.quoteId);
-  // The approved card once per extra (a repeated Stripe event finds it approved already and never gets here).
   if (q) await postExtraCard(q, "extra_approved", true, { extra: fresh, amountCents: fresh.amountCents });
-  return true;
+  return "approved";
+}
+
+/** Finishes an Approve left waiting on 3D Secure (the Stripe event or the job), under the claim. Busy: later. */
+async function finishWaiting(extraId: string, intent: any): Promise<Finish | "busy"> {
+  const x = await extraById(extraId);
+  if (!x) return "gone";
+  const c = await claimPayment(x.appointmentId, APPROVABLE);
+  if (!c) return "busy";
+  try { return await finishApproval(extraId, intent, c.tag); } finally { await unclaimPayment(x.appointmentId, c.tag); }
 }
 
 /**
  * The customer approves an extra (B1). Near the job: a hold for the new total on the deposit's card, on session.
  * Far out: a card check that reserves nothing. A card that needs the customer (3D Secure) returns the secret to
- * finish in the app; the approval stands when it goes through (this call again, or the Stripe event). newCard: pay
- * with a different card in the payment sheet.
+ * finish in the app; the approval stands when it goes through (this call again, the Stripe event, or the job).
+ * newCard: pay with a different card in the payment sheet.
  */
 export async function approveExtra(q: Quote, extraId: string, opts: { newCard?: boolean } = {}, now = new Date()): Promise<ApproveResult> {
   const extra0 = await extraById(extraId);
   if (!extra0 || extra0.quoteId !== q.id) return { ok: false, status: 404, code: "NOT_FOUND", message: "Extra not found" };
+  // Already approved (the Stripe event finished it first, or a second tap): that is the answer.
+  if (extra0.status === "approved") return { ok: true, status: "approved", extra: extra0 };
   if (!["proposed", "approving"].includes(extra0.status)) return { ok: false, ...NOT_OPEN };
   const closed = await bookingOpen(q);
   if (closed) return { ok: false, ...closed };
   const apptId = q.appointmentId!;
-  const tag = randomUUID();
-  const [claimed] = await rows<QuoteExtrasPayment & { id: string; release_pi: string | null }>(sql`
-    UPDATE quote_extras_payments SET approve_claim_tag = ${tag}, approve_claimed_at = now(), updated_at = now()
-     WHERE appointment_id = ${apptId} AND status IN ('none', 'scheduled', 'held', 'hold_failed')
-       AND (approve_claimed_at IS NULL OR approve_claimed_at < now() - make_interval(mins => ${CLAIM_MINUTES}))
-       AND EXISTS (SELECT 1 FROM appointments a WHERE a.id = ${apptId} AND a.status = 'confirmed')
-       AND EXISTS (SELECT 1 FROM quote_jobs j WHERE j.appointment_id = ${apptId} AND j.completed_at IS NULL)
-     RETURNING id, release_pi`);
-  if (!claimed) {
+  const c = await claimPayment(apptId, APPROVABLE);
+  if (!c) {
     const p = await extrasPaymentFor(apptId);
-    if (p && ["capturing", "captured", "unpaid", "released"].includes(p.status)) return { ok: false, status: 409, code: "ALREADY_COMPLETE", message: "The job is already marked complete." };
+    if (p && ["capturing", "captured", "unpaid"].includes(p.status)) return { ok: false, status: 409, code: "ALREADY_COMPLETE", message: "The job is already marked complete." };
     return BUSY;
   }
-  const unclaim = async () => { await rows(sql`UPDATE quote_extras_payments SET approve_claim_tag = NULL, approve_claimed_at = NULL WHERE id = ${claimed.id} AND approve_claim_tag = ${tag}`); };
-  const note = async (msg: string) => { await rows(sql`UPDATE quote_extras_payments SET last_error = ${msg.slice(0, 500)}, updated_at = now() WHERE id = ${claimed.id} AND approve_claim_tag = ${tag}`); };
+  const tag = c.tag;
+  const claimed = c.row;
+  const unclaim = () => unclaimPayment(apptId, tag);
+  const note = async (msg: string) => { await rows(sql`UPDATE quote_extras_payments SET last_error = ${msg.slice(0, 500)}, updated_at = now() WHERE appointment_id = ${apptId} AND approve_claim_tag = ${tag}`); };
+  const result = (f: Finish): ApproveResult | Promise<ApproveResult> => f === "approved"
+    ? extraById(extraId).then((x) => ({ ok: true as const, status: "approved" as const, extra: x! }))
+    : f === "retry" ? TRY_AGAIN : { ok: false, ...NOT_OPEN };
   const stripe: any = await getUncachableStripeClient();
+  let keepClaim = false;
   try {
+    // The booking must still be open under the claim (Job complete or a cancel may have started meanwhile).
+    const [still] = await rows(sql`
+      SELECT 1 AS x FROM appointments a JOIN quote_jobs j ON j.appointment_id = a.id WHERE a.id = ${apptId} AND a.status = 'confirmed' AND j.completed_at IS NULL`);
+    if (!still) return { ok: false, status: 409, code: "NOT_CONFIRMED", message: "Extras can only be added to a confirmed booking." };
     // A hold this one would replace that wasn't let go yet: let it go first, so only one is ever left over.
-    if (claimed.release_pi && !(await releaseReplaced(claimed.id))) { await unclaim(); return BUSY; }
+    if (claimed.release_pi && !(await releaseReplaced(claimed.id))) return BUSY;
     // Another extra half approved (3D Secure never finished): this approval replaces it; it goes back to open.
     const others = await rows<{ id: string; approve_intent_id: string | null }>(sql`
       UPDATE quote_extras e SET status = 'proposed', approve_intent_id = NULL, updated_at = now()
@@ -331,42 +376,44 @@ export async function approveExtra(q: Quote, extraId: string, opts: { newCard?: 
        WHERE e.id = p.id AND e.status = 'approving' RETURNING e.id, p.approve_intent_id`);
     for (const o of others) if (o.approve_intent_id) await letGoOfIntent(o.approve_intent_id, "another extra was approved");
 
-    const extra = (await extraById(extraId))!;
+    let extra = (await extraById(extraId))!;
+    if (extra.status === "approved") return { ok: true, status: "approved", extra };
     // This extra's own earlier try: finish it if it went through, return it again if it still needs the customer.
     if (extra.status === "approving" && extra.approveIntentId) {
       const id = extra.approveIntentId;
-      const cur: any = id.startsWith("seti_") ? await stripe.setupIntents.retrieve(id, {}, BOUND) : await stripe.paymentIntents.retrieve(id, {}, BOUND);
-      if (cur?.status === "requires_capture" || (cur?.object === "setup_intent" && cur?.status === "succeeded")) {
-        const ok = await finishApproval(extraId, cur);
-        await unclaim();
-        return ok ? { ok: true, status: "approved", extra: (await extraById(extraId))! } : { ok: false, ...NOT_OPEN };
-      }
-      if (cur?.status === "requires_action" || (opts.newCard && cur?.status === "requires_payment_method")) {
-        await unclaim();
-        return { ok: true, status: "needs_action", extra, intentType: id.startsWith("seti_") ? "setup" : "payment", clientSecret: cur.client_secret, intentId: id };
+      let cur: any;
+      try { cur = id.startsWith("seti_") ? await stripe.setupIntents.retrieve(id, {}, BOUND) : await stripe.paymentIntents.retrieve(id, {}, BOUND); }
+      catch (err) { await note(`lookup: ${errMsg(err)}`); return STRIPE_DOWN; }
+      if (cur?.status === "requires_capture" || (isSetupIntent(cur) && cur?.status === "succeeded")) return result(await finishApproval(extraId, cur, tag));
+      if (cur?.status === "requires_action" || cur?.status === "processing" || (cur?.metadata?.newCard === "true" && cur?.status === "requires_payment_method")) {
+        if (cur.status === "processing") return BUSY;
+        return { ok: true, status: "needs_action", extra, intentType: id.startsWith("seti_") ? "setup" : "payment", clientSecret: cur.client_secret, intentId: id, customerId: idOf(cur.customer) };
       }
       await letGoOfIntent(id, "an earlier approve that didn't go through");
       await rows(sql`UPDATE quote_extras SET status = 'proposed', approve_intent_id = NULL, updated_at = now() WHERE id = ${extraId} AND status = 'approving'`);
+      extra = (await extraById(extraId))!;
     }
 
     const { quoteJobFor } = await import("./quoteBalance");
     const job = await quoteJobFor(apptId);
-    const near = holdAtApprove(new Date(job!.autoCompleteAt), now);
+    // Extras already on hold are always replaced by a hold (a card check can't raise what is held).
+    const near = claimed.status === "held" || holdAtApprove(new Date(job!.autoCompleteAt), now);
     const approvedAmounts = (await extrasFor(apptId)).filter((x) => x.status === "approved").map((x) => x.amountCents);
     // The limits again, under the claim (one Approve at a time per booking): what is charged never passes them.
     if (approvedAmounts.length >= MAX_EXTRAS || approvedAmounts.reduce((n, a) => n + a, 0) + extra.amountCents > q.totalCents) {
-      await unclaim();
       return { ok: false, status: 409, code: "OVER_TOTAL", message: "All extras together can be up to the quote total." };
     }
     const total = extrasTotals([...approvedAmounts, extra.amountCents]);
     let card: { customerId: string | null; paymentMethodId: string | null };
-    try { card = await depositCard(apptId); } catch (err) { await note(`deposit lookup: ${errMsg(err)}`); await unclaim(); return BUSY; }
-    if (!card.customerId) { await unclaim(); return { ok: false, status: 409, code: "NO_CUSTOMER", message: "Open the quote again to approve." }; }
+    try { card = await depositCard(apptId); } catch (err) { await note(`deposit lookup: ${errMsg(err)}`); return STRIPE_DOWN; }
+    if (!card.customerId) return { ok: false, status: 409, code: "NO_CUSTOMER", message: "Open the quote again to approve." };
     const useSaved = !opts.newCard && !!card.paymentMethodId;
     const metadata = { type: EXTRAS_PI_TYPE, appointmentId: apptId, quoteId: q.id, businessId: q.businessId, extraId, ...(near ? {} : { check: "true" }) };
 
-    // A try whose reply was lost: use what reached Stripe.
-    let intent: any = await findApproveIntent(stripe, card.customerId, extraId, !near).catch(() => null);
+    // A try whose reply was lost: use what reached Stripe. A failed lookup decides nothing.
+    let intent: any;
+    try { intent = await findApproveIntent(stripe, card.customerId, extraId, !near); }
+    catch (err) { await note(`lookup: ${errMsg(err)}`); return STRIPE_DOWN; }
     const reuse = !!intent && (
       (!near && intent.status === "succeeded")
       || (near && intent.status === "requires_capture" && Number(intent.amount) === total.holdCents)
@@ -396,32 +443,32 @@ export async function approveExtra(q: Quote, extraId: string, opts: { newCard?: 
         if (isCardError(err)) {
           const failed = err?.raw?.payment_intent?.id ?? err?.raw?.setup_intent?.id;
           if (failed) await letGoOfIntent(failed, "declined at approve");
-          await note(errMsg(err)); await unclaim();
+          await note(errMsg(err));
           return DECLINED;
         }
-        // No reply: it may have landed. The claim stays until it runs out; the next try looks it up first.
         await note(errMsg(err));
+        if (err?.statusCode) return STRIPE_DOWN; // Stripe answered: nothing was made
+        // No reply: it may have landed. The claim stays until it runs out; the next try looks it up first.
+        keepClaim = true;
         return BUSY;
       }
     }
     const wentThrough = near ? intent?.status === "requires_capture" : intent?.status === "succeeded";
-    if (wentThrough) {
-      const ok = await finishApproval(extraId, intent);
-      await unclaim();
-      return ok ? { ok: true, status: "approved", extra: (await extraById(extraId))! } : { ok: false, ...NOT_OPEN };
-    }
+    if (wentThrough) return result(await finishApproval(extraId, intent, tag));
     if (intent?.status === "requires_action" || (!useSaved && intent?.status === "requires_payment_method")) {
       await rows(sql`UPDATE quote_extras SET status = 'approving', approve_intent_id = ${intent.id}, updated_at = now() WHERE id = ${extraId} AND status IN ('proposed', 'approving')`);
-      await unclaim();
-      return { ok: true, status: "needs_action", extra: (await extraById(extraId))!, intentType: near ? "payment" : "setup", clientSecret: intent.client_secret, intentId: intent.id };
+      return { ok: true, status: "needs_action", extra: (await extraById(extraId))!, intentType: near ? "payment" : "setup", clientSecret: intent.client_secret, intentId: intent.id, customerId: idOf(intent.customer) };
     }
     if (intent?.id) await letGoOfIntent(intent.id, `approve came back ${intent?.status}`);
-    await note(`approve: status ${intent?.status}`); await unclaim();
+    await note(`approve: status ${intent?.status}`);
     return DECLINED;
   } catch (err) {
-    await note(errMsg(err)); await unclaim();
+    await note(errMsg(err));
     console.error(`[quote extras] approve ${extraId} failed:`, err);
+    keepClaim = true; // unknown: let the claim run out so nothing races a call that may have landed
     return BUSY;
+  } finally {
+    if (!keepClaim) await unclaim();
   }
 }
 
@@ -464,10 +511,15 @@ export async function placeExtrasHold(paymentId: string, now = new Date()): Prom
     return "declined" as const;
   };
   const held = async (pi: any) => {
-    await rows(sql`
+    const [ok] = await rows<{ id: string }>(sql`
       UPDATE quote_extras_payments SET status = 'held', stripe_payment_intent_id = ${pi.id}, held_cents = ${Number(pi.amount)}::int, held_at = now(),
              retry_at = NULL, last_error = NULL, failed_notice_at = NULL, updated_at = now()
-       WHERE id = ${paymentId} AND claim_tag = ${tag} AND status = 'holding'`);
+       WHERE id = ${paymentId} AND claim_tag = ${tag} AND status = 'holding' RETURNING id`);
+    if (!ok) {
+      // The claim was taken over meanwhile (a cancel): this hold is on no record, so it never stays on the card.
+      if (pi.status === "requires_capture") await letGoOfIntent(pi.id, "the hold claim was taken over");
+      return "busy" as const;
+    }
     return "held" as const;
   };
   const stripe: any = await getUncachableStripeClient();
@@ -517,12 +569,18 @@ async function closeOpenExtras(appointmentId: string, to: "lapsed" | "canceled")
   for (const x of closed) if (x.intent) await letGoOfIntent(x.intent, `extra ${to}`);
 }
 
+async function alertOutsyde(subject: string, text: string): Promise<void> {
+  console.error(`[quote extras] ${subject}: ${text}`);
+  try { const { quoteAdminAlert } = await import("./quoteWindow"); await quoteAdminAlert(subject, text); } catch { /* logged above */ }
+}
+
 export type ExtrasCapture = { capturedCents: number; status: string };
 
 /**
  * Job complete (quoteBalance.completeQuoteJob, after the balance): charges the held extras once (the whole hold).
  * A hold that can't be charged any more becomes unpaid (Pay for extras); the job still completes (B4). A charge in
- * doubt stays 'capturing' and the extras job finishes it from Stripe. Never throws.
+ * doubt stays 'capturing' and the extras job finishes it from Stripe. Never starts while an Approve is under way.
+ * Never throws.
  */
 export async function captureExtrasAtComplete(appointmentId: string): Promise<ExtrasCapture> {
   try {
@@ -531,6 +589,7 @@ export async function captureExtrasAtComplete(appointmentId: string): Promise<Ex
     const [c] = await rows<any>(sql`
       UPDATE quote_extras_payments SET status = 'capturing', claim_tag = ${tag}, updated_at = now()
        WHERE appointment_id = ${appointmentId} AND stripe_payment_intent_id IS NOT NULL AND approved_cents > 0
+         AND (approve_claimed_at IS NULL OR approve_claimed_at < now() - make_interval(mins => ${CLAIM_MINUTES}))
          AND (status = 'held' OR (status = 'capturing' AND updated_at < now() - make_interval(mins => ${CLAIM_MINUTES})))
        RETURNING *`);
     if (!c) {
@@ -553,8 +612,9 @@ export async function captureExtrasAtComplete(appointmentId: string): Promise<Ex
       }
     }
     if (cur?.status === "succeeded") {
-      const got = await recordCaptured(c.id, cur, tag);
-      return { capturedCents: got, status: "captured" };
+      const r = await recordCaptured(c.id, cur, tag);
+      if (!r.recorded) await alertOutsyde("Extras charge not on record", `Extras payment ${cur.id} on quote booking ${appointmentId} was charged (${r.got} cents) but the record had moved on. Check it in Stripe.`);
+      return { capturedCents: r.got, status: "captured" };
     }
     // The hold ended (expired, let go at Stripe): the backup, Pay for extras.
     await rows(sql`UPDATE quote_extras_payments SET status = 'unpaid', last_error = ${`hold is ${cur?.status} at Stripe`}, failed_notice_at = NULL, updated_at = now() WHERE id = ${c.id} AND claim_tag = ${tag}`);
@@ -568,16 +628,19 @@ export async function captureExtrasAtComplete(appointmentId: string): Promise<Ex
 }
 
 /** Records a charged extras payment once: the vendor's share held for the window, and the points pending. */
-async function recordCaptured(paymentId: string, pi: any, tag: string | null): Promise<number> {
+async function recordCaptured(paymentId: string, pi: any, tag: string | null): Promise<{ got: number; recorded: boolean }> {
   const got = Number(pi.amount_received ?? pi.amount);
   const [done] = await rows<any>(sql`
     UPDATE quote_extras_payments SET status = 'captured', stripe_payment_intent_id = ${pi.id}, stripe_charge_id = ${chargeIdOf(pi)},
            captured_cents = ${got}::int, captured_at = COALESCE(captured_at, now()), payout_status = CASE WHEN payout_status = 'none' THEN 'held' ELSE payout_status END,
            last_error = NULL, updated_at = now()
      WHERE id = ${paymentId} AND (${tag}::text IS NULL OR claim_tag = ${tag}) AND status IN ('held', 'capturing', 'unpaid')
-       AND (stripe_payment_intent_id = ${pi.id} OR status = 'unpaid')
+       AND stripe_payment_intent_id = ${pi.id}
      RETURNING id, appointment_id, client_id, business_id`);
-  if (!done) return got;
+  if (!done) {
+    const [already] = await rows(sql`SELECT 1 AS x FROM quote_extras_payments WHERE id = ${paymentId} AND status = 'captured' AND stripe_payment_intent_id = ${pi.id}`);
+    return { got, recorded: !!already };
+  }
   try {
     const { createPending, pointsForGrossCents } = await import("../loyaltyLedger");
     await createPending({
@@ -587,41 +650,70 @@ async function recordCaptured(paymentId: string, pi: any, tag: string | null): P
   } catch (err) {
     console.error(`[quote extras] points failed for ${done.appointment_id}:`, err);
   }
-  return got;
+  return { got, recorded: true };
 }
 
 // ─── A booking that ends before Job complete ────────────────────────────────
 
 export type ExtrasReleaseResult = { ok: true } | { ok: false; message: string };
 
+/** Every extras PaymentIntent on this booking that still reserves money or could (found at Stripe by metadata). */
+async function liveExtrasIntents(stripe: any, customerId: string, appointmentId: string, sinceUnix: number): Promise<any[]> {
+  const out: any[] = [];
+  let startingAfter: string | undefined;
+  for (let page = 0; page < 5; page++) {
+    const list = await stripe.paymentIntents.list({ customer: customerId, created: { gte: sinceUnix }, limit: 100, ...(startingAfter ? { starting_after: startingAfter } : {}) }, BOUND);
+    for (const pi of list?.data ?? []) if (pi?.metadata?.type === EXTRAS_PI_TYPE && pi?.metadata?.appointmentId === appointmentId) out.push(pi);
+    if (!list?.has_more || !list.data?.length) break;
+    startingAfter = list.data[list.data.length - 1].id;
+  }
+  return out;
+}
+
 /**
- * The booking is ending before Job complete (any cancel path, through quoteBalance.settleBalanceOnCancel): open
- * extras are closed and the extras hold is let go (extras are never part of a cancellation fee). Charged extras are
- * left to the refund paths.
+ * The booking is ending before Job complete (any cancel path, through quoteBalance.settleBalanceOnCancel, and the
+ * job's safety net): open extras are closed and every extras hold on the booking is let go (extras are never part
+ * of a cancellation fee). Claimed ('releasing'), never while an Approve is under way; a stale hold or release claim
+ * is taken over. Every extras PaymentIntent for the booking is looked up at Stripe, so a hold whose reply was lost
+ * is let go too. Charged extras are left to the refund paths.
  */
 export async function releaseExtrasOnCancel(appointmentId: string): Promise<ExtrasReleaseResult> {
   await closeOpenExtras(appointmentId, "canceled");
-  const p = await extrasPaymentFor(appointmentId);
-  if (!p || ["released", "captured", "unpaid"].includes(p.status)) return { ok: true };
-  if (p.status === "holding" || p.status === "capturing") return { ok: false, message: "The extras are being updated right now. Try again in a few minutes." };
-  if (p.releasePi && !(await releaseReplaced(p.id))) return { ok: false, message: "The extras hold couldn't be released right now. Try again in a few minutes." };
-  if (p.stripePaymentIntentId && p.status !== "none") {
-    const stripe: any = await getUncachableStripeClient();
-    try {
-      const cur: any = await stripe.paymentIntents.retrieve(p.stripePaymentIntentId, {}, BOUND);
-      if (cur?.status === "succeeded") {
-        await recordCaptured(p.id, cur, null);
-        return { ok: false, message: "The extras were just charged. Refund them instead." };
-      }
-      if (CANCELABLE.includes(cur?.status)) await stripe.paymentIntents.cancel(cur.id, { cancellation_reason: "requested_by_customer" }, BOUND);
-    } catch (err) {
-      await rows(sql`UPDATE quote_extras_payments SET last_error = ${`release: ${errMsg(err)}`}, updated_at = now() WHERE id = ${p.id}`);
-      return { ok: false, message: "The extras hold couldn't be released right now. Try again in a few minutes." };
+  const tag = randomUUID();
+  const [c] = await rows<any>(sql`
+    UPDATE quote_extras_payments SET status = 'releasing', claim_tag = ${tag}, updated_at = now()
+     WHERE appointment_id = ${appointmentId}
+       AND ((status IN ('none', 'scheduled', 'held', 'hold_failed') AND (approve_claimed_at IS NULL OR approve_claimed_at < now() - make_interval(mins => ${CLAIM_MINUTES})))
+         OR (status IN ('holding', 'releasing') AND updated_at < now() - make_interval(mins => ${CLAIM_MINUTES})))
+     RETURNING *`);
+  if (!c) {
+    const p = await extrasPaymentFor(appointmentId);
+    if (!p || ["released", "captured", "unpaid"].includes(p.status)) return { ok: true };
+    return { ok: false, message: "The extras are being updated right now. Try again in a few minutes." };
+  }
+  const stripe: any = await getUncachableStripeClient();
+  try {
+    const ids = new Set<string>([c.stripe_payment_intent_id, c.release_pi].filter(Boolean));
+    const customerId = c.stripe_customer_id ?? (await depositCard(appointmentId)).customerId;
+    if (customerId) {
+      for (const pi of await liveExtrasIntents(stripe, customerId, appointmentId, Math.floor(new Date(c.created_at).getTime() / 1000) - 3600)) ids.add(pi.id);
     }
+    for (const id of Array.from(ids)) {
+      const cur: any = await stripe.paymentIntents.retrieve(id, {}, BOUND);
+      if (cur?.status === "succeeded") {
+        await alertOutsyde("Extras charged on a booking that ended", `Extras payment ${id} on quote booking ${appointmentId} was charged before the booking ended. Refund it from the booking.`);
+        continue;
+      }
+      if (CANCELABLE.includes(cur?.status)) await stripe.paymentIntents.cancel(id, { cancellation_reason: "requested_by_customer" }, BOUND);
+    }
+  } catch (err) {
+    // Left 'releasing': the job takes the claim over once it is stale and tries again.
+    await rows(sql`UPDATE quote_extras_payments SET last_error = ${`release: ${errMsg(err)}`}, updated_at = now() WHERE id = ${c.id} AND claim_tag = ${tag}`);
+    return { ok: false, message: "The extras hold couldn't be released right now. Try again in a few minutes." };
   }
   await rows(sql`
-    UPDATE quote_extras_payments SET status = 'released', released_at = now(), retry_at = NULL, hold_at = NULL, updated_at = now()
-     WHERE id = ${p.id} AND status IN ('none', 'scheduled', 'held', 'hold_failed')`);
+    UPDATE quote_extras_payments SET status = 'released', released_at = now(), release_pi = NULL, retry_at = NULL, hold_at = NULL, updated_at = now()
+     WHERE id = ${c.id} AND claim_tag = ${tag} AND status = 'releasing'`);
   return { ok: true };
 }
 
@@ -646,8 +738,9 @@ export async function recordExtrasRefund(paymentIntentId: string, amountCents: n
 
 /**
  * Stripe events for an extras PaymentIntent (metadata.type quote_extras). Returns true when handled.
- *   capturable: an Approve that needed the customer went through, or Update your card is now held.
- *   succeeded: Pay for extras paid, or a capture whose reply was lost.
+ *   capturable: an Approve that needed the customer went through (finished under the claim), or Update your card is
+ *     now held. Never lets an intent go while an Approve is under way (it may be that Approve's own hold).
+ *   succeeded: Pay for extras paid, or a capture whose reply was lost. One that isn't on record is flagged to Outsyde.
  *   canceled: Stripe let the hold go while we thought it held.
  */
 export async function handleExtrasEvent(kind: "capturable" | "succeeded" | "canceled", pi: any): Promise<boolean> {
@@ -655,29 +748,33 @@ export async function handleExtrasEvent(kind: "capturable" | "succeeded" | "canc
   const apptId = pi.metadata.appointmentId;
   if (!apptId) return true;
   const p = await extrasPaymentFor(apptId);
+  const claimLive = !!p?.approveClaimedAt && new Date(p.approveClaimedAt).getTime() > Date.now() - CLAIM_MINUTES * 60_000;
   if (kind === "capturable" && pi.status === "requires_capture") {
+    if (p && p.stripePaymentIntentId === pi.id && p.status !== "hold_failed") return true; // already the hold on record
     const extraId = pi.metadata.extraId;
     if (extraId) {
       const x = await extraById(extraId);
-      if (x?.status === "approving" && x.approveIntentId === pi.id) await finishApproval(extraId, pi);
-      else if (p?.stripePaymentIntentId !== pi.id) await letGoOfIntent(pi.id, `not an extra waiting on it (${x?.status ?? "none"})`);
+      if (x?.status === "approving" && x.approveIntentId === pi.id) { await finishWaiting(extraId, pi); return true; } // busy: Approve or the job finishes it
+      if (!claimLive && x?.status !== "approving") await letGoOfIntent(pi.id, `not an extra waiting on it (${x?.status ?? "none"})`);
       return true;
     }
     if (pi.metadata.newCard === "true") {
       const [done] = await rows<{ id: string }>(sql`
         UPDATE quote_extras_payments SET status = 'held', held_cents = ${Number(pi.amount)}::int, held_at = now(), retry_at = NULL, last_error = NULL, updated_at = now()
          WHERE appointment_id = ${apptId} AND status = 'hold_failed' AND stripe_payment_intent_id = ${pi.id} AND hold_cents = ${Number(pi.amount)}::int RETURNING id`);
-      if (!done && p?.stripePaymentIntentId !== pi.id) await letGoOfIntent(pi.id, "not the payment on the booking");
-      else if (!done && p?.status !== "held") await letGoOfIntent(pi.id, `extras are ${p?.status}`);
+      if (!done && !claimLive) await letGoOfIntent(pi.id, `extras are ${p?.status}, not waiting on this card`);
     }
     return true;
   }
-  if (kind === "succeeded" && p && p.stripePaymentIntentId === pi.id && ["held", "capturing", "unpaid"].includes(p.status)) {
-    await recordCaptured(p.id, pi, null);
+  if (kind === "succeeded") {
+    if (p && p.stripePaymentIntentId === pi.id && ["held", "capturing", "unpaid"].includes(p.status)) { await recordCaptured(p.id, pi, null); return true; }
+    if (!(p && p.stripePaymentIntentId === pi.id && p.status === "captured")) {
+      await alertOutsyde("Extras payment not on record", `Extras payment ${pi.id} (${Number(pi.amount_received ?? 0)} cents) on quote booking ${apptId} went through but isn't the payment on record (status ${p?.status ?? "none"}). Refund it or record it.`);
+    }
     return true;
   }
   if (kind === "canceled" && p && p.stripePaymentIntentId === pi.id && p.status === "held") {
-    await rows(sql`UPDATE quote_extras_payments SET status = 'hold_failed', retry_at = NULL, last_error = 'hold canceled at Stripe', updated_at = now() WHERE id = ${p.id} AND status = 'held'`);
+    await rows(sql`UPDATE quote_extras_payments SET status = 'hold_failed', retry_at = NULL, last_error = 'hold canceled at Stripe', failed_notice_at = NULL, updated_at = now() WHERE id = ${p.id} AND status = 'held' AND stripe_payment_intent_id = ${pi.id}`);
     const fresh = await extrasPaymentFor(apptId);
     if (fresh?.status === "hold_failed") await postPaymentCardOnce(fresh, "extras_hold_failed");
   }
@@ -690,45 +787,66 @@ export type ExtrasCardResult = { ok: true; pi: any; captureMethod: "manual" | "a
 
 /**
  * The customer pays with a new card: a hold that failed for good (Update your card, before Job complete) or extras
- * that couldn't be charged at Job complete (Pay for extras, charged now). One payment per try: a second tap returns
- * the same unfinished one.
+ * that couldn't be charged at Job complete (Pay for extras, charged now). Under the payment claim. A second tap
+ * returns the same unfinished payment; one that is processing or already went through is never replaced, and a
+ * failed lookup decides nothing.
  */
 export async function startExtrasCardPayment(appointmentId: string, customerId: string): Promise<ExtrasCardResult> {
-  const p = await extrasPaymentFor(appointmentId);
-  const appt = await storage.getAppointment(appointmentId);
-  if (!p || !appt) return { ok: false, status: 409, code: "NOT_NEEDED", message: "Nothing to pay right now." };
-  const payNow = p.status === "unpaid";
-  if (!payNow) {
-    if (p.status !== "hold_failed") return { ok: false, status: 409, code: p.status === "held" || p.status === "captured" ? "ALREADY_HELD" : "NOT_NEEDED", message: p.status === "held" ? "The extras are already on hold on your card." : "Nothing to pay right now." };
-    if (p.retryAt) return { ok: false, status: 409, code: "RETRY_PENDING", message: "We'll try your card again before the job. If that doesn't work, you can add a new card." };
-    if (appt.status !== BOOKING_STATES.CONFIRMED) return { ok: false, status: 409, code: "NOT_CONFIRMED", message: "This booking can't take a payment now." };
+  const c = await claimPayment(appointmentId, ["hold_failed", "unpaid"]);
+  if (!c) {
+    const p = await extrasPaymentFor(appointmentId);
+    if (!p || !["hold_failed", "unpaid"].includes(p.status)) {
+      return { ok: false, status: 409, code: p?.status === "held" || p?.status === "captured" ? "ALREADY_HELD" : "NOT_NEEDED", message: p?.status === "held" ? "The extras are already on hold on your card." : p?.status === "captured" ? "The extras are paid." : "Nothing to pay right now." };
+    }
+    return BUSY;
   }
-  const stripe: any = await getUncachableStripeClient();
-  if (p.stripePaymentIntentId) {
-    const cur: any = await stripe.paymentIntents.retrieve(p.stripePaymentIntentId, {}, BOUND).catch(() => null);
-    const mine = cur?.metadata?.newCard === "true" && (cur?.capture_method === "manual") === !payNow;
-    if (mine && ["requires_payment_method", "requires_confirmation", "requires_action"].includes(cur.status)) return { ok: true, pi: cur, captureMethod: payNow ? "automatic" : "manual" };
-    if (cur?.status === "succeeded" && payNow) { await recordCaptured(p.id, cur, null); return { ok: false, status: 409, code: "ALREADY_PAID", message: "The extras are paid." }; }
+  const p = c.row;
+  try {
+    const appt = await storage.getAppointment(appointmentId);
+    const payNow = p.status === "unpaid";
+    if (!payNow) {
+      if (p.retry_at) return { ok: false, status: 409, code: "RETRY_PENDING", message: "We'll try your card again before the job. If that doesn't work, you can add a new card." };
+      if (appt?.status !== BOOKING_STATES.CONFIRMED) return { ok: false, status: 409, code: "NOT_CONFIRMED", message: "This booking can't take a payment now." };
+    }
+    const stripe: any = await getUncachableStripeClient();
+    if (p.stripe_payment_intent_id) {
+      let cur: any;
+      try { cur = await stripe.paymentIntents.retrieve(p.stripe_payment_intent_id, {}, BOUND); }
+      catch { return STRIPE_DOWN; }
+      const mine = cur?.metadata?.newCard === "true" && (cur?.capture_method === "manual") === !payNow;
+      if (mine && ["requires_payment_method", "requires_confirmation", "requires_action"].includes(cur.status)) return { ok: true, pi: cur, captureMethod: payNow ? "automatic" : "manual" };
+      if (cur?.status === "processing") return { ok: false, status: 409, code: "PROCESSING", message: "Your payment is going through. Check back in a minute." };
+      if (cur?.status === "succeeded" && payNow) { await recordCaptured(p.id, cur, null); return { ok: false, status: 409, code: "ALREADY_PAID", message: "The extras are paid." }; }
+      if (cur?.status === "requires_capture" && !payNow && mine) { await handleExtrasEvent("capturable", cur); return { ok: false, status: 409, code: "ALREADY_HELD", message: "The extras are already on hold on your card." }; }
+    }
+    const q = await quoteOf(p.quote_id);
+    const pi = await stripe.paymentIntents.create({
+      amount: p.hold_cents, currency: "usd", customer: customerId,
+      ...(payNow ? {} : { capture_method: "manual" }),
+      setup_future_usage: "off_session",
+      automatic_payment_methods: { enabled: true, allow_redirects: "never" },
+      metadata: { type: EXTRAS_PI_TYPE, appointmentId, quoteId: p.quote_id, businessId: p.business_id, newCard: "true", ...(payNow ? { payNow: "true" } : {}) },
+      description: `Extras for ${q?.title ?? "your booking"}`.slice(0, 450),
+    }, { idempotencyKey: `quote_extras_card_${appointmentId}_${p.attempts}`, ...BOUND });
+    await rows(sql`
+      UPDATE quote_extras_payments SET stripe_payment_intent_id = ${pi.id}, attempts = attempts + 1, updated_at = now()
+       WHERE id = ${p.id} AND approve_claim_tag = ${c.tag} AND status = ${p.status}`);
+    return { ok: true, pi, captureMethod: payNow ? "automatic" : "manual" };
+  } finally {
+    await unclaimPayment(appointmentId, c.tag);
   }
-  const q = await quoteOf(p.quoteId);
-  const pi = await stripe.paymentIntents.create({
-    amount: p.holdCents, currency: "usd", customer: customerId,
-    ...(payNow ? {} : { capture_method: "manual" }),
-    setup_future_usage: "off_session",
-    automatic_payment_methods: { enabled: true, allow_redirects: "never" },
-    metadata: { type: EXTRAS_PI_TYPE, appointmentId, quoteId: p.quoteId, businessId: p.businessId, newCard: "true", ...(payNow ? { payNow: "true" } : {}) },
-    description: `Extras for ${q?.title ?? "your booking"}`.slice(0, 450),
-  }, { idempotencyKey: `quote_extras_card_${appointmentId}_${p.attempts}`, ...BOUND });
-  await rows(sql`
-    UPDATE quote_extras_payments SET stripe_payment_intent_id = ${pi.id}, attempts = attempts + 1, updated_at = now()
-     WHERE id = ${p.id} AND status = ${p.status} AND attempts = ${p.attempts}`);
-  return { ok: true, pi, captureMethod: payNow ? "automatic" : "manual" };
 }
 
 // ─── The job (every 5 minutes, with the quote expiry job) ───────────────────
 
 export async function runQuoteExtrasJob(now = new Date()): Promise<{ holds: number; charged: number; released: number; reminders: number }> {
   let holds = 0, charged = 0, released = 0, reminders = 0;
+  // Review I2: extras released for a cancel that never went through (the booking is still confirmed): hold again.
+  await rows(sql`
+    UPDATE quote_extras_payments x SET status = 'scheduled', hold_at = ${now}::timestamptz, retry_at = NULL, released_at = NULL, failed_notice_at = NULL, updated_at = now()
+      FROM appointments a, quote_jobs j
+     WHERE a.id = x.appointment_id AND j.appointment_id = x.appointment_id AND a.status = 'confirmed' AND j.completed_at IS NULL
+       AND x.status = 'released' AND x.approved_cents > 0 AND x.released_at < now() - interval '2 minutes'`);
   // Far out holds and retries due, for confirmed bookings.
   const due = await rows<{ id: string }>(sql`
     SELECT x.id FROM quote_extras_payments x JOIN appointments a ON a.id = x.appointment_id AND a.status = 'confirmed'
@@ -739,22 +857,29 @@ export async function runQuoteExtrasJob(now = new Date()): Promise<{ holds: numb
   for (const d of due) {
     try { if ((await placeExtrasHold(d.id, now)) === "held") holds++; } catch (err) { console.error(`[quote extras] hold failed for ${d.id}:`, err); }
   }
-  // A charge in doubt at Job complete (no reply): finish it from Stripe.
+  // A charge in doubt at Job complete (no reply), or held extras on a completed booking: finish from Stripe.
   const doubt = await rows<{ appointment_id: string }>(sql`
     SELECT x.appointment_id FROM quote_extras_payments x JOIN appointments a ON a.id = x.appointment_id AND a.status = 'completed'
      WHERE (x.status = 'capturing' AND x.updated_at < now() - make_interval(mins => ${CLAIM_MINUTES}))
         OR (x.status = 'held' AND EXISTS (SELECT 1 FROM quote_jobs j WHERE j.appointment_id = x.appointment_id AND j.completed_at IS NOT NULL))
      LIMIT 25`);
   for (const d of doubt) { if ((await captureExtrasAtComplete(d.appointment_id)).status === "captured") charged++; }
-  // Safety net: a booking that ended by a path that skipped the release, and replaced holds not let go yet.
+  // Safety net: a booking that ended by a path that skipped the release, a stale hold or release claim (review I3),
+  // and a release left half done on a booking still confirmed.
   const ended = await rows<{ appointment_id: string }>(sql`
     SELECT x.appointment_id FROM quote_extras_payments x JOIN appointments a ON a.id = x.appointment_id
-     WHERE a.status NOT IN ('confirmed', 'completed') AND (x.status IN ('none', 'scheduled', 'hold_failed', 'held')
-        OR EXISTS (SELECT 1 FROM quote_extras e WHERE e.appointment_id = x.appointment_id AND e.status IN ('proposed', 'approving'))) LIMIT 25`);
+     WHERE (a.status NOT IN ('confirmed', 'completed') AND (x.status IN ('none', 'scheduled', 'hold_failed', 'held')
+             OR (x.status IN ('holding', 'releasing') AND x.updated_at < now() - make_interval(mins => ${CLAIM_MINUTES}))
+             OR EXISTS (SELECT 1 FROM quote_extras e WHERE e.appointment_id = x.appointment_id AND e.status IN ('proposed', 'approving'))))
+        OR (x.status = 'releasing' AND x.updated_at < now() - make_interval(mins => ${CLAIM_MINUTES}))
+     LIMIT 25`);
   for (const e of ended) { try { if ((await releaseExtrasOnCancel(e.appointment_id)).ok) released++; } catch (err) { console.error(`[quote extras] release failed for ${e.appointment_id}:`, err); } }
-  const replaced = await rows<{ id: string }>(sql`SELECT id FROM quote_extras_payments WHERE release_pi IS NOT NULL AND updated_at < now() - interval '2 minutes' LIMIT 25`);
+  // Replaced holds not let go yet (only while no Approve is under way, which may be letting it go itself).
+  const replaced = await rows<{ id: string }>(sql`
+    SELECT id FROM quote_extras_payments WHERE release_pi IS NOT NULL AND updated_at < now() - interval '2 minutes'
+       AND (approve_claimed_at IS NULL OR approve_claimed_at < now() - make_interval(mins => ${CLAIM_MINUTES})) LIMIT 25`);
   for (const r of replaced) if (await releaseReplaced(r.id)) released++;
-  // An Approve that needed the customer and was left: finish it if it went through.
+  // An Approve that needed the customer and was left: finish it if it went through (under the claim).
   const waiting = await rows<{ id: string; intent: string }>(sql`
     SELECT id, approve_intent_id AS intent FROM quote_extras WHERE status = 'approving' AND approve_intent_id IS NOT NULL
        AND updated_at < now() - make_interval(mins => ${CLAIM_MINUTES}) LIMIT 25`);
@@ -762,7 +887,7 @@ export async function runQuoteExtrasJob(now = new Date()): Promise<{ holds: numb
     try {
       const stripe: any = await getUncachableStripeClient();
       const cur: any = w.intent.startsWith("seti_") ? await stripe.setupIntents.retrieve(w.intent, {}, BOUND) : await stripe.paymentIntents.retrieve(w.intent, {}, BOUND);
-      if (cur?.status === "requires_capture" || (cur?.object === "setup_intent" && cur?.status === "succeeded")) await finishApproval(w.id, cur);
+      if (cur?.status === "requires_capture" || (isSetupIntent(cur) && cur?.status === "succeeded")) await finishWaiting(w.id, cur);
       else if (["canceled", "requires_payment_method"].includes(cur?.status) && !cur?.metadata?.newCard) {
         await rows(sql`UPDATE quote_extras SET status = 'proposed', approve_intent_id = NULL, updated_at = now() WHERE id = ${w.id} AND status = 'approving' AND approve_intent_id = ${w.intent}`);
       }

@@ -78,6 +78,7 @@ assert(extrasCompleteBlocker(null, now) === null && extrasCompleteBlocker(pay('n
 assert(extrasCompleteBlocker(pay('held'), now) === null, 'held: Job complete charges it');
 assert(extrasCompleteBlocker(pay('scheduled'), now) === 'EXTRAS_NOT_HELD' && extrasCompleteBlocker(pay('hold_failed'), now) === 'EXTRAS_NOT_HELD', 'approved but not held yet: blocked');
 assert(extrasCompleteBlocker(pay('holding'), now) === 'EXTRAS_BUSY', 'a hold being placed: wait');
+assert(extrasCompleteBlocker(pay('releasing'), now) === 'EXTRAS_BUSY', 'a release under way: wait');
 assert(extrasCompleteBlocker(pay('held', 10000, new Date(now.getTime() - 60_000)), now) === 'EXTRAS_BUSY', 'an Approve under way: wait');
 assert(extrasCompleteBlocker(pay('held', 10000, new Date(now.getTime() - 11 * 60_000)), now) === null, 'a stale Approve claim does not block forever');
 

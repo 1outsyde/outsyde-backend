@@ -62,6 +62,9 @@ async function adminAlert(subject: string, text: string): Promise<boolean> {
   }
 }
 
+/** For the extras module: the same Outsyde alert. */
+export const quoteAdminAlert = (subject: string, text: string) => adminAlert(subject, text);
+
 // ─── Cards ──────────────────────────────────────────────────────────────────
 
 export type WindowCardEvent = "job_complete" | "job_confirmed" | "problem_reported" | "report_decided";
@@ -517,6 +520,9 @@ export async function decideQuoteReport(reportId: string, outcome: ReportOutcome
   if (res.outcome !== "full_refund") {
     await payBalanceShare(job.id);
     if (xp) await payExtrasShare(xp.id);
+  } else {
+    // A full refund: extras never charged (Pay for extras) are no longer owed.
+    await rows(sql`UPDATE quote_extras_payments SET status = 'released', released_at = now(), payout_status = 'canceled', updated_at = now() WHERE appointment_id = ${appt.id} AND status = 'unpaid'`);
   }
   await settlePointsAndStamp(job.id, appt.id);
   if (res.outcome === "full_refund") {

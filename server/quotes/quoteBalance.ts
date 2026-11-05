@@ -326,8 +326,10 @@ export type CancelBalanceResult = { ok: true; capturedCents: number; chargeId: s
 export async function settleBalanceOnCancel(appointmentId: string, owedCents = 0): Promise<CancelBalanceResult> {
   // Step 4b-2b: the extras are let go first, on every cancel path (they are never part of a cancellation fee).
   const { releaseExtrasOnCancel } = await import("./quoteExtras");
-  const ex = await releaseExtrasOnCancel(appointmentId);
-  if (!ex.ok) return { ok: false, code: "BALANCE_RELEASE_FAILED", message: ex.message };
+  // Review I3: an extras release that can't finish now never holds up the balance; the extras job finishes it
+  // (and holds the extras again if the booking turns out to stay confirmed).
+  const ex = await releaseExtrasOnCancel(appointmentId).catch((err) => ({ ok: false as const, message: String(err?.message ?? err) }));
+  if (!ex.ok) console.error(`[quote balance] extras release for ${appointmentId} left to the job: ${ex.message}`);
   return settleBalancePart(appointmentId, owedCents);
 }
 
@@ -474,7 +476,7 @@ export type CompleteResult =
   | { ok: false; status: number; code: JobCompleteBlock | "BALANCE_BUSY" | "CAPTURE_FAILED" | "NOT_FOUND" | "EXTRAS_NOT_HELD" | "EXTRAS_BUSY"; message: string };
 
 const EXTRAS_BLOCK_TEXT = {
-  EXTRAS_NOT_HELD: "The approved extras aren't on hold on the customer's card yet, so the job can't be completed. The customer was asked to update their card.",
+  EXTRAS_NOT_HELD: "The approved extras aren't on hold on the customer's card yet, so the job can't be marked complete until they are.",
   EXTRAS_BUSY: "The customer is approving an extra right now. Try again in a few minutes.",
 } as const;
 
