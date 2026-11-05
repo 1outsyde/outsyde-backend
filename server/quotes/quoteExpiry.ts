@@ -32,6 +32,8 @@ export function startQuoteExpiryJob(intervalMs = 5 * 60 * 1000): void {
     import("./quoteBalance").then((m) => m.runQuoteBalanceJob()).catch((err) => console.error("[quote balance] job failed:", err));
     // Step 4b-1: the 6 hour window (payouts, retries), points that follow the money, report reminders.
     import("./quoteWindow").then((m) => m.runQuoteWindowJob()).catch((err) => console.error("[quote window] job failed:", err));
+    // Step 4b-2b: far out extras holds and retries, charges in doubt, releases, unpaid reminders.
+    import("./quoteExtras").then((m) => m.runQuoteExtrasJob()).catch((err) => console.error("[quote extras] job failed:", err));
   };
   timer = setInterval(run, intervalMs);
   setTimeout(run, 30 * 1000);

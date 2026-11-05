@@ -495,6 +495,12 @@ export class WebhookHandlers {
   static async handlePaymentIntentSucceeded(paymentIntent: any) {
     const metadata = paymentIntent.metadata || {};
     // Quotes step 4a: a balance PaymentIntent (own type) never reaches the appointment branches.
+    // Quotes step 4b-2b: an extras PaymentIntent (own type) never reaches the appointment branches either.
+    if (metadata.type === 'quote_extras') {
+      const { handleExtrasEvent } = await import("../quotes/quoteExtras");
+      await handleExtrasEvent('succeeded', paymentIntent).catch((err) => console.error('[quote extras] succeeded event failed:', err));
+      return;
+    }
     if (metadata.type === 'quote_balance') {
       const { handleBalanceEvent } = await import("../quotes/quoteBalance");
       await handleBalanceEvent('succeeded', paymentIntent).catch((err) => console.error('[quote balance] succeeded event failed:', err));
@@ -1449,6 +1455,12 @@ export class WebhookHandlers {
    */
   static async handlePaymentIntentCapturableUpdated(paymentIntent: any) {
     const metadata = paymentIntent.metadata || {};
+    // Quotes step 4b-2b: an extras PaymentIntent (own type) never reaches the appointment branches either.
+    if (metadata.type === 'quote_extras') {
+      const { handleExtrasEvent } = await import("../quotes/quoteExtras");
+      await handleExtrasEvent('capturable', paymentIntent).catch((err) => console.error('[quote extras] capturable event failed:', err));
+      return;
+    }
     if (metadata.type === 'quote_balance') {
       const { handleBalanceEvent } = await import("../quotes/quoteBalance");
       await handleBalanceEvent('capturable', paymentIntent).catch((err) => console.error('[quote balance] capturable event failed:', err));
@@ -1496,6 +1508,12 @@ export class WebhookHandlers {
    */
   static async handlePaymentIntentCanceled(paymentIntent: any) {
     const metadata = paymentIntent.metadata || {};
+    // Quotes step 4b-2b: an extras PaymentIntent (own type) never reaches the appointment branches either.
+    if (metadata.type === 'quote_extras') {
+      const { handleExtrasEvent } = await import("../quotes/quoteExtras");
+      await handleExtrasEvent('canceled', paymentIntent).catch((err) => console.error('[quote extras] canceled event failed:', err));
+      return;
+    }
     if (metadata.type === 'quote_balance') {
       const { handleBalanceEvent } = await import("../quotes/quoteBalance");
       await handleBalanceEvent('canceled', paymentIntent).catch((err) => console.error('[quote balance] canceled event failed:', err));

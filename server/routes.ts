@@ -9215,7 +9215,11 @@ export async function registerRoutes(
           const job = await qb.quoteJobFor(appointmentId);
           const paid = (appointment.depositAmountCents ?? 0) > 0 ? appointment.depositAmountCents! : appointment.totalPrice;
           const balancePaid = job ? job.refundedCents + qb.refundableBalanceCents(job) : 0;
-          const remaining = Math.max(0, paid + balancePaid - (appointment.refundAmount ?? 0));
+          // Step 4b-2b: the approved extras charged at Job complete (the business's part) count too.
+          const qx = await import("./quotes/quoteExtras");
+          const xp = await qx.extrasPaymentFor(appointmentId);
+          const extrasPaid = xp ? xp.refundedCents + qx.refundableExtrasCents(xp) : 0;
+          const remaining = Math.max(0, paid + balancePaid + extrasPaid - (appointment.refundAmount ?? 0));
           // An earlier refund whose second part failed is finished first, whatever this call asks for.
           const resuming = await qb.hasOpenQuoteRefund(appointmentId);
           const qResolved = resuming
@@ -9228,12 +9232,12 @@ export async function registerRoutes(
           const done = await qb.refundQuoteBooking(appointment, qResolved.refundCents, `provider_refund_${appointmentId}_${appointment.refundAmount ?? 0}_${qResolved.refundCents}`, {
             initiatedBy: userId, reason: reason || 'Provider initiated refund',
           });
-          const amount = done.fromBalance + done.fromDeposit;
+          const amount = done.fromExtras + done.fromBalance + done.fromDeposit;
           const refundedTotal = (await storage.getAppointment(appointmentId))?.refundAmount ?? 0;
           await db.update(appointments).set({ cancellationReason: reason || 'Refunded by provider' }).where(eq(appointments.id, appointmentId));
           // Step 4b-1: points follow the money in the quote job (quoteWindow.ts settles the deposit and balance points
           // on what stays paid, again after every refund), so nothing is reversed here.
-          if (refundedTotal >= paid + balancePaid) await giveBackPromoCode({ type: 'appointment', id: appointmentId }, 'provider full refund');
+          if (refundedTotal >= paid + balancePaid + extrasPaid) await giveBackPromoCode({ type: 'appointment', id: appointmentId }, 'provider full refund');
           try {
             const refundUser = await storage.getUser(appointment.clientId);
             await NotificationTriggers.bookingCanceledOrRefunded({
@@ -9252,10 +9256,11 @@ export async function registerRoutes(
           return res.json({
             success: true,
             refundId: done.refundIds[done.refundIds.length - 1] ?? null,
-            amount: done.fromBalance + done.fromDeposit,
-            refundedAmountCents: done.fromBalance + done.fromDeposit,
+            amount,
+            refundedAmountCents: amount,
             status: 'succeeded',
             ...(done.resumed ? { resumedEarlierRefund: true } : {}),
+            extrasRefundedCents: done.fromExtras,
             balanceRefundedCents: done.fromBalance,
             depositRefundedCents: done.fromDeposit,
           });

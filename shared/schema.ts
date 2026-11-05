@@ -843,6 +843,74 @@ export const quoteReports = pgTable("quote_reports", {
 });
 export type QuoteReport = typeof quoteReports.$inferSelect;
 
+// Step 4b-2b (migration 102): extras. One row per extra the vendor sends; only the customer's Approve adds it.
+export const quoteExtras = pgTable("quote_extras", {
+  id: varchar("id", { length: 36 }).primaryKey().default(sql`gen_random_uuid()`),
+  appointmentId: varchar("appointment_id", { length: 36 }).notNull().references((): AnyPgColumn => appointments.id, { onDelete: "cascade" }),
+  quoteId: varchar("quote_id", { length: 36 }).notNull().references(() => quotes.id, { onDelete: "cascade" }),
+  businessId: varchar("business_id", { length: 36 }).notNull(),
+  customerId: varchar("customer_id", { length: 36 }).notNull(),
+  proposedBy: varchar("proposed_by", { length: 36 }).notNull(),
+  description: text("description").notNull(),
+  amountCents: integer("amount_cents").notNull(),
+  status: text("status").$type<"proposed" | "approving" | "approved" | "declined" | "withdrawn" | "lapsed" | "canceled">().notNull().default("proposed"),
+  approveIntentId: text("approve_intent_id"),
+  messageId: varchar("message_id", { length: 36 }),
+  answeredAt: timestamp("answered_at", { withTimezone: true }),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+}, (t) => ({ apptIdx: index("idx_quote_extras_appointment").on(t.appointmentId) }));
+export type QuoteExtra = typeof quoteExtras.$inferSelect;
+
+// One extras payment per booking: one hold for all approved extras, one charge at Job complete, its own payout.
+export const quoteExtrasPayments = pgTable("quote_extras_payments", {
+  id: varchar("id", { length: 36 }).primaryKey().default(sql`gen_random_uuid()`),
+  appointmentId: varchar("appointment_id", { length: 36 }).notNull().unique().references((): AnyPgColumn => appointments.id, { onDelete: "cascade" }),
+  quoteId: varchar("quote_id", { length: 36 }).notNull().references(() => quotes.id, { onDelete: "cascade" }),
+  businessId: varchar("business_id", { length: 36 }).notNull(),
+  clientId: varchar("client_id", { length: 36 }).notNull(),
+  approvedCents: integer("approved_cents").notNull().default(0),
+  feeCents: integer("fee_cents").notNull().default(0),
+  platformFeeCents: integer("platform_fee_cents").notNull().default(0),
+  vendorNetCents: integer("vendor_net_cents").notNull().default(0),
+  holdCents: integer("hold_cents").notNull().default(0),
+  status: text("status").$type<"none" | "scheduled" | "holding" | "held" | "hold_failed" | "capturing" | "captured" | "unpaid" | "released">().notNull().default("none"),
+  approveClaimTag: text("approve_claim_tag"),
+  approveClaimedAt: timestamp("approve_claimed_at", { withTimezone: true }),
+  holdAt: timestamp("hold_at", { withTimezone: true }),
+  retryAt: timestamp("retry_at", { withTimezone: true }),
+  attempts: integer("attempts").notNull().default(0),
+  claimTag: text("claim_tag"),
+  stripeCustomerId: text("stripe_customer_id"),
+  paymentMethodId: text("payment_method_id"),
+  stripePaymentIntentId: text("stripe_payment_intent_id"),
+  releasePi: text("release_pi"),
+  stripeChargeId: text("stripe_charge_id"),
+  heldCents: integer("held_cents"),
+  heldAt: timestamp("held_at", { withTimezone: true }),
+  capturedCents: integer("captured_cents"),
+  capturedAt: timestamp("captured_at", { withTimezone: true }),
+  releasedAt: timestamp("released_at", { withTimezone: true }),
+  refundedCents: integer("refunded_cents").notNull().default(0),
+  failedNoticeAt: timestamp("failed_notice_at", { withTimezone: true }),
+  reminderAt: timestamp("reminder_at", { withTimezone: true }),
+  payoutStatus: text("payout_status").$type<"none" | "held" | "paid" | "paused" | "canceled">().notNull().default("none"),
+  payoutClaimTag: text("payout_claim_tag"),
+  payoutClaimedAt: timestamp("payout_claimed_at", { withTimezone: true }),
+  payoutAttempts: integer("payout_attempts").notNull().default(0),
+  payoutNextAt: timestamp("payout_next_at", { withTimezone: true }),
+  payoutError: text("payout_error"),
+  payoutAlertedAt: timestamp("payout_alerted_at", { withTimezone: true }),
+  payoutCents: integer("payout_cents"),
+  payoutRecipient: text("payout_recipient").$type<"business" | "staff">(),
+  payoutTransferId: text("payout_transfer_id"),
+  paidOutAt: timestamp("paid_out_at", { withTimezone: true }),
+  lastError: text("last_error"),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+});
+export type QuoteExtrasPayment = typeof quoteExtrasPayments.$inferSelect;
+
 // R39 (migration 098): one cancellation fee charge per booking. Claimed before every try, looked up at Stripe
 // first, one idempotency key per try (server/payments/cancellationFees.ts).
 export const cancellationFeeCharges = pgTable("cancellation_fee_charges", {

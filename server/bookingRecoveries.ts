@@ -54,10 +54,20 @@ export async function resolveBooking(paymentIntentId: string): Promise<ResolvedB
     const [b] = await rows<any>(sql`
       SELECT j.appointment_id AS id, j.balance_cents, j.vendor_net_cents, a.staff_member_id
       FROM quote_jobs j JOIN appointments a ON a.id = j.appointment_id WHERE j.stripe_payment_intent_id = ${paymentIntentId} LIMIT 1`);
-    if (!b) return null;
+    if (b) {
+      return {
+        type: "appointment", id: b.id, base: Number(b.balance_cents), intendedPayout: Number(b.vendor_net_cents),
+        group: `appointment_balance_${b.id}`, recipient: b.staff_member_id ? "staff" : "business",
+      };
+    }
+    // Step 4b-2b: the extras payment, figured on the approved extras and sent in its own group.
+    const [x] = await rows<any>(sql`
+      SELECT x.appointment_id AS id, x.approved_cents, x.vendor_net_cents, a.staff_member_id
+      FROM quote_extras_payments x JOIN appointments a ON a.id = x.appointment_id WHERE x.stripe_payment_intent_id = ${paymentIntentId} LIMIT 1`);
+    if (!x) return null;
     return {
-      type: "appointment", id: b.id, base: Number(b.balance_cents), intendedPayout: Number(b.vendor_net_cents),
-      group: `appointment_balance_${b.id}`, recipient: b.staff_member_id ? "staff" : "business",
+      type: "appointment", id: x.id, base: Number(x.approved_cents), intendedPayout: Number(x.vendor_net_cents),
+      group: `appointment_extras_${x.id}`, recipient: x.staff_member_id ? "staff" : "business",
     };
   }
   const base = Number(r.deposit_amount_cents ?? r.total_price);
@@ -112,6 +122,9 @@ export async function backfillRefunds(limit = 50, s?: RecoveryBackfillStripe): P
       UNION ALL
       -- Quotes step 4a: a quote booking's balance payment, when it was refunded.
       SELECT stripe_payment_intent_id AS pi, updated_at AS ts FROM quote_jobs
+      WHERE stripe_payment_intent_id IS NOT NULL AND refunded_cents > 0 AND updated_at >= now() - interval '30 days'
+      UNION ALL
+      SELECT stripe_payment_intent_id AS pi, updated_at AS ts FROM quote_extras_payments
       WHERE stripe_payment_intent_id IS NOT NULL AND refunded_cents > 0 AND updated_at >= now() - interval '30 days'
       UNION ALL
       SELECT stripe_payment_intent_id AS pi, COALESCE(refunded_at, updated_at) AS ts FROM shoot_bookings

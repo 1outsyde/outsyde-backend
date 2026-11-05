@@ -46,6 +46,9 @@ export const appointmentRevenueAmountSql = sql.raw(
   `GREATEST(COALESCE(NULLIF(deposit_amount_cents, 0), total_price, 0)` +
   ` + COALESCE((SELECT qj.balance_cents FROM quote_jobs qj WHERE qj.appointment_id = appointments.id` +
   ` AND qj.balance_status = 'captured' AND qj.captured_cents >= qj.hold_cents), 0)` +
+  // Step 4b-2b: approved extras once charged (the business's part). Their refunds are in refund_amount too.
+  ` + COALESCE((SELECT qx.approved_cents FROM quote_extras_payments qx WHERE qx.appointment_id = appointments.id` +
+  ` AND qx.status = 'captured' AND qx.captured_cents >= qx.hold_cents), 0)` +
   ` - COALESCE(refund_amount, 0), 0)`,
 );
 

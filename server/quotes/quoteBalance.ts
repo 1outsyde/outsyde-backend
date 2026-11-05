@@ -324,6 +324,14 @@ export type CancelBalanceResult = { ok: true; capturedCents: number; chargeId: s
  * bookings without a quote job.
  */
 export async function settleBalanceOnCancel(appointmentId: string, owedCents = 0): Promise<CancelBalanceResult> {
+  // Step 4b-2b: the extras are let go first, on every cancel path (they are never part of a cancellation fee).
+  const { releaseExtrasOnCancel } = await import("./quoteExtras");
+  const ex = await releaseExtrasOnCancel(appointmentId);
+  if (!ex.ok) return { ok: false, code: "BALANCE_RELEASE_FAILED", message: ex.message };
+  return settleBalancePart(appointmentId, owedCents);
+}
+
+async function settleBalancePart(appointmentId: string, owedCents: number): Promise<CancelBalanceResult> {
   const job = await quoteJobFor(appointmentId);
   if (!job || job.balanceStatus === "none" || job.balanceStatus === "released") return { ok: true, capturedCents: 0, chargeId: null, released: false };
   if (job.balanceStatus === "captured") return { ok: true, capturedCents: 0, chargeId: null, released: false }; // refund paths handle it
@@ -341,7 +349,7 @@ export async function settleBalanceOnCancel(appointmentId: string, owedCents = 0
       }
       return { ok: true, capturedCents: 0, chargeId: null, released: true };
     }
-    return settleBalanceOnCancel(appointmentId, owedCents);
+    return settleBalancePart(appointmentId, owedCents);
   }
   if (job.balanceStatus !== "held") return { ok: false, code: "BALANCE_BUSY", message: "The balance is being updated right now. Try again in a few minutes." };
 
@@ -357,7 +365,7 @@ export async function settleBalanceOnCancel(appointmentId: string, owedCents = 0
   const [claimed] = await rows<{ id: string; pi: string }>(sql`
     UPDATE quote_jobs SET balance_status = 'releasing', claim_tag = ${tag}, updated_at = now()
      WHERE id = ${job.id} AND balance_status = 'held' RETURNING id, stripe_payment_intent_id AS pi`);
-  if (!claimed) return settleBalanceOnCancel(appointmentId, owedCents);
+  if (!claimed) return settleBalancePart(appointmentId, owedCents);
   const stripe: any = await getUncachableStripeClient();
   try {
     const cur: any = await stripe.paymentIntents.retrieve(claimed.pi, {}, BOUND);
@@ -395,6 +403,9 @@ export async function recordBalanceRefund(paymentIntentId: string, amountCents: 
            payout_status = CASE WHEN refunded_cents + ${amountCents}::int >= balance_cents AND payout_status IN ('held', 'paused') THEN 'canceled' ELSE payout_status END,
            updated_at = now()
      WHERE stripe_payment_intent_id = ${paymentIntentId}`);
+  // Step 4b-2b: or the extras payment (the same refund paths reach it).
+  const { recordExtrasRefund } = await import("./quoteExtras");
+  await recordExtrasRefund(paymentIntentId, amountCents);
 }
 
 /**
@@ -410,21 +421,26 @@ export async function hasOpenQuoteRefund(appointmentId: string): Promise<boolean
   return !!r;
 }
 
-export async function refundQuoteBooking(appt: Appointment, amountCents: number, opKey: string, metadata: Record<string, string>): Promise<{ fromBalance: number; fromDeposit: number; refundIds: string[]; resumed: boolean }> {
+export async function refundQuoteBooking(appt: Appointment, amountCents: number, opKey: string, metadata: Record<string, string>): Promise<{ fromExtras: number; fromBalance: number; fromDeposit: number; refundIds: string[]; resumed: boolean }> {
   const { stripeService } = await import("../stripe/stripeService");
   const [open] = await rows<any>(sql`SELECT * FROM quote_refunds WHERE appointment_id = ${appt.id} AND done_at IS NULL ORDER BY created_at LIMIT 1`);
   let plan = open;
   if (!plan) {
     const job = await quoteJobFor(appt.id);
-    const fromBalance = Math.min(amountCents, refundableBalanceCents(job));
+    // Step 4b-2b (B6): the extras first, then the balance, then the deposit.
+    const { extrasPaymentFor, refundableExtrasCents } = await import("./quoteExtras");
+    const ex = await extrasPaymentFor(appt.id);
+    const fromExtras = Math.min(amountCents, refundableExtrasCents(ex));
+    const fromBalance = Math.min(amountCents - fromExtras, refundableBalanceCents(job));
     await rows(sql`
-      INSERT INTO quote_refunds (op_key, appointment_id, balance_pi, deposit_pi, balance_cents, deposit_cents)
-      VALUES (${opKey}, ${appt.id}, ${fromBalance > 0 ? job?.stripePaymentIntentId ?? null : null}, ${appt.stripePaymentIntentId ?? null}, ${fromBalance}::int, ${amountCents - fromBalance}::int)
+      INSERT INTO quote_refunds (op_key, appointment_id, extras_pi, balance_pi, deposit_pi, extras_cents, balance_cents, deposit_cents)
+      VALUES (${opKey}, ${appt.id}, ${fromExtras > 0 ? ex?.stripePaymentIntentId ?? null : null}, ${fromBalance > 0 ? job?.stripePaymentIntentId ?? null : null}, ${appt.stripePaymentIntentId ?? null},
+              ${fromExtras}::int, ${fromBalance}::int, ${amountCents - fromExtras - fromBalance}::int)
       ON CONFLICT (op_key) DO NOTHING`);
     [plan] = await rows<any>(sql`SELECT * FROM quote_refunds WHERE op_key = ${opKey}`);
   }
   const refundIds: string[] = [];
-  const part = async (which: "balance" | "deposit") => {
+  const part = async (which: "extras" | "balance" | "deposit") => {
     const cents = Number(plan[`${which}_cents`]);
     const pi = plan[`${which}_pi`];
     if (cents <= 0 || plan[`${which}_refund_id`]) { if (plan[`${which}_refund_id`]) refundIds.push(plan[`${which}_refund_id`]); return; }
@@ -440,20 +456,27 @@ export async function refundQuoteBooking(appt: Appointment, amountCents: number,
     if (first) {
       await rows(sql`UPDATE appointments SET refund_amount = COALESCE(refund_amount, 0) + ${got}::int, refunded_at = now(), stripe_refund_id = ${r.id} WHERE id = ${appt.id}`);
       if (which === "balance") await recordBalanceRefund(pi, got, r.id);
+      if (which === "extras") { const { recordExtrasRefund } = await import("./quoteExtras"); await recordExtrasRefund(pi, got); }
     }
     refundIds.push(r.id);
   };
+  await part("extras");
   await part("balance");
   await part("deposit");
   await rows(sql`UPDATE quote_refunds SET done_at = now(), updated_at = now() WHERE id = ${plan.id} AND done_at IS NULL`);
-  return { fromBalance: Number(plan.balance_cents), fromDeposit: Number(plan.deposit_cents), refundIds, resumed: !!open && open.op_key !== opKey };
+  return { fromExtras: Number(plan.extras_cents ?? 0), fromBalance: Number(plan.balance_cents), fromDeposit: Number(plan.deposit_cents), refundIds, resumed: !!open && open.op_key !== opKey };
 }
 
 // ─── Job complete ───────────────────────────────────────────────────────────
 
 export type CompleteResult =
-  | { ok: true; pointsReleased: number; capturedCents: number }
-  | { ok: false; status: number; code: JobCompleteBlock | "BALANCE_BUSY" | "CAPTURE_FAILED" | "NOT_FOUND"; message: string };
+  | { ok: true; pointsReleased: number; capturedCents: number; extrasCapturedCents: number }
+  | { ok: false; status: number; code: JobCompleteBlock | "BALANCE_BUSY" | "CAPTURE_FAILED" | "NOT_FOUND" | "EXTRAS_NOT_HELD" | "EXTRAS_BUSY"; message: string };
+
+const EXTRAS_BLOCK_TEXT = {
+  EXTRAS_NOT_HELD: "The approved extras aren't on hold on the customer's card yet, so the job can't be completed. The customer was asked to update their card.",
+  EXTRAS_BUSY: "The customer is approving an extra right now. Try again in a few minutes.",
+} as const;
 
 const BLOCK_TEXT: Record<JobCompleteBlock, string> = {
   ALREADY_COMPLETE: "This job is already marked complete.",
@@ -479,6 +502,10 @@ export async function completeQuoteJob(appointmentId: string, actor: { userId: s
     balanceStatus: job ? (job.balanceStatus === "none" ? null : job.balanceStatus) : null, completedAt: job?.completedAt ? new Date(job.completedAt) : null,
   }, now);
   if (block) return { ok: false, status: block === "NOT_CONFIRMED" ? 400 : 409, code: block, message: BLOCK_TEXT[block] };
+  // Step 4b-2b (E3): approved extras must be held first.
+  const { extrasBlockFor, captureExtrasAtComplete } = await import("./quoteExtras");
+  const xBlock = await extrasBlockFor(appointmentId, now);
+  if (xBlock) return { ok: false, status: 409, code: xBlock, message: EXTRAS_BLOCK_TEXT[xBlock] };
 
   let capturedCents = 0;
   if (job && job.balanceStatus !== "none") { // held, a capture in doubt, or charged already: the capture reads Stripe first
@@ -486,6 +513,8 @@ export async function completeQuoteJob(appointmentId: string, actor: { userId: s
     if (!c.ok) return { ok: false, status: c.code === "CAPTURE_FAILED" ? 502 : 409, code: c.code, message: c.message };
     capturedCents = c.capturedCents;
   }
+  // The extras with it (B1): one charge. One that can't be charged becomes Pay for extras; the job still completes.
+  const extrasCapturedCents = (await captureExtrasAtComplete(appointmentId)).capturedCents;
   const { transitionAppointmentState } = await import("../bookingStateMachine");
   const t = await transitionAppointmentState(appointmentId, BOOKING_STATES.COMPLETED, {
     triggeredBy: actor.userId, triggerSource: actor.via === "auto" ? "system" : "api", metadata: { action: actor.via === "auto" ? "quote_auto_complete" : "quote_job_complete" },
@@ -514,7 +543,7 @@ export async function completeQuoteJob(appointmentId: string, actor: { userId: s
   } catch (err) {
     console.error(`[quote balance] aftercare email failed for ${appointmentId}:`, err);
   }
-  return { ok: true, pointsReleased, capturedCents };
+  return { ok: true, pointsReleased, capturedCents, extrasCapturedCents };
 }
 
 /**
