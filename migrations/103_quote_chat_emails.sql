@@ -8,6 +8,7 @@ CREATE TABLE IF NOT EXISTS quote_chat_emails (
   recipient_id varchar(36) NOT NULL,
   last_sent_at timestamptz,
   last_message_at timestamptz,
+  failed_count integer NOT NULL DEFAULT 0 CHECK (failed_count >= 0),
   created_at timestamptz NOT NULL DEFAULT now(),
   updated_at timestamptz NOT NULL DEFAULT now(),
   PRIMARY KEY (conversation_id, recipient_id)

@@ -43,15 +43,22 @@ async function sendMail(m: Mail): Promise<boolean> {
   return sendAdminEmail({ to: m.to, subject: m.subject, html: m.html, text: m.text, log: { kind: "booking", label: "Quote note" } });
 }
 
+/** After this many failed sends in a row the notes in them are given up (the chat still has them). */
+const MAX_FAILED_SENDS = 6;
+
 /**
  * Every 5 minutes (with the quote expiry job). One email per chat and person at most every 10 minutes, covering the
- * text notes they haven't read that are at least 2 minutes old and newer than the last email. The row is claimed
- * (last_sent_at) before sending; a failed send puts it back, so the notes go in the next email.
+ * text notes they haven't read that are at least 2 minutes old, sent after the chat's live quote and newer than the
+ * last email. The row is claimed first (last_sent_at, returned so only this claim can undo it).
+ *   - A send that fails: the notes stay due and are tried again after 10 minutes (never every run); after 6 failures
+ *     in a row they are given up.
+ *   - An error mid way (a database blip): the claim is undone, so no note is lost.
+ *   - Nobody to email (no address, blocked, a removed staff member): the notes are passed over, not retried.
  */
 export async function runQuoteNoteEmails(now = new Date()): Promise<{ sent: number }> {
   if (process.env.QUOTE_EMAILS_ENABLED !== "true") return { sent: 0 };
   let sent = 0;
-  const due = await rows<{ conversation_id: string; recipient_id: string; sender_id: string; quote_id: string; newest: string; prev_sent: string | null; prev_newest: string | null }>(sql`
+  const due = await rows<{ conversation_id: string; recipient_id: string; sender_id: string; quote_id: string; since: string; newest: string; prev_sent: string | null; prev_newest: string | null; failed: number | null }>(sql`
     WITH live AS (
       SELECT DISTINCT ON (q.conversation_id) q.conversation_id, q.id, q.customer_id, q.sender_id, q.sent_at
         FROM quotes q
@@ -59,44 +66,53 @@ export async function runQuoteNoteEmails(now = new Date()): Promise<{ sent: numb
          AND q.sent_at > ${now}::timestamptz - interval '90 days'
        ORDER BY q.conversation_id, q.sent_at DESC
     ), unread AS (
-      SELECT l.conversation_id, l.id AS quote_id, m.sender_id,
+      SELECT l.conversation_id, l.id AS quote_id, l.sent_at, m.sender_id,
              CASE WHEN m.sender_id = l.customer_id THEN l.sender_id ELSE l.customer_id END AS recipient_id, m.created_at
         FROM live l JOIN messages m ON m.conversation_id = l.conversation_id
        WHERE m.kind = 'text' AND m.is_read = false AND m.sender_id IN (l.customer_id, l.sender_id)
          AND m.created_at >= l.sent_at - interval '1 minute'
          AND m.created_at <= ${now}::timestamptz - make_interval(mins => ${NOTE_EMAIL_DELAY_MINUTES})
     )
-    SELECT u.conversation_id, u.recipient_id, min(u.sender_id) AS sender_id, min(u.quote_id) AS quote_id, max(u.created_at)::text AS newest,
-           e.last_sent_at::text AS prev_sent, e.last_message_at::text AS prev_newest
+    SELECT u.conversation_id, u.recipient_id, min(u.sender_id) AS sender_id, min(u.quote_id) AS quote_id,
+           (min(u.sent_at) - interval '1 minute')::text AS since, max(u.created_at)::text AS newest,
+           e.last_sent_at::text AS prev_sent, e.last_message_at::text AS prev_newest, e.failed_count AS failed
       FROM unread u LEFT JOIN quote_chat_emails e ON e.conversation_id = u.conversation_id AND e.recipient_id = u.recipient_id
      WHERE (e.last_message_at IS NULL OR u.created_at > e.last_message_at)
        AND (e.last_sent_at IS NULL OR e.last_sent_at <= ${now}::timestamptz - make_interval(mins => ${NOTE_EMAIL_EVERY_MINUTES}))
-     GROUP BY u.conversation_id, u.recipient_id, e.last_sent_at, e.last_message_at
+     GROUP BY u.conversation_id, u.recipient_id, e.last_sent_at, e.last_message_at, e.failed_count
+     ORDER BY min(u.created_at)
      LIMIT 50`);
   for (const d of due) {
+    if (!noteEmailDue(d.prev_sent ? new Date(d.prev_sent) : null, now)) continue;
+    // Claim: only one run sends for this chat and person in the window.
+    const [claimed] = await rows<{ at: string }>(sql`
+      INSERT INTO quote_chat_emails (conversation_id, recipient_id, last_sent_at, last_message_at)
+      VALUES (${d.conversation_id}, ${d.recipient_id}, now(), ${d.newest}::timestamptz)
+      ON CONFLICT (conversation_id, recipient_id) DO UPDATE SET last_sent_at = now(), last_message_at = ${d.newest}::timestamptz, updated_at = now()
+       WHERE quote_chat_emails.last_sent_at IS NULL OR quote_chat_emails.last_sent_at <= now() - make_interval(mins => ${NOTE_EMAIL_EVERY_MINUTES})
+      RETURNING last_sent_at::text AS at`).catch(() => []);
+    if (!claimed) continue;
+    const mine = sql`conversation_id = ${d.conversation_id} AND recipient_id = ${d.recipient_id} AND last_sent_at = ${claimed.at}::timestamptz`;
+    /** Undo the claim entirely (an error mid way): the next run tries the same notes. */
+    const undo = async () => {
+      await rows(sql`UPDATE quote_chat_emails SET last_sent_at = ${d.prev_sent}::timestamptz, last_message_at = ${d.prev_newest}::timestamptz, updated_at = now() WHERE ${mine}`).catch(() => undefined);
+    };
     try {
-      if (!noteEmailDue(d.prev_sent ? new Date(d.prev_sent) : null, now)) continue;
-      // Claim: only one run sends for this chat and person in the window.
-      const [claimed] = await rows(sql`
-        INSERT INTO quote_chat_emails (conversation_id, recipient_id, last_sent_at, last_message_at)
-        VALUES (${d.conversation_id}, ${d.recipient_id}, now(), ${d.newest}::timestamptz)
-        ON CONFLICT (conversation_id, recipient_id) DO UPDATE SET last_sent_at = now(), last_message_at = ${d.newest}::timestamptz, updated_at = now()
-         WHERE quote_chat_emails.last_sent_at IS NULL OR quote_chat_emails.last_sent_at <= now() - make_interval(mins => ${NOTE_EMAIL_EVERY_MINUTES})
-        RETURNING conversation_id`);
-      if (!claimed) continue;
-      const putBack = async () => {
-        await rows(sql`UPDATE quote_chat_emails SET last_sent_at = ${d.prev_sent}::timestamptz, last_message_at = ${d.prev_newest}::timestamptz, updated_at = now()
-                        WHERE conversation_id = ${d.conversation_id} AND recipient_id = ${d.recipient_id}`);
-      };
       const notes = await rows<{ content: string; media: number }>(sql`
         SELECT m.content, jsonb_array_length(m.media_items) AS media FROM messages m
          WHERE m.conversation_id = ${d.conversation_id} AND m.kind = 'text' AND m.is_read = false AND m.sender_id <> ${d.recipient_id}
+           AND m.created_at >= ${d.since}::timestamptz
            AND (${d.prev_newest}::timestamptz IS NULL OR m.created_at > ${d.prev_newest}::timestamptz) AND m.created_at <= ${d.newest}::timestamptz
          ORDER BY m.created_at`);
       const [q] = await db.select().from(quotes).where(eq(quotes.id, d.quote_id));
       const recipient = await storage.getUser(d.recipient_id);
-      // Nothing to send after all: give the claim back so it never holds up the next note.
-      if (!q || !recipient?.email || !notes.length || (await storage.isUserBlockedEitherWay(d.sender_id, d.recipient_id))) { await putBack(); continue; }
+      // Nobody to email: pass these notes over (the claim stands), never retried every run.
+      if (!q || !recipient?.email || !notes.length || (await storage.isUserBlockedEitherWay(d.sender_id, d.recipient_id))) continue;
+      // A staff member who no longer works there isn't emailed about the business's chats (review M3).
+      if (q.staffMemberId && d.recipient_id === q.senderId) {
+        const [s] = await rows<{ ok: boolean }>(sql`SELECT (status = 'active' AND business_id = ${q.businessId}) AS ok FROM staff_members WHERE id = ${q.staffMemberId}`);
+        if (!s?.ok) continue;
+      }
       // The business side writes as the business; the customer as their public name.
       let senderName = "";
       if (d.sender_id === q.customerId) {
@@ -113,9 +129,20 @@ export async function runQuoteNoteEmails(now = new Date()): Promise<{ sent: numb
         link: quoteLink(q),
       });
       const ok = await sendMail({ to: recipient.email, ...email }).catch(() => false);
-      if (ok) sent++; else await putBack();
+      if (ok) {
+        sent++;
+        await rows(sql`UPDATE quote_chat_emails SET failed_count = 0 WHERE ${mine}`);
+      } else if (Number(d.failed ?? 0) + 1 >= MAX_FAILED_SENDS) {
+        // Given up: the claim stands (these notes are passed over), the count starts again.
+        await rows(sql`UPDATE quote_chat_emails SET failed_count = 0 WHERE ${mine}`);
+        console.error(`[quote notes] gave up emailing ${d.recipient_id} about chat ${d.conversation_id} after ${MAX_FAILED_SENDS} failed sends`);
+      } else {
+        // Failed: the same notes again after 10 minutes (last_sent_at stays now), never every run.
+        await rows(sql`UPDATE quote_chat_emails SET last_message_at = ${d.prev_newest}::timestamptz, failed_count = failed_count + 1, updated_at = now() WHERE ${mine}`);
+      }
     } catch (err) {
       console.error(`[quote notes] email for chat ${d.conversation_id} failed:`, err);
+      await undo();
     }
   }
   return { sent };

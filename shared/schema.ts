@@ -917,6 +917,7 @@ export const quoteChatEmails = pgTable("quote_chat_emails", {
   recipientId: varchar("recipient_id", { length: 36 }).notNull(),
   lastSentAt: timestamp("last_sent_at", { withTimezone: true }),
   lastMessageAt: timestamp("last_message_at", { withTimezone: true }),
+  failedCount: integer("failed_count").notNull().default(0),
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
 }, (t) => ({ pk: primaryKey({ columns: [t.conversationId, t.recipientId] }) }));

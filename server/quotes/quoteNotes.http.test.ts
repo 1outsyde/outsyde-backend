@@ -84,8 +84,12 @@ const daysFromNow = (n: number) => { const d = new Date(); d.setUTCDate(d.getUTC
   const admin = { token: generateAccessToken({ userId: adminRow.id, isVendor: false, isAdmin: true }) };
   const qn = await import('./quoteNotes');
   const sent: { to: string; subject: string; text: string; html: string }[] = [];
-  qn.setQuoteNoteMailerForTest(async (m) => { sent.push(m); return true; });
+  let failNext = 0, tries = 0;
+  qn.setQuoteNoteMailerForTest(async (m) => { tries++; if (failNext > 0) { failNext--; return false; } sent.push(m); return true; });
 
+  // Review I1: an unread note from long before the quote is never part of a quote email.
+  await call('POST', `/api/conversations/${conv}/messages`, { token: cust.token, body: { content: 'Old note from last month' } });
+  await q(`UPDATE messages SET created_at = created_at - interval '5 days' WHERE conversation_id = $1`, [conv]);
   try {
     const made = await call('POST', '/api/quotes', { token: owner.token, body: { conversationId: conv, title: '2 Bedroom Move', details: 'Crew of 3, gate code needed', jobDate: daysFromNow(10), startTime: '09:00', durationMinutes: 180, totalCents: 65000, paymentMode: 'deposit', depositCents: 10000 } });
     const quote = made.body?.quote;
@@ -150,6 +154,22 @@ const daysFromNow = (n: number) => { const d = new Date(); d.setUTCDate(d.getUTC
     await backdate(3);
     await qn.runQuoteNoteEmails(new Date());
     assert(sent.length === 3 && sent[2].to === `${owner.uid}@qn.test` && sent[2].subject === 'New note from Ana about 2 Bedroom Move', 'the business is emailed the customer\'s unread note', sent[2]);
+    assert(!sent[2]?.text.includes('Old note from last month'), 'a note from before the quote is never in it (review I1)', sent[2]?.text);
+
+    console.log('\n── a send that fails is tried again after 10 minutes, not every run (review I2) ──');
+    await q(`UPDATE quote_chat_emails SET last_sent_at = last_sent_at - interval '11 minutes' WHERE conversation_id = $1`, [conv]);
+    await send(cust.token, 'Is 9 AM still good?');
+    await backdate(3);
+    failNext = 1; tries = 0;
+    await qn.runQuoteNoteEmails(new Date());
+    let row = (await q(`SELECT * FROM quote_chat_emails WHERE conversation_id = $1 AND recipient_id = $2`, [conv, owner.uid]))[0];
+    assert(tries === 1 && sent.length === 3 && row.failed_count === 1, 'the send failed once', { tries, row });
+    await qn.runQuoteNoteEmails(new Date());
+    assert(tries === 1, 'not tried again on the next run', tries);
+    await q(`UPDATE quote_chat_emails SET last_sent_at = last_sent_at - interval '11 minutes' WHERE conversation_id = $1`, [conv]);
+    await qn.runQuoteNoteEmails(new Date());
+    row = (await q(`SELECT * FROM quote_chat_emails WHERE conversation_id = $1 AND recipient_id = $2`, [conv, owner.uid]))[0];
+    assert(tries === 2 && sent.length === 4 && sent[3].text.includes('Is 9 AM still good?') && row.failed_count === 0, 'after 10 minutes the same note goes out', { tries, row, t: sent[3]?.text });
     // A request or quote card is never emailed as a note.
     assert(sent.every((m) => !m.text.includes('Sent a quote')), 'cards are never emailed', sent.map((m) => m.text.slice(0, 40)));
 
@@ -159,7 +179,7 @@ const daysFromNow = (n: number) => { const d = new Date(); d.setUTCDate(d.getUTC
     await backdate(3);
     await q(`UPDATE quote_chat_emails SET last_sent_at = last_sent_at - interval '11 minutes' WHERE conversation_id = $1`, [conv]);
     await qn.runQuoteNoteEmails(new Date());
-    assert(sent.length === 3, 'a withdrawn quote: the chat is a normal chat again', sent.length);
+    assert(sent.length === 4, 'a withdrawn quote: the chat is a normal chat again', sent.length);
   } finally {
     qn.setQuoteNoteMailerForTest(null);
     await q(`DELETE FROM quote_chat_emails WHERE recipient_id = ANY($1)`, [users]).catch(() => undefined);
