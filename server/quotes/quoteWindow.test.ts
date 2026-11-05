@@ -6,7 +6,8 @@
  * Legend 2026-11-05 (calls B5 to B14): the customer has 6 hours after Job complete to Confirm (vendor paid at once)
  * or Report a problem (payout paused, Outsyde reviews). No answer: paid when the 6 hours end. A report covers
  * everything still held, reason 10 to 1,000 characters, up to 5 photos, one per booking. Outcomes: pay in full,
- * partial refund (an amount), full refund (every dollar paid, service fees included). Refunds come from the balance
+ * partial refund (an amount), full refund (everything the business was paid; the service fee is never refunded,
+ * Legend 2026-11-05). Refunds come from the balance
  * first, then the deposit. Decided reports are final. Points follow the money and wait for Confirm or the window.
  */
 import {
@@ -92,28 +93,29 @@ assert(!payoutEligible({ ...base, payoutStatus: 'paid' }, null, now), 'paid alre
 assert(!payoutEligible({ ...base, payoutStatus: 'canceled' }, null, now), 'canceled: never');
 assert(!payoutEligible({ ...base, completedAt: null, windowEndsAt: null }, null, now), 'not complete: never');
 
-console.log('\n── report refunds (B6: balance first, then the deposit, fees included) ──');
-let s = splitReportRefund(30000, { balanceLeft: 59400, depositLeft: 10800 });
+console.log('\n── report refunds (B6: balance first, then the deposit; the service fee is never refunded) ──');
+// The business's parts only: balance $550, deposit $100 (their fees stay with Outsyde).
+let s = splitReportRefund(30000, { balanceLeft: 55000, depositLeft: 10000 });
 assert(s.ok && s.fromBalance === 30000 && s.fromDeposit === 0, 'a partial refund comes off the balance first', s);
-s = splitReportRefund(65000, { balanceLeft: 59400, depositLeft: 10800 });
-assert(s.ok && s.fromBalance === 59400 && s.fromDeposit === 5600, 'then the deposit', s);
-s = splitReportRefund(70200, { balanceLeft: 59400, depositLeft: 10800 });
-assert(s.ok && s.fromBalance === 59400 && s.fromDeposit === 10800, 'a full refund is every dollar, fees included', s);
-s = splitReportRefund(70201, { balanceLeft: 59400, depositLeft: 10800 });
-assert(!s.ok, 'never more than was paid', s);
-s = splitReportRefund(0, { balanceLeft: 59400, depositLeft: 10800 });
+s = splitReportRefund(60000, { balanceLeft: 55000, depositLeft: 10000 });
+assert(s.ok && s.fromBalance === 55000 && s.fromDeposit === 5000, 'then the deposit', s);
+s = splitReportRefund(65000, { balanceLeft: 55000, depositLeft: 10000 });
+assert(s.ok && s.fromBalance === 55000 && s.fromDeposit === 10000, 'a full refund is everything the business was paid', s);
+s = splitReportRefund(65001, { balanceLeft: 55000, depositLeft: 10000 });
+assert(!s.ok, 'never more than the business was paid (no fee)', s);
+s = splitReportRefund(0, { balanceLeft: 55000, depositLeft: 10000 });
 assert(!s.ok, 'zero is not a refund', s);
 
-const left = { balanceLeft: 59400, depositLeft: 10800 };
+const left = { balanceLeft: 55000, depositLeft: 10000 };
 let o = resolveOutcome('pay_full', undefined, left);
 assert(o.ok && o.refundCents === 0, 'pay in full refunds nothing', o);
 o = resolveOutcome('full_refund', undefined, left);
-assert(o.ok && o.refundCents === 70200, 'full refund is everything still paid', o);
+assert(o.ok && o.refundCents === 65000, 'full refund is the business part still paid, never the fee', o);
 o = resolveOutcome('partial_refund', 25000, left);
 assert(o.ok && o.refundCents === 25000, 'partial refund takes the amount', o);
 o = resolveOutcome('partial_refund', undefined, left);
 assert(!o.ok && o.code === 'AMOUNT_REQUIRED', 'partial needs an amount', o);
-o = resolveOutcome('partial_refund', 70200, left);
+o = resolveOutcome('partial_refund', 65000, left);
 assert(!o.ok && o.code === 'USE_FULL_REFUND', 'the whole amount is a full refund', o);
 o = resolveOutcome('partial_refund', 12.5 as any, left);
 assert(!o.ok && o.code === 'AMOUNT_INVALID', 'whole cents only', o);
@@ -128,10 +130,12 @@ assert(legacyDecision('approved', 'partial_refund') === 'partial_refund', 'an ou
 assert(legacyDecision('pending', undefined) === null, 'pending decides nothing');
 
 console.log('\n── points follow the money (B8) ──');
-assert(pointsTarget(10800, 0) === pointsForGrossCents(10800), 'nothing refunded: all the points');
-assert(pointsTarget(10800, 10800) === 0, 'all refunded: none');
-assert(pointsTarget(59400, 29700) === pointsForGrossCents(29700), 'half refunded: points on the half still paid');
-assert(pointsTarget(10800, 20000) === 0, 'never negative');
+const depPts = pointsForGrossCents(10800);
+assert(pointsTarget(depPts, 10000, 0) === depPts, 'nothing refunded: all the points');
+assert(pointsTarget(depPts, 10000, 10000) === 0, 'the business part all refunded: none (the kept fee earns nothing)');
+assert(pointsTarget(pointsForGrossCents(59400), 55000, 27500) === Math.round(pointsForGrossCents(59400) / 2), 'half the balance refunded: half its points');
+assert(pointsTarget(depPts, 10000, 20000) === 0, 'never negative');
+assert(pointsTarget(depPts, 0, 0) === 0, 'no base: none');
 assert(pointsToReverse({ earned: 2000, alreadyReversed: 0, target: 1000 }) === 1000, 'reverse down to the target');
 assert(pointsToReverse({ earned: 2000, alreadyReversed: 1200, target: 1000 }) === 0, 'already below the target: nothing more (never adds back)');
 assert(pointsToReverse({ earned: 2000, alreadyReversed: 500, target: 1000 }) === 500, 'only the part still above the target');

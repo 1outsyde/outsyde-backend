@@ -289,7 +289,8 @@ const hmNY = (d: Date) => new Intl.DateTimeFormat("en-GB", { timeZone: "America/
   const pending = async (type: string, ref: string) => (await q(`SELECT * FROM pending_points_transactions WHERE reference_type = $1 AND reference_id = $2`, [type, ref]))[0];
   const earned = async (type: string, ref: string) => Number((await q(`SELECT COALESCE(SUM(points), 0)::int AS p FROM point_transactions WHERE type = 'earn' AND reference_type = $1 AND reference_id = $2`, [type, ref]))[0].p);
   const reversed = async (ref: string) => Number((await q(`SELECT COALESCE(SUM(-points), 0)::int AS p FROM point_transactions WHERE type = 'reversal' AND reference_type = 'refund_reversal' AND reference_id = $1`, [ref]))[0].p);
-  const DEP_GROSS = 10800, BAL_GROSS = 59400;
+  const DEP_GROSS = 10800, BAL_GROSS = 59400, DEP = 10000, BAL = 55000; // money paid, and the business's part (the fee is never refunded)
+  const balPts = (refunded: number) => Math.round((pointsForGrossCents(BAL_GROSS) * (BAL - refunded)) / BAL);
 
   try {
     console.log("\n── Job complete opens the 6 hour window (deposit points wait, balance points pending) ──");
@@ -337,7 +338,7 @@ const hmNY = (d: Date) => new Intl.DateTimeFormat("en-GB", { timeZone: "America/
     assert(r.status === 200 && r.body?.balanceRefundedCents === 27500, "the vendor refunds part of the balance", r);
     await qw.runQuoteWindowJob(new Date());
     j = await jobOf(A.a.id);
-    const balTarget = pointsForGrossCents(BAL_GROSS - 27500);
+    const balTarget = balPts(27500);
     assert(await earned("quote_balance", j.id) - await reversed(j.id) === balTarget, "balance points down to what stays paid", { e: await earned("quote_balance", j.id), r: await reversed(j.id), balTarget });
     assert(await reversed(A.a.id) === 0, "deposit points untouched (the refund came off the balance)", await reversed(A.a.id));
     await qw.runQuoteWindowJob(new Date());
@@ -411,8 +412,8 @@ const hmNY = (d: Date) => new Intl.DateTimeFormat("en-GB", { timeZone: "America/
     const rr = rep ? (await q(`SELECT * FROM refund_requests WHERE id = $1`, [rep.refund_request_id]))[0] : null;
     assert(r.status === 200 && reqsBefore === 0, "the customer reports a problem", r);
     assert(j.payout_status === "paused" && !!j.reported_at, "the payout is paused", j);
-    assert(rep?.status === "open" && rep.reason === "The crew broke a lamp in the hallway" && rep.photos?.length === 1 && rep.held_cents === BAL_GROSS + DEP_GROSS, "the report covers everything still paid", rep);
-    assert(rr?.status === "pending" && rr.target_type === "appointment" && rr.target_id === E.a.id && rr.amount === BAL_GROSS + DEP_GROSS && rr.requester_id === cust.uid && rr.reason.includes("lamp"), "it shows on the admin Refunds page", rr);
+    assert(rep?.status === "open" && rep.reason === "The crew broke a lamp in the hallway" && rep.photos?.length === 1 && rep.held_cents === BAL + DEP, "the report covers everything the business was paid (no fee)", rep);
+    assert(rr?.status === "pending" && rr.target_type === "appointment" && rr.target_id === E.a.id && rr.amount === BAL + DEP && rr.requester_id === cust.uid && rr.reason.includes("lamp"), "it shows on the admin Refunds page", rr);
     assert((await cardsOf(conv, "problem_reported")).length >= 1, "the vendor gets a paused payout card");
     r = await call("POST", `/api/quotes/${E.qid}/report`, { token: cust.token, body: { reason: "Reporting a second time" } });
     assert(r.status === 409 && r.body?.code === "ALREADY_REPORTED", "one report per booking", r);
@@ -423,7 +424,7 @@ const hmNY = (d: Date) => new Intl.DateTimeFormat("en-GB", { timeZone: "America/
     assert(balanceTransfers(E.a.id).length === 0 && (await pending("quote_balance", j.id))?.status === "pending" && (await pending("appointment", E.a.id))?.status === "pending", "after the window: still paused, points still pending");
     r = await call("GET", `/api/admin/refund-requests`, { token: admin.token });
     const row = (r.body?.requests ?? []).find((x: any) => x.id === rr?.id);
-    assert(row?.quoteReport?.reportId === rep?.id && row.quoteReport.maxRefundCents === BAL_GROSS + DEP_GROSS && row.quoteReport.photos?.length === 1 && Array.isArray(row.quoteReport.outcomes), "the admin list shows the report details (additive)", row?.quoteReport);
+    assert(row?.quoteReport?.reportId === rep?.id && row.quoteReport.maxRefundCents === BAL + DEP && row.quoteReport.photos?.length === 1 && Array.isArray(row.quoteReport.outcomes), "the admin list shows the report details (additive)", row?.quoteReport);
     r = await call("GET", `/api/quotes/${E.qid}`, { token: cust.token });
     assert(r.body?.quote?.window?.state === "reported" && r.body?.quote?.report?.status === "open", "the quote shows the open report", { w: r.body?.quote?.window, rp: r.body?.quote?.report });
     // The 48 hour reminder.
@@ -441,7 +442,7 @@ const hmNY = (d: Date) => new Intl.DateTimeFormat("en-GB", { timeZone: "America/
     assert(r.status === 400 && r.body?.code === "AMOUNT_REQUIRED", "partial needs an amount", r);
     r = await call("PATCH", `/api/admin/refund-requests/${rr.id}`, { token: admin.token, body: { status: "pending", outcome: "partial_refund", amountCents: 25000 } });
     assert(r.status === 400 && (await q(`SELECT status FROM quote_reports WHERE id = $1`, [rep.id]))[0].status === "open", "pending decides nothing (review M5)", r);
-    r = await call("PATCH", `/api/admin/refund-requests/${rr.id}`, { token: admin.token, body: { status: "approved", outcome: "partial_refund", amountCents: BAL_GROSS + DEP_GROSS } });
+    r = await call("PATCH", `/api/admin/refund-requests/${rr.id}`, { token: admin.token, body: { status: "approved", outcome: "partial_refund", amountCents: BAL + DEP } });
     assert(r.status === 400 && r.body?.code === "USE_FULL_REFUND", "everything is a full refund", r);
     const refundsBefore = refunds.length;
     r = await call("PATCH", `/api/admin/refund-requests/${rr.id}`, { token: admin.token, body: { status: "approved", outcome: "partial_refund", amountCents: 25000, adminNotes: "Lamp" } });
@@ -463,14 +464,14 @@ const hmNY = (d: Date) => new Intl.DateTimeFormat("en-GB", { timeZone: "America/
     j = await jobOf(E.a.id);
     bt = balanceTransfers(E.a.id);
     assert(bt.length === 1 && bt[0].amount === 53900 - Math.round(53900 * 25000 / 55000) && j.payout_status === "paid", "then the vendor is paid the rest of their share, taken off once", { bt, s: j.payout_status });
-    assert(await earned("quote_balance", j.id) === pointsForGrossCents(BAL_GROSS - 25000) && await earned("appointment", E.a.id) === pointsForGrossCents(DEP_GROSS), "points on what stays paid", { b: await earned("quote_balance", j.id), d: await earned("appointment", E.a.id) });
+    assert(await earned("quote_balance", j.id) === balPts(25000) && await earned("appointment", E.a.id) === pointsForGrossCents(DEP_GROSS), "points on what stays paid", { b: await earned("quote_balance", j.id), d: await earned("appointment", E.a.id) });
     assert((await apptOf(E.qid)).status === "completed", "the booking stays completed");
     r = await call("PATCH", `/api/admin/refund-requests/${rr.id}`, { token: admin.token, body: { status: "approved", outcome: "full_refund" } });
     assert(r.status === 400 && refunds.length === refundsBefore + 1, "decided reports are final (B13)", r);
     r = await call("PATCH", `/api/admin/refund-requests/${rr.id}`, { token: admin.token, body: { status: "rejected" } });
     assert(r.status === 400, "no change after a decision", r);
 
-    console.log("\n── today's Approve button: full refund, fees included ──");
+    console.log("\n── today's Approve button: full refund (the service fee is never refunded) ──");
     const F = await completed();
     // In process (the server process sends real email): the report emails Outsyde.
     const { db: appDb2 } = await import("../db");
@@ -486,7 +487,7 @@ const hmNY = (d: Date) => new Intl.DateTimeFormat("en-GB", { timeZone: "America/
     const fr = refunds.slice(rb0);
     const aF = await apptOf(F.qid);
     assert(r.status === 200, "approved", r);
-    assert(fr.length === 2 && fr.find((x) => x.payment_intent === j.stripe_payment_intent_id)?.amount === BAL_GROSS && fr.find((x) => x.payment_intent === aF.stripe_payment_intent_id)?.amount === DEP_GROSS, "every dollar back from both payments, fees included", fr);
+    assert(fr.length === 2 && fr.find((x) => x.payment_intent === j.stripe_payment_intent_id)?.amount === BAL && fr.find((x) => x.payment_intent === aF.stripe_payment_intent_id)?.amount === DEP, "everything the business was paid comes back from both payments, the fees stay", fr);
     assert(j.payout_status === "canceled" && balanceTransfers(F.a.id).length === 0, "the vendor's balance share is never paid", j.payout_status);
     assert(await earned("quote_balance", j.id) === 0 && await earned("appointment", F.a.id) === 0 && (await pending("quote_balance", j.id))?.status === "rejected" && (await pending("appointment", F.a.id))?.status === "rejected", "no points (all refunded)");
     assert((await q(`SELECT outcome FROM quote_reports WHERE id = $1`, [repF.id]))[0].outcome === "full_refund", "recorded as full refund");
@@ -514,8 +515,8 @@ const hmNY = (d: Date) => new Intl.DateTimeFormat("en-GB", { timeZone: "America/
     r = await call("PATCH", `/api/admin/refund-requests/${repH.refund_request_id}`, { token: admin.token, body: { status: "rejected" } });
     repH2 = (await q(`SELECT * FROM quote_reports WHERE id = $1`, [repH.id]))[0];
     const hr = refunds.slice(rbH);
-    assert(r.status === 200 && repH2.outcome === "full_refund" && repH2.refund_cents === BAL_GROSS + DEP_GROSS, "the retry finishes the saved full refund, whatever is sent", { r: r.body, repH2 });
-    assert(hr.length === 2 && hr.reduce((n, x) => n + x.amount, 0) === BAL_GROSS + DEP_GROSS && balanceTransfers(H2.a.id).length === 0, "every dollar back once, no payout", hr);
+    assert(r.status === 200 && repH2.outcome === "full_refund" && repH2.refund_cents === BAL + DEP, "the retry finishes the saved full refund, whatever is sent", { r: r.body, repH2 });
+    assert(hr.length === 2 && hr.reduce((n, x) => n + x.amount, 0) === BAL + DEP && balanceTransfers(H2.a.id).length === 0, "refunded once, no payout", hr);
     assert((await q(`SELECT status FROM refund_requests WHERE id = $1`, [repH.refund_request_id]))[0].status === "approved", "recorded as approved");
     void jH;
 
@@ -533,7 +534,7 @@ const hmNY = (d: Date) => new Intl.DateTimeFormat("en-GB", { timeZone: "America/
     assert(refunds.slice(rbI).length === 1 && (await q(`SELECT count(*)::int AS n FROM quote_refunds WHERE appointment_id = $1 AND done_at IS NULL`, [I.a.id]))[0].n === 0, "only the unfinished part was sent", refunds.slice(rbI));
     r = await call("PATCH", `/api/admin/refund-requests/${repI.refund_request_id}`, { token: admin.token, body: { status: "approved", outcome: "full_refund" } });
     const paidBackI = refunds.filter((x) => x.payment_intent === I.a.stripe_payment_intent_id || x.payment_intent === I.job.stripe_payment_intent_id).reduce((n, x) => n + x.amount, 0);
-    assert(r.status === 200 && paidBackI === BAL_GROSS + DEP_GROSS, "then the full refund returns the rest: every dollar back, never more", { r: r.body, paidBackI });
+    assert(r.status === 200 && paidBackI === BAL + DEP, "then the full refund returns the rest of the business part, never more", { r: r.body, paidBackI });
 
     console.log("\n── a booking completed without its Job complete steps is repaired (review I4) ──");
     const U = await completed();
@@ -576,7 +577,7 @@ const hmNY = (d: Date) => new Intl.DateTimeFormat("en-GB", { timeZone: "America/
     assert(r.status === 200 && refunds.length === rb2 + 1 && refunds[refunds.length - 1].amount === 5000, "approved through the 4a refund plan", r);
     await qw.runQuoteWindowJob(new Date());
     const jL = await jobOf(L.a.id);
-    assert(await earned("quote_balance", jL.id) - await reversed(jL.id) === pointsForGrossCents(BAL_GROSS - 5000) && await reversed(L.a.id) === 0, "points follow the money there too", { b: await earned("quote_balance", jL.id), rv: await reversed(jL.id), d: await reversed(L.a.id) });
+    assert(await earned("quote_balance", jL.id) - await reversed(jL.id) === balPts(5000) && await reversed(L.a.id) === 0, "points follow the money there too", { b: await earned("quote_balance", jL.id), rv: await reversed(jL.id), d: await reversed(L.a.id) });
   } finally {
     const ids = users;
     await q(`DELETE FROM quote_jobs WHERE business_id = ANY($1)`, [bizs]).catch(() => undefined);

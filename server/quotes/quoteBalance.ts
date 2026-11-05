@@ -409,16 +409,13 @@ export async function hasOpenQuoteRefund(appointmentId: string): Promise<boolean
   return !!r;
 }
 
-export async function refundQuoteBooking(appt: Appointment, amountCents: number, opKey: string, metadata: Record<string, string>,
-  opts: { balanceCapCents?: number } = {}): Promise<{ fromBalance: number; fromDeposit: number; refundIds: string[]; resumed: boolean }> {
+export async function refundQuoteBooking(appt: Appointment, amountCents: number, opKey: string, metadata: Record<string, string>): Promise<{ fromBalance: number; fromDeposit: number; refundIds: string[]; resumed: boolean }> {
   const { stripeService } = await import("../stripe/stripeService");
   const [open] = await rows<any>(sql`SELECT * FROM quote_refunds WHERE appointment_id = ${appt.id} AND done_at IS NULL ORDER BY created_at LIMIT 1`);
   let plan = open;
   if (!plan) {
     const job = await quoteJobFor(appt.id);
-    // Step 4b-1: a report's refund may also return the balance's service fee (B6), so the caller passes what is
-    // still paid on the balance payment; everything else refunds only the business's part.
-    const fromBalance = Math.min(amountCents, opts.balanceCapCents ?? refundableBalanceCents(job));
+    const fromBalance = Math.min(amountCents, refundableBalanceCents(job));
     await rows(sql`
       INSERT INTO quote_refunds (op_key, appointment_id, balance_pi, deposit_pi, balance_cents, deposit_cents)
       VALUES (${opKey}, ${appt.id}, ${fromBalance > 0 ? job?.stripePaymentIntentId ?? null : null}, ${appt.stripePaymentIntentId ?? null}, ${fromBalance}::int, ${amountCents - fromBalance}::int)

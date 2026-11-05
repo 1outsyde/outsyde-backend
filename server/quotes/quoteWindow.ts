@@ -5,7 +5,8 @@
  * Legend 2026-11-05 (calls B5 to B14):
  *   - Confirm pays the vendor's balance share at once; Report pauses it; no answer pays it when the 6 hours end.
  *   - Reports are reviewed on the admin Refunds page (their refund_requests row). Outcomes: pay in full, partial
- *     refund, full refund (every dollar paid, fees included), from the balance first then the deposit. Final.
+ *     refund, full refund (everything the business was paid; the service fee is never refunded), from the balance
+ *     first then the deposit. Final.
  *   - The balance share is its own transfer (group appointment_balance_<id>, recipient business_balance or
  *     staff_balance), to the staff member's account for a staff booking exactly like the deposit. Money rules as in
  *     quoteBalance.ts: claimed, Stripe looked up first, one key per try, bounded, retried by the quote job, Outsyde
@@ -22,7 +23,8 @@ import { quotes, type Appointment, type Quote, type QuoteJob } from "@shared/sch
 import { getUncachableStripeClient } from "../stripe/stripeClient";
 import { postCardMessage } from "../messaging/postCard";
 import { formatCents } from "./quoteRules";
-import { balanceTransferGroup, quoteJobFor, refundQuoteBooking } from "./quoteBalance";
+import { balanceTransferGroup, quoteJobFor, refundQuoteBooking, refundableBalanceCents } from "./quoteBalance";
+import { calculateBookingFees } from "../fees";
 import {
   balancePayoutCents, checkReport, confirmBlocker, pointsTarget, pointsToReverse, reportBlocker, resolveOutcome,
   windowState, REPORT_REMINDER_HOURS, type MoneyLeft, type ReportOutcome, type WindowJob,
@@ -111,12 +113,15 @@ export async function afterJobComplete(appointmentId: string): Promise<void> {
 
 // ─── Money still paid ───────────────────────────────────────────────────────
 
-/** What the customer still has paid on each payment (money, fees included), for a report's refund. */
+/** The business's part still paid on each payment, for a report's refund. The service fee is never refunded. */
 export async function moneyLeft(appt: Appointment, job: QuoteJob | undefined | null): Promise<MoneyLeft> {
-  const balanceLeft = job && job.balanceStatus === "captured" ? Math.max(0, (job.capturedCents ?? 0) - job.refundedCents) : 0;
+  const balanceLeft = refundableBalanceCents(job);
   const d = appt.stripePaymentIntentId ? await depositMoney(appt.stripePaymentIntentId) : { received: 0, refunded: 0 };
-  return { balanceLeft, depositLeft: Math.max(0, d.received - d.refunded) };
+  return { balanceLeft, depositLeft: Math.max(0, depositBase(appt) - d.refunded) };
 }
+
+/** The business's part of the deposit (or the full price when the quote was paid in full). */
+const depositBase = (appt: Appointment) => ((appt.depositAmountCents ?? 0) > 0 ? appt.depositAmountCents! : appt.totalPrice);
 
 /** What the deposit (or full) payment took and what Stripe gave back on it. Bounded (review M6). */
 async function depositMoney(paymentIntentId: string): Promise<{ received: number; refunded: number }> {
@@ -222,50 +227,57 @@ export async function payBalanceShare(jobId: string): Promise<PayoutOutcome> {
 
 // ─── Points follow the money ────────────────────────────────────────────────
 
-type PointsRecord = { type: "appointment" | "quote_balance"; ref: string; refundedCents: number };
+/** One payment's points: what it earned in full, the business's part it was paid on, and what was refunded of that. */
+type PointsRecord = { type: "appointment" | "quote_balance"; ref: string; fullPoints: number; baseCents: number; refundedCents: number };
 
 /** Lands one payment's points on what stays paid (final). Pending: released at the target or rejected. Released: taken down. */
 async function settleRecord(userId: string, rec: PointsRecord, keep: boolean): Promise<void> {
   const { rejectPendingForReference, releasePendingForReference, reversePointsForReference, pointsValueCents } = await import("../loyaltyLedger");
+  const target = keep ? pointsTarget(rec.fullPoints, rec.baseCents, rec.refundedCents) : 0;
   const [p] = await rows<any>(sql`SELECT * FROM pending_points_transactions WHERE reference_type = ${rec.type} AND reference_id = ${rec.ref} LIMIT 1`);
   if (p?.status === "pending") {
-    const target = keep ? Math.min(Number(p.points_earned), pointsTarget(Number(p.dollar_amount_cents), rec.refundedCents)) : 0;
-    if (target <= 0) { await rejectPendingForReference(rec.type, rec.ref, "Refunded or ended"); return; }
+    const t = Math.min(Number(p.points_earned), target);
+    if (t <= 0) { await rejectPendingForReference(rec.type, rec.ref, "Refunded or ended"); return; }
     // The kept amount too, so the referral check at release sees what stayed paid (review M1).
-    const kept = Math.max(0, Number(p.dollar_amount_cents) - Math.max(0, rec.refundedCents));
-    await rows(sql`UPDATE pending_points_transactions SET points_earned = ${target}::int, outsyde_revenue_cents = ${pointsValueCents(target)}::int,
+    const kept = Math.round((Number(p.dollar_amount_cents) * t) / Math.max(1, Number(p.points_earned)));
+    await rows(sql`UPDATE pending_points_transactions SET points_earned = ${t}::int, outsyde_revenue_cents = ${pointsValueCents(t)}::int,
                     dollar_amount_cents = ${kept}::int, updated_at = now()
                     WHERE id = ${p.id} AND status = 'pending'`);
     await releasePendingForReference(rec.type, rec.ref, "system");
     return;
   }
   const [e] = await rows<any>(sql`
-    SELECT COALESCE(SUM(points), 0)::int AS earned, COALESCE(MAX(dollar_amount_cents), 0)::int AS gross FROM point_transactions
+    SELECT COALESCE(SUM(points), 0)::int AS earned FROM point_transactions
      WHERE user_id = ${userId} AND type = 'earn' AND reference_type = ${rec.type} AND reference_id = ${rec.ref}`);
   const earned = Number(e?.earned ?? 0);
   if (earned <= 0) return;
   const [r] = await rows<any>(sql`
     SELECT COALESCE(SUM(-points), 0)::int AS back FROM point_transactions
      WHERE user_id = ${userId} AND type = 'reversal' AND reference_type = 'refund_reversal' AND reference_id = ${rec.ref}`);
-  const target = keep ? Math.min(earned, pointsTarget(Number(e.gross), rec.refundedCents)) : 0;
-  const n = pointsToReverse({ earned, alreadyReversed: Number(r?.back ?? 0), target });
+  const n = pointsToReverse({ earned, alreadyReversed: Number(r?.back ?? 0), target: Math.min(earned, target) });
   if (n > 0) await reversePointsForReference(userId, rec.type, rec.ref, { refundFraction: n / earned, description: "Points adjusted to what stays paid" });
 }
 
 /**
  * Points for a quote booking whose money is final, or again after a later refund. keep: the booking still stands
- * (completed), or the customer canceled and kept paying the deposit. Otherwise nothing is earned.
+ * (completed), or the customer canceled and kept paying the deposit. Otherwise nothing is earned. Points follow the
+ * business's part still paid; the service fee is never refunded, so it never decides them.
  */
 export async function settleQuotePoints(appointmentId: string): Promise<void> {
   const appt = await storage.getAppointment(appointmentId);
   const job = await quoteJobFor(appointmentId);
   if (!appt || !job) return;
   const keep = appt.status === "completed" || (appt.status === "canceled" && appt.canceledBy === appt.clientId);
-  const balanceRefunded = job.refundedCents;
+  const { pointsForGrossCents } = await import("../loyaltyLedger");
   // Read from Stripe (review M2): a lost dispute on the balance is on the job but not on the booking's refund total.
   const depositRefunded = appt.stripePaymentIntentId ? (await depositMoney(appt.stripePaymentIntentId)).refunded : 0;
-  await settleRecord(appt.clientId, { type: "appointment", ref: appt.id, refundedCents: depositRefunded }, keep);
-  await settleRecord(appt.clientId, { type: "quote_balance", ref: job.id, refundedCents: balanceRefunded }, keep);
+  const dBase = depositBase(appt);
+  await settleRecord(appt.clientId, {
+    type: "appointment", ref: appt.id, fullPoints: pointsForGrossCents(calculateBookingFees(dBase).customerTotalBeforeTaxCents), baseCents: dBase, refundedCents: depositRefunded,
+  }, keep);
+  await settleRecord(appt.clientId, {
+    type: "quote_balance", ref: job.id, fullPoints: pointsForGrossCents(job.balanceStatus === "captured" ? job.capturedCents ?? 0 : 0), baseCents: job.balanceCents, refundedCents: job.refundedCents,
+  }, keep);
 }
 
 const fingerprint = sql.raw(`(COALESCE(a.refund_amount, 0) + j.refunded_cents)`);
@@ -380,7 +392,7 @@ export async function reportQuoteJob(q: Quote, body: { reason?: unknown; photos?
 export type DecideResult = { ok: true; outcome: ReportOutcome; refundCents: number; refundIds: string[] } | { ok: false; status: number; code: string; message: string };
 
 /**
- * Decides a report once (B13). Refunds come from the balance first, then the deposit, fees included (B6). Pay in
+ * Decides a report once (B13). Refunds come from the balance first, then the deposit; never the service fee. Pay in
  * full and partial refund pay the vendor's balance share (less their part of the refund); full refund never does.
  */
 export async function decideQuoteReport(reportId: string, outcome: ReportOutcome, amountCents: unknown, adminId: string, adminNotes?: string | null): Promise<DecideResult> {
@@ -431,7 +443,7 @@ export async function decideQuoteReport(reportId: string, outcome: ReportOutcome
   let refundIds: string[] = [];
   if (res.refundCents > 0) {
     try {
-      const done = await refundQuoteBooking(appt, res.refundCents, opKey, meta, { balanceCapCents: left.balanceLeft });
+      const done = await refundQuoteBooking(appt, res.refundCents, opKey, meta);
       if (done.resumed) {
         await reopen();
         return { ok: false, status: 409, code: "EARLIER_REFUND_FINISHED", message: "An earlier refund on this booking was finished first. Refresh and decide again." };

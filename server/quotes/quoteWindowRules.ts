@@ -6,12 +6,13 @@
  *     vendor's balance payout for Outsyde's review. No answer: the vendor is paid when the 6 hours end.
  *   - A report covers everything still held. Reason 10 to 1,000 characters, up to 5 photos (our uploads only),
  *     one report per booking.
- *   - Outcomes: pay in full, partial refund (an amount), full refund (every dollar the customer paid, service fees
- *     included). Refunds come from the balance first, then the deposit (extras come first once 4b-2 adds them).
+ *   - Outcomes: pay in full, partial refund (an amount), full refund (everything the business was paid). The
+ *     service fee is never refunded (Legend 2026-11-05). Refunds come from the balance first, then the deposit
+ *     (extras come first once 4b-2 adds them).
  *     Today's admin Approve button means full refund and Reject means pay in full. Decided reports are final.
- *   - Points follow the money: points on what stays paid, released at Confirm, the end of the window or the decision.
+ *   - Points follow the money: points on the business's part that stays paid, released at Confirm, the end of the
+ *     window or the decision.
  */
-import { pointsForGrossCents } from "../loyaltyLedger";
 
 const HOUR = 3600_000;
 export const WINDOW_HOURS = 6;
@@ -100,7 +101,7 @@ export function payoutEligible(j: WindowJob, report: { outcome: ReportOutcome | 
 
 export type MoneyLeft = { balanceLeft: number; depositLeft: number };
 
-/** A refund for a report: the balance payment first, then the deposit. Amounts in money paid (fees included). */
+/** A refund for a report: the balance payment first, then the deposit. Amounts are the business's part (no fee). */
 export function splitReportRefund(amountCents: number, left: MoneyLeft): { ok: true; fromBalance: number; fromDeposit: number } | { ok: false; message: string } {
   const total = Math.max(0, left.balanceLeft) + Math.max(0, left.depositLeft);
   if (!Number.isInteger(amountCents) || amountCents <= 0) return { ok: false, message: "The refund must be more than $0." };
@@ -134,9 +135,11 @@ export function legacyDecision(status: string, outcome: ReportOutcome | undefine
   return null;
 }
 
-/** Points on what stays paid on one payment. */
-export function pointsTarget(grossCents: number, refundedCents: number): number {
-  return pointsForGrossCents(Math.max(0, grossCents - Math.max(0, refundedCents)));
+/** Points on one payment: its full points in proportion to the business's part still paid (fees are never refunded). */
+export function pointsTarget(fullPoints: number, baseCents: number, refundedCents: number): number {
+  if (!(baseCents > 0) || !(fullPoints > 0)) return 0;
+  const kept = Math.max(0, baseCents - Math.max(0, refundedCents));
+  return Math.round((fullPoints * kept) / baseCents);
 }
 
 /** Points to take back so an earned payment lands on its target. Never adds back what was already taken. */
