@@ -791,10 +791,53 @@ export const quoteJobs = pgTable("quote_jobs", {
   failedNoticeAt: timestamp("failed_notice_at", { withTimezone: true }),
   payoutStatus: text("payout_status").$type<"none" | "held" | "paid" | "paused" | "canceled">().notNull().default("none"),
   lastError: text("last_error"),
+  // Step 4b-1 (migration 100): the 6 hour Confirm or Report window, the vendor's balance payout, points.
+  windowEndsAt: timestamp("window_ends_at", { withTimezone: true }),
+  confirmedAt: timestamp("confirmed_at", { withTimezone: true }),
+  reportedAt: timestamp("reported_at", { withTimezone: true }),
+  completeNoticeAt: timestamp("complete_notice_at", { withTimezone: true }),
+  confirmedNoticeAt: timestamp("confirmed_notice_at", { withTimezone: true }),
+  payoutClaimTag: text("payout_claim_tag"),
+  payoutClaimedAt: timestamp("payout_claimed_at", { withTimezone: true }),
+  payoutAttempts: integer("payout_attempts").notNull().default(0),
+  payoutNextAt: timestamp("payout_next_at", { withTimezone: true }),
+  payoutError: text("payout_error"),
+  payoutAlertedAt: timestamp("payout_alerted_at", { withTimezone: true }),
+  payoutCents: integer("payout_cents"),
+  payoutRecipient: text("payout_recipient").$type<"business" | "staff">(),
+  payoutTransferId: text("payout_transfer_id"),
+  paidOutAt: timestamp("paid_out_at", { withTimezone: true }),
+  pointsSettledAt: timestamp("points_settled_at", { withTimezone: true }),
+  pointsRefundSeenCents: integer("points_refund_seen_cents"),
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
 });
 export type QuoteJob = typeof quoteJobs.$inferSelect;
+
+// Step 4b-1 (migration 100): a customer's report on a completed quote booking, one per booking, reviewed through
+// its refund_requests row. Final once decided (B13).
+export const quoteReports = pgTable("quote_reports", {
+  id: varchar("id", { length: 36 }).primaryKey().default(sql`gen_random_uuid()`),
+  appointmentId: varchar("appointment_id", { length: 36 }).notNull().unique().references((): AnyPgColumn => appointments.id, { onDelete: "cascade" }),
+  quoteId: varchar("quote_id", { length: 36 }).notNull().references(() => quotes.id, { onDelete: "cascade" }),
+  refundRequestId: varchar("refund_request_id", { length: 36 }).notNull().unique().references((): AnyPgColumn => refundRequests.id, { onDelete: "cascade" }),
+  customerId: varchar("customer_id", { length: 36 }).notNull(),
+  reason: text("reason").notNull(),
+  photos: jsonb("photos").$type<string[]>().notNull().default(sql`'[]'::jsonb`),
+  heldCents: integer("held_cents").notNull().default(0),
+  status: text("status").$type<"open" | "deciding" | "decided">().notNull().default("open"),
+  decideTag: text("decide_tag"),
+  outcome: text("outcome").$type<"pay_full" | "partial_refund" | "full_refund">(),
+  refundCents: integer("refund_cents"),
+  decidedBy: varchar("decided_by", { length: 36 }),
+  decidedAt: timestamp("decided_at", { withTimezone: true }),
+  adminNotes: text("admin_notes"),
+  vendorNoticeAt: timestamp("vendor_notice_at", { withTimezone: true }),
+  reminderSentAt: timestamp("reminder_sent_at", { withTimezone: true }),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+});
+export type QuoteReport = typeof quoteReports.$inferSelect;
 
 // R39 (migration 098): one cancellation fee charge per booking. Claimed before every try, looked up at Stripe
 // first, one idempotency key per try (server/payments/cancellationFees.ts).

@@ -409,13 +409,16 @@ export async function hasOpenQuoteRefund(appointmentId: string): Promise<boolean
   return !!r;
 }
 
-export async function refundQuoteBooking(appt: Appointment, amountCents: number, opKey: string, metadata: Record<string, string>): Promise<{ fromBalance: number; fromDeposit: number; refundIds: string[]; resumed: boolean }> {
+export async function refundQuoteBooking(appt: Appointment, amountCents: number, opKey: string, metadata: Record<string, string>,
+  opts: { balanceCapCents?: number } = {}): Promise<{ fromBalance: number; fromDeposit: number; refundIds: string[]; resumed: boolean }> {
   const { stripeService } = await import("../stripe/stripeService");
   const [open] = await rows<any>(sql`SELECT * FROM quote_refunds WHERE appointment_id = ${appt.id} AND done_at IS NULL ORDER BY created_at LIMIT 1`);
   let plan = open;
   if (!plan) {
     const job = await quoteJobFor(appt.id);
-    const fromBalance = Math.min(amountCents, refundableBalanceCents(job));
+    // Step 4b-1: a report's refund may also return the balance's service fee (B6), so the caller passes what is
+    // still paid on the balance payment; everything else refunds only the business's part.
+    const fromBalance = Math.min(amountCents, opts.balanceCapCents ?? refundableBalanceCents(job));
     await rows(sql`
       INSERT INTO quote_refunds (op_key, appointment_id, balance_pi, deposit_pi, balance_cents, deposit_cents)
       VALUES (${opKey}, ${appt.id}, ${fromBalance > 0 ? job?.stripePaymentIntentId ?? null : null}, ${appt.stripePaymentIntentId ?? null}, ${fromBalance}::int, ${amountCents - fromBalance}::int)
@@ -464,8 +467,8 @@ const BLOCK_TEXT: Record<JobCompleteBlock, string> = {
 
 /**
  * Job complete for a quote booking: charges the held balance (balance + its fee), then moves the booking to
- * completed and releases the deposit's pending points (as the existing complete route does). The vendor's share of
- * the balance stays with Outsyde (4b pays it). The caller checks who may do it.
+ * completed and opens the 6 hour Confirm or Report window (4b-1). The vendor's share of the balance stays with
+ * Outsyde until the window decides it (quoteWindow.ts); the points wait too. The caller checks who may do it.
  */
 export async function completeQuoteJob(appointmentId: string, actor: { userId: string; via: "owner" | "staff" | "auto" }, now = new Date()): Promise<CompleteResult> {
   const appt = await storage.getAppointment(appointmentId);
@@ -497,16 +500,27 @@ export async function completeQuoteJob(appointmentId: string, actor: { userId: s
     }
   }
   if (job) {
-    await db.update(quoteJobs).set({ completedAt: now, completedBy: actor.userId, completedVia: actor.via, updatedAt: now })
+    const { windowEndsAt } = await import("./quoteWindowRules");
+    await db.update(quoteJobs).set({ completedAt: now, completedBy: actor.userId, completedVia: actor.via, windowEndsAt: windowEndsAt(now), updatedAt: now })
       .where(and(eq(quoteJobs.id, job.id), sql`${quoteJobs.completedAt} IS NULL`));
   }
-  let pointsReleased = 0;
-  try {
-    const { releasePendingForReference } = await import("../loyaltyLedger");
-    const released: any = await releasePendingForReference("appointment", appointmentId, actor.userId);
-    pointsReleased = released?.pointsEarned ?? 0;
-  } catch (err) {
-    console.error(`[quote balance] points release failed for ${appointmentId}:`, err);
+  // Step 4b-1 (B8): points wait for the 6 hour window (Confirm, its end, or Outsyde's decision on a report), so the
+  // deposit's points stay pending here and the balance's points are added, pending, on what was charged.
+  const pointsReleased = 0;
+  if (job && capturedCents > 0) {
+    try {
+      const { createPending, pointsForGrossCents } = await import("../loyaltyLedger");
+      await createPending({
+        userId: appt.clientId, points: pointsForGrossCents(capturedCents), dollarAmountCents: capturedCents, transactionType: "business_transaction",
+        referenceType: "quote_balance", referenceId: job.id, releaseAfter: null, businessId: appt.businessId, description: "Points earned on your balance",
+      });
+    } catch (err) {
+      console.error(`[quote balance] balance points failed for ${appointmentId}:`, err);
+    }
+  }
+  if (job) {
+    const { afterJobComplete } = await import("./quoteWindow");
+    await afterJobComplete(appointmentId).catch((err) => console.error(`[quote balance] job complete card failed for ${appointmentId}:`, err));
   }
   // Same aftercare email as the existing complete route (best effort).
   try {

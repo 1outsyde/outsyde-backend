@@ -359,11 +359,16 @@ export function registerQuoteRoutes(app: Express): void {
       if (!q || !(await canRead(q, userId))) return res.status(404).json({ error: "Quote not found" });
       // Step 4a (additive): the balance of a paid quote (held, charged, needs a new card) and its Job complete.
       let balance = null;
+      let win: { window: unknown; report: unknown; payout: unknown } = { window: null, report: null, payout: null };
       if (q.appointmentId) {
         const { quoteJobFor, balanceJson } = await import("./quoteBalance");
-        balance = balanceJson(await quoteJobFor(q.appointmentId));
+        const job = await quoteJobFor(q.appointmentId);
+        balance = balanceJson(job);
+        // Step 4b-1 (additive): the 6 hour Confirm or Report window, the report, and (vendor side) the payout.
+        const { windowJson } = await import("./quoteWindow");
+        win = await windowJson(q, job, userId, q.customerId !== userId && (await canManage(q, userId)));
       }
-      return res.json({ quote: { ...toQuoteJson(q, await businessName(q.businessId)), balance } });
+      return res.json({ quote: { ...toQuoteJson(q, await businessName(q.businessId)), balance, ...win } });
     } catch (err) {
       console.error("[quotes] read failed:", err);
       return res.status(500).json({ error: "Failed to load the quote" });
@@ -389,6 +394,42 @@ export function registerQuoteRoutes(app: Express): void {
     } catch (err) {
       console.error("[quotes] job complete failed:", err);
       return res.status(500).json({ error: "Failed to complete the job" });
+    }
+  });
+
+  // POST /api/quotes/:id/confirm (step 4b-1): the customer confirms the job inside the 6 hour window. The vendor's
+  // balance share is paid at once and the points land.
+  app.post("/api/quotes/:id/confirm", async (req, res) => {
+    try {
+      const userId = userIdOf(req);
+      if (!userId) return res.status(401).json({ error: "Not authenticated" });
+      const q = await loadQuote(req.params.id);
+      if (!q || q.customerId !== userId) return res.status(404).json({ error: "Quote not found" });
+      const { confirmQuoteJob, windowJson } = await import("./quoteWindow");
+      const r = await confirmQuoteJob(q);
+      if (!r.ok) return res.status(r.status).json({ code: r.code, message: r.message, error: r.message });
+      return res.json({ success: true, ...(await windowJson(q, r.job, userId, false)) });
+    } catch (err) {
+      console.error("[quotes] confirm failed:", err);
+      return res.status(500).json({ error: "Failed to confirm the job" });
+    }
+  });
+
+  // POST /api/quotes/:id/report (step 4b-1): the customer reports a problem inside the 6 hour window. Body
+  // { reason, photos? } (photos uploaded first, like request photos). The vendor's payout is paused for Outsyde's review.
+  app.post("/api/quotes/:id/report", async (req, res) => {
+    try {
+      const userId = userIdOf(req);
+      if (!userId) return res.status(401).json({ error: "Not authenticated" });
+      const q = await loadQuote(req.params.id);
+      if (!q || q.customerId !== userId) return res.status(404).json({ error: "Quote not found" });
+      const { reportQuoteJob, windowJson } = await import("./quoteWindow");
+      const r = await reportQuoteJob(q, req.body ?? {});
+      if (!r.ok) return res.status(r.status).json({ code: r.code, message: r.message, error: r.message });
+      return res.json({ success: true, reportId: r.reportId, ...(await windowJson(q, r.job, userId, false)) });
+    } catch (err) {
+      console.error("[quotes] report failed:", err);
+      return res.status(500).json({ error: "Failed to send the report" });
     }
   });
 

@@ -145,7 +145,8 @@ export async function settleAppointmentBooking(appointmentId: string): Promise<S
       referenceId: appointmentId,
       description: 'Points earned from service booking',
       businessId,
-      releaseAfter: releaseAfterForBooking(appointment.appointmentDate, appointment.appointmentEndTime ?? appointment.appointmentTime),
+      // Quotes step 4b-1 (B8): a quote booking's points wait for its 6 hour window (quoteWindow.ts), never a date.
+      releaseAfter: appointment.quoteId ? null : releaseAfterForBooking(appointment.appointmentDate, appointment.appointmentEndTime ?? appointment.appointmentTime),
     });
   } catch (pointsErr) {
     if (isUniqueViolation(pointsErr)) {

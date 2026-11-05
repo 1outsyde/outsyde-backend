@@ -21,6 +21,12 @@ const POINTS_REJECT_STATES: ReadonlySet<string> = new Set([
   BOOKING_STATES.NO_SHOW,
 ]);
 
+async function isPaidQuoteBooking(appointmentId: string): Promise<boolean> {
+  const { quoteJobs } = await import('@shared/schema');
+  const [j] = await db.select({ id: quoteJobs.id }).from(quoteJobs).where(eq(quoteJobs.appointmentId, appointmentId));
+  return !!j;
+}
+
 async function rejectPendingPointsOnEnd(
   referenceType: 'appointment' | 'shoot_booking',
   bookingId: string,
@@ -28,7 +34,11 @@ async function rejectPendingPointsOnEnd(
 ): Promise<void> {
   if (!POINTS_REJECT_STATES.has(toState)) return;
   try {
-    await rejectPendingForReference(referenceType, bookingId, `Booking ${toState}`);
+    // Quotes step 4b-1 (B8, points follow the money): a paid quote booking's points are settled by the quote job once
+    // its refunds are recorded (a customer cancel that keeps the deposit keeps its points), never rejected here.
+    if (!(referenceType === 'appointment' && (await isPaidQuoteBooking(bookingId)))) {
+      await rejectPendingForReference(referenceType, bookingId, `Booking ${toState}`);
+    }
   } catch (err) {
     console.error(`[Points] Failed to reject pending points for ${referenceType} ${bookingId}:`, err);
   }
