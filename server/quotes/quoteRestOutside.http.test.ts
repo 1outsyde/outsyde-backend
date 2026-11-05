@@ -275,6 +275,8 @@ const hmNY = (d: Date) => new Intl.DateTimeFormat("en-GB", { timeZone: "America/
     assert(r.status === 400 && r.body?.field === "restPaid", "a full payment quote has nothing left to pay outside", r.body);
     r = await call("PATCH", `/api/quotes/${qo.id}`, { token: owner.token, body: { ...body(), version: qo.version, totalCents: 70000 } });
     assert(r.status === 200 && r.body?.quote?.restPaid === "outside" && r.body.quote.amounts.paidDirectlyCents === 60000, "an edit that leaves it out keeps it", r.body?.quote);
+    r = await call("PATCH", `/api/quotes/${qo.id}`, { token: owner.token, body: { ...body({ restPaid: null }), version: r.body.quote.version } });
+    assert(r.status === 200 && r.body?.quote?.restPaid === "outside", "an edit sending it empty keeps it too (review 5)", r.body?.quote);
     r = await call("PATCH", `/api/quotes/${qo.id}`, { token: owner.token, body: { ...body({ restPaid: "outsyde" }), version: r.body.quote.version } });
     assert(r.status === 200 && r.body?.quote?.restPaid === "outsyde", "and the vendor can switch it back", r.body?.quote);
 
@@ -282,6 +284,10 @@ const hmNY = (d: Date) => new Intl.DateTimeFormat("en-GB", { timeZone: "America/
     const O = await mkQuote({ biz, sender: owner.uid, customer: cust.uid, conv, hoursOut: 72, minutes: 180, restPaid: "outside" });
     const aO = await payQuote(O.qid, cust.token);
     let jO = await jobOf(aO.id);
+    const paidCard = (await cardsOf(conv, "paid")).find((m: any) => m.card?.quoteId === O.qid);
+    assert(paidCard?.card?.restPaid === "outside" && paidCard.card.paidDirectlyCents === 55000, "the paid card says the rest is paid directly (review 2)", paidCard?.card);
+    r = await call("GET", `/api/quotes/${O.qid}`, { token: cust.token });
+    assert(r.body?.quote?.balance === null && r.body?.quote?.amounts?.paidDirectlyCents === 55000, "no balance block on an outside quote, only what is paid directly (review 3)", { b: r.body?.quote?.balance, a: r.body?.quote?.amounts });
     assert(aO.status === "confirmed" && jO?.balance_status === "none" && jO.balance_cents === 0 && jO.hold_cents === 0 && jO.payout_status === "none", "no balance to hold or pay out", jO);
     await shiftJob(aO.id, 60);
     await qb.runQuoteBalanceJob(new Date());

@@ -193,12 +193,6 @@ export function quoteAmounts(totalCents: number, depositCents: number | null, re
   };
 }
 
-/** The line about the rest on the quote and its email (null when paid in full). */
-export function quoteRestText(a: { balanceCents: number; restPaid: QuoteRestPaid }): string | null {
-  if (!(a.balanceCents > 0)) return null;
-  return a.restPaid === "outside" ? `Remainder of ${formatCents(a.balanceCents)} paid to the business directly` : "Balance, held on your card the day before";
-}
-
 export function formatCents(cents: number): string {
   return `$${(cents / 100).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 }

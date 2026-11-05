@@ -5,7 +5,8 @@
  * Legend 2026-11-05 (E5): new deposit quotes default to through Outsyde.
  * Run with: DATABASE_URL=postgresql://x:y@localhost:5432/z npx tsx server/quotes/quoteRestOutside.test.ts
  */
-import { checkQuoteInput, quoteAmounts, quoteRestText } from './quoteRules';
+import { checkQuoteInput, quoteAmounts } from './quoteRules';
+import { buildQuoteEmail } from './quoteEmail';
 import { windowCardText } from './quoteWindow';
 
 let passed = 0;
@@ -42,11 +43,12 @@ a = quoteAmounts(65000, null, 'outside');
 assert(a.paidDirectlyCents === 0 && a.balanceTotalCents === 0, 'a full payment has nothing left either way', a);
 
 console.log('\n── the copy (commas and periods, never the fee rate) ──');
-const t1 = quoteRestText(quoteAmounts(65000, 10000, 'outside'));
-assert(t1 === 'Remainder of $550.00 paid to the business directly', 'outside: paid to the business directly', t1);
-const t2 = quoteRestText(quoteAmounts(65000, 10000, 'outsyde'));
-assert(t2 === 'Balance, held on your card the day before', 'through Outsyde: unchanged wording', t2);
-assert(quoteRestText(quoteAmounts(65000, null)) === null, 'full payment: no line');
+const qBase: any = { totalCents: 65000, depositCents: 10000, paymentMode: 'deposit', jobDate: '2026-12-01', startTime: '09:00', title: 'Move', linkCode: 'x' };
+const e1 = buildQuoteEmail({ quote: { ...qBase, restPaid: 'outside' }, businessName: 'Royal Elite Moving', businessPhone: null, customerFirstName: 'Ana', link: 'https://x' });
+const e2 = buildQuoteEmail({ quote: { ...qBase, restPaid: 'outsyde' }, businessName: 'Royal Elite Moving', businessPhone: null, customerFirstName: 'Ana', link: 'https://x' });
+const t1 = e1.text, t2 = e2.text;
+assert(/Remainder, paid to the business directly/.test(t1) && !/held on your card/.test(t1), 'email, outside: paid to the business directly', t1);
+assert(/Balance, held on your card the day before/.test(t2), 'email, through Outsyde: unchanged wording', t2);
 const charged = windowCardText('job_complete', { businessName: 'Royal Elite Moving', title: 'Move', charged: true });
 const notCharged = windowCardText('job_complete', { businessName: 'Royal Elite Moving', title: 'Move', charged: false });
 assert(/balance was charged/.test(charged), 'Job complete with a balance: says it was charged', charged);

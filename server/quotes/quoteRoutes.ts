@@ -274,7 +274,8 @@ export function registerQuoteRoutes(app: Express): void {
         return res.status(409).json({ code: "QUOTE_CHANGED", message: "This quote was changed in the meantime. Open it again and make your change." });
       }
       // Step 4b-2a: an edit that leaves out how the rest is paid keeps it (a full payment quote has none).
-      const body = req.body?.restPaid === undefined && req.body?.paymentMode === "deposit" ? { ...req.body, restPaid: q.restPaid } : req.body;
+      const restLeftOut = req.body?.restPaid === undefined || req.body?.restPaid === null || req.body?.restPaid === "";
+      const body = restLeftOut && req.body?.paymentMode === "deposit" ? { ...req.body, restPaid: q.restPaid } : req.body;
       const input = checkQuoteInput(body);
       if (!input.ok) return res.status(400).json({ error: "Invalid data", field: input.field, message: input.message });
       const now = new Date();
@@ -369,7 +370,8 @@ export function registerQuoteRoutes(app: Express): void {
       if (q.appointmentId) {
         const { quoteJobFor, balanceJson } = await import("./quoteBalance");
         const job = await quoteJobFor(q.appointmentId);
-        balance = balanceJson(job);
+        // Step 4b-2a: no balance block when the rest is paid to the business directly (amounts.paidDirectlyCents).
+        balance = q.restPaid === "outside" ? null : balanceJson(job);
         // Step 4b-1 (additive): the 6 hour Confirm or Report window, the report, and (vendor side) the payout.
         const { windowJson } = await import("./quoteWindow");
         win = await windowJson(q, job, userId, q.customerId !== userId && (await canManage(q, userId)));
