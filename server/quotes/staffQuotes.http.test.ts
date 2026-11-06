@@ -2,7 +2,7 @@
  * Quotes step 6d-2a: HTTP integration tests.
  *   GET /api/staff/quotes?businessId=  only the quotes this staff member sent, only while they are active staff.
  *   bookingStatus on the quote detail (GET /api/quotes/:id, GET /api/me/quotes): the paid quote's booking status,
- *   null before it is paid. Additive.
+ *   null before it is paid. Additive. Step 6d-2c: on GET /api/vendor/quotes too.
  * Legend 2026-11-05 (6d-2 calls 5 and 6, as recommended).
  *
  * Run with: npx tsx server/quotes/staffQuotes.http.test.ts
@@ -145,6 +145,13 @@ const daysFromNow = (n: number) => { const d = new Date(); d.setUTCDate(d.getUTC
     assert(unpaidRow && unpaidRow.bookingStatus === null, "an unpaid quote in /api/me/quotes: null", unpaidRow);
     const l3 = await call("GET", "/api/staff/quotes", { token: staff.token });
     assert(l3.body.quotes.find((x: any) => x.id === qid)?.bookingStatus === "canceled" && l3.body.quotes.find((x: any) => x.id === qid)?.status === "paid", "staff list shows paid with the canceled booking", l3.body.quotes);
+    // Step 6d-2c: the owner list carries it too (the app's owner Open tab and chips).
+    const vl = await call("GET", "/api/vendor/quotes", { token: owner.token });
+    const vrow = (vl.body?.quotes ?? []).find((x: any) => x.id === qid);
+    assert(vl.status === 200 && vrow?.bookingStatus === "canceled" && vrow.status === "paid", "owner list: paid with the canceled booking", vrow);
+    const vunpaid = (vl.body?.quotes ?? []).find((x: any) => x.id === o1.body.quote.id);
+    assert(vunpaid && "bookingStatus" in vunpaid && vunpaid.bookingStatus === null, "owner list: null before payment", vunpaid);
+    assert((vl.body?.quotes ?? []).every((x: any) => x.businessId === biz), "owner list: only this business", vl.body?.quotes?.length);
     const keys = Object.keys(d2.body.quote);
     for (const k of ["id", "status", "version", "amounts", "balance", "window", "report", "extras", "extrasPayment", "business"]) {
       assert(keys.includes(k), `detail still has ${k}`);

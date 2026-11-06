@@ -9,7 +9,7 @@
  *   POST  /api/quotes/:id/decline           the customer { reason? }
  *   GET   /api/quotes/:id                   the customer, the business owner, the sending staff member, or admin
  *   GET   /api/conversations/:id/quotes     the two people in the chat
- *   GET   /api/vendor/quotes                business owner (or admin with x-business-id)
+ *   GET   /api/vendor/quotes                business owner (or admin with x-business-id), with bookingStatus (6d-2c)
  *   GET   /api/staff/quotes                 active staff: only the quotes they sent (step 6d-2a, ?businessId=)
  *   GET   /api/me/quotes                    the customer
  *
@@ -711,7 +711,9 @@ export function registerQuoteRoutes(app: Express): void {
       const owner = await resolveVendorBusiness(req, res);
       if (!owner) return;
       const rows = await db.select().from(quotes).where(eq(quotes.businessId, owner.business.id)).orderBy(desc(quotes.createdAt)).limit(500);
-      return res.json({ quotes: rows.map((r) => toQuoteJson(r, owner.business.name)) });
+      // Step 6d-2c (additive): each paid quote's booking status, one query, as on the staff list.
+      const statuses = await bookingStatusesFor(rows);
+      return res.json({ quotes: rows.map((r) => ({ ...toQuoteJson(r, owner.business.name), bookingStatus: r.appointmentId ? statuses.get(r.appointmentId) ?? null : null })) });
     } catch (err) {
       console.error("[quotes] vendor list failed:", err);
       return res.status(500).json({ error: "Failed to load quotes" });
