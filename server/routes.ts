@@ -247,6 +247,7 @@ import { serviceCitiesInput } from "./estimates/serviceCities";
 import { registerRequestFormRoutes } from "./requests/requestFormRoutes";
 import { registerQuoteRoutes } from "./quotes/quoteRoutes";
 import { registerEstimateRequestRoutes } from "./estimates/estimateRequestRoutes";
+import { registerEmailChangeRoutes } from "./account/emailChange";
 import {
   transitionAppointmentState,
   transitionShootBookingState,
@@ -14401,6 +14402,11 @@ export async function registerRoutes(
 
   // Estimate requests (migration 068): saved form + vendor dashboard list. See server/estimates.
   registerEstimateRequestRoutes(app);
+  // Change email (migration 107): code to the new address, then users.email moves. See server/account.
+  registerEmailChangeRoutes(app, {
+    verifyPassword: async (password, hash) =>
+      isLegacyHash(hash) ? legacyVerifyPassword(password, hash) : verifyPassword(password, hash),
+  });
   // Request forms (migration 096, Quotes step 1). See server/requests.
   registerRequestFormRoutes(app);
   // Quotes (migration 097, Quotes step 2). See server/quotes.
