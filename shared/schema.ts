@@ -724,6 +724,14 @@ export const quotes = pgTable("quotes", {
   // becomes an order). Product quotes have no job date, time or length.
   kind: text("kind").$type<"service" | "product">().notNull().default("service"),
   dueDate: text("due_date"),
+  // Deliverables D1a (migration 106): the business's own product it's for (a label and a link, never stock), how it
+  // gets to the customer (product quotes only), an optional delivery fee line inside the total, and the delivery
+  // address the customer adds before paying.
+  productId: varchar("product_id", { length: 36 }).references((): AnyPgColumn => vendorProducts.id, { onDelete: "set null" }),
+  fulfillment: text("fulfillment").$type<"pickup" | "delivery">(),
+  deliveryFeeCents: integer("delivery_fee_cents"),
+  deliveryAddress: text("delivery_address"),
+  deliveryAddressAt: timestamp("delivery_address_at", { withTimezone: true }),
   jobDate: text("job_date"),
   startTime: text("start_time"),
   durationMinutes: integer("duration_minutes"),

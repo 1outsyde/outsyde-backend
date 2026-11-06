@@ -33,6 +33,8 @@ export type QuoteRestPaid = "outsyde" | "outside";
 /** Step 3 (Legend 2026-11-04): a service gets a date and time and becomes a booking; a product or deliverable
  *  (a cake, a dress) has an optional due date and becomes an order. */
 export type QuoteKind = "service" | "product";
+/** Deliverables D1a (Legend 2026-11-06, call 5): how a product quote gets to the customer. Services have none. */
+export type QuoteFulfillment = "pickup" | "delivery";
 export type QuoteStatus = "sent" | "withdrawn" | "declined" | "expired" | "paid";
 export type QuoteEvent = "sent" | "updated" | "withdrawn" | "declined" | "expired" | "paid";
 
@@ -49,6 +51,8 @@ export interface QuoteInput {
   paymentMode: QuotePaymentMode;
   depositCents: number | null;
   restPaid: QuoteRestPaid;
+  fulfillment: QuoteFulfillment | null;   // product quotes only: pickup (the default) or delivery
+  deliveryFeeCents: number | null;        // delivery only, optional, a line inside the total
 }
 
 type Fail = { ok: false; field: string; message: string };
@@ -121,15 +125,55 @@ export function checkQuoteInput(raw: unknown): { ok: true; value: QuoteInput } |
   if (restRaw === "outside" && paymentMode !== "deposit") return { ok: false, field: "restPaid", message: "A full payment quote has nothing left to pay" };
   const restPaid: QuoteRestPaid = restRaw;
 
+  // Deliverables D1a (call 5): Pickup or Delivery, and an optional delivery fee line inside the total.
+  const given = (v: unknown) => v !== undefined && v !== null && v !== "";
+  const feeGiven = given(b.deliveryFeeCents) && b.deliveryFeeCents !== 0; // 0 means no fee line, on any quote
+  let fulfillment: QuoteFulfillment | null = null;
+  let deliveryFeeCents: number | null = null;
+  if (kind === "service") {
+    if (given(b.fulfillment)) return { ok: false, field: "fulfillment", message: "Pickup or delivery is for deliverables. A service has a date and start time." };
+    if (feeGiven) return { ok: false, field: "deliveryFeeCents", message: "A delivery fee is for deliverables only." };
+  } else {
+    const f = given(b.fulfillment) ? b.fulfillment : "pickup";
+    if (f !== "pickup" && f !== "delivery") return { ok: false, field: "fulfillment", message: "Choose Pickup or Delivery" };
+    fulfillment = f;
+    if (feeGiven) {
+      const fee = b.deliveryFeeCents;
+      if (f !== "delivery") return { ok: false, field: "deliveryFeeCents", message: "A delivery fee goes with Delivery. Choose Delivery, or remove the fee." };
+      if (!isWholeCents(fee) || fee < 0) return { ok: false, field: "deliveryFeeCents", message: "Enter the delivery fee" };
+      if (fee >= totalCents) return { ok: false, field: "deliveryFeeCents", message: "The delivery fee is part of the total, so it must be less than the total." };
+      deliveryFeeCents = fee > 0 ? fee : null;
+    }
+    // Call 7: for now the rest of a deliverable's deposit is paid directly to the business (no card hold, which
+    // needs a job start). Through Outsyde comes in a later step.
+    if (paymentMode === "deposit" && restPaid !== "outside") {
+      return { ok: false, field: "restPaid", message: "For a deliverable, the rest of a deposit is paid directly to you. Choose that, or full payment." };
+    }
+  }
+
   return {
     ok: true,
     value: {
       kind, dueDate: kind === "product" && dueDate ? dueDate : null,
       title, details: details || null, extrasNote: extrasNote || null,
       jobDate: kind === "service" ? jobDate : null, startTime: kind === "service" ? startTime : null, durationMinutes,
-      totalCents, paymentMode, depositCents, restPaid,
+      totalCents, paymentMode, depositCents, restPaid, fulfillment, deliveryFeeCents,
     },
   };
+}
+
+/** Deliverables D1a (call 5): the delivery address the customer adds before paying. One line, 5 to 300 characters. */
+export const DELIVERY_ADDRESS_MAX = 300;
+export function checkDeliveryAddress(raw: unknown): { ok: true; value: string } | Fail {
+  if (typeof raw !== "string") return { ok: false, field: "address", message: "Enter the delivery address" };
+  // Control characters (and NUL, which Postgres refuses) become spaces; length counts characters as the database does.
+  const value = raw.replace(/[\u0000-\u0009\u000B\u000C\u000E-\u001F\u007F]/g, " ")
+    .split(/\r?\n|\r/).map((l) => l.trim().replace(/\s+/g, " ")).filter(Boolean).join(", ").replace(/,\s*,/g, ",");
+  const chars = Array.from(value).length;
+  if (!value) return { ok: false, field: "address", message: "Enter the delivery address" };
+  if (chars < 5) return { ok: false, field: "address", message: "Enter the full delivery address, with the street and town" };
+  if (chars > DELIVERY_ADDRESS_MAX) return { ok: false, field: "address", message: `The address can be up to ${DELIVERY_ADDRESS_MAX} characters` };
+  return { ok: true, value };
 }
 
 /** When the job starts and when the quote expires (decision 1). The start must be in the future. */

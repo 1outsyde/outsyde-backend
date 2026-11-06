@@ -26,7 +26,7 @@ import { appointments, businesses, estimateRequests, quotes, staffMembers, type 
 import { resolveVendorBusiness } from "../estimates/estimateRequestRoutes";
 import { resolveTimeZone } from "../manualRequests";
 import { postCardMessage } from "../messaging/postCard";
-import { checkQuoteInput, effectiveStatus, quoteAmounts, quoteMessageText, quoteTiming, type QuoteEvent } from "./quoteRules";
+import { checkDeliveryAddress, checkQuoteInput, effectiveStatus, quoteAmounts, quoteMessageText, quoteTiming, type QuoteEvent } from "./quoteRules";
 import { sendQuoteEmailIfEnabled } from "./quoteEmail";
 
 const ADMIN_EMAILS = ["info@goutsyde.com", "jamesmeyers2304@gmail.com"];
@@ -145,6 +145,12 @@ export function toQuoteJson(q: Quote, businessName: string | null, now = new Dat
     serviceId: q.serviceId ?? null,
     kind: q.kind,
     dueDate: q.dueDate ?? null,
+    // Deliverables D1a (additive): the product it's for, Pickup or Delivery, the delivery fee line, and the address
+    // the customer added (only the customer, the business and admin ever read this JSON).
+    productId: q.productId ?? null,
+    fulfillment: q.fulfillment ?? null,
+    deliveryFeeCents: q.deliveryFeeCents ?? null,
+    deliveryAddress: q.deliveryAddress ?? null,
     title: q.title,
     details: q.details ?? null,
     extrasNote: q.extrasNote ?? null,
@@ -183,6 +189,8 @@ function cardFor(q: Quote, event: QuoteEvent) {
     businessId: q.businessId,
     kind: q.kind,
     dueDate: q.dueDate ?? null,
+    fulfillment: q.fulfillment ?? null,
+    deliveryFeeCents: q.deliveryFeeCents ?? null,
     title: q.title,
     totalCents: q.totalCents,
     paymentMode: q.paymentMode,
@@ -275,6 +283,15 @@ export async function postEvent(q: Quote, event: QuoteEvent, fromCustomer: boole
   }
 }
 
+/** Deliverables D1a (call 10): the business's own active product a deliverable is for. A label and a link only. */
+async function productFor(raw: unknown, businessId: string, kind: string): Promise<{ ok: true; id: string | null } | { ok: false; message: string }> {
+  if (raw === undefined || raw === null || raw === "") return { ok: true, id: null };
+  if (kind !== "product") return { ok: false, message: "A product goes with a deliverable. Choose Deliverable, or remove the product." };
+  const p = await storage.getVendorProduct(String(raw));
+  if (!p || p.businessId !== businessId || p.isActive === false || p.status === "archived") return { ok: false, message: "Choose one of your products" };
+  return { ok: true, id: p.id };
+}
+
 export function registerQuoteRoutes(app: Express): void {
   app.post("/api/quotes", async (req, res) => {
     try {
@@ -316,6 +333,8 @@ export function registerQuoteRoutes(app: Express): void {
         }
         requestId = r.id;
       }
+      const product = await productFor(req.body?.productId, business.id, input.value.kind);
+      if (!product.ok) return res.status(400).json({ error: "Invalid data", field: "productId", message: product.message });
 
       const [created] = await db.insert(quotes).values({
         businessId: business.id,
@@ -325,6 +344,7 @@ export function registerQuoteRoutes(app: Express): void {
         conversationId: conv.id,
         requestId,
         serviceId,
+        productId: product.id,
         ...input.value,
         timeZone,
         startsAt: timing.startsAt,
@@ -371,7 +391,10 @@ export function registerQuoteRoutes(app: Express): void {
       }
       // Step 4b-2a: an edit that leaves out how the rest is paid keeps it (a full payment quote has none).
       const restLeftOut = req.body?.restPaid === undefined || req.body?.restPaid === null || req.body?.restPaid === "";
-      const body = restLeftOut && req.body?.paymentMode === "deposit" ? { ...req.body, restPaid: q.restPaid } : req.body;
+      let body = restLeftOut && req.body?.paymentMode === "deposit" ? { ...req.body, restPaid: q.restPaid } : req.body;
+      // Deliverables D1a: an edit of a deliverable that leaves out Pickup or Delivery keeps it.
+      const fulfillmentLeftOut = body?.fulfillment === undefined || body?.fulfillment === null || body?.fulfillment === "";
+      if (fulfillmentLeftOut && body?.kind === "product" && q.kind === "product" && q.fulfillment) body = { ...body, fulfillment: q.fulfillment };
       const input = checkQuoteInput(body);
       if (!input.ok) return res.status(400).json({ error: "Invalid data", field: input.field, message: input.message });
       const now = new Date();
@@ -388,8 +411,18 @@ export function registerQuoteRoutes(app: Express): void {
           serviceId = svc.id;
         }
       }
+      // productId left out keeps the current product, unless the quote is now a service.
+      let productId = input.value.kind === "product" ? q.productId ?? null : null;
+      if (req.body?.productId !== undefined) {
+        const product = await productFor(req.body.productId, q.businessId, input.value.kind);
+        if (!product.ok) return res.status(400).json({ error: "Invalid data", field: "productId", message: product.message });
+        productId = product.id;
+      }
+      // The customer's address stays only while it's still a Delivery. While it is, the address is left out of the
+      // update, so one the customer adds during the edit is never overwritten (the address doesn't bump the version).
+      const addressReset = input.value.fulfillment === "delivery" ? {} : { deliveryAddress: null, deliveryAddressAt: null };
       const [updated] = await db.update(quotes)
-        .set({ ...input.value, serviceId, startsAt: timing.startsAt, expiresAt: timing.expiresAt, version: q.version + 1, updatedAt: now })
+        .set({ ...input.value, serviceId, productId, ...addressReset, startsAt: timing.startsAt, expiresAt: timing.expiresAt, version: q.version + 1, updatedAt: now })
         .where(and(eq(quotes.id, q.id), eq(quotes.status, "sent"), eq(quotes.version, q.version), gt(quotes.expiresAt, now), notPaying(now)))
         .returning();
       if (!updated) {
@@ -426,6 +459,53 @@ export function registerQuoteRoutes(app: Express): void {
     } catch (err) {
       console.error("[quotes] withdraw failed:", err);
       return res.status(500).json({ error: "Failed to withdraw the quote" });
+    }
+  });
+
+  // POST /api/quotes/:id/delivery-address (deliverables D1a, call 5): the customer adds or changes the delivery
+  // address of a Delivery quote before paying. The terms don't change, so the version stays. A plain message goes
+  // to the business in the chat, readable on every app build.
+  app.post("/api/quotes/:id/delivery-address", async (req, res) => {
+    try {
+      const userId = userIdOf(req);
+      if (!userId) return res.status(401).json({ error: "Not authenticated" });
+      const q = await loadQuote(req.params.id);
+      if (!q || q.customerId !== userId) return res.status(404).json({ error: "Quote not found" });
+      const now = new Date();
+      if (effectiveStatus(q, now) !== "sent") return res.status(409).json(closedBody(q));
+      if (isPaying(q, now)) return res.status(409).json(PAYING_BODY);
+      if (q.kind !== "product" || q.fulfillment !== "delivery") {
+        return res.status(409).json({ code: "NOT_DELIVERY", message: "This quote isn't for delivery, so it needs no address." });
+      }
+      const a = checkDeliveryAddress(req.body?.address);
+      if (!a.ok) return res.status(400).json({ error: "Invalid data", field: a.field, message: a.message });
+      const open = and(eq(quotes.id, q.id), eq(quotes.status, "sent"), eq(quotes.fulfillment, "delivery"), gt(quotes.expiresAt, now), notPaying(now));
+      // Only a different address is written, so two identical saves at once post one message.
+      const [updated] = await db.update(quotes)
+        .set({ deliveryAddress: a.value, deliveryAddressAt: now, updatedAt: now })
+        .where(and(open, sql`${quotes.deliveryAddress} IS DISTINCT FROM ${a.value}`))
+        .returning();
+      if (!updated) {
+        const fresh = await loadQuote(q.id);
+        if (fresh && isPaying(fresh, new Date())) return res.status(409).json(PAYING_BODY);
+        if (fresh && effectiveStatus(fresh, new Date()) !== "sent") return res.status(409).json(closedBody(fresh));
+        if (fresh && fresh.fulfillment === "delivery" && fresh.deliveryAddress === a.value) {
+          return res.json({ quote: toQuoteJson(fresh, await businessName(fresh.businessId)) });
+        }
+        return res.status(409).json({ code: "NOT_DELIVERY", message: "This quote isn't for delivery, so it needs no address." });
+      }
+      // The message goes to whoever sent the quote, only while they can still manage it (a removed staff member gets
+      // nothing; the owner reads the address on the quote).
+      if ((await canManage(updated, updated.senderId)) && !(await storage.isUserBlockedEitherWay(q.senderId, q.customerId))) {
+        await postCardMessage({
+          conversationId: q.conversationId, senderId: q.customerId, recipientId: q.senderId, kind: "text", card: null,
+          content: `Delivery address for ${q.title}: ${a.value}`,
+        }).catch((err) => console.error(`[quotes] address message failed for ${q.id}:`, err));
+      }
+      return res.json({ quote: toQuoteJson(updated, await businessName(updated.businessId)) });
+    } catch (err) {
+      console.error("[quotes] delivery address failed:", err);
+      return res.status(500).json({ error: "Failed to save the address" });
     }
   });
 
@@ -699,7 +779,15 @@ export function registerQuoteRoutes(app: Express): void {
       const rows = await db.select().from(quotes).where(eq(quotes.conversationId, conv.id)).orderBy(desc(quotes.createdAt)).limit(100);
       const names = new Map<string, string | null>();
       for (const r of rows) if (!names.has(r.businessId)) names.set(r.businessId, await businessName(r.businessId));
-      return res.json({ quotes: rows.map((r) => toQuoteJson(r, names.get(r.businessId) ?? null)) });
+      // Deliverables D1a: the delivery address only for the customer and those who can manage the quote (a removed
+      // staff member is still in the chat but no longer sees it).
+      const out = [];
+      for (const r of rows) {
+        const j = toQuoteJson(r, names.get(r.businessId) ?? null);
+        if (j.deliveryAddress && r.customerId !== userId && !(await canManage(r, userId))) j.deliveryAddress = null;
+        out.push(j);
+      }
+      return res.json({ quotes: out });
     } catch (err) {
       console.error("[quotes] chat list failed:", err);
       return res.status(500).json({ error: "Failed to load quotes" });
