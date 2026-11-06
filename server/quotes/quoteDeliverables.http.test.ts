@@ -180,7 +180,8 @@ const daysFromNow = (n: number) => { const d = new Date(); d.setUTCDate(d.getUTC
     assert(busy.status === 409 && busy.body?.code === 'QUOTE_PAYING', 'no change while the customer is paying', busy.body);
     await q(`UPDATE quotes SET paying_until = NULL WHERE id = $1`, [qd.id]);
     const pay = await call('POST', `/api/quotes/${qd.id}/pay`, { token: cust.token, body: { version: qd.version } });
-    assert(pay.status === 400 && pay.body?.code === 'QUOTE_PRODUCT_LATER', 'paying a deliverable is still refused until D1b', pay.body);
+    // D1b: deliverables are paid as product orders (quoteOrders.http.test.ts); this business has no payouts set up.
+    assert(pay.status === 400 && pay.body?.code === 'PAYOUTS_NOT_READY', 'paying goes through the payment checks (no payouts here)', pay.body);
 
     console.log('\n── editing a deliverable ──');
     const e1 = await edit(qd.id, qd.version, { kind: 'product', title: 'Two tier birthday cake', dueDate: daysFromNow(15), totalCents: 22000, paymentMode: 'full', deliveryFeeCents: 2500 });

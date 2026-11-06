@@ -506,6 +506,16 @@ export class WebhookHandlers {
       await handleBalanceEvent('succeeded', paymentIntent).catch((err) => console.error('[quote balance] succeeded event failed:', err));
       return;
     }
+    // Deliverables D1b: a deliverable quote paid as a product order (POST /api/quotes/:id/pay). Its own type, so it never
+    // reaches the cart branch (no cart clear, no stock change).
+    if (metadata.type === 'quote_order') {
+      try {
+        await this.handleQuoteOrderSucceeded(paymentIntent);
+      } catch (error) {
+        console.error(`[Stripe] Error handling quote_order payment ${paymentIntent.id}:`, error);
+      }
+      return;
+    }
     // Event tickets (server/events/ticketCheckout.ts) carry their own keys (ticketOrderId), never
     // bookingId/orderId, and are handled here before any other branch sees them.
     if (metadata.type === 'event_ticket') {
@@ -1536,7 +1546,7 @@ export class WebhookHandlers {
       const ref: PromoRef | null =
         type === 'appointment' && metadata.appointmentId ? { type: 'appointment', id: metadata.appointmentId }
         : type === 'shoot_booking' && bookingId ? { type: 'shoot_booking', id: bookingId }
-        : type === 'product_purchase' && metadata.orderId ? { type: 'order', id: metadata.orderId }
+        : (type === 'product_purchase' || type === 'quote_order') && metadata.orderId ? { type: 'order', id: metadata.orderId }
         : type === 'appointment_booking' && bookingId ? { type: 'appointment', id: bookingId }
         : null;
       if (ref) {
@@ -1615,12 +1625,121 @@ export class WebhookHandlers {
   }
 
   /**
+   * Deliverables D1b: a deliverable quote's payment succeeded. The quote is claimed first (still sent at the paid
+   * version, else everything is refunded and the order cancelled), then the order is marked paid once. Receipts,
+   * points (Outsyde loyalty rewards points, right away as on any product purchase), the points code, the business's
+   * new order notice and the Paid card follow, like a product purchase without stock or cart changes.
+   */
+  static async handleQuoteOrderSucceeded(paymentIntent: any) {
+    const metadata = paymentIntent.metadata || {};
+    const orderId = metadata.orderId;
+    if (!orderId) return;
+    const order = await storage.getOrder(orderId);
+    if (!order || !order.quoteId) {
+      console.error(`[Stripe] quote_order: order ${orderId} not found or not from a quote`);
+      return;
+    }
+    const qo = await import("../quotes/quoteOrders");
+    const version = metadata.quoteVersion ? Number(metadata.quoteVersion) : null;
+    const claim = await qo.claimDeliverablePaid(order, Number.isInteger(version) ? version : null);
+    if (!claim.ok) {
+      console.warn(`[Stripe] quote_order ${orderId}: quote ${order.quoteId} changed or closed before payment finished; refunding`);
+      await qo.refundUnpayableDeliverable(order, paymentIntent.id, Number(paymentIntent.amount_received ?? paymentIntent.amount ?? 0));
+      return;
+    }
+    if (!(await claimOrderPaid(orderId, paymentIntent.id))) {
+      // A repeat delivery: only make sure the Paid card went out (it is guarded to post once).
+      await qo.afterDeliverablePaid(claim.quote, order);
+      logReceiptsSkipped('quote_order', orderId);
+      return;
+    }
+    const business = await storage.getBusiness(order.businessId).catch(() => undefined);
+    const vendor = await storage.getUserByBusinessOwnerId(order.businessId).catch(() => undefined);
+    const customer = await storage.getUser(order.customerId).catch(() => undefined);
+    const how = order.fulfillment === 'delivery' ? `Delivery to ${order.shippingAddress ?? 'your address'}` : 'Pickup';
+    const due = claim.quote.dueDate ? `, due ${claim.quote.dueDate}` : '';
+    const items = ((order.items as any[]) || []).map((i: any) => ({
+      productName: i.name || 'Item',
+      variantLabel: `${how}${due}`,
+      vendorName: business?.name || vendor?.name || 'Business',
+      vendorContactEmail: business?.contactEmail ?? undefined,
+      quantity: i.quantity || 1,
+      basePrice: i.price || 0,
+    }));
+    const vendorItems = items.map(({ vendorName: _vn, vendorContactEmail: _vce, ...rest }) => rest);
+    const rewardsCents = Number(metadata.discountCents) > 0 && metadata.promoCodeId ? Number(metadata.discountCents) : undefined;
+    await sendTransactionReceipts('quote_order', orderId, {
+      consumer: {
+        email: customer?.email,
+        send: () => sendOrderConfirmationToConsumer({
+          toEmail: customer!.email!,
+          consumerName: customer!.firstName ? `${customer!.firstName} ${customer!.lastName ?? ''}`.trim() : realName(customer) || customer!.email!.split('@')[0],
+          orderId, orderNumber: order.orderNumber, items,
+          totalAmountCents: order.grossChargeAmount ?? undefined,
+          platformFeeCents: order.consumerServiceFee ?? undefined,
+          rewardsDiscountCents: rewardsCents,
+        }),
+      },
+      vendor: {
+        email: vendor?.email,
+        send: () => sendOrderNotificationToVendor({
+          toEmail: vendor!.email!,
+          vendorName: business?.name || vendor!.name || 'Business',
+          consumerName: realName(customer) || 'Customer',
+          consumerUsername: customer?.username ?? undefined,
+          orderId, orderNumber: order.orderNumber, items: vendorItems,
+          vendorNetCents: order.vendorNet ?? undefined,
+          rewardsDiscountCents: rewardsCents,
+        }),
+      },
+      admin: () => sendInternalEventAlert({
+        eventType: 'product_order',
+        bookingOrOrderId: orderId,
+        consumerName: realName(customer) || 'Customer',
+        consumerEmail: customer?.email || '',
+        vendorName: business?.name || vendor?.name || 'Business',
+        vendorEmail: vendor?.email || '',
+        items: vendorItems,
+        stripeChargeCents: paymentIntent.amount,
+        rewardsDiscountCents: rewardsCents,
+      }),
+    });
+    if (metadata.promoCodeId) {
+      await storage.applyPromoCode(metadata.promoCodeId, 'order', orderId).catch((err) =>
+        console.error(`[Stripe] Failed to apply promo code ${metadata.promoCodeId} for order ${orderId}:`, err));
+    }
+    const pointsBase = metadata.originalConsumerTotalCents ? Number(metadata.originalConsumerTotalCents) : (order.grossChargeAmount ?? order.totalAmount);
+    if (customer) {
+      await bestEffort(`earnPoints for order ${orderId}`, () => storage.earnPoints({
+        userId: customer.id,
+        dollarAmountCents: pointsBase,
+        transactionType: 'business_transaction',
+        referenceType: 'cart_order',
+        referenceId: orderId,
+        description: 'Points earned from purchase',
+      }));
+      await bestEffort(`referral check for order ${orderId}`, () => this.tryCompleteReferral(customer.id, { type: 'order', id: orderId, grossCents: pointsBase }));
+    }
+    if (vendor) {
+      await bestEffort(`newOrderReceived for order ${orderId}`, () => NotificationTriggers.newOrderReceived({
+        vendorUserId: vendor.id, orderId,
+        customerName: realName(customer) || customer?.email || 'Customer',
+        orderTotal: order.totalAmount, itemCount: 1, triggeredByUserId: customer?.id ?? null,
+      }));
+    }
+    await qo.afterDeliverablePaid(claim.quote, order);
+  }
+
+  /**
    * Handle payment_intent.payment_failed - payment attempt failed
    */
   static async handlePaymentIntentFailed(paymentIntent: any) {
     const metadata = paymentIntent.metadata || {};
     const { type, bookingId } = metadata;
 
+    // Deliverables D1b: a declined card leaves the order pending; the customer can try another card on the same
+    // payment, and the quote job retires it once the payment lock runs out.
+    if (type === 'quote_order') return;
     // Handle product order payment failure
     if (metadata.orderId && !metadata.bookingId) {
       try {
