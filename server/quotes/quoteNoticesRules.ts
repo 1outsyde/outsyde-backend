@@ -51,9 +51,9 @@ export function buildExtraEmail(p: {
     [d, formatCents(p.amountCents)],
     ["Service fee", formatCents(p.serviceFeeCents)],
     ["You approve", formatCents(p.amountCents + p.serviceFeeCents)],
-    ["New total", formatCents(p.totalBeforeCents + p.amountCents)],
+    ["New total before fees", formatCents(p.totalBeforeCents + p.amountCents)],
   ];
-  const decline = `If you decline, your total stays ${formatCents(p.totalBeforeCents)}. You can also ask ${name} a question in your chat.`;
+  const decline = `If you decline, your total stays ${formatCents(p.totalBeforeCents)} before fees. You can also ask ${name} a question in your chat.`;
   const when = "Approved extras are charged when the job is complete.";
   const cta = "Review and approve";
   const subject = `${name} needs your OK for ${d}`;

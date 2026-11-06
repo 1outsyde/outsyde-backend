@@ -18,6 +18,7 @@
 import { randomUUID } from "crypto";
 import { eq, sql } from "drizzle-orm";
 import { db } from "../db";
+import { noticeBusiness } from "./quoteNotices";
 import { storage } from "../storage";
 import { quotes, type Appointment, type Quote, type QuoteJob } from "@shared/schema";
 import { getUncachableStripeClient } from "../stripe/stripeClient";
@@ -429,7 +430,6 @@ export async function reportQuoteJob(q: Quote, body: { reason?: unknown; photos?
   if (first) {
     await postWindowCard(q, job, "problem_reported", true);
     // Step 6a call 6: the business's Activity row (the card above already pushed them).
-    const { noticeBusiness } = await import("./quoteNotices");
     await noticeBusiness(q, "problem_reported", q.id);
   }
   const business = await storage.getBusiness(q.businessId);

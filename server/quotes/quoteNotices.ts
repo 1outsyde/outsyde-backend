@@ -43,12 +43,13 @@ async function deps(): Promise<QuoteNoticeDeps> {
  * Adds an Activity row unless one is already there for this person, type and reference (unreadOnly: unless an unread
  * one is). Returns true only when this call added it, so whatever follows (email, push) happens once.
  */
-async function addRow(o: { userId: string; type: string; title: string; message: string; referenceId: string; metadata: Record<string, string>; unreadOnly?: boolean }): Promise<boolean> {
+async function addRow(o: { userId: string; type: string; title: string; message: string; referenceId: string; metadata: Record<string, string>; unreadOnly?: boolean; openExtraId?: string }): Promise<boolean> {
   const [r] = await rows<{ id: string }>(sql`
     INSERT INTO notifications (user_id, type, title, message, reference_type, reference_id, metadata)
     SELECT ${o.userId}, ${o.type}, ${o.title}, ${o.message}, 'quote', ${o.referenceId}, ${JSON.stringify(o.metadata)}::jsonb
      WHERE NOT EXISTS (SELECT 1 FROM notifications WHERE user_id = ${o.userId} AND type = ${o.type} AND reference_id = ${o.referenceId}
                          AND (${!o.unreadOnly} OR is_read = false))
+       AND (${o.openExtraId ?? null}::varchar IS NULL OR EXISTS (SELECT 1 FROM quote_extras WHERE id = ${o.openExtraId ?? null} AND status IN ('proposed', 'approving')))
     RETURNING id`);
   return !!r;
 }
@@ -61,8 +62,9 @@ export async function noticeExtraProposed(q: Quote, extra: Pick<QuoteExtra, "id"
     const fee = quoteExtraSplit(extra.amountCents).serviceFeeCents;
     const businessName = (await storage.getBusiness(q.businessId))?.name ?? "";
     const words = extraActivityText({ businessName, title: q.title, description: extra.description, totalCents: extra.amountCents + fee });
+    // Review I3: only while the extra is still open (an answer that came first never gets an "only if you approve" row).
     const added = await addRow({
-      userId: q.customerId, type: "quote_extra", ...words, referenceId: extra.id,
+      userId: q.customerId, type: "quote_extra", ...words, referenceId: extra.id, openExtraId: extra.id,
       metadata: { quoteId: q.id, extraId: extra.id, conversationId: q.conversationId, screen: "chat" },
     });
     if (!added || process.env.QUOTE_EMAILS_ENABLED !== "true") return;
@@ -83,16 +85,18 @@ export async function noticeExtraProposed(q: Quote, extra: Pick<QuoteExtra, "id"
 }
 
 /** The extra was answered or closed: its Activity row is done. */
-export async function closeExtraNotice(extraId: string): Promise<void> {
-  await rows(sql`UPDATE notifications SET is_read = true, read_at = now() WHERE type = 'quote_extra' AND reference_id = ${extraId} AND is_read = false`)
+export async function closeExtraNotice(extraId: string, customerId: string): Promise<void> {
+  await rows(sql`UPDATE notifications SET is_read = true, read_at = now() WHERE user_id = ${customerId} AND type = 'quote_extra' AND reference_id = ${extraId} AND is_read = false`)
     .catch((err) => console.error(`[quote notices] closing ${extraId} failed:`, err));
 }
 
 /** The safety net (with the extras job): rows for extras closed some other way (lapsed, canceled). */
 export async function sweepExtraNotices(): Promise<void> {
+  // Driven from the extras closed in the last 2 days, per customer (the notifications index leads with user_id).
   await rows(sql`
     UPDATE notifications n SET is_read = true, read_at = now() FROM quote_extras x
-     WHERE n.type = 'quote_extra' AND n.is_read = false AND n.reference_id = x.id AND x.status NOT IN ('proposed', 'approving')`)
+     WHERE x.status NOT IN ('proposed', 'approving') AND x.updated_at > now() - interval '2 days'
+       AND n.user_id = x.customer_id AND n.type = 'quote_extra' AND n.reference_id = x.id AND n.is_read = false`)
     .catch((err) => console.error("[quote notices] sweep failed:", err));
 }
 
@@ -105,9 +109,15 @@ export async function noticeBusiness(q: Quote, kind: BusinessNoticeKind, referen
     const customerName = customer ? (await resolvePublicIdentity(customer)).publicName ?? "" : "";
     const n = businessNotice(kind, { customerName, title: q.title, description: o.description, amountCents: o.amountCents ?? 0 });
     const metadata: Record<string, string> = { quoteId: q.id, conversationId: q.conversationId, screen: "chat" };
-    const added = await addRow({ userId: q.senderId, type: n.type, title: n.title, message: n.message, referenceId, metadata, unreadOnly: kind === "card_failed" });
+    // A staff member who no longer works there isn't told (review minor, like note emails): the owner is.
+    let to = q.senderId;
+    if (q.staffMemberId) {
+      const [s] = await rows<{ ok: boolean }>(sql`SELECT (status = 'active' AND business_id = ${q.businessId}) AS ok FROM staff_members WHERE id = ${q.staffMemberId}`);
+      if (!s?.ok) to = (await storage.getBusiness(q.businessId))?.ownerId ?? q.senderId;
+    }
+    const added = await addRow({ userId: to, type: n.type, title: n.title, message: n.message, referenceId, metadata, unreadOnly: kind === "card_failed" });
     if (added && n.push) {
-      await (await deps()).sendPush({ userId: q.senderId, title: n.title, body: n.message, data: { type: "new_message", conversationId: q.conversationId, quoteId: q.id } }).catch(() => false);
+      await (await deps()).sendPush({ userId: to, title: n.title, body: n.message, data: { type: "new_message", conversationId: q.conversationId, quoteId: q.id } }).catch(() => false);
     }
   } catch (err) {
     console.error(`[quote notices] ${kind} notice for ${q.id} failed:`, err);

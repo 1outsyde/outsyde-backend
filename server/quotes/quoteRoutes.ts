@@ -55,15 +55,33 @@ export async function quoteDetailJson(q: Quote, viewerId: string, canManageIt: b
   }
   return { balance, ...win, ...extras };
 }
-/** The customer's quotes, newest first (200 at most), each with its booking detail (step 6a, additive). */
-async function myQuotesWithDetail(userId: string, o: { paidOnly?: boolean } = {}) {
-  const where = o.paidOnly ? and(eq(quotes.customerId, userId), eq(quotes.status, "paid")) : eq(quotes.customerId, userId);
+/**
+ * The customer's quotes, newest first (200 at most), each with its booking detail (step 6a, additive).
+ * openOnly (the pop-up list): only paid quotes whose booking can still need the customer (not complete, the window
+ * still running, or extras unpaid or needing a card), so a long history costs nothing. Review I1 and I2: the detail
+ * is read 8 at a time, and a detail that fails falls back to the bare quote (the list never fails for one row).
+ */
+async function myQuotesWithDetail(userId: string, o: { openOnly?: boolean } = {}) {
+  const where = o.openOnly
+    ? and(eq(quotes.customerId, userId), eq(quotes.status, "paid"), sql`EXISTS (
+        SELECT 1 FROM quote_jobs j WHERE j.appointment_id = ${quotes.appointmentId}
+           AND (j.completed_at IS NULL OR j.window_ends_at > now()
+                OR EXISTS (SELECT 1 FROM quote_extras_payments x WHERE x.appointment_id = j.appointment_id AND x.status IN ('unpaid', 'hold_failed'))))`)
+    : eq(quotes.customerId, userId);
   const list = await db.select().from(quotes).where(where).orderBy(desc(quotes.createdAt)).limit(200);
   const names = new Map<string, string | null>();
-  const out = [];
-  for (const r of list) {
-    if (!names.has(r.businessId)) names.set(r.businessId, await businessName(r.businessId));
-    out.push({ ...toQuoteJson(r, names.get(r.businessId) ?? null), ...(await quoteDetailJson(r, userId, false)) });
+  for (const r of list) if (!names.has(r.businessId)) names.set(r.businessId, await businessName(r.businessId));
+  const out: Record<string, unknown>[] = [];
+  for (let i = 0; i < list.length; i += 8) {
+    out.push(...(await Promise.all(list.slice(i, i + 8).map(async (r) => {
+      const base = toQuoteJson(r, names.get(r.businessId) ?? null);
+      try {
+        return { ...base, ...(await quoteDetailJson(r, userId, false)) };
+      } catch (err) {
+        console.error(`[quotes] detail for ${r.id} failed:`, err);
+        return base;
+      }
+    }))));
   }
   return out;
 }
@@ -674,7 +692,7 @@ export function registerQuoteRoutes(app: Express): void {
       const userId = userIdOf(req);
       if (!userId) return res.status(401).json({ error: "Not authenticated" });
       const { quoteActionsFor } = await import("./quoteNoticesRules");
-      const list = (await myQuotesWithDetail(userId, { paidOnly: true })) as any[];
+      const list = (await myQuotesWithDetail(userId, { openOnly: true })) as any[];
       return res.json({ actions: quoteActionsFor(list.map((d) => ({ quote: d, balance: d.balance, window: d.window, extras: d.extras, extrasPayment: d.extrasPayment }))) });
     } catch (err) {
       console.error("[quotes] my actions failed:", err);

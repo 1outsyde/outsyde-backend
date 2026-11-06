@@ -694,6 +694,14 @@ const hmNY = (d: Date) => new Intl.DateTimeFormat("en-GB", { timeZone: "America/
       const res = await call("GET", "/api/me/quote-actions", { token });
       return { status: res.status, all: res.body?.actions ?? [], mine: (res.body?.actions ?? []).filter((a: any) => a.quoteId === qid) };
     };
+    /** The customer's row is added in the background after the send: wait for it (3 s at most). */
+    const rowLanded = async (extraId: string) => {
+      for (let i = 0; i < 30; i++) {
+        if ((await q(`SELECT 1 FROM notifications WHERE user_id = $1 AND type = 'quote_extra' AND reference_id = $2`, [cust.uid, extraId])).length) return true;
+        await new Promise((res) => setTimeout(res, 100));
+      }
+      return false;
+    };
     const N = await paidQuote();
     let paidRows = await notesOf(owner.uid, "quote_paid");
     paidRows = paidRows.filter((n: any) => n.reference_id === N.qid);
@@ -707,7 +715,7 @@ const hmNY = (d: Date) => new Intl.DateTimeFormat("en-GB", { timeZone: "America/
       const pushed = fs.readFileSync(EXPO, "utf8").slice(pm);
       assert(pushed.includes("Needs your OK: 2 extra hours, $108.00 with the service fee. Nothing is charged unless you approve.") && pushed.includes('"type":"new_message"') && pushed.includes(conv),
         "the push: its own words, still a message push to the chat", pushed.slice(0, 500));
-    } else console.log("  (push words not checked: QB_TEST_EXPO_FILE unset)");
+    } else assert(false, "the push words need QB_TEST_EXPO_FILE (the Expo stub file)");
     let cRows = (await notesOf(cust.uid, "quote_extra")).filter((n: any) => n.reference_id === n1.id);
     assert(cRows.length === 1 && cRows[0].reference_id === n1.id && cRows[0].title === "Movers a" && cRows[0].message === "Added 2 extra hours to 2 Bedroom Move. $108.00 with the service fee, only if you approve."
       && cRows[0].metadata?.quoteId === N.qid && cRows[0].metadata?.extraId === n1.id && cRows[0].metadata?.conversationId === conv && cRows[0].is_read === false,
@@ -715,7 +723,8 @@ const hmNY = (d: Date) => new Intl.DateTimeFormat("en-GB", { timeZone: "America/
     let A6 = await actionsFor(N.qid);
     assert(A6.status === 200 && A6.mine.length === 1 && A6.mine[0].kind === "approve_extra" && A6.mine[0].extraId === n1.id && A6.mine[0].totalCents === 10800 && A6.mine[0].serviceFeeCents === 800
       && A6.mine[0].businessName === "Movers a" && A6.mine[0].conversationId === conv && A6.mine[0].title === "2 Bedroom Move", "the pop-up list has it", A6);
-    assert((await actionsFor(N.qid, owner.token)).mine.length === 0, "the business never sees the customer's list");
+    const strangerList = await actionsFor(N.qid, stranger.token);
+    assert(strangerList.status === 200 && strangerList.all.length === 0, "someone else gets only their own (empty) list", strangerList);
     assert((await call("GET", "/api/me/quote-actions")).status === 401, "signed out: 401");
     let mq = (await call("GET", "/api/me/quotes", { token: cust.token })).body?.quotes?.find((x: any) => x.id === N.qid);
     assert(mq && mq.extras?.[0]?.id === n1.id && mq.extras[0].canApprove === true && mq.extras[0].canWithdraw === false && mq.balance?.holdCents > 0 && "window" in mq && "report" in mq && "extrasPayment" in mq && mq.payout == null && mq.business === undefined,
@@ -730,19 +739,26 @@ const hmNY = (d: Date) => new Intl.DateTimeFormat("en-GB", { timeZone: "America/
     let bRows = (await notesOf(owner.uid, "quote_extra_approved")).filter((n: any) => n.reference_id === n1.id);
     assert(bRows.length === 1 && / approved 2 extra hours, \$100\.00\.$/.test(bRows[0].message) && bRows[0].metadata?.conversationId === conv, "the business: Extra approved", bRows);
     assert((await actionsFor(N.qid)).mine.length === 0, "and it leaves the pop-up list");
+    mq = (await call("GET", "/api/me/quotes", { token: cust.token })).body?.quotes?.find((x: any) => x.id === N.qid);
+    assert(mq?.extrasPayment && mq.extrasPayment.approvedCents === 10000 && !("payout" in mq.extrasPayment), "the extras payment shows, with no payout for the customer", mq?.extrasPayment);
     const n2 = (await propose(N.qid, "Boxes", 1000)).body?.extra;
+    assert(await rowLanded(n2.id), "Boxes: the row lands");
     r6 = await call("POST", `/api/quotes/${N.qid}/extras/${n2.id}/decline`, { token: cust.token });
     assert(r6.status === 200 && (await notesOf(cust.uid, "quote_extra")).find((n: any) => n.reference_id === n2.id)?.is_read === true, "declined: done", r6);
     bRows = (await notesOf(owner.uid, "quote_extra_declined")).filter((n: any) => n.reference_id === n2.id);
     assert(bRows.length === 1 && / declined Boxes\. Nothing was added\.$/.test(bRows[0].message), "the business: Extra declined", bRows);
     const n3 = (await propose(N.qid, "Tape", 500)).body?.extra;
-    await call("POST", `/api/quotes/${N.qid}/extras/${n3.id}/withdraw`, { token: owner.token });
-    assert((await notesOf(cust.uid, "quote_extra")).find((n: any) => n.reference_id === n3.id)?.is_read === true, "withdrawn: done");
+    assert(await rowLanded(n3.id), "Tape: the row lands");
+    r6 = await call("POST", `/api/quotes/${N.qid}/extras/${n3.id}/withdraw`, { token: owner.token });
+    assert(r6.status === 200 && (await notesOf(cust.uid, "quote_extra")).find((n: any) => n.reference_id === n3.id)?.is_read === true, "withdrawn: done", r6);
     assert((await notesOf(owner.uid, "quote_extra_declined")).every((n: any) => n.reference_id !== n3.id), "a withdraw tells the business nothing (they did it)");
     const n4 = (await propose(N.qid, "Shelf", 700)).body?.extra;
+    assert(await rowLanded(n4.id), "Shelf: the row lands");
     await q(`UPDATE quote_extras SET status = 'lapsed' WHERE id = $1`, [n4.id]);
     await qx.runQuoteExtrasJob(new Date());
-    assert((await notesOf(cust.uid, "quote_extra")).find((n: any) => n.reference_id === n4.id)?.is_read === true, "closed some other way (lapsed, canceled): the job marks it done");
+    assert((await notesOf(cust.uid, "quote_extra")).find((n: any) => n.reference_id === n4.id)?.is_read === true, "closed some other way (lapsed): the job marks it done");
+    const canceledRows = (await notesOf(cust.uid, "quote_extra")).filter((n: any) => n.reference_id === c1.id || n.reference_id === c2.id);
+    assert(canceledRows.length === 2 && canceledRows.every((n: any) => n.is_read === true), "extras canceled with the booking: done too", canceledRows);
 
     console.log("\n── step 6a: the extra's email (call 3), once ──");
     const mkExtra = async (desc: string, cents: number) => (await q(`INSERT INTO quote_extras (appointment_id, quote_id, business_id, customer_id, proposed_by, description, amount_cents) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *`,
@@ -760,14 +776,33 @@ const hmNY = (d: Date) => new Intl.DateTimeFormat("en-GB", { timeZone: "America/
     await qnot.noticeExtraProposed(quoteRow, asExtra(e2));
     await qnot.noticeExtraProposed(quoteRow, asExtra(e2));
     assert(noticeEmails.length === 1 && noticeEmails[0].to === `${cust.uid}@qx.test` && noticeEmails[0].subject === "Movers a needs your OK for Piano" && noticeEmails[0].text.includes(`/q/${Nq.link_code}`)
-      && noticeEmails[0].text.includes("$150.00") && noticeEmails[0].text.includes("New total: $"), "on: one email with the link, never twice", noticeEmails);
+      && noticeEmails[0].text.includes("$150.00") && noticeEmails[0].text.includes("New total before fees: $"), "on: one email with the link, never twice", noticeEmails);
     assert((await notesOf(cust.uid, "quote_extra")).filter((n: any) => n.reference_id === e2.id).length === 1, "and one row");
-    await q(`INSERT INTO user_blocks (blocker_id, blocked_id) VALUES ($1, $2)`, [cust.uid, owner.uid]).catch(() => undefined);
+    await q(`INSERT INTO user_blocks (blocker_id, blocked_id) VALUES ($1, $2)`, [cust.uid, owner.uid]);
     const e3 = await mkExtra("Rug", 900);
-    const blockedWorks = (await q(`SELECT count(*)::int AS n FROM user_blocks WHERE blocker_id = $1 AND blocked_id = $2`, [cust.uid, owner.uid]).catch(() => [{ n: 0 }]))[0].n === 1;
     await qnot.noticeExtraProposed(quoteRow, asExtra(e3));
-    if (blockedWorks) assert(noticeEmails.length === 1 && !(await notesOf(cust.uid, "quote_extra")).some((n: any) => n.reference_id === e3.id), "blocked either way: nothing", noticeEmails.length);
-    await q(`DELETE FROM user_blocks WHERE blocker_id = $1`, [cust.uid]).catch(() => undefined);
+    assert(noticeEmails.length === 1 && !(await notesOf(cust.uid, "quote_extra")).some((n: any) => n.reference_id === e3.id), "blocked either way: nothing", noticeEmails.length);
+    await q(`DELETE FROM user_blocks WHERE blocker_id = $1`, [cust.uid]);
+    // Review I3: an extra answered before its notice ran never gets an "only if you approve" row or email.
+    const e4 = await mkExtra("Dolly", 800);
+    await q(`UPDATE quote_extras SET status = 'approved' WHERE id = $1`, [e4.id]);
+    await qnot.noticeExtraProposed(quoteRow, asExtra(e4));
+    assert(noticeEmails.length === 1 && !(await notesOf(cust.uid, "quote_extra")).some((n: any) => n.reference_id === e4.id), "already answered: no row, no email", noticeEmails.length);
+    await q(`UPDATE quote_extras SET status = 'withdrawn' WHERE id = $1`, [e4.id]);
+    // A sender that throws never throws into the money step.
+    qnot.setQuoteNoticeDepsForTest({ sendPush: async () => { throw new Error("push down"); }, sendEmail: async () => { throw new Error("email down"); } });
+    const e5 = await mkExtra("Hand truck", 600);
+    let threw = false;
+    try { await qnot.noticeExtraProposed(quoteRow, asExtra(e5)); await qnot.noticeBusiness(quoteRow, "card_failed", `t-${e5.id}`.slice(0, 36), { amountCents: 600 }); } catch { threw = true; }
+    assert(!threw && (await notesOf(cust.uid, "quote_extra")).some((n: any) => n.reference_id === e5.id), "email and push failures are swallowed, the row still lands");
+    qnot.setQuoteNoticeDepsForTest({ sendPush: async (p) => { noticePushes.push(p); return true; }, sendEmail: async (m) => { noticeEmails.push(m); return true; } });
+    await q(`UPDATE quote_extras SET status = 'withdrawn' WHERE id = $1`, [e5.id]);
+    // A staff member who no longer works there: the owner hears it instead.
+    await q(`UPDATE staff_members SET status = 'removed' WHERE id = $1`, [staffId]);
+    await qnot.noticeBusiness({ ...quoteRow, staffMemberId: staffId, senderId: staffUser.uid }, "problem_reported", `staffgone-${qn}`);
+    assert((await notesOf(owner.uid, "quote_problem_reported")).some((n: any) => n.reference_id === `staffgone-${qn}`) && !(await notesOf(staffUser.uid, "quote_problem_reported")).some((n: any) => n.reference_id === `staffgone-${qn}`),
+      "removed staff: the owner gets the row");
+    await q(`UPDATE staff_members SET status = 'active' WHERE id = $1`, [staffId]);
     if (before === undefined) delete process.env.QUOTE_EMAILS_ENABLED; else process.env.QUOTE_EMAILS_ENABLED = before;
     await q(`UPDATE quote_extras SET status = 'withdrawn' WHERE id = ANY($1)`, [[e1.id, e2.id, e3.id]]);
 
