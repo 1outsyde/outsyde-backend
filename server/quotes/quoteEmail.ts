@@ -20,11 +20,11 @@ export function buildQuoteEmail(p: { quote: Quote; businessName: string; busines
   const a = quoteAmounts(q.totalCents, q.depositCents ?? null, q.restPaid ?? "outsyde");
   const biz = p.businessName.trim();
   // Step 3: date and time are optional; with none, the line is left out.
-  // Deliverables D1a: a product quote reads "Ready by <date>" and Pickup or Delivery, with no date to lock in.
+  // Deliverables D1a: a product quote reads "Due <date>" (optional, Legend 2026-11-06) and Pickup or Delivery, with no date to lock in.
   const product = q.kind === "product";
   const delivery = product && q.fulfillment === "delivery";
   const when = product
-    ? [q.dueDate ? `Ready by ${formatDateLabel(q.dueDate)}` : "", delivery ? "Delivery" : "Pickup"].filter(Boolean).join(", ")
+    ? [q.dueDate ? `Due ${formatDateLabel(q.dueDate)}` : "", delivery ? "Delivery" : "Pickup"].filter(Boolean).join(", ")
     : q.jobDate && q.startTime ? `${formatDateLabel(q.jobDate)} at ${formatTimeLabel(q.startTime)}` : "";
   const lines: [string, string][] = [["Total", formatCents(a.totalCents)]];
   if (delivery && q.deliveryFeeCents) lines.push(["Delivery fee, in the total", formatCents(q.deliveryFeeCents)]);

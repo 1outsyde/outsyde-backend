@@ -100,17 +100,17 @@ console.log('\n── the quote email for a deliverable ──');
     depositCents: null, restPaid: 'outsyde', fulfillment: 'delivery', deliveryFeeCents: 2000, linkCode: 'abc',
   };
   const e = buildQuoteEmail({ quote: base, businessName: 'Jazzy Sweet Tooth', businessPhone: null, customerFirstName: 'Ana', link: 'https://goutsyde.com/q/abc' });
-  assert(/Ready by/.test(e.text) && /Fri, Nov 20/.test(e.text), 'says when it is ready', e.text);
+  assert(/Due Fri, Nov 20/.test(e.text), 'says when it is due', e.text);
   assert(/Delivery fee/.test(e.text) && /\$20\.00/.test(e.text), 'shows the delivery fee line', e.text);
   assert(/Delivery/.test(e.text) && /delivery address/i.test(e.text), 'asks for the delivery address before paying', e.text);
   assert(!/lock in your date/.test(e.text) && !/held on your card/.test(e.text), 'no date to lock and no card hold', e.text);
   assert(clean(e.text) && clean(e.subject), 'commas and periods only, no fee rate', e.text);
   const pick = buildQuoteEmail({ quote: { ...base, fulfillment: 'pickup', deliveryFeeCents: null, dueDate: null }, businessName: 'Jazzy Sweet Tooth', businessPhone: null, customerFirstName: null, link: 'x' });
-  assert(/Pickup/.test(pick.text) && !/Ready by/.test(pick.text) && !/Delivery fee/.test(pick.text), 'Pickup with no date', pick.text);
+  assert(/Pickup/.test(pick.text) && !/Due /.test(pick.text) && !/Delivery fee/.test(pick.text), 'Pickup with no due date', pick.text);
   const dep = buildQuoteEmail({ quote: { ...base, paymentMode: 'deposit', depositCents: 5000, restPaid: 'outside' }, businessName: 'Jazzy Sweet Tooth', businessPhone: null, customerFirstName: null, link: 'x' });
   assert(/paid to the business directly/.test(dep.text), 'a deposit says the rest goes to the business directly', dep.text);
   const svc = buildQuoteEmail({ quote: { ...base, kind: 'service', jobDate: '2026-11-13', startTime: '09:00', dueDate: null, fulfillment: null, deliveryFeeCents: null }, businessName: 'Royal Elite', businessPhone: null, customerFirstName: null, link: 'x' });
-  assert(/lock in your date/.test(svc.text) && !/Ready by|Pickup|Delivery/.test(svc.text), 'the service email is unchanged', svc.text);
+  assert(/lock in your date/.test(svc.text) && !/Due |Pickup|Delivery/.test(svc.text), 'the service email is unchanged', svc.text);
 }
 
 console.log(`\n${passed} passed, ${failed} failed`);

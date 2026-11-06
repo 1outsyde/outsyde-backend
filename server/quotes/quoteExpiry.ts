@@ -26,6 +26,8 @@ export function startQuoteExpiryJob(intervalMs = 5 * 60 * 1000): void {
   const run = () => {
     expireDueQuotes().catch((err) => console.error("[quotes] expiry job failed:", err));
     confirmMissedQuotePayments().catch((err) => console.error("[quotes] payment backstop failed:", err));
+    // Deliverables D1b: the same backstop for deliverable orders, and retiring their payments once the lock runs out.
+    import("./quoteOrders").then((m) => m.settleStaleDeliverableOrders()).catch((err) => console.error("[quotes] deliverable backstop failed:", err));
     // R39: fee charges whose call failed are looked up at Stripe later (all bookings, not only quotes).
     resolveStaleFeeCharges().catch((err) => console.error("[cancel fee] later check failed:", err));
     // Step 4a: balance holds and retries, auto complete 2 h after the end, and releases for ended bookings.

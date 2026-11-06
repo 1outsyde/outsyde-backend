@@ -279,7 +279,7 @@ import {
   type PromoRef,
 } from "./loyaltyLedger";
 import { claimPromoForCheckout, confirmPromoStillHeld, PROMO_TAKEN_RESPONSE } from "./promoCheckout";
-import { calculateProductFee, calculateBookingFee, calculateConsumerServiceFee, calculateBookingFees, quoteDeposit } from "./fees";
+import { calculateProductFee, calculateBookingFee, calculateConsumerServiceFee, calculateBookingFees, calculateProductFees, quoteDeposit } from "./fees";
 import { resolveProviderRefund } from "./providerRefund";
 import { validateDeposit, invalidDepositBody, validatePhotographerDeposit, photographerBookingDepositCents } from "./deposits";
 import { parseCancellationPolicy, parseDefaultDeposit, computeBusinessSetupSteps, payoutsReady } from "./accountSetup/businessSetup";
@@ -6855,7 +6855,186 @@ export async function registerRoutes(
       // Legend 2026-11-04: a service quote becomes a booking (date, start and length, always set for services); a
       // product or deliverable quote becomes an order, paid in the products step of the build board.
       if (q.kind === 'product') {
-        return res.status(400).json({ code: "QUOTE_PRODUCT_LATER", message: "Paying for custom products in Outsyde is coming soon. Message the business to arrange payment for now." });
+        // Deliverables D1b (Legend 2026-11-06, "just like selling a product"): a deliverable is paid as a normal product
+        // order for the business, with a destination charge like a single shop product sale (the business is paid at
+        // payment). Its own PaymentIntent type, quote_order, never reaches the cart branch (which clears the cart).
+        // The quote keeps its 15 minute payment lock and version check; a retry picks up the same payment.
+        const { orders: ordersTable } = await import("@shared/schema");
+        const { quoteAmounts } = await import("./quotes/quoteRules");
+        if (q.fulfillment === 'delivery' && !q.deliveryAddress) {
+          return res.status(400).json({ code: "ADDRESS_NEEDED", field: "address", message: "Add your delivery address, then pay." });
+        }
+        const dBusiness = await storage.getBusiness(q.businessId);
+        if (!dBusiness) return res.status(404).json({ error: "Business not found" });
+        const dPlan = await storage.isBusinessSubscriptionActive(dBusiness.id);
+        // The business is paid (not the staff member who sent it), so only the staff member's active status matters.
+        if (q.staffMemberId) {
+          const [s] = await db.select().from(staffTable).where(eq(staffTable.id, q.staffMemberId));
+          if (!s || s.status !== 'active') {
+            return res.status(400).json({ code: "STAFF_NOT_ACTIVE", message: "The person who sent this quote no longer works with this business. Message the business for a new quote." });
+          }
+        }
+        const dGate = canTakeQuotePayments(dBusiness, dPlan.active, null);
+        if (!dGate.ok || !dBusiness.stripeAccountId) {
+          const message = dGate.ok ? "This business can't take payments in Outsyde yet." : dGate.message;
+          return res.status(400).json({ error: message, code: dGate.ok ? "PAYOUTS_NOT_READY" : dGate.code, message });
+        }
+
+        // A payment already started for this quote: pick it up, or retire it once its lock has run out.
+        const [liveOrder] = await db.select().from(ordersTable)
+          .where(and(eq(ordersTable.quoteId, q.id), eq(ordersTable.status, 'pending')))
+          .orderBy(desc(ordersTable.createdAt)).limit(1);
+        if (liveOrder) {
+          const UNPAID = ['requires_payment_method', 'requires_confirmation', 'requires_action'];
+          const lpi: any = liveOrder.stripePaymentIntentId ? await stripeService.getPaymentIntent(liveOrder.stripePaymentIntentId) : null;
+          if (lpi && !UNPAID.includes(lpi.status) && lpi.status !== 'canceled') {
+            return res.status(409).json({ code: "QUOTE_PAYING", message: "Your payment is being confirmed. Check back in a minute." });
+          }
+          const lockLive = q.status === 'sent' && !!q.payingUntil && new Date(q.payingUntil).getTime() > now.getTime();
+          if (lockLive && lpi && UNPAID.includes(lpi.status) && lpi.metadata?.quoteVersion === String(q.version) && liveOrder.customerId === userId) {
+            return res.json({
+              ...(await paymentSheetFields(lpi.customer, req.body?.paymentSheet === true)),
+              quoteId: q.id, orderId: liveOrder.id, orderNumber: liveOrder.orderNumber,
+              clientSecret: lpi.client_secret, paymentIntentId: lpi.id, captureMethod: 'automatic',
+              holdExpiresAt: new Date(q.payingUntil!).toISOString(),
+              amounts: { baseCents: liveOrder.totalAmount, serviceFeeCents: liveOrder.consumerServiceFee ?? 0, discountCents: liveOrder.discountAmountCents ?? 0, chargeCents: lpi.amount },
+            });
+          }
+          // A canceled payment (for example its points code was taken by another checkout) is retired at once.
+          if (lockLive && lpi && lpi.status !== 'canceled') return res.status(409).json({ code: "QUOTE_PAYING", message: "A payment for this quote is already in progress. Try again in a few minutes." });
+          if (lpi && lpi.status !== 'canceled') {
+            try {
+              await stripeService.cancelPaymentIntent(lpi.id, 'abandoned');
+            } catch (cancelErr) {
+              console.error(`[quotes] could not retire payment ${lpi.id} of quote ${q.id}:`, cancelErr);
+              return res.status(409).json({ code: "QUOTE_PAYING", message: "Your payment is being confirmed. Check back in a minute." });
+            }
+          }
+          await db.update(ordersTable).set({ status: 'cancelled', updatedAt: new Date() })
+            .where(and(eq(ordersTable.id, liveOrder.id), eq(ordersTable.status, 'pending')));
+          await qp.unlockQuote(q.id);
+        }
+
+        const dDue = quoteDeposit(q.totalCents, q.depositCents ?? null);
+        const dWanted = requestedPromoCodeId(req);
+        let dPromo: BookingPromo = null;
+        if (dWanted) {
+          // The booking rule (at least 10x the code paid online now) also keeps the charge above the business's share.
+          const checked = await checkBookingPromo(dWanted, userId, dDue.dueNowCents);
+          if (!checked.ok) return res.status(checked.status).json(checked.body);
+          dPromo = checked.promo;
+        }
+        const dLocked = await qp.lockQuoteForPayment(q, q.version, now);
+        if (!dLocked) {
+          const [fresh] = await db.select().from(quotesTable).where(eq(quotesTable.id, q.id));
+          if (fresh && fresh.status === 'sent' && fresh.version === q.version && fresh.payingUntil && new Date(fresh.payingUntil).getTime() > Date.now()) {
+            return res.status(409).json({ code: "QUOTE_PAYING", message: "A payment for this quote is already in progress. Try again in a few minutes." });
+          }
+          return res.status(409).json({ code: "QUOTE_CHANGED", message: "This quote was changed. Check the new quote before you pay." });
+        }
+        lockedQuoteId = q.id;
+        const base = dDue.chargeAmountCents;
+        const dFees = calculateProductFees(base);
+        const discount = dPromo?.discountCents ?? 0;
+        const charged = base + dFees.consumerServiceFeeCents - discount;
+        const dAmounts = quoteAmounts(q.totalCents, q.depositCents ?? null, q.restPaid ?? 'outsyde');
+        let order: Awaited<ReturnType<typeof storage.createOrder>>;
+        try {
+          order = await storage.createOrder({
+            businessId: dBusiness.id,
+            customerId: userId,
+            // One line: the quote title. The linked product is only a label; stock never changes.
+            items: [{ productId: q.productId ?? "", name: q.title, quantity: 1, price: base }],
+            totalAmount: base,
+            platformFee: dFees.platformFeeCents,
+            vendorNet: dFees.vendorNetCents,
+            consumerServiceFee: dFees.consumerServiceFeeCents,
+            influencerCommission: 0,
+            grossChargeAmount: base + dFees.consumerServiceFeeCents,
+            outsydeGrossRevenue: dFees.outsydeGrossRevenueCents,
+            feeModelVersion: 'v2',
+            status: 'pending',
+            shippingAddress: q.fulfillment === 'delivery' ? q.deliveryAddress : null,
+            promoCodeUsed: dPromo?.code ?? null,
+            discountAmountCents: discount,
+            quoteId: q.id,
+            fulfillment: q.fulfillment ?? 'pickup',
+            quoteTotalCents: q.totalCents,
+            paidDirectlyCents: dAmounts.paidDirectlyCents,
+          } as any);
+        } catch (err: any) {
+          if ((err?.code ?? err?.cause?.code) === '23505') {
+            await giveBack();
+            return res.status(409).json({ code: "QUOTE_PAYING", message: "A payment for this quote is already in progress. Try again in a few minutes." });
+          }
+          throw err;
+        }
+        // From here an order row exists: a failure leaves it pending, the next tap resumes it, and the quote job
+        // retires it after the lock (15 minutes).
+        lockedQuoteId = null;
+        const orderRef: PromoRef = { type: 'order', id: order.id };
+        if (dPromo) {
+          const claim = await claimPromoForCheckout(dPromo.id, userId, orderRef);
+          if (!claim.ok) {
+            await db.update(ordersTable).set({ status: 'cancelled', updatedAt: new Date() }).where(eq(ordersTable.id, order.id));
+            await qp.unlockQuote(q.id);
+            return res.status(claim.status).json({ error: claim.error, code: claim.code });
+          }
+        }
+        const dUser = await storage.getUser(userId);
+        if (!dUser) {
+          await db.update(ordersTable).set({ status: 'cancelled', updatedAt: new Date() }).where(eq(ordersTable.id, order.id));
+          await qp.unlockQuote(q.id);
+          if (dPromo) await giveBackPromoCode(orderRef, 'customer not found');
+          return res.status(404).json({ error: "User not found" });
+        }
+        const dCustomer = await resolveBookingStripeCustomer(userId, dUser);
+        let dpi: Awaited<ReturnType<typeof stripeService.createBookingPaymentIntent>>;
+        try {
+          dpi = await stripeService.createBookingPaymentIntent({
+            totalChargedCents: charged,
+            vendorPayoutCents: dFees.vendorNetCents,
+            customerId: dCustomer,
+            connectedAccountId: dBusiness.stripeAccountId,
+            captureMethod: 'automatic',
+            metadata: {
+              type: 'quote_order',
+              orderId: order.id,
+              quoteId: q.id,
+              quoteVersion: String(q.version),
+              userId,
+              businessId: dBusiness.id,
+              basePriceCents: String(base),
+              consumerUpchargeCents: String(dFees.consumerServiceFeeCents),
+              vendorPayoutCents: String(dFees.vendorNetCents),
+              platformFeeCents: String(dFees.platformFeeCents),
+              promoCodeId: dPromo?.id ?? '',
+              discountCents: String(discount),
+              originalConsumerTotalCents: String(base + dFees.consumerServiceFeeCents),
+            },
+            description: `${q.title} at ${dBusiness.name}`.slice(0, 450),
+          });
+        } catch (piError) {
+          console.error(`[quotes] deliverable payment failed to start for quote ${q.id}:`, piError);
+          await db.update(ordersTable).set({ status: 'cancelled', updatedAt: new Date() }).where(and(eq(ordersTable.id, order.id), eq(ordersTable.status, 'pending')));
+          await qp.unlockQuote(q.id);
+          if (dPromo) await giveBackPromoCode(orderRef, 'deliverable payment failed to start');
+          return res.status(502).json({ code: "PAYMENT_START_FAILED", message: "We couldn't start the payment. Try again in a moment." });
+        }
+        await db.update(ordersTable).set({ stripePaymentIntentId: dpi.id, updatedAt: new Date() }).where(eq(ordersTable.id, order.id));
+        if (dPromo && !(await confirmPromoStillHeld(dPromo.id, orderRef, dpi.id))) {
+          await stripeService.cancelPaymentIntent(dpi.id, 'abandoned').catch(() => undefined);
+          await db.update(ordersTable).set({ status: 'cancelled', updatedAt: new Date() }).where(eq(ordersTable.id, order.id));
+          await qp.unlockQuote(q.id);
+          return res.status(409).json(PROMO_TAKEN_RESPONSE);
+        }
+        return res.json({
+          ...(await paymentSheetFields(dpi.customer, req.body?.paymentSheet === true)),
+          quoteId: q.id, orderId: order.id, orderNumber: order.orderNumber,
+          clientSecret: dpi.client_secret, paymentIntentId: dpi.id, captureMethod: 'automatic',
+          holdExpiresAt: new Date(Date.now() + qp.PAY_LOCK_MINUTES * 60_000).toISOString(),
+          amounts: { baseCents: base, serviceFeeCents: dFees.consumerServiceFeeCents, discountCents: discount, chargeCents: charged },
+        });
       }
       if (!qp.isScheduled(q)) {
         return res.status(400).json({ code: "QUOTE_NEEDS_TIME", message: "This quote doesn't have a date and time yet. Ask the business to add them, then pay." });
@@ -12958,7 +13137,7 @@ export async function registerRoutes(
             // orders.items is a JSONB array: [{ productId, name, quantity, price }]
             // There is no separate order_items table — tally product counts in app code.
             const completedOrders = await db
-              .select({ items: orders.items })
+              .select({ items: orders.items, quoteId: orders.quoteId })
               .from(orders)
               .where(and(
                 eq(orders.businessId, business.id),
@@ -12967,7 +13146,10 @@ export async function registerRoutes(
 
             const productCounts = new Map<string, { count: number; name: string }>();
             for (const order of completedOrders) {
+              // Deliverables D1b: a deliverable is never a product sale (its linked product is only a label).
+              if (order.quoteId) continue;
               for (const item of (order.items || [])) {
+                if (!item.productId) continue;
                 const existing = productCounts.get(item.productId);
                 if (existing) {
                   existing.count += item.quantity;
@@ -21627,6 +21809,11 @@ export async function registerRoutes(
               // Outsyde rewards the customer used. Paid by Outsyde; the business payout is unchanged.
               discount_amount_cents: order.discountAmountCents ?? 0,
               points_redeemed: order.pointsRedeemed ?? 0,
+              // Deliverables D1b (additive): an order paid from a deliverable quote. null on cart orders.
+              quote_id: order.quoteId ?? null,
+              fulfillment: order.fulfillment ?? null,
+              quote_total_cents: order.quoteTotalCents ?? null,
+              paid_directly_cents: order.paidDirectlyCents ?? null,
             };
           }
           // Default: camelCase shape for mobile (unchanged from before Task 4)
@@ -24523,6 +24710,62 @@ export async function registerRoutes(
   });
 
   // Consumer: Confirm delivery of an order
+  // POST /api/business/orders/:id/handed-over (deliverables D1b, call 7): the business marks an order that isn't
+  // shipped (Pickup or Delivery) as picked up or delivered. Paid moves to Delivered and the delivered emails go out.
+  // Shipped orders keep carrier and tracking as before.
+  app.post("/api/business/orders/:id/handed-over", hybridAuthMiddleware, async (req, res) => {
+    try {
+      const authReq = req as AuthenticatedRequest;
+      const userId = authReq.user?.userId || req.session?.userId;
+      if (!userId) return res.status(401).json({ error: "Not authenticated" });
+      const business = await storage.getBusinessByOwnerId(userId);
+      const order = await storage.getOrder(req.params.id);
+      if (!business || !order || order.businessId !== business.id) return res.status(404).json({ error: "Order not found" });
+      const { canMarkHandedOver } = await import("./quotes/quoteOrders");
+      if (order.status === 'delivered') return res.json({ order, message: "Already marked" });
+      if (!canMarkHandedOver(order)) {
+        const why = !order.fulfillment
+          ? "This order is shipped. Add the carrier and tracking number instead."
+          : order.status === 'pending' ? "This order isn't paid yet." : "This order can't be marked now.";
+        return res.status(409).json({ code: "NOT_HANDED_OVER_ORDER", message: why });
+      }
+      const [updated] = await db.update(orders).set({ status: 'delivered', updatedAt: new Date() })
+        .where(and(eq(orders.id, order.id), eq(orders.status, 'paid'), sql`${orders.fulfillment} IN ('pickup', 'delivery')`))
+        .returning();
+      if (!updated) {
+        const fresh = await storage.getOrder(order.id);
+        if (fresh?.status === 'delivered') return res.json({ order: fresh, message: "Already marked" });
+        return res.status(409).json({ code: "NOT_HANDED_OVER_ORDER", message: "This order can't be marked now." });
+      }
+      storage.createAuditLog({
+        actorId: userId, actorType: 'user', action: order.fulfillment === 'pickup' ? 'vendor_marked_picked_up' : 'vendor_marked_delivered',
+        targetType: 'order', targetId: order.id, metadata: { quoteId: order.quoteId ?? null },
+      }).catch((err) => console.error('Audit log error (handed_over):', err));
+      ;(async () => {
+        try {
+          const { sendOrderDeliveredEmail, sendOrderDeliveredVendorEmail } = await import('./emailService');
+          const consumer = await storage.getUser(order.customerId);
+          const vendorOwner = await storage.getUser(business.ownerId);
+          const orderItems = ((order.items as Array<{ name?: string; variantLabel?: string; addonsLabel?: string; quantity?: number }>) || []).map(i => ({
+            productName: i.name || 'Item', variantLabel: orderItemDetail(i), quantity: i.quantity || 1,
+          }));
+          if (consumer?.email) {
+            await sendOrderDeliveredEmail({ toEmail: consumer.email, consumerName: realName(consumer) || 'there', vendorName: business.name || 'the vendor', orderId: order.id, orderNumber: order.orderNumber, items: orderItems });
+          }
+          if (vendorOwner?.email) {
+            await sendOrderDeliveredVendorEmail({ toEmail: vendorOwner.email, vendorName: business.name || 'Business', consumerName: realName(consumer) || 'Customer', orderId: order.id, orderNumber: order.orderNumber, items: orderItems });
+          }
+        } catch (emailErr) {
+          console.error('Order handed over email error:', emailErr);
+        }
+      })();
+      return res.json({ order: updated });
+    } catch (error) {
+      console.error("Handed over error:", error);
+      return res.status(500).json({ error: "Failed to update the order" });
+    }
+  });
+
   app.post("/api/orders/:orderId/confirm-delivery", hybridAuthMiddleware, async (req, res) => {
     try {
       const authReq = req as AuthenticatedRequest;
@@ -24824,6 +25067,11 @@ export async function registerRoutes(
             status: order.status,
             createdAt: order.createdAt,
             shipment: shipments.length > 0 ? shipments[0] : null,
+            // Deliverables D1b (additive): an order paid from a deliverable quote. null on cart orders.
+            quoteId: order.quoteId ?? null,
+            fulfillment: order.fulfillment ?? null,
+            quoteTotalCents: order.quoteTotalCents ?? null,
+            paidDirectlyCents: order.paidDirectlyCents ?? null,
           };
         })
       );

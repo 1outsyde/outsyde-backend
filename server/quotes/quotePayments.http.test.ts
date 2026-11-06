@@ -247,7 +247,11 @@ const holdTs = (date: string, h: number, m: number) => { const [y, mo, d] = date
     await q(`INSERT INTO quotes (id, business_id, sender_id, customer_id, conversation_id, kind, due_date, title, time_zone, total_cents, payment_mode, deposit_cents, expires_at, link_code)
              VALUES ($1, $2, $3, $4, $5, 'product', $6, 'Custom wedding cake', 'America/New_York', 45000, 'full', NULL, now() + interval '6 days', $7)`, [qProd, biz, owner.uid, cust.uid, conv, daysFromNow(30), `lc${qProd}`]);
     r = await call("POST", `/api/quotes/${qProd}/pay`, { token: cust.token, body: { version: 1 } });
-    assert(r.status === 400 && r.body?.code === "QUOTE_PRODUCT_LATER" && piCreates.length === 0, "a product quote is not paid as a booking (orders come in the products step)", r);
+    // Deliverables D1b: a product quote is paid as a product order (quoteOrders.http.test.ts), never as a booking.
+    const prodPi = piCreates[piCreates.length - 1];
+    assert(r.status === 200 && !!r.body?.orderId && !r.body?.appointmentId && prodPi?.metadata?.type === "quote_order" && (await q(`SELECT count(*)::int n FROM appointments WHERE quote_id = $1`, [qProd]))[0].n === 0, "a product quote is paid as an order, never as a booking", r.body);
+    piCreates.length = 0;
+    await q(`DELETE FROM orders WHERE quote_id = $1`, [qProd]);
     await q(`DELETE FROM quotes WHERE id = $1`, [qProd]);
 
     console.log("\n── paying a deposit quote ──");

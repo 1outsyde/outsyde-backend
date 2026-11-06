@@ -754,6 +754,8 @@ export const quotes = pgTable("quotes", {
   expiredAt: timestamp("expired_at", { withTimezone: true }),
   // Step 3 (migration 098): the booking a paid quote became, when it was paid, and the payment lock.
   appointmentId: varchar("appointment_id", { length: 36 }),
+  // Deliverables D1b (migration 107): the product order a paid deliverable quote became.
+  orderId: varchar("order_id", { length: 36 }).references((): AnyPgColumn => orders.id, { onDelete: "set null" }),
   paidAt: timestamp("paid_at", { withTimezone: true }),
   payingUntil: timestamp("paying_until", { withTimezone: true }),
   paidNoticeAt: timestamp("paid_notice_at", { withTimezone: true }),
@@ -1727,6 +1729,13 @@ export const orders = pgTable("orders", {
   promoCodeUsed: text("promo_code_used"),
   discountAmountCents: integer("discount_amount_cents").default(0),
   pointsRedeemed: integer("points_redeemed").default(0),
+
+  // Deliverables D1b (migration 107): an order paid from a deliverable quote. The quote it came from, Pickup or
+  // Delivery, the quote total and the part paid directly to the business (deposit quotes). Cart orders: null.
+  quoteId: varchar("quote_id", { length: 36 }).references((): AnyPgColumn => quotes.id, { onDelete: "set null" }),
+  fulfillment: text("fulfillment").$type<"pickup" | "delivery">(),
+  quoteTotalCents: integer("quote_total_cents"),
+  paidDirectlyCents: integer("paid_directly_cents"),
 
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),

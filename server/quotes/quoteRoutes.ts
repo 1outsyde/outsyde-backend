@@ -22,7 +22,7 @@ import type { SQL } from "drizzle-orm";
 import { db } from "../db";
 import { storage } from "../storage";
 import { getUserIdFromRequest } from "../auth";
-import { appointments, businesses, estimateRequests, quotes, staffMembers, type Business, type Quote } from "@shared/schema";
+import { appointments, businesses, estimateRequests, orders, quotes, staffMembers, type Business, type Quote } from "@shared/schema";
 import { resolveVendorBusiness } from "../estimates/estimateRequestRoutes";
 import { resolveTimeZone } from "../manualRequests";
 import { postCardMessage } from "../messaging/postCard";
@@ -171,6 +171,8 @@ export function toQuoteJson(q: Quote, businessName: string | null, now = new Dat
     declineReason: q.declineReason ?? null,
     // Step 3 (additive): the booking a paid quote became, and whether a payment is running right now.
     appointmentId: q.appointmentId ?? null,
+    // Deliverables D1b (additive): the product order a paid deliverable became.
+    orderId: q.orderId ?? null,
     paidAt: q.paidAt ?? null,
     paying: !!q.payingUntil && new Date(q.payingUntil).getTime() > now.getTime() && q.status === "sent",
     sentAt: q.sentAt,
@@ -494,6 +496,10 @@ export function registerQuoteRoutes(app: Express): void {
         }
         return res.status(409).json({ code: "NOT_DELIVERY", message: "This quote isn't for delivery, so it needs no address." });
       }
+      // Review D1b 8: a payment that is still open ships to the new address too.
+      await db.update(orders).set({ shippingAddress: a.value, updatedAt: now })
+        .where(and(eq(orders.quoteId, q.id), eq(orders.status, "pending")))
+        .catch((err) => console.error(`[quotes] could not move the open order's address for ${q.id}:`, err));
       // The message goes to whoever sent the quote, only while they can still manage it (a removed staff member gets
       // nothing; the owner reads the address on the quote).
       if ((await canManage(updated, updated.senderId)) && !(await storage.isUserBlockedEitherWay(q.senderId, q.customerId))) {
@@ -569,7 +575,13 @@ export function registerQuoteRoutes(app: Express): void {
       // Step 5a (additive): the business's look for the goutsyde.com quote page.
       const { businessLookJson } = await import("./quoteNotesRules");
       const biz = await storage.getBusiness(q.businessId);
-      return res.json({ quote: { ...toQuoteJson(q, await businessName(q.businessId)), ...detail, business: biz ? businessLookJson(biz) : null } });
+      // Deliverables D1b (additive): the order's status (paid, delivered, cancelled), so the quote can say Refunded.
+      let orderStatus: string | null = null;
+      if (q.orderId) {
+        const [o] = await db.select({ status: orders.status }).from(orders).where(eq(orders.id, q.orderId));
+        orderStatus = o?.status ?? null;
+      }
+      return res.json({ quote: { ...toQuoteJson(q, await businessName(q.businessId)), ...detail, orderStatus, business: biz ? businessLookJson(biz) : null } });
     } catch (err) {
       console.error("[quotes] read failed:", err);
       return res.status(500).json({ error: "Failed to load the quote" });
