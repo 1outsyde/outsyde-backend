@@ -10,18 +10,19 @@
  *   GET   /api/quotes/:id                   the customer, the business owner, the sending staff member, or admin
  *   GET   /api/conversations/:id/quotes     the two people in the chat
  *   GET   /api/vendor/quotes                business owner (or admin with x-business-id)
+ *   GET   /api/staff/quotes                 active staff: only the quotes they sent (step 6d-2a, ?businessId=)
  *   GET   /api/me/quotes                    the customer
  *
  * Every change is one UPDATE guarded by status, expiry and (for edits) version, so two taps can never both win.
  */
 import type { Express, Request } from "express";
 import { randomBytes } from "crypto";
-import { and, desc, eq, gt, sql } from "drizzle-orm";
+import { and, desc, eq, gt, inArray, sql } from "drizzle-orm";
 import type { SQL } from "drizzle-orm";
 import { db } from "../db";
 import { storage } from "../storage";
 import { getUserIdFromRequest } from "../auth";
-import { businesses, estimateRequests, quotes, staffMembers, type Business, type Quote } from "@shared/schema";
+import { appointments, businesses, estimateRequests, quotes, staffMembers, type Business, type Quote } from "@shared/schema";
 import { resolveVendorBusiness } from "../estimates/estimateRequestRoutes";
 import { resolveTimeZone } from "../manualRequests";
 import { postCardMessage } from "../messaging/postCard";
@@ -40,6 +41,8 @@ const newLinkCode = () => randomBytes(12).toString("base64url");
  * Used by GET /api/quotes/:id and (step 6a, customer view) GET /api/me/quotes and /api/me/quote-actions.
  */
 export async function quoteDetailJson(q: Quote, viewerId: string, canManageIt: boolean) {
+  // Step 6d-2a (additive): the booking's status, so clients can tell a canceled booking from an open one.
+  const bookingStatus = await bookingStatusOf(q);
   let balance = null;
   let win: { window: unknown; report: unknown; payout: unknown } = { window: null, report: null, payout: null };
   let extras: { extras: unknown[]; extrasPayment: unknown } = { extras: [], extrasPayment: null };
@@ -53,7 +56,48 @@ export async function quoteDetailJson(q: Quote, viewerId: string, canManageIt: b
     const { extrasJson } = await import("./quoteExtras");
     extras = await extrasJson(q, viewerId, canManageIt);
   }
-  return { balance, ...win, ...extras };
+  return { bookingStatus, balance, ...win, ...extras };
+}
+
+/** The paid quote's booking status (confirmed, canceled, completed and so on), or null before it is paid. */
+async function bookingStatusOf(q: Quote): Promise<string | null> {
+  if (!q.appointmentId) return null;
+  const [a] = await db.select({ status: appointments.status }).from(appointments).where(eq(appointments.id, q.appointmentId));
+  return a?.status ?? null;
+}
+
+/** Booking statuses for a list of quotes, one query (step 6d-2a, the staff list). */
+async function bookingStatusesFor(list: Quote[]): Promise<Map<string, string>> {
+  const ids = list.map((r) => r.appointmentId).filter((v): v is string => !!v);
+  const out = new Map<string, string>();
+  if (!ids.length) return out;
+  const rows = await db.select({ id: appointments.id, status: appointments.status }).from(appointments).where(inArray(appointments.id, ids));
+  for (const r of rows) out.set(r.id, r.status);
+  return out;
+}
+
+/**
+ * Which staff membership the staff quotes list is for (step 6d-2a). Same rules as the other staff routes
+ * (?businessId= picks one; several without it is 409 with the list), and only while active: a removed staff member
+ * gets 403, as they lost access to those quotes (canManage).
+ */
+async function staffForList(userId: string, wantedBusinessId: unknown): Promise<
+  { ok: true; staffId: string } | { ok: false; status: number; body: Record<string, unknown> }
+> {
+  const all = await db.select().from(staffMembers).where(eq(staffMembers.userId, userId));
+  if (typeof wantedBusinessId === "string" && wantedBusinessId) {
+    const m = all.find((r) => r.businessId === wantedBusinessId);
+    if (!m) return { ok: false, status: 404, body: { error: "No staff profile found for that business" } };
+    if (m.status !== "active") return { ok: false, status: 403, body: { error: "You are no longer staff at this business" } };
+    return { ok: true, staffId: m.id };
+  }
+  const active = all.filter((r) => r.status === "active");
+  if (active.length === 1) return { ok: true, staffId: active[0].id };
+  if (active.length > 1) {
+    return { ok: false, status: 409, body: { error: "Staff member linked to multiple businesses, specify businessId", businesses: active.map((r) => ({ businessId: r.businessId, staffId: r.id, displayName: r.displayName })) } };
+  }
+  if (all.length) return { ok: false, status: 403, body: { error: "You are no longer staff at this business" } };
+  return { ok: false, status: 404, body: { error: "No staff profile found" } };
 }
 /**
  * The customer's quotes, newest first (200 at most), each with its booking detail (step 6a, additive).
@@ -671,6 +715,27 @@ export function registerQuoteRoutes(app: Express): void {
     } catch (err) {
       console.error("[quotes] vendor list failed:", err);
       return res.status(500).json({ error: "Failed to load quotes" });
+    }
+  });
+
+  // GET /api/staff/quotes (step 6d-2a, call 5): the quotes this staff member sent, newest first, each with its
+  // booking status. Only while they are active staff (removed staff lost access to them).
+  app.get("/api/staff/quotes", async (req, res) => {
+    try {
+      const userId = userIdOf(req);
+      if (!userId) return res.status(401).json({ error: "Not authenticated" });
+      const who = await staffForList(userId, req.query.businessId);
+      if (!who.ok) return res.status(who.status).json(who.body);
+      const rows = await db.select().from(quotes)
+        .where(and(eq(quotes.staffMemberId, who.staffId), eq(quotes.senderId, userId)))
+        .orderBy(desc(quotes.createdAt)).limit(500);
+      const names = new Map<string, string | null>();
+      for (const r of rows) if (!names.has(r.businessId)) names.set(r.businessId, await businessName(r.businessId));
+      const statuses = await bookingStatusesFor(rows);
+      return res.json({ quotes: rows.map((r) => ({ ...toQuoteJson(r, names.get(r.businessId) ?? null), bookingStatus: r.appointmentId ? statuses.get(r.appointmentId) ?? null : null })) });
+    } catch (err) {
+      console.error("[quotes] staff list failed:", err);
+      return res.status(500).json({ error: "Failed to load your quotes" });
     }
   });
 
