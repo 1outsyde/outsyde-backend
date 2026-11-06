@@ -17,6 +17,10 @@ export function toPublicBusinessDTO(
   business: Business,
   opts: PublicBusinessDTOOptions
 ) {
+  // R40 (Legend 2026-11-06): the vendor's "show address" switch is enforced
+  // here, not only on screen. Hidden → no street, zip or map spot (the map spot
+  // is geocoded from the street at signup). City and state stay.
+  const hideStreet = business.showAddress === false;
   return {
     id: business.id,
     ownerId: business.ownerId,
@@ -30,13 +34,13 @@ export function toPublicBusinessDTO(
 
     hasPhysicalLocation: business.hasPhysicalLocation,
     showAddress: business.showAddress,
-    address: business.address,
+    address: hideStreet ? null : business.address,
     city: business.city,
     state: business.state,
-    zipCode: business.zipCode,
+    zipCode: hideStreet ? null : business.zipCode,
     country: business.country,
-    latitude: business.latitude,
-    longitude: business.longitude,
+    latitude: hideStreet ? null : business.latitude,
+    longitude: hideStreet ? null : business.longitude,
 
     websiteUrl: business.showWebsite ? business.websiteUrl : null,
     socialMedia: business.socialMedia,

@@ -12445,7 +12445,11 @@ export async function registerRoutes(
         isAdmin,
       });
 
-      res.json(results);
+      // R40: map spots are only for distance sorting (done in SQL); never send them.
+      res.json({
+        ...results,
+        results: results.results.map(({ latitude: _lat, longitude: _lng, ...entry }) => entry),
+      });
     } catch (error) {
       console.error("Unified search error:", error);
       res.status(500).json({ error: "Failed to search" });
