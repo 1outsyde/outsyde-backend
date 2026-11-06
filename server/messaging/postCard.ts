@@ -12,8 +12,9 @@ export async function postCardMessage(input: {
   conversationId: string;
   senderId: string;
   recipientId: string;
-  kind: "quote";
-  card: Record<string, unknown>;
+  /** Deliverables D1a: "text" posts a plain message for the sender (no card), e.g. the delivery address. */
+  kind: "quote" | "text";
+  card: Record<string, unknown> | null;
   content: string;
   /** Step 6a: the push body when it should say more than the card text (no 50 character cut). */
   pushBody?: string;
@@ -23,7 +24,7 @@ export async function postCardMessage(input: {
     senderId: input.senderId,
     content: input.content,
     kind: input.kind,
-    card: input.card,
+    card: input.kind === "text" ? null : input.card,
   });
   try {
     const { notifyNewMessageInBackground } = await import("./notifyNewMessage");

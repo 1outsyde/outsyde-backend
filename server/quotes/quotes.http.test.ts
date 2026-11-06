@@ -282,9 +282,9 @@ const daysFromNow = (n: number) => { const d = new Date(); d.setUTCDate(d.getUTC
     assert(appts.n === 0 && holds.n === 0, 'quotes create no booking and no hold', { appts, holds });
     console.log('\n── service or product (step 3) ──');
     {
-      const prod = await call('POST', '/api/quotes', { token: owner.token, body: quoteBody({ requestId: null, kind: 'product', jobDate: undefined, startTime: undefined, durationMinutes: undefined, dueDate: daysFromNow(30), title: 'Custom wedding cake' }) });
+      const prod = await call('POST', '/api/quotes', { token: owner.token, body: quoteBody({ requestId: null, kind: 'product', jobDate: undefined, startTime: undefined, durationMinutes: undefined, dueDate: daysFromNow(30), title: 'Custom wedding cake', restPaid: 'outside' }) });
       assert(prod.status === 201 && prod.body?.quote?.kind === 'product' && prod.body.quote.dueDate === daysFromNow(30) && prod.body.quote.jobDate === null && prod.body.quote.startsAt === null, 'a product quote with a due date and no job time', prod.body);
-      const noDue = await call('POST', '/api/quotes', { token: owner.token, body: quoteBody({ requestId: null, kind: 'product', jobDate: undefined, startTime: undefined, durationMinutes: undefined, title: 'Custom dress' }) });
+      const noDue = await call('POST', '/api/quotes', { token: owner.token, body: quoteBody({ requestId: null, kind: 'product', jobDate: undefined, startTime: undefined, durationMinutes: undefined, title: 'Custom dress', restPaid: 'outside' }) });
       assert(noDue.status === 201 && noDue.body?.quote?.dueDate === null, 'a product quote without a due date', noDue.body);
       const svcNoTime = await call('POST', '/api/quotes', { token: owner.token, body: quoteBody({ requestId: null, kind: 'service', startTime: undefined }) });
       assert(svcNoTime.status === 400 && svcNoTime.body?.field === 'startTime', 'a service quote still needs its start time', svcNoTime.body);

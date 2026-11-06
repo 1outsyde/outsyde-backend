@@ -20,8 +20,14 @@ export function buildQuoteEmail(p: { quote: Quote; businessName: string; busines
   const a = quoteAmounts(q.totalCents, q.depositCents ?? null, q.restPaid ?? "outsyde");
   const biz = p.businessName.trim();
   // Step 3: date and time are optional; with none, the line is left out.
-  const when = q.jobDate && q.startTime ? `${formatDateLabel(q.jobDate)} at ${formatTimeLabel(q.startTime)}` : "";
+  // Deliverables D1a: a product quote reads "Ready by <date>" and Pickup or Delivery, with no date to lock in.
+  const product = q.kind === "product";
+  const delivery = product && q.fulfillment === "delivery";
+  const when = product
+    ? [q.dueDate ? `Ready by ${formatDateLabel(q.dueDate)}` : "", delivery ? "Delivery" : "Pickup"].filter(Boolean).join(", ")
+    : q.jobDate && q.startTime ? `${formatDateLabel(q.jobDate)} at ${formatTimeLabel(q.startTime)}` : "";
   const lines: [string, string][] = [["Total", formatCents(a.totalCents)]];
+  if (delivery && q.deliveryFeeCents) lines.push(["Delivery fee, in the total", formatCents(q.deliveryFeeCents)]);
   if (q.paymentMode === "deposit") {
     // Step 4b-2a (B15): the rest paid to the business directly reads as such, with no hold.
     lines.push(["Deposit due now", formatCents(a.depositOrTotalCents)], ["Service fee", formatCents(a.serviceFeeCents)],
@@ -31,7 +37,9 @@ export function buildQuoteEmail(p: { quote: Quote; businessName: string; busines
   }
   const pay = `Review and pay ${formatCents(a.payNowCents)}`;
   const hi = p.customerFirstName ? `Hi ${p.customerFirstName.trim()},` : "Hi,";
-  const intro = `${biz} sent you a quote. Pay ${q.paymentMode === "deposit" ? "the deposit" : "now"} to lock in your date.`;
+  const intro = product
+    ? `${biz} sent you a quote. ${delivery ? "Add your delivery address, then pay" : "Pay"} ${q.paymentMode === "deposit" ? "the deposit" : "now"} to confirm your order.`
+    : `${biz} sent you a quote. Pay ${q.paymentMode === "deposit" ? "the deposit" : "now"} to lock in your date.`;
   const footer = `This quote is valid until it expires. You earn Outsyde loyalty rewards points on this payment.${p.businessPhone ? ` Questions? Reply in the Outsyde app or call ${biz} at ${p.businessPhone}.` : " Questions? Reply in the Outsyde app."}`;
   const subject = `Your quote from ${biz}`;
   const rows = lines.map(([l, v]) => `<tr><td style="padding:6px 0;color:#4A4843;">${escapeHtml(l)}</td><td style="padding:6px 0;text-align:right;font-weight:700;">${escapeHtml(v)}</td></tr>`).join("");

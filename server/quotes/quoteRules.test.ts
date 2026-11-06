@@ -51,9 +51,10 @@ assert(field({ durationMinutes: 10 }) === 'durationMinutes' && field({ durationM
   const svc = bad({});
   assert(svc.ok && svc.value.kind === 'service' && svc.value.dueDate === null, 'no kind sent: a service quote', svc);
   assert(field({ jobDate: undefined }) === 'jobDate' && field({ startTime: undefined }) === 'startTime' && field({ durationMinutes: undefined }) === 'durationMinutes', 'a service quote needs date, start and length');
-  const prod = bad({ kind: 'product', jobDate: undefined, startTime: undefined, durationMinutes: undefined });
+  // Deliverables D1a (call 7): a deliverable's deposit has the rest paid directly to the business for now.
+  const prod = bad({ kind: 'product', jobDate: undefined, startTime: undefined, durationMinutes: undefined, restPaid: 'outside' });
   assert(prod.ok && prod.value.kind === 'product' && prod.value.jobDate === null && prod.value.startTime === null && prod.value.durationMinutes === null && prod.value.dueDate === null, 'a product quote with no date passes', prod);
-  const due = bad({ kind: 'product', jobDate: undefined, startTime: undefined, durationMinutes: undefined, dueDate: '2026-12-20' });
+  const due = bad({ kind: 'product', jobDate: undefined, startTime: undefined, durationMinutes: undefined, dueDate: '2026-12-20', restPaid: 'outside' });
   assert(due.ok && due.value.dueDate === '2026-12-20', 'a product quote can have a due date', due);
   assert(field({ kind: 'product', jobDate: undefined, startTime: undefined, durationMinutes: undefined, dueDate: '12/20/2026' }) === 'dueDate', 'a due date must be a real date');
   assert(field({ kind: 'product' }) === 'jobDate', 'a product quote has no job time (use the due date)');

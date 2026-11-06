@@ -32,6 +32,9 @@ export function quotePreviewJson(q: Quote, b: Pick<Business, "id" | "name" | "lo
     durationMinutes: q.durationMinutes,
     timeZone: q.timeZone,
     dueDate: q.dueDate ?? null,
+    // Deliverables D1a (additive): Pickup or Delivery and the fee line. Never the delivery address (signed out).
+    fulfillment: q.fulfillment ?? null,
+    deliveryFeeCents: q.deliveryFeeCents ?? null,
     totalCents: q.totalCents,
     paymentMode: q.paymentMode,
     depositCents: q.depositCents ?? null,
