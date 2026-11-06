@@ -71,6 +71,11 @@ async function postBalanceCard(job: QuoteJob, event: "balance_held" | "balance_f
       },
       content: balanceCardText(event, q.title, job.holdCents),
     });
+    // Step 6a call 6: the business hears a card couldn't be held (this card goes to the customer only).
+    if (event === "balance_failed") {
+      const { noticeBusiness } = await import("./quoteNotices");
+      await noticeBusiness(q, "card_failed", job.id, { amountCents: job.holdCents });
+    }
   } catch (err) {
     console.error(`[quote balance] ${event} card failed for job ${job.id}:`, err);
   }

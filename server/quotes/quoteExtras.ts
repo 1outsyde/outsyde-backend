@@ -25,6 +25,7 @@ import { storage } from "../storage";
 import { quoteExtras, quoteExtrasPayments, quotes, BOOKING_STATES, type Quote, type QuoteExtra, type QuoteExtrasPayment } from "@shared/schema";
 import { getUncachableStripeClient } from "../stripe/stripeClient";
 import { postCardMessage } from "../messaging/postCard";
+import { extraPushText } from "./quoteNoticesRules";
 import { quoteExtraSplit } from "../fees";
 import {
   checkExtraInput, extraCardText, extrasHoldTimes, extrasTotals, holdAtApprove, EXTRAS_CLAIM_MINUTES, MAX_EXTRAS,
@@ -75,6 +76,8 @@ async function postExtraCard(q: Quote, event: ExtraCardEvent, fromCustomer: bool
         ...(o.extra ? { extraId: o.extra.id, description: o.extra.description, amountCents: o.extra.amountCents, serviceFeeCents: fee, totalCents: o.extra.amountCents + fee } : { amountCents: o.amountCents }),
       },
       content: extraCardText(event, { businessName: business?.name ?? "", description: o.extra?.description ?? "", amountCents: o.amountCents }),
+      // Step 6a call 2: the extra's push says what and how much, with the fee.
+      ...(event === "extra_proposed" && o.extra ? { pushBody: extraPushText({ description: o.extra.description, totalCents: o.extra.amountCents + fee }) } : {}),
     });
     return msg.id;
   } catch (err) {
@@ -92,7 +95,13 @@ async function postPaymentCardOnce(p: QuoteExtrasPayment, event: "extras_failed"
     UPDATE quote_extras_payments SET failed_notice_at = now(), updated_at = now() WHERE id = ${p.id} AND failed_notice_at IS NULL RETURNING id`);
   if (!first) return;
   const q = await quoteOf(p.quoteId);
-  if (q) await postExtraCard(q, event, false, { amountCents: p.holdCents });
+  if (!q) return;
+  await postExtraCard(q, event, false, { amountCents: p.holdCents });
+  // Step 6a call 6: the business hears a card couldn't be held (no chat card reaches them for it).
+  if (event === "extras_hold_failed") {
+    const { noticeBusiness } = await import("./quoteNotices");
+    await noticeBusiness(q, "card_failed", p.id, { amountCents: p.holdCents });
+  }
 }
 
 // ─── Send, withdraw, decline ────────────────────────────────────────────────
@@ -138,6 +147,9 @@ export async function proposeExtra(q: Quote, proposedBy: string, body: unknown):
   const extra = (await extraById(x.id))!;
   const msgId = await postExtraCard(q, "extra_proposed", false, { extra, amountCents: extra.amountCents });
   if (msgId) await rows(sql`UPDATE quote_extras SET message_id = ${msgId} WHERE id = ${extra.id}`);
+  // Step 6a calls 3 and 4: the customer's Activity row and email.
+  const { noticeExtraProposed } = await import("./quoteNotices");
+  await noticeExtraProposed(q, extra);
   return { ok: true, extra: (await extraById(x.id))! };
 }
 
@@ -151,6 +163,8 @@ export async function withdrawExtra(q: Quote, extraId: string): Promise<ExtraRes
   if (!x) return (await extraById(extraId))?.quoteId === q.id ? { ok: false, ...NOT_OPEN } : { ok: false, status: 404, code: "NOT_FOUND", message: "Extra not found" };
   const extra = (await extraById(extraId))!;
   await postExtraCard(q, "extra_withdrawn", false, { extra, amountCents: extra.amountCents });
+  const { closeExtraNotice } = await import("./quoteNotices");
+  await closeExtraNotice(extraId);
   return { ok: true, extra };
 }
 
@@ -164,6 +178,9 @@ export async function declineExtra(q: Quote, extraId: string): Promise<ExtraResu
   if (x.prev_intent) await letGoOfIntent(x.prev_intent, "declined while approving");
   const extra = (await extraById(extraId))!;
   await postExtraCard(q, "extra_declined", true, { extra, amountCents: extra.amountCents });
+  const { closeExtraNotice, noticeBusiness } = await import("./quoteNotices");
+  await closeExtraNotice(extraId);
+  await noticeBusiness(q, "extra_declined", extraId, { description: extra.description, amountCents: extra.amountCents });
   return { ok: true, extra };
 }
 
@@ -320,6 +337,9 @@ async function finishApproval(extraId: string, intent: any, tag: string): Promis
   const fresh = (await extraById(extraId))!;
   const q = await quoteOf(fresh.quoteId);
   if (q) await postExtraCard(q, "extra_approved", true, { extra: fresh, amountCents: fresh.amountCents });
+  const { closeExtraNotice, noticeBusiness } = await import("./quoteNotices");
+  await closeExtraNotice(extraId);
+  if (q) await noticeBusiness(q, "extra_approved", extraId, { description: fresh.description, amountCents: fresh.amountCents });
   return "approved";
 }
 
@@ -841,6 +861,9 @@ export async function startExtrasCardPayment(appointmentId: string, customerId: 
 
 export async function runQuoteExtrasJob(now = new Date()): Promise<{ holds: number; charged: number; released: number; reminders: number }> {
   let holds = 0, charged = 0, released = 0, reminders = 0;
+  // Step 6a: Activity rows for extras closed some other way (lapsed at Job complete, canceled with the booking).
+  const { sweepExtraNotices } = await import("./quoteNotices");
+  await sweepExtraNotices();
   // Review I2: extras released for a cancel that never went through (the booking is still confirmed): hold again.
   await rows(sql`
     UPDATE quote_extras_payments x SET status = 'scheduled', hold_at = ${now}::timestamptz, retry_at = NULL, released_at = NULL, failed_notice_at = NULL, updated_at = now()

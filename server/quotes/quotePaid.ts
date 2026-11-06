@@ -198,6 +198,9 @@ export async function afterQuotePaid(q: Quote, appt: Appointment): Promise<void>
         },
         content: quoteMessageText("paid", q.title, q.totalCents, q.paymentMode),
       });
+      // Step 6a call 6: the business's Activity row (the paid card above already pushed them).
+      const { noticeBusiness } = await import("./quoteNotices");
+      await noticeBusiness(q, "paid", q.id);
     }
   } catch (err) {
     console.error(`[quotes] paid card failed for ${q.id}:`, err);

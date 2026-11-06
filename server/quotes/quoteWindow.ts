@@ -426,7 +426,12 @@ export async function reportQuoteJob(q: Quote, body: { reason?: unknown; photos?
   }
   const job = (await quoteJobFor(appt.id))!;
   const [first] = await rows<{ id: string }>(sql`UPDATE quote_reports SET vendor_notice_at = now() WHERE id = ${rep.id} AND vendor_notice_at IS NULL RETURNING id`);
-  if (first) await postWindowCard(q, job, "problem_reported", true);
+  if (first) {
+    await postWindowCard(q, job, "problem_reported", true);
+    // Step 6a call 6: the business's Activity row (the card above already pushed them).
+    const { noticeBusiness } = await import("./quoteNotices");
+    await noticeBusiness(q, "problem_reported", q.id);
+  }
   const business = await storage.getBusiness(q.businessId);
   await adminAlert(`Problem reported on a quote: ${business?.name ?? q.businessId}`,
     `A customer reported a problem on quote booking ${appt.id} (${q.title}, ${business?.name ?? ""}). Held for review: ${formatCents(held)}.\n` +

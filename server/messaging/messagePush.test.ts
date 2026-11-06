@@ -61,6 +61,16 @@ const base = {
     assert(calls.expo[0].title === "New message", "falls back to 'New message' with no name", calls.expo[0].title);
   }
   {
+    // Quotes step 6a: a card's own push words, not cut at 50.
+    const { deps, calls } = fakeDeps({ getWebPushSubscriptions: async () => [{ id: "a" }] });
+    const words = "Needs your OK: 2 extra hours, $108.00 with the service fee. Nothing is charged unless you approve.";
+    await notifyNewMessage({ ...base, content: "Royal Elite added 2 extra hours.", pushBody: words }, deps);
+    assert(calls.expo[0].body === words && calls.web[0].payload.body === words && calls.expo[0].data.type === "new_message", "pushBody: the full words, still a message push", calls.expo[0]);
+    const c2 = fakeDeps();
+    await notifyNewMessage({ ...base, pushBody: "y".repeat(400) }, c2.deps);
+    assert(c2.calls.expo[0].body.length === 178 && c2.calls.expo[0].body.endsWith("..."), "a very long pushBody is cut at 178", c2.calls.expo[0].body.length);
+  }
+  {
     const { deps, calls } = fakeDeps({ getWebPushSubscriptions: async () => [{ id: "a" }, { id: "b" }] });
     const r = await notifyNewMessage(base, deps);
     assert(r.webDevices === 2 && calls.web.length === 2, "web push still sent to every subscription");
