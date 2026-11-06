@@ -255,7 +255,7 @@ import { isValidTimeZone } from "./manualRequests";
 import { applyReferralAtSignup } from "./referralSignup";
 import { applyBusinessReferralAtSignup, checkBusinessReferralSoon, checkBusinessReferralsForOwnerSoon, listBusinessReferralsFor } from "./referrals/businessReferrals";
 import { filterProviderBookings } from "./providerBookingLists";
-import { settleAppointmentBooking, settleShootBooking } from "./bookingSettlement";
+import { settleAppointmentBooking, settleShootBooking, pendingPointsForAppointment, pendingPointsForShoot } from "./bookingSettlement";
 import { requirePlatformAdmin, isPlatformAdminUser } from "./middleware/requirePlatformAdmin";
 import {
   pointsForGrossCents,
@@ -6148,6 +6148,8 @@ export async function registerRoutes(
                 // Payment sheet session when the app asks (additive; p4-applepay).
                 ...(await paymentSheetFields(existingPI.customer, req.body?.paymentSheet === true)),
                 holdExpiresAt: new Date(hold.expiresAt).toISOString(), // Part B: payment screen counts down to this
+                // Booking step 4: points the customer gets once this booking settles (same amount settlement saves).
+                pendingPoints: pendingPointsForShoot(existingShoot),
                 clientSecret: existingPI.client_secret,
                 paymentIntentId: existingPI.id,
                 shootBookingId: existingShoot.id,
@@ -6189,6 +6191,8 @@ export async function registerRoutes(
               // Payment sheet session when the app asks (additive; p4-applepay).
               ...(await paymentSheetFields(resumedPI.customer, req.body?.paymentSheet === true)),
               holdExpiresAt: new Date(hold.expiresAt).toISOString(), // Part B: payment screen counts down to this
+              // Booking step 4: points the customer gets once this booking settles (same amount settlement saves).
+              pendingPoints: pendingPointsForShoot(existingShoot),
               clientSecret: resumedPI.client_secret,
               paymentIntentId: resumedPI.id,
               shootBookingId: existingShoot.id,
@@ -6336,6 +6340,8 @@ export async function registerRoutes(
           // Payment sheet session when the app asks (additive; p4-applepay).
           ...(await paymentSheetFields(photographerPI.customer, req.body?.paymentSheet === true)),
           holdExpiresAt: new Date(hold.expiresAt).toISOString(), // Part B: payment screen counts down to this
+          // Booking step 4: points the customer gets once this booking settles (same amount settlement saves).
+          pendingPoints: pendingPointsForShoot(shootBooking),
           clientSecret: photographerPI.client_secret,
           paymentIntentId: photographerPI.id,
           shootBookingId: shootBooking.id,
@@ -6415,6 +6421,8 @@ export async function registerRoutes(
               // Payment sheet session when the app asks (additive; p4-applepay).
               ...(await paymentSheetFields(existingPI.customer, req.body?.paymentSheet === true)),
               holdExpiresAt: new Date(hold.expiresAt).toISOString(), // Part B: payment screen counts down to this
+              // Booking step 4: points the customer gets once this booking settles (same amount settlement saves).
+              pendingPoints: pendingPointsForAppointment(existing),
               clientSecret: existingPI.client_secret,
               paymentIntentId: existingPI.id,
               appointmentId: existing.id,
@@ -6489,6 +6497,8 @@ export async function registerRoutes(
             // Payment sheet session when the app asks (additive; p4-applepay).
             ...(await paymentSheetFields(resumedPI.customer, req.body?.paymentSheet === true)),
             holdExpiresAt: new Date(hold.expiresAt).toISOString(), // Part B: payment screen counts down to this
+            // Booking step 4: points the customer gets once this booking settles (same amount settlement saves).
+            pendingPoints: pendingPointsForAppointment(existing),
             clientSecret: resumedPI.client_secret,
             paymentIntentId: resumedPI.id,
             appointmentId: existing.id,
@@ -6683,6 +6693,8 @@ export async function registerRoutes(
         // Payment sheet session when the app asks (additive; p4-applepay).
         ...(await paymentSheetFields(paymentIntent.customer, req.body?.paymentSheet === true)),
         holdExpiresAt: new Date(hold.expiresAt).toISOString(), // Part B: payment screen counts down to this
+        // Booking step 4: points the customer gets once this booking settles (same amount settlement saves).
+        pendingPoints: pendingPointsForAppointment(appointment),
         clientSecret: paymentIntent.client_secret,
         paymentIntentId: paymentIntent.id,
         appointmentId: appointment.id,
