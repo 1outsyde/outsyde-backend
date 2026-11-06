@@ -132,15 +132,54 @@ function timeToMinutes(time: string): number {
   return NaN; // Unknown format
 }
 
-function doTimesOverlap(
+/**
+ * True when range 1 (the new booking) clashes with range 2 (an existing booking or hold).
+ * gapMinutes (migration 104) keeps that many minutes free after EACH booking: range 1 may
+ * start no earlier than range 2's end + gap, and must end at least gap before range 2
+ * starts. gapMinutes = 0 is the plain overlap check used before the gap existed.
+ */
+export function doTimesOverlap(
   start1: string, end1: string,
-  start2: string, end2: string
+  start2: string, end2: string,
+  gapMinutes: number = 0
 ): boolean {
   const s1 = timeToMinutes(start1);
   const e1 = timeToMinutes(end1);
   const s2 = timeToMinutes(start2);
   const e2 = timeToMinutes(end2);
-  return s1 < e2 && e1 > s2;
+  const gap = Number.isFinite(gapMinutes) && gapMinutes > 0 ? gapMinutes : 0;
+  return s1 < e2 + gap && e1 + gap > s2;
+}
+
+// ============================================
+// GAP AFTER BOOKINGS (migration 104, businesses.booking_gap_minutes)
+// ============================================
+
+/** The gap lengths a vendor can pick (Legend 2026-11-05). Default 15. */
+export const BOOKING_GAP_CHOICES = [0, 5, 10, 15, 20, 30, 45, 60] as const;
+export const DEFAULT_BOOKING_GAP_MINUTES = 15;
+
+export function isValidBookingGap(value: unknown): value is number {
+  return typeof value === 'number' && (BOOKING_GAP_CHOICES as readonly number[]).includes(value);
+}
+
+/**
+ * Minutes kept free after each booking for this provider. Businesses and their staff use
+ * businesses.booking_gap_minutes; photographers return 0 here because their own
+ * travel_buffer_minutes is applied at hold time (checkProviderAvailability), unchanged.
+ * Used by all three gates (slot list + calendar, validate, hold) so they always agree.
+ */
+export async function getBookingGapMinutes(
+  providerType: 'business' | 'staff' | 'photographer',
+  providerId: string
+): Promise<number> {
+  if (providerType === 'photographer') return 0;
+  const [row] = await db
+    .select({ gap: businesses.bookingGapMinutes })
+    .from(businesses)
+    .where(eq(businesses.id, providerId));
+  if (!row) return 0;
+  return isValidBookingGap(row.gap) ? row.gap : DEFAULT_BOOKING_GAP_MINUTES;
 }
 
 // ============================================
@@ -880,11 +919,12 @@ function isTimeBlockedByHold(
   startTime: string,
   endTime: string,
   holds: BookingHold[],
-  excludeHoldId?: string
+  excludeHoldId?: string,
+  gapMinutes: number = 0
 ): { blocked: boolean; holdId?: string } {
   for (const hold of holds) {
     if (excludeHoldId && hold.id === excludeHoldId) continue;
-    if (doTimesOverlap(startTime, endTime, hold.startTime, hold.endTime)) {
+    if (doTimesOverlap(startTime, endTime, hold.startTime, hold.endTime, gapMinutes)) {
       return { blocked: true, holdId: hold.id };
     }
   }
@@ -1043,6 +1083,9 @@ export async function generateAvailabilitySlots(
     staffMemberId
   );
   
+  // Gap after each booking (migration 104): the same value validate and the hold use.
+  const gapMinutes = await getBookingGapMinutes(providerType, providerId);
+
   // 5. Generate slots for each window
   const allSlots: GeneratedSlot[] = [];
 
@@ -1093,18 +1136,18 @@ export async function generateAvailabilitySlots(
         continue;
       }
       
-      // Check if slot overlaps with confirmed booking
-      const bookingConflict = bookings.find(b => 
-        doTimesOverlap(startTime, endTime, b.startTime, b.endTime)
+      // Check if slot overlaps with confirmed booking (with the gap after each booking)
+      const bookingConflict = bookings.find(b =>
+        doTimesOverlap(startTime, endTime, b.startTime, b.endTime, gapMinutes)
       );
       if (bookingConflict) {
         allSlots.push({ startTime, endTime, available: false, reason: 'booked' });
         currentMinutes += 15;
         continue;
       }
-      
-      // Check if slot overlaps with active hold
-      const holdCheck = isTimeBlockedByHold(startTime, endTime, holds, excludeHoldId);
+
+      // Check if slot overlaps with active hold (with the gap after each booking)
+      const holdCheck = isTimeBlockedByHold(startTime, endTime, holds, excludeHoldId, gapMinutes);
       if (holdCheck.blocked) {
         allSlots.push({ startTime, endTime, available: false, reason: 'held' });
         currentMinutes += 15;
@@ -1338,16 +1381,17 @@ export async function validateBookingSlot(
     };
   }
   
-  // 5. Check existing bookings
+  // 5. Check existing bookings (with the gap after each booking, migration 104)
+  const gapMinutes = await getBookingGapMinutes(providerType, providerId);
   const bookings = await getConfirmedBookingsForDate(
     providerType,
     providerId,
     date,
     staffMemberId
   );
-  
-  const bookingConflict = bookings.find(b => 
-    doTimesOverlap(startTime, endTime, b.startTime, b.endTime)
+
+  const bookingConflict = bookings.find(b =>
+    doTimesOverlap(startTime, endTime, b.startTime, b.endTime, gapMinutes)
   );
   
   if (bookingConflict) {
@@ -1366,7 +1410,7 @@ export async function validateBookingSlot(
     staffMemberId
   );
   
-  const holdCheck = isTimeBlockedByHold(startTime, endTime, holds, excludeHoldId);
+  const holdCheck = isTimeBlockedByHold(startTime, endTime, holds, excludeHoldId, gapMinutes);
   if (holdCheck.blocked) {
     return {
       valid: false,
@@ -1646,8 +1690,9 @@ export async function createBookingHold(params: CreateHoldParams): Promise<HoldR
   const bookings = await getConfirmedBookingsForDate(
     params.providerType, params.providerId, params.date, params.staffMemberId
   );
+  const holdGapMinutes = await getBookingGapMinutes(params.providerType, params.providerId);
   const bookingConflict = bookings.find(b =>
-    doTimesOverlap(params.startTime, endTime, b.startTime, b.endTime)
+    doTimesOverlap(params.startTime, endTime, b.startTime, b.endTime, holdGapMinutes)
   );
   if (bookingConflict) {
     throw new AvailabilityError(
@@ -2018,7 +2063,13 @@ export async function checkProviderAvailability(
     .from(bookingHolds)
     .where(and(...holdConditions));
 
-  const holdConflict = holds.some(h => bufferedStart < h.endAt && bufferedEnd > h.startAt);
+  // Gap after each booking (migration 104) for businesses and staff; 0 for photographers,
+  // whose travel buffer is already in bufferedStart/bufferedEnd. Same value the slot list
+  // and validate use. Never applied to blocks.
+  const gapMinutes = await getBookingGapMinutes(providerType, providerId);
+  const holdWindowStart = new Date(bufferedStart.getTime() - gapMinutes * 60_000);
+  const holdWindowEnd = new Date(bufferedEnd.getTime() + gapMinutes * 60_000);
+  const holdConflict = holds.some(h => holdWindowStart < h.endAt && holdWindowEnd > h.startAt);
   if (holdConflict) {
     return { available: false, reason: 'Slot is temporarily held by another customer' };
   }

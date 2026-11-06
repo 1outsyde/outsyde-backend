@@ -393,6 +393,9 @@ export const businesses = pgTable("businesses", {
   autoAcceptBookings: boolean("auto_accept_bookings").default(true).notNull(),
   // Migration 044: business-level bookings may end after closing (start must be in open hours, end by 23:59)
   allowPastClosing: boolean("allow_past_closing").default(false).notNull(),
+  // Minutes kept free after every booking (migration 104): 0, 5, 10, 15, 20, 30, 45 or 60.
+  // Applies to the business and its staff; photographers use travel_buffer_minutes.
+  bookingGapMinutes: integer("booking_gap_minutes").default(15).notNull(),
   // IANA time zone (e.g. "America/New_York") from the owner's phone or browser (migration 054).
   // Null = America/New_York. Used for the request deadline and reminder times (Part C).
   timeZone: text("time_zone"),
