@@ -298,6 +298,8 @@ const holdTs = (date: string, h: number, m: number) => { const [y, mo, d] = date
     assert(cancel.status === 200 && o2c.status === "cancelled", "the business cancels the paid order", { s: cancel.status, b: cancel.body, st: o2c.status });
     assert(rf.length === 1 && rf[0].amount === 15000, "the business's part is refunded in full, the service fee is kept", rf);
     assert(reversals.some((x) => x.amount === o2.vendor_net), "the business's share is taken back", reversals);
+    await WebhookHandlers.handlePaymentIntentSucceeded({ ...piStore[r2.body.paymentIntentId] });
+    assert((await orderOf(o2.id)).status === "cancelled", "a repeated paid event never brings a cancelled order back");
     const r2read = await call("GET", `/api/quotes/${dq.id}`, { token: cust.token });
     assert(r2read.body?.quote?.orderStatus === "cancelled", "the quote shows the order was cancelled", r2read.body?.quote?.orderStatus);
 

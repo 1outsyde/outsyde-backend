@@ -1647,7 +1647,13 @@ export class WebhookHandlers {
       await qo.refundUnpayableDeliverable(order, paymentIntent.id, Number(paymentIntent.amount_received ?? paymentIntent.amount ?? 0));
       return;
     }
-    if (!(await claimOrderPaid(orderId, paymentIntent.id))) {
+    // Only a pending order becomes paid (a declined card leaves it pending). A cancelled one (cancelled and refunded
+    // by the business, or retired) is never brought back by a late or repeated event.
+    const flipped = await db.update(orders)
+      .set({ status: 'paid', stripePaymentIntentId: paymentIntent.id, paidAt: sql`COALESCE(${orders.paidAt}, now())` })
+      .where(and(eq(orders.id, orderId), eq(orders.status, 'pending')))
+      .returning({ id: orders.id });
+    if (!flipped.length) {
       // A repeat delivery: only make sure the Paid card went out (it is guarded to post once).
       await qo.afterDeliverablePaid(claim.quote, order);
       logReceiptsSkipped('quote_order', orderId);
