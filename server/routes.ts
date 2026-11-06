@@ -238,7 +238,8 @@ import {
   AvailabilityError,
   AVAILABILITY_ERRORS,
   syncHoursOfOperationToWeeklyAvailability,
-  syncWeeklyAvailabilityToHoursOfOperation
+  syncWeeklyAvailabilityToHoursOfOperation,
+  isValidBookingGap
 } from "./availabilityService";
 import { isHoldStillBookable, SERVICE_UNAVAILABLE_BODY } from "./bookableService";
 import { serviceCitiesInput } from "./estimates/serviceCities";
@@ -12810,6 +12811,8 @@ export async function registerRoutes(
         "showStoreHours",
         "showAddress",
         "allowPastClosing",
+        // Minutes kept free after each booking (migration 104). Checked below.
+        "bookingGapMinutes",
         // Industry from the shared list (migration 047). Checked below with validateIndustrySelection.
         "categoryCode",
         "specialties",
@@ -12821,6 +12824,13 @@ export async function registerRoutes(
       ]);
       if (otherFields.allowPastClosing !== undefined && typeof otherFields.allowPastClosing !== "boolean") {
         return res.status(400).json({ error: "allowPastClosing must be true or false" });
+      }
+      if (otherFields.bookingGapMinutes !== undefined && !isValidBookingGap(otherFields.bookingGapMinutes)) {
+        return res.status(400).json({
+          error: "bookingGapMinutes must be 0, 5, 10, 15, 20, 30, 45 or 60",
+          message: "Pick a time between bookings from the list.",
+          field: "bookingGapMinutes",
+        });
       }
       if (otherFields.defaultDepositCents !== undefined) {
         const deposit = parseDefaultDeposit(otherFields.defaultDepositCents);
