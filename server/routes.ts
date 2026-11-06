@@ -19821,6 +19821,17 @@ export async function registerRoutes(
 
   // Create a refund request (vendors, photographers, or customers)
   app.post("/api/refund-requests", async (req, res) => {
+    // Open decision 2 / R9 / N12 (Legend, 2026-11-05): closed. Anyone signed in could file a
+    // request on any order or booking for any amount, and no app or site calls this route.
+    // Quote reports create their own refund_requests rows (quotes/quoteWindow.ts reportQuoteJob)
+    // and the admin decide route (PATCH /api/admin/refund-requests/:id) is unchanged.
+    // The code below is kept; set REFUND_REQUESTS_OPEN=true on Render to turn it back on.
+    if (process.env.REFUND_REQUESTS_OPEN !== "true") {
+      return res.status(410).json({
+        error: "Refund requests are no longer accepted here. Please contact support.",
+        code: "REFUND_REQUESTS_CLOSED",
+      });
+    }
     const userId = req.session?.userId;
     if (!userId) {
       return res.status(401).json({ error: "Not authenticated" });
