@@ -4,8 +4,24 @@ import { and, eq, isNull, sql } from "drizzle-orm";
 import { storage } from "./storage";
 import { stripeService } from "./stripe/stripeService";
 import { markHoldAsConverted } from "./availabilityService";
-import { calculateBookingFees } from "./fees";
-import { releaseAfterForBooking } from "./loyaltyLedger";
+import { calculateBookingFees, quoteDeposit } from "./fees";
+
+// Booking step 4 (Legend 2026-11-06): the Booked screen shows the pending points the
+// customer will get. These are the SAME amounts settlement saves below, so the number
+// on screen and the points written can never differ.
+
+/** Business / staff: deposit (or full price) plus the service fee, before any points code. */
+export function appointmentPointsBaseCents(a: { depositAmountCents: number | null; totalPrice: number }): number {
+  return calculateBookingFees(a.depositAmountCents ?? a.totalPrice).customerTotalBeforeTaxCents;
+}
+export function pendingPointsForAppointment(a: { depositAmountCents: number | null; totalPrice: number }): number {
+  return pointsForGrossCents(appointmentPointsBaseCents(a));
+}
+/** Photographer: what is due now, before any points code (the PaymentIntent's originalConsumerTotalCents). */
+export function pendingPointsForShoot(sb: { depositAmountCents: number | null; totalPrice: number }): number {
+  return pointsForGrossCents(quoteDeposit(sb.totalPrice, sb.depositAmountCents).dueNowCents);
+}
+import { releaseAfterForBooking, pointsForGrossCents } from "./loyaltyLedger";
 import { payBookingRecipient } from "./payouts";
 
 export type SettlementResult =
@@ -139,7 +155,7 @@ export async function settleAppointmentBooking(appointmentId: string): Promise<S
   try {
     await storage.createPendingPointTransaction({
       userId: appointment.clientId,
-      dollarAmountCents: calculateBookingFees(chargedAmountCents).customerTotalBeforeTaxCents,
+      dollarAmountCents: appointmentPointsBaseCents(appointment),
       transactionType: 'business_transaction',
       referenceType: 'appointment',
       referenceId: appointmentId,

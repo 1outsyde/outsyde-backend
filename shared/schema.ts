@@ -131,7 +131,7 @@ export interface HoursOfOperation {
 export const BOOKING_STATES = {
   DRAFT: 'draft',              // Slot locked, awaiting payment initiation (10-min TTL)
   PENDING_PAYMENT: 'pending_payment', // Payment initiated, awaiting confirmation
-  PENDING_PROVIDER: 'pending_provider', // Payment authorized, awaiting provider accept/decline (24h TTL, only if autoAccept=false)
+  PENDING_PROVIDER: 'pending_provider', // Payment authorized, awaiting provider accept/decline (48h, PENDING_PROVIDER_TTL_HOURS; only if autoAccept=false)
   CONFIRMED: 'confirmed',      // Payment captured, booking active
   COMPLETED: 'completed',      // Service delivered
   CANCELED: 'canceled',        // Booking canceled (by user, vendor, or system)
