@@ -1460,6 +1460,11 @@ export const shootBookings = pgTable("shoot_bookings", {
   addonsTotalCents: integer("addons_total_cents").notNull().default(0),
   addonsDurationMinutes: integer("addons_duration_minutes").notNull().default(0),
   customerDetails: text("customer_details"),
+
+  // 105: customer agreed before paying (booking step 3). Null on old clients.
+  customerAgreedAt: timestamp("customer_agreed_at"),
+  customerAgreedTermsVersion: text("customer_agreed_terms_version"),
+  customerAgreedVendorTerms: text("customer_agreed_vendor_terms"),
 }, (table) => ({
   // Prevent double bookings: only one ACTIVE booking per photographer + date + start time.
   // Partial index (migration 050): expired / canceled / declined bookings no longer block the slot.
@@ -1583,6 +1588,11 @@ export const appointments = pgTable("appointments", {
   customerServiceCity: text("customer_service_city"),
   customerServiceState: text("customer_service_state"),
   customerServiceZipCode: text("customer_service_zip_code"),
+
+  // 105: customer agreed before paying (booking step 3). Null on old clients.
+  customerAgreedAt: timestamp("customer_agreed_at"),
+  customerAgreedTermsVersion: text("customer_agreed_terms_version"),
+  customerAgreedVendorTerms: text("customer_agreed_vendor_terms"),
 
   // Service snapshot — captured at booking-creation time so historical records remain
   // correct even if the service is later edited, archived, or deleted. Nullable because
