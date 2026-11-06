@@ -148,8 +148,8 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
     assert(dup.status === 409 && dup.json.error.code === "DUPLICATE_SEND", "same text within 10 minutes: 409", dup.json);
     const notes = await q(`SELECT user_id, type, metadata FROM notifications WHERE reference_id = $1 ORDER BY user_id`, [sendId]);
     assert(notes.length === 2 && notes.every((n) => n.type === "announcement" && n.metadata.screen === "events"), "Activity row per recipient", notes);
-    // GET /api/notifications reads only the session cookie (routes.ts, pre-existing), not a Bearer token,
-    // so the Activity row is checked in the database above rather than through that route.
+    // The Activity row is checked in the database above (GET /api/notifications takes the Bearer token since R37,
+    // covered in server/notificationsBearer.http.test.ts).
     r = await call("GET", "/api/admin/push/sends", undefined, adminJwt);
     assert(r.status === 200 && r.json.sends[0]?.id === sendId && r.json.sends[0].sentCount === 2, "history lists the send", r.json?.sends?.[0]);
 
