@@ -4355,7 +4355,8 @@ export async function registerRoutes(
   // ==================== NOTIFICATIONS ====================
 
   app.get("/api/notifications", async (req, res) => {
-    const userId = req.session?.userId;
+    // R37 (2026-11-05): the app's Bearer token too (it checks the token first, then the web session).
+    const userId = getUserIdFromRequest(req);
     if (!userId) {
       return res.status(401).json({ error: "Not authenticated" });
     }
@@ -4434,7 +4435,8 @@ export async function registerRoutes(
   });
 
   app.get("/api/notifications/unread-count", async (req, res) => {
-    const userId = req.session?.userId;
+    // R37 (2026-11-05): the app's Bearer token too (it checks the token first, then the web session).
+    const userId = getUserIdFromRequest(req);
     if (!userId) {
       return res.status(401).json({ error: "Not authenticated" });
     }
@@ -4449,7 +4451,8 @@ export async function registerRoutes(
   });
 
   app.patch("/api/notifications/:id/read", async (req, res) => {
-    const userId = req.session?.userId;
+    // R37 (2026-11-05): the app's Bearer token too (it checks the token first, then the web session).
+    const userId = getUserIdFromRequest(req);
     if (!userId) {
       return res.status(401).json({ error: "Not authenticated" });
     }
@@ -4468,7 +4471,8 @@ export async function registerRoutes(
   });
 
   app.post("/api/notifications/mark-all-read", async (req, res) => {
-    const userId = req.session?.userId;
+    // R37 (2026-11-05): the app's Bearer token too (it checks the token first, then the web session).
+    const userId = getUserIdFromRequest(req);
     if (!userId) {
       return res.status(401).json({ error: "Not authenticated" });
     }
