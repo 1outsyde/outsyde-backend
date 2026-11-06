@@ -337,14 +337,21 @@ export async function confirmEmailChange(p: { userId: string; body: unknown; ip?
   return { status: 200, body: { success: true, email: pending.newEmail } };
 }
 
+/**
+ * The open request (or null) and passwordRequired: whether the request step must ask for a password (step 2a).
+ * The app and goutsyde.com never see the password hash, so this is how a Google or Apple only account is spared
+ * a password box it can't fill.
+ */
 export async function getPendingEmailChange(userId: string): Promise<ServiceResult> {
+  const user: any = await storage.getUser(userId);
+  const passwordRequired = !!user?.password;
   const pending = await loadPending(userId);
   if (!pending || pending.expiresAt.getTime() <= emailChangeDeps.now().getTime()) {
-    return { status: 200, body: { success: true, pending: null } };
+    return { status: 200, body: { success: true, pending: null, passwordRequired } };
   }
   return {
     status: 200,
-    body: { success: true, pending: { newEmail: pending.newEmail, expiresAt: pending.expiresAt.toISOString(), triesLeft: Math.max(0, MAX_CODE_TRIES - pending.attempts) } },
+    body: { success: true, passwordRequired, pending: { newEmail: pending.newEmail, expiresAt: pending.expiresAt.toISOString(), triesLeft: Math.max(0, MAX_CODE_TRIES - pending.attempts) } },
   };
 }
 

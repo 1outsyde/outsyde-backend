@@ -115,6 +115,7 @@ const isLocal = (u: string) => ['localhost', '127.0.0.1', '::1', '[::1]'].includ
     assert(row && row.code_hash !== sent[0].code && row.old_email === `${a}@old.test`, 'saved with a hash, never the code');
     const g = await m.getPendingEmailChange(a);
     assert((g.body as any).pending?.newEmail === 'new-a@new.test' && (g.body as any).pending?.triesLeft === 5, 'GET shows the open request');
+    assert((g.body as any).passwordRequired === true, 'GET: passwordRequired true for an account with a password');
     assert((await email(a)) === `${a}@old.test`, 'email unchanged until confirmed');
 
     const w = await conf(a, lastCode() === '000000' ? '000001' : '000000');
@@ -136,6 +137,8 @@ const isLocal = (u: string) => ['localhost', '127.0.0.1', '::1', '[::1]'].includ
 
     console.log('\n── replace, tries, expiry, cancel ──');
     const b = await mkUser('b', { password: null }); // Google or Apple only
+    const gb = await m.getPendingEmailChange(b);
+    assert((gb.body as any).passwordRequired === false && (gb.body as any).pending === null, 'GET: passwordRequired false and no request for a Google or Apple only account');
     const r1 = await req(b, { newEmail: 'b1@new.test' });
     assert(r1.status === 200, 'no password account: code alone is enough');
     const code1 = lastCode();
