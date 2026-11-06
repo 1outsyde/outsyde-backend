@@ -36,9 +36,10 @@ export async function claimDeliverablePaid(order: Order, paidVersion: number | n
  * The quote changed or closed before Stripe confirmed the payment: everything goes back. Full refund (with the
  * service fee) and the business's share taken back from the destination charge; the order is cancelled.
  */
-export async function refundUnpayableDeliverable(order: Order, paymentIntentId: string, chargedCents: number): Promise<void> {
+export async function refundUnpayableDeliverable(order: Order, paymentIntentId: string, chargedCents: number): Promise<boolean> {
   try {
-    // The whole charge, service fee included (capped at what was charged), and the business's share taken back.
+    // The whole charge, service fee included, and the business's share taken back. Both Stripe calls use fixed keys
+    // per order (order_cancel_refund_<id>, order_cancel_reversal_<id>), so a retry never refunds twice.
     await stripeService.refundOrderCancellation({
       paymentIntentId,
       refundAmountCents: chargedCents,
@@ -47,10 +48,20 @@ export async function refundUnpayableDeliverable(order: Order, paymentIntentId: 
       orderId: order.id,
     });
   } catch (err) {
-    console.error(`[quotes] refund of unpayable deliverable order ${order.id} failed:`, err);
+    // Review D1b 1: the order stays pending, so the quote job's backstop retries this with the same keys.
+    console.error(`[quotes] refund of unpayable deliverable order ${order.id} failed; the backstop retries:`, err);
+    return false;
   }
   await db.update(orders).set({ status: "cancelled", updatedAt: new Date() })
     .where(and(eq(orders.id, order.id), sql`${orders.status} IN ('pending', 'paid')`));
+  // Review D1b 2: everything came back, so the points code does too (as for any full refund).
+  try {
+    const { restorePromoForReference } = await import("../loyaltyLedger");
+    await restorePromoForReference({ type: "order", id: order.id });
+  } catch (err) {
+    console.error(`[quotes] could not give back the points code of order ${order.id}:`, err);
+  }
+  return true;
 }
 
 /** The Paid card in the chat (once), the business's Activity row, and the request moved to booked. */

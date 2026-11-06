@@ -1540,6 +1540,13 @@ export class WebhookHandlers {
     }
     const { type, bookingId } = metadata;
 
+    // Deliverables D1b (review 3): a deliverable's payment was canceled (retired, or its points code taken by another
+    // checkout): the quote is unlocked at once, so the customer can start again.
+    if (type === 'quote_order' && metadata.quoteId) {
+      const { unlockQuote } = await import("../quotes/quotePaid");
+      await unlockQuote(metadata.quoteId).catch((err) => console.error(`[Stripe] could not unlock quote ${metadata.quoteId}:`, err));
+    }
+
     // A cancelled payment never used its points code: give the hold back. Only a hold by this
     // same checkout is released (a newer checkout that took the code over keeps it).
     if (metadata.promoCodeId) {
@@ -1663,7 +1670,8 @@ export class WebhookHandlers {
     const vendor = await storage.getUserByBusinessOwnerId(order.businessId).catch(() => undefined);
     const customer = await storage.getUser(order.customerId).catch(() => undefined);
     const how = order.fulfillment === 'delivery' ? `Delivery to ${order.shippingAddress ?? 'your address'}` : 'Pickup';
-    const due = claim.quote.dueDate ? `, due ${claim.quote.dueDate}` : '';
+    const { formatDateLabel } = await import("../manualRequests");
+    const due = claim.quote.dueDate ? `, due ${formatDateLabel(claim.quote.dueDate)}` : '';
     const items = ((order.items as any[]) || []).map((i: any) => ({
       productName: i.name || 'Item',
       variantLabel: `${how}${due}`,

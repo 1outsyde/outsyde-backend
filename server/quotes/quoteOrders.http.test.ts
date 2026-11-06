@@ -65,6 +65,7 @@ const holdTs = (date: string, h: number, m: number) => { const [y, mo, d] = date
   const refunds: any[] = [];
   const transfers: any[] = [];
   const reversals: any[] = [];
+  let failNextRefund = false;
   let failNextCreateNetwork = false;
   const lostKeys = new Set<string>();
   const stub = http.createServer((req, res) => {
@@ -116,6 +117,7 @@ const holdTs = (date: string, h: number, m: number) => { const [y, mo, d] = date
       const piCancel = url.pathname.match(/^\/v1\/payment_intents\/([^/]+)\/cancel$/);
       if (req.method === "POST" && piCancel) { const pi = piStore[piCancel[1]]; if (pi) pi.status = "canceled"; return send(200, pi); }
       if (req.method === "POST" && url.pathname === "/v1/refunds") {
+        if (failNextRefund) { failNextRefund = false; return send(400, { error: { type: "invalid_request_error", message: "stub: refund failed" } }); }
         const pi = piStore[form.get("payment_intent") || ""];
         const amount = Number(form.get("amount") || (pi ? pi.amount_received - (pi._refunded || 0) : 0));
         if (pi) pi._refunded = (pi._refunded || 0) + amount;
@@ -314,6 +316,51 @@ const holdTs = (date: string, h: number, m: number) => { const [y, mo, d] = date
     assert(o3.status === "cancelled" && (await quoteRow(cq.id)).status === "sent", "the order is cancelled and the quote stays open", { o3: o3.status });
     assert(refunds.length === rb + 1 && refunds[rb].amount === paid3.amount, "everything is refunded, the service fee too", refunds.slice(rb));
 
+    console.log("\n── review fixes ──");
+    {
+      // 1. A refund that fails leaves the order pending; the backstop retries it.
+      const fq = (await send({ ...cake(), conversationId: conv2, title: "Pie" })).body?.quote;
+      const rf1 = await pay(fq.id, fq.version, cust2.token);
+      await q(`UPDATE quotes SET version = version + 1, paying_until = NULL WHERE id = $1`, [fq.id]);
+      failNextRefund = true;
+      const before1 = refunds.length;
+      const paidF = succeed(rf1.body.paymentIntentId);
+      await WebhookHandlers.handlePaymentIntentSucceeded({ ...paidF });
+      assert((await orderOf(rf1.body.orderId)).status === "pending" && refunds.length === before1, "a failed refund leaves the order pending", (await orderOf(rf1.body.orderId)).status);
+      await q(`UPDATE orders SET created_at = now() - interval '5 minutes' WHERE id = $1`, [rf1.body.orderId]);
+      await settleStaleDeliverableOrders();
+      assert((await orderOf(rf1.body.orderId)).status === "cancelled" && refunds.length === before1 + 1 && refunds[before1].amount === paidF.amount, "the backstop retries it: refunded in full, then cancelled", refunds.slice(before1));
+
+      // 2. A points code comes back after that full refund.
+      const codeId = id("code");
+      await q(`INSERT INTO promo_codes (id, code, user_id, points_cost, discount_cents, status, expires_at) VALUES ($1, $2, $3, 500, 500, 'active', now() + interval '30 days')`, [codeId, `C${P}`.slice(0, 20), cust2.uid]);
+      const pcq = (await send({ ...cake(), conversationId: conv2, title: "Tart" })).body?.quote;
+      const rp = await pay(pcq.id, pcq.version, cust2.token, { promoCodeId: codeId });
+      assert(rp.status === 200 && rp.body?.amounts?.discountCents === 500 && rp.body.amounts.chargeCents === 20000 + rp.body.amounts.serviceFeeCents - 500, "a points code takes money off the charge", rp.body);
+      assert(piStore[rp.body.paymentIntentId].transfer_data.amount <= piStore[rp.body.paymentIntentId].amount, "the business's share never exceeds the charge");
+      await q(`UPDATE quotes SET version = version + 1, paying_until = NULL WHERE id = $1`, [pcq.id]);
+      await WebhookHandlers.handlePaymentIntentSucceeded(succeed(rp.body.paymentIntentId));
+      const code = (await q(`SELECT status FROM promo_codes WHERE id = $1`, [codeId]))[0];
+      assert((await orderOf(rp.body.orderId)).status === "cancelled" && code.status === "active", "after the full refund the points code is active again", code);
+
+      // 3. A canceled payment unlocks the quote at once, and Pay works again right away.
+      const uq = (await send({ ...cake(), conversationId: conv2, title: "Scones" })).body?.quote;
+      const ru = await pay(uq.id, uq.version, cust2.token);
+      piStore[ru.body.paymentIntentId].status = "canceled";
+      const ru2 = await pay(uq.id, uq.version, cust2.token);
+      assert(ru2.status === 200 && ru2.body?.paymentIntentId !== ru.body.paymentIntentId && (await orderOf(ru.body.orderId)).status === "cancelled", "a canceled payment is retired even while the lock runs: a new payment starts", ru2.body);
+      await WebhookHandlers.handlePaymentIntentCanceled({ ...piStore[ru2.body.paymentIntentId], status: "canceled" });
+      assert((await quoteRow(uq.id)).paying_until === null, "a canceled payment event unlocks the quote");
+
+      // 8. Changing the address moves an open payment's order too.
+      const aq = (await send(cake({ fulfillment: "delivery", conversationId: conv2, title: "Bread" }))).body?.quote;
+      await call("POST", `/api/quotes/${aq.id}/delivery-address`, { token: cust2.token, body: { address: "1 First St, Freeport, NY" } });
+      const ra = await pay(aq.id, aq.version, cust2.token);
+      await q(`UPDATE quotes SET paying_until = NULL WHERE id = $1`, [aq.id]);
+      await call("POST", `/api/quotes/${aq.id}/delivery-address`, { token: cust2.token, body: { address: "2 Second St, Freeport, NY" } });
+      assert((await orderOf(ra.body.orderId)).shipping_address === "2 Second St, Freeport, NY", "the open order ships to the new address");
+    }
+
     console.log("\n── backstop ──");
     const bq = (await send({ ...cake(), conversationId: conv2, title: "Cupcakes" })).body?.quote;
     const r4 = await pay(bq.id, bq.version, cust2.token);
@@ -335,6 +382,8 @@ const holdTs = (date: string, h: number, m: number) => { const [y, mo, d] = date
   } finally {
     await q(`UPDATE quotes SET order_id = NULL, message_id = NULL WHERE business_id = ANY($1)`, [bizs]).catch(() => undefined);
     await q(`DELETE FROM point_transactions WHERE user_id = ANY($1)`, [users]).catch(() => undefined);
+    await q(`DELETE FROM promo_code_reservations WHERE promo_code_id IN (SELECT id FROM promo_codes WHERE user_id = ANY($1))`, [users]).catch(() => undefined);
+    await q(`DELETE FROM promo_codes WHERE user_id = ANY($1)`, [users]).catch(() => undefined);
     await q(`DELETE FROM notifications WHERE user_id = ANY($1)`, [users]).catch(() => undefined);
     await q(`DELETE FROM audit_logs WHERE actor_id = ANY($1)`, [users]).catch(() => undefined);
     await q(`DELETE FROM orders WHERE business_id = ANY($1)`, [bizs]).catch((e) => console.error("cleanup orders", e.message));

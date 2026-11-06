@@ -496,6 +496,10 @@ export function registerQuoteRoutes(app: Express): void {
         }
         return res.status(409).json({ code: "NOT_DELIVERY", message: "This quote isn't for delivery, so it needs no address." });
       }
+      // Review D1b 8: a payment that is still open ships to the new address too.
+      await db.update(orders).set({ shippingAddress: a.value, updatedAt: now })
+        .where(and(eq(orders.quoteId, q.id), eq(orders.status, "pending")))
+        .catch((err) => console.error(`[quotes] could not move the open order's address for ${q.id}:`, err));
       // The message goes to whoever sent the quote, only while they can still manage it (a removed staff member gets
       // nothing; the owner reads the address on the quote).
       if ((await canManage(updated, updated.senderId)) && !(await storage.isUserBlockedEitherWay(q.senderId, q.customerId))) {

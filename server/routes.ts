@@ -6899,7 +6899,8 @@ export async function registerRoutes(
               amounts: { baseCents: liveOrder.totalAmount, serviceFeeCents: liveOrder.consumerServiceFee ?? 0, discountCents: liveOrder.discountAmountCents ?? 0, chargeCents: lpi.amount },
             });
           }
-          if (lockLive) return res.status(409).json({ code: "QUOTE_PAYING", message: "A payment for this quote is already in progress. Try again in a few minutes." });
+          // A canceled payment (for example its points code was taken by another checkout) is retired at once.
+          if (lockLive && lpi && lpi.status !== 'canceled') return res.status(409).json({ code: "QUOTE_PAYING", message: "A payment for this quote is already in progress. Try again in a few minutes." });
           if (lpi && lpi.status !== 'canceled') {
             try {
               await stripeService.cancelPaymentIntent(lpi.id, 'abandoned');
@@ -6910,6 +6911,7 @@ export async function registerRoutes(
           }
           await db.update(ordersTable).set({ status: 'cancelled', updatedAt: new Date() })
             .where(and(eq(ordersTable.id, liveOrder.id), eq(ordersTable.status, 'pending')));
+          await qp.unlockQuote(q.id);
         }
 
         const dDue = quoteDeposit(q.totalCents, q.depositCents ?? null);
@@ -6979,7 +6981,12 @@ export async function registerRoutes(
           }
         }
         const dUser = await storage.getUser(userId);
-        if (!dUser) return res.status(404).json({ error: "User not found" });
+        if (!dUser) {
+          await db.update(ordersTable).set({ status: 'cancelled', updatedAt: new Date() }).where(eq(ordersTable.id, order.id));
+          await qp.unlockQuote(q.id);
+          if (dPromo) await giveBackPromoCode(orderRef, 'customer not found');
+          return res.status(404).json({ error: "User not found" });
+        }
         const dCustomer = await resolveBookingStripeCustomer(userId, dUser);
         let dpi: Awaited<ReturnType<typeof stripeService.createBookingPaymentIntent>>;
         try {
@@ -7010,6 +7017,7 @@ export async function registerRoutes(
           console.error(`[quotes] deliverable payment failed to start for quote ${q.id}:`, piError);
           await db.update(ordersTable).set({ status: 'cancelled', updatedAt: new Date() }).where(and(eq(ordersTable.id, order.id), eq(ordersTable.status, 'pending')));
           await qp.unlockQuote(q.id);
+          if (dPromo) await giveBackPromoCode(orderRef, 'deliverable payment failed to start');
           return res.status(502).json({ code: "PAYMENT_START_FAILED", message: "We couldn't start the payment. Try again in a moment." });
         }
         await db.update(ordersTable).set({ stripePaymentIntentId: dpi.id, updatedAt: new Date() }).where(eq(ordersTable.id, order.id));
@@ -13128,7 +13136,7 @@ export async function registerRoutes(
             // orders.items is a JSONB array: [{ productId, name, quantity, price }]
             // There is no separate order_items table — tally product counts in app code.
             const completedOrders = await db
-              .select({ items: orders.items })
+              .select({ items: orders.items, quoteId: orders.quoteId })
               .from(orders)
               .where(and(
                 eq(orders.businessId, business.id),
@@ -13137,8 +13145,9 @@ export async function registerRoutes(
 
             const productCounts = new Map<string, { count: number; name: string }>();
             for (const order of completedOrders) {
+              // Deliverables D1b: a deliverable is never a product sale (its linked product is only a label).
+              if (order.quoteId) continue;
               for (const item of (order.items || [])) {
-                // Deliverables D1b: a deliverable line with no linked product is not a product sale.
                 if (!item.productId) continue;
                 const existing = productCounts.get(item.productId);
                 if (existing) {
