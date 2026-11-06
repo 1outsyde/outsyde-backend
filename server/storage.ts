@@ -1,3 +1,4 @@
+import { businessAddressForCustomer } from "./serializers/hiddenAddress";
 import { 
   type User, 
   type InsertUser, 
@@ -2107,6 +2108,7 @@ export class DatabaseStorage implements IStorage {
       businessCity: businesses.city,
       businessState: businesses.state,
       businessAddress: businesses.address,
+      businessShowAddress: businesses.showAddress,
       serviceName: vendorServices.name,
       serviceDurationMinutes: vendorServices.durationMinutes,
       staffDisplayName: staffMembers.displayName,
@@ -2143,10 +2145,12 @@ export class DatabaseStorage implements IStorage {
       .where(eq(appointments.clientId, clientId))
       .orderBy(desc(appointments.createdAt));
 
-    return rows.map((row) => {
+    return rows.map(({ businessShowAddress, ...row }) => {
       const chargeFields = appointmentChargeFields(row.totalPrice, row.depositAmountCents, row.quoteId ?? null, row.quoteRestPaid ?? null);
       return {
         ...row,
+        // R40: a business that hides its address shares it only on real bookings.
+        businessAddress: businessAddressForCustomer(row.businessAddress, businessShowAddress, row.status),
         ...chargeFields,
         inPersonDueCents: chargeFields.dueAtAppointmentCents,
         addons: (row.addons as Array<{ id: string; name: string; priceCents: number; durationMinutes: number }>) ?? [],
