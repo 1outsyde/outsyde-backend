@@ -18,6 +18,7 @@
 import { randomUUID } from "crypto";
 import { eq, sql } from "drizzle-orm";
 import { db } from "../db";
+import { noticeBusiness } from "./quoteNotices";
 import { storage } from "../storage";
 import { quotes, type Appointment, type Quote, type QuoteJob } from "@shared/schema";
 import { getUncachableStripeClient } from "../stripe/stripeClient";
@@ -426,7 +427,11 @@ export async function reportQuoteJob(q: Quote, body: { reason?: unknown; photos?
   }
   const job = (await quoteJobFor(appt.id))!;
   const [first] = await rows<{ id: string }>(sql`UPDATE quote_reports SET vendor_notice_at = now() WHERE id = ${rep.id} AND vendor_notice_at IS NULL RETURNING id`);
-  if (first) await postWindowCard(q, job, "problem_reported", true);
+  if (first) {
+    await postWindowCard(q, job, "problem_reported", true);
+    // Step 6a call 6: the business's Activity row (the card above already pushed them).
+    await noticeBusiness(q, "problem_reported", q.id);
+  }
   const business = await storage.getBusiness(q.businessId);
   await adminAlert(`Problem reported on a quote: ${business?.name ?? q.businessId}`,
     `A customer reported a problem on quote booking ${appt.id} (${q.title}, ${business?.name ?? ""}). Held for review: ${formatCents(held)}.\n` +

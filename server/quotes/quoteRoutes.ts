@@ -34,6 +34,58 @@ const MAX_REASON = 500;
 const userIdOf = (req: Request): string | null => (req.session as any)?.userId || getUserIdFromRequest(req);
 const newLinkCode = () => randomBytes(12).toString("base64url");
 
+/**
+ * The paid quote's booking as `viewerId` sees it: the balance (step 4a), the Confirm or Report window, the report and
+ * (business side) the payout (4b-1), the extras and the extras payment (4b-2b). Empty for a quote not paid yet.
+ * Used by GET /api/quotes/:id and (step 6a, customer view) GET /api/me/quotes and /api/me/quote-actions.
+ */
+export async function quoteDetailJson(q: Quote, viewerId: string, canManageIt: boolean) {
+  let balance = null;
+  let win: { window: unknown; report: unknown; payout: unknown } = { window: null, report: null, payout: null };
+  let extras: { extras: unknown[]; extrasPayment: unknown } = { extras: [], extrasPayment: null };
+  if (q.appointmentId) {
+    const { quoteJobFor, balanceJson } = await import("./quoteBalance");
+    const job = await quoteJobFor(q.appointmentId);
+    // Step 4b-2a: no balance block when the rest is paid to the business directly (amounts.paidDirectlyCents).
+    balance = q.restPaid === "outside" ? null : balanceJson(job);
+    const { windowJson } = await import("./quoteWindow");
+    win = await windowJson(q, job, viewerId, canManageIt);
+    const { extrasJson } = await import("./quoteExtras");
+    extras = await extrasJson(q, viewerId, canManageIt);
+  }
+  return { balance, ...win, ...extras };
+}
+/**
+ * The customer's quotes, newest first (200 at most), each with its booking detail (step 6a, additive).
+ * openOnly (the pop-up list): only paid quotes whose booking can still need the customer (not complete, the window
+ * still running, or extras unpaid or needing a card), so a long history costs nothing. Review I1 and I2: the detail
+ * is read 8 at a time, and a detail that fails falls back to the bare quote (the list never fails for one row).
+ */
+async function myQuotesWithDetail(userId: string, o: { openOnly?: boolean } = {}) {
+  const where = o.openOnly
+    ? and(eq(quotes.customerId, userId), eq(quotes.status, "paid"), sql`EXISTS (
+        SELECT 1 FROM quote_jobs j WHERE j.appointment_id = ${quotes.appointmentId}
+           AND (j.completed_at IS NULL OR j.window_ends_at > now()
+                OR EXISTS (SELECT 1 FROM quote_extras_payments x WHERE x.appointment_id = j.appointment_id AND x.status IN ('unpaid', 'hold_failed'))))`)
+    : eq(quotes.customerId, userId);
+  const list = await db.select().from(quotes).where(where).orderBy(desc(quotes.createdAt)).limit(200);
+  const names = new Map<string, string | null>();
+  for (const r of list) if (!names.has(r.businessId)) names.set(r.businessId, await businessName(r.businessId));
+  const out: Record<string, unknown>[] = [];
+  for (let i = 0; i < list.length; i += 8) {
+    out.push(...(await Promise.all(list.slice(i, i + 8).map(async (r) => {
+      const base = toQuoteJson(r, names.get(r.businessId) ?? null);
+      try {
+        return { ...base, ...(await quoteDetailJson(r, userId, false)) };
+      } catch (err) {
+        console.error(`[quotes] detail for ${r.id} failed:`, err);
+        return base;
+      }
+    }))));
+  }
+  return out;
+}
+
 export function toQuoteJson(q: Quote, businessName: string | null, now = new Date()) {
   return {
     id: q.id,
@@ -389,27 +441,11 @@ export function registerQuoteRoutes(app: Express): void {
       const q = await loadQuote(req.params.id);
       if (!q || !(await canRead(q, userId))) return res.status(404).json({ error: "Quote not found" });
       // Step 4a (additive): the balance of a paid quote (held, charged, needs a new card) and its Job complete.
-      let balance = null;
-      let win: { window: unknown; report: unknown; payout: unknown } = { window: null, report: null, payout: null };
-      if (q.appointmentId) {
-        const { quoteJobFor, balanceJson } = await import("./quoteBalance");
-        const job = await quoteJobFor(q.appointmentId);
-        // Step 4b-2a: no balance block when the rest is paid to the business directly (amounts.paidDirectlyCents).
-        balance = q.restPaid === "outside" ? null : balanceJson(job);
-        // Step 4b-1 (additive): the 6 hour Confirm or Report window, the report, and (vendor side) the payout.
-        const { windowJson } = await import("./quoteWindow");
-        win = await windowJson(q, job, userId, q.customerId !== userId && (await canManage(q, userId)));
-      }
-      // Step 4b-2b (additive): the extras the vendor sent and the one extras payment.
-      let extras: { extras: unknown[]; extrasPayment: unknown } = { extras: [], extrasPayment: null };
-      if (q.appointmentId) {
-        const { extrasJson } = await import("./quoteExtras");
-        extras = await extrasJson(q, userId, q.customerId !== userId && (await canManage(q, userId)));
-      }
+      const detail = await quoteDetailJson(q, userId, q.customerId !== userId && (await canManage(q, userId)));
       // Step 5a (additive): the business's look for the goutsyde.com quote page.
       const { businessLookJson } = await import("./quoteNotesRules");
       const biz = await storage.getBusiness(q.businessId);
-      return res.json({ quote: { ...toQuoteJson(q, await businessName(q.businessId)), balance, ...win, ...extras, business: biz ? businessLookJson(biz) : null } });
+      return res.json({ quote: { ...toQuoteJson(q, await businessName(q.businessId)), ...detail, business: biz ? businessLookJson(biz) : null } });
     } catch (err) {
       console.error("[quotes] read failed:", err);
       return res.status(500).json({ error: "Failed to load the quote" });
@@ -642,13 +678,25 @@ export function registerQuoteRoutes(app: Express): void {
     try {
       const userId = userIdOf(req);
       if (!userId) return res.status(401).json({ error: "Not authenticated" });
-      const rows = await db.select().from(quotes).where(eq(quotes.customerId, userId)).orderBy(desc(quotes.createdAt)).limit(200);
-      const names = new Map<string, string | null>();
-      for (const r of rows) if (!names.has(r.businessId)) names.set(r.businessId, await businessName(r.businessId));
-      return res.json({ quotes: rows.map((r) => toQuoteJson(r, names.get(r.businessId) ?? null)) });
+      return res.json({ quotes: await myQuotesWithDetail(userId) });
     } catch (err) {
       console.error("[quotes] my list failed:", err);
       return res.status(500).json({ error: "Failed to load your quotes" });
+    }
+  });
+
+  // GET /api/me/quote-actions (step 6a call 5): everything waiting on the signed in customer (an extra to approve,
+  // Update your card, Pay for extras, Confirm or Report), for the app's pop-up. Money first.
+  app.get("/api/me/quote-actions", async (req, res) => {
+    try {
+      const userId = userIdOf(req);
+      if (!userId) return res.status(401).json({ error: "Not authenticated" });
+      const { quoteActionsFor } = await import("./quoteNoticesRules");
+      const list = (await myQuotesWithDetail(userId, { openOnly: true })) as any[];
+      return res.json({ actions: quoteActionsFor(list.map((d) => ({ quote: d, balance: d.balance, window: d.window, extras: d.extras, extrasPayment: d.extrasPayment }))) });
+    } catch (err) {
+      console.error("[quotes] my actions failed:", err);
+      return res.status(500).json({ error: "Failed to load what needs you" });
     }
   });
 }

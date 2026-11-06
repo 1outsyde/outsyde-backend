@@ -391,6 +391,10 @@ const hmNY = (d: Date) => new Intl.DateTimeFormat("en-GB", { timeZone: "America/
     assert(failCards[0] && !/ - | — | – |8%/.test(failCards[0].content), "card text reads plainly, no fee rate", failCards[0]?.content);
     await qb.runQuoteBalanceJob(new Date());
     assert((await cardsOf(conv, "balance_failed")).length === 1, "posted once");
+    // Step 6a call 6: the business hears it in Activity, once (the card goes to the customer only).
+    const bFail = await q(`SELECT * FROM notifications WHERE user_id = $1 AND type = 'quote_card_failed' AND reference_id = $2`, [owner.uid, jF.id]);
+    assert(bFail.length === 1 && /^We couldn't hold .+'s card for .+, \$[0-9.,]+\. We asked them to update it\.$/.test(bFail[0].message) && bFail[0].metadata?.conversationId === conv && bFail[0].metadata?.quoteId === F.qid,
+      "the business: card couldn't be held (balance), once", bFail);
     await shiftJob(aF.id, 12);
     r = await call("POST", `/api/quotes/${F.qid}/job-complete`, { token: owner.token });
     assert(r.status === 409 && r.body?.code === "BALANCE_NOT_HELD", "the balance isn't held: can't be completed", r);

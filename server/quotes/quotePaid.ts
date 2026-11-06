@@ -11,6 +11,7 @@
  */
 import { and, eq, inArray, isNotNull, lt, sql } from "drizzle-orm";
 import { db } from "../db";
+import { noticeBusiness } from "./quoteNotices";
 import { storage } from "../storage";
 import {
   appointments, bookingHolds, estimateRequests, providerBlocks, quotes, staffMembers,
@@ -198,6 +199,8 @@ export async function afterQuotePaid(q: Quote, appt: Appointment): Promise<void>
         },
         content: quoteMessageText("paid", q.title, q.totalCents, q.paymentMode),
       });
+      // Step 6a call 6: the business's Activity row (the paid card above already pushed them).
+      await noticeBusiness(q, "paid", q.id);
     }
   } catch (err) {
     console.error(`[quotes] paid card failed for ${q.id}:`, err);

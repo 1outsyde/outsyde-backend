@@ -15,6 +15,8 @@ export async function postCardMessage(input: {
   kind: "quote";
   card: Record<string, unknown>;
   content: string;
+  /** Step 6a: the push body when it should say more than the card text (no 50 character cut). */
+  pushBody?: string;
 }): Promise<Message> {
   const message = await storage.createMessage({
     conversationId: input.conversationId,
@@ -42,6 +44,7 @@ export async function postCardMessage(input: {
         content: input.content,
         mediaItems: [],
         senderPublicName,
+        ...(input.pushBody ? { pushBody: input.pushBody } : {}),
       });
     }
   } catch (err) {

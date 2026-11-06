@@ -14,6 +14,7 @@
  */
 
 import { messageSummary } from "./messageRules";
+import { pushPreview } from "../quotes/quoteNoticesRules";
 
 export const PUSH_PREVIEW_MAX = 50;
 
@@ -35,6 +36,8 @@ export interface NotifyNewMessageInput {
   mediaItems?: string[];
   /** Sender's public name (business name for vendors). Falls back to "New message". */
   senderPublicName: string | null;
+  /** Quotes step 6a: a card's own push words, cut at 178 characters instead of the 50 character preview. */
+  pushBody?: string;
 }
 
 export interface NotifyDeps {
@@ -59,7 +62,7 @@ export async function notifyNewMessage(input: NotifyNewMessageInput, deps: Notif
   if (!input.recipientId || input.recipientId === input.senderId) return result;
 
   const title = (input.senderPublicName || "").trim() || "New message";
-  const body = buildMessagePreview(messageSummary(input.content, input.mediaItems)) || "New message";
+  const body = (input.pushBody ? pushPreview(input.pushBody) : buildMessagePreview(messageSummary(input.content, input.mediaItems))) || "New message";
 
   let badgeCount: number | null = null;
   try {

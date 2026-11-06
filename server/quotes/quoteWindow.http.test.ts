@@ -277,6 +277,8 @@ const hmNY = (d: Date) => new Intl.DateTimeFormat("en-GB", { timeZone: "America/
     await qb.runQuoteBalanceJob(new Date());
     await shiftJob(a.id, 24);
     await q(`UPDATE appointments SET appointment_date = $2 WHERE id = $1`, [a.id, ymdNY(new Date(Date.now() - 2 * H))]);
+    // A job that crossed midnight left a block on its next day: move it back with the booking (test runs after 9 PM).
+    await q(`UPDATE provider_blocks SET start_at = start_at - interval '30 days', end_at = end_at - interval '30 days' WHERE appointment_id = $1`, [a.id]);
     const r = await call("POST", `/api/quotes/${Q.qid}/job-complete`, { token: owner.token });
     if (r.status !== 200) throw new Error(`job complete failed ${JSON.stringify(r)}`);
     return { qid: Q.qid, a: await apptOf(Q.qid), job: await jobOf(a.id) };
