@@ -127,16 +127,17 @@ export function checkQuoteInput(raw: unknown): { ok: true; value: QuoteInput } |
 
   // Deliverables D1a (call 5): Pickup or Delivery, and an optional delivery fee line inside the total.
   const given = (v: unknown) => v !== undefined && v !== null && v !== "";
+  const feeGiven = given(b.deliveryFeeCents) && b.deliveryFeeCents !== 0; // 0 means no fee line, on any quote
   let fulfillment: QuoteFulfillment | null = null;
   let deliveryFeeCents: number | null = null;
   if (kind === "service") {
     if (given(b.fulfillment)) return { ok: false, field: "fulfillment", message: "Pickup or delivery is for deliverables. A service has a date and start time." };
-    if (given(b.deliveryFeeCents)) return { ok: false, field: "deliveryFeeCents", message: "A delivery fee is for deliverables only." };
+    if (feeGiven) return { ok: false, field: "deliveryFeeCents", message: "A delivery fee is for deliverables only." };
   } else {
     const f = given(b.fulfillment) ? b.fulfillment : "pickup";
     if (f !== "pickup" && f !== "delivery") return { ok: false, field: "fulfillment", message: "Choose Pickup or Delivery" };
     fulfillment = f;
-    if (given(b.deliveryFeeCents)) {
+    if (feeGiven) {
       const fee = b.deliveryFeeCents;
       if (f !== "delivery") return { ok: false, field: "deliveryFeeCents", message: "A delivery fee goes with Delivery. Choose Delivery, or remove the fee." };
       if (!isWholeCents(fee) || fee < 0) return { ok: false, field: "deliveryFeeCents", message: "Enter the delivery fee" };
@@ -165,10 +166,13 @@ export function checkQuoteInput(raw: unknown): { ok: true; value: QuoteInput } |
 export const DELIVERY_ADDRESS_MAX = 300;
 export function checkDeliveryAddress(raw: unknown): { ok: true; value: string } | Fail {
   if (typeof raw !== "string") return { ok: false, field: "address", message: "Enter the delivery address" };
-  const value = raw.split(/\r?\n/).map((l) => l.trim().replace(/\s+/g, " ")).filter(Boolean).join(", ").replace(/,\s*,/g, ",");
+  // Control characters (and NUL, which Postgres refuses) become spaces; length counts characters as the database does.
+  const value = raw.replace(/[\u0000-\u0009\u000B\u000C\u000E-\u001F\u007F]/g, " ")
+    .split(/\r?\n|\r/).map((l) => l.trim().replace(/\s+/g, " ")).filter(Boolean).join(", ").replace(/,\s*,/g, ",");
+  const chars = Array.from(value).length;
   if (!value) return { ok: false, field: "address", message: "Enter the delivery address" };
-  if (value.length < 5) return { ok: false, field: "address", message: "Enter the full delivery address, with the street and town" };
-  if (value.length > DELIVERY_ADDRESS_MAX) return { ok: false, field: "address", message: `The address can be up to ${DELIVERY_ADDRESS_MAX} characters` };
+  if (chars < 5) return { ok: false, field: "address", message: "Enter the full delivery address, with the street and town" };
+  if (chars > DELIVERY_ADDRESS_MAX) return { ok: false, field: "address", message: `The address can be up to ${DELIVERY_ADDRESS_MAX} characters` };
   return { ok: true, value };
 }
 

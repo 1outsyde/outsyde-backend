@@ -202,6 +202,35 @@ const daysFromNow = (n: number) => { const d = new Date(); d.setUTCDate(d.getUTC
     const m2 = (await msgs(convStaff)).slice(before2);
     assert(sa.status === 200 && m2.some((m) => m.kind === 'text' && m.sender_id === cust2.uid && m.content.includes('9 Pine St')), 'the address message lands in the staff member\'s chat', m2);
 
+    console.log('\n── review fixes ──');
+    {
+      // Two identical saves at once post one message (review 8).
+      const sid = st.body?.quote?.id;
+      const n0 = (await msgs(convStaff)).length;
+      const [x1, x2] = await Promise.all([addr(sid, '30 Bay Rd, Freeport, NY', cust2.token), addr(sid, '30 Bay Rd, Freeport, NY', cust2.token)]);
+      const added = (await msgs(convStaff)).slice(n0).filter((m) => m.content.includes('30 Bay Rd'));
+      assert(x1.status === 200 && x2.status === 200 && added.length === 1, 'two identical saves at once: both fine, one message', { s: [x1.status, x2.status], n: added.length });
+      // A removed staff member gets no message and no address (review 2).
+      await q(`UPDATE staff_members SET status = 'removed' WHERE id = $1`, [staffId]);
+      const n1 = (await msgs(convStaff)).length;
+      const moved = await addr(sid, '31 Bay Rd, Freeport, NY', cust2.token);
+      assert(moved.status === 200 && (await msgs(convStaff)).length === n1, 'the customer can still change it, but no message goes to a removed staff member', moved.body);
+      const staffList = await call('GET', `/api/conversations/${convStaff}/quotes`, { token: staffUser.token });
+      const custList = await call('GET', `/api/conversations/${convStaff}/quotes`, { token: cust2.token });
+      const sq = staffList.body?.quotes?.find((x: any) => x.id === sid);
+      const cq = custList.body?.quotes?.find((x: any) => x.id === sid);
+      assert(staffList.status === 200 && sq && sq.deliveryAddress === null, 'the removed staff member no longer sees the address in the chat list', sq);
+      assert(cq?.deliveryAddress === '31 Bay Rd, Freeport, NY', 'the customer still does', cq);
+      const ownerRead = await call('GET', `/api/quotes/${sid}`, { token: owner.token });
+      assert(ownerRead.body?.quote?.deliveryAddress === '31 Bay Rd, Freeport, NY', 'the owner reads it on the quote', ownerRead.body?.quote);
+      await q(`UPDATE staff_members SET status = 'active' WHERE id = $1`, [staffId]);
+      // An address left on the quote is never overwritten by an edit that keeps Delivery (review 1).
+      const v = (await q(`SELECT version FROM quotes WHERE id = $1`, [sid]))[0].version;
+      await q(`UPDATE quotes SET delivery_address = '99 Late Ln, Freeport, NY' WHERE id = $1`, [sid]);
+      const keep = await call('PATCH', `/api/quotes/${sid}`, { token: staffUser.token, body: { kind: 'product', title: 'Cake', totalCents: 20000, paymentMode: 'full', fulfillment: 'delivery', version: v } });
+      assert(keep.status === 200 && keep.body?.quote?.deliveryAddress === '99 Late Ln, Freeport, NY', 'an edit that keeps Delivery leaves the stored address alone', keep.body?.quote);
+    }
+
     console.log('\n── the database guards the rules ──');
     const tryInsert = async (cols: string, vals: string) => {
       try { await q(`INSERT INTO quotes (id, business_id, sender_id, customer_id, conversation_id, title, kind, time_zone, total_cents, payment_mode, expires_at, link_code${cols}) VALUES ('${id('raw')}${Math.random().toString(36).slice(2, 6)}', $1, $2, $3, $4, 'Raw', 'product', 'America/New_York', 20000, 'full', now() + interval '1 day', '${P}raw${Math.random().toString(36).slice(2, 8)}'${vals})`, [biz, owner.uid, cust.uid, conv]); return true; } catch { return false; }
