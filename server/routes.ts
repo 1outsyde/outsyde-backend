@@ -110,6 +110,7 @@ export function sanitizeUserForResponse(user: User, options: { includeOwnData?: 
   };
 }
 import { eq, desc, sql, gte, lte, or, isNull, gt, inArray, notInArray, and } from "drizzle-orm";
+import { parseBookingAgreement, recordBookingAgreement } from "./bookingAgreement";
 import { validateOptionsPayload, planVariantSync, withEffectivePrice, summarizeVariants, type VariantSummary } from "./productOptions";
 import {
   assembleGroups,
@@ -6012,6 +6013,8 @@ export async function registerRoutes(
 
       // Validates: hold exists, belongs to this user, is active, not expired.
       const { hold } = await confirmBookingHold(holdId, userId);
+      // Step 3: optional record that the customer agreed (old clients don't send it).
+      const agreement = parseBookingAgreement(req.body);
 
       if (hold.providerType !== 'business' && hold.providerType !== 'photographer') {
         return res.status(400).json({ error: "Unsupported provider type" });
@@ -6042,6 +6045,9 @@ export async function registerRoutes(
         const photographer = await storage.getPhotographer(hold.providerId);
         if (!photographer) {
           return res.status(404).json({ error: "Photographer not found" });
+        }
+        if (existingShoot && agreement && !existingShoot.customerAgreedAt) {
+          await recordBookingAgreement('shoot_booking', existingShoot.id, agreement, photographer.vendorTermsAndConditions);
         }
 
         // Respect autoAcceptBookings: shoot_booking is already handled by the
@@ -6263,6 +6269,7 @@ export async function registerRoutes(
           addonsDurationMinutes: holdAddonsDurationMinutes,
           customerDetails: holdCustomerDetails,
         });
+        await recordBookingAgreement('shoot_booking', shootBooking.id, agreement, photographer.vendorTermsAndConditions);
         const newShootRef: PromoRef = { type: 'shoot_booking', id: shootBooking.id };
         if (shootPromo) await saveShootPromo(shootBooking.id, shootPromo);
 
@@ -6364,6 +6371,10 @@ export async function registerRoutes(
       // /api/bookings/appointments/:appointmentId/create-payment-intent.
       const [existing] = await db.select().from(appointments).where(eq(appointments.holdId, holdId));
       if (existing) {
+        if (agreement && !existing.customerAgreedAt) {
+          const agreedBusiness = await storage.getBusiness(existing.businessId);
+          await recordBookingAgreement('appointment', existing.id, agreement, agreedBusiness?.vendorTermsAndConditions);
+        }
         const existingRef: PromoRef = { type: 'appointment', id: existing.id };
         const existingDueNow = quoteDeposit(existing.totalPrice, existing.depositAmountCents).dueNowCents;
         const saveExistingPromo = async (promo: BookingPromo) => {
@@ -6627,6 +6638,7 @@ export async function registerRoutes(
         promoCodeUsed: apptPromo?.code ?? null,
         discountAmountCents: apptPromo?.discountCents ?? 0,
       });
+      await recordBookingAgreement('appointment', appointment.id, agreement, business.vendorTermsAndConditions);
       const apptRef: PromoRef = { type: 'appointment', id: appointment.id };
 
       if (apptPromo) {
