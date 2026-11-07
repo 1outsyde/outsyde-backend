@@ -6,6 +6,7 @@ import { db } from "../db";
 import { subscriptionTiers } from "@shared/schema";
 import { asc, eq } from "drizzle-orm";
 import { randomUUID } from "crypto";
+import { automaticPaymentMethods } from "./paymentMethodPolicy";
 
 function idempotencyKey(prefix: string): string {
   return `${prefix}_${randomUUID()}`;
@@ -418,6 +419,9 @@ export class StripeService {
     metadata: Record<string, string>;
     description?: string;
     saveForFutureUse?: boolean;
+    // Lets Stripe offer redirect methods (Klarna, Afterpay, Cash App Pay, Amazon Pay). Only the new app
+    // build asks for it; bookings never pass it. Default: today's allow_redirects 'never'.
+    redirectMethods?: boolean;
   }) {
     const stripe = await getUncachableStripeClient();
 
@@ -431,10 +435,7 @@ export class StripeService {
       },
       metadata: params.metadata,
       description: params.description,
-      automatic_payment_methods: {
-        enabled: true,
-        allow_redirects: 'never',
-      },
+      automatic_payment_methods: automaticPaymentMethods(params.redirectMethods === true),
     };
 
     if (params.customerId) {
@@ -473,6 +474,8 @@ export class StripeService {
     // attempt created instead of creating a second one. Stripe rejects a
     // reused key sent with different parameters. Default: random per call.
     idempotencyKey?: string;
+    // See createBookingPaymentIntent. Default: today's allow_redirects 'never'.
+    redirectMethods?: boolean;
   }) {
     const stripe = await getUncachableStripeClient();
 
@@ -482,10 +485,7 @@ export class StripeService {
       capture_method: params.captureMethod,
       metadata: params.metadata,
       description: params.description,
-      automatic_payment_methods: {
-        enabled: true,
-        allow_redirects: 'never',
-      },
+      automatic_payment_methods: automaticPaymentMethods(params.redirectMethods === true),
     };
 
     if (params.customerId) {
