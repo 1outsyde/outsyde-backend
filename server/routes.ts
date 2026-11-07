@@ -25583,6 +25583,32 @@ export async function registerRoutes(
     }
   });
 
+  // App payment methods Step 1: the new checkout shows Stripe's payment list before any PaymentIntent
+  // exists, so it asks for the customer session up front. Same session rules as the payment sheets.
+  // Never fails the checkout: on a Stripe error it answers with no session (cards just aren't listed).
+  app.post("/api/me/payment-methods/checkout-session", authMiddleware, async (req, res) => {
+    const authReq = req as AuthenticatedRequest;
+    const userId = authReq.user?.userId;
+    if (!userId) return res.status(401).json({ error: "Not authenticated" });
+    try {
+      const user = await storage.getUser(userId);
+      if (!user) return res.status(404).json({ error: "User not found" });
+      const stripeCustomerId = await stripeService.getOrCreateStripeCustomer({
+        userId,
+        email: user.email,
+        name: realName(user) || undefined,
+        existingStripeCustomerId: user.stripeCustomerId,
+      });
+      if (!user.stripeCustomerId || user.stripeCustomerId !== stripeCustomerId) {
+        await storage.updateUser(userId, { stripeCustomerId });
+      }
+      res.json(await paymentSheetFields(stripeCustomerId, true));
+    } catch (error: any) {
+      console.error("Checkout session error:", error?.message || error);
+      res.json({});
+    }
+  });
+
   app.post("/api/me/payment-methods/setup-intent", authMiddleware, async (req, res) => {
     const authReq = req as AuthenticatedRequest;
     const userId = authReq.user?.userId;

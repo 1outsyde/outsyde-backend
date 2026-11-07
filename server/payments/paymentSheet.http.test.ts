@@ -168,8 +168,10 @@ async function call(method: string, path: string, o: { token?: string; body?: un
       && made["components[mobile_payment_element][features][payment_method_redisplay]"] === "enabled"
       && made["components[mobile_payment_element][features][payment_method_remove]"] === "disabled"
       && made["components[mobile_payment_element][features][payment_method_allow_redisplay_filters][0]"] === "always"
-      && !("components[mobile_payment_element][features][payment_method_allow_redisplay_filters][1]" in made),
-      "session shows chosen cards and the Save box only", made);
+      && made["components[mobile_payment_element][features][payment_method_allow_redisplay_filters][1]"] === "limited"
+      && made["components[mobile_payment_element][features][payment_method_allow_redisplay_filters][2]"] === "unspecified"
+      && !("components[mobile_payment_element][features][payment_method_allow_redisplay_filters][3]" in made),
+      "session shows every saved card (booking cards too, Legend 2026-11-07), never removable, with the Save box", made);
 
     r = await pay(h, { paymentSheet: true });
     s = sessionFor(r);
@@ -220,6 +222,26 @@ async function call(method: string, path: string, o: { token?: string; body?: un
     const b6 = await mkUser("b6");
     r = await buy(b6, { redirectCapable: "yes" });
     assert(r.status === 400, "the strict schema still refuses a non boolean flag", r);
+
+    // App payment methods Step 1 Task 5: the new checkout's session, before any PaymentIntent exists.
+    console.log("Checkout session");
+    r = await call("POST", "/api/me/payment-methods/checkout-session", {});
+    assert(r.status === 401, "checkout session needs sign in", r);
+    const shopper = await mkUser("shop");
+    const shopTok = generateAccessToken({ userId: shopper, isVendor: false, isAdmin: false } as any);
+    const madeBefore = sessions.length;
+    r = await call("POST", "/api/me/payment-methods/checkout-session", { token: shopTok });
+    const [shopRow] = await q(`SELECT stripe_customer_id FROM users WHERE id = $1`, [shopper]);
+    assert(r.status === 200 && !!shopRow?.stripe_customer_id && r.body?.customerId === shopRow.stripe_customer_id && r.body?.customerSessionClientSecret === `cuss_secret_${shopRow.stripe_customer_id}`, "checkout session is for the shopper's own Stripe customer (made if missing)", { body: r.body, shopRow });
+    const cs = sessions[sessions.length - 1];
+    assert(sessions.length === madeBefore + 1 && cs["components[mobile_payment_element][features][payment_method_remove]"] === "disabled" && cs["components[mobile_payment_element][features][payment_method_allow_redisplay_filters][1]"] === "limited", "checkout session: every saved card, never removable (Option 1)", cs);
+    r = await call("POST", "/api/me/payment-methods/checkout-session", { token: shopTok });
+    const [shopRow2] = await q(`SELECT stripe_customer_id FROM users WHERE id = $1`, [shopper]);
+    assert(r.status === 200 && shopRow2.stripe_customer_id === shopRow.stripe_customer_id, "a second call reuses the same customer");
+    failSessions = true;
+    r = await call("POST", "/api/me/payment-methods/checkout-session", { token: shopTok });
+    failSessions = false;
+    assert(r.status === 200 && r.body && !("customerSessionClientSecret" in r.body), "a Stripe outage answers with no session so checkout still works (cards just aren't listed)", r);
   } finally {
     const clean = async (sql: string, p: unknown[]) => q(sql, p).catch((e: any) => console.error("cleanup", e.message));
     await clean(`DELETE FROM tickets WHERE event_id = ANY($1)`, [eventIds]);

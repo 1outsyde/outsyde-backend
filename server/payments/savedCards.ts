@@ -106,7 +106,7 @@ export async function listShownCards(customerId: string, defaultId: string | nul
 
 /**
  * Extra fields for a booking or ticket payment the app opens in Stripe's payment sheet: a CustomerSession
- * for the PaymentIntent's own customer, so the sheet shows the customer's chosen cards, a Save box (off by
+ * for the PaymentIntent's own customer, so the sheet shows the customer's saved cards, a Save box (off by
  * default) and Apple Pay. Only when the caller asked (`paymentSheet: true`); {} otherwise, with no
  * customer, or on any Stripe error, so the payment itself never fails over it.
  */
@@ -127,7 +127,11 @@ export async function paymentSheetFields(
             payment_method_save: "enabled",
             payment_method_redisplay: "enabled",
             payment_method_remove: "disabled",
-            payment_method_allow_redisplay_filters: ["always"],
+            // Every saved card shows: chosen ones, booking cards on file and older cards (Legend 2026-11-07).
+            // Stripe's SDK drops Apple Pay, Google Pay and Link cards itself (stripe-ios 26.13.0
+            // PaymentSheetLoader.swift:477-480). Removal stays off: booking no-show cards and plan
+            // cards live on the same customer, and removing one detaches it (Option 1).
+            payment_method_allow_redisplay_filters: ["always", "limited", "unspecified"],
           },
         },
       },
