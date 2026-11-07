@@ -3,7 +3,9 @@
  *
  * Stripe marks each saved card with `allow_redisplay`:
  *  - "always": the customer chose to save it (Save switch or Save box). Shown.
- *  - "limited": kept only for the payment it came from (a booking's cancellation fee). Never shown.
+ *  - "limited": kept only for the payment it came from (a booking's cancellation fee). Not in the shop list
+ *    or the booking and ticket sheets; shown only in the new app checkout's session (checkoutSessionFields,
+ *    Legend 2026-11-07: a card saved for a booking is the client's saved payment method at checkout).
  *  - "unspecified": no mark. Cards saved before SAVED_CARD_RULES_START are the customer's older cards and
  *    stay available, tucked away; ones saved later came from a flow with no Save choice and are hidden.
  * Wallet cards (Apple Pay, Google Pay) are never shown: Apple's terms forbid reusing a saved Apple Pay
@@ -106,13 +108,14 @@ export async function listShownCards(customerId: string, defaultId: string | nul
 
 /**
  * Extra fields for a booking or ticket payment the app opens in Stripe's payment sheet: a CustomerSession
- * for the PaymentIntent's own customer, so the sheet shows the customer's chosen cards, a Save box (off by
+ * for the PaymentIntent's own customer, so the sheet shows the customer's saved cards, a Save box (off by
  * default) and Apple Pay. Only when the caller asked (`paymentSheet: true`); {} otherwise, with no
  * customer, or on any Stripe error, so the payment itself never fails over it.
  */
 export async function paymentSheetFields(
   customer: string | { id: string } | null | undefined,
   wanted: boolean,
+  opts: { everySavedCard?: boolean } = {},
 ): Promise<{ customerId?: string; customerSessionClientSecret?: string }> {
   const customerId = typeof customer === "string" ? customer : customer?.id;
   if (!wanted || !customerId) return {};
@@ -127,7 +130,13 @@ export async function paymentSheetFields(
             payment_method_save: "enabled",
             payment_method_redisplay: "enabled",
             payment_method_remove: "disabled",
-            payment_method_allow_redisplay_filters: ["always"],
+            // Sheets (bookings, tickets, quotes, every app build): chosen cards only, as before.
+            // New checkout session: every saved card, booking cards on file and older ones too
+            // (Legend 2026-11-07). Stripe's SDK drops Apple Pay, Google Pay and Link cards itself
+            // (stripe-ios 26.13.0 PaymentSheetLoader.swift:477-480; Android to verify before it ships).
+            // Removal stays off everywhere: booking no-show cards and plan cards share the customer,
+            // and removing one detaches it (Option 1).
+            payment_method_allow_redisplay_filters: opts.everySavedCard ? ["always", "limited", "unspecified"] : ["always"],
           },
         },
       },
@@ -137,4 +146,9 @@ export async function paymentSheetFields(
     console.error(`[SavedCards] could not start a payment sheet session for ${customerId}:`, e instanceof Error ? e.message : "unknown error");
     return {};
   }
+}
+
+/** The new app checkout's session (POST /api/me/payment-methods/checkout-session): every saved card shows. */
+export function checkoutSessionFields(customerId: string): Promise<{ customerId?: string; customerSessionClientSecret?: string }> {
+  return paymentSheetFields(customerId, true, { everySavedCard: true });
 }

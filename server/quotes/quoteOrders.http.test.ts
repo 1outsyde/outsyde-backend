@@ -91,7 +91,7 @@ const holdTs = (date: string, h: number, m: number) => { const [y, mo, d] = date
         const pi = { id, object: "payment_intent", amount: Number(form.get("amount") || 0), amount_received: isFee ? Number(form.get("amount") || 0) : 0,
           status: isFee ? "succeeded" : "requires_payment_method", client_secret: `${id}_secret`, capture_method: form.get("capture_method") || "automatic",
           metadata, customer: form.get("customer"), payment_method: isFee ? form.get("payment_method") : "pm_qp_card", latest_charge: isFee ? `ch_${id}` : null,
-          setup_future_usage: form.get("setup_future_usage"), transfer_data: { destination: form.get("transfer_data[destination]"), amount: Number(form.get("transfer_data[amount]") || 0) }, created: Math.floor(Date.now() / 1000), _key: key };
+          setup_future_usage: form.get("setup_future_usage"), _redirects: form.get("automatic_payment_methods[allow_redirects]"), transfer_data: { destination: form.get("transfer_data[destination]"), amount: Number(form.get("transfer_data[amount]") || 0) }, created: Math.floor(Date.now() / 1000), _key: key };
         piCreates.push({ key, amount: pi.amount, metadata });
         if (isFee && failNextCreateNetwork) {
           failNextCreateNetwork = false;
@@ -379,6 +379,14 @@ const holdTs = (date: string, h: number, m: number) => { const [y, mo, d] = date
     assert(r6.status === 200 && r6.body?.orderId !== r5.body.orderId, "the customer can start again with a new order", r6.body);
     const early = await call("POST", `/api/business/orders/${r6.body.orderId}/handed-over`, { token: owner.token });
     assert(early.status === 409 && early.body?.code === "NOT_HANDED_OVER_ORDER" && (await orderOf(r6.body.orderId)).status === "pending", "an unpaid order can't be marked picked up", early.body);
+
+    console.log("\n── payment methods (app payment methods, Step 1 Task 4) ──");
+    assert(piStore[r1.body?.paymentIntentId]?._redirects === "never", "a product quote paid without the flag keeps allow_redirects never", piStore[r1.body?.paymentIntentId]?._redirects);
+    const mq = (await send({ ...cake(), title: "Cupcakes" })).body?.quote;
+    const rm = await pay(mq.id, mq.version, cust.token, { redirectCapable: true });
+    const pm = piStore[rm.body?.paymentIntentId];
+    assert(rm.status === 200 && pm && pm._redirects === null && pm.metadata?.type === "quote_order", "the new app's product quote opens redirect methods", { s: rm.status, b: rm.body, r: pm?._redirects });
+    assert(pm?.transfer_data?.destination === `acct_a_${P}` && !pm?.setup_future_usage, "still a destination charge that saves no card", pm);
   } finally {
     await q(`UPDATE quotes SET order_id = NULL, message_id = NULL WHERE business_id = ANY($1)`, [bizs]).catch(() => undefined);
     await q(`DELETE FROM point_transactions WHERE user_id = ANY($1)`, [users]).catch(() => undefined);

@@ -79,6 +79,7 @@ async function call(method: string, path: string, o: { token?: string; body?: un
           id: piId, object: "payment_intent", amount: Number(form.get("amount") || 0), currency: "usd", status: "requires_payment_method",
           client_secret: `${piId}_secret_stub`, metadata: {}, capture_method: form.get("capture_method") || "automatic",
           customer: form.get("customer"), setup_future_usage: form.get("setup_future_usage"),
+          _redirects: form.get("automatic_payment_methods[allow_redirects]"),
         };
         return send(200, piStore[piId]);
       }
@@ -168,7 +169,7 @@ async function call(method: string, path: string, o: { token?: string; body?: un
       && made["components[mobile_payment_element][features][payment_method_remove]"] === "disabled"
       && made["components[mobile_payment_element][features][payment_method_allow_redisplay_filters][0]"] === "always"
       && !("components[mobile_payment_element][features][payment_method_allow_redisplay_filters][1]" in made),
-      "session shows chosen cards and the Save box only", made);
+      "booking and ticket sheets unchanged: chosen cards and the Save box only (old builds see no change)", made);
 
     r = await pay(h, { paymentSheet: true });
     s = sessionFor(r);
@@ -206,6 +207,44 @@ async function call(method: string, path: string, o: { token?: string; body?: un
     const b3 = await mkUser("b3", { email: false });
     r = await buy(b3, { paymentSheet: true });
     assert(r.status === 201 && !("customerSessionClientSecret" in (r.body || {})), "ticket checkout without email customer returns no session", r);
+
+    // App payment methods Step 1 Task 4: only the new app's redirectCapable opens redirect methods.
+    const b4 = await mkUser("b4");
+    r = await buy(b4, {});
+    const t4 = Object.values(piStore).find((p: any) => p.client_secret === r.body?.clientSecret);
+    assert(r.status === 201 && t4?._redirects === "never", "ticket checkout without the flag keeps allow_redirects never", { s: r.status, r: t4?._redirects });
+    const b5 = await mkUser("b5");
+    r = await buy(b5, { paymentSheet: true, redirectCapable: true });
+    const t5 = Object.values(piStore).find((p: any) => p.client_secret === r.body?.clientSecret);
+    assert(r.status === 201 && !!t5 && t5._redirects === null, "the new app's ticket checkout opens redirect methods", { s: r.status, b: r.body, r: t5?._redirects });
+    const b6 = await mkUser("b6");
+    r = await buy(b6, { redirectCapable: "yes" });
+    assert(r.status === 400, "the strict schema still refuses a non boolean flag", r);
+
+    // App payment methods Step 1 Task 5: the new checkout's session, before any PaymentIntent exists.
+    console.log("Checkout session");
+    r = await call("POST", "/api/me/payment-methods/checkout-session", {});
+    assert(r.status === 401, "checkout session needs sign in", r);
+    const shopper = await mkUser("shop");
+    const shopTok = generateAccessToken({ userId: shopper, isVendor: false, isAdmin: false } as any);
+    const madeBefore = sessions.length;
+    r = await call("POST", "/api/me/payment-methods/checkout-session", { token: shopTok });
+    const [shopRow] = await q(`SELECT stripe_customer_id FROM users WHERE id = $1`, [shopper]);
+    assert(r.status === 200 && !!shopRow?.stripe_customer_id && r.body?.customerId === shopRow.stripe_customer_id && r.body?.customerSessionClientSecret === `cuss_secret_${shopRow.stripe_customer_id}`, "checkout session is for the shopper's own Stripe customer (made if missing)", { body: r.body, shopRow });
+    const cs = sessions[sessions.length - 1];
+    assert(sessions.length === madeBefore + 1
+      && cs["components[mobile_payment_element][features][payment_method_remove]"] === "disabled"
+      && cs["components[mobile_payment_element][features][payment_method_allow_redisplay_filters][0]"] === "always"
+      && cs["components[mobile_payment_element][features][payment_method_allow_redisplay_filters][1]"] === "limited"
+      && cs["components[mobile_payment_element][features][payment_method_allow_redisplay_filters][2]"] === "unspecified",
+      "checkout session: every saved card incl. booking cards (Legend 2026-11-07), never removable (Option 1)", cs);
+    r = await call("POST", "/api/me/payment-methods/checkout-session", { token: shopTok });
+    const [shopRow2] = await q(`SELECT stripe_customer_id FROM users WHERE id = $1`, [shopper]);
+    assert(r.status === 200 && shopRow2.stripe_customer_id === shopRow.stripe_customer_id, "a second call reuses the same customer");
+    failSessions = true;
+    r = await call("POST", "/api/me/payment-methods/checkout-session", { token: shopTok });
+    failSessions = false;
+    assert(r.status === 200 && r.body && !("customerSessionClientSecret" in r.body), "a Stripe outage answers with no session so checkout still works (cards just aren't listed)", r);
   } finally {
     const clean = async (sql: string, p: unknown[]) => q(sql, p).catch((e: any) => console.error("cleanup", e.message));
     await clean(`DELETE FROM tickets WHERE event_id = ANY($1)`, [eventIds]);

@@ -1,6 +1,7 @@
 import type { Express, RequestHandler, Request as ExpressRequest, Response as ExpressResponse } from "express";
 import type { Server } from "http";
 import { randomUUID } from "crypto";
+import { wantsRedirects } from "./stripe/paymentMethodPolicy";
 import multer from "multer";
 import { storage, appointmentChargeFields } from "./storage";
 import { db } from "./db";
@@ -206,7 +207,7 @@ import { isClaimable, issueClaimCode, firstNameOf } from "./accountSetup/claim";
 import { namesForNewAccount, realName, publicDisplayName } from "./personName";
 import { sendAppointmentReceipts, sendShootBookingReceipts } from "./stripe/webhookHandlers";
 import { getStripePublishableKey, getUncachableStripeClient } from "./stripe/stripeClient";
-import { listShownCards, paymentSheetFields, SAVED_CARD_SETUP_METADATA } from "./payments/savedCards";
+import { listShownCards, paymentSheetFields, checkoutSessionFields, SAVED_CARD_SETUP_METADATA } from "./payments/savedCards";
 import { chargeCancellationFeeOnce } from "./payments/cancellationFees";
 import { savedQuotePolicy } from "./quotes/quotePayments";
 import { payQuoteCancelFeeShare } from "./quotes/quotePaid";
@@ -6997,6 +6998,8 @@ export async function registerRoutes(
             customerId: dCustomer,
             connectedAccountId: dBusiness.stripeAccountId,
             captureMethod: 'automatic',
+            // App payment methods Step 1: product quotes only. Service quotes (below) keep card on file.
+            redirectMethods: wantsRedirects(req.body),
             metadata: {
               type: 'quote_order',
               orderId: order.id,
@@ -9006,6 +9009,8 @@ export async function registerRoutes(
 
     try {
       const { items: requestItems, shippingAddress: rawShippingAddress, promoCodeId } = req.body;
+      // New app build only: let Stripe offer Klarna, Afterpay, Cash App Pay, Amazon Pay. Everyone else unchanged.
+      const redirectMethods = wantsRedirects(req.body);
 
       // ── Address guard (validate structure + ensure address is present) ────────
       const shippingAddrSchema = z.object({
@@ -9189,6 +9194,7 @@ export async function registerRoutes(
           customerId: stripeCustomerId,
           connectedAccountId: business.stripeAccountId,
           captureMethod: 'automatic',
+          redirectMethods,
           // No saveForFutureUse: a shop card is saved only through the Save switch (SetupIntent route).
           metadata: {
             type: 'product_purchase',
@@ -9306,6 +9312,7 @@ export async function registerRoutes(
           amountCents: fullConsumerTotalCents,
           customerId: stripeCustomerId,
           captureMethod: 'automatic',
+          redirectMethods,
           // No saveForFutureUse: a shop card is saved only through the Save switch (SetupIntent route).
           metadata: {
             type: 'multi_vendor_product_purchase',
@@ -9330,6 +9337,115 @@ export async function registerRoutes(
     } catch (error: unknown) {
       console.error("Create cart PaymentIntent error:", error);
       res.status(500).json({ success: false, error: { code: 'SERVER_ERROR', message: 'Failed to create payment intent' } });
+    }
+  });
+
+  // App payment methods Step 1: the new checkout shows Stripe's payment list before any order exists, so it
+  // needs the exact amount POST /api/cart/payment-intent will charge. Same pricing, same fee engine, same
+  // points code rules; writes nothing (no order, no order group, no code hold, no Stripe call).
+  // cartPricePreview.http.test.ts checks it stays equal to the real charge.
+  app.post("/api/cart/price-preview", optionalAuthMiddleware, async (req, res) => {
+    const authReq = req as AuthenticatedRequest;
+    const userId = authReq.user?.userId || req.session?.userId;
+    if (!userId) {
+      return res.status(401).json({ success: false, error: { code: 'AUTH_REQUIRED', message: 'Not authenticated' } });
+    }
+    try {
+      const { items: requestItems, promoCodeId } = req.body ?? {};
+      if (!Array.isArray(requestItems) || requestItems.length === 0) {
+        return res.status(400).json({ success: false, error: { code: 'INVALID_INPUT', message: 'Items array is required and must not be empty' } });
+      }
+      for (const item of requestItems) {
+        if (!item.priceCents || typeof item.priceCents !== 'number' || item.priceCents <= 0 || !Number.isInteger(item.priceCents)) {
+          return res.status(400).json({ success: false, error: { code: 'INVALID_INPUT', message: 'All items must have a positive integer priceCents' } });
+        }
+        if (!item.quantity || typeof item.quantity !== 'number' || item.quantity <= 0 || !Number.isInteger(item.quantity)) {
+          return res.status(400).json({ success: false, error: { code: 'INVALID_INPUT', message: 'All items must have a positive quantity' } });
+        }
+      }
+      const { priceCartLines } = await import('./cartPricing');
+      const priced = await priceCartLines(requestItems, {
+        getProduct: async (id) => (await storage.getVendorProduct(id)) as any,
+        getActiveVariants: (productId) =>
+          db.select().from(productVariants).where(and(
+            eq(productVariants.productId, productId),
+            eq(productVariants.isActive, true),
+          )) as any,
+        getAddonGroups: (productId) => loadAddonGroups(productId),
+        logLegacyLine: () => {},
+      });
+      if (!priced.ok) {
+        return res.status(400).json({ success: false, error: priced.error });
+      }
+      const items = priced.lines;
+      const vendorIds = new Set(items.map((i: { vendorId: string }) => i.vendorId));
+      if (vendorIds.size > 1 && promoCodeId) {
+        return res.status(400).json({ success: false, error: { code: 'PROMO_SINGLE_SHOP_ONLY', message: 'Codes can only be used on orders from one shop. Remove the code or check out each shop separately.' } });
+      }
+      const { getActiveAttribution } = await import('./influencerTrackingService');
+      const attribution = await getActiveAttribution(userId);
+      const { calculateProductFees } = await import('./fees');
+      const baseOf = (lines: Array<{ priceCents: number; quantity: number }>) => lines.reduce((sum, i) => sum + i.priceCents * i.quantity, 0);
+
+      if (vendorIds.size === 1) {
+        const businessId = items[0].vendorId || '';
+        if (!businessId) {
+          return res.status(400).json({ success: false, error: { code: 'INVALID_INPUT', message: 'vendorId is required' } });
+        }
+        const business = await storage.getBusiness(businessId);
+        if (!business) {
+          return res.status(404).json({ success: false, error: { code: 'BUSINESS_NOT_FOUND', message: 'Business not found' } });
+        }
+        if (!business.stripeAccountId) {
+          return res.status(400).json({ success: false, error: { code: 'STRIPE_NOT_ONBOARDED', message: 'Business has not completed Stripe onboarding' } });
+        }
+        const basePriceCents = baseOf(items);
+        const feeBreakdown = calculateProductFees(basePriceCents, { influencerAttributed: !!attribution });
+        const totalChargedToConsumerCents = feeBreakdown.customerTotalBeforeTaxCents;
+        const outsydePointsEarned = pointsForGrossCents(totalChargedToConsumerCents);
+        let discountCents = 0;
+        if (promoCodeId) {
+          const promoCode = await storage.getPromoCodeById(promoCodeId);
+          if (!promoCode || !['active', 'reserved'].includes(promoCode.status) || promoCode.usedAt !== null || promoCode.userId !== userId
+              || new Date(promoCode.expiresAt).getTime() <= Date.now()) {
+            return res.status(400).json({ success: false, error: { code: 'INVALID_PROMO', message: 'Invalid or already used promo code' } });
+          }
+          if (basePriceCents < promoMinimumBaseCents(promoCode.discountCents)
+              || totalChargedToConsumerCents - promoCode.discountCents < feeBreakdown.vendorNetCents) {
+            return res.status(400).json({ success: false, error: { code: 'PROMO_MINIMUM_NOT_MET', message: `This code needs an order of at least $${(promoMinimumBaseCents(promoCode.discountCents) / 100).toFixed(2)} before the service fee.` } });
+          }
+          discountCents = promoCode.discountCents;
+        }
+        const chargedToConsumer = Math.max(totalChargedToConsumerCents - discountCents, 50);
+        return res.json({
+          success: true,
+          amountChargedCents: chargedToConsumer,
+          feeBreakdown: {
+            basePriceCents,
+            consumerUpchargeCents: feeBreakdown.consumerServiceFeeCents,
+            vendorPayoutCents: feeBreakdown.vendorNetCents,
+            platformFeeCents: feeBreakdown.platformFeeCents,
+            totalChargedToConsumerCents,
+            outsydePointsEarned,
+            discountCents,
+            amountChargedCents: chargedToConsumer,
+          },
+        });
+      }
+
+      let fullConsumerTotalCents = 0;
+      for (const vendorId of Array.from(vendorIds)) {
+        const vendorItems = items.filter((i: { vendorId: string }) => i.vendorId === vendorId);
+        fullConsumerTotalCents += calculateProductFees(baseOf(vendorItems), { influencerAttributed: !!attribution }).customerTotalBeforeTaxCents;
+      }
+      return res.json({
+        success: true,
+        amountChargedCents: fullConsumerTotalCents,
+        feeBreakdown: { totalChargedToConsumerCents: fullConsumerTotalCents },
+      });
+    } catch (error) {
+      console.error("Cart price preview error:", error);
+      res.status(500).json({ success: false, error: { code: 'SERVER_ERROR', message: 'Could not price the cart' } });
     }
   });
 
@@ -25573,6 +25689,34 @@ export async function registerRoutes(
     } catch (error: any) {
       console.error("List payment methods error:", error);
       res.status(500).json({ error: "Failed to list payment methods" });
+    }
+  });
+
+  // App payment methods Step 1: the new checkout shows Stripe's payment list before any PaymentIntent
+  // exists, so it asks for the customer session up front. Same session rules as the payment sheets.
+  // Never fails the checkout: on a Stripe error it answers with no session (cards just aren't listed).
+  app.post("/api/me/payment-methods/checkout-session", authMiddleware, async (req, res) => {
+    const authReq = req as AuthenticatedRequest;
+    const userId = authReq.user?.userId;
+    if (!userId) return res.status(401).json({ error: "Not authenticated" });
+    try {
+      const user = await storage.getUser(userId);
+      if (!user) return res.status(404).json({ error: "User not found" });
+      // No email, no Stripe customer: no saved cards to show (same as ticket checkout).
+      if (!user.email) return res.json({});
+      const stripeCustomerId = await stripeService.getOrCreateStripeCustomer({
+        userId,
+        email: user.email,
+        name: realName(user) || undefined,
+        existingStripeCustomerId: user.stripeCustomerId,
+      });
+      if (!user.stripeCustomerId || user.stripeCustomerId !== stripeCustomerId) {
+        await storage.updateUser(userId, { stripeCustomerId });
+      }
+      res.json(await checkoutSessionFields(stripeCustomerId));
+    } catch (error: any) {
+      console.error("Checkout session error:", error?.message || error);
+      res.json({});
     }
   });
 
