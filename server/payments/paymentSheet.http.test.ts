@@ -79,6 +79,7 @@ async function call(method: string, path: string, o: { token?: string; body?: un
           id: piId, object: "payment_intent", amount: Number(form.get("amount") || 0), currency: "usd", status: "requires_payment_method",
           client_secret: `${piId}_secret_stub`, metadata: {}, capture_method: form.get("capture_method") || "automatic",
           customer: form.get("customer"), setup_future_usage: form.get("setup_future_usage"),
+          _redirects: form.get("automatic_payment_methods[allow_redirects]"),
         };
         return send(200, piStore[piId]);
       }
@@ -206,6 +207,19 @@ async function call(method: string, path: string, o: { token?: string; body?: un
     const b3 = await mkUser("b3", { email: false });
     r = await buy(b3, { paymentSheet: true });
     assert(r.status === 201 && !("customerSessionClientSecret" in (r.body || {})), "ticket checkout without email customer returns no session", r);
+
+    // App payment methods Step 1 Task 4: only the new app's redirectCapable opens redirect methods.
+    const b4 = await mkUser("b4");
+    r = await buy(b4, {});
+    const t4 = Object.values(piStore).find((p: any) => p.client_secret === r.body?.clientSecret);
+    assert(r.status === 201 && t4?._redirects === "never", "ticket checkout without the flag keeps allow_redirects never", { s: r.status, r: t4?._redirects });
+    const b5 = await mkUser("b5");
+    r = await buy(b5, { paymentSheet: true, redirectCapable: true });
+    const t5 = Object.values(piStore).find((p: any) => p.client_secret === r.body?.clientSecret);
+    assert(r.status === 201 && !!t5 && t5._redirects === null, "the new app's ticket checkout opens redirect methods", { s: r.status, b: r.body, r: t5?._redirects });
+    const b6 = await mkUser("b6");
+    r = await buy(b6, { redirectCapable: "yes" });
+    assert(r.status === 400, "the strict schema still refuses a non boolean flag", r);
   } finally {
     const clean = async (sql: string, p: unknown[]) => q(sql, p).catch((e: any) => console.error("cleanup", e.message));
     await clean(`DELETE FROM tickets WHERE event_id = ANY($1)`, [eventIds]);

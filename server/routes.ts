@@ -6998,6 +6998,8 @@ export async function registerRoutes(
             customerId: dCustomer,
             connectedAccountId: dBusiness.stripeAccountId,
             captureMethod: 'automatic',
+            // App payment methods Step 1: product quotes only. Service quotes (below) keep card on file.
+            redirectMethods: wantsRedirects(req.body),
             metadata: {
               type: 'quote_order',
               orderId: order.id,

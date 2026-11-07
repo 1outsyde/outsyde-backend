@@ -99,7 +99,7 @@ const holdTs = (date: string, h: number, m: number) => { const [y, mo, d] = date
         const pi = { id, object: "payment_intent", amount: Number(form.get("amount") || 0), amount_received: isFee ? Number(form.get("amount") || 0) : 0,
           status: isFee ? "succeeded" : "requires_payment_method", client_secret: `${id}_secret`, capture_method: form.get("capture_method") || "automatic",
           metadata, customer: form.get("customer"), payment_method: isFee ? form.get("payment_method") : "pm_qp_card", latest_charge: isFee ? `ch_${id}` : null,
-          setup_future_usage: form.get("setup_future_usage"), created: Math.floor(Date.now() / 1000), _key: key };
+          setup_future_usage: form.get("setup_future_usage"), _redirects: form.get("automatic_payment_methods[allow_redirects]"), created: Math.floor(Date.now() / 1000), _key: key };
         piCreates.push({ key, amount: pi.amount, metadata });
         if (isFee && failNextCreateNetwork) {
           failNextCreateNetwork = false;
@@ -255,9 +255,11 @@ const holdTs = (date: string, h: number, m: number) => { const [y, mo, d] = date
     await q(`DELETE FROM quotes WHERE id = $1`, [qProd]);
 
     console.log("\n── paying a deposit quote ──");
-    r = await call("POST", `/api/quotes/${q1}/pay`, { token: cust.token, body: { version: 1 } });
+    // App payment methods Step 1: the new app sends redirectCapable everywhere; a service quote must ignore it.
+    r = await call("POST", `/api/quotes/${q1}/pay`, { token: cust.token, body: { version: 1, redirectCapable: true } });
     assert(r.status === 200 && typeof r.body?.clientSecret === "string" && r.body?.quoteId === q1, "pay starts a payment", r);
     const pi1 = piStore[r.body?.paymentIntentId];
+    assert(pi1?._redirects === "never", "a service quote keeps allow_redirects never even when the app asks", pi1?._redirects);
     assert(pi1?.amount === 10800, "charged the deposit plus the service fee, the same as the quote card (payNowCents)", pi1?.amount);
     assert(pi1?.metadata?.type === "appointment" && pi1.metadata.quoteId === q1 && pi1.metadata.quoteVersion === "1", "same booking PaymentIntent, with the quote and version", pi1?.metadata);
     assert(pi1?.setup_future_usage === "off_session", "card saved for the balance (step 4)", pi1?.setup_future_usage);

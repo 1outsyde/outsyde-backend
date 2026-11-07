@@ -42,7 +42,7 @@ type StripeLike = {
   getOrCreateStripeCustomer(p: { userId: string; email: string; name?: string; existingStripeCustomerId?: string | null }): Promise<string>;
   createPlatformPaymentIntent(p: {
     amountCents: number; customerId?: string; captureMethod: "automatic" | "manual";
-    metadata: Record<string, string>; description?: string; idempotencyKey?: string;
+    metadata: Record<string, string>; description?: string; idempotencyKey?: string; redirectMethods?: boolean;
   }): Promise<{ id: string; client_secret: string | null; status: string; customer?: string | { id: string } | null }>;
   getPaymentIntent(id: string): Promise<{ id: string; status: string; amount_received?: number; amount?: number; client_secret?: string | null; customer?: string | { id: string } | null }>;
   cancelPaymentIntent(id: string, reason?: "abandoned"): Promise<unknown>;
@@ -279,6 +279,8 @@ const checkoutSchema = z.object({
   idempotencyKey: z.string().trim().min(8).max(100).optional(),
   // The app opens Stripe's payment sheet: answer with a customer session too (p4-applepay).
   paymentSheet: z.boolean().optional(),
+  // App payment methods Step 1: the new app build can handle redirect methods (Klarna, Afterpay, Cash App Pay).
+  redirectCapable: z.boolean().optional(),
   // p4-team step 3: the promoter link the buyer came through. Anything that isn't a live link is ignored, never refused.
   linkCode: z.unknown().optional(),
 }).strict();
@@ -437,6 +439,7 @@ router.post("/:id/checkout", hybridAuthMiddleware, async (req: Request, res: Res
         amountCents: fees.totalCents,
         customerId,
         captureMethod: "automatic",
+        redirectMethods: parsed.data.redirectCapable === true,
         description: `Tickets: ${String(ev?.title ?? "event").slice(0, 80)}`,
         metadata: { type: "event_ticket", ticketOrderId: orderId, eventId, ticketTypeId, buyerUserId: userId, quantity: String(quantity) },
         idempotencyKey: `ticket_pi_${orderId}`,
