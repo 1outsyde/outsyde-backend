@@ -1,6 +1,7 @@
 import type { Express, RequestHandler, Request as ExpressRequest, Response as ExpressResponse } from "express";
 import type { Server } from "http";
 import { randomUUID } from "crypto";
+import { wantsRedirects } from "./stripe/paymentMethodPolicy";
 import multer from "multer";
 import { storage, appointmentChargeFields } from "./storage";
 import { db } from "./db";
@@ -9006,6 +9007,8 @@ export async function registerRoutes(
 
     try {
       const { items: requestItems, shippingAddress: rawShippingAddress, promoCodeId } = req.body;
+      // New app build only: let Stripe offer Klarna, Afterpay, Cash App Pay, Amazon Pay. Everyone else unchanged.
+      const redirectMethods = wantsRedirects(req.body);
 
       // ── Address guard (validate structure + ensure address is present) ────────
       const shippingAddrSchema = z.object({
@@ -9189,6 +9192,7 @@ export async function registerRoutes(
           customerId: stripeCustomerId,
           connectedAccountId: business.stripeAccountId,
           captureMethod: 'automatic',
+          redirectMethods,
           // No saveForFutureUse: a shop card is saved only through the Save switch (SetupIntent route).
           metadata: {
             type: 'product_purchase',
@@ -9306,6 +9310,7 @@ export async function registerRoutes(
           amountCents: fullConsumerTotalCents,
           customerId: stripeCustomerId,
           captureMethod: 'automatic',
+          redirectMethods,
           // No saveForFutureUse: a shop card is saved only through the Save switch (SetupIntent route).
           metadata: {
             type: 'multi_vendor_product_purchase',
