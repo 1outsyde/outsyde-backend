@@ -207,7 +207,7 @@ import { isClaimable, issueClaimCode, firstNameOf } from "./accountSetup/claim";
 import { namesForNewAccount, realName, publicDisplayName } from "./personName";
 import { sendAppointmentReceipts, sendShootBookingReceipts } from "./stripe/webhookHandlers";
 import { getStripePublishableKey, getUncachableStripeClient } from "./stripe/stripeClient";
-import { listShownCards, paymentSheetFields, SAVED_CARD_SETUP_METADATA } from "./payments/savedCards";
+import { listShownCards, paymentSheetFields, checkoutSessionFields, SAVED_CARD_SETUP_METADATA } from "./payments/savedCards";
 import { chargeCancellationFeeOnce } from "./payments/cancellationFees";
 import { savedQuotePolicy } from "./quotes/quotePayments";
 import { payQuoteCancelFeeShare } from "./quotes/quotePaid";
@@ -25713,7 +25713,7 @@ export async function registerRoutes(
       if (!user.stripeCustomerId || user.stripeCustomerId !== stripeCustomerId) {
         await storage.updateUser(userId, { stripeCustomerId });
       }
-      res.json(await paymentSheetFields(stripeCustomerId, true));
+      res.json(await checkoutSessionFields(stripeCustomerId));
     } catch (error: any) {
       console.error("Checkout session error:", error?.message || error);
       res.json({});

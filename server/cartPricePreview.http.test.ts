@@ -113,6 +113,12 @@ async function call(method: string, path: string, o: { token?: string; body?: un
     const goneCharge = await charge({ items: tooMany });
     assert(gone.status === 400 && gone.status === goneCharge.status && gone.body?.error?.code === goneCharge.body?.error?.code, "over stock refused the same way as checkout", { p: gone.body, c: goneCharge.body });
 
+    // Deliberate (review finding 2): prices never depend on the address, and the new checkout previews before
+    // the address is confirmed, so the preview skips the address checks the real charge runs first.
+    const noAddr = await preview({ items: oneA });
+    const noAddrCharge = await call("POST", "/api/cart/payment-intent", { token, body: { items: oneA } });
+    assert(noAddr.status === 200 && noAddrCharge.status === 400 && noAddrCharge.body?.error === "ADDRESS_REQUIRED", "preview needs no address; the real charge still requires one", { p: noAddr.status, c: noAddrCharge.body });
+
     console.log("writes nothing");
     const c0 = await counts();
     const s0 = stripeCalls;

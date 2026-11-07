@@ -168,10 +168,8 @@ async function call(method: string, path: string, o: { token?: string; body?: un
       && made["components[mobile_payment_element][features][payment_method_redisplay]"] === "enabled"
       && made["components[mobile_payment_element][features][payment_method_remove]"] === "disabled"
       && made["components[mobile_payment_element][features][payment_method_allow_redisplay_filters][0]"] === "always"
-      && made["components[mobile_payment_element][features][payment_method_allow_redisplay_filters][1]"] === "limited"
-      && made["components[mobile_payment_element][features][payment_method_allow_redisplay_filters][2]"] === "unspecified"
-      && !("components[mobile_payment_element][features][payment_method_allow_redisplay_filters][3]" in made),
-      "session shows every saved card (booking cards too, Legend 2026-11-07), never removable, with the Save box", made);
+      && !("components[mobile_payment_element][features][payment_method_allow_redisplay_filters][1]" in made),
+      "booking and ticket sheets unchanged: chosen cards and the Save box only (old builds see no change)", made);
 
     r = await pay(h, { paymentSheet: true });
     s = sessionFor(r);
@@ -234,7 +232,12 @@ async function call(method: string, path: string, o: { token?: string; body?: un
     const [shopRow] = await q(`SELECT stripe_customer_id FROM users WHERE id = $1`, [shopper]);
     assert(r.status === 200 && !!shopRow?.stripe_customer_id && r.body?.customerId === shopRow.stripe_customer_id && r.body?.customerSessionClientSecret === `cuss_secret_${shopRow.stripe_customer_id}`, "checkout session is for the shopper's own Stripe customer (made if missing)", { body: r.body, shopRow });
     const cs = sessions[sessions.length - 1];
-    assert(sessions.length === madeBefore + 1 && cs["components[mobile_payment_element][features][payment_method_remove]"] === "disabled" && cs["components[mobile_payment_element][features][payment_method_allow_redisplay_filters][1]"] === "limited", "checkout session: every saved card, never removable (Option 1)", cs);
+    assert(sessions.length === madeBefore + 1
+      && cs["components[mobile_payment_element][features][payment_method_remove]"] === "disabled"
+      && cs["components[mobile_payment_element][features][payment_method_allow_redisplay_filters][0]"] === "always"
+      && cs["components[mobile_payment_element][features][payment_method_allow_redisplay_filters][1]"] === "limited"
+      && cs["components[mobile_payment_element][features][payment_method_allow_redisplay_filters][2]"] === "unspecified",
+      "checkout session: every saved card incl. booking cards (Legend 2026-11-07), never removable (Option 1)", cs);
     r = await call("POST", "/api/me/payment-methods/checkout-session", { token: shopTok });
     const [shopRow2] = await q(`SELECT stripe_customer_id FROM users WHERE id = $1`, [shopper]);
     assert(r.status === 200 && shopRow2.stripe_customer_id === shopRow.stripe_customer_id, "a second call reuses the same customer");
