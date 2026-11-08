@@ -13,6 +13,7 @@
  */
 import { createHash } from "crypto";
 import Expo, { type ExpoPushMessage, type ExpoPushReceipt, type ExpoPushTicket } from "expo-server-sdk";
+import { offReceipts, offTickets, pushDisabled } from "./pushSwitch";
 import { sql } from "drizzle-orm";
 import { db } from "../db";
 import { pgTextArray } from "../emailHistory";
@@ -41,9 +42,10 @@ export interface PushDeps {
 let expoClient: Expo | null = null;
 const expo = () => (expoClient ??= new Expo());
 
+// PUSH_DISABLED=true (test backend on copied data): nothing reaches Expo; rows read as sent and delivered.
 export const defaultPushDeps: PushDeps = {
-  sendChunk: (messages) => expo().sendPushNotificationsAsync(messages),
-  getReceipts: (ids) => expo().getPushNotificationReceiptsAsync(ids),
+  sendChunk: async (messages) => (pushDisabled() ? offTickets(messages.length) : expo().sendPushNotificationsAsync(messages)),
+  getReceipts: async (ids) => (pushDisabled() ? offReceipts(ids) : expo().getPushNotificationReceiptsAsync(ids)),
 };
 
 export function tokenHash(token: string): string {

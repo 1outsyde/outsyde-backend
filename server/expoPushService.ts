@@ -6,6 +6,7 @@
 
 import Expo, { type ExpoPushMessage, type ExpoPushTicket } from 'expo-server-sdk';
 import { storage } from './storage';
+import { pushDisabled } from './push/pushSwitch';
 
 const expo = new Expo();
 
@@ -41,6 +42,12 @@ export async function sendExpoPush(params: ExpoPushParams): Promise<boolean> {
       body: params.body,
       data: params.data,
     }];
+
+    if (pushDisabled()) {
+      // Test backend on copied data (PUSH_DISABLED=true): never reach real phones.
+      console.log(`[ExpoPush] PUSH_DISABLED: not sent to user ${params.userId}: "${params.title}"`);
+      return true;
+    }
 
     const tickets = await expo.sendPushNotificationsAsync(messages);
     const ticket = tickets[0] as ExpoPushTicket;
