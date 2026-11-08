@@ -5,12 +5,18 @@ export const mux = new Mux({
   tokenSecret: process.env.MUX_TOKEN_SECRET!,
 });
 
+/** Mux direct upload link lifetime, in seconds (Mux: min 60, max 604800). */
+export const MUX_UPLOAD_TIMEOUT_SECONDS = 6 * 60 * 60;
+
 export async function createMuxUploadUrl(): Promise<{
   uploadUrl: string;
   uploadId: string;
 }> {
   const upload = await mux.video.uploads.create({
     cors_origin: "*",
+    // How long the upload link stays valid. Mux's default is 1 hour, which a 10 minute Pulse
+    // video on slow data can run past; 6 hours leaves room (Mux allows up to 7 days).
+    timeout: MUX_UPLOAD_TIMEOUT_SECONDS,
     new_asset_settings: {
       playback_policies: ["public"],
       video_quality: "basic",
