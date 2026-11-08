@@ -149,6 +149,11 @@ export async function paymentSheetFields(
 }
 
 /** The new app checkout's session (POST /api/me/payment-methods/checkout-session): every saved card shows. */
-export function checkoutSessionFields(customerId: string): Promise<{ customerId?: string; customerSessionClientSecret?: string }> {
-  return paymentSheetFields(customerId, true, { everySavedCard: true });
+export function checkoutSessionFields(
+  customerId: string,
+  opts: { chosenCardsOnly?: boolean } = {},
+): Promise<{ customerId?: string; customerSessionClientSecret?: string }> {
+  // chosenCardsOnly (Android, Step 4a): stripe-android 23.22.0 keeps wallet cards in a session's list
+  // (CustomerState.kt:80-90), so Android gets only cards the customer saved with the Save box.
+  return paymentSheetFields(customerId, true, { everySavedCard: opts.chosenCardsOnly !== true });
 }

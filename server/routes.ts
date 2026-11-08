@@ -25713,7 +25713,10 @@ export async function registerRoutes(
       if (!user.stripeCustomerId || user.stripeCustomerId !== stripeCustomerId) {
         await storage.updateUser(userId, { stripeCustomerId });
       }
-      res.json(await checkoutSessionFields(stripeCustomerId));
+      // App payment methods Step 4a: the Android app sends chosenCardsOnly (its Stripe SDK doesn't drop
+      // Apple Pay cards from the list). Only a real true narrows; iPhone and anything else get every card.
+      const chosenCardsOnly = (req.body as { chosenCardsOnly?: unknown } | undefined)?.chosenCardsOnly === true;
+      res.json(await checkoutSessionFields(stripeCustomerId, { chosenCardsOnly }));
     } catch (error: any) {
       console.error("Checkout session error:", error?.message || error);
       res.json({});

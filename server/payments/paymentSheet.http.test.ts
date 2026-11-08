@@ -241,6 +241,19 @@ async function call(method: string, path: string, o: { token?: string; body?: un
     r = await call("POST", "/api/me/payment-methods/checkout-session", { token: shopTok });
     const [shopRow2] = await q(`SELECT stripe_customer_id FROM users WHERE id = $1`, [shopper]);
     assert(r.status === 200 && shopRow2.stripe_customer_id === shopRow.stripe_customer_id, "a second call reuses the same customer");
+    // App payment methods Step 4a: Android's Stripe SDK doesn't drop Apple Pay cards from a customer
+    // session (stripe-android 23.22.0 CustomerState.kt:80-90), so the Android app asks for chosen cards only.
+    r = await call("POST", "/api/me/payment-methods/checkout-session", { token: shopTok, body: { chosenCardsOnly: true } });
+    const csA = sessions[sessions.length - 1];
+    assert(r.status === 200 && r.body?.customerSessionClientSecret === `cuss_secret_${shopRow.stripe_customer_id}`
+      && csA["components[mobile_payment_element][features][payment_method_allow_redisplay_filters][0]"] === "always"
+      && !("components[mobile_payment_element][features][payment_method_allow_redisplay_filters][1]" in csA)
+      && csA["components[mobile_payment_element][features][payment_method_remove]"] === "disabled",
+      "Android checkout session: chosen cards only, still never removable", csA);
+    r = await call("POST", "/api/me/payment-methods/checkout-session", { token: shopTok, body: { chosenCardsOnly: "yes" } });
+    const csB = sessions[sessions.length - 1];
+    assert(r.status === 200 && csB["components[mobile_payment_element][features][payment_method_allow_redisplay_filters][2]"] === "unspecified",
+      "only a real true narrows the cards; anything else keeps every saved card", csB);
     failSessions = true;
     r = await call("POST", "/api/me/payment-methods/checkout-session", { token: shopTok });
     failSessions = false;
