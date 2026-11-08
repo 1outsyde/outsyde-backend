@@ -130,6 +130,11 @@ async function call(method: string, path: string, o: { token?: string; body?: un
     assert(JSON.stringify(r1.map((r: any) => [r.business_id, r.total_amount])) === JSON.stringify(r2.map((r: any) => [r.business_id, r.total_amount])), "same per shop totals either way", { r1, r2 });
     assert(r2.every((r: any) => r.order_group_id && r.order_group_id === r2[0].order_group_id), "shared order group with the flag", r2);
     assert(JSON.stringify(m1.body?.feeBreakdown) === JSON.stringify(m2.body?.feeBreakdown), "same multi shop fee breakdown either way");
+    // Unpaid order cleanup: every order in a multi shop group carries the group's PaymentIntent from the start,
+    // so the cleanup job can cancel it (one shop orders already did, routes.ts:9219).
+    const withPi = await q(`SELECT stripe_payment_intent_id AS pi FROM orders WHERE order_group_id = $1`, [m2.body?.orderGroupId ?? "none"]);
+    assert(withPi.length === 2 && withPi.every((r: any) => typeof r.pi === "string" && r.pi.startsWith("pi_stub_") && r.pi === withPi[0].pi),
+      "multi shop orders all carry the shared PaymentIntent", withPi);
   } finally {
     await q(`DELETE FROM orders WHERE business_id IN ($1,$2)`, [bizA, bizB]).catch((e) => console.error("cleanup", e.message));
     await q(`DELETE FROM order_groups WHERE customer_id = $1`, [customer]).catch((e) => console.error("cleanup", e.message));
