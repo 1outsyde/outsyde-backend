@@ -9323,6 +9323,12 @@ export async function registerRoutes(
           description: 'Multi-vendor product purchase via Outsyde',
         });
 
+        // Unpaid order cleanup: every order in the group carries the PaymentIntent from the start (one shop orders
+        // already do), so an abandoned group can have its payment cancelled. The paid webhook writes the same value.
+        for (const vo of vendorOrders) {
+          await storage.updateOrder(vo.orderId, { stripePaymentIntentId: paymentIntent.id });
+        }
+
         console.log(`[Cart] Created multi-vendor PaymentIntent ${paymentIntent.id} for order group ${orderGroup.id} (${vendorIds.size} vendors, charged: ${fullConsumerTotalCents}¢)`);
 
         res.json({

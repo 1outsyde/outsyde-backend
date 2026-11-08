@@ -40,6 +40,7 @@ import { startReminderJob } from "./reminderService";
 import { startPointsReleaseJob } from "./loyaltyLedger";
 import { startBusinessReferralSweep } from "./referrals/businessReferrals";
 import { startPayoutRetryJob } from "./payouts";
+import { startAbandonedOrderJob } from "./abandonedOrders";
 import { processScheduledDeletions } from "./services/accountDeletionService";
 import { cleanupExpiredStories } from "./services/stories";
 import { expireComplimentarySubscriptions } from "./services/complimentarySubscription";
@@ -362,6 +363,9 @@ if (process.env.NODE_ENV === 'production') {
   startBusinessReferralSweep(60 * 60 * 1000);
   // Booking payouts Stripe refused (e.g. balance too low): retried hourly, admin alerted.
   startPayoutRetryJob(60 * 60 * 1000);
+  // Unpaid product orders (left at Klarna, Afterpay, Cash App or a bank check): after 6 hours their payment is
+  // cancelled and the order closed, or a paid one whose webhook never came is confirmed. Every 15 minutes.
+  startAbandonedOrderJob(15 * 60 * 1000);
   console.log("Loyalty points release job started");
 
   // Daily account deletion job — processes users whose 30-day grace period has expired
