@@ -6697,6 +6697,9 @@ export class DatabaseStorage implements IStorage {
           providerUserId: row.bOwnerId || null,
           username: null,
           price: row.s.price,
+          // Additive (step P follow up): a contact for pricing service, so clients show Price on request, not the
+          // starting price.
+          ...(row.s.requestOnly === true ? { requestOnly: true } : {}),
           businessId: row.s.businessId,
           businessName: row.bName || null,
           providerName: row.bName || null,
@@ -6768,6 +6771,8 @@ export class DatabaseStorage implements IStorage {
           providerUserId: row.pUserId,
           username: null,
           price: row.s.priceCents,
+          // Additive (step P follow up): a photographer's contact for pricing service.
+          ...(row.s.isContactForPricing === true ? { requestOnly: true } : {}),
           providerId: row.pId,
           providerName: row.pName || null,
           providerType: 'photographer',

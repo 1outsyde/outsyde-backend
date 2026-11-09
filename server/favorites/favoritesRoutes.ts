@@ -38,6 +38,8 @@ export interface FavoriteView {
   /** product only: what ProductDetail needs to open */
   businessId?: string;
   priceCents?: number;
+  /** Step P follow up: a contact for pricing product (no priceCents then: its starting price is never shown). */
+  requestOnly?: boolean;
 }
 
 type Target = Omit<FavoriteView, "savedAt">;
@@ -93,6 +95,7 @@ async function loadTargets(type: FavoriteType, ids: string[]): Promise<Map<strin
         images: vendorProducts.images,
         businessId: vendorProducts.businessId,
         businessName: businesses.name,
+        requestOnly: vendorProducts.requestOnly,
       })
       .from(vendorProducts)
       .innerJoin(businesses, eq(businesses.id, vendorProducts.businessId))
@@ -114,7 +117,7 @@ async function loadTargets(type: FavoriteType, ids: string[]): Promise<Map<strin
         image: productImage(r.imageUrl, r.images),
         subtitle: r.businessName || "",
         businessId: r.businessId,
-        priceCents: r.price,
+        ...(r.requestOnly === true ? { requestOnly: true } : { priceCents: r.price }),
       });
     }
   }
