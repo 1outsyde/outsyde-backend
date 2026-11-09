@@ -18857,6 +18857,16 @@ export async function registerRoutes(
         }
       }
 
+      // Step P (call P4): a contact for pricing product is quoted, never added to a cart. Checked before the
+      // variant checks so a product with kept variations still answers PRICE_ON_REQUEST.
+      {
+        const target = await storage.getVendorProduct(data.productId);
+        if (target?.requestOnly === true) {
+          const { PRICE_ON_REQUEST_MESSAGE } = await import('./cartPricing');
+          return res.status(400).json({ success: false, error: { code: 'PRICE_ON_REQUEST', message: PRICE_ON_REQUEST_MESSAGE } });
+        }
+      }
+
       // Resolve price server-side; enforce variant selection when required
       let resolvedPriceCents = data.priceInCents;
       let resolvedVariantLabel: string | null = null;
@@ -18900,11 +18910,6 @@ export async function registerRoutes(
 
       // Check stock before adding to cart
       const product = await storage.getVendorProduct(data.productId);
-      // Step P (call P4): a contact for pricing product is quoted, never added to a cart.
-      if (product?.requestOnly === true) {
-        const { PRICE_ON_REQUEST_MESSAGE } = await import('./cartPricing');
-        return res.status(400).json({ success: false, error: { code: 'PRICE_ON_REQUEST', message: PRICE_ON_REQUEST_MESSAGE } });
-      }
       if (product?.trackInventory) {
         const currentCart = await storage.getCartItems(userId);
         const existingQty = currentCart.find(i => i.productId === data.productId && i.variantId === (data.variantId ?? null))?.quantity || 0;

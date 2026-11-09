@@ -186,7 +186,7 @@ const PRICE_ON_REQUEST = 'This is priced on request. Send a request instead.';
     const both = await call('POST', '/api/estimate-requests', { token: cust.token, body: body({ serviceId: sA }) });
     assert(both.status === 400, 'a service and a product together are refused', both);
     const noBiz = await call('POST', '/api/estimate-requests', { token: cust.token, body: body({ businessId: undefined, photographerId: id('ph') }) });
-    assert(noBiz.status === 400, 'a product needs its business', noBiz);
+    assert(noBiz.status === 400 && noBiz.body?.message === 'Please check the form and try again.', 'a product needs its business', noBiz);
     for (const [label, pid] of [['sold as is', pSell], ['draft', pDraft], ['inactive', pOff], ["another business's", pOther], ['unknown', id('nope')]] as const) {
       const r = await call('POST', '/api/estimate-requests', { token: cust.token, body: body({ productId: pid }) });
       assert(r.status === 400 && r.body?.field === 'productId' && r.body.message === "That product isn't taking requests. Please choose another.", `a ${label} product is refused`, r);
@@ -222,9 +222,9 @@ const PRICE_ON_REQUEST = 'This is priced on request. Send a request instead.';
     const svcSend = await call('POST', '/api/estimate-requests', { token: cust.token, body: body({ productId: undefined, serviceId: sA, answers: { [(await call('GET', `/api/services/${sA}/request-form`)).body.questions[0].id]: 'x' } }) });
     const [svcRow] = await q(`SELECT product_id, service_id FROM estimate_requests WHERE id = $1`, [svcSend.body?.request?.id]);
     assert(svcSend.status === 201 && svcRow?.product_id === null && svcRow?.service_id === sA, 'service requests are unchanged', svcSend);
-    let bothRefused = false;
-    try { await q(`UPDATE estimate_requests SET product_id = $1 WHERE id = $2`, [pReq2, svcSend.body?.request?.id]); } catch { bothRefused = true; }
-    assert(bothRefused, 'the database refuses a request for a service and a product');
+    let bothErr: any = null;
+    try { await q(`UPDATE estimate_requests SET product_id = $1 WHERE id = $2`, [pReq2, svcSend.body?.request?.id]); } catch (e) { bothErr = e; }
+    assert(bothErr?.code === '23514' && bothErr?.constraint === 'estimate_requests_service_or_product', 'the database refuses a request for a service and a product (the CHECK)', bothErr?.message);
 
     console.log('\n── public list and search hide them unless asked ──');
     const list = await call('GET', `/api/businesses/${biz}/products`);
@@ -248,6 +248,13 @@ const PRICE_ON_REQUEST = 'This is priced on request. Send a request instead.';
     const snRows = searchNew.body?.results ?? [];
     assert(searchNew.status === 200 && snRows.some((r: any) => r.id === pReq && r.requestOnly === true) && snRows.find((r: any) => r.id === pSell)?.requestOnly === undefined,
       'search with includeRequestOnly=1: marked requestOnly, sold rows unchanged', snRows.map((r: any) => [r.id, r.requestOnly]));
+    // The older unified search reads search_index, rebuilt only by an admin: a product indexed while sold and
+    // switched on afterwards is left out at read time.
+    await q(`INSERT INTO search_index (entity_type, entity_id, name, is_active) VALUES ('product', $1, $2, true), ('product', $3, $4, true)`,
+      [pReq, `${P} Cake req`, pSell, `${P} Cake sell`]);
+    const us = await call('GET', `/api/unified-search?q=${encodeURIComponent(P)}&types=product`);
+    const usIds = (us.body?.results ?? []).map((r: any) => r.entityId ?? r.id);
+    assert(us.status === 200 && usIds.includes(pSell) && !usIds.includes(pReq), 'unified search leaves out a product switched on after it was indexed', us.body);
     const detail = await call('GET', `/api/products/${pReq}`);
     assert(detail.status === 200 && detail.body?.requestOnly === true, 'the product page sees requestOnly', detail.body?.requestOnly);
 
@@ -257,6 +264,11 @@ const PRICE_ON_REQUEST = 'This is priced on request. Send a request instead.';
     assert(login.status === 200 && !!cookie, 'customer signed in for the cart routes', login.status);
     const addReq = await call('POST', '/api/cart/add', { cookie, body: { productId: pReq, productName: 'Cake', priceInCents: 4500, quantity: 1, businessId: biz } });
     assert(addReq.status === 400 && addReq.body?.error?.code === 'PRICE_ON_REQUEST' && addReq.body.error.message === PRICE_ON_REQUEST, 'cart add refuses a request only product', addReq);
+    // Variations are kept while it's on (call P7): the answer is still PRICE_ON_REQUEST, not a variant error.
+    await q(`INSERT INTO product_variants (id, product_id, label, is_active) VALUES ($1, $2, 'Two tiers', true)`, [id('v1'), pReq]);
+    const addVarNone = await call('POST', '/api/cart/add', { cookie, body: { productId: pReq, productName: 'Cake', priceInCents: 4500, quantity: 1, businessId: biz } });
+    const addVarBad = await call('POST', '/api/cart/add', { cookie, body: { productId: pReq, productName: 'Cake', priceInCents: 4500, quantity: 1, businessId: biz, variantId: id('nope') } });
+    assert(addVarNone.body?.error?.code === 'PRICE_ON_REQUEST' && addVarBad.body?.error?.code === 'PRICE_ON_REQUEST', 'with kept variations it still says priced on request', { addVarNone, addVarBad });
     const addSell = await call('POST', '/api/cart/add', { cookie, body: { productId: pSell, productName: 'Cake', priceInCents: 4500, quantity: 1, businessId: biz } });
     assert(addSell.status === 200 || addSell.status === 201, 'cart add still takes a sold product', addSell);
     const pi = await call('POST', '/api/cart/payment-intent', { token: cust.token, body: {
@@ -304,6 +316,7 @@ const PRICE_ON_REQUEST = 'This is priced on request. Send a request instead.';
     await q(`UPDATE vendor_services SET request_form_id = NULL WHERE business_id = ANY($1)`, [bizs]).catch(() => undefined);
     await q(`DELETE FROM request_forms WHERE business_id = ANY($1)`, [bizs]).catch(() => undefined);
     await q(`DELETE FROM search_index WHERE entity_id IN (SELECT id FROM vendor_products WHERE business_id = ANY($1))`, [bizs]).catch(() => undefined);
+    await q(`DELETE FROM product_variants WHERE product_id IN (SELECT id FROM vendor_products WHERE business_id = ANY($1))`, [bizs]).catch(() => undefined);
     await q(`DELETE FROM vendor_products WHERE business_id = ANY($1)`, [bizs]).catch(() => undefined);
     await q(`DELETE FROM vendor_services WHERE business_id = ANY($1)`, [bizs]).catch(() => undefined);
     await q(`DELETE FROM vendor_subscriptions WHERE business_id = ANY($1)`, [bizs]).catch(() => undefined);

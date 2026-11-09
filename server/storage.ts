@@ -3329,6 +3329,9 @@ export class DatabaseStorage implements IStorage {
     const { query, city, category, entityTypes, userLatitude, userLongitude, userPreferences, limit = 50, offset = 0, isAdmin = false } = params;
     
     let conditions: any[] = [eq(searchIndex.isActive, true)];
+    // Step P: a product switched to contact for pricing after the index was built is left out at read time
+    // (the index is only rebuilt by an admin), so this older search never shows it with a price.
+    conditions.push(sql`NOT (${searchIndex.entityType} = 'product' AND EXISTS (SELECT 1 FROM vendor_products vp WHERE vp.id = ${searchIndex.entityId} AND vp.request_only = true))`);
     
     // Hide demo data from non-admin users
     if (!isAdmin) {

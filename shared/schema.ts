@@ -2773,6 +2773,10 @@ export const insertBusinessSchema = createInsertSchema(businesses).omit({
 export const insertVendorProductSchema = createInsertSchema(vendorProducts).omit({
   id: true,
   createdAt: true,
+  // Migration 109: written only by PUT /api/vendor/products/:id/request-form (server/requests), like services.
+  requestFormId: true,
+  requestFormUseBase: true,
+  requestQuestions: true,
 });
 
 export const insertVendorServiceSchema = createInsertSchema(vendorServices).omit({
