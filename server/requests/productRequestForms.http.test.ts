@@ -255,6 +255,26 @@ const PRICE_ON_REQUEST = 'This is priced on request. Send a request instead.';
     const us = await call('GET', `/api/unified-search?q=${encodeURIComponent(P)}&types=product`);
     const usIds = (us.body?.results ?? []).map((r: any) => r.entityId ?? r.id);
     assert(us.status === 200 && usIds.includes(pSell) && !usIds.includes(pReq), 'unified search leaves out a product switched on after it was indexed', us.body);
+    // Follow up: contact for pricing services say so in search (no starting price shown by clients).
+    await q(`UPDATE vendor_services SET name = $1 WHERE id = $2`, [`${P} Tasting`, sA]);
+    const ss = await call('GET', `/api/search?q=${encodeURIComponent(P)}&scope=services`);
+    const sRow = (ss.body?.results ?? []).find((r: any) => r.id === sA);
+    assert(ss.status === 200 && sRow?.type === 'service' && sRow.requestOnly === true, 'search: a contact for pricing service is marked requestOnly', ss.body?.results?.map((r: any) => [r.id, r.type, r.requestOnly]));
+    await q(`UPDATE vendor_services SET request_only = false WHERE id = $1`, [sA]);
+    const ss2 = await call('GET', `/api/search?q=${encodeURIComponent(P)}&scope=services`);
+    const sRow2 = (ss2.body?.results ?? []).find((r: any) => r.id === sA);
+    assert(!!sRow2 && sRow2.requestOnly === undefined && typeof sRow2.price === 'number', 'search: a bookable service is unchanged', sRow2);
+    await q(`UPDATE vendor_services SET request_only = true WHERE id = $1`, [sA]);
+
+    // Follow up: Saved never carries a contact for pricing product's starting price.
+    const fav1 = await call('POST', '/api/favorites', { token: cust.token, body: { type: 'product', id: pReq } });
+    const fav2 = await call('POST', '/api/favorites', { token: cust.token, body: { type: 'product', id: pSell } });
+    const favs = await call('GET', '/api/users/me/favorites', { token: cust.token });
+    const fReq = (favs.body?.favorites ?? []).find((f: any) => f.id === pReq);
+    const fSell = (favs.body?.favorites ?? []).find((f: any) => f.id === pSell);
+    assert(fav1.status === 200 && fav2.status === 200 && fReq?.requestOnly === true && !('priceCents' in fReq) && fReq.businessId === biz, 'Saved: requestOnly, no priceCents', fReq);
+    assert(fSell?.priceCents === 4500 && fSell.requestOnly === undefined, 'Saved: a sold product keeps its price', fSell);
+
     const detail = await call('GET', `/api/products/${pReq}`);
     assert(detail.status === 200 && detail.body?.requestOnly === true, 'the product page sees requestOnly', detail.body?.requestOnly);
 
@@ -309,6 +329,7 @@ const PRICE_ON_REQUEST = 'This is priced on request. Send a request instead.';
   } finally {
     const all = [...users];
     await q(`DELETE FROM cart_items WHERE user_id = ANY($1)`, [all]).catch(() => undefined);
+    await q(`DELETE FROM user_favorites WHERE user_id = ANY($1)`, [all]).catch(() => undefined);
     await q(`DELETE FROM messages WHERE conversation_id IN (SELECT id FROM conversations WHERE participant1_id = ANY($1) OR participant2_id = ANY($1))`, [all]).catch(() => undefined);
     await q(`DELETE FROM estimate_requests WHERE customer_id = ANY($1)`, [all]).catch(() => undefined);
     await q(`DELETE FROM conversations WHERE participant1_id = ANY($1) OR participant2_id = ANY($1)`, [all]).catch(() => undefined);
