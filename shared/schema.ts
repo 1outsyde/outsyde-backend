@@ -644,7 +644,10 @@ export type EstimateRequestStatus = typeof ESTIMATE_REQUEST_STATUSES[number];
 
 export const estimateRequests = pgTable("estimate_requests", {
   id: varchar("id", { length: 36 }).primaryKey().default(sql`gen_random_uuid()`),
-  businessId: varchar("business_id", { length: 36 }).notNull().references(() => businesses.id, { onDelete: "cascade" }),
+  // Migration 108 (Request forms F2): a request is to a business OR a photographer, exactly one (database rule
+  // estimate_requests_one_owner). Business lists filter by business_id, so photographer rows never show there.
+  businessId: varchar("business_id", { length: 36 }).references(() => businesses.id, { onDelete: "cascade" }),
+  photographerId: varchar("photographer_id", { length: 36 }).references((): AnyPgColumn => photographers.id, { onDelete: "cascade" }),
   customerId: varchar("customer_id", { length: 36 }),
   serviceId: varchar("service_id", { length: 36 }),
   serviceName: text("service_name"),
@@ -665,6 +668,7 @@ export const estimateRequests = pgTable("estimate_requests", {
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 }, (table) => ({
   businessCreatedIdx: index("idx_estimate_requests_business_created").on(table.businessId, table.createdAt),
+  photographerCreatedIdx: index("idx_estimate_requests_photographer_created").on(table.photographerId, table.createdAt),
   customerIdx: index("idx_estimate_requests_customer").on(table.customerId),
 }));
 
@@ -693,7 +697,9 @@ export interface RequestAnswerShape {
 }
 export const requestForms = pgTable("request_forms", {
   id: varchar("id", { length: 36 }).primaryKey().default(sql`gen_random_uuid()`),
-  businessId: varchar("business_id", { length: 36 }).notNull().references(() => businesses.id, { onDelete: "cascade" }),
+  // Migration 108 (Request forms F2): a business's OR a photographer's library, exactly one (request_forms_one_owner).
+  businessId: varchar("business_id", { length: 36 }).references(() => businesses.id, { onDelete: "cascade" }),
+  photographerId: varchar("photographer_id", { length: 36 }).references((): AnyPgColumn => photographers.id, { onDelete: "cascade" }),
   name: text("name").notNull(),
   isBase: boolean("is_base").notNull().default(false),
   questions: jsonb("questions").$type<RequestQuestionShape[]>().notNull().default(sql`'[]'::jsonb`),
@@ -702,6 +708,7 @@ export const requestForms = pgTable("request_forms", {
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 }, (table) => ({
   businessIdx: index("idx_request_forms_business").on(table.businessId, table.isActive, table.name),
+  photographerIdx: index("idx_request_forms_photographer").on(table.photographerId, table.isActive, table.name),
 }));
 export type RequestForm = typeof requestForms.$inferSelect;
 
@@ -1347,6 +1354,11 @@ export const photographerServices = pgTable("photographer_services", {
   depositAmountCents: integer("deposit_amount_cents"),
   
   isContactForPricing: boolean("is_contact_for_pricing").default(false),
+  // Migration 108 (Request forms F2): which request form a contact for pricing service uses, same rules as
+  // vendor_services (server/requests/requestForms.ts). All defaults = nothing set, which reads as the base form.
+  requestFormId: varchar("request_form_id", { length: 36 }).references((): AnyPgColumn => requestForms.id, { onDelete: "set null" }),
+  requestFormUseBase: boolean("request_form_use_base").notNull().default(false),
+  requestQuestions: jsonb("request_questions").$type<RequestQuestionShape[]>().notNull().default(sql`'[]'::jsonb`),
   estimatedDurationMinutes: integer("estimated_duration_minutes"),
 
   isActive: boolean("is_active").default(true),
