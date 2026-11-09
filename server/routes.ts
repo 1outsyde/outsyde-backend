@@ -828,6 +828,8 @@ export async function registerRoutes(
         limit: Math.min(100, parseInt(limit as string) || 50),
         offset: parseInt(offset as string) || 0,
         isAdmin,
+        // Step P (call P3): contact for pricing products only for clients that ask (the new app).
+        includeRequestOnly: req.query.includeRequestOnly === '1' || req.query.includeRequestOnly === 'true',
       });
 
       res.json(results);
@@ -12947,8 +12949,11 @@ export async function registerRoutes(
       }
       
       const products = await storage.getVendorProducts(req.params.id);
-      // Only return active AND live products for public view
-      const liveProducts = products.filter(p => p.isActive && p.status === 'live');
+      // Only return active AND live products for public view.
+      // Step P (call P3): contact for pricing products only for clients that ask (?includeRequestOnly=1, the new
+      // app), so vendor sites, goutsyde.com and older app builds never show Add to cart on them.
+      const includeRequestOnly = req.query.includeRequestOnly === '1' || req.query.includeRequestOnly === 'true';
+      const liveProducts = products.filter(p => p.isActive && p.status === 'live' && (includeRequestOnly || p.requestOnly !== true));
       // variantSummary for storefront cards ("From $125 · 11 lengths"): null when
       // a product has no active variations. Added field only; if the lookup fails
       // the list is returned exactly as before.
@@ -13906,6 +13911,8 @@ export async function registerRoutes(
         // "Out of stock" for 0, so a no-limit product is saved with null, not 0 (2026-10-28).
         inventory: z.number().nullable().optional(),
         trackInventory: z.boolean().optional(),
+        // Step P (migration 109): contact for pricing (customers send a request; never in a cart).
+        requestOnly: z.boolean().optional(),
         isActive: z.boolean().optional(),
         isFeatured: z.boolean().optional(),
       });
@@ -13974,6 +13981,8 @@ export async function registerRoutes(
         // "Out of stock" for 0, so a no-limit product is saved with null, not 0 (2026-10-28).
         inventory: z.number().nullable().optional(),
         trackInventory: z.boolean().optional(),
+        // Step P (migration 109): contact for pricing (customers send a request; never in a cart).
+        requestOnly: z.boolean().optional(),
         isActive: z.boolean().optional(),
         isFeatured: z.boolean().optional(),
         status: z.enum(['draft', 'live', 'paused', 'archived']).optional(),
@@ -18891,6 +18900,11 @@ export async function registerRoutes(
 
       // Check stock before adding to cart
       const product = await storage.getVendorProduct(data.productId);
+      // Step P (call P4): a contact for pricing product is quoted, never added to a cart.
+      if (product?.requestOnly === true) {
+        const { PRICE_ON_REQUEST_MESSAGE } = await import('./cartPricing');
+        return res.status(400).json({ success: false, error: { code: 'PRICE_ON_REQUEST', message: PRICE_ON_REQUEST_MESSAGE } });
+      }
       if (product?.trackInventory) {
         const currentCart = await storage.getCartItems(userId);
         const existingQty = currentCart.find(i => i.productId === data.productId && i.variantId === (data.variantId ?? null))?.quantity || 0;
@@ -19089,6 +19103,11 @@ export async function registerRoutes(
         }
         if (product.status !== 'live') {
           return res.status(400).json({ success: false, error: { code: 'PRODUCT_UNAVAILABLE', message: `Product is not available: ${product.name}` } });
+        }
+        // Step P (call P4): a contact for pricing product is quoted, never bought as is.
+        if (product.requestOnly === true) {
+          const { PRICE_ON_REQUEST_MESSAGE } = await import('./cartPricing');
+          return res.status(400).json({ success: false, error: { code: 'PRICE_ON_REQUEST', message: PRICE_ON_REQUEST_MESSAGE } });
         }
         if (!product.stripePriceId) {
           return res.status(400).json({ success: false, error: { code: 'PRODUCT_NOT_READY', message: `Product is not ready for checkout: ${product.name}` } });

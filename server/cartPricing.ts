@@ -46,6 +46,9 @@ export interface PricedCartLine extends CartLineInput {
   addonsLabel?: string;
 }
 
+/** Step P: what every buying path answers for a contact for pricing product (no dashes, Legend's copy rule). */
+export const PRICE_ON_REQUEST_MESSAGE = "This is priced on request. Send a request instead.";
+
 export interface ProductRow {
   id: string;
   businessId: string;
@@ -55,6 +58,8 @@ export interface ProductRow {
   trackInventory: boolean | null;
   isActive: boolean | null;
   status: string;
+  /** Step P (migration 109): contact for pricing, never bought as is. Optional so older test rows still fit. */
+  requestOnly?: boolean | null;
 }
 
 export interface VariantRow {
@@ -81,6 +86,7 @@ export type CartPricingError = {
   code:
     | 'PRODUCT_VENDOR_MISMATCH'
     | 'PRODUCT_UNAVAILABLE'
+    | 'PRICE_ON_REQUEST'
     | 'INVALID_VARIANT'
     | 'VARIANT_REQUIRED'
     | 'INSUFFICIENT_STOCK'
@@ -133,6 +139,10 @@ export async function priceCartLines(
     }
     if (product.isActive === false || product.status !== 'live') {
       return { ok: false, error: { code: 'PRODUCT_UNAVAILABLE', message: `${product.name} is no longer available`, productId: product.id } };
+    }
+    // Step P (call P4): a contact for pricing product is quoted, never bought as is.
+    if (product.requestOnly === true) {
+      return { ok: false, error: { code: 'PRICE_ON_REQUEST', message: PRICE_ON_REQUEST_MESSAGE, productId: product.id } };
     }
 
     const variants = await deps.getActiveVariants(product.id);

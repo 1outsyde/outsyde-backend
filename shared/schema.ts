@@ -478,6 +478,13 @@ export const vendorProducts = pgTable("vendor_products", {
   stripeProductId: text("stripe_product_id"),
   stripePriceId: text("stripe_price_id"),
 
+  // Migration 109 (Request forms step P): contact for pricing products. true = customers send a request and get a
+  // deliverable quote; never added to a cart or bought as is. The price stays as a starting price, never shown.
+  requestOnly: boolean("request_only").notNull().default(false),
+  requestFormId: varchar("request_form_id", { length: 36 }).references((): AnyPgColumn => requestForms.id, { onDelete: "set null" }),
+  requestFormUseBase: boolean("request_form_use_base").notNull().default(false),
+  requestQuestions: jsonb("request_questions").$type<RequestQuestionShape[]>().notNull().default(sql`'[]'::jsonb`),
+
   ratingCount: integer("rating_count").default(0).notNull(),
   ratingAverage: integer("rating_average").default(0).notNull(),
   // stored as rating * 10 — e.g. 4.5 stars = 45
@@ -650,6 +657,9 @@ export const estimateRequests = pgTable("estimate_requests", {
   photographerId: varchar("photographer_id", { length: 36 }).references((): AnyPgColumn => photographers.id, { onDelete: "cascade" }),
   customerId: varchar("customer_id", { length: 36 }),
   serviceId: varchar("service_id", { length: 36 }),
+  // Migration 109 (step P): the product a request is for (a service OR a product, never both). service_name then
+  // holds the product's name, so every list, card and email shows it as before.
+  productId: varchar("product_id", { length: 36 }).references((): AnyPgColumn => vendorProducts.id, { onDelete: "set null" }),
   serviceName: text("service_name"),
   city: text("city"),
   customerName: text("customer_name").notNull(),

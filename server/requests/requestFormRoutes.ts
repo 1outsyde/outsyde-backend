@@ -35,6 +35,7 @@ import {
   photographers,
   photographerServices,
   requestForms,
+  vendorProducts,
   vendorServices,
   type EstimateRequest,
   type RequestForm,
@@ -42,7 +43,7 @@ import {
 import { resolveRequestPhotographer, resolveVendorBusiness } from "../estimates/estimateRequestRoutes";
 import { isServiceOfferedInCity } from "../estimates/serviceCities";
 import { checkResolvedLimits, normalizeQuestions, resolveServiceForm, type RequestQuestion } from "./requestForms";
-import { formBelongsTo, formOwnerWhere, loadFormQuestions, loadPhotographerResolvedForm, loadResolvedForm, type FormOwner } from "./serviceForm";
+import { formBelongsTo, formOwnerWhere, loadFormQuestions, loadPhotographerResolvedForm, loadProductResolvedForm, loadResolvedForm, type FormOwner } from "./serviceForm";
 import { requestablePhotographerService } from "./photographerRequests";
 
 const ADMIN_EMAILS = ["info@goutsyde.com", "jamesmeyers2304@gmail.com"];
@@ -71,6 +72,9 @@ function toCustomerJson(r: EstimateRequest, vendorName: string | null) {
     photographerId: r.photographerId ?? null,
     vendorType: r.photographerId ? "photographer" : "business",
     serviceId: r.serviceId,
+    // Step P (additive): a product request carries productId; serviceName holds the product's name.
+    productId: r.productId ?? null,
+    itemType: r.productId ? "product" : "service",
     serviceName: r.serviceName,
     city: r.city,
     preferredDate: r.preferredDate,
@@ -97,6 +101,21 @@ interface OwnerSide {
   baseUsers(owner: FormOwner): Promise<{ id: string; name: string; requestQuestions: unknown }[]>;
   /** The owner's services that use this saved form. */
   formUsers(owner: FormOwner, formId: string): Promise<{ id: string; name: string }[]>;
+  /** Step P: what the item is called in errors (default Service), and the NOT_REQUEST_ONLY message. */
+  itemNoun?: string;
+  notRequestOnlyMessage?: string;
+}
+
+/** Step P: a business's products that put the base form first with no saved form, or use a saved form. */
+async function productBaseUsers(businessId: string) {
+  return db.select({ id: vendorProducts.id, name: vendorProducts.name, requestQuestions: vendorProducts.requestQuestions, requestFormId: vendorProducts.requestFormId })
+    .from(vendorProducts)
+    .where(and(eq(vendorProducts.businessId, businessId), eq(vendorProducts.requestFormUseBase, true)))
+    .then((rows) => rows.filter((r) => !r.requestFormId));
+}
+async function productFormUsers(businessId: string, formId: string) {
+  return db.select({ id: vendorProducts.id, name: vendorProducts.name }).from(vendorProducts)
+    .where(and(eq(vendorProducts.businessId, businessId), eq(vendorProducts.requestFormId, formId)));
 }
 
 const businessSide: OwnerSide = {
@@ -114,16 +133,38 @@ const businessSide: OwnerSide = {
       .where(and(eq(vendorServices.id, id), eq(vendorServices.businessId, owner.id))).returning();
     return { id: u.id, name: u.name, requestOnly: u.requestOnly === true, requestFormId: u.requestFormId, requestFormUseBase: u.requestFormUseBase, requestQuestions: u.requestQuestions };
   },
+  // Step P: a business's library is shared by its services and its products, so both count.
   async baseUsers(owner) {
-    return db.select({ id: vendorServices.id, name: vendorServices.name, requestQuestions: vendorServices.requestQuestions, requestFormId: vendorServices.requestFormId })
+    const services = await db.select({ id: vendorServices.id, name: vendorServices.name, requestQuestions: vendorServices.requestQuestions, requestFormId: vendorServices.requestFormId })
       .from(vendorServices)
       .where(and(eq(vendorServices.businessId, owner.id), eq(vendorServices.requestFormUseBase, true)))
       .then((rows) => rows.filter((r) => !r.requestFormId));
+    return [...services, ...(await productBaseUsers(owner.id))];
   },
   async formUsers(owner, formId) {
-    return db.select({ id: vendorServices.id, name: vendorServices.name }).from(vendorServices)
+    const services = await db.select({ id: vendorServices.id, name: vendorServices.name }).from(vendorServices)
       .where(and(eq(vendorServices.businessId, owner.id), eq(vendorServices.requestFormId, formId)));
+    return [...services, ...(await productFormUsers(owner.id, formId))];
   },
+};
+
+/** Step P: a business's products, with the business's own library (form routes only; the library is businessSide). */
+const productSide: OwnerSide = {
+  resolve: businessSide.resolve,
+  async service(owner, id) {
+    const p = await storage.getVendorProduct(id);
+    if (!p || p.businessId !== owner.id) return null;
+    return { id: p.id, name: p.name, requestOnly: p.requestOnly === true, requestFormId: p.requestFormId, requestFormUseBase: p.requestFormUseBase, requestQuestions: p.requestQuestions };
+  },
+  async saveService(owner, id, set) {
+    const [u] = await db.update(vendorProducts).set(set as any)
+      .where(and(eq(vendorProducts.id, id), eq(vendorProducts.businessId, owner.id))).returning();
+    return { id: u.id, name: u.name, requestOnly: u.requestOnly === true, requestFormId: u.requestFormId, requestFormUseBase: u.requestFormUseBase, requestQuestions: u.requestQuestions };
+  },
+  baseUsers: businessSide.baseUsers,
+  formUsers: businessSide.formUsers,
+  itemNoun: "Product",
+  notRequestOnlyMessage: "Only contact for pricing products use a request form.",
 };
 
 const photographerSide: OwnerSide = {
@@ -266,6 +307,7 @@ function registerLibrary(app: Express, side: OwnerSide, formsPath: string, servi
           eq(requestForms.id, form.id),
           sql`NOT EXISTS (SELECT 1 FROM vendor_services s WHERE s.request_form_id = ${form.id})`,
           sql`NOT EXISTS (SELECT 1 FROM photographer_services p WHERE p.request_form_id = ${form.id})`,
+          sql`NOT EXISTS (SELECT 1 FROM vendor_products vp WHERE vp.request_form_id = ${form.id})`,
         ))
         .returning({ id: requestForms.id });
       if (removed.length === 0) {
@@ -278,13 +320,21 @@ function registerLibrary(app: Express, side: OwnerSide, formsPath: string, servi
     }
   });
 
-  // ── Service form settings ────────────────────────────────────────────────────────────────────────────────
-  app.get(`${servicesPath}/:id/request-form`, async (req, res) => {
+  registerItemFormRoutes(app, side, servicesPath);
+}
+
+/**
+ * A service's (or, step P, a product's) form settings: GET and PUT `${itemsPath}/:id/request-form`. The item must be
+ * the owner's and (for PUT) contact for pricing.
+ */
+function registerItemFormRoutes(app: Express, side: OwnerSide, itemsPath: string): void {
+  const noun = side.itemNoun ?? "Service";
+  app.get(`${itemsPath}/:id/request-form`, async (req, res) => {
     try {
       const owner = await side.resolve(req, res);
       if (!owner) return;
       const svc = await side.service(owner, req.params.id);
-      if (!svc) return res.status(404).json({ error: "Service not found" });
+      if (!svc) return res.status(404).json({ error: `${noun} not found` });
       return res.json({ settings: settingsJson(svc), resolved: await loadFormQuestions(owner, svc) });
     } catch (err) {
       console.error("[request-forms] service settings failed:", err);
@@ -292,14 +342,14 @@ function registerLibrary(app: Express, side: OwnerSide, formsPath: string, servi
     }
   });
 
-  app.put(`${servicesPath}/:id/request-form`, async (req, res) => {
+  app.put(`${itemsPath}/:id/request-form`, async (req, res) => {
     try {
       const owner = await side.resolve(req, res);
       if (!owner) return;
       const svc = await side.service(owner, req.params.id);
-      if (!svc) return res.status(404).json({ error: "Service not found" });
+      if (!svc) return res.status(404).json({ error: `${noun} not found` });
       if (svc.requestOnly !== true) {
-        return res.status(400).json({ code: "NOT_REQUEST_ONLY", message: "Only request only services use a request form." });
+        return res.status(400).json({ code: "NOT_REQUEST_ONLY", message: side.notRequestOnlyMessage ?? "Only request only services use a request form." });
       }
       const formId = req.body?.formId ?? null;
       const useBase = req.body?.useBase === true;
@@ -338,6 +388,8 @@ function registerLibrary(app: Express, side: OwnerSide, formsPath: string, servi
 export function registerRequestFormRoutes(app: Express): void {
   registerLibrary(app, businessSide, "/api/vendor/request-forms", "/api/vendor/services");
   registerLibrary(app, photographerSide, "/api/photographers/me/request-forms", "/api/photographers/me/services");
+  // Step P: products use the business's library.
+  registerItemFormRoutes(app, productSide, "/api/vendor/products");
 
   // ── Customer side ────────────────────────────────────────────────────────────────────────────────────────
   app.get("/api/services/:id/request-form", async (req, res) => {
@@ -382,6 +434,32 @@ export function registerRequestFormRoutes(app: Express): void {
       });
     } catch (err) {
       console.error("[request-forms] public photographer form failed:", err);
+      return res.status(500).json({ error: "Failed to load the form" });
+    }
+  });
+
+  // Step P: a business's contact for pricing product (a deliverable). Same answer as a service's form.
+  app.get("/api/products/:id/request-form", async (req, res) => {
+    try {
+      const p = await storage.getVendorProduct(req.params.id);
+      if (!p || p.status !== "live" || p.isActive !== true || p.requestOnly !== true) {
+        return res.status(404).json({ error: "This product doesn't take requests" });
+      }
+      const business = await storage.getBusiness(p.businessId);
+      if (!business) return res.status(404).json({ error: "This product doesn't take requests" });
+      return res.json({
+        service: { id: p.id, name: p.name, description: p.description, price: null },
+        product: { id: p.id, name: p.name, description: p.description },
+        itemType: "product",
+        business: { id: business.id, name: business.name.trim() },
+        // Products have no city list of their own: every city of the business (the send needs one when it has a list).
+        cities: business.serviceCities ?? [],
+        cityRequired: (business.serviceCities ?? []).length > 0,
+        phoneRequired: true,
+        questions: await loadProductResolvedForm(p),
+      });
+    } catch (err) {
+      console.error("[request-forms] public product form failed:", err);
       return res.status(500).json({ error: "Failed to load the form" });
     }
   });

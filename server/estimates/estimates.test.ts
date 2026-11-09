@@ -63,7 +63,20 @@ assert(pe.text.includes('Extras: Second shooter, Album') && pe.text.includes('Wh
 assert(pe.html.includes('under Requests'), 'footer points to Requests in the app');
 assert(!/[–—]| - /.test(pe.text) && !/[–—]/.test(pe.html), 'no dashes (copy rule)', pe.text);
 
-assert(escapeHtml(`<a href="x">'&`) === '&lt;a href=&quot;x&quot;&gt;&#x27;&amp;', 'escapeHtml');
+console.log('\n── product request email (Request forms step P, call P5) ──');
+const prodEmail = buildEstimateRequestEmail({
+  businessName: 'Sweet Layers',
+  itemLabel: 'Product',
+  request: {
+    customerName: 'Tasha M.', customerEmail: 't@x.test', customerPhone: '516 555 0142', city: null,
+    serviceName: 'Custom cake', preferredDate: null, details: {},
+  },
+});
+assert(prodEmail.html.includes('>Product<') && !prodEmail.html.includes('>Service<') && prodEmail.html.includes('Custom cake'), 'a product request row reads Product');
+assert(prodEmail.text.includes('Product: Custom cake') && !prodEmail.text.includes('Service:'), 'the text version reads Product too', prodEmail.text);
+assert(!/[–—]| - /.test(prodEmail.text) && !/[–—]/.test(prodEmail.html), 'no dashes (copy rule)', prodEmail.text);
+
+assert(escapeHtml(`<a href="x">'&`) ==='&lt;a href=&quot;x&quot;&gt;&#x27;&amp;', 'escapeHtml');
 
 console.log(`\n${passed} passed, ${failed} failed\n`);
 process.exit(failed > 0 ? 1 : 0);

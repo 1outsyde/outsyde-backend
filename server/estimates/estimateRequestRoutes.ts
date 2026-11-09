@@ -29,7 +29,7 @@ import { sendAdminEmail, ADMIN_NOTIFICATION_EMAIL } from "../emailService";
 import { buildEstimateRequestEmail } from "./estimateEmail";
 import { cleanCityName, isBusinessCity, isServiceOfferedInCity } from "./serviceCities";
 import { checkAnswers, requestMessageText } from "../requests/requestForms";
-import { loadPhotographerResolvedForm, loadResolvedForm } from "../requests/serviceForm";
+import { loadPhotographerResolvedForm, loadProductResolvedForm, loadResolvedForm } from "../requests/serviceForm";
 import { requestablePhotographer } from "../requests/photographerRequests";
 
 const ADMIN_EMAILS = ["info@goutsyde.com", "jamesmeyers2304@gmail.com"];
@@ -42,6 +42,8 @@ const submitSchema = z.object({
   businessId: z.string().min(1).max(64).optional(),
   photographerId: z.string().min(1).max(64).optional(),
   serviceId: z.string().min(1).max(64).nullable().optional(),
+  // Step P (migration 109): a business's contact for pricing product instead of a service (never both).
+  productId: z.string().min(1).max(64).nullable().optional(),
   // Required when the business has a city list (Royal Elite); optional otherwise (migration 096).
   city: z.preprocess((v) => (typeof v === "string" && v.trim() === "" ? null : v), z.string().trim().min(1).max(60).nullable().optional()),
   name: z.string().trim().min(1).max(120),
@@ -122,6 +124,9 @@ function toVendorJson(r: EstimateRequest) {
     id: r.id,
     status: r.status,
     serviceId: r.serviceId,
+    // Step P (additive): set on a product request; serviceName then holds the product's name.
+    productId: r.productId ?? null,
+    itemType: r.productId ? "product" : "service",
     serviceName: r.serviceName,
     city: r.city,
     customerName: r.customerName,
@@ -166,6 +171,8 @@ async function postRequestCard(
       // F2 (additive): set when the request is to a photographer.
       photographerId: saved.photographerId ?? null,
       serviceId: saved.serviceId,
+      // Step P (additive): the product a request is for (Send a quote starts a deliverable).
+      productId: saved.productId ?? null,
       serviceName: saved.serviceName,
       preferredDate: saved.preferredDate,
       city: saved.city,
@@ -238,7 +245,7 @@ export function registerEstimateRequestRoutes(app: Express): void {
         return res.status(400).json({ success: false, message: "Please check the form and try again.", details: parsed.error.errors });
       }
       const input = parsed.data;
-      if (!!input.businessId === !!input.photographerId) {
+      if (!!input.businessId === !!input.photographerId || (input.serviceId && input.productId) || (input.productId && !input.businessId)) {
         return res.status(400).json({ success: false, message: "Please check the form and try again." });
       }
       try {
@@ -266,6 +273,7 @@ export function registerEstimateRequestRoutes(app: Express): void {
         }
 
         let serviceId: string | null = null;
+        let productId: string | null = null;
         let serviceName: string | null = null;
         let questions: Awaited<ReturnType<typeof loadResolvedForm>> = [];
         if (input.serviceId && vendor.kind === "business") {
@@ -281,6 +289,15 @@ export function registerEstimateRequestRoutes(app: Express): void {
           serviceName = svc.name;
           // Request form answers: checked against the service's form; a service with no form takes none.
           questions = await loadResolvedForm(svc);
+        } else if (input.productId) {
+          // Step P: only the business's own live, active contact for pricing products take requests.
+          const p = await storage.getVendorProduct(input.productId);
+          if (!p || p.businessId !== vendor.id || p.status !== "live" || p.isActive !== true || p.requestOnly !== true) {
+            return res.status(400).json({ success: false, field: "productId", message: "That product isn't taking requests. Please choose another." });
+          }
+          productId = p.id;
+          serviceName = p.name;
+          questions = await loadProductResolvedForm(p);
         } else if (input.serviceId) {
           // F2: only the photographer's own live, active contact for pricing services take requests.
           const svc = await storage.getPhotographerService(input.serviceId);
@@ -310,6 +327,7 @@ export function registerEstimateRequestRoutes(app: Express): void {
             photographerId: vendor.kind === "photographer" ? vendor.id : null,
             customerId: (req as any).estimateUserId,
             serviceId,
+            productId,
             serviceName,
             city,
             customerName: input.name,
@@ -332,7 +350,7 @@ export function registerEstimateRequestRoutes(app: Express): void {
         }
 
         // Emails never decide the answer: the request is saved, so the vendor sees it either way.
-        const email = buildEstimateRequestEmail({ businessName: vendor.name, request: saved });
+        const email = buildEstimateRequestEmail({ businessName: vendor.name, request: saved, itemLabel: productId ? "Product" : "Service" });
         const owner = vendor.ownerId ? await storage.getUser(vendor.ownerId) : undefined;
         const sends: Promise<boolean>[] = [];
         if (owner?.email) {
