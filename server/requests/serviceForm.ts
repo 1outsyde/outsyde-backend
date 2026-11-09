@@ -7,7 +7,7 @@
  */
 import { and, eq } from "drizzle-orm";
 import { db } from "../db";
-import { requestForms, type PhotographerService, type VendorService } from "@shared/schema";
+import { requestForms, type PhotographerService, type VendorProduct, type VendorService } from "@shared/schema";
 import { resolveServiceForm, type RequestQuestion } from "./requestForms";
 
 /** Whose library a form or request belongs to. */
@@ -58,4 +58,9 @@ export async function loadResolvedForm(service: Pick<VendorService, "businessId"
 /** A photographer service's questions (migration 108). */
 export async function loadPhotographerResolvedForm(service: Pick<PhotographerService, "photographerId" | "requestFormId" | "requestFormUseBase" | "requestQuestions">): Promise<RequestQuestion[]> {
   return loadFormQuestions({ kind: "photographer", id: service.photographerId }, service);
+}
+
+/** A business product's questions (Request forms step P, migration 109): the business's library, same rules. */
+export async function loadProductResolvedForm(product: Pick<VendorProduct, "businessId" | "requestFormId" | "requestFormUseBase" | "requestQuestions">): Promise<RequestQuestion[]> {
+  return loadFormQuestions({ kind: "business", id: product.businessId }, product);
 }

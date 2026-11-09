@@ -948,6 +948,8 @@ export interface UnifiedSearchParams {
   limit: number;
   offset: number;
   isAdmin: boolean;
+  /** Step P: include contact for pricing products (only clients that understand them ask). */
+  includeRequestOnly?: boolean;
 }
 
 export interface UnifiedSearchResult {
@@ -977,6 +979,8 @@ export interface UnifiedSearchResult {
   providerName?: string | null;
   providerType?: 'photographer' | 'business' | null;
   isFeatured?: boolean | null;
+  /** Step P: a contact for pricing product (only returned with includeRequestOnly). */
+  requestOnly?: boolean;
 }
 
 export interface UnifiedSearchResponse {
@@ -3195,7 +3199,9 @@ export class DatabaseStorage implements IStorage {
         .where(and(
           eq(vendorProducts.businessId, business.id),
           eq(vendorProducts.isActive, true),
-          eq(vendorProducts.status, 'live')
+          eq(vendorProducts.status, 'live'),
+          // Step P: contact for pricing products stay out of the search index (it has no way to ask).
+          eq(vendorProducts.requestOnly, false)
         ));
       for (const product of products) {
         await this.upsertSearchIndexEntry({
@@ -3323,6 +3329,9 @@ export class DatabaseStorage implements IStorage {
     const { query, city, category, entityTypes, userLatitude, userLongitude, userPreferences, limit = 50, offset = 0, isAdmin = false } = params;
     
     let conditions: any[] = [eq(searchIndex.isActive, true)];
+    // Step P: a product switched to contact for pricing after the index was built is left out at read time
+    // (the index is only rebuilt by an admin), so this older search never shows it with a price.
+    conditions.push(sql`NOT (${searchIndex.entityType} = 'product' AND EXISTS (SELECT 1 FROM vendor_products vp WHERE vp.id = ${searchIndex.entityId} AND vp.request_only = true))`);
     
     // Hide demo data from non-admin users
     if (!isAdmin) {
@@ -4710,6 +4719,8 @@ export class DatabaseStorage implements IStorage {
       tags: data.tags ?? undefined,
       stripeProductId: data.stripeProductId ?? undefined,
       stripePriceId: data.stripePriceId ?? undefined,
+      // Step P: contact for pricing; undefined leaves the column default (false).
+      requestOnly: data.requestOnly ?? undefined,
     };
     const [product] = await db.insert(vendorProducts).values(insertData).returning();
     return product;
@@ -6547,6 +6558,8 @@ export class DatabaseStorage implements IStorage {
           and(
             eq(vendorProducts.status, 'live'),
             eq(vendorProducts.isActive, true),
+            // Step P (call P3): contact for pricing products only when the client asks (the new app).
+            params.includeRequestOnly ? undefined : eq(vendorProducts.requestOnly, false),
             or(
               ilike(vendorProducts.name, likePattern),
               ilike(vendorProducts.description, likePattern),
@@ -6605,6 +6618,8 @@ export class DatabaseStorage implements IStorage {
           businessName: row.bName || null,
           productImage: row.p.imageUrl || null,
           isFeatured: row.isFeatured ?? null,
+          // Step P (additive, only with includeRequestOnly): the app shows Price on request.
+          ...(row.p.requestOnly ? { requestOnly: true } : {}),
           baseScore,
           personalizationScore,
         });

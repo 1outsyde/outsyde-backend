@@ -47,6 +47,8 @@ function row(label: string, value: string, odd: boolean): string {
 /** The email both the business and Outsyde receive. Plain words, no dashes (Legend's copy rule). */
 export function buildEstimateRequestEmail(p: {
   businessName: string;
+  /** Step P: the label of the item row (Product for a product request). Default Service. */
+  itemLabel?: "Service" | "Product";
   request: Pick<EstimateRequest, "customerName" | "customerEmail" | "customerPhone" | "city" | "serviceName" | "preferredDate" | "details"> & {
     /** Request form answers (migration 096), shown after the fields above, in form order. */
     answers?: RequestAnswerShape[] | null;
@@ -58,7 +60,7 @@ export function buildEstimateRequestEmail(p: {
     ["Phone", r.customerPhone],
     ["Email", r.customerEmail],
     ["City", r.city ?? ""],
-    ["Service", r.serviceName ?? "Not chosen"],
+    [p.itemLabel ?? "Service", r.serviceName ?? "Not chosen"],
     ["Preferred date", r.preferredDate ?? ""],
   ];
   const details = r.details ?? {};
