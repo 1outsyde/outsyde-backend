@@ -176,11 +176,11 @@ async function call(method: string, path: string, o: { token?: string; body?: un
     photogs.push(pid);
     return pid;
   };
-  const mkPhotogSvc = async (key: string, pid: string, o: { status?: string; isActive?: boolean } = {}) => {
+  const mkPhotogSvc = async (key: string, pid: string, o: { status?: string; isActive?: boolean; contactForPricing?: boolean } = {}) => {
     const sid = id(key);
     await q(`INSERT INTO photographer_services (id, photographer_id, name, price_cents, estimated_duration_minutes, is_active, status, pricing_model, is_contact_for_pricing, created_at)
-             VALUES ($1, $2, $3, 7000, 30, $4, $5, 'package', false, now())`,
-      [sid, pid, `Shoot ${key}`, o.isActive ?? true, o.status ?? 'live']);
+             VALUES ($1, $2, $3, $6, 30, $4, $5, 'package', $7, now())`,
+      [sid, pid, `Shoot ${key}`, o.isActive ?? true, o.status ?? 'live', o.contactForPricing ? null : 7000, o.contactForPricing ?? false]);
     return sid;
   };
 
@@ -240,6 +240,7 @@ async function call(method: string, path: string, o: { token?: string; body?: un
   const pLivePay = await mkPhotogSvc('p-livepay', ph);
   const pDraft = await mkPhotogSvc('p-draft', ph, { status: 'draft' });
   const pInactive = await mkPhotogSvc('p-inactive', ph, { isActive: false });
+  const pCfp = await mkPhotogSvc('p-cfp', ph, { contactForPricing: true });
   const ph2 = await mkPhotog('ph2');
   const pOther = await mkPhotogSvc('p-other', ph2);
 
@@ -307,6 +308,11 @@ async function call(method: string, path: string, o: { token?: string; body?: un
     assert(refused(r), 'draft photographer service → refused', r);
     r = await hold({ providerType: 'photographer', providerId: ph, serviceId: pInactive });
     assert(refused(r), 'inactive photographer service → refused', r);
+    // Request forms F2 (call 6): contact for pricing photographer services take requests, never holds.
+    r = await hold({ providerType: 'photographer', providerId: ph, serviceId: pCfp });
+    assert(refused(r), 'contact for pricing photographer service → refused (was a $0 hold)', r);
+    r = await validate({ providerType: 'photographer', providerId: ph, serviceId: pCfp });
+    assert(refused(r) && r.body?.valid === false, 'validate: contact for pricing photographer service → SERVICE_UNAVAILABLE', r);
 
     console.log('\n── 6. POST /api/booking/validate uses the same rule ──');
     r = await validate({ providerType: 'business', providerId: bizA, serviceId: sLive });

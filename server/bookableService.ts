@@ -61,7 +61,8 @@ export async function lookupBookableService(
   if (providerType === "photographer") {
     const [svc] = await db.select().from(photographerServices).where(eq(photographerServices.id, serviceId));
     if (!svc) return NOT_FOUND;
-    if (!ownsService(svc.photographerId, providerId) || !isServiceBookable(svc)) return UNAVAILABLE;
+    // Request forms F2 (call 6): a contact for pricing photographer service takes requests, never holds.
+    if (!ownsService(svc.photographerId, providerId) || !isServiceBookable({ ...svc, requestOnly: svc.isContactForPricing === true })) return UNAVAILABLE;
     return { ok: true, kind: "photographer", service: svc };
   }
 

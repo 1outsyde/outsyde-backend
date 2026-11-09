@@ -9,6 +9,10 @@
  *   POST  /api/estimate-requests                 signed in customer (Bearer or session), 5 per hour per account
  *   GET   /api/vendor/estimate-requests          business owner, or platform admin with x-business-id
  *   PATCH /api/vendor/estimate-requests/:id      same; changes status and / or vendor notes only
+ *   GET   /api/photographers/me/requests         the signed in photographer's requests (Request forms F2, migration 108)
+ *   PATCH /api/photographers/me/requests/:id     same; status and / or vendor notes
+ *
+ * A request goes to a business (businessId) or a photographer (photographerId), exactly one (F2, call 7).
  *
  * Sign in is required (Legend 2026-10-02 and 2026-10-22): vendor sites post through their own server, so
  * per IP limits would see one address for everyone; per account limits do not.
@@ -25,14 +29,18 @@ import { sendAdminEmail, ADMIN_NOTIFICATION_EMAIL } from "../emailService";
 import { buildEstimateRequestEmail } from "./estimateEmail";
 import { cleanCityName, isBusinessCity, isServiceOfferedInCity } from "./serviceCities";
 import { checkAnswers, requestMessageText } from "../requests/requestForms";
-import { loadResolvedForm } from "../requests/serviceForm";
+import { loadPhotographerResolvedForm, loadResolvedForm } from "../requests/serviceForm";
+import { requestablePhotographer } from "../requests/photographerRequests";
 
 const ADMIN_EMAILS = ["info@goutsyde.com", "jamesmeyers2304@gmail.com"];
 const MAX_DETAIL_KEYS = 20;
 const MAX_DETAIL_VALUE = 2000;
 
 const submitSchema = z.object({
-  businessId: z.string().min(1).max(64),
+  // Exactly one of businessId or photographerId (Request forms F2, call 7). A site's server that sets its own
+  // businessId can't be pointed at a photographer: both together are refused.
+  businessId: z.string().min(1).max(64).optional(),
+  photographerId: z.string().min(1).max(64).optional(),
   serviceId: z.string().min(1).max(64).nullable().optional(),
   // Required when the business has a city list (Royal Elite); optional otherwise (migration 096).
   city: z.preprocess((v) => (typeof v === "string" && v.trim() === "" ? null : v), z.string().trim().min(1).max(60).nullable().optional()),
@@ -84,6 +92,31 @@ export async function resolveVendorBusiness(req: Request, res: Response): Promis
   return { business };
 }
 
+type PhotographerOwner = { photographer: NonNullable<Awaited<ReturnType<typeof storage.getPhotographerByUserId>>> };
+
+/**
+ * The signed in photographer (Request forms F2, migration 108): their own forms, services and requests only.
+ * No admin override yet (call 10); admins read any request through GET /api/requests/:id.
+ */
+export async function resolveRequestPhotographer(req: Request, res: Response): Promise<PhotographerOwner | null> {
+  const userId = (req.session as any)?.userId || getUserIdFromRequest(req);
+  if (!userId) {
+    res.status(401).json({ error: "Not authenticated" });
+    return null;
+  }
+  const user = await storage.getUser(userId);
+  if (!user || user.isActive === false) {
+    res.status(401).json({ error: "Not authenticated" });
+    return null;
+  }
+  const photographer = user.isPhotographer ? await storage.getPhotographerByUserId(userId) : undefined;
+  if (!photographer) {
+    res.status(404).json({ error: "No photographer profile found" });
+    return null;
+  }
+  return { photographer };
+}
+
 function toVendorJson(r: EstimateRequest) {
   return {
     id: r.id,
@@ -113,10 +146,10 @@ function toVendorJson(r: EstimateRequest) {
  */
 async function postRequestCard(
   saved: EstimateRequest,
-  business: NonNullable<Awaited<ReturnType<typeof storage.getBusiness>>>,
+  // The person who answers: the business owner, or the photographer's own login (F2).
+  ownerId: string | null,
 ): Promise<string | null> {
   const customerId = saved.customerId;
-  const ownerId = business.ownerId;
   if (!customerId || !ownerId || customerId === ownerId) return null;
   if (await storage.isUserBlockedEitherWay(customerId, ownerId)) return null;
   const conversation = await storage.getOrCreateConversation(customerId, ownerId);
@@ -129,7 +162,9 @@ async function postRequestCard(
     card: {
       type: "request",
       requestId: saved.id,
-      businessId: saved.businessId,
+      businessId: saved.businessId ?? null,
+      // F2 (additive): set when the request is to a photographer.
+      photographerId: saved.photographerId ?? null,
       serviceId: saved.serviceId,
       serviceName: saved.serviceName,
       preferredDate: saved.preferredDate,
@@ -203,26 +238,40 @@ export function registerEstimateRequestRoutes(app: Express): void {
         return res.status(400).json({ success: false, message: "Please check the form and try again.", details: parsed.error.errors });
       }
       const input = parsed.data;
+      if (!!input.businessId === !!input.photographerId) {
+        return res.status(400).json({ success: false, message: "Please check the form and try again." });
+      }
       try {
-        const business = await storage.getBusiness(input.businessId);
-        if (!business) return res.status(404).json({ success: false, message: "Business not found." });
+        // Who the request is to: a business (as before) or a photographer (F2). Same checks, form rules, card,
+        // push and email for both; only where the questions and the name come from differ.
+        let vendor: { kind: "business" | "photographer"; id: string; name: string; ownerId: string | null; cityList: string[] };
+        if (input.businessId) {
+          const business = await storage.getBusiness(input.businessId);
+          if (!business) return res.status(404).json({ success: false, message: "Business not found." });
+          vendor = { kind: "business", id: business.id, name: business.name, ownerId: business.ownerId ?? null, cityList: business.serviceCities ?? [] };
+        } else {
+          const photographer = await requestablePhotographer(input.photographerId!);
+          if (!photographer) return res.status(404).json({ success: false, message: "Photographer not found." });
+          vendor = { kind: "photographer", id: photographer.id, name: photographer.displayName, ownerId: photographer.userId, cityList: [] };
+        }
 
-        const hasCityList = (business.serviceCities ?? []).length > 0;
+        const hasCityList = vendor.cityList.length > 0;
         const city = input.city ? cleanCityName(input.city) : null;
         if (hasCityList && !city) {
           return res.status(400).json({ success: false, field: "city", message: "Please choose your city." });
         }
-        if (city && !isBusinessCity(business.serviceCities, city)) {
+        // An empty list (photographers have none) accepts any city, as before for businesses.
+        if (city && !isBusinessCity(vendor.cityList, city)) {
           return res.status(400).json({ success: false, field: "city", message: "This business doesn't serve that city yet." });
         }
 
         let serviceId: string | null = null;
         let serviceName: string | null = null;
-        let service: Awaited<ReturnType<typeof storage.getVendorService>> | null = null;
-        if (input.serviceId) {
+        let questions: Awaited<ReturnType<typeof loadResolvedForm>> = [];
+        if (input.serviceId && vendor.kind === "business") {
           const svc = await storage.getVendorService(input.serviceId);
           // Only request only services take requests (Legend 2026-11-04); bookable services are booked.
-          if (!svc || svc.businessId !== business.id || svc.status !== "live" || svc.isActive !== true || svc.requestOnly !== true) {
+          if (!svc || svc.businessId !== vendor.id || svc.status !== "live" || svc.isActive !== true || svc.requestOnly !== true) {
             return res.status(400).json({ success: false, field: "serviceId", message: "That plan isn't available. Please choose another." });
           }
           if (city && !isServiceOfferedInCity(svc.serviceCities, city)) {
@@ -230,11 +279,19 @@ export function registerEstimateRequestRoutes(app: Express): void {
           }
           serviceId = svc.id;
           serviceName = svc.name;
-          service = svc;
+          // Request form answers: checked against the service's form; a service with no form takes none.
+          questions = await loadResolvedForm(svc);
+        } else if (input.serviceId) {
+          // F2: only the photographer's own live, active contact for pricing services take requests.
+          const svc = await storage.getPhotographerService(input.serviceId);
+          if (!svc || svc.photographerId !== vendor.id || svc.status !== "live" || svc.isActive !== true || svc.isContactForPricing !== true) {
+            return res.status(400).json({ success: false, field: "serviceId", message: "That service isn't available. Please choose another." });
+          }
+          serviceId = svc.id;
+          serviceName = svc.name;
+          questions = await loadPhotographerResolvedForm(svc);
         }
 
-        // Request form answers: checked against the service's form; a service with no form takes none.
-        const questions = service ? await loadResolvedForm(service) : [];
         const checked = checkAnswers(questions, input.answers ?? {}, process.env.R2_PUBLIC_URL);
         if (!checked.ok) {
           return res.status(400).json({ success: false, field: checked.field ?? "answers", message: checked.message });
@@ -249,7 +306,8 @@ export function registerEstimateRequestRoutes(app: Express): void {
         const [saved] = await db
           .insert(estimateRequests)
           .values({
-            businessId: business.id,
+            businessId: vendor.kind === "business" ? vendor.id : null,
+            photographerId: vendor.kind === "photographer" ? vendor.id : null,
             customerId: (req as any).estimateUserId,
             serviceId,
             serviceName,
@@ -264,18 +322,18 @@ export function registerEstimateRequestRoutes(app: Express): void {
           })
           .returning();
 
-        // The request opens (or continues) a chat with the business owner, with a request card from the
-        // customer. Never decides the answer: the request is saved either way (Legend 2026-11-04).
+        // The request opens (or continues) a chat with the business owner or the photographer, with a request
+        // card from the customer. Never decides the answer: the request is saved either way (Legend 2026-11-04).
         let conversationId: string | null = null;
         try {
-          conversationId = await postRequestCard(saved, business);
+          conversationId = await postRequestCard(saved, vendor.ownerId);
         } catch (err) {
           console.error(`[estimate-requests] request card failed for ${saved.id}:`, err);
         }
 
-        // Emails never decide the answer: the request is saved, so the business sees it either way.
-        const email = buildEstimateRequestEmail({ businessName: business.name, request: saved });
-        const owner = business.ownerId ? await storage.getUser(business.ownerId) : undefined;
+        // Emails never decide the answer: the request is saved, so the vendor sees it either way.
+        const email = buildEstimateRequestEmail({ businessName: vendor.name, request: saved });
+        const owner = vendor.ownerId ? await storage.getUser(vendor.ownerId) : undefined;
         const sends: Promise<boolean>[] = [];
         if (owner?.email) {
           sends.push(sendAdminEmail({
@@ -287,12 +345,12 @@ export function registerEstimateRequestRoutes(app: Express): void {
             log: { kind: "booking", label: "Estimate request" },
           }));
         } else {
-          console.error(`[estimate-requests] business ${business.id} has no owner email; only Outsyde is emailed`);
+          console.error(`[estimate-requests] ${vendor.kind} ${vendor.id} has no owner email; only Outsyde is emailed`);
         }
         if (!owner?.email || owner.email.toLowerCase() !== ADMIN_NOTIFICATION_EMAIL.toLowerCase()) {
           sends.push(sendAdminEmail({
             to: ADMIN_NOTIFICATION_EMAIL,
-            subject: `${email.subject} (${business.name.trim()})`,
+            subject: `${email.subject} (${vendor.name.trim()})`,
             html: email.html,
             text: email.text,
             replyTo: saved.customerEmail,
@@ -352,6 +410,51 @@ export function registerEstimateRequestRoutes(app: Express): void {
     } catch (err) {
       console.error("[estimate-requests] update failed:", err);
       return res.status(500).json({ error: "Failed to update estimate request" });
+    }
+  });
+
+  // ── Photographers (Request forms F2): the same list and status change, for the signed in photographer ──────
+  app.get("/api/photographers/me/requests", async (req, res) => {
+    try {
+      const me = await resolveRequestPhotographer(req, res);
+      if (!me) return;
+      const status = typeof req.query.status === "string" ? req.query.status : undefined;
+      if (status && !(ESTIMATE_REQUEST_STATUSES as readonly string[]).includes(status)) {
+        return res.status(400).json({ error: "Unknown status" });
+      }
+      const where = status
+        ? and(eq(estimateRequests.photographerId, me.photographer.id), eq(estimateRequests.status, status as EstimateRequest["status"]))
+        : eq(estimateRequests.photographerId, me.photographer.id);
+      const rows = await db.select().from(estimateRequests).where(where).orderBy(desc(estimateRequests.createdAt)).limit(500);
+      return res.json({ requests: rows.map(toVendorJson) });
+    } catch (err) {
+      console.error("[estimate-requests] photographer list failed:", err);
+      return res.status(500).json({ error: "Failed to load requests" });
+    }
+  });
+
+  app.patch("/api/photographers/me/requests/:id", async (req, res) => {
+    try {
+      const me = await resolveRequestPhotographer(req, res);
+      if (!me) return;
+      const parsed = updateSchema.safeParse(req.body);
+      if (!parsed.success) return res.status(400).json({ error: "Invalid data", details: parsed.error.errors });
+      const [existing] = await db.select().from(estimateRequests).where(eq(estimateRequests.id, req.params.id));
+      if (!existing || existing.photographerId !== me.photographer.id) {
+        return res.status(404).json({ error: "Request not found" });
+      }
+      const set: Partial<EstimateRequest> = { updatedAt: new Date() };
+      if (parsed.data.status !== undefined) set.status = parsed.data.status;
+      if (parsed.data.vendorNotes !== undefined) set.vendorNotes = parsed.data.vendorNotes?.trim() || null;
+      const [updated] = await db
+        .update(estimateRequests)
+        .set(set)
+        .where(and(eq(estimateRequests.id, existing.id), eq(estimateRequests.photographerId, me.photographer.id)))
+        .returning();
+      return res.json({ request: toVendorJson(updated) });
+    } catch (err) {
+      console.error("[estimate-requests] photographer update failed:", err);
+      return res.status(500).json({ error: "Failed to update the request" });
     }
   });
 }
