@@ -22,7 +22,7 @@ function assert(condition: boolean, name: string, detail?: unknown) {
 
   const result = await createMuxUploadUrl();
   assert(result.uploadId === "up_123" && result.uploadUrl === "https://storage.example/upload", "returns the upload id and url", result);
-  assert(sent?.timeout === 21600, "upload link lasts 6 hours (21600 s)", sent);
+  assert(sent?.timeout === 86400, "upload link lasts 24 hours (86400 s)", sent);
   assert(MUX_UPLOAD_TIMEOUT_SECONDS >= 60 && MUX_UPLOAD_TIMEOUT_SECONDS <= 604800, "inside Mux's allowed range");
   assert(sent?.cors_origin === "*", "cors_origin unchanged", sent);
   assert(
