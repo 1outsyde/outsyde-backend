@@ -438,6 +438,8 @@ export const businesses = pgTable("businesses", {
 
   // Cities this business serves (migration 068). Shown on its site's estimate form.
   serviceCities: text("service_cities").array().notNull().default(sql`'{}'::text[]`),
+  // Extra people emailed on every estimate request (migration 111). Private: never in toPublicBusinessDTO.
+  requestNotifyEmails: text("request_notify_emails").array().notNull().default(sql`'{}'::text[]`),
 
   createdAt: timestamp("created_at").defaultNow().notNull(),
 }, (table) => ({
