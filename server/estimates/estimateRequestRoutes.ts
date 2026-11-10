@@ -24,8 +24,9 @@ import { and, desc, eq } from "drizzle-orm";
 import { db } from "../db";
 import { storage } from "../storage";
 import { getUserIdFromRequest } from "../auth";
-import { estimateRequests, ESTIMATE_REQUEST_STATUSES, type EstimateRequest } from "@shared/schema";
+import { businesses, estimateRequests, ESTIMATE_REQUEST_STATUSES, type EstimateRequest } from "@shared/schema";
 import { sendAdminEmail, ADMIN_NOTIFICATION_EMAIL } from "../emailService";
+import { cleanRecipients, extraRecipientsFor } from "./requestRecipients";
 import { buildEstimateRequestEmail } from "./estimateEmail";
 import { cleanCityName, isBusinessCity, isServiceOfferedInCity } from "./serviceCities";
 import { checkAnswers, requestMessageText } from "../requests/requestForms";
@@ -251,15 +252,15 @@ export function registerEstimateRequestRoutes(app: Express): void {
       try {
         // Who the request is to: a business (as before) or a photographer (F2). Same checks, form rules, card,
         // push and email for both; only where the questions and the name come from differ.
-        let vendor: { kind: "business" | "photographer"; id: string; name: string; ownerId: string | null; cityList: string[] };
+        let vendor: { kind: "business" | "photographer"; id: string; name: string; ownerId: string | null; cityList: string[]; extraEmails: string[] };
         if (input.businessId) {
           const business = await storage.getBusiness(input.businessId);
           if (!business) return res.status(404).json({ success: false, message: "Business not found." });
-          vendor = { kind: "business", id: business.id, name: business.name, ownerId: business.ownerId ?? null, cityList: business.serviceCities ?? [] };
+          vendor = { kind: "business", id: business.id, name: business.name, ownerId: business.ownerId ?? null, cityList: business.serviceCities ?? [], extraEmails: business.requestNotifyEmails ?? [] };
         } else {
           const photographer = await requestablePhotographer(input.photographerId!);
           if (!photographer) return res.status(404).json({ success: false, message: "Photographer not found." });
-          vendor = { kind: "photographer", id: photographer.id, name: photographer.displayName, ownerId: photographer.userId, cityList: [] };
+          vendor = { kind: "photographer", id: photographer.id, name: photographer.displayName, ownerId: photographer.userId, cityList: [], extraEmails: [] };
         }
 
         const hasCityList = vendor.cityList.length > 0;
@@ -374,6 +375,17 @@ export function registerEstimateRequestRoutes(app: Express): void {
             replyTo: saved.customerEmail,
           }));
         }
+        // Migration 111: the business's extra people (e.g. Royal Elite's call handler) get the same email.
+        for (const to of extraRecipientsFor(vendor.extraEmails, owner?.email, ADMIN_NOTIFICATION_EMAIL)) {
+          sends.push(sendAdminEmail({
+            to,
+            subject: email.subject,
+            html: email.html,
+            text: email.text,
+            replyTo: saved.customerEmail,
+            log: { kind: "booking", label: "Estimate request (extra recipient)" },
+          }));
+        }
         const results = await Promise.allSettled(sends);
         if (results.some((r) => r.status === "rejected" || r.value === false)) {
           console.error(`[estimate-requests] an email failed for request ${saved.id}`);
@@ -386,6 +398,47 @@ export function registerEstimateRequestRoutes(app: Express): void {
       }
     },
   );
+
+  // Migration 111: extra people emailed on every estimate request. Owner, or a platform admin with x-business-id.
+  // The owner's login email and Outsyde always get a copy and are returned so the site can show them.
+  async function recipientsJson(business: Owner["business"]) {
+    const owner = business.ownerId ? await storage.getUser(business.ownerId) : undefined;
+    return {
+      ownerEmail: owner?.email ?? null,
+      outsydeEmail: ADMIN_NOTIFICATION_EMAIL,
+      emails: extraRecipientsFor(business.requestNotifyEmails, owner?.email, ADMIN_NOTIFICATION_EMAIL),
+    };
+  }
+
+  app.get("/api/vendor/request-recipients", async (req, res) => {
+    try {
+      const found = await resolveVendorBusiness(req, res);
+      if (!found) return;
+      return res.json(await recipientsJson(found.business));
+    } catch (err) {
+      console.error("[request-recipients] get failed", err);
+      return res.status(500).json({ error: "Could not load who gets requests." });
+    }
+  });
+
+  app.put("/api/vendor/request-recipients", async (req, res) => {
+    try {
+      const found = await resolveVendorBusiness(req, res);
+      if (!found) return;
+      const owner = found.business.ownerId ? await storage.getUser(found.business.ownerId) : undefined;
+      const cleaned = cleanRecipients(req.body?.emails, owner?.email, ADMIN_NOTIFICATION_EMAIL);
+      if ("error" in cleaned) return res.status(400).json({ error: cleaned.error, field: "emails" });
+      const [updated] = await db
+        .update(businesses)
+        .set({ requestNotifyEmails: cleaned.emails })
+        .where(eq(businesses.id, found.business.id))
+        .returning();
+      return res.json(await recipientsJson(updated ?? { ...found.business, requestNotifyEmails: cleaned.emails }));
+    } catch (err) {
+      console.error("[request-recipients] save failed", err);
+      return res.status(500).json({ error: "Could not save who gets requests." });
+    }
+  });
 
   app.get("/api/vendor/estimate-requests", async (req, res) => {
     try {
