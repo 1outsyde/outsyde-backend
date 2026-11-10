@@ -2,7 +2,8 @@
  * Admin push announcements (goutsyde.com/admin/emails?tab=push). Migration 073.
  *   Mounted at /api/admin/push, every route behind requirePlatformAdmin (router level, like emailAdmin.ts).
  * "Outsyde news and offers" switch in the app:
- *   Mounted at /api/push/preferences (GET, PUT { news }), signed in user only.
+ *   Mounted at /api/push/preferences (GET, PUT { news?, bookings?, messages?, orders?, events? }), signed in user only.
+ *   Category switches: migration 110, server/push/pushCategories.ts (Activity step 3a, 2026-11-10).
  * Logic: server/push/*. Vault: Features/Notifications & Push.
  */
 import { Router, type Request, type Response } from "express";
@@ -14,6 +15,7 @@ import {
   MAX_BODY, MAX_CLIENT_KEY, MAX_TITLE, PUSH_DAILY_LIMIT,
   checkPushContent, getNewsPreference, getPushLimits, getPushSend, listPushSends, sendPushTest, setNewsPreference, startPushSend,
 } from "../push/pushBroadcasts";
+import { PUSH_CATEGORIES, getCategoryPreferences, setCategoryPreferences, type CategoryPrefs } from "../push/pushCategories";
 
 function fail(res: Response, status: number, code: string, message: string, extra: Record<string, unknown> = {}) {
   return res.status(status).json({ success: false, error: { code, message, ...extra } });
@@ -142,7 +144,8 @@ pushPreferencesRouter.get("/", async (req, res) => {
   const userId = getUserIdFromRequest(req);
   if (!userId) return fail(res, 401, "AUTH_REQUIRED", "Sign in first");
   try {
-    res.json({ success: true, news: await getNewsPreference(userId) });
+    const [news, categories] = await Promise.all([getNewsPreference(userId), getCategoryPreferences(userId)]);
+    res.json({ success: true, news, categories });
   } catch (err) {
     console.error("[PushPreferences] get error:", err);
     fail(res, 500, "SERVER_ERROR", "Could not load your notification settings");
@@ -152,10 +155,26 @@ pushPreferencesRouter.get("/", async (req, res) => {
 pushPreferencesRouter.put("/", async (req, res) => {
   const userId = getUserIdFromRequest(req);
   if (!userId) return fail(res, 401, "AUTH_REQUIRED", "Sign in first");
-  const news = (req.body ?? {}).news;
-  if (typeof news !== "boolean") return fail(res, 400, "INVALID_BODY", "Send { news: true } or { news: false }");
+  // Any of news, bookings, messages, orders, events (older apps send { news } only). At least one,
+  // and every one sent must be a boolean.
+  const body = (req.body ?? {}) as Record<string, unknown>;
+  const news = body.news;
+  const changes: Partial<CategoryPrefs> = {};
+  let bad = news !== undefined && typeof news !== "boolean";
+  for (const c of PUSH_CATEGORIES) {
+    if (body[c] === undefined) continue;
+    if (typeof body[c] !== "boolean") bad = true;
+    else changes[c] = body[c] as boolean;
+  }
+  if (bad || (news === undefined && Object.keys(changes).length === 0)) {
+    return fail(res, 400, "INVALID_BODY", "Send { news: true } or { news: false }");
+  }
   try {
-    res.json({ success: true, news: await setNewsPreference(userId, news) });
+    const newsNow = typeof news === "boolean" ? await setNewsPreference(userId, news) : await getNewsPreference(userId);
+    const categories = Object.keys(changes).length
+      ? await setCategoryPreferences(userId, changes)
+      : await getCategoryPreferences(userId);
+    res.json({ success: true, news: newsNow, categories });
   } catch (err) {
     console.error("[PushPreferences] save error:", err);
     fail(res, 500, "SERVER_ERROR", "Couldn't save. Try again.");

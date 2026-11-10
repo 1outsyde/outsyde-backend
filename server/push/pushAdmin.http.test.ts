@@ -2,7 +2,7 @@
  * Admin push routes + news preference + cart reminder lock, over HTTP.
  * Run with: npx tsx server/push/pushAdmin.http.test.ts
  *
- * SCRATCH ONLY. Needs a backend on localhost against a LOCAL scratch Postgres with migration 073 applied,
+ * SCRATCH ONLY. Needs a backend on localhost against a LOCAL scratch Postgres with migrations 073 and 110 applied,
  * started with the same JWT_SECRET and EXPO_BASE_URL=http://127.0.0.1:<PUSH_TEST_EXPO_PORT>.
  * This test runs the Expo stub itself on PUSH_TEST_EXPO_PORT, so no push ever leaves the machine.
  *   PUSH_TEST_BASE_URL   e.g. http://localhost:5077 (must be localhost)
@@ -176,6 +176,20 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
     r = await call("PUT", "/api/push/preferences", { news: true }, userJwt);
     assert(r.status === 200 && r.json.news === true, "preferences back on", r.json);
 
+    // ── 6b. category switches (migration 110, Activity step 3a) ─────────────
+    r = await call("GET", "/api/push/preferences", undefined, userJwt);
+    assert(r.status === 200 && JSON.stringify(r.json.categories) === JSON.stringify({ bookings: true, messages: true, orders: true, events: true }), "categories default on", r.json);
+    r = await call("PUT", "/api/push/preferences", {}, userJwt);
+    assert(r.status === 400, "preferences: empty body 400", r.status);
+    r = await call("PUT", "/api/push/preferences", { bookings: "off" }, userJwt);
+    assert(r.status === 400, "preferences: bad category value 400", r.status);
+    r = await call("PUT", "/api/push/preferences", { bookings: false, events: false }, userJwt);
+    assert(r.status === 200 && r.json.news === true && r.json.categories.bookings === false && r.json.categories.events === false && r.json.categories.messages === true, "categories off, news untouched", r.json);
+    r = await call("PUT", "/api/push/preferences", { news: false }, userJwt);
+    assert(r.status === 200 && r.json.news === false && r.json.categories.bookings === false, "old app body { news } leaves categories alone", r.json);
+    r = await call("PUT", "/api/push/preferences", { news: true, bookings: true, events: true }, userJwt);
+    assert(r.status === 200 && r.json.news === true && Object.values(r.json.categories).every((v) => v === true), "everything back on", r.json);
+
     // ── 7. existing push routes ─────────────────────────────────────────────
     r = await call("POST", "/api/push/send-cart-reminders");
     const r2 = await call("POST", "/api/push/send-cart-reminders", undefined, userJwt);
@@ -189,6 +203,7 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
     await q(`DELETE FROM notifications WHERE user_id LIKE $1`, [`${P}-%`]);
     await q(`DELETE FROM push_log`); await q(`DELETE FROM push_sends`);
     await q(`DELETE FROM push_news_optouts WHERE user_id LIKE $1`, [`${P}-%`]);
+    await q(`DELETE FROM push_category_optouts WHERE user_id LIKE $1`, [`${P}-%`]);
     await q(`DELETE FROM businesses WHERE owner_id LIKE $1`, [`${P}-%`]);
     if (createdAdmin) await q(`DELETE FROM notifications WHERE user_id = $1`, [adminId]);
     await q(`DELETE FROM users WHERE id LIKE $1`, [`${P}-%`]);

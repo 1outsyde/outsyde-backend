@@ -7,6 +7,7 @@
 import Expo, { type ExpoPushMessage, type ExpoPushTicket } from 'expo-server-sdk';
 import { storage } from './storage';
 import { pushDisabled } from './push/pushSwitch';
+import { pushAllowedFor } from './push/pushCategories';
 
 const expo = new Expo();
 
@@ -32,6 +33,13 @@ export async function sendExpoPush(params: ExpoPushParams): Promise<boolean> {
 
     if (!Expo.isExpoPushToken(token)) {
       console.warn(`[ExpoPush] Invalid token for user ${params.userId}: ${token}`);
+      return false;
+    }
+
+    // Activity step 3a: the person turned this category off in Notification settings (migration 110).
+    // The Activity row and emails are separate and still go out. Always-on types skip this check.
+    if (!(await pushAllowedFor(params.userId, params.data?.type))) {
+      console.log(`[ExpoPush] Muted by the user's settings (${params.data?.type}): user ${params.userId}`);
       return false;
     }
 
