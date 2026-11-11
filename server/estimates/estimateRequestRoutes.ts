@@ -30,7 +30,7 @@ import { cleanRecipients, extraRecipientsFor } from "./requestRecipients";
 import { buildEstimateRequestEmail } from "./estimateEmail";
 import { cleanCityName, isBusinessCity, isServiceOfferedInCity } from "./serviceCities";
 import { checkAnswers, requestMessageText } from "../requests/requestForms";
-import { loadPhotographerResolvedForm, loadProductResolvedForm, loadResolvedForm } from "../requests/serviceForm";
+import { loadBusinessBaseForm, loadPhotographerResolvedForm, loadProductResolvedForm, loadResolvedForm } from "../requests/serviceForm";
 import { requestablePhotographer } from "../requests/photographerRequests";
 
 const ADMIN_EMAILS = ["info@goutsyde.com", "jamesmeyers2304@gmail.com"];
@@ -308,6 +308,9 @@ export function registerEstimateRequestRoutes(app: Express): void {
           serviceId = svc.id;
           serviceName = svc.name;
           questions = await loadPhotographerResolvedForm(svc);
+        } else if (vendor.kind === "business") {
+          // Step 6 (Royal Elite): a business request with no plan or product answers the business's base form.
+          questions = await loadBusinessBaseForm(vendor.id);
         }
 
         const checked = checkAnswers(questions, input.answers ?? {}, process.env.R2_PUBLIC_URL);

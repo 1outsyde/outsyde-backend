@@ -43,7 +43,7 @@ import {
 import { resolveRequestPhotographer, resolveVendorBusiness } from "../estimates/estimateRequestRoutes";
 import { isServiceOfferedInCity } from "../estimates/serviceCities";
 import { checkResolvedLimits, normalizeQuestions, resolveServiceForm, type RequestQuestion } from "./requestForms";
-import { formBelongsTo, formOwnerWhere, loadFormQuestions, loadPhotographerResolvedForm, loadProductResolvedForm, loadResolvedForm, type FormOwner } from "./serviceForm";
+import { formBelongsTo, formOwnerWhere, loadBusinessBaseForm, loadFormQuestions, loadPhotographerResolvedForm, loadProductResolvedForm, loadResolvedForm, type FormOwner } from "./serviceForm";
 import { requestablePhotographerService } from "./photographerRequests";
 
 const ADMIN_EMAILS = ["info@goutsyde.com", "jamesmeyers2304@gmail.com"];
@@ -412,6 +412,28 @@ export function registerRequestFormRoutes(app: Express): void {
       });
     } catch (err) {
       console.error("[request-forms] public form failed:", err);
+      return res.status(500).json({ error: "Failed to load the form" });
+    }
+  });
+
+  // Step 6 (Royal Elite): a business's base form, for a request that names no plan or product (his own site).
+  // Questions only; ids match what POST /api/estimate-requests checks. Approved businesses only.
+  app.get("/api/businesses/:id/request-form", async (req, res) => {
+    try {
+      const business = await storage.getBusiness(req.params.id);
+      if (!business || business.approvalStatus !== "approved") {
+        return res.status(404).json({ error: "This business doesn't take requests" });
+      }
+      const cities = business.serviceCities ?? [];
+      return res.json({
+        business: { id: business.id, name: business.name.trim() },
+        cities,
+        cityRequired: cities.length > 0,
+        phoneRequired: true,
+        questions: await loadBusinessBaseForm(business.id),
+      });
+    } catch (err) {
+      console.error("[request-forms] business base form failed:", err);
       return res.status(500).json({ error: "Failed to load the form" });
     }
   });
