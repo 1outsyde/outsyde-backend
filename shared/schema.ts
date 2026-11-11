@@ -651,6 +651,22 @@ export const vendorServices = pgTable("vendor_services", {
 export const ESTIMATE_REQUEST_STATUSES = ["new", "called", "quoted", "booked", "closed"] as const;
 export type EstimateRequestStatus = typeof ESTIMATE_REQUEST_STATUSES[number];
 
+// Migration 112: people who help run a business's own site dashboard (Royal Elite team access, 2026-11-11).
+// role 'requests' = Estimate requests + read only views; 'manager' reserved for later. Not staff_members.
+export const BUSINESS_TEAM_ROLES = ["requests", "manager"] as const;
+export const businessTeamMembers = pgTable("business_team_members", {
+  id: varchar("id", { length: 36 }).primaryKey().default(sql`gen_random_uuid()`),
+  businessId: varchar("business_id", { length: 36 }).notNull().references(() => businesses.id, { onDelete: "cascade" }),
+  userId: varchar("user_id", { length: 36 }).notNull().references(() => users.id, { onDelete: "cascade" }),
+  role: text("role").$type<typeof BUSINESS_TEAM_ROLES[number]>().notNull().default("requests"),
+  addedBy: varchar("added_by", { length: 36 }),
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+}, (table) => ({
+  memberUq: uniqueIndex("uq_business_team_member").on(table.businessId, table.userId),
+  userIdx: index("idx_business_team_members_user").on(table.userId),
+}));
+export type BusinessTeamMember = typeof businessTeamMembers.$inferSelect;
+
 export const estimateRequests = pgTable("estimate_requests", {
   id: varchar("id", { length: 36 }).primaryKey().default(sql`gen_random_uuid()`),
   // Migration 108 (Request forms F2): a request is to a business OR a photographer, exactly one (database rule
