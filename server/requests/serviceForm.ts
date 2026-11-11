@@ -64,3 +64,11 @@ export async function loadPhotographerResolvedForm(service: Pick<PhotographerSer
 export async function loadProductResolvedForm(product: Pick<VendorProduct, "businessId" | "requestFormId" | "requestFormUseBase" | "requestQuestions">): Promise<RequestQuestion[]> {
   return loadFormQuestions({ kind: "business", id: product.businessId }, product);
 }
+
+/**
+ * A business's base form on its own: the questions for a request that names no plan or product
+ * (Royal Elite step 6, Legend 2026-11-10: his site sends move details without a plan). Empty when no base form.
+ */
+export async function loadBusinessBaseForm(businessId: string): Promise<RequestQuestion[]> {
+  return loadFormQuestions({ kind: "business", id: businessId }, { requestFormId: null, requestFormUseBase: true, requestQuestions: [] });
+}
