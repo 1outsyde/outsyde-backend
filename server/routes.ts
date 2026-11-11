@@ -248,6 +248,8 @@ import { serviceCitiesInput } from "./estimates/serviceCities";
 import { registerRequestFormRoutes } from "./requests/requestFormRoutes";
 import { registerQuoteRoutes } from "./quotes/quoteRoutes";
 import { registerEstimateRequestRoutes } from "./estimates/estimateRequestRoutes";
+import { registerTeamRoutes } from "./team/teamRoutes";
+import { teamFor } from "./team/team";
 import { registerEmailChangeRoutes } from "./account/emailChange";
 import {
   transitionAppointmentState,
@@ -2981,6 +2983,8 @@ export async function registerRoutes(
         isPhotographer: false as boolean,
         isInfluencer: user.isInfluencer,
         businessId: null as string | null,
+        // Migration 112: businesses this user helps run (site dashboards). Additive; old clients ignore it.
+        team: [] as { businessId: string; role: string }[],
         photographerId: null as string | null,
         subscriptionTier: null as string | null,
         influencerStatus: null as string | null,
@@ -2988,6 +2992,8 @@ export async function registerRoutes(
         scheduledDeletionAt: user.scheduledDeletionAt ?? null,
         loyaltyPoints: user.loyaltyPoints ?? 0,
       };
+
+      sessionState.team = await teamFor(user.id).catch(() => []);
 
       // Check for business ownership
       const business = await storage.getBusinessByOwnerId(user.id);
@@ -3057,6 +3063,7 @@ export async function registerRoutes(
           isAdmin: sessionState.isAdmin || false,
           isVendor: sessionState.isVendor || false,
           businessId: sessionState.businessId,
+          team: sessionState.team,
           photographerId: sessionState.photographerId,
           loyaltyPoints: sessionState.loyaltyPoints ?? 0,
           profileImageUrl: sessionState.profilePhotoUrl ?? null,
@@ -14715,6 +14722,7 @@ export async function registerRoutes(
 
   // Estimate requests (migration 068): saved form + vendor dashboard list. See server/estimates.
   registerEstimateRequestRoutes(app);
+  registerTeamRoutes(app);
   // Change email (migration 107): code to the new address, then users.email moves. See server/account.
   registerEmailChangeRoutes(app, {
     verifyPassword: async (password, hash) =>

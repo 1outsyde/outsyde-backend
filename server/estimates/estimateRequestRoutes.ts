@@ -24,7 +24,8 @@ import { and, desc, eq } from "drizzle-orm";
 import { db } from "../db";
 import { storage } from "../storage";
 import { getUserIdFromRequest } from "../auth";
-import { businesses, estimateRequests, ESTIMATE_REQUEST_STATUSES, type EstimateRequest } from "@shared/schema";
+import { businesses, businessTeamMembers, estimateRequests, ESTIMATE_REQUEST_STATUSES, users, type EstimateRequest } from "@shared/schema";
+import { roleAllows, teamRoleFor, type TeamAccess, type TeamRole } from "../team/team";
 import { sendAdminEmail, ADMIN_NOTIFICATION_EMAIL } from "../emailService";
 import { cleanRecipients, extraRecipientsFor } from "./requestRecipients";
 import { buildEstimateRequestEmail } from "./estimateEmail";
@@ -68,10 +69,16 @@ const updateSchema = z
   })
   .refine((v) => v.status !== undefined || v.vendorNotes !== undefined, { message: "Nothing to update" });
 
-type Owner = { business: NonNullable<Awaited<ReturnType<typeof storage.getBusiness>>> };
+// teamRole is set only when a team member (migration 112) is acting; owners and admins have none.
+type Owner = { business: NonNullable<Awaited<ReturnType<typeof storage.getBusiness>>>; teamRole?: TeamRole };
 
 /** Owner of the business, or a platform admin acting on the business named in x-business-id. */
-export async function resolveVendorBusiness(req: Request, res: Response): Promise<Owner | null> {
+/**
+ * The business the signed in user may act for: their own, or any (admin + x-business-id).
+ * opts.team (migration 112): also lets a team member of the business named in x-business-id through, for
+ * what the route allows. Routes that don't pass it stay owner or admin only.
+ */
+export async function resolveVendorBusiness(req: Request, res: Response, opts: { team?: TeamAccess } = {}): Promise<Owner | null> {
   const userId = (req.session as any)?.userId || getUserIdFromRequest(req);
   if (!userId) {
     res.status(401).json({ error: "Not authenticated" });
@@ -83,6 +90,14 @@ export async function resolveVendorBusiness(req: Request, res: Response): Promis
   const business = xBusinessId && isAdmin
     ? await storage.getBusiness(xBusinessId)
     : await storage.getBusinessByOwnerId(userId);
+  // A team member acts only for the business the site names, and only where the route opts in.
+  if (opts.team && xBusinessId && !isAdmin && business?.id !== xBusinessId) {
+    const role = await teamRoleFor(userId, xBusinessId);
+    if (roleAllows(role, opts.team)) {
+      const teamBusiness = await storage.getBusiness(xBusinessId);
+      if (teamBusiness) return { business: teamBusiness, teamRole: role! };
+    }
+  }
   if (!business) {
     res.status(404).json({ error: "No business found" });
     return null;
@@ -415,7 +430,7 @@ export function registerEstimateRequestRoutes(app: Express): void {
 
   app.get("/api/vendor/request-recipients", async (req, res) => {
     try {
-      const found = await resolveVendorBusiness(req, res);
+      const found = await resolveVendorBusiness(req, res, { team: "read" });
       if (!found) return;
       return res.json(await recipientsJson(found.business));
     } catch (err) {
@@ -445,7 +460,7 @@ export function registerEstimateRequestRoutes(app: Express): void {
 
   app.get("/api/vendor/estimate-requests", async (req, res) => {
     try {
-      const owner = await resolveVendorBusiness(req, res);
+      const owner = await resolveVendorBusiness(req, res, { team: "requests" });
       if (!owner) return;
       const status = typeof req.query.status === "string" ? req.query.status : undefined;
       if (status && !(ESTIMATE_REQUEST_STATUSES as readonly string[]).includes(status)) {
@@ -464,7 +479,7 @@ export function registerEstimateRequestRoutes(app: Express): void {
 
   app.patch("/api/vendor/estimate-requests/:id", async (req, res) => {
     try {
-      const owner = await resolveVendorBusiness(req, res);
+      const owner = await resolveVendorBusiness(req, res, { team: "requests" });
       if (!owner) return;
       const parsed = updateSchema.safeParse(req.body);
       if (!parsed.success) return res.status(400).json({ error: "Invalid data", details: parsed.error.errors });
